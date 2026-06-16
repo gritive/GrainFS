@@ -223,7 +223,13 @@ func bootClusterCoordinatorRouting(state *bootState) error {
 		WithNodeAddressResolver(metaRaft.FSM()).
 		WithSelfPeerAlias(state.raftAddr).
 		WithECConfig(state.effectiveEC).
-		WithCapabilityGate(state.capabilityGate)
+		WithCapabilityGate(state.capabilityGate).
+		// Lazy gen-0 establishment: the first object write on any node records a
+		// consistent initial placement generation into the meta-FSM, so every node
+		// routes objects over the same candidate set instead of its divergent
+		// boot-frozen snapshot. Forwarding variant — a write on a meta follower
+		// still establishes gen-0 (the FSM apply dedups concurrent first-writers).
+		WithGenZeroRecorder(metaRaft.ProposeAddPlacementGenerationForwarding)
 	state.clusterCoord.SetAppendForwardBufferConfig(cluster.AppendForwardBufferConfig{
 		TotalBytes:    state.cfg.AppendForwardBufferTotalBytes,
 		MaxPerRequest: state.cfg.AppendForwardBufferMaxPerRequest,

@@ -50,9 +50,23 @@ func (f *MetaFSM) applyAddPlacementGeneration(data []byte) error {
 		return fmt.Errorf("meta_fsm: AddPlacementGeneration: empty group_ids")
 	}
 	f.mu.Lock()
+	defer f.mu.Unlock()
+	// Dedup: a proposal whose set equals ANY existing generation is a no-op. The
+	// registry is an append-only, monotonic list of DISTINCT generations, so the
+	// same set must never appear twice. Comparing against the whole registry (not
+	// just the latest) closes two races at once: (1) concurrent first writers each
+	// propose the same converged candidate set; (2) a stale lazy gen-0 proposal
+	// (set A) is ordered AFTER an operator expansion appended B — deduping only
+	// against the latest would form [A, B, A], silently reverting the expansion
+	// (currentGroupIDs would become the pre-growth set A and the registry never
+	// shrinks). A genuinely new set is real growth and still appends.
+	for i := range f.placementGenerations {
+		if stringSlicesEqual(f.placementGenerations[i].groupIDs, groupIDs) {
+			return nil
+		}
+	}
 	epoch := uint64(len(f.placementGenerations))
 	f.placementGenerations = append(f.placementGenerations, placementGeneration{epoch: epoch, groupIDs: groupIDs})
-	f.mu.Unlock()
 	return nil
 }
 

@@ -141,6 +141,12 @@ type ClusterCoordinator struct {
 
 	maxBody             int64
 	appendForwardBuffer *appendForwardBuffer
+
+	// recordGenZero records the initial placement generation (gen-0) once, on the
+	// first object write, so every node routes objects over the same raft-replicated
+	// candidate set instead of its divergent boot-frozen snapshot. nil disables the
+	// behavior (single-node / test wiring). See ensureGenZero.
+	recordGenZero func(ctx context.Context, groupIDs []string) error
 }
 
 type clusterCoordinatorRuntime struct {
@@ -248,6 +254,16 @@ func (c *ClusterCoordinator) SetAppendForwardBufferConfig(cfg AppendForwardBuffe
 
 func (c *ClusterCoordinator) WithCapabilityGate(gate *CapabilityGate) *ClusterCoordinator {
 	c.capGate = gate
+	return c
+}
+
+// WithGenZeroRecorder installs the closure that records the initial placement
+// generation (gen-0) into the control-plane meta-FSM (leader-serialized, raft-
+// replicated). Production wires it to MetaRaft.ProposeAddPlacementGenerationForwarding
+// so a write on any node can establish gen-0. nil (single-node / test wiring)
+// disables lazy gen-0 capture entirely. See ensureGenZero.
+func (c *ClusterCoordinator) WithGenZeroRecorder(fn func(ctx context.Context, groupIDs []string) error) *ClusterCoordinator {
+	c.recordGenZero = fn
 	return c
 }
 
@@ -487,6 +503,66 @@ func (c *ClusterCoordinator) routeWriteOrBucket(bucket, key string) (RouteTarget
 
 func (c *ClusterCoordinator) routeAppendOrBucket(bucket, key string, expectedOffset int64) (RouteTarget, ShardGroupEntry, error) {
 	return c.routeWriteOrBucket(bucket, key)
+}
+
+// liveCandidateGroupIDs returns the candidate placement group-ID set derived
+// from the LIVE shard-group registry (sorted, as candidateGroupsFor returns it).
+// Unlike the OpRouter's boot-frozen placementGroupIDs, this reflects every group
+// that has joined since boot — the correct gen-0 ground truth at formation, when
+// zero objects have been written.
+func (c *ClusterCoordinator) liveCandidateGroupIDs() ([]string, error) {
+	if c.meta == nil {
+		return nil, fmt.Errorf("gen-0: no shard-group source")
+	}
+	candidates, err := candidateGroupsFor(c.meta.ShardGroups(), c.ecConfig)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, len(candidates))
+	for i, cand := range candidates {
+		ids[i] = cand.ID
+	}
+	return ids, nil
+}
+
+// ensureGenZero lazily establishes a consistent gen-0 on the first object write.
+// In a per-join cluster each node boot-freezes a partial, divergent shard-group
+// snapshot, so the same key hash-routes to different groups on different nodes
+// (append fragments → InvalidWriteOffset). Recording gen-0 once into the meta-FSM
+// (replicated) makes every node's rebuild() apply the SAME candidate set, so
+// routing converges.
+//
+// Cheap on the hot path: once any generation exists in the local FSM it returns
+// after a single RLock read. The first write proposes gen-0 = the live converged
+// set via the recorder (which forwards to the meta leader and blocks until the
+// command applies locally — the post-commit hook then rebuilds the OpRouter, so
+// this write already routes over gen-0). Concurrent first-writers all propose the
+// same set; the FSM apply dedups against the whole registry, so they converge to a
+// single gen-0 without a new lock. Best-effort: a propose failure is logged and
+// retried by the next write rather than failing the user's request — the triggering
+// write may then still route on the boot-frozen set (and an append may fragment),
+// exactly as it did before this fix, until a subsequent write establishes gen-0.
+func (c *ClusterCoordinator) ensureGenZero(ctx context.Context) {
+	if c.recordGenZero == nil {
+		return
+	}
+	src, ok := c.meta.(placementGenerationSource)
+	if !ok {
+		return
+	}
+	if len(src.PlacementGenerations()) > 0 {
+		return // gen-0 (or a later generation) already recorded
+	}
+	ids, err := c.liveCandidateGroupIDs()
+	if err != nil || len(ids) == 0 {
+		return // no EC-active candidate groups yet — nothing to pin
+	}
+	if err := c.recordGenZero(ctx, ids); err != nil {
+		log.Warn().Err(err).Strs("groups", ids).
+			Msg("gen-0 placement record failed; retrying on next write")
+		return
+	}
+	log.Debug().Strs("groups", ids).Msg("recorded gen-0 placement generation")
 }
 
 func (c *ClusterCoordinator) requireObjectBucket(ctx context.Context, bucket string) error {
@@ -1321,6 +1397,7 @@ func (c *ClusterCoordinator) PutObjectWithRequest(ctx context.Context, req stora
 	if err := c.requireObjectBucket(ctx, bucket); err != nil {
 		return nil, err
 	}
+	c.ensureGenZero(ctx)
 	routeStart := time.Now()
 	target, group, err := c.routeWriteOrBucket(bucket, key)
 	if err != nil {
@@ -1734,6 +1811,7 @@ func (c *ClusterCoordinator) AppendObject(ctx context.Context, bucket, key strin
 	if err := c.requireObjectBucket(ctx, bucket); err != nil {
 		return nil, err
 	}
+	c.ensureGenZero(ctx)
 	target, group, err := c.routeAppendOrBucket(bucket, key, expectedOffset)
 	if err != nil {
 		return nil, err
