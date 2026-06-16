@@ -298,8 +298,20 @@ func (rcv *PutObjectMetaCmd) MutateAcl(n byte) bool {
 	return rcv._tab.MutateByteSlot(44, n)
 }
 
+func (rcv *PutObjectMetaCmd) MetaSeq() uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(46))
+	if o != 0 {
+		return rcv._tab.GetUint64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *PutObjectMetaCmd) MutateMetaSeq(n uint64) bool {
+	return rcv._tab.MutateUint64Slot(46, n)
+}
+
 func PutObjectMetaCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(21)
+	builder.StartObject(22)
 }
 func PutObjectMetaCmdAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -378,6 +390,9 @@ func PutObjectMetaCmdAddStripeBytes(builder *flatbuffers.Builder, stripeBytes ui
 }
 func PutObjectMetaCmdAddAcl(builder *flatbuffers.Builder, acl byte) {
 	builder.PrependByteSlot(20, acl, 0)
+}
+func PutObjectMetaCmdAddMetaSeq(builder *flatbuffers.Builder, metaSeq uint64) {
+	builder.PrependUint64Slot(21, metaSeq, 0)
 }
 func PutObjectMetaCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

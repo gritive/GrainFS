@@ -26,6 +26,7 @@ func buildPutObjectMeta(cmd PutObjectMetaCmd) objectMeta {
 		Segments:         segmentMetaEntriesToRefs(cmd.Segments),
 		Tags:             cmd.Tags,
 		ACL:              cmd.ACL,
+		MetaSeq:          cmd.MetaSeq,
 	}
 }
 

@@ -43,6 +43,10 @@ type objectMeta struct {
 	// objects; nil for legacy single-blob and appendable objects.
 	Parts []storage.MultipartPartEntry
 	Tags  []storage.Tag // Task 12a
+	// MetaSeq is the lowest-priority quorum-meta LWW tiebreak (see
+	// PutObjectMetaCmd.MetaSeq). Carried on the FSM-stored objectMeta so a
+	// re-derived quorum-meta blob cannot be tied by a stale one. Default 0.
+	MetaSeq uint64
 }
 
 // CoalescedShardRef references a single coalesced blob produced by merging a
@@ -273,6 +277,9 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	if c.ACL != 0 {
 		clusterpb.PutObjectMetaCmdAddAcl(b, c.ACL)
 	}
+	if c.MetaSeq != 0 {
+		clusterpb.PutObjectMetaCmdAddMetaSeq(b, c.MetaSeq)
+	}
 	return fbFinish(b, clusterpb.PutObjectMetaCmdEnd(b)), nil
 }
 
@@ -360,6 +367,7 @@ func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
 		Segments:         segments,
 		Tags:             readTagsVector(t.TagsLength(), t.Tags),
 		ACL:              t.Acl(),
+		MetaSeq:          t.MetaSeq(),
 	}, nil
 }
 
@@ -927,6 +935,9 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 	if tagsVec != 0 {
 		clusterpb.ObjectMetaAddTags(b, tagsVec)
 	}
+	if m.MetaSeq != 0 {
+		clusterpb.ObjectMetaAddMetaSeq(b, m.MetaSeq)
+	}
 	return fbFinish(b, clusterpb.ObjectMetaEnd(b)), nil
 }
 
@@ -1051,6 +1062,7 @@ func unmarshalObjectMeta(data []byte) (objectMeta, error) {
 		IsAppendable:     t.IsAppendable(),
 		Parts:            parts,
 		Tags:             tags,
+		MetaSeq:          t.MetaSeq(),
 	}, nil
 }
 

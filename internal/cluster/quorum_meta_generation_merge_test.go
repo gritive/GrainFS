@@ -131,11 +131,11 @@ func TestQuorumMetaMerge_CrossGenerationTombstone(t *testing.T) {
 // greater VersionID wins, giving point-GET and scatter-gather LIST a single
 // shared ordering for same-second cross-generation ties.
 func TestQuorumMetaBlobWins_VersionIDTiebreak(t *testing.T) {
-	require.True(t, quorumMetaBlobWins(200, "v1", 100, "v9"), "higher ModTime wins regardless of VersionID")
-	require.False(t, quorumMetaBlobWins(100, "v9", 200, "v1"), "lower ModTime loses regardless of VersionID")
-	require.True(t, quorumMetaBlobWins(100, "v9", 100, "v1"), "equal ModTime: higher VersionID wins")
-	require.False(t, quorumMetaBlobWins(100, "v1", 100, "v9"), "equal ModTime: lower VersionID loses")
-	require.False(t, quorumMetaBlobWins(100, "v1", 100, "v1"), "identical: not strictly greater")
+	require.True(t, quorumMetaBlobWins(200, "v1", 0, 100, "v9", 0), "higher ModTime wins regardless of VersionID")
+	require.False(t, quorumMetaBlobWins(100, "v9", 0, 200, "v1", 0), "lower ModTime loses regardless of VersionID")
+	require.True(t, quorumMetaBlobWins(100, "v9", 0, 100, "v1", 0), "equal ModTime: higher VersionID wins")
+	require.False(t, quorumMetaBlobWins(100, "v1", 0, 100, "v9", 0), "equal ModTime: lower VersionID loses")
+	require.False(t, quorumMetaBlobWins(100, "v1", 0, 100, "v1", 0), "identical: not strictly greater")
 }
 
 // TestQuorumMetaMerge_SameModTimeTiebreak proves the tiebreak resolves a
