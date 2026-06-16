@@ -1,8 +1,15 @@
 package cluster
 
 import (
+	"errors"
 	"fmt"
 )
+
+// ErrPutObjectMetaCAS is returned (wrapped) when a PutObjectMeta command carries
+// an ExpectedETag that no longer matches the current object's ETag. Callers that
+// perform a compare-and-swap meta write (e.g. relocation) use errors.Is to map
+// this to a benign "object changed" skip rather than a hard failure.
+var ErrPutObjectMetaCAS = errors.New("put object meta CAS: etag mismatch")
 
 func buildPutObjectMeta(cmd PutObjectMetaCmd) objectMeta {
 	etag := cmd.ETag
@@ -47,8 +54,8 @@ func (f *FSM) checkPutObjectExpectedETag(txn MetadataTxn, bucket, key, expectedE
 		return fmt.Errorf("put object meta CAS: decode current meta: %w", err)
 	}
 	if current.ETag != expectedETag {
-		return fmt.Errorf("put object meta CAS: etag changed for %s/%s: got %q, want %q",
-			bucket, key, current.ETag, expectedETag)
+		return fmt.Errorf("put object meta CAS: etag changed for %s/%s: got %q, want %q: %w",
+			bucket, key, current.ETag, expectedETag, ErrPutObjectMetaCAS)
 	}
 	return nil
 }
