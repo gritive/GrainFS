@@ -2614,6 +2614,30 @@ func TestClusterCoordinator_PutObject_StreamForward_AboveBodyCap(t *testing.T) {
 	require.Zero(t, args.BodyLength(), "stream metadata must not embed the object body")
 }
 
+func TestClusterCoordinator_PutObject_StreamForward_AboveFloorBelowMaxBody(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	c.forward.WithStreamDialer(d.stream)
+	// Default maxBody (64 MiB) is NOT overridden. The body is far below it but
+	// above the 1 MiB PUT stream floor, so it must stream body-less rather than
+	// buffer the whole body into the args FlatBuffer.
+	body := bytes.Repeat([]byte("z"), minPutObjectForwardStreamBytes+1024)
+	d.streamReplyBy[raftpb.ForwardOpPutObject] = buildObjectReply(
+		&storage.Object{Key: "k", Size: int64(len(body)), ETag: "etag-stream"}, "bk",
+	)
+
+	obj, err := c.PutObject(context.Background(), "bk", "k", bytes.NewReader(body), "application/octet-stream")
+	require.NoError(t, err)
+	require.Equal(t, int64(len(body)), obj.Size)
+	require.Len(t, d.calls, 1, "streamed PutObject should only use single-message preflight")
+	require.Equal(t, raftpb.ForwardOpHeadObject, d.calls[0].op)
+	require.Len(t, d.streamCalls, 1)
+	require.Equal(t, body, d.streamCalls[0].rawly)
+	require.Equal(t, raftpb.ForwardOpPutObject, d.streamCalls[0].op)
+
+	args := raftpb.GetRootAsPutObjectArgs(d.streamCalls[0].args, 0)
+	require.Zero(t, args.BodyLength(), "stream metadata must not embed the object body")
+}
+
 func TestClusterCoordinator_PutObject_StreamDialerSmallBodyUsesSingleMessage(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
 	c.forward.WithStreamDialer(d.stream)

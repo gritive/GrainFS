@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.601.0] - 2026-06-16
+
+### Changed
+- **Forwarded PutObject now streams from 1 MiB instead of 64 MiB.** On the cold
+  (forwarded-to-owning-group) path, a simple PUT previously only streamed its body
+  when it exceeded the 64 MiB single-frame cap (`maxBody`); everything smaller was
+  read fully into memory and copied into the request FlatBuffer (`PutObjectArgs.body`).
+  Added a 1 MiB streaming floor (`minPutObjectForwardStreamBytes`, the simple-PUT
+  analogue of UploadPart's existing 5 MiB `minMultipartForwardStreamBytes` floor) so
+  forwarded PUTs in the [1 MiB, 64 MiB] band now stream body-less args + a separate
+  body stream from the seekable spool. This cuts peak transient memory on forwarded
+  PUTs from up to ~64 MiB (the `[]byte` plus the FlatBuffer builder buffer) to ~1 MiB.
+  The `body > maxBody` single-frame cap, the frame-path size cap, and the AppendObject
+  buffering cap are unchanged; sub-1 MiB PUTs still use the single-frame path.
+  Note: this widens the population of forwarded PUTs that use the bounded forward
+  stream pool (64 slots, shared with UploadPart), so under very high concurrency of
+  mid-size forwarded PUTs more requests may receive a retryable 503 SlowDown
+  (`ErrForwardBackpressure`) — the intended streaming admission-control behavior.
+
 ## [0.0.600.0] - 2026-06-16
 
 ### Changed

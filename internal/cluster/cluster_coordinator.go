@@ -34,6 +34,17 @@ const DefaultMaxForwardReplyBytes = 64 * 1024 * 1024
 
 const minMultipartForwardStreamBytes = 5 * 1024 * 1024
 
+// minPutObjectForwardStreamBytes is the simple-PUT analogue of
+// minMultipartForwardStreamBytes. A forwarded PutObject whose body is at least
+// this large streams (body-less FlatBuffer args + a separate body stream)
+// instead of buffering the whole body into the args FlatBuffer. Unlike
+// UploadPart (which has the 5 MiB S3 minimum-part floor), a simple PUT has no
+// inherent lower bound, so without this a PUT only streamed above the 64 MiB
+// single-frame cap — buffering up to 64 MiB into the args FlatBuffer on the
+// cold (forwarded) path. 1 MiB matches the spool copy buffer. The body>maxBody
+// single-frame cap still applies independently.
+const minPutObjectForwardStreamBytes = 1 * 1024 * 1024
+
 const auditBucketName = "grainfs-audit"
 
 // ErrCoordinatorNoRouter is returned when OpRouter is called on a
@@ -1854,6 +1865,28 @@ func shouldStreamUploadPartForward(r io.Reader, maxBody int64) bool {
 		return true
 	}
 	return end-cur >= minMultipartForwardStreamBytes
+}
+
+func shouldStreamPutObjectForward(r io.Reader, maxBody int64) bool {
+	if forwardBodyExceedsSingleFrameCap(r, maxBody) {
+		return true
+	}
+	seeker, ok := r.(io.Seeker)
+	if !ok {
+		return true
+	}
+	cur, err := seeker.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return true
+	}
+	end, err := seeker.Seek(0, io.SeekEnd)
+	if _, seekErr := seeker.Seek(cur, io.SeekStart); err == nil && seekErr != nil {
+		err = seekErr
+	}
+	if err != nil {
+		return true
+	}
+	return end-cur >= minPutObjectForwardStreamBytes
 }
 
 func (c *ClusterCoordinator) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {
