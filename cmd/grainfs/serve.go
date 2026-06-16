@@ -45,6 +45,10 @@ func registerAllServeFlags(cmd *cobra.Command) {
 		"minimum filesystem mtime age before an orphan raw segment is eligible for sweep")
 	cmd.Flags().Duration("segment-gc-retention", 24*time.Hour,
 		"grace period before unreferenced raw segment blobs are GC'd")
+	cmd.Flags().Bool("ec-redundancy-upgrade", true,
+		"relocate non-redundant (1+0) objects into a redundant EC group after the cluster grows (background sweep; default on)")
+	cmd.Flags().Int("ec-redundancy-upgrade-max", 8,
+		"max objects relocated per scrub cycle by the EC-redundancy-upgrade sweep")
 	cmd.Flags().Duration("lifecycle-interval", 1*time.Hour, "lifecycle rule evaluation interval (0 to disable)")
 	cmd.Flags().Duration("degraded-check-interval", 30*time.Second, "EC degraded-mode liveness check interval")
 	cmd.Flags().Duration("raft-log-gc-interval", 30*time.Second, "how often Raft log GC runs")

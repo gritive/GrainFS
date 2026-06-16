@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.608.0] - 2026-06-17
+
+### Added
+- **`--ec-redundancy-upgrade` (default on) + `--ec-redundancy-upgrade-max` (default 8)
+  wire the background EC-redundancy-upgrade sweep.** After a cluster grows, the
+  scrubber can now relocate non-redundant (1+0) objects into a redundant EC group.
+  The sweep is enabled by default; `--ec-redundancy-upgrade=false` is the kill switch,
+  and `--ec-redundancy-upgrade-max` bounds relocations per scrub cycle.
+
 ## [0.0.607.0] - 2026-06-16
 
 ### Fixed

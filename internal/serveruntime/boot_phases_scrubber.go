@@ -16,6 +16,20 @@ import (
 	"github.com/gritive/GrainFS/internal/startuprecovery"
 )
 
+// redundancyUpgradeMax decides whether the EC-redundancy-upgrade sweep should
+// be enabled on the scrubber and, if so, the per-cycle relocation cap. A
+// non-positive configured max falls back to the default of 8.
+func redundancyUpgradeMax(cfg Config) (enabled bool, max int) {
+	if !cfg.ECRedundancyUpgrade {
+		return false, 0
+	}
+	max = cfg.ECRedundancyUpgradeMax
+	if max <= 0 {
+		max = 8
+	}
+	return true, max
+}
+
 // targetLogKey returns the log-friendly key for an EC shard scan target:
 // ObjectKey for object-version targets, ShardKey for segment/coalesced targets.
 func targetLogKey(t cluster.ECShardScanTarget) string {
@@ -185,6 +199,9 @@ func bootRecoveryAndScrubber(ctx context.Context, state *bootState) error {
 		})
 		sc := scrubber.New(state.distBackend, cfg.ScrubInterval, segGCOpts...)
 		sc.SetEmitter(activeEmitter)
+		if enabled, max := redundancyUpgradeMax(cfg); enabled {
+			sc.EnableRedundancyUpgrade(max)
+		}
 		sc.Start(ctx)
 
 		placementMonitors := NewPlacementMonitorRegistry()
