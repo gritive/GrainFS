@@ -393,52 +393,6 @@ func readSpoolEncryptedRecord(r io.Reader, seam storage.DataEncryptor, domain st
 	return out, blob, false, nil
 }
 
-// writeFileAtomicFromReader materializes bytes from r at path via
-// tmp + rename for atomic visibility. Durability is the caller's
-// responsibility: this helper does not fsync the tmp file or its parent
-// directory. Callers that need crash durability must route through a
-// data WAL helper or fsync the renamed file explicitly (see
-// repair_replica.go writeRepairedReplica for the latter pattern).
-func writeFileAtomicFromReader(path string, r io.Reader) error {
-	stageStart := time.Now()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("create object dir: %w", err)
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".object-*")
-	if err != nil {
-		return fmt.Errorf("create tmp object: %w", err)
-	}
-	observePutStage("write_file_atomic", "create_temp", stageStart)
-	tmpPath := tmp.Name()
-	cleanup := func() {
-		_ = tmp.Close()
-		_ = os.Remove(tmpPath)
-	}
-	stageStart = time.Now()
-	bufp := spoolCopyBufferPool.Get().(*[]byte)
-	_, err = io.CopyBuffer(tmp, r, *bufp)
-	clear(*bufp)
-	spoolCopyBufferPool.Put(bufp)
-	if err != nil {
-		cleanup()
-		return fmt.Errorf("write tmp object: %w", err)
-	}
-	observePutStage("write_file_atomic", "copy", stageStart)
-	stageStart = time.Now()
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("close tmp object: %w", err)
-	}
-	observePutStage("write_file_atomic", "close", stageStart)
-	stageStart = time.Now()
-	if err := os.Rename(tmpPath, path); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("rename object: %w", err)
-	}
-	observePutStage("write_file_atomic", "rename", stageStart)
-	return nil
-}
-
 func (b *DistributedBackend) spoolDir() string {
 	return filepath.Join(b.root, "tmp", "put-spool")
 }

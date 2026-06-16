@@ -198,26 +198,6 @@ func (b *LocalBackend) objectPath(bucket, key string) string {
 	return filepath.Join(targetRoot, "data", bucket, key)
 }
 
-// OpenLocalReplica returns a ReadCloser for the locally-stored copy of an
-// object. It does NOT fall back to peers (there are none in solo mode) and
-// returns os.ErrNotExist when the file is missing — the contract scrubber
-// verifiers rely on.
-func (b *LocalBackend) OpenLocalReplica(bucket, key string) (io.ReadCloser, error) {
-	obj, err := b.HeadObject(context.Background(), bucket, key)
-	if err != nil {
-		return nil, err
-	}
-	if obj.Segments != nil {
-		rc, _, err := b.GetObject(context.Background(), bucket, key)
-		return rc, err
-	}
-	objPath := b.objectPath(bucket, key)
-	if b.segEnc != nil {
-		return openEncryptedObjectFile(objPath, b.segEnc, objectFileAADFields(bucket, key), obj.Size)
-	}
-	return os.Open(objPath)
-}
-
 func (b *LocalBackend) CreateBucket(ctx context.Context, bucket string) error {
 	_ = ctx
 	return b.db.Update(func(txn *badger.Txn) error {

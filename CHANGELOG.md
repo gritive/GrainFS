@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.599.0] - 2026-06-16
+
+### Removed
+- **Volume N×-replica durability + the `internal/volume` package** — Phase D1 of the
+  volume-removal epic. Deleted `RepairReplica`/`writeRepairedReplica` (the only writer
+  of whole-replica local files), the scrubber `"replication"` source
+  (`internal/scrubber/replication.go`, `ReplicationObjectSource`/`ReplicationVerifier`)
+  and its boot wiring, `ReplicaRepairerFunc`, `OpenLocalReplica` (concrete method on
+  both DistributedBackend and LocalBackend — not an interface method), the now-dead
+  `writeFileAtomicFromReader` helper, and the vestigial `ServerStorage.VolumeBackend`
+  field (it only ever aliased the primary backend). The `internal/volume` package is
+  fully removed.
+- Safe per owner confirmation: no legacy N×-replicated or volume objects exist on disk
+  (greenfield). The EC scrub source and the orphan-segment/shard scrubbers are
+  unaffected. The S3 read plane is UNCHANGED in this phase — the Branch D/E
+  whole-object/whole-replica read fallbacks are removed in Phase D2.
+
 ## [0.0.598.0] - 2026-06-16
 
 ### Removed

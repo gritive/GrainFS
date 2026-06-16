@@ -161,9 +161,8 @@ type Server struct {
 }
 
 type ServerStorage struct {
-	Ops           *storage.Operations
-	Backend       storage.Backend
-	VolumeBackend storage.Backend
-	Snapshotable  storage.Snapshotable
-	DBProvider    storage.DBProvider
+	Ops          *storage.Operations
+	Backend      storage.Backend
+	Snapshotable storage.Snapshotable
+	DBProvider   storage.DBProvider
 }
