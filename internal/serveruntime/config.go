@@ -106,7 +106,7 @@ type Config struct {
 	ScrubOrphanAge time.Duration
 	// SegmentGCRetention is the grace period after a raw segment blob becomes
 	// unreferenced before the scrubber may physically delete it. Protects
-	// in-flight reads and recent-PITR margin. 0 disables retention gating
+	// in-flight reads and recent-write margin. 0 disables retention gating
 	// (age-gate only). Default 24h (matches snapshot retention 1h x 24).
 	SegmentGCRetention time.Duration
 

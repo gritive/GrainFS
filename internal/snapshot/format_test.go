@@ -21,7 +21,6 @@ func testSnapshot(seq uint64) *Snapshot {
 	return &Snapshot{
 		Seq:         seq,
 		Timestamp:   time.Unix(1700000000, 0).UTC(),
-		WALOffset:   42,
 		Reason:      "test",
 		ObjectCount: 0,
 		SizeBytes:   0,
@@ -74,7 +73,6 @@ func TestWriteSnapshotAddsHeaderAndRoundTrips(t *testing.T) {
 	got, err := m.readSnapshot(path)
 	require.NoError(t, err)
 	require.Equal(t, snap.Seq, got.Seq)
-	require.Equal(t, snap.WALOffset, got.WALOffset)
 }
 
 func TestReadLegacyGzipSnapshotIsUnsupported(t *testing.T) {

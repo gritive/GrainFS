@@ -25,7 +25,7 @@ func TestWithSnapshotManager_InjectedInstanceIsUsedAndNotReplaced(t *testing.T) 
 	snap := storageSnapshotable(backend)
 	require.NotNil(t, snap, "LocalBackend must implement Snapshotable for this test to be meaningful")
 
-	mgr, err := snapshot.NewManager(filepath.Join(dir, "snapshots"), snap, "", store, cid)
+	mgr, err := snapshot.NewManager(filepath.Join(dir, "snapshots"), snap, store, cid)
 	require.NoError(t, err)
 
 	// Construct a Server with all conditions for self-construction present:

@@ -43,7 +43,7 @@ table ClusterConfig {
   disk_warn_frac:                     DoubleBox;
   disk_critical_frac:                 DoubleBox;
 
-  // Snapshot (object PITR) — interval=0 disables auto-snapshot, hot-toggleable.
+  // Snapshot — interval=0 disables auto-snapshot, hot-toggleable.
   snapshot_interval_ns:               Int64Box;
   snapshot_retain:                    Int32Box;
 

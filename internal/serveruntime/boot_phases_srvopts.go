@@ -144,7 +144,7 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 		server.WithSnapshotKEK(state.kekStore, [16]byte(state.clusterID)),
 	}
 	// Share the auto-snapshotter's Manager (built in bootBackendWrap, which runs
-	// before this phase) so the HTTP snapshot/PITR handlers and the auto-snapshotter
+	// before this phase) so the HTTP snapshot handlers and the auto-snapshotter
 	// use ONE Manager / one nextSeq. WithSnapshotEncryptor + WithSnapshotKEK above
 	// stay as the self-construction fallback for the nil-objSnapMgr edge
 	// (objSnapMgr != nil iff an auto writer is running, so the fallback never

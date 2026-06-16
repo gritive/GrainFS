@@ -13,24 +13,23 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/packblob"
 	"github.com/gritive/GrainFS/internal/storage/pullthrough"
-	"github.com/gritive/GrainFS/internal/storage/wal"
 )
 
 // bootBackendWrap composes the final storage.Backend chain consumed by the
 // data plane:
 //
-//	ClusterCoord → wal.Backend → pullthrough.Backend → optional RecoveryWriteGate.
+//	ClusterCoord → pullthrough.Backend → optional RecoveryWriteGate.
 //
 // Also reduces startup probe decisions, honours the recovery cluster marker,
 // constructs the DiskCollector (alerts wired in a later phase), creates the
 // default bucket on singleton startup, kicks off the auto-snapshotter, and
 // emits the startup config snapshot.
 //
-// Inputs:  state.clusterCoord, state.wal, state.cfg.IAMStore,
+// Inputs:  state.clusterCoord, state.cfg.IAMStore,
 //
 //	state.roleRegistry, state.startupDecisions, state.cfg.DataDir,
 //	state.peers, state.cfg.RaftAddrExplicit, state.joinMode,
-//	state.walDir, state.nodeID,
+//	state.nodeID,
 //	state.raftAddr, state.addr from cfg, state.cfg.FlagsSnapshot.
 //
 // Outputs: state.backend, state.recoveryReadOnly, state.diskCollector.
@@ -47,7 +46,7 @@ func bootBackendWrap(ctx context.Context, state *bootState) error {
 	if cfg.PackThreshold > 0 && !cfg.RaftAddrExplicit && cfg.NodeID == "" && !state.inviteJoinMode {
 		blobDir := filepath.Join(cfg.DataDir, "blobs")
 		// R1: prefer the gen-aware DEK seam for blob entries. bootBackendWrap runs
-		// after WaitDEKReady + bootLogicalWALOpen, so on the single-node path the
+		// after WaitDEKReady, so on the single-node path the
 		// keeper is populated and clusterID is 16 bytes. Encryption-disabled keeps
 		// both nil → packblob falls through to a plaintext blob store.
 		pb, err := packblob.NewPackedBackendWithOptions(routed, blobDir, int64(cfg.PackThreshold), packblob.PackedBackendOptions{
@@ -66,8 +65,7 @@ func bootBackendWrap(ctx context.Context, state *bootState) error {
 	}
 	state.lifecycleBackend = routed
 
-	// Wrap it with WAL so routed object mutations are captured for PITR.
-	var backend storage.Backend = wal.NewBackend(routed, state.wal)
+	var backend storage.Backend = routed
 
 	// Wrap with pull-through cache. Per /plan-eng-review override A10 — fail-fast at
 	// startup if cfg.IAMStore is nil. This guards against future construction-order
@@ -120,20 +118,13 @@ func bootBackendWrap(ctx context.Context, state *bootState) error {
 		}
 	}
 
-	// Start auto-snapshotter for object-level PITR snapshots (separate from
-	// Raft snapshots above). Uses the WAL-wrapped backend so replay is
-	// anchored to the object mutation log.
+	// Start auto-snapshotter for object-level snapshots (separate from Raft
+	// snapshots above). Snapshots provide point-in-time backup/restore and KEK
+	// sealing anchors.
 	if len(state.clusterID) != 16 {
 		return fmt.Errorf("boot: snapshot KEK wiring: cluster id len %d", len(state.clusterID))
 	}
-	// PITR WAL sealer: mirror bootLogicalWALOpen's exact condition so the
-	// snapshot Manager decrypts the WAL with the SAME keeper it was sealed with.
-	// nil on the encryption-disabled path (plaintext WAL).
-	var pitrWALSealer wal.RecordSealer
-	if state.dekKeeper != nil && len(state.clusterID) == 16 {
-		pitrWALSealer = storage.NewDEKKeeperAdapter(state.dekKeeper, state.clusterID)
-	}
-	objSnapMgr, err := StartAutoSnapshotterWhenReady(ctx, cfg.DataDir, state.walDir, backend, state.metaRaft.FSM().ClusterConfig(), state.kekStore, [16]byte(state.clusterID), pitrWALSealer, 30*time.Second)
+	objSnapMgr, err := StartAutoSnapshotterWhenReady(ctx, cfg.DataDir, backend, state.metaRaft.FSM().ClusterConfig(), state.kekStore, [16]byte(state.clusterID), 30*time.Second)
 	if err != nil {
 		log.Warn().Err(err).Msg("auto-snapshot init failed")
 	}

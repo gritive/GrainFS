@@ -19,9 +19,7 @@ import (
 // is wired later by bootClusterCoordinatorRouting after the distributed backend
 // exists. Also performs the join-mode meta-join + initial Router sync.
 //
-// R1 (narrow): the logical/PITR WAL (wal.OpenEncrypted) is DEK-sealed and
-// decrypts existing records at open, so it is opened in bootLogicalWALOpen
-// (post-gate, after WaitDEKReady). This phase keeps forwarder + coordinator
+// This phase keeps forwarder + coordinator
 // CONSTRUCTION and the keeper-population catch-up (legacy PerformMetaJoin /
 // invite-Phase-2 bootInviteJoinPhase2 below), which MUST run BEFORE
 // WaitDEKReady so a joiner's empty keeper fills via the meta-raft apply loop
@@ -41,7 +39,7 @@ import (
 // Ordering: R-FSM-α moves this BEFORE WaitDEKReady (so the keeper-population
 // catch-up runs pre-gate) and BEFORE bootShardService (handler registration
 // happens later in bootRegisterForwardHandlers). MUST run BEFORE
-// bootLogicalWALOpen + bootClusterCoordinatorRouting + bootBackendWrap.
+// bootClusterCoordinatorRouting + bootBackendWrap.
 func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 	// Seed data groups from cluster size only. Operators no longer choose this:
 	// group count is placement headroom, not a durability policy.

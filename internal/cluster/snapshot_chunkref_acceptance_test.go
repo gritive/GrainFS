@@ -62,7 +62,7 @@ func TestSnapshotPinSurvivesLiveDelete(t *testing.T) {
 	}
 	var cid [16]byte
 	cid[0] = 0x5A
-	mgr, err := snapshot.NewManager(t.TempDir(), b, "", store, cid)
+	mgr, err := snapshot.NewManager(t.TempDir(), b, store, cid)
 	if err != nil {
 		t.Fatalf("snap mgr: %v", err)
 	}

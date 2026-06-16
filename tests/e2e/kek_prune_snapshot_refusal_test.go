@@ -88,7 +88,7 @@ func startSingleKEKNodeWithHTTP(t testing.TB) (dataDir, serverURL, clusterName s
 
 // createSnapshotReturningSeq posts to POST /admin/snapshots and returns the
 // created snapshot's seq number. It retries for up to 30 s while the snapshot
-// subsystem is warming up (same approach as createPITRSnapshot in pitr_test.go).
+// subsystem is warming up (same approach as createSnapshot).
 func createSnapshotReturningSeq(serverURL string) uint64 {
 	ginkgo.GinkgoHelper()
 	var resp snapshotCreateResp

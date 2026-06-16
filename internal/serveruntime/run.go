@@ -184,12 +184,6 @@ func Run(ctx context.Context, cfg Config) error {
 			return fmt.Errorf("DEK readiness: %w", err)
 		}
 	}
-	// Open the DEK-sealed logical/PITR WAL (decrypts existing records on open)
-	// AFTER the gate. Its consumer (wal.NewBackend) is in bootBackendWrap,
-	// after the routed backend is fully constructed.
-	if err := bootLogicalWALOpen(ctx, state); err != nil {
-		return err
-	}
 
 	// R-FSM-α: PR 5 storage runtime now runs AFTER WaitDEKReady so the data
 	// encryptor it constructs sees a populated DEK keeper.

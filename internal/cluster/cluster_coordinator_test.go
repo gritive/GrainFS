@@ -22,7 +22,6 @@ import (
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/gritive/GrainFS/internal/storage/wal"
 	"github.com/stretchr/testify/require"
 )
 
@@ -436,10 +435,7 @@ func TestClusterCoordinator_PutObjectWithACLThroughWALRoutesToLocalGroup(t *test
 	d := &recordingDialer{defaultErr: ErrNoReachablePeer}
 	c := NewClusterCoordinator(base, mgr, router, meta, "self").
 		WithForwardSender(NewForwardSender(d.dial))
-	w, err := wal.Open(t.TempDir())
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, w.Close()) })
-	ops := storage.NewOperations(wal.NewBackend(c, w))
+	ops := storage.NewOperations(c)
 
 	obj, err := ops.PutObjectWithACL(context.Background(), "write-bucket", "key", strings.NewReader("body"), "text/plain", 7)
 
@@ -1058,10 +1054,7 @@ func TestClusterCoordinator_WALWriteAtReadAt_RoutesToLocalGroup(t *testing.T) {
 	c := NewClusterCoordinator(base, mgr, router, meta, "test-node").
 		WithECConfig(ECConfig{DataShards: 1, ParityShards: 0})
 
-	w, err := wal.Open(t.TempDir())
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, w.Close()) })
-	wrapped := wal.NewBackend(c, w)
+	wrapped := c
 	// PreferWriteAt is always false now; full writes use PutObject via RMW path.
 	require.False(t, wrapped.PreferWriteAt("__grainfs_vfs_default"))
 	require.False(t, wrapped.PreferWriteAt("photos"))
