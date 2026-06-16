@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.0.601.0] - 2026-06-16
+
+### Changed
+- **Unified the forwarded PutObject / UploadPart streaming floor to 4 MiB**
+  (`minForwardStreamBytes`, replacing PutObject's implicit 64 MiB cap and
+  UploadPart's 5 MiB `minMultipartForwardStreamBytes`; one shared
+  `shouldStreamForwardBody`). On the cold (forwarded-to-owning-group) path, a
+  forwarded PUT/UploadPart at or above this floor streams its body (body-less
+  args FlatBuffer + a separate body stream); below it the body rides in the args
+  FlatBuffer in a single frame. Previously a forwarded PutObject only streamed
+  above the 64 MiB single-frame cap, so it buffered the whole body (up to tens of
+  MiB) into the request FlatBuffer.
+- Value chosen from an end-to-end forward benchmark (`BenchmarkForwardPutObjectWire`:
+  two real HTTPTransports + a real receiver, so it includes Hertz HTTP processing
+  and receiver-side body parsing). It shows the single-frame path is actually
+  *faster* than streaming across the 0.5–5 MiB range, with the gap widening with
+  size (1 MiB: frame 9.1 ms vs stream 13.0 ms; 5 MiB: 26.9 vs 44.6 ms), because
+  streaming chunks the body into ~11x more allocations plus per-chunk HTTP framing.
+  So the floor is a **memory cap for large objects** (stream to avoid buffering a
+  huge body), not a latency optimization — 4 MiB caps a framed request at
+  ~41 MB/op while keeping the faster frame path for the common 1–4 MiB range.
+  The `body > maxBody` single-frame cap, the frame-path size cap, and the
+  AppendObject buffering cap are unchanged.
+
 ## [0.0.600.0] - 2026-06-16
 
 ### Changed
