@@ -42,7 +42,6 @@ storage.Operations
     |       |
     |       +-- RecoveryWriteGate blocks writes
     |       +-- CachedBackend invalidates cache
-    |       +-- wal.Backend records PITR entries
     |
     +-- safe fallback only through Operations
             |

@@ -32,19 +32,19 @@ func NewTestKEK(t *testing.T) (*encrypt.KEKStore, [16]byte) {
 }
 
 // NewTestManager creates a Manager wired with a test KEK for use in tests.
-func NewTestManager(t *testing.T, dir string, backend storage.Snapshotable, walDir string) *Manager {
+func NewTestManager(t *testing.T, dir string, backend storage.Snapshotable, _ string) *Manager {
 	t.Helper()
 	store, cid := NewTestKEK(t)
-	m, err := NewManager(dir, backend, walDir, store, cid)
+	m, err := NewManager(dir, backend, store, cid)
 	require.NoError(t, err)
 	return m
 }
 
 // NewTestManagerRefSink creates a Manager with a test KEK and chunk-ref sink.
-func NewTestManagerRefSink(t *testing.T, dir string, backend storage.Snapshotable, walDir string, refs RefSink) *Manager {
+func NewTestManagerRefSink(t *testing.T, dir string, backend storage.Snapshotable, _ string, refs RefSink) *Manager {
 	t.Helper()
 	store, cid := NewTestKEK(t)
-	m, err := NewManagerWithRefSink(dir, backend, walDir, store, cid, refs)
+	m, err := NewManagerWithRefSink(dir, backend, store, cid, refs)
 	require.NoError(t, err)
 	return m
 }

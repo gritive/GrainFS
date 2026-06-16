@@ -1,5 +1,5 @@
 // Package chunkref provides the chunk-layer reference primitive shared by
-// snapshot, PITR, and dedup: an idempotent (manifestID, chunkID) reference
+// snapshot and dedup: an idempotent (manifestID, chunkID) reference
 // table plus a t_zero GC tombstone registry.
 //
 // refcount is a DERIVED value (the number of distinct ManifestIDs referencing a

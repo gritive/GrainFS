@@ -56,8 +56,8 @@ func (t *RefTable) Has(m ManifestID, c ChunkID) bool {
 // The scrubber pairs this with GCCandidate.TZero immediately before physical
 // deletion: if the current t_zero differs from the candidate's TZero, c was
 // re-referenced and unreferenced again between the scan and the delete, its
-// retention window has reset, and the candidate is stale (skip it to avoid PITR
-// data loss).
+// retention window has reset, and the candidate is stale (skip it to avoid
+// snapshot data loss).
 func (t *RefTable) TombstoneTime(c ChunkID) (time.Time, bool) {
 	tZero, ok := t.tombstones[c]
 	return tZero, ok
@@ -89,7 +89,7 @@ func (t *RefTable) RemoveRef(m ManifestID, c ChunkID, now time.Time) {
 // chunk can be re-referenced and unreferenced again between the scan and the
 // delete, resetting its retention window. Deleting
 // on a stale TZero would delete a chunk whose new window has not yet elapsed
-// (PITR data loss).
+// (snapshot data loss).
 type GCCandidate struct {
 	ChunkID ChunkID
 	TZero   time.Time

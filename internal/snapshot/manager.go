@@ -16,14 +16,7 @@ import (
 	"github.com/gritive/GrainFS/internal/chunkref"
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/gritive/GrainFS/internal/storage/wal"
 )
-
-// WALProvider is an optional interface for backends that expose a WAL offset.
-// If the backend implements this, snapshot creation records the WAL anchor.
-type WALProvider interface {
-	WALOffset() uint64
-}
 
 // RefSink receives chunk-ref mutations for snapshot freeze/delete. The snapshot
 // domain ManifestID is chunkref.SnapshotID(seq). nil disables ref tracking.
@@ -38,30 +31,14 @@ type Manager struct {
 	dir       string
 	backend   storage.Snapshotable
 	nextSeq   atomic.Uint64
-	walDir    string // optional: path to WAL directory for PITR
 	refs      RefSink
 	kek       KEKSource
 	clusterID [16]byte
-	// walSealer, when non-nil, decrypts the DEK-sealed PITR WAL during
-	// PITRRestore (mirrors how serveruntime boot opens the WAL with
-	// wal.OpenEncrypted). nil = plaintext WAL (encryption-disabled deployment).
-	walSealer wal.RecordSealer
-}
-
-// SetPITRWALSealer installs the sealer used to decrypt the PITR WAL during
-// PITRRestore. Production passes storage.NewDEKKeeperAdapter(dekKeeper, clusterID)
-// — the same keeper the logical WAL was sealed with at boot. Set post-construction
-// (like refs) so the NewManager* signatures stay stable. nil keeps plaintext replay.
-func (m *Manager) SetPITRWALSealer(s wal.RecordSealer) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.walSealer = s
 }
 
 // NewManager creates a Manager backed by the given snapshotable backend.
 // snapshotDir is the directory where snapshot files are stored.
-// walDir is optional: if non-empty, enables PITR via WAL replay.
-func NewManager(snapshotDir string, backend storage.Snapshotable, walDir string, kek KEKSource, clusterID [16]byte) (*Manager, error) {
+func NewManager(snapshotDir string, backend storage.Snapshotable, kek KEKSource, clusterID [16]byte) (*Manager, error) {
 	if kek == nil {
 		return nil, fmt.Errorf("snapshot: NewManager: KEK source required")
 	}
@@ -71,7 +48,7 @@ func NewManager(snapshotDir string, backend storage.Snapshotable, walDir string,
 	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create snapshot dir: %w", err)
 	}
-	m := &Manager{dir: snapshotDir, backend: backend, walDir: walDir, kek: kek, clusterID: clusterID}
+	m := &Manager{dir: snapshotDir, backend: backend, kek: kek, clusterID: clusterID}
 	maxSeq, err := maxSnapshotSeqFromFilenames(snapshotDir)
 	if err != nil {
 		return nil, err
@@ -82,8 +59,8 @@ func NewManager(snapshotDir string, backend storage.Snapshotable, walDir string,
 
 // NewManagerWithRefSink is NewManager plus a chunk-ref sink so snapshot freeze
 // pins (AddRef) and delete unpins (RemoveRef) the frozen chunks.
-func NewManagerWithRefSink(snapshotDir string, backend storage.Snapshotable, walDir string, kek KEKSource, clusterID [16]byte, refs RefSink) (*Manager, error) {
-	m, err := NewManager(snapshotDir, backend, walDir, kek, clusterID)
+func NewManagerWithRefSink(snapshotDir string, backend storage.Snapshotable, kek KEKSource, clusterID [16]byte, refs RefSink) (*Manager, error) {
+	m, err := NewManager(snapshotDir, backend, kek, clusterID)
 	if err != nil {
 		return nil, err
 	}
@@ -114,12 +91,6 @@ func (m *Manager) Create(reason string) (*Snapshot, error) {
 	}
 	sort.Strings(buckets)
 
-	// Record WAL offset before listing objects so the anchor is conservative
-	var walOffset uint64
-	if wp, ok := m.backend.(WALProvider); ok {
-		walOffset = wp.WALOffset()
-	}
-
 	// Capture bucket metadata (versioning, EC) if the backend supports it.
 	var bucketMeta []storage.SnapshotBucket
 	if bs, ok := m.backend.(storage.BucketSnapshotable); ok {
@@ -133,7 +104,6 @@ func (m *Manager) Create(reason string) (*Snapshot, error) {
 	snap := &Snapshot{
 		Seq:         seq,
 		Timestamp:   time.Now().UTC(),
-		WALOffset:   walOffset,
 		Reason:      reason,
 		ObjectCount: len(objects),
 		SizeBytes:   totalSize,
@@ -216,7 +186,6 @@ func (m *Manager) listLocked() ([]*Snapshot, error) {
 			// Best-effort listing: skip files we cannot open, but make the skip
 			// observable. With envelopes "unreadable" can mean an unresolvable KEK
 			// version, an auth failure, or tampering — not just benign corruption.
-			// PITRRestore cross-checks for such skipped files and fails closed.
 			metrics.SnapshotOpenErrorsTotal.Inc()
 			log.Warn().Err(err).Str("file", e.Name()).Msg("snapshot: List: skipping unreadable snapshot file")
 			continue

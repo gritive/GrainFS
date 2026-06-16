@@ -16,7 +16,7 @@ import (
 // regression guard for the single-node packed hot path. PackedBackend wraps
 // inner via a NON-embedded field, so unlike interface-embedded wrappers it
 // promotes NO methods automatically — `CreateMultipartUploadWithTags` must be
-// declared explicitly or the wal.Backend sitting above it would fail the
+// declared explicitly or an outer decorator sitting above it would fail the
 // (tagsCreator) type assertion when PackThreshold > 0 is enabled.
 func TestPackedBackend_CreateMultipartUploadWithTags_DelegatesToInner(t *testing.T) {
 	dir := t.TempDir()
@@ -29,7 +29,7 @@ func TestPackedBackend_CreateMultipartUploadWithTags_DelegatesToInner(t *testing
 	tc, ok := any(pb).(interface {
 		CreateMultipartUploadWithTags(ctx context.Context, bucket, key, contentType string, tags []storage.Tag) (string, error)
 	})
-	require.True(t, ok, "PackedBackend must expose CreateMultipartUploadWithTags so wal.Backend's (tagsCreator) type assertion reaches inner")
+	require.True(t, ok, "PackedBackend must expose CreateMultipartUploadWithTags so an outer decorator.s (tagsCreator) type assertion reaches inner")
 
 	ctx := context.Background()
 	require.NoError(t, pb.CreateBucket(ctx, "b"))

@@ -33,7 +33,6 @@ import (
 	"github.com/gritive/GrainFS/internal/snapshot"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/packblob"
-	"github.com/gritive/GrainFS/internal/storage/wal"
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
@@ -238,8 +237,6 @@ type bootState struct {
 	placementStatsStore *gossip.NodeStatsStore // nil when balancer disabled
 
 	// bootWALAndForwardersPart1
-	wal               *wal.WAL
-	walDir            string
 	forwardSender     *cluster.ForwardSender
 	forwardReceiver   *cluster.ForwardReceiver
 	metaForwardSender *cluster.MetaProposeForwardSender
@@ -268,7 +265,7 @@ type bootState struct {
 	lifecycleBackend storage.Backend
 	recoveryReadOnly bool
 	diskCollector    *cluster.DiskCollector
-	// objSnapMgr is the object-level PITR snapshot Manager, created
+	// objSnapMgr is the object-level snapshot Manager, created
 	// synchronously by StartAutoSnapshotterWhenReady during the backend phase.
 	// Consumed by bootRecoveryAndScrubber to wire orphan-segment GC (frozen-path
 	// source). Nil when the backend does not implement storage.Snapshotable.

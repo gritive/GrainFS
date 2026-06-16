@@ -927,7 +927,7 @@ func (pb *PackedBackend) DeleteObject(ctx context.Context, bucket, key string) e
 }
 
 // DeleteObjectReturningMarker forwards to the inner backend only when bucket
-// versioning is enabled so the wal.Backend soft-delete path can obtain the
+// versioning is enabled so an outer decorator.s soft-delete path can obtain the
 // freshly minted delete-marker versionId. Non-versioned packed objects live in
 // this wrapper's index, so they must take the local DeleteObject path to clear
 // the packed entry instead of bypassing it through the inner backend.
@@ -973,9 +973,9 @@ func (pb *PackedBackend) evictPackedKeyIfSame(pk packedKey, entry *indexEntry) {
 }
 
 // DeleteObjectVersion forwards version-specific hard deletes to the inner
-// backend. Required so wal.Backend.DeleteObjectVersion's type assertion
-// (b.Backend.(versionDeleter)) succeeds when packblob sits between WAL and
-// the version-aware backend (DistributedBackend / ClusterCoordinator).
+// backend. Required so an outer decorator.s DeleteObjectVersion type assertion
+// (b.Backend.(versionDeleter)) succeeds when packblob sits between that decorator
+// and the version-aware backend (DistributedBackend / ClusterCoordinator).
 func (pb *PackedBackend) DeleteObjectVersion(bucket, key, versionID string) error {
 	vd, ok := pb.inner.(storage.ObjectVersionDeleter)
 	if !ok {
@@ -1380,7 +1380,7 @@ func (pb *PackedBackend) CreateMultipartUpload(ctx context.Context, bucket, key,
 
 // CreateMultipartUploadWithTags forwards to the inner backend when it supports
 // the tagsCreator extension. PackedBackend uses a non-embedded inner field, so
-// no method is promoted — without this explicit pass-through the wal.Backend
+// no method is promoted — without this explicit pass-through an outer decorator
 // wrapping us in the single-node packed hot path would fail its type assertion
 // (tagsCreator) and silently drop x-amz-tagging on multipart-initiate.
 func (pb *PackedBackend) CreateMultipartUploadWithTags(ctx context.Context, bucket, key, contentType string, tags []storage.Tag) (string, error) {

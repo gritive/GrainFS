@@ -156,18 +156,9 @@ func (b *Backend) PreferWriteAt(bucket string) bool {
 	return ok && pref.PreferWriteAt(bucket)
 }
 
-// WALOffset forwards PITR snapshot anchors through the pull-through decorator.
-func (b *Backend) WALOffset() uint64 {
-	type walProvider interface{ WALOffset() uint64 }
-	if wp, ok := b.Backend.(walProvider); ok {
-		return wp.WALOffset()
-	}
-	return 0
-}
-
 // ListAllObjects implements storage.Snapshotable by delegating to the wrapped
 // backend. Embedding storage.Backend does not promote Snapshotable, so this
-// forwarding is required for PITR snapshots to see through the pull-through layer.
+// forwarding is required for snapshots to see through the pull-through layer.
 func (b *Backend) ListAllObjects() ([]storage.SnapshotObject, error) {
 	if snap, ok := b.Backend.(storage.Snapshotable); ok {
 		return snap.ListAllObjects()

@@ -10,23 +10,20 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/snapshot"
 	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/gritive/GrainFS/internal/storage/wal"
 )
 
-// StartAutoSnapshotterWhenReady wires the object-level PITR auto-snapshotter
-// once the backend reports ready. Interval/retain are driven by cluster config
+// StartAutoSnapshotterWhenReady wires the object-level auto-snapshotter once the
+// backend reports ready. Interval/retain are driven by cluster config
 // (hot-reloadable). Backends that don't implement storage.Snapshotable are
-// skipped silently. walSealer, when non-nil, is the DEK sealer the logical WAL
-// was opened with (bootLogicalWALOpen) — it lets PITRRestore decrypt the
-// encrypted WAL. nil = encryption-disabled (plaintext WAL).
+// skipped silently. Snapshots provide point-in-time backup/restore and KEK
+// sealing anchors.
 func StartAutoSnapshotterWhenReady(
 	ctx context.Context,
-	dataDir, walDir string,
+	dataDir string,
 	backend storage.Backend,
 	cfg *cluster.ClusterConfig,
 	kek snapshot.KEKSource,
 	clusterID [16]byte,
-	walSealer wal.RecordSealer,
 	readinessTimeout time.Duration,
 ) (*snapshot.Manager, error) {
 	snapshotable, ok := backend.(storage.Snapshotable)
@@ -37,11 +34,10 @@ func StartAutoSnapshotterWhenReady(
 	if err := waitForSnapshotBackendReady(ctx, snapshotable, readinessTimeout); err != nil {
 		return nil, err
 	}
-	objSnapMgr, err := snapshot.NewManager(filepath.Join(dataDir, "snapshots"), snapshotable, walDir, kek, clusterID)
+	objSnapMgr, err := snapshot.NewManager(filepath.Join(dataDir, "snapshots"), snapshotable, kek, clusterID)
 	if err != nil {
 		return nil, err
 	}
-	objSnapMgr.SetPITRWALSealer(walSealer)
 	as := snapshot.NewAutoSnapshotter(objSnapMgr, cfg, 0)
 	as.Start(ctx)
 	log.Info().

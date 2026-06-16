@@ -21,12 +21,6 @@ var _ = ginkgo.Describe("R1 narrow boot phase ordering (run.go)", func() {
 		gomega.Expect(idx("bootWALAndForwardersPart1(ctx, state)")).To(gomega.BeNumerically(">", 0))
 		gomega.Expect(idx("WaitDEKReady(readyCtx")).To(gomega.BeNumerically(">", idx("bootWALAndForwardersPart1(ctx, state)")))
 	})
-	ginkgo.It("opens the logical WAL after the gate", func() {
-		gomega.Expect(idx("bootLogicalWALOpen(ctx, state)")).To(gomega.BeNumerically(">", idx("WaitDEKReady(readyCtx")))
-	})
-	ginkgo.It("wraps the backend (wal consumer) after the logical WAL open", func() {
-		gomega.Expect(idx("bootBackendWrap(ctx, state)")).To(gomega.BeNumerically(">", idx("bootLogicalWALOpen(ctx, state)")))
-	})
 	ginkgo.It("wraps the backend after routed storage exists", func() {
 		gomega.Expect(idx("bootClusterCoordinatorRouting(state)")).To(gomega.BeNumerically(">", idx("bootOwnedGroupsAndEC(ctx, state")))
 		gomega.Expect(idx("bootBackendWrap(ctx, state)")).To(gomega.BeNumerically(">", idx("bootClusterCoordinatorRouting(state)")))

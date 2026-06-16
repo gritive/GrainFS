@@ -93,9 +93,6 @@ func dataDirHasEntries(path string) bool {
 //     (boot_phases_backend.go:48)
 //   - shared-fsm/     — cluster FSM-state BadgerDB with encrypted values
 //     (boot_phases.go:235 bootOpenSharedFSMDB)
-//   - wal/            — logical WAL opened via wal.OpenEncrypted
-//     (boot_phases_logical_wal.go bootLogicalWALOpen; forwarder wiring lives
-//     in boot_phases_forwarders.go bootWALAndForwardersPart1)
 //   - raft/raft-v2/   — data-plane raft v2 Badger log/stable/snapshot store
 //   - meta_raft/raft-v2/ — meta-raft v2 Badger log/stable/snapshot store
 //   - metaDir (= --meta-dir or <dataDir>/meta):

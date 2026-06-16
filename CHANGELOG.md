@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.603.0] - 2026-06-16
+
+### Removed
+- **Point-In-Time Recovery (PITR) and the logical WAL it replayed.** PITR
+  restored object metadata to an arbitrary timestamp by replaying a per-mutation
+  logical write-ahead log on top of a base snapshot. After the data-WAL removal
+  epic, this logical WAL was the *only* remaining WAL, and PITR was its *only*
+  reader — every S3 mutation paid an advisory async WAL append that nothing
+  consumed. Removing PITR therefore also removes that write-only overhead.
+  - **BREAKING:** the `POST /admin/pitr` admin endpoint is gone. Object-level
+    snapshots and `POST /admin/snapshots`, `POST /admin/snapshots/:seq/restore`,
+    and `DELETE /admin/snapshots/:seq` are **unchanged** — coarse-grained
+    point-in-time *snapshot* restore, the auto-snapshotter, and KEK-sealing of
+    retained snapshots all remain. Only arbitrary-timestamp WAL replay is removed.
+  - Deleted `internal/storage/wal` (the logical WAL package + its `wal.Backend`
+    mutation-capture decorator), `internal/snapshot/pitr.go`, the `/admin/pitr`
+    handler, the `bootLogicalWALOpen` boot phase, and the snapshot `WALOffset`
+    anchor (`Manager.SetPITRWALSealer`, the `WALProvider` interface, the
+    `Snapshot.WALOffset` field, and the pull-through `WALOffset` forwarder).
+    Snapshot files written by older builds still load — the now-absent
+    `wal_offset` JSON field is simply ignored on read.
+
 ## [0.0.602.0] - 2026-06-16
 
 ### Fixed

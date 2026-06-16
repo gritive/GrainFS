@@ -36,7 +36,6 @@ func benchmarkSnapshotPayload() *Snapshot {
 	return &Snapshot{
 		Seq:         1,
 		Timestamp:   time.Unix(1778800000, 0).UTC(),
-		WALOffset:   123456,
 		Reason:      "benchmark",
 		ObjectCount: len(objects),
 		SizeBytes:   4096 * int64(len(objects)),

@@ -187,7 +187,7 @@ type Copier interface {
 //
 // Segments carries the per-object chunk refs introduced in Phase 1.6: a
 // chunked object's blobs live under <key>_segments/<blob_id>, not at the
-// legacy objectPath. Snapshots must capture Segments so PITR restore can
+// legacy objectPath. Snapshots must capture Segments so snapshot restore can
 // verify the right blobs and rehydrate Object metadata. Older snapshots
 // without this field are still readable; they fall back to the legacy
 // single-file blob check during restore.
@@ -237,7 +237,7 @@ type Snapshotable interface {
 }
 
 // SnapshotBucket is a point-in-time record of bucket-level metadata
-// (versioning state). Captured by BucketSnapshotable backends so PITR
+// (versioning state). Captured by BucketSnapshotable backends so snapshot
 // restores reproduce the full bucket configuration.
 type SnapshotBucket struct {
 	Name            string `json:"name"`

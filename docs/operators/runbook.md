@@ -788,7 +788,7 @@ Walk/delete errors > 0 indicates filesystem permission or I/O issues.
   24h). Set `--segment-gc-retention 0` to disable the time-based grace period
   (the 5-minute age gate still applies). If disk reclamation lags after a large
   delete/overwrite, this window is usually why — shorten it deliberately, not
-  reflexively (it protects in-flight reads and recent-PITR margin).
+  reflexively (it protects in-flight reads and recent-write margin).
 - Deletion is reference-counted: a segment is removed only when no live object
   version and no snapshot references it. If `found` stays high but `deleted` is
   zero, the segments are still referenced (expected) rather than stuck.
