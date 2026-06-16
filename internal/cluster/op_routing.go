@@ -53,11 +53,18 @@ func NewOpRouter(
 	var placementGroupIDs []string
 	if groups != nil {
 		if candidates, err := candidateGroupsFor(groups.ShardGroups(), ec); err == nil {
-			ids := make([]string, len(candidates))
-			for i, c := range candidates {
-				ids[i] = c.ID
+			// Durability gate: never boot-freeze a non-redundant (1+0 single-peer)
+			// candidate set in a multi-node cluster whose wide EC groups have not
+			// formed yet. Leaving placementGroupIDs nil keeps the frozen set empty,
+			// so RouteObjectWrite takes the live path (also gated) until redundant
+			// groups appear and gen-0 captures them. See redundantPlacementGate.
+			if redundantPlacementGate(candidates, metaNodeCount(groups)) == nil {
+				ids := make([]string, len(candidates))
+				for i, c := range candidates {
+					ids[i] = c.ID
+				}
+				placementGroupIDs = ids
 			}
-			placementGroupIDs = ids
 		}
 	}
 	return &OpRouter{
@@ -230,15 +237,32 @@ func (r *OpRouter) RouteObjectWrite(bucket, key string) (RouteTarget, ShardGroup
 		group ShardGroupEntry
 		err   error
 	)
+	nodeCount := metaNodeCount(r.groups)
 	if placementIDs := r.placement.currentGroupIDs(); len(placementIDs) > 0 {
 		groupID := groupIDForObject(bucket, key, placementIDs)
 		if g, ok := r.groups.ShardGroup(groupID); ok {
-			group = g
+			// Durability gate on the frozen/gen path: a non-redundant group from a
+			// poisoned gen-0 (formation-race artifact, before self-heal advances it)
+			// must not place the object non-redundantly. Leaving group.ID empty falls
+			// through to the live path, which rejects with ErrPlacementNotRedundant
+			// while only 1+0 groups exist; self-heal advances the generation on the
+			// next write once wide EC groups form. This keeps the frozen and live
+			// paths symmetric — both refuse non-redundant placement in a ≥2-node cluster.
+			if redundantPlacementGate([]ShardGroupEntry{g}, nodeCount) == nil {
+				group = g
+			}
 		}
 	}
 	if group.ID == "" {
 		group, err = SelectObjectPlacementGroup(bucket, key, r.groups.ShardGroups(), r.ec)
 		if err != nil {
+			// No EC-capable candidate. In a multi-node cluster this is the formation
+			// window (wide groups not formed yet) — reject rather than bucket-route
+			// the object into a non-redundant group (Trap A). A single-node cluster
+			// keeps the bucket fallback (its 1+0 group is the best available).
+			if nodeCount >= 2 {
+				return RouteTarget{}, ShardGroupEntry{}, ErrPlacementNotRedundant
+			}
 			target, routeErr := r.RouteBucket(bucket)
 			if routeErr != nil {
 				return RouteTarget{}, ShardGroupEntry{}, err
@@ -248,6 +272,12 @@ func (r *OpRouter) RouteObjectWrite(bucket, key string) (RouteTarget, ShardGroup
 				return RouteTarget{}, ShardGroupEntry{}, err
 			}
 			return target, groupSnapshot, nil
+		}
+		// Durability gate: the live candidate is non-redundant (1+0 single-peer) in a
+		// multi-node cluster — the wide EC groups have not formed. Reject rather than
+		// place where a single node loss destroys the only copy.
+		if gateErr := redundantPlacementGate([]ShardGroupEntry{group}, nodeCount); gateErr != nil {
+			return RouteTarget{}, ShardGroupEntry{}, gateErr
 		}
 	}
 	target, err := r.routeGroup(group.ID)

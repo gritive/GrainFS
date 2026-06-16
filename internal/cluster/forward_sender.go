@@ -520,6 +520,17 @@ func (s *ForwardSender) SendReadStream(
 	}()
 
 	_, callerHasDeadline := ctx.Deadline()
+	// Mirror Send's readiness-retry promotion: a deadline-less read (S3 GET carries
+	// no ctx deadline) otherwise returns immediately on the first not-leader/dial
+	// failure, so a read racing a data-group leader re-election fails instead of
+	// waiting it out. Imposing readinessRetry and marking callerHasDeadline enables
+	// the not-leader/dial-failure backoff loop below, symmetric with the write path.
+	if !callerHasDeadline && s.readinessRetry > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.readinessRetry)
+		defer cancel()
+		callerHasDeadline = true
+	}
 	if s.timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, s.timeout)

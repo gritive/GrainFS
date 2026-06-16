@@ -61,6 +61,9 @@ func mapError(c *app.RequestContext, err error) {
 		writeXMLError(c, consts.StatusServiceUnavailable, "SlowDown", "metadata commit timed out under load; retry")
 	case errors.Is(err, cluster.ErrPlacementTargetsUnavailable):
 		writeXMLError(c, consts.StatusServiceUnavailable, "ServiceUnavailable", err.Error())
+	case errors.Is(err, cluster.ErrPlacementNotRedundant):
+		writeXMLError(c, consts.StatusServiceUnavailable, "SlowDown",
+			"redundant placement groups still forming; retry")
 	case errors.Is(err, encrypt.ErrDEKGenUnknown):
 		writeXMLError(c, consts.StatusServiceUnavailable, "ServiceUnavailable",
 			"data encryption key generation not yet available; retry")

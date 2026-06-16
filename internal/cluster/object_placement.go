@@ -3,10 +3,36 @@ package cluster
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"sort"
 )
+
+// ErrPlacementNotRedundant is returned by the placement-redundancy gate when an
+// object cannot be placed durably: the widest candidate group cannot survive a
+// single-node loss (parity 0 / <2 peers) while the cluster has >=2 member nodes,
+// so the redundant EC groups have not formed yet. Callers map it to a transient
+// ServiceUnavailable rather than routing the object into a non-redundant group.
+var ErrPlacementNotRedundant = errors.New("placement: no redundancy-capable group (cluster still forming)")
+
+// redundantPlacementGate reports whether the candidate set may receive a durable
+// object placement. candidates must be candidateGroupsFor output (all widest, same
+// peer count), so candidates[0] represents the whole set's redundancy. It returns
+// ErrPlacementNotRedundant when the widest group is non-redundant (1+0, a single
+// peer) AND the cluster has >=2 member nodes — a multi-node cluster mid-formation
+// whose wide EC groups have not appeared yet; the caller defers rather than pinning
+// the object to a group a single node loss would destroy. A genuine single-node
+// cluster (metaNodeCount < 2) keeps the 1+0 candidate, which is the best available.
+func redundantPlacementGate(candidates []ShardGroupEntry, metaNodeCount int) error {
+	if len(candidates) == 0 || metaNodeCount < 2 {
+		return nil
+	}
+	if !DesiredECConfigForGroup(candidates[0]).Redundant() {
+		return ErrPlacementNotRedundant
+	}
+	return nil
+}
 
 // ValidatePlacementGroupID rejects new object-index rows that cannot route to a
 // concrete data group.

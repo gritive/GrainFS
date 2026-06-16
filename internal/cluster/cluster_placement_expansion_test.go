@@ -73,3 +73,34 @@ func TestPlanPlacementExpansion_NoOp(t *testing.T) {
 	require.True(t, plan.NoOp, "no new candidate groups → no-op")
 	require.Empty(t, plan.Added)
 }
+
+// TestPlanPlacementExpansion_RejectsNonRedundant pins the durability guard on the
+// operator expand-placement path: it refuses to record a non-redundant generation
+// in a multi-node cluster. This protects ensureGenZero's self-heal invariant (the
+// latest generation regresses to non-redundant only at gen-0/boot). A redundant
+// base is frozen, then the wide group vanishes leaving only a single-peer group —
+// the operator expansion to that 1+0 set is rejected.
+//
+// RED-on-revert: drop the redundantPlacementGate in PlanPlacementExpansion and it
+// returns a normal plan over the single-peer set.
+func TestPlanPlacementExpansion_RejectsNonRedundant(t *testing.T) {
+	ec := ECConfig{DataShards: 2, ParityShards: 2}
+	meta := &fakeGenShardSource{
+		nodeCount: 4,
+		groups: map[string]ShardGroupEntry{
+			"group-wide": {ID: "group-wide", PeerIDs: []string{"n1", "n2", "n3", "n4"}},
+		},
+	}
+	c := NewClusterCoordinator(&fakeBackend{}, NewDataGroupManager(), nil, meta, "n1").
+		WithECConfig(ec)
+	require.Equal(t, []string{"group-wide"}, c.runtimeState().opRouter.currentPlacementGroupIDs(),
+		"redundant base is boot-frozen")
+
+	// The wide group vanishes; only a single-peer group remains live.
+	delete(meta.groups, "group-wide")
+	meta.groups["group-narrow"] = ShardGroupEntry{ID: "group-narrow", PeerIDs: []string{"n1"}}
+
+	_, err := c.PlanPlacementExpansion()
+	require.ErrorIs(t, err, ErrPlacementNotRedundant,
+		"operator expansion to a non-redundant set is refused")
+}

@@ -308,6 +308,35 @@ func TestForwardSender_ReadinessRetryAddsDeadlineForBackgroundCaller(t *testing.
 	require.Equal(t, []string{"a", "b", "a"}, connected)
 }
 
+// TestForwardSender_SendReadStreamReadinessRetryAddsDeadlineForBackgroundCaller
+// pins the read-side symmetry with Send: a deadline-less read (S3 GET carries no
+// ctx deadline) must wait out a data-group leader re-election via the not-leader
+// backoff loop, which readinessRetry enables. Without the promotion, the read
+// returns immediately on the first not-leader reply (connected==["a"]).
+//
+// RED-on-revert: remove the `!callerHasDeadline && s.readinessRetry > 0` promotion
+// in SendReadStream and the read returns after the first peer instead of retrying.
+func TestForwardSender_SendReadStreamReadinessRetryAddsDeadlineForBackgroundCaller(t *testing.T) {
+	var connected []string
+	readDialer := func(ctx context.Context, peer string, payload []byte) ([]byte, io.ReadCloser, error) {
+		connected = append(connected, peer)
+		if len(connected) < 3 {
+			return notLeaderReplyBytes(t, ""), nil, nil
+		}
+		return okReplyBytes(t), io.NopCloser(bytes.NewReader([]byte("body"))), nil
+	}
+	s := NewForwardSender(func(context.Context, string, []byte) ([]byte, error) {
+		return okReplyBytes(t), nil
+	}).WithReadStreamDialer(readDialer).WithReadinessRetry(500 * time.Millisecond)
+
+	reply, rc, err := s.SendReadStream(context.Background(), []string{"a", "b"}, "g",
+		raftpb.ForwardOpGetObject, buildGetObjectArgs("b", "k"))
+	require.NoError(t, err)
+	require.NotEmpty(t, reply)
+	require.NoError(t, rc.Close())
+	require.Equal(t, []string{"a", "b", "a"}, connected)
+}
+
 // TestForwardSender_NotLeaderHintFails_FallthroughOriginalReply verifies that
 // when the hint dial also fails, we don't loop forever — we return the original
 // NotLeader reply and let the caller retry from a fresh node.
