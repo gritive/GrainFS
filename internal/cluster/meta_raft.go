@@ -442,6 +442,24 @@ func (m *MetaRaft) ProposeAddPlacementGeneration(ctx context.Context, groupIDs [
 	return m.waitAppliedResult(ctx, idx)
 }
 
+// ProposeAddPlacementGenerationForwarding is ProposeAddPlacementGeneration that
+// forwards to the meta leader when this node is a follower. The lazy gen-0
+// establishment (first object write on any node) needs to record the initial
+// placement generation regardless of which node serves the write, so it cannot
+// require the writer to be the meta leader. The FSM apply dedups an identical
+// latest generation, so concurrent first-writers converge to a single gen-0.
+func (m *MetaRaft) ProposeAddPlacementGenerationForwarding(ctx context.Context, groupIDs []string) error {
+	if len(groupIDs) == 0 {
+		return fmt.Errorf("meta_raft: ProposeAddPlacementGenerationForwarding: empty group set")
+	}
+	payload := encodeMetaAddPlacementGenerationCmd(groupIDs)
+	data, err := encodeMetaCmd(MetaCmdTypeAddPlacementGeneration, payload)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
+	}
+	return m.proposeOrForward(ctx, m.node, data)
+}
+
 // AddTopologyGeneration records a new topology generation that grows the object→
 // group placement set from baseGroupIDs to expandedGroupIDs (S7-6 add-protocol,
 // must-solve ②). The new groups must already be formed and registered

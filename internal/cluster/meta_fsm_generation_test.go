@@ -46,6 +46,63 @@ func TestApplyAddPlacementGeneration_AppendsMonotonic(t *testing.T) {
 	require.Equal(t, "group-1", f.PlacementGenerations()[0].groupIDs[0])
 }
 
+// TestApplyAddPlacementGeneration_DedupsIdenticalLatest pins the idempotency the
+// lazy-first-write gen-0 establishment relies on: concurrent first writes both
+// propose the same converged candidate set, so the FSM apply must no-op when the
+// proposed group set equals the current LATEST generation — otherwise the registry
+// would accumulate duplicate generations ([set, set, ...]), inflating the read
+// fan-out and (for gen-0) violating the "one gen-0" contract. A genuinely different
+// set (growth) still appends.
+func TestApplyAddPlacementGeneration_DedupsIdenticalLatest(t *testing.T) {
+	f := NewMetaFSM()
+
+	// First record establishes gen-0.
+	require.NoError(t, f.applyCmd(makeAddPlacementGenerationCmd(t, []string{"group-1", "group-2", "group-3"})))
+	require.Len(t, f.PlacementGenerations(), 1)
+
+	// Re-proposing the identical set (concurrent first-writer / retry) is a no-op.
+	require.NoError(t, f.applyCmd(makeAddPlacementGenerationCmd(t, []string{"group-1", "group-2", "group-3"})))
+	require.Len(t, f.PlacementGenerations(), 1, "identical-to-latest generation must dedup, not append")
+
+	// A genuinely different set (growth) appends gen-1.
+	require.NoError(t, f.applyCmd(makeAddPlacementGenerationCmd(t, []string{"group-1", "group-2", "group-3", "group-4"})))
+	require.Len(t, f.PlacementGenerations(), 2, "a changed set is real growth and must append")
+
+	// Re-proposing the new latest is again a no-op.
+	require.NoError(t, f.applyCmd(makeAddPlacementGenerationCmd(t, []string{"group-1", "group-2", "group-3", "group-4"})))
+	require.Len(t, f.PlacementGenerations(), 2, "identical-to-latest after growth must also dedup")
+}
+
+// TestApplyAddPlacementGeneration_DedupsAnyExisting pins the registry invariant
+// that closes the lazy-gen-0-vs-operator-growth race: a proposal equal to ANY
+// existing generation (not just the latest) is a no-op. The race forms a
+// [A, B, A] history when a stale lazy gen-0 proposal (set A) is ordered AFTER an
+// operator expansion appended B — dedup-against-latest (last=B≠A) would append A,
+// silently reverting the expansion (currentGroupIDs would become the pre-growth
+// set A and the registry would never shrink). Deduping against the whole registry
+// keeps it [A, B], preserving the expansion.
+//
+// RED-on-revert: compare only against the last entry and the third apply appends
+// A → registry becomes [A, B, A].
+func TestApplyAddPlacementGeneration_DedupsAnyExisting(t *testing.T) {
+	f := NewMetaFSM()
+	setA := []string{"group-1", "group-2"}
+	setB := []string{"group-1", "group-2", "group-3", "group-4"}
+
+	// Operator growth captures gen-0 = A, then appends the expanded set B.
+	require.NoError(t, f.applyCmd(makeAddPlacementGenerationCmd(t, setA)))
+	require.NoError(t, f.applyCmd(makeAddPlacementGenerationCmd(t, setB)))
+	require.Len(t, f.PlacementGenerations(), 2)
+
+	// A stale lazy gen-0 proposal (set A) is ordered last. It equals an EARLIER
+	// generation, not the latest — it must still dedup, or it reverts the growth.
+	require.NoError(t, f.applyCmd(makeAddPlacementGenerationCmd(t, setA)))
+	gens := f.PlacementGenerations()
+	require.Len(t, gens, 2, "a set equal to ANY existing generation must dedup, not append")
+	require.Equal(t, setB, gens[len(gens)-1].groupIDs,
+		"latest generation stays the expanded set B; the expansion is not reverted")
+}
+
 // TestPlacementGenerations_SnapshotRestore proves the generation registry
 // survives a snapshot→restore round-trip with order, epoch, and group IDs intact.
 func TestPlacementGenerations_SnapshotRestore(t *testing.T) {

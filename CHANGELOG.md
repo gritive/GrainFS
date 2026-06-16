@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.0.606.0] - 2026-06-16
+
+### Fixed
+- **Cross-node AppendObject on a multi-node cluster no longer fragments.** In a
+  cluster formed by per-join (no `--bootstrap-expect-nodes`), each node froze its
+  object→group placement candidate set at boot from its then-partial view of the
+  shard-group registry — group registration does not trigger a placement rebuild (by
+  design, to avoid re-routing existing objects). Nodes therefore froze **divergent**
+  subsets, so the same key hash-routed (`hash % len(candidateSet)`) to different
+  data-Raft groups on different nodes; an append issued from a second node landed in
+  a different group than the original write and failed the offset check
+  (`InvalidWriteOffset`) or read back stale / 404. The cluster now establishes a
+  consistent initial placement generation (gen-0) once, lazily on the first object
+  write, recorded into the meta-Raft control plane and applied identically on every
+  node, so all nodes route a key to the same group. Subsequent topology growth keeps
+  using the existing `cluster expand-placement` generation model; the placement-
+  generation registry now dedups against its whole history, so a late gen-0 proposal
+  can never silently revert an operator expansion. Fixes 5 of the 6 `AppendObject
+  Cluster4Node` e2e cases (forwarded append, concurrent offset-0 race,
+  stat-then-append, coalesce, 8 MiB body). The remaining case (`survives owner kill
+  after coalesce`) now fails for a separate, tracked reason — read-failover after a
+  data-group leader dies (no EC-reconstruct / surviving-peer fallback) — not
+  placement routing.
+
 ## [0.0.605.0] - 2026-06-16
 
 ### Fixed
