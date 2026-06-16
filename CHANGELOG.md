@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.605.0] - 2026-06-16
+
+### Fixed
+- **Audit log search and the Iceberg REST catalog work out of the box.**
+  `--audit-iceberg` defaults ON and writes audit rows to an Iceberg table, and its
+  search path (a DuckDB client attaching to the server's own `/iceberg/v1/config`
+  REST catalog) therefore requires the catalog to be available. But
+  `--enable-iceberg` defaulted OFF, so `s.icebergCatalog` was nil and every Iceberg
+  REST call returned `501 NotImplemented` — audit search 500'd ("audit search
+  warmup failed") and any Iceberg REST client (DuckDB, `warp iceberg`) failed at the
+  mandatory `GET /v1/config` handshake. `--enable-iceberg` now defaults to **true**
+  so the default-on audit lake is actually queryable and the REST catalog is
+  reachable. Fixes the `Audit policy decisions` (SingleNode + Cluster3Node), the
+  `Protocol credential ... attaches DuckDB to the REST catalog`, and the
+  `Multi-Raft ... splits Iceberg catalog` e2e cases. Set `--enable-iceberg=false`
+  to opt out (which also makes audit search unavailable).
+
 ## [0.0.604.0] - 2026-06-16
 
 ### Fixed
