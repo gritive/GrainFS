@@ -18,8 +18,6 @@ var ErrRelocateSkipped = errors.New("relocate: object changed or no longer a can
 // relocateInput identifies the LATEST version of an object to relocate into a
 // redundant placement group. VersionID/ExpectedETag pin the exact record so a
 // concurrent overwrite causes a skip rather than corrupting a fresher object.
-//
-//nolint:unused // wired up by the orphan/redundancy-upgrade sweep in a later task.
 type relocateInput struct {
 	Bucket, Key, VersionID, ExpectedETag string
 }
@@ -30,8 +28,6 @@ type relocateInput struct {
 // marker, its ETag and VersionID still match the pinned candidate, and the
 // cluster currently has redundant placement capacity. Any mismatch returns
 // ErrRelocateSkipped.
-//
-//nolint:unused // wired up by the orphan/redundancy-upgrade sweep in a later task.
 func relocationStillEligible(cur PutObjectMetaCmd, in relocateInput, clusterRedundant bool) error {
 	switch {
 	case !clusterRedundant:
@@ -57,8 +53,6 @@ func relocationStillEligible(cur PutObjectMetaCmd, in relocateInput, clusterRedu
 // contentType/userMetadata/tags/ACL/LastModified) and atomically swapping the
 // placement via a CAS-honoring FSM propose. OLD shards are never deleted here; a
 // separate orphan-segment sweep reclaims them. LATEST-VERSION-ONLY.
-//
-//nolint:unused // wired up by the orphan/redundancy-upgrade sweep in a later task.
 func (b *DistributedBackend) relocateObjectToRedundantGroup(ctx context.Context, in relocateInput) error {
 	cur, err := b.readQuorumMetaCmd(in.Bucket, in.Key)
 	if err != nil {

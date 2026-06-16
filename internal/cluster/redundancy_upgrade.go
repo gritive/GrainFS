@@ -8,8 +8,6 @@ import "github.com/gritive/GrainFS/internal/scrubber"
 // fingerprint), the cluster currently has redundant placement capacity, it is
 // not a delete marker, and it is older than minAge (the age gate avoids racing
 // an in-flight write or a settling append).
-//
-//nolint:unused // wired up by the orphan/redundancy-upgrade sweep in a later task.
 func needsRedundancyUpgrade(rec scrubber.ObjectRecord, clusterRedundant bool, now, minAge int64) bool {
 	if !clusterRedundant || rec.IsDeleteMarker {
 		return false
@@ -27,8 +25,6 @@ func needsRedundancyUpgrade(rec scrubber.ObjectRecord, clusterRedundant bool, no
 // but stated positively — note redundantPlacementGate returns nil for a genuine
 // single-node cluster (metaNodeCount < 2), which is NOT redundant capacity, so we
 // guard metaNodeCount >= 2 explicitly rather than mapping its nil to true.
-//
-//nolint:unused // wired up by the orphan/redundancy-upgrade sweep in a later task.
 func clusterHasRedundantCapacity(groups []ShardGroupEntry, cfg ECConfig, metaNodeCount int) bool {
 	if metaNodeCount < 2 {
 		return false
