@@ -109,13 +109,21 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 	// Proposing CmdPutObjectMeta is deterministic on all FSM nodes (no per-node
 	// filesystem read inside FSM apply) and brings the record into BadgerDB on
 	// all nodes before the append is committed.
+	// quorumMetaNodes records the placement nodes that hold a quorum-meta replica
+	// of this object, captured BEFORE migration. The quorum-meta is K-of-N
+	// replicated across these nodes (writeQuorumMeta), so the post-append cleanup
+	// MUST delete the replica on every one of them — a local-only delete leaves
+	// stale replicas on peers that shadow the BadgerDB append (headObjectMeta
+	// reads quorum-meta first, with peer fan-out), making the append invisible on
+	// a multi-node cluster.
+	var quorumMetaNodes []string
 	if b.shardSvc != nil && !storage.IsInternalBucket(bucket) {
 		if rawCmd, qerr := b.readQuorumMetaCmd(bucket, key); qerr == nil {
+			quorumMetaNodes = append([]string(nil), rawCmd.NodeIDs...)
 			if err := b.propose(ctx, CmdPutObjectMeta, rawCmd); err != nil {
 				_ = os.Remove(b.segmentBlobPath(bucket, key, seg.BlobID))
 				return nil, fmt.Errorf("migrate quorum meta before append: %w", err)
 			}
-			_ = b.shardSvc.deleteQuorumMetaLocal(bucket, key)
 		}
 	}
 
@@ -147,11 +155,14 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 		return nil, err
 	}
 
-	// Phase 3: remove any stale quorum meta entry so subsequent HeadObject calls
-	// read from BadgerDB (which the FSM just updated) rather than the now-outdated
-	// quorum meta file. Best-effort — the raft state is authoritative.
+	// Phase 3: remove the stale quorum-meta replica on EVERY placement node so
+	// subsequent HeadObject calls read from BadgerDB (which the FSM just updated,
+	// and which alone can represent an appendable object — PutObjectMetaCmd has no
+	// IsAppendable/Coalesced fields). The quorum-meta is K-of-N replicated, so a
+	// local-only delete would leave peer replicas that shadow the append. Mirrors
+	// the fan-out in writeQuorumMeta. Best-effort — the raft state is authoritative.
 	if b.shardSvc != nil && !storage.IsInternalBucket(bucket) {
-		_ = b.shardSvc.deleteQuorumMetaLocal(bucket, key)
+		b.deleteQuorumMetaQuorum(ctx, bucket, key, quorumMetaNodes)
 	}
 
 	obj := appendObjectResult(existing, key, versionID, pgID, seg, modifiedUnixSec)

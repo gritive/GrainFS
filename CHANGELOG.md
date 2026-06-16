@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.604.0] - 2026-06-16
+
+### Fixed
+- **AppendObject onto a plain-PUT object now reads back correctly on a multi-node
+  cluster (single-append case).** An appended object is migrated to BadgerDB (the
+  quorum-meta `PutObjectMetaCmd` format cannot represent appendable objects), then
+  the quorum-meta entry must be removed so reads fall through to BadgerDB. The
+  removal used a LOCAL-only delete, but quorum-meta is K-of-N replicated across the
+  object's placement nodes; the surviving peer replicas shadowed the append because
+  `headObjectMeta` reads quorum-meta first (with peer fan-out), so GET returned the
+  pre-append object on a cluster (single-node passed — the only replica was local).
+  Added a `DeleteQuorumMeta` shard RPC and a `deleteQuorumMetaQuorum` fan-out that
+  removes the replica on every placement node, mirroring `writeQuorumMeta`.
+  - Note: the remaining cross-node `AppendObject Cluster4Node` cases (appends
+    issued from different nodes) need a separate placement-routing-determinism fix
+    (object hash-placement candidate sets are boot-frozen per-node and diverge in
+    dynamically-seeded clusters); that fix is specced separately because making it
+    growth-safe requires recording topology generations under serialization.
+
 ## [0.0.603.0] - 2026-06-16
 
 ### Removed
