@@ -58,6 +58,13 @@ func (b *DistributedBackend) relocateObjectToRedundantGroup(ctx context.Context,
 		return err
 	}
 
+	// Cross-generation read correctness note: the relocation writes the NEW record
+	// to a different placement group and never overwrites the OLD nodes' quorum-meta
+	// files, so reads must consult the cross-generation LWW merge (multiGeneration)
+	// to surface the higher-MetaSeq winner. That merge is armed exactly when there is
+	// >1 placement generation — which is implied here: redundant capacity requires a
+	// grown (1→N) topology, and growth records a new placement generation. So a
+	// relocation can only run once the read path is already multi-generation.
 	clusterRedundant := clusterHasRedundantCapacity(b.shardGroup.ShardGroups(), b.currentECConfig(), metaNodeCount(b.shardGroup))
 	if err := relocationStillEligible(cur, in, clusterRedundant); err != nil {
 		return err

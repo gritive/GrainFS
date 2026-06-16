@@ -63,9 +63,6 @@ func (b *DistributedBackend) ScanObjects(bucket string) (<-chan scrubber.ObjectR
 		return ch, nil
 	}
 
-	dataShards := b.currentECConfig().DataShards
-	parityShards := b.currentECConfig().ParityShards
-
 	go func() {
 		defer close(ch)
 		rawLatPrefix := []byte("lat:" + bucket + "/")
@@ -106,12 +103,19 @@ func (b *DistributedBackend) ScanObjects(bucket string) (<-chan scrubber.ObjectR
 					return nil // tombstone — no shards to scrub
 				}
 
+				// Report the object's OWN EC profile (meta.ECData/ECParity), not the
+				// cluster's current config: a genesis 1+0 object in a grown 4+2 cluster
+				// must enumerate as 1+0 so the EC scrubber expects the right shard count
+				// AND the redundancy-upgrade sweep can detect it (parity==0). Using the
+				// cluster config here reported every FSM-resident object — including
+				// versioned 1+0 objects — with the current parity, silently hiding them
+				// from the upgrade sweep. Mirrors the quorum-meta branch (cmd.ECData).
 				ch <- scrubber.ObjectRecord{
 					Bucket:       bucket,
 					Key:          key,
 					VersionID:    versionID,
-					DataShards:   dataShards,
-					ParityShards: parityShards,
+					DataShards:   int(meta.ECData),
+					ParityShards: int(meta.ECParity),
 					ETag:         meta.ETag,
 					LastModified: meta.LastModified,
 				}
