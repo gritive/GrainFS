@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.0.602.0] - 2026-06-16
+
+### Fixed
+- **AppendObject onto a plain (chunked-PUT) object now reads back correctly on a
+  single node.** Two independent pre-existing bugs were fixed:
+  1. **Placement-group selection.** `lookupPlacementGroupForAppend` ignored the
+     object's own stored `PlacementGroupID` and instead sent the routed data-group
+     from context (or a `group-0` default) as the propose-time PG. The FSM
+     stale-placement check compares that against the freshly-read object's stored
+     PG, so the routed-group ≠ stored-PG mismatch falsely tripped
+     `ErrStalePlacement` ("placement group changed mid-request"). The propose-time
+     PG is now the object's authoritative stored PG (`storage.Object` carries it
+     since the read-plane unification); a real placement move still trips the check.
+  2. **EC-backed base segment misread as a plain append blob.** A chunked PUT
+     stores its bytes as EC-backed segments (`ECData>0`, `NodeIDs` set), read via
+     EC reconstruction. Appending flips the object to `IsAppendable`, so the GET
+     goes through `openAppendableSegments` / `readAtAppendable` — which only knew
+     how to open plain `_segments/<blobID>` files and so failed on the EC base
+     segment with "open segment … (local missing, peer fetch failed)". Both the
+     streaming reader and the range (`ReadAt`) path now detect an EC-backed
+     `SegmentRef` (`segmentRefIsECBacked`) and reconstruct it through the segment
+     store, stitching EC base segments and plain append blobs into one stream.
+  Note: the cluster (multi-group) append read-visibility path remains a separate
+  pre-existing failure tracked outside this change; this fix covers the single-node
+  path and removes the spurious 500 on the EC base segment in all modes.
+- Removed a stale e2e assertion for the long-removed "Volumes" Web UI tab
+  (regression introduced when the volume block-storage subsystem was deleted).
+
 ## [0.0.601.0] - 2026-06-16
 
 ### Changed
