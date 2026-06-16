@@ -13,6 +13,19 @@
   sweep never races an in-flight write. `0` relocates eligible objects immediately
   (used by the e2e durability test); the previous behavior was a fixed 5-minute gate.
 
+### Fixed
+- **The EC-redundancy-upgrade sweep now actually relocates genesis 1+0 objects.**
+  The relocation committed its new metadata with a raw data-raft `PutObjectMeta`
+  propose carrying an ETag CAS guard. For user-bucket objects the authoritative
+  metadata lives in quorum-meta — a chunked PUT never writes the data-raft FSM
+  object key — so the CAS always read an absent FSM key and every relocation failed
+  with `commit meta: ... read current meta: metastore: key not found`. The relocate
+  now commits through the same `writeQuorumMeta` path a normal chunked PUT uses,
+  stamping `MetaSeq = current+1` so the identity-preserving re-write strictly wins
+  the LWW tie. Surfaced by the new owner-kill e2e: a 1+0 genesis object now
+  relocates into a redundant group and survives killing its original single-owner
+  node, where before it was lost.
+
 ## [0.0.607.0] - 2026-06-16
 
 ### Fixed

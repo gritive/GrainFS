@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
-	"github.com/rs/zerolog/log"
 )
 
 // ErrRelocateSkipped marks a relocation that became a no-op because the object
@@ -95,24 +94,28 @@ func (b *DistributedBackend) relocateObjectToRedundantGroup(ctx context.Context,
 		chunkSize:    int(chunkSize),
 	}
 
-	// The override does ONLY the authoritative CAS-honoring propose (NOT the
-	// quorum-meta mirror). If propose fails (incl. CAS reject), runChunkedPut keeps
-	// committed=false so its cleanup defer deletes the NEW blobs — safe, because the
-	// FSM is unchanged and the OLD blobs are untouched. If propose succeeds, the
-	// override returns nil → committed=true → NEW blobs are retained (the committed
-	// FSM record now references them). The quorum-meta mirror is deferred to AFTER
-	// runChunkedPut returns success (below) so a mirror failure can never trip the
-	// cleanup that would delete FSM-referenced new blobs (phantom-commit safety).
-	var committedCmd *PutObjectMetaCmd
+	// The override does the authoritative meta commit via the SAME path a normal
+	// chunked PUT uses (b.writeQuorumMeta): quorum-meta fan-out for user buckets
+	// (and the per-version FSM persist for versioning-enabled buckets). The genesis
+	// 1+0 object's authoritative metadata lives in quorum-meta — NOT the data-raft
+	// FSM, which a chunked PUT never populates for user buckets — so a raw FSM
+	// CmdPutObjectMeta propose here would CAS against an absent FSM key ("key not
+	// found") and the relocation would always fail. We stamp MetaSeq = cur+1 so the
+	// re-write strictly wins the (ModTime,VersionID) LWW tie (preserved identity
+	// keeps both equal), which is the relocation ordering mechanism documented on
+	// quorumMetaBlobWins. The ETag/VersionID drift guard already ran above against a
+	// freshly-read quorum-meta record, so the FSM-only ExpectedETag CAS is dropped
+	// (it cannot apply to a quorum-meta-resident object); we clear ExpectedETag to
+	// avoid the versioned-bucket sub-propose hitting the same absent-FSM-key CAS.
+	//
+	// Commit semantics are unchanged: writeQuorumMeta success → committed=true →
+	// NEW blobs retained; failure → committed=false → runChunkedPut's cleanup defer
+	// deletes the NEW blobs while the OLD blobs and the prior winning record are
+	// untouched (the stale record still wins LWW until a later successful re-write).
 	csb.writeQuorumMetaFn = func(ctx context.Context, cmd PutObjectMetaCmd) error {
-		cmd.MetaSeq = cur.MetaSeq + 1      // strictly win the (ModTime,VersionID) LWW tie
-		cmd.ExpectedETag = in.ExpectedETag // CAS guard (also passed via runChunkedPut arg)
-		if err := b.propose(ctx, CmdPutObjectMeta, cmd); err != nil {
-			return err
-		}
-		stamped := cmd
-		committedCmd = &stamped
-		return nil
+		cmd.MetaSeq = cur.MetaSeq + 1 // strictly win the (ModTime,VersionID) LWW tie
+		cmd.ExpectedETag = ""         // eligibility already enforced ETag/VersionID; FSM CAS N/A for quorum-meta objects
+		return b.writeQuorumMeta(ctx, cmd)
 	}
 
 	_, err = runChunkedPut(ctx, csb, rc, in.Bucket, in.Key, in.VersionID, obj.ContentType,
@@ -124,18 +127,6 @@ func (b *DistributedBackend) relocateObjectToRedundantGroup(ctx context.Context,
 			return fmt.Errorf("%w: %v", ErrRelocateSkipped, err)
 		}
 		return fmt.Errorf("relocate %s/%s: %w", in.Bucket, in.Key, err)
-	}
-
-	// Mirror the committed record into quorum-meta (LIST-visibility / read fallback)
-	// AFTER the FSM commit succeeded. Best-effort: the object is already durable via
-	// the FSM, so a mirror failure must NOT fail the op or delete the committed
-	// blobs. The next sweep cycle re-detects (quorum-meta may still show parity 0)
-	// and retries idempotently.
-	if committedCmd != nil {
-		if perr := b.writeQuorumMeta(ctx, *committedCmd); perr != nil {
-			log.Warn().Err(perr).Str("bucket", in.Bucket).Str("key", in.Key).Str("version_id", in.VersionID).
-				Msg("relocate: quorum-meta mirror failed (object committed via FSM; LIST visibility deferred until next sweep)")
-		}
 	}
 
 	return nil
