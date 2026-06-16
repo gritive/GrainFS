@@ -32,18 +32,29 @@ const DefaultMaxForwardBodyBytes = 64 * 1024 * 1024
 // without reintroducing the request-body buffering fixed for writes.
 const DefaultMaxForwardReplyBytes = 64 * 1024 * 1024
 
-const minMultipartForwardStreamBytes = 5 * 1024 * 1024
-
-// minPutObjectForwardStreamBytes is the simple-PUT analogue of
-// minMultipartForwardStreamBytes. A forwarded PutObject whose body is at least
-// this large streams (body-less FlatBuffer args + a separate body stream)
-// instead of buffering the whole body into the args FlatBuffer. Unlike
-// UploadPart (which has the 5 MiB S3 minimum-part floor), a simple PUT has no
-// inherent lower bound, so without this a PUT only streamed above the 64 MiB
-// single-frame cap — buffering up to 64 MiB into the args FlatBuffer on the
-// cold (forwarded) path. 1 MiB matches the spool copy buffer. The body>maxBody
-// single-frame cap still applies independently.
-const minPutObjectForwardStreamBytes = 1 * 1024 * 1024
+// minForwardStreamBytes is the body size at or above which a forwarded
+// PutObject OR UploadPart streams its body (body-less FlatBuffer args + a
+// separate body stream) instead of buffering the whole body into the args
+// FlatBuffer. Below it (and at/under the maxBody single-frame cap) the body
+// rides inside the args FlatBuffer in a single frame. PutObject and UploadPart
+// deliberately share ONE floor.
+//
+// Set to 4 MiB from BenchmarkForwardPutObjectWire — the END-TO-END forward bench
+// (two real HTTPTransports + a real receiver, so it includes the Hertz HTTP
+// processing AND the receiver body parsing, unlike the sender-only
+// BenchmarkForwardBodyEncode). That bench shows the SINGLE-FRAME path is
+// actually FASTER than streaming across the whole 0.5–5 MiB range and the gap
+// widens with size (1 MiB: frame 9.1 ms vs stream 13.0 ms; 5 MiB: 26.9 vs
+// 44.6 ms), because streaming chunks the body into many small allocations
+// (~11x the allocs of the one-shot frame buffer) and per-chunk HTTP framing.
+// Framing's only cost is ~1.4x peak memory (body buffered into the args
+// FlatBuffer). So the floor is NOT a latency win — it is a MEMORY cap for large
+// objects: above it, a forwarded PUT/UploadPart streams to avoid buffering the
+// whole (potentially tens-of-MiB) body. 4 MiB caps a framed request at ~41 MB/op
+// while keeping the faster frame path for the common 1–4 MiB range; the previous
+// PutObject behaviour only streamed above the 64 MiB single-frame cap, buffering
+// far larger bodies. PutObject and UploadPart share this floor.
+const minForwardStreamBytes = 4 * 1024 * 1024 // 4 MiB (see BenchmarkForwardPutObjectWire)
 
 const auditBucketName = "grainfs-audit"
 
@@ -1845,7 +1856,13 @@ func forwardBodyExceedsSingleFrameCap(r io.Reader, maxBody int64) bool {
 	return end-cur > maxBody
 }
 
-func shouldStreamUploadPartForward(r io.Reader, maxBody int64) bool {
+// shouldStreamForwardBody decides whether a forwarded PutObject/UploadPart body
+// streams (true) or rides in a single args FlatBuffer frame (false). It streams
+// when the body exceeds the maxBody single-frame cap OR is at least
+// minForwardStreamBytes. Non-seekable bodies always stream (size unknown). The
+// io.Seeker size probe rewinds to the original offset, so it does not consume
+// the body.
+func shouldStreamForwardBody(r io.Reader, maxBody int64) bool {
 	if forwardBodyExceedsSingleFrameCap(r, maxBody) {
 		return true
 	}
@@ -1864,29 +1881,7 @@ func shouldStreamUploadPartForward(r io.Reader, maxBody int64) bool {
 	if err != nil {
 		return true
 	}
-	return end-cur >= minMultipartForwardStreamBytes
-}
-
-func shouldStreamPutObjectForward(r io.Reader, maxBody int64) bool {
-	if forwardBodyExceedsSingleFrameCap(r, maxBody) {
-		return true
-	}
-	seeker, ok := r.(io.Seeker)
-	if !ok {
-		return true
-	}
-	cur, err := seeker.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return true
-	}
-	end, err := seeker.Seek(0, io.SeekEnd)
-	if _, seekErr := seeker.Seek(cur, io.SeekStart); err == nil && seekErr != nil {
-		err = seekErr
-	}
-	if err != nil {
-		return true
-	}
-	return end-cur >= minPutObjectForwardStreamBytes
+	return end-cur >= minForwardStreamBytes
 }
 
 func (c *ClusterCoordinator) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {

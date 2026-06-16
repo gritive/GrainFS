@@ -135,7 +135,7 @@ func (r forwardRuntime) putObject(
 	bodyReader := req.Body
 	contentType := req.ContentType
 	versioningState := versioningStateFromContext(ctx)
-	if r.sender.streamDialer != nil && shouldStreamPutObjectForward(bodyReader, r.maxBody) {
+	if r.sender.streamDialer != nil && shouldStreamForwardBody(bodyReader, r.maxBody) {
 		args := buildPutObjectArgsWithSSE(bucket, key, contentType, nil, req.SystemMetadata.SSEAlgorithm, req.UserMetadata, req.ContentMD5Hex, derefACL(req.ACL), versioningState)
 		ctx = ContextWithPutTrace(ctx, PutTraceRequest{
 			Bucket:      bucket,
@@ -204,7 +204,7 @@ func (r forwardRuntime) uploadPart(
 	if r.sender == nil {
 		return nil, ErrCoordinatorNoRouter
 	}
-	if r.sender.streamDialer != nil && shouldStreamUploadPartForward(bodyReader, r.maxBody) {
+	if r.sender.streamDialer != nil && shouldStreamForwardBody(bodyReader, r.maxBody) {
 		args := buildUploadPartArgs(bucket, key, uploadID, int32(partNumber), nil, contentMD5Hex)
 		peers := r.sender.ResolveLeaderPeers(ctx, target.Peers, target.GroupID, bucket, key)
 		reply, err := r.sender.SendStream(ctx, peers, target.GroupID, raftpb.ForwardOpUploadPart, args, bodyReader)

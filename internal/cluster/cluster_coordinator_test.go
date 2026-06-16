@@ -1389,7 +1389,7 @@ func TestClusterCoordinator_GetObject_ForwardRejectsSizeMismatch(t *testing.T) {
 
 func TestClusterCoordinator_GetObject_Forward_AboveLegacyCap(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
-	body := bytes.Repeat([]byte("g"), minMultipartForwardStreamBytes+1024)
+	body := bytes.Repeat([]byte("g"), minForwardStreamBytes+1024)
 	d.replyByOp[raftpb.ForwardOpGetObject] = buildGetObjectReply(
 		&storage.Object{Key: "large", Size: int64(len(body)), ETag: "etag-large", ContentType: "application/octet-stream"},
 		"bk", body,
@@ -2620,7 +2620,7 @@ func TestClusterCoordinator_PutObject_StreamForward_AboveFloorBelowMaxBody(t *te
 	// Default maxBody (64 MiB) is NOT overridden. The body is far below it but
 	// above the 1 MiB PUT stream floor, so it must stream body-less rather than
 	// buffer the whole body into the args FlatBuffer.
-	body := bytes.Repeat([]byte("z"), minPutObjectForwardStreamBytes+1024)
+	body := bytes.Repeat([]byte("z"), minForwardStreamBytes+1024)
 	d.streamReplyBy[raftpb.ForwardOpPutObject] = buildObjectReply(
 		&storage.Object{Key: "k", Size: int64(len(body)), ETag: "etag-stream"}, "bk",
 	)
@@ -2679,10 +2679,10 @@ func TestClusterCoordinator_UploadPart_StreamForward_AboveBodyCap(t *testing.T) 
 	require.Zero(t, args.BodyLength(), "stream metadata must not embed the part body")
 }
 
-func TestClusterCoordinator_UploadPart_StreamForward_AtMultipartPartFloor(t *testing.T) {
+func TestClusterCoordinator_UploadPart_StreamForward_AtForwardStreamFloor(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
 	c.forward.WithStreamDialer(d.stream)
-	body := bytes.Repeat([]byte("p"), minMultipartForwardStreamBytes)
+	body := bytes.Repeat([]byte("p"), minForwardStreamBytes)
 	d.streamReplyBy[raftpb.ForwardOpUploadPart] = buildPartReply(
 		&storage.Part{PartNumber: 1, ETag: "etag-part", Size: int64(len(body))},
 	)
