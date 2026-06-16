@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.600.0] - 2026-06-16
+
+### Changed
+- **S3 read plane unified onto the SegmentReader** — Phase D2 (final) of the
+  volume-removal epic. Removed the whole-object/whole-replica read fallbacks
+  (Branch D local-file reads via objectPath/objectPathV, Branch E peer-fetch
+  whole-replica) from `GetObject`, `readAtPreparedObject`, and `GetObjectVersion`.
+  The read dispatch is now exactly: appendable | SegmentReader | EC reader |
+  terminal error. Deleted the dead `openObjectIfSizeMatches` helper.
+- These fallbacks only ever served volume blocks and legacy N×-replicated objects,
+  neither of which exists (greenfield, owner-confirmed) — every object is created
+  appendable, segmented, or EC. `objectPath`/`objectPathV` are kept (they back the
+  appendable `_segments` and coalesce `_coalesced` path construction); the delete/
+  scrubber cleanup calls are unchanged.
+
+This completes the volume block-storage removal epic (Phases A–D): NBD frontend,
+the `grainfs volume` CLI + admin API, `volume.Manager` + volume-health metrics, the
+N×-replica durability + `internal/volume` package, and now the read-plane fallbacks.
+
 ## [0.0.599.0] - 2026-06-16
 
 ### Removed

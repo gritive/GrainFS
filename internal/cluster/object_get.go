@@ -1,12 +1,10 @@
 package cluster
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
-	"os"
 
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -104,16 +102,6 @@ func (b *DistributedBackend) readAtPreparedObject(ctx context.Context, bucket, k
 		}
 	}
 
-	if obj.VersionID != "" {
-		if f, oerr := b.openObjectIfSizeMatches(b.objectPathV(bucket, key, obj.VersionID), obj); oerr == nil {
-			defer f.Close()
-			return f.ReadAt(buf, offset)
-		}
-	}
-	if f, oerr := b.openObjectIfSizeMatches(b.objectPath(bucket, key), obj); oerr == nil {
-		defer f.Close()
-		return f.ReadAt(buf, offset)
-	}
 	return b.readAtViaGetObject(ctx, bucket, key, offset, buf)
 }
 
@@ -151,12 +139,6 @@ func (b *DistributedBackend) GetObject(ctx context.Context, bucket, key string) 
 		return storage.NewSegmentReaderCtx(ctx, store, obj.Segments), obj, nil
 	}
 
-	// EC path: shardKey = key+"/"+versionID for versioned objects.
-	shardKey := key
-	if obj.VersionID != "" {
-		shardKey = key + "/" + obj.VersionID
-	}
-
 	if b.shardSvc != nil {
 		resolved, rerr := b.ResolvePlacement(ctx, bucket, key, placementMeta)
 		if rerr == nil {
@@ -171,89 +153,7 @@ func (b *DistributedBackend) GetObject(ctx context.Context, bucket, key string) 
 		}
 	}
 
-	// Try the version-addressable local path first (new writers), then the
-	// legacy unversioned path (pre-versioning replay). A stale or partial
-	// local file must not satisfy metadata that names a larger object; under
-	// MultiRaft follower reads that would otherwise surface as a successful
-	// GET with an empty body.
-	var localErr error
-	if obj.VersionID != "" {
-		if f, oerr := b.openObjectIfSizeMatches(b.objectPathV(bucket, key, obj.VersionID), obj); oerr == nil {
-			return f, obj, nil
-		} else if !os.IsNotExist(oerr) {
-			localErr = oerr
-		}
-	}
-	f, err := b.openObjectIfSizeMatches(b.objectPath(bucket, key), obj)
-	if err == nil {
-		return f, obj, nil
-	}
-	if !os.IsNotExist(err) {
-		localErr = err
-	}
-
-	// Local file not found — try fetching from peer nodes (healthy first, then all).
-	// Peers store under shardKey (key+"/"+versionID) when the write was versioned.
-	if b.shardSvc != nil {
-
-		// Try healthy peers first
-		for _, peer := range b.liveNodes() {
-			if peer == b.currentSelfAddr() {
-				continue
-			}
-			if b.currentPeerHealth() != nil && !b.currentPeerHealth().IsHealthy(peer) {
-				continue
-			}
-			data, fetchErr := b.shardSvc.ReadShard(ctx, peer, bucket, shardKey, 0)
-			if fetchErr == nil && data != nil {
-				if b.currentPeerHealth() != nil {
-					b.currentPeerHealth().MarkHealthy(peer)
-				}
-				return io.NopCloser(bytes.NewReader(data)), obj, nil
-			}
-			if fetchErr != nil && b.currentPeerHealth() != nil {
-				b.currentPeerHealth().MarkUnhealthy(peer)
-			}
-		}
-		// Fallback: try unhealthy peers (they may have recovered)
-		if b.currentPeerHealth() != nil {
-			for _, peer := range b.clusterNodes() {
-				if peer == b.currentSelfAddr() {
-					continue
-				}
-				if b.currentPeerHealth().IsHealthy(peer) {
-					continue // already tried
-				}
-				data, fetchErr := b.shardSvc.ReadShard(ctx, peer, bucket, shardKey, 0)
-				if fetchErr == nil && data != nil {
-					b.currentPeerHealth().MarkHealthy(peer)
-					return io.NopCloser(bytes.NewReader(data)), obj, nil
-				}
-			}
-		}
-	}
-
-	if localErr != nil {
-		return nil, nil, fmt.Errorf("open object: %w", localErr)
-	}
-	return nil, nil, fmt.Errorf("open object: %w", err)
-}
-
-func (b *DistributedBackend) openObjectIfSizeMatches(path string, obj *storage.Object) (*os.File, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	st, err := f.Stat()
-	if err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	if st.Size() != obj.Size {
-		_ = f.Close()
-		return nil, fmt.Errorf("local object size mismatch for %s: metadata=%d file=%d", path, obj.Size, st.Size())
-	}
-	return f, nil
+	return nil, nil, fmt.Errorf("get object %s/%s: object has no readable layout (not appendable, no segments, not EC)", bucket, key)
 }
 
 func (b *DistributedBackend) newECObjectReader() ecObjectReader {
