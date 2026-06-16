@@ -72,6 +72,7 @@ func serveOptionsFromCmd(cmd *cobra.Command) (serveruntime.ServeOptions, error) 
 	// resolved value), unlike the duration helper's 0→default reset semantics.
 	opts.ECRedundancyUpgrade, _ = cmd.Flags().GetBool("ec-redundancy-upgrade")
 	opts.ECRedundancyUpgradeMax, _ = cmd.Flags().GetInt("ec-redundancy-upgrade-max")
+	opts.ECRedundancyUpgradeMinAge, _ = cmd.Flags().GetDuration("ec-redundancy-upgrade-min-age")
 	opts.DegradedInterval, _ = cmd.Flags().GetDuration("degraded-check-interval")
 	opts.LifecycleInterval, _ = cmd.Flags().GetDuration("lifecycle-interval")
 	opts.RaftLogGCInterval, _ = cmd.Flags().GetDuration("raft-log-gc-interval")

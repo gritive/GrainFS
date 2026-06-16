@@ -3,6 +3,7 @@ package scrubber
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -12,6 +13,7 @@ import (
 type fakeRedundancyBackend struct {
 	sweepCalls   int
 	lastMaxPerCy int
+	lastMinAge   time.Duration
 }
 
 func (f *fakeRedundancyBackend) ListBuckets(context.Context) ([]string, error) { return nil, nil }
@@ -29,9 +31,10 @@ func (f *fakeRedundancyBackend) WriteShard(string, string, string, int, string, 
 	return nil
 }
 
-func (f *fakeRedundancyBackend) RunRedundancyUpgradeSweep(_ context.Context, maxPerCycle int) (int, error) {
+func (f *fakeRedundancyBackend) RunRedundancyUpgradeSweep(_ context.Context, maxPerCycle int, minAge time.Duration) (int, error) {
 	f.sweepCalls++
 	f.lastMaxPerCy = maxPerCycle
+	f.lastMinAge = minAge
 	return 0, nil
 }
 
@@ -47,9 +50,10 @@ func TestRunOnce_RedundancyUpgradeGating(t *testing.T) {
 	t.Run("enabled invokes sweep with configured cap", func(t *testing.T) {
 		be := &fakeRedundancyBackend{}
 		s := New(be, 0)
-		s.EnableRedundancyUpgrade(7)
+		s.EnableRedundancyUpgrade(7, 30*time.Second)
 		s.runOnce(context.Background())
 		require.Equal(t, 1, be.sweepCalls)
 		require.Equal(t, 7, be.lastMaxPerCy)
+		require.Equal(t, 30*time.Second, be.lastMinAge)
 	})
 }

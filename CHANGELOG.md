@@ -8,6 +8,10 @@
   scrubber can now relocate non-redundant (1+0) objects into a redundant EC group.
   The sweep is enabled by default; `--ec-redundancy-upgrade=false` is the kill switch,
   and `--ec-redundancy-upgrade-max` bounds relocations per scrub cycle.
+- **`--ec-redundancy-upgrade-min-age` (default 5m)** makes the sweep's age gate
+  configurable: an object must be at least this old before it is relocated, so the
+  sweep never races an in-flight write. `0` relocates eligible objects immediately
+  (used by the e2e durability test); the previous behavior was a fixed 5-minute gate.
 
 ## [0.0.607.0] - 2026-06-16
 

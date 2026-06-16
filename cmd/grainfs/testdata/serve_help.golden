@@ -36,6 +36,7 @@ Flags:
       --degraded-check-interval duration                    EC degraded-mode liveness check interval (default 30s)
       --ec-redundancy-upgrade                               relocate non-redundant (1+0) objects into a redundant EC group after the cluster grows (background sweep; default on) (default true)
       --ec-redundancy-upgrade-max int                       max objects relocated per scrub cycle by the EC-redundancy-upgrade sweep (default 8)
+      --ec-redundancy-upgrade-min-age duration              minimum object age before the EC-redundancy-upgrade sweep relocates it (avoids racing in-flight writes) (default 5m0s)
       --enable-iceberg                                      enable Iceberg REST Catalog endpoint (also required by the default-on --audit-iceberg log lake, whose search path queries this catalog) (default true)
       --fd-classification-cap int                           max open file descriptors to classify by category per sample (default 512)
       --fd-critical-threshold float                         FD used fraction (0-1) at which a critical incident fires (default 0.9)

@@ -49,6 +49,8 @@ func registerAllServeFlags(cmd *cobra.Command) {
 		"relocate non-redundant (1+0) objects into a redundant EC group after the cluster grows (background sweep; default on)")
 	cmd.Flags().Int("ec-redundancy-upgrade-max", 8,
 		"max objects relocated per scrub cycle by the EC-redundancy-upgrade sweep")
+	cmd.Flags().Duration("ec-redundancy-upgrade-min-age", 5*time.Minute,
+		"minimum object age before the EC-redundancy-upgrade sweep relocates it (avoids racing in-flight writes)")
 	cmd.Flags().Duration("lifecycle-interval", 1*time.Hour, "lifecycle rule evaluation interval (0 to disable)")
 	cmd.Flags().Duration("degraded-check-interval", 30*time.Second, "EC degraded-mode liveness check interval")
 	cmd.Flags().Duration("raft-log-gc-interval", 30*time.Second, "how often Raft log GC runs")

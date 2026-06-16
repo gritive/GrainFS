@@ -112,9 +112,12 @@ type Config struct {
 
 	// EC-redundancy-upgrade sweep: relocate non-redundant (1+0) objects into a
 	// redundant EC group after the cluster grows. Default on; ECRedundancyUpgradeMax
-	// bounds relocations per scrub cycle (<=0 → default 8).
-	ECRedundancyUpgrade    bool
-	ECRedundancyUpgradeMax int
+	// bounds relocations per scrub cycle (<=0 → default 8). ECRedundancyUpgradeMinAge
+	// is the minimum object age before relocation (avoids racing in-flight writes;
+	// 0 → relocate immediately, <0 → conservative default).
+	ECRedundancyUpgrade       bool
+	ECRedundancyUpgradeMax    int
+	ECRedundancyUpgradeMinAge time.Duration
 
 	// Audit Iceberg log lake
 	AuditIceberg        bool

@@ -54,16 +54,17 @@ type ServeOptions struct {
 	EnableIceberg      bool          // --enable-iceberg
 
 	// --- Intervals ---
-	ScrubInterval          time.Duration // --scrub-interval
-	ScrubOrphanAge         time.Duration // --scrub-orphan-age
-	SegmentGCRetention     time.Duration // --segment-gc-retention
-	ECRedundancyUpgrade    bool          // --ec-redundancy-upgrade
-	ECRedundancyUpgradeMax int           // --ec-redundancy-upgrade-max
-	DegradedInterval       time.Duration // --degraded-check-interval
-	LifecycleInterval      time.Duration // --lifecycle-interval
-	RaftLogGCInterval      time.Duration // --raft-log-gc-interval
-	RaftHeartbeatInterval  time.Duration // --raft-heartbeat-interval
-	RaftElectionTimeout    time.Duration // --raft-election-timeout
+	ScrubInterval             time.Duration // --scrub-interval
+	ScrubOrphanAge            time.Duration // --scrub-orphan-age
+	SegmentGCRetention        time.Duration // --segment-gc-retention
+	ECRedundancyUpgrade       bool          // --ec-redundancy-upgrade
+	ECRedundancyUpgradeMax    int           // --ec-redundancy-upgrade-max
+	ECRedundancyUpgradeMinAge time.Duration // --ec-redundancy-upgrade-min-age
+	DegradedInterval          time.Duration // --degraded-check-interval
+	LifecycleInterval         time.Duration // --lifecycle-interval
+	RaftLogGCInterval         time.Duration // --raft-log-gc-interval
+	RaftHeartbeatInterval     time.Duration // --raft-heartbeat-interval
+	RaftElectionTimeout       time.Duration // --raft-election-timeout
 
 	// --- Heal Receipt ---
 	HealReceiptEnabled        bool          // --heal-receipt-enabled

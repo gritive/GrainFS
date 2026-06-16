@@ -212,7 +212,7 @@ func (s *BackgroundScrubber) hoistSegmentSources() (segByBucket map[string]map[s
 // into a redundant placement group. The sweep runs at the end of each scrub
 // cycle when enabled, returning the count relocated.
 type RedundancyUpgrader interface {
-	RunRedundancyUpgradeSweep(ctx context.Context, maxPerCycle int) (int, error)
+	RunRedundancyUpgradeSweep(ctx context.Context, maxPerCycle int, minAge time.Duration) (int, error)
 }
 
 // Migrator is an optional interface ECBackend can implement to enable plain→EC migration.
@@ -294,10 +294,12 @@ type BackgroundScrubber struct {
 	lastStatuses map[string]ShardStatus // "bucket/key" → last observed status
 
 	// redundancyUpgradeEnabled gates the end-of-cycle EC redundancy-upgrade sweep
-	// (relocate 1+0 objects into a redundant group). Disabled by default; T-next
-	// wires config. redundancyUpgradeMaxPerCycle bounds relocations per cycle.
+	// (relocate 1+0 objects into a redundant group). Disabled by default; config
+	// wires it. redundancyUpgradeMaxPerCycle bounds relocations per cycle;
+	// redundancyUpgradeMinAge is the minimum object age before relocation.
 	redundancyUpgradeEnabled     bool
 	redundancyUpgradeMaxPerCycle int
+	redundancyUpgradeMinAge      time.Duration
 
 	// Replication-source registry. EC scrub keeps using the legacy runOnce
 	// path above; replication sources (volume blocks today, future internal
@@ -418,11 +420,14 @@ func (s *BackgroundScrubber) SetInterval(d time.Duration) {
 }
 
 // EnableRedundancyUpgrade turns on the end-of-cycle EC redundancy-upgrade sweep
-// and bounds relocations per cycle to maxPerCycle. Must be called before Start.
-// The sweep only runs when the backend implements RedundancyUpgrader.
-func (s *BackgroundScrubber) EnableRedundancyUpgrade(maxPerCycle int) {
+// and bounds relocations per cycle to maxPerCycle. minAge is the minimum object
+// age before the sweep relocates an object (avoids racing in-flight writes).
+// Must be called before Start. The sweep only runs when the backend implements
+// RedundancyUpgrader.
+func (s *BackgroundScrubber) EnableRedundancyUpgrade(maxPerCycle int, minAge time.Duration) {
 	s.redundancyUpgradeEnabled = true
 	s.redundancyUpgradeMaxPerCycle = maxPerCycle
+	s.redundancyUpgradeMinAge = minAge
 }
 
 // RegisterSource attaches a BlockSource/BlockVerifier pair for replication
@@ -756,7 +761,7 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 	// Fail-soft: a sweep error is recorded on the cycle span but does not abort.
 	if s.redundancyUpgradeEnabled {
 		if upgrader, ok := s.backend.(RedundancyUpgrader); ok {
-			n, err := upgrader.RunRedundancyUpgradeSweep(ctx, s.redundancyUpgradeMaxPerCycle)
+			n, err := upgrader.RunRedundancyUpgradeSweep(ctx, s.redundancyUpgradeMaxPerCycle, s.redundancyUpgradeMinAge)
 			if err != nil {
 				log.Warn().Err(err).Msg("scrub: redundancy-upgrade sweep failed")
 				cycleSpan.RecordError(err)

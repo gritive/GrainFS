@@ -200,7 +200,7 @@ func bootRecoveryAndScrubber(ctx context.Context, state *bootState) error {
 		sc := scrubber.New(state.distBackend, cfg.ScrubInterval, segGCOpts...)
 		sc.SetEmitter(activeEmitter)
 		if enabled, max := redundancyUpgradeMax(cfg); enabled {
-			sc.EnableRedundancyUpgrade(max)
+			sc.EnableRedundancyUpgrade(max, cfg.ECRedundancyUpgradeMinAge)
 		}
 		sc.Start(ctx)
 

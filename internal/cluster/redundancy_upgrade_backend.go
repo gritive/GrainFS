@@ -54,8 +54,15 @@ func (a redundancyUpgradeAdapter) relocate(ctx context.Context, in relocateInput
 // RunRedundancyUpgradeSweep relocates up to maxPerCycle non-redundant (1+0) EC
 // objects into a redundant placement group, returning the count relocated. Only
 // the caught-up leader of each hosted group relocates that group's objects.
+// minAge is the minimum object age before relocation (avoids racing in-flight
+// writes); when minAge < 0 the conservative default is used, while minAge == 0
+// relocates eligible objects immediately (used by tests and aggressive ops).
 // Implements scrubber.RedundancyUpgrader.
-func (b *DistributedBackend) RunRedundancyUpgradeSweep(ctx context.Context, maxPerCycle int) (int, error) {
+func (b *DistributedBackend) RunRedundancyUpgradeSweep(ctx context.Context, maxPerCycle int, minAge time.Duration) (int, error) {
 	adapter := redundancyUpgradeAdapter{b: b, ctx: ctx}
-	return runRedundancyUpgradeSweep(ctx, adapter, time.Now().Unix(), b.redundancyUpgradeMinAge(), maxPerCycle)
+	minAgeSecs := int64(minAge.Seconds())
+	if minAge < 0 {
+		minAgeSecs = b.redundancyUpgradeMinAge()
+	}
+	return runRedundancyUpgradeSweep(ctx, adapter, time.Now().Unix(), minAgeSecs, maxPerCycle)
 }
