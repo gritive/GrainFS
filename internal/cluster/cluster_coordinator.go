@@ -1200,10 +1200,38 @@ func (c *ClusterCoordinator) DeleteObjectReturningMarker(bucket, key string) (st
 
 func (c *ClusterCoordinator) DeleteObjectVersion(bucket, key, versionID string) error {
 	ctx := context.Background()
-	target, err := c.routeReadOrBucket(bucket, key, versionID)
+	targets, err := c.routeReadGenerations(bucket, key, versionID)
 	if err != nil {
 		return err
 	}
+	// A version record lives in exactly one generation group — whichever the key
+	// hashed to when that version was written — but routing cannot tell which
+	// without reading. applyDeleteObjectVersion is idempotent (no-op when the
+	// version is absent), so we cannot use probeRead's stop-on-first-success loop
+	// (the newest-gen group would "succeed" by no-op and we'd never reach the
+	// resident older-gen group). Instead fan the delete out to every generation
+	// group: the resident group deletes the record, the rest no-op idempotently
+	// (a group that holds neither this version nor a stale lat: pointer to it does
+	// nothing; the apply.go:394-427 latest-recompute is local and harmless).
+	// Dedup repeated group IDs (a key may hash to the same group across
+	// generations) and fail-closed on the first real error so the client retries
+	// the whole (idempotent) fan-out rather than leaving the record behind in a
+	// transiently-unreachable group.
+	seen := make(map[string]struct{}, len(targets))
+	var firstErr error
+	for _, target := range targets {
+		if _, dup := seen[target.GroupID]; dup {
+			continue
+		}
+		seen[target.GroupID] = struct{}{}
+		if derr := c.deleteObjectVersionOnTarget(ctx, target, bucket, key, versionID); derr != nil && firstErr == nil {
+			firstErr = derr
+		}
+	}
+	return firstErr
+}
+
+func (c *ClusterCoordinator) deleteObjectVersionOnTarget(ctx context.Context, target RouteTarget, bucket, key, versionID string) error {
 	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
 		return err
 	} else if gb != nil {
