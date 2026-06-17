@@ -1,6 +1,19 @@
 # Changelog
 
-## [0.0.609.0] - 2026-06-17
+## [0.0.610.0] - 2026-06-17
+
+### Added
+- **Per-version quorum-meta dual-write (foundation slice S1).** Every write to a versioning-enabled
+  bucket now also stores an immutable per-version metadata blob in a separate
+  `.quorum_meta_versions/{bucket}/{key}/{versionID}` subtree, K-of-N replicated to the same placement
+  nodes, in addition to the existing latest-only quorum-meta blob. This is the first step of moving
+  versioned object metadata off the data-raft FSM into quorum-meta (completing the no-raft GET/PUT
+  bypass for versioning), so version history lives in the rendezvous-hashed, replicated quorum-meta
+  world. The write is best-effort (a failure is logged and never fails the PUT) and **behavior-neutral**:
+  no read, LIST, version-list, scan, or delete path observes the new subtree yet — it is invisible to
+  the `.quorum_meta`-rooted walkers and harmless to the `shard_<N>`-filtered shard walkers. Subsequent
+  slices switch reads/LIST/delete to per-version (derive-by-scan latest), migrate existing data, retire
+  the FSM object-meta path, and make non-latest EC-redundancy durable via metadata re-replication.
 
 ### Fixed
 - **`DeleteObjectVersion` now deletes versions whose metadata lives in an older
