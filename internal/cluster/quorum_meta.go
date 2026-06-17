@@ -744,6 +744,93 @@ func (s *ShardService) ScanQuorumMetaBucket(bucket, prefix string) ([]PutObjectM
 	return results, err
 }
 
+// ScanQuorumMetaVersionsBucket walks .quorum_meta_versions/{bucket}/, decodes
+// EVERY version blob, groups by the decoded cmd.Key (authoritative — keys contain
+// '/', so a dir can be both a key-leaf and an intermediate dir, e.g. a/b and
+// a/b/c.txt; dir structure can't be trusted), and returns the max-VersionID blob
+// per key (markers included; the coordinator merge decides exclusion). Cost is
+// O(total versions on this node). ADDITIVE: it does NOT replace
+// ScanQuorumMetaBucket, whose latest-only consumers (scatterGatherList /
+// ScanObjectMetaEntries facts, the ScanQuorumMeta RPC fan-in, scrubbable.go scrub
+// records) must keep the latest-only tree — do not reroute them through this.
+func (s *ShardService) ScanQuorumMetaVersionsBucket(bucket, prefix string) ([]PutObjectMetaCmd, error) {
+	if len(s.dataDirs) == 0 {
+		return nil, nil
+	}
+	bucketRoot := filepath.Join(s.dataDirs[0], quorumMetaVersionsSubDir, bucket)
+	byKey := map[string]PutObjectMetaCmd{}
+	err := filepath.WalkDir(bucketRoot, func(path string, d fs.DirEntry, werr error) error {
+		if werr != nil {
+			if os.IsNotExist(werr) {
+				return nil
+			}
+			return werr
+		}
+		if d.IsDir() || isQuorumMetaTempName(d.Name()) {
+			return nil
+		}
+		data, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return nil // tolerate a transient unreadable blob
+		}
+		cmd, derr := s.decodeQuorumMetaCmdBlob(data)
+		if derr != nil {
+			return nil
+		}
+		if prefix != "" && !strings.HasPrefix(cmd.Key, prefix) {
+			return nil
+		}
+		if ex, ok := byKey[cmd.Key]; !ok || cmd.VersionID > ex.VersionID ||
+			(cmd.VersionID == ex.VersionID && cmd.MetaSeq >= ex.MetaSeq) {
+			byKey[cmd.Key] = cmd
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]PutObjectMetaCmd, 0, len(byKey))
+	for _, c := range byKey {
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+// ScanQuorumMetaVersions fans the per-version bucket walk to a remote node and
+// returns its per-key max-VersionID PutObjectMetaCmds (markers included).
+func (s *ShardService) ScanQuorumMetaVersions(ctx context.Context, addr, bucket, prefix string) ([]PutObjectMetaCmd, error) {
+	if s.transport == nil {
+		return nil, fmt.Errorf("scan quorum meta versions: no transport")
+	}
+	envb := buildShardEnvelope("ScanQuorumMetaVersions", bucket, prefix, 0, nil)
+	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
+	respEnvelope, err := s.callShardRPC(ctx, addr, envb)
+	if err != nil {
+		return nil, fmt.Errorf("scan quorum meta versions from %s: %w", addr, err)
+	}
+	rpcType, data, err := unmarshalEnvelope(respEnvelope)
+	if err != nil {
+		return nil, fmt.Errorf("unmarshal scan quorum meta versions response: %w", err)
+	}
+	if rpcType == "Error" {
+		return nil, fmt.Errorf("remote scan quorum meta versions error from %s", addr)
+	}
+	if len(data) == 0 {
+		return nil, nil
+	}
+	blobs, uerr := unpackBlobList(data) // NOTE: two-return
+	if uerr != nil {
+		return nil, fmt.Errorf("unpack scan quorum meta versions response: %w", uerr)
+	}
+	out := make([]PutObjectMetaCmd, 0, len(blobs))
+	for _, blob := range blobs {
+		if cmd, derr := s.decodeQuorumMetaCmdBlob(blob); derr == nil {
+			out = append(out, cmd)
+		}
+	}
+	return out, nil
+}
+
 // deleteQuorumMetaLocal removes the local quorum meta file for (bucket, key).
 // Called by deleteObjectWithMarker after the raft CmdDeleteObject commit so
 // subsequent reads fall through to BadgerDB and find the delete marker.
