@@ -805,6 +805,47 @@ Walk/delete errors > 0 indicates filesystem permission or I/O issues.
 
 ---
 
+### Issue: hard-deleted version reappears in LIST / HEAD ?versionId (versioned buckets)
+
+**Symptoms:** on a versioning-enabled bucket, a version you removed with
+`DELETE ?versionId=<vid>` still appears in `ListObjects`/`HEAD ?versionId` after
+the delete returned success; `grainfs_scrub_orphan_quorum_meta_versions_found_total`
+increasing across scrub cycles.
+
+**Diagnosis:** the per-version metadata write is K-of-N replicated; the S2a
+hard-delete fans the per-version-blob removal across the version's placement
+nodes fail-closed, but a missed/offline node can leave a lingering blob. Because
+LIST and `HEAD ?versionId` derive from the per-version blobs, a lingering blob
+resurfaces the dead version until reclaimed. The per-version orphan scrubber
+removes any blob whose authoritative FSM `obj:` record is gone — track:
+
+```bash
+curl http://<node>:9000/metrics | grep -E 'grainfs_scrub_orphan_quorum_meta_version(s_found|s_deleted|_sweep_capped)_total'
+```
+
+`found` rising with `deleted` rising means the sweep is reclaiming residuals as
+expected. `found` rising while `deleted` stays flat means the candidates are not
+yet eligible (age gate / two-cycle tombstone) or the node cannot authoritatively
+judge them — see the fix notes.
+
+**Fix:**
+- Same age gate as the shard/segment sweeps (`--scrub-orphan-age`, floored to
+  `2*proposeForwardTimeout`) plus a two-cycle tombstone: a blob is deleted only
+  after it has appeared orphan in two consecutive cycles. Reclamation lag of a
+  few scrub intervals after a delete is expected, not a fault.
+- Authority is fail-closed: a blob is kept whenever any metadata read errors, the
+  bucket's owning group is not locally hosted, or the version's `obj:` record is
+  found in any hosted group (incl. a delete-marker / soft-delete version, which is
+  legitimately retained). So `found` > `deleted` on a node that does not host the
+  bucket's owner is expected — that node keeps the blob and another reclaims it.
+- Genesis 1+0 versions whose owning group moved to a non-hosted group after
+  cluster growth are intentionally NOT reclaimed here (kept, never mis-deleted);
+  that case is covered by the genesis re-fan-out work (foundation S5).
+- Sweep cap is 50 per cycle. If `OrphanQuorumMetaVersionSweepCappedTotal` climbs,
+  shorten the scrub interval rather than raising the cap.
+
+---
+
 ### EC-redundancy upgrade sweep (relocating genesis 1+0 objects)
 
 **What it does:** when a cluster that started genuinely single-node (genesis boot,

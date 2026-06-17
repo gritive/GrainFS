@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.0.614.0] - 2026-06-17
+
+### Fixed
+- **Hard-deleted versions no longer resurface in LIST / `HEAD ?versionId` on versioning-enabled
+  buckets (foundation slice S2b residual — per-version orphan reconciliation scrubber).** The S2a
+  hard-delete fans the per-version metadata-blob removal across the version's placement nodes
+  fail-closed, but a missed/offline node could leave a lingering blob; because LIST and per-version
+  HEAD/GET derive from those blobs, the dead version kept reappearing until the blob was reclaimed.
+  A new background sweep (`orphan_quorum_meta_version_walker.go`, the metadata-blob analog of the EC
+  orphan-shard scrubber) reclaims any `.quorum_meta_versions` blob whose authoritative FSM `obj:`
+  record is gone. Liveness is judged across all locally-hosted groups (a record present in any of them
+  — including a delete-marker / soft-delete version — keeps the blob) and is fail-closed on any read
+  error, the bucket's owner not being locally hosted, or the candidate being within the age gate. It
+  reuses the shard sweep's enable gate, all-hosted caught-up gate, owning-group-hosted gate, floored
+  age gate, and two-cycle tombstone delay; deletion is node-local (each placement node reclaims its own
+  copy). Genesis 1+0 versions whose owner moved to a non-hosted group after cluster growth are
+  intentionally left for the S5 re-fan-out work, never mis-deleted. New metrics:
+  `grainfs_scrub_orphan_quorum_meta_versions_found_total`,
+  `grainfs_scrub_orphan_quorum_meta_versions_deleted_total`,
+  `grainfs_scrub_orphan_quorum_meta_version_sweep_capped_total`.
+
 ## [0.0.613.0] - 2026-06-17
 
 ### Fixed

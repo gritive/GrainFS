@@ -45,8 +45,19 @@
       write failure, reconciled by S3 backfill; (b) `deriveLatestVersion` (HEAD) lacks the MetaSeq tiebreak
       the LIST walker uses. Benchmark before S4 (O(total versions) per LIST). ListObjectVersions stays
       FSM-backed (deferrable to S4).
-    - **S2b residual — per-version orphan reconciliation scrubber** (removes blobs whose FSM record is gone;
-      also closes residual (a) above) — separate slice, not yet scheduled.
+    - **S2b residual — per-version orphan reconciliation scrubber — DONE (this PR).** A background sweep
+      (`orphan_quorum_meta_version_walker.go`, analog of the EC orphan-shard scrubber) reclaims dangling
+      per-version blobs whose FSM `obj:` record is gone (the residual of a partially-failed S2a hard-delete
+      dual-delete), stopping the derive-by-scan LIST/HEAD?vid resurface. Authority = `obj:` record present
+      in ANY hosted group (delete-marker counts as present → keep); fail-closed on any read error; reuses
+      the shard sweep's gate + all-hosted-caught-up + owning-group-hosted + floored age-gate + two-cycle
+      tombstone; node-local delete (each placement node reclaims its own copy — VERIFIED INVARIANT: blobs
+      are written only to owning-group placement nodes and never relocated). Metrics:
+      `grainfs_scrub_orphan_quorum_meta_versions_{found,deleted}_total` + `..._sweep_capped_total`.
+      **Follow-up (tracked):** full S3-level e2e (versioned PUT/DELETE through the server + lingering-blob
+      injection) — landed with a deterministic `internal/cluster` integration test
+      (`TestPerVersionOrphanReconcile_StopsDeriveByScanResurface`) instead, since a clean blob-injection
+      seam through the S3 edge does not yet exist and multi-node e2e is resource-flaky.
   - **S3 — migrate existing data** (legacy latest-only blob + FSM per-version records → per-version blobs).
   - **S4 — cutover: per-version sole authority; remove FSM object-meta path** (`CmdPutObjectMeta`/`apply*`/
     `obj:`/`lat:`), repoint scrubber/snapshot. **Appendable/coalesced carve-out:** those objects bypass

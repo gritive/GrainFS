@@ -277,6 +277,9 @@ type BackgroundScrubber struct {
 	stats           ScrubStats
 	statsSnap       atomic.Value // published at end of each cycle; stores ScrubStats
 	orphanTombstone map[string]struct{}
+	// orphanVersionTombstone tracks dangling per-version quorum-meta blobs seen in
+	// the previous cycle (parallel to orphanTombstone for EC shards).
+	orphanVersionTombstone map[string]struct{}
 	// segmentTombstone tracks raw segment orphan candidates across cycles
 	// (parallel to orphanTombstone for EC shards).
 	segmentTombstone map[string]struct{}
@@ -355,16 +358,17 @@ func WithSegmentOrphanLog(log segmentOrphanLog, window time.Duration) ScrubberOp
 // New creates a BackgroundScrubber with a rate limit of 100 scans/sec.
 func New(backend Scrubbable, interval time.Duration, opts ...ScrubberOption) *BackgroundScrubber {
 	s := &BackgroundScrubber{
-		backend:          backend,
-		verifier:         NewShardVerifier(backend),
-		repairer:         NewRepairEngine(backend),
-		emitter:          NoopEmitter{},
-		interval:         interval,
-		resetCh:          make(chan time.Duration, 1),
-		limiter:          rate.NewLimiter(100, 10),
-		lastStatuses:     make(map[string]ShardStatus),
-		orphanTombstone:  make(map[string]struct{}),
-		segmentTombstone: make(map[string]struct{}),
+		backend:                backend,
+		verifier:               NewShardVerifier(backend),
+		repairer:               NewRepairEngine(backend),
+		emitter:                NoopEmitter{},
+		interval:               interval,
+		resetCh:                make(chan time.Duration, 1),
+		limiter:                rate.NewLimiter(100, 10),
+		lastStatuses:           make(map[string]ShardStatus),
+		orphanTombstone:        make(map[string]struct{}),
+		orphanVersionTombstone: make(map[string]struct{}),
+		segmentTombstone:       make(map[string]struct{}),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -754,6 +758,12 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 	// Optional: sweep orphan shard dirs left by migration crashes.
 	if walker, ok := s.backend.(OrphanWalkable); ok {
 		s.orphanSweep(walker, knownDirs)
+	}
+
+	// Optional: reclaim dangling per-version quorum-meta blobs whose FSM record
+	// is gone (residual of a partially-failed S2a hard-delete dual-delete).
+	if vw, ok := s.backend.(OrphanQuorumMetaVersionWalkable); ok {
+		s.orphanVersionSweep(vw)
 	}
 
 	// Optional: relocate non-redundant (1+0) EC objects into a redundant group.
