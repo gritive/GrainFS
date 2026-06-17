@@ -291,7 +291,7 @@ func (b *DistributedBackend) restorePlacementMeta(snap storage.SnapshotObject) P
 	if snap.IsDeleteMarker || snap.VersionID == "" {
 		return PlacementMeta{}
 	}
-	obj, placement, err := b.headObjectMetaV(snap.Bucket, snap.Key, snap.VersionID)
+	obj, placement, err := b.headObjectMetaV(context.Background(), snap.Bucket, snap.Key, snap.VersionID)
 	if err != nil || obj == nil {
 		return PlacementMeta{}
 	}

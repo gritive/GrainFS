@@ -1101,7 +1101,7 @@ func (c *ClusterCoordinator) GetObjectVersion(
 		if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
 			return err
 		} else if gb != nil {
-			r, o, e := gb.GetObjectVersion(bucket, key, versionID)
+			r, o, e := gb.getObjectVersionCtx(ctx, bucket, key, versionID)
 			if e != nil {
 				return e
 			}
@@ -1157,7 +1157,7 @@ func (c *ClusterCoordinator) HeadObjectVersion(bucket, key, versionID string) (*
 		if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
 			return err
 		} else if gb != nil {
-			o, e := gb.HeadObjectVersion(bucket, key, versionID)
+			o, e := gb.headObjectVersionCtx(ctx, bucket, key, versionID)
 			if e != nil {
 				return e
 			}
