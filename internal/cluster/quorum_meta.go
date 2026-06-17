@@ -510,6 +510,77 @@ func (s *ShardService) ReadQuorumMetaVersions(ctx context.Context, addr, bucket,
 	return out, nil
 }
 
+// readQuorumMetaVersions unions a key's per-version blobs across ALL placement
+// groups (every generation) by fanning ReadQuorumMetaVersions to ShardGroups()
+// peers + self, deduped by VersionID. Unconditional all-groups fan-out (mirrors
+// fetchQuorumMetaFromPeers) — NOT the multiGeneration-gated fast path.
+func (b *DistributedBackend) readQuorumMetaVersions(bucket, key string) ([]PutObjectMetaCmd, error) {
+	if b.shardSvc == nil {
+		return nil, nil
+	}
+	byVID := map[string]PutObjectMetaCmd{}
+	// keep the higher-MetaSeq blob for a same-VID replica (mirrors quorumMetaBlobWins's
+	// MetaSeq tiebreak so a relocation re-write wins deterministically).
+	put := func(c PutObjectMetaCmd) {
+		if ex, ok := byVID[c.VersionID]; !ok || c.MetaSeq >= ex.MetaSeq {
+			byVID[c.VersionID] = c
+		}
+	}
+	// self
+	if local, err := b.shardSvc.readQuorumMetaVersionsLocal(bucket, key); err == nil {
+		for _, c := range local {
+			put(c)
+		}
+	}
+	self := b.currentSelfAddr()
+	seen := map[string]bool{self: true}
+	ctx, cancel := context.WithTimeout(context.Background(), quorumMetaReadTimeout)
+	defer cancel()
+	if b.shardGroup != nil {
+		for _, g := range b.shardGroup.ShardGroups() {
+			for _, p := range g.PeerIDs {
+				if seen[p] {
+					continue
+				}
+				seen[p] = true
+				addr, aerr := b.shardSvc.resolvePeerAddress(p)
+				if aerr != nil {
+					continue
+				}
+				remote, rerr := b.shardSvc.ReadQuorumMetaVersions(ctx, addr, bucket, key)
+				if rerr != nil {
+					continue // partial tolerated (see spec predicate boundary)
+				}
+				for _, c := range remote {
+					put(c)
+				}
+			}
+		}
+	}
+	out := make([]PutObjectMetaCmd, 0, len(byVID))
+	for _, c := range byVID {
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+// deriveLatestVersion returns the max-VersionID blob and whether the object's
+// latest state is live (false = no versions OR latest is a delete marker).
+func deriveLatestVersion(cmds []PutObjectMetaCmd) (PutObjectMetaCmd, bool) {
+	var latest PutObjectMetaCmd
+	found := false
+	for _, c := range cmds {
+		if !found || c.VersionID > latest.VersionID {
+			latest = c
+			found = true
+		}
+	}
+	if !found || latest.IsDeleteMarker {
+		return PutObjectMetaCmd{}, false
+	}
+	return latest, true
+}
+
 // isQuorumMetaTempName reports whether a directory entry is an in-flight
 // atomic-publish temp file (os.CreateTemp(dir, ".qmeta-*.tmp") above). Store
 // walkers MUST skip these: the temp lives in the same directory as its rename
