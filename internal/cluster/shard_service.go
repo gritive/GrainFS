@@ -599,6 +599,8 @@ func (s *ShardService) handleRPC(payload []byte) []byte {
 		return s.handleQuorumMetaRead(sr)
 	case "ScanQuorumMeta":
 		return s.handleScanQuorumMeta(sr)
+	case "ReadQuorumMetaVersions":
+		return s.handleQuorumMetaVersionsRead(sr)
 	default:
 		return s.errorResponse("unknown shard RPC: " + rpcType)
 	}
@@ -658,6 +660,22 @@ func (s *ShardService) handleScanQuorumMeta(sr *shardRequest) []byte {
 	for i := range entries {
 		blob, eerr := EncodeCommand(CmdPutObjectMeta, entries[i])
 		if eerr == nil {
+			blobs = append(blobs, blob)
+		}
+	}
+	return s.okResponse(packBlobList(blobs))
+}
+
+// handleQuorumMetaVersionsRead serves a ReadQuorumMetaVersions RPC: lists the
+// local per-version blobs for (bucket, key) and returns them as a packBlobList.
+func (s *ShardService) handleQuorumMetaVersionsRead(sr *shardRequest) []byte {
+	cmds, err := s.readQuorumMetaVersionsLocal(sr.Bucket, sr.Key)
+	if err != nil {
+		return s.errorResponse(err.Error())
+	}
+	blobs := make([][]byte, 0, len(cmds))
+	for i := range cmds {
+		if blob, eerr := EncodeCommand(CmdPutObjectMeta, cmds[i]); eerr == nil {
 			blobs = append(blobs, blob)
 		}
 	}

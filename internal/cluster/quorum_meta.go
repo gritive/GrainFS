@@ -440,6 +440,76 @@ func (s *ShardService) writeQuorumMetaVersionLocal(bucket, versionSubpath string
 	return nil
 }
 
+// readQuorumMetaVersionsLocal returns the decoded per-version blobs for one key
+// from .quorum_meta_versions/{bucket}/{key}/{vid}. Absent dir → empty, no error.
+func (s *ShardService) readQuorumMetaVersionsLocal(bucket, key string) ([]PutObjectMetaCmd, error) {
+	if len(s.dataDirs) == 0 {
+		return nil, nil
+	}
+	root := filepath.Join(s.dataDirs[0], quorumMetaVersionsSubDir)
+	dir := filepath.Join(root, bucket, key)
+	if rel, err := filepath.Rel(root, dir); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return nil, fmt.Errorf("quorum meta versions: key %q escapes root", key)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	out := make([]PutObjectMetaCmd, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() || isQuorumMetaTempName(e.Name()) {
+			continue
+		}
+		data, rerr := os.ReadFile(filepath.Join(dir, e.Name()))
+		if rerr != nil {
+			continue // tolerate a transient unreadable blob
+		}
+		cmd, derr := s.decodeQuorumMetaCmdBlob(data)
+		if derr != nil {
+			continue
+		}
+		out = append(out, cmd)
+	}
+	return out, nil
+}
+
+// ReadQuorumMetaVersions fans the per-key version list to a remote placement node.
+func (s *ShardService) ReadQuorumMetaVersions(ctx context.Context, addr, bucket, key string) ([]PutObjectMetaCmd, error) {
+	if s.transport == nil {
+		return nil, fmt.Errorf("quorum meta versions: no transport")
+	}
+	envb := buildShardEnvelope("ReadQuorumMetaVersions", bucket, key, 0, nil)
+	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
+	respEnvelope, err := s.callShardRPC(ctx, addr, envb)
+	if err != nil {
+		return nil, fmt.Errorf("read quorum meta versions from %s: %w", addr, err)
+	}
+	rpcType, data, err := unmarshalEnvelope(respEnvelope)
+	if err != nil {
+		return nil, err
+	}
+	if rpcType == "Error" {
+		return nil, fmt.Errorf("remote quorum meta versions error from %s", addr)
+	}
+	if len(data) == 0 {
+		return nil, nil // empty payload = key has no per-version blobs on this node
+	}
+	blobs, uerr := unpackBlobList(data) // NOTE: two-return (quorum_meta.go ~886)
+	if uerr != nil {
+		return nil, uerr
+	}
+	out := make([]PutObjectMetaCmd, 0, len(blobs))
+	for _, blob := range blobs {
+		if cmd, derr := s.decodeQuorumMetaCmdBlob(blob); derr == nil {
+			out = append(out, cmd)
+		}
+	}
+	return out, nil
+}
+
 // isQuorumMetaTempName reports whether a directory entry is an in-flight
 // atomic-publish temp file (os.CreateTemp(dir, ".qmeta-*.tmp") above). Store
 // walkers MUST skip these: the temp lives in the same directory as its rename
