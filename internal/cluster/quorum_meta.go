@@ -650,6 +650,30 @@ func (s *ShardService) WriteQuorumMeta(ctx context.Context, addr, bucket, key st
 	return nil
 }
 
+// WriteQuorumMetaVersion sends an immutable per-version quorum-meta blob to a
+// remote placement node. versionSubpath is path.Join(key, versionID); it rides
+// the existing shard envelope's key field (no schema change) and the receiver
+// writes it under the .quorum_meta_versions subtree.
+func (s *ShardService) WriteQuorumMetaVersion(ctx context.Context, addr, bucket, versionSubpath string, data []byte) error {
+	if s.transport == nil {
+		return fmt.Errorf("quorum meta version: no transport")
+	}
+	envb := buildShardEnvelope("WriteQuorumMetaVersion", bucket, versionSubpath, 0, data)
+	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
+	respEnvelope, err := s.callShardRPC(ctx, addr, envb)
+	if err != nil {
+		return fmt.Errorf("write quorum meta version to %s: %w", addr, err)
+	}
+	rpcType, _, err := unmarshalEnvelope(respEnvelope)
+	if err != nil {
+		return fmt.Errorf("unmarshal quorum meta version response: %w", err)
+	}
+	if rpcType == "Error" {
+		return fmt.Errorf("remote quorum meta version error from %s", addr)
+	}
+	return nil
+}
+
 // DeleteQuorumMeta removes the quorum-meta replica for (bucket, key) on a remote
 // placement node. Mirrors WriteQuorumMeta; the receiver runs deleteQuorumMetaLocal.
 func (s *ShardService) DeleteQuorumMeta(ctx context.Context, addr, bucket, key string) error {

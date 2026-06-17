@@ -591,6 +591,8 @@ func (s *ShardService) handleRPC(payload []byte) []byte {
 		return s.handleShadowMeta(sr)
 	case "WriteQuorumMeta":
 		return s.handleQuorumMetaWrite(sr)
+	case "WriteQuorumMetaVersion":
+		return s.handleQuorumMetaVersionWrite(sr)
 	case "DeleteQuorumMeta":
 		return s.handleQuorumMetaDelete(sr)
 	case "ReadQuorumMeta":
@@ -607,6 +609,16 @@ func (s *ShardService) handleRPC(payload []byte) []byte {
 // caller so the PUT can fail the quorum check.
 func (s *ShardService) handleQuorumMetaWrite(sr *shardRequest) []byte {
 	if err := s.writeQuorumMetaLocal(sr.Bucket, sr.Key, sr.Data); err != nil {
+		return s.errorResponse(err.Error())
+	}
+	return s.okResponse(nil)
+}
+
+// handleQuorumMetaVersionWrite receives a per-version quorum-meta blob and
+// durably writes it under the .quorum_meta_versions subtree. sr.Key carries
+// path.Join(key, versionID).
+func (s *ShardService) handleQuorumMetaVersionWrite(sr *shardRequest) []byte {
+	if err := s.writeQuorumMetaVersionLocal(sr.Bucket, sr.Key, sr.Data); err != nil {
 		return s.errorResponse(err.Error())
 	}
 	return s.okResponse(nil)
