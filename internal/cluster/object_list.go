@@ -31,11 +31,22 @@ func objectFromCmd(cmd PutObjectMetaCmd) *storage.Object {
 	}
 }
 
+// listLatestEntries chooses the per-version derive for versioning-enabled
+// buckets, else the legacy latest-only scatter-gather. Both return sorted-by-key,
+// tombstone-excluded []PutObjectMetaCmd so the three LIST methods are identical
+// downstream. Internal buckets and non-versioned/suspended buckets keep legacy.
+func (b *DistributedBackend) listLatestEntries(ctx context.Context, bucket, prefix string) ([]PutObjectMetaCmd, error) {
+	if !storage.IsInternalBucket(bucket) && b.bucketVersioningEnabled(ctx, bucket) {
+		return b.listObjectsPerVersion(ctx, bucket, prefix)
+	}
+	return b.scatterGatherList(ctx, bucket, prefix)
+}
+
 func (b *DistributedBackend) ListObjects(ctx context.Context, bucket, prefix string, maxKeys int) ([]*storage.Object, error) {
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, err
 	}
-	entries, err := b.scatterGatherList(ctx, bucket, prefix)
+	entries, err := b.listLatestEntries(ctx, bucket, prefix)
 	if err != nil {
 		return nil, err
 	}
@@ -56,7 +67,7 @@ func (b *DistributedBackend) ListObjectsPage(ctx context.Context, bucket, prefix
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, false, err
 	}
-	entries, err := b.scatterGatherList(ctx, bucket, prefix)
+	entries, err := b.listLatestEntries(ctx, bucket, prefix)
 	if err != nil {
 		return nil, false, err
 	}
@@ -79,7 +90,7 @@ func (b *DistributedBackend) WalkObjects(ctx context.Context, bucket, prefix str
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return err
 	}
-	entries, err := b.scatterGatherList(ctx, bucket, prefix)
+	entries, err := b.listLatestEntries(ctx, bucket, prefix)
 	if err != nil {
 		return err
 	}

@@ -564,6 +564,67 @@ func (b *DistributedBackend) readQuorumMetaVersions(bucket, key string) ([]PutOb
 	return out, nil
 }
 
+// listObjectsPerVersion derives latest-per-key from per-version blobs across ALL
+// generation groups (unconditional ShardGroups fan-out, like readQuorumMetaVersions),
+// excluding keys whose global-max version is a delete marker. Returns sorted-by-key
+// cmds, same shape/contract as scatterGatherList (tombstone-excluded, key-sorted),
+// so the three LIST methods stay unchanged downstream. Orphan per-version blobs (a
+// node unreachable at hard-delete that rejoins later) could show a rare phantom;
+// reconciliation (scrubber removes blobs with no FSM record) is a separate slice.
+func (b *DistributedBackend) listObjectsPerVersion(ctx context.Context, bucket, prefix string) ([]PutObjectMetaCmd, error) {
+	if b.shardSvc == nil {
+		return nil, nil
+	}
+	byKey := map[string]PutObjectMetaCmd{}
+	// Inline max-vid + same-VID MetaSeq>= tiebreak (mirrors readQuorumMetaVersions'
+	// put), NOT deriveLatestVersion (which lacks the MetaSeq tiebreak).
+	put := func(c PutObjectMetaCmd) {
+		if ex, ok := byKey[c.Key]; !ok || c.VersionID > ex.VersionID ||
+			(c.VersionID == ex.VersionID && c.MetaSeq >= ex.MetaSeq) {
+			byKey[c.Key] = c
+		}
+	}
+	if local, err := b.shardSvc.ScanQuorumMetaVersionsBucket(bucket, prefix); err == nil {
+		for _, c := range local {
+			put(c)
+		}
+	}
+	self := b.currentSelfAddr()
+	seen := map[string]bool{self: true}
+	rctx, cancel := context.WithTimeout(ctx, quorumMetaReadTimeout)
+	defer cancel()
+	if b.shardGroup != nil {
+		for _, g := range b.shardGroup.ShardGroups() {
+			for _, p := range g.PeerIDs {
+				if seen[p] {
+					continue
+				}
+				seen[p] = true
+				addr, aerr := b.shardSvc.resolvePeerAddress(p)
+				if aerr != nil {
+					continue
+				}
+				remote, rerr := b.shardSvc.ScanQuorumMetaVersions(rctx, addr, bucket, prefix)
+				if rerr != nil {
+					continue // partial-tolerant
+				}
+				for _, c := range remote {
+					put(c)
+				}
+			}
+		}
+	}
+	out := make([]PutObjectMetaCmd, 0, len(byKey))
+	for _, c := range byKey {
+		if c.IsDeleteMarker {
+			continue // global-max is a marker → key deleted, omit from LIST
+		}
+		out = append(out, c)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out, nil
+}
+
 // readQuorumMetaVersion returns the single per-version blob for (bucket, key,
 // versionID), found via the all-groups fan-out (NOT local-only) so a reachable
 // replica is located even when the local node isn't a placement node. Returns

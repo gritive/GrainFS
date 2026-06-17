@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/stretchr/testify/require"
 )
@@ -70,6 +71,153 @@ func TestScanQuorumMetaVersionsBucket_PrefixFilter(t *testing.T) {
 		keys[c.Key] = true
 	}
 	require.Equal(t, map[string]bool{"foo/1": true, "foo/2": true}, keys)
+}
+
+// listKeys returns the sorted object keys ListObjects reports.
+func listKeys(t *testing.T, b *DistributedBackend, ctx context.Context, bkt, prefix string) []string {
+	t.Helper()
+	objs, err := b.ListObjects(ctx, bkt, prefix, 1000)
+	require.NoError(t, err)
+	keys := make([]string, 0, len(objs))
+	for _, o := range objs {
+		keys = append(keys, o.Key)
+	}
+	return keys
+}
+
+// TestListObjects_PerVersionDerive_DivergenceRepro is the core S2b repro: on a
+// versioning-enabled bucket, PUT v1, PUT v2, then hard-delete v2
+// (DeleteObjectVersion) → ListObjects must show the key with v1, matching
+// HEAD/GET. RED before the per-version derive branch: legacy scatterGatherList
+// reads the stale latest-only blob (still v2, not maintained on hard-delete) so
+// the deleted-latest object stays visible. Then delete v1 too → key absent.
+func TestListObjects_PerVersionDerive_DivergenceRepro(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	const bkt, key = "vbkt", "obj"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+
+	vid1 := putVersioned(t, b, ctx, bkt, key, "content-v1")
+	vid2 := putVersioned(t, b, ctx, bkt, key, "content-v2")
+
+	// Sanity: HEAD agrees latest is v2 before the delete.
+	head, err := b.HeadObject(ctx, bkt, key)
+	require.NoError(t, err)
+	require.Equal(t, vid2, head.VersionID)
+
+	// Hard-delete the latest (v2). HEAD now re-derives v1.
+	require.NoError(t, b.DeleteObjectVersion(bkt, key, vid2))
+	head, err = b.HeadObject(ctx, bkt, key)
+	require.NoError(t, err)
+	require.Equal(t, vid1, head.VersionID)
+
+	// LIST must agree: key present (it is v1's live latest), NOT omitted, NOT v2.
+	objs, err := b.ListObjects(ctx, bkt, "", 1000)
+	require.NoError(t, err)
+	require.Len(t, objs, 1, "RED before derive: stale latest-only blob keeps the hard-deleted object visible")
+	require.Equal(t, key, objs[0].Key)
+	require.Equal(t, vid1, objs[0].VersionID, "LIST must show the re-derived latest v1, matching HEAD")
+
+	// Delete v1 too → key absent from LIST (no live version remains).
+	require.NoError(t, b.DeleteObjectVersion(bkt, key, vid1))
+	require.Empty(t, listKeys(t, b, ctx, bkt, ""), "after deleting every version, key is absent from LIST")
+}
+
+// TestListObjects_PerVersionDerive_SoftDeleteExcluded proves a soft-delete
+// (DeleteObject writes a delete marker as the newest per-version blob) omits the
+// key from LIST.
+func TestListObjects_PerVersionDerive_SoftDeleteExcluded(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	const bkt, key = "vbkt", "obj"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+
+	_ = putVersioned(t, b, ctx, bkt, key, "content-v1")
+	require.NoError(t, b.DeleteObject(ctx, bkt, key)) // soft-delete → marker as latest
+
+	require.Empty(t, listKeys(t, b, ctx, bkt, ""), "soft-deleted key (marker latest) omitted from LIST")
+}
+
+// TestListObjects_PerVersionDerive_DedupAndPagination proves the derive dedups
+// multiple versions of a key to one (latest) and that prefix/maxKeys/marker
+// pagination is preserved (byte-compatible with scatterGatherList's contract).
+func TestListObjects_PerVersionDerive_DedupAndPagination(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	const bkt = "vbkt"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+
+	// Three keys, "a" with three versions (dedup to one), under two prefixes.
+	for _, body := range []string{"a1", "a2", "a3"} {
+		_ = putVersioned(t, b, ctx, bkt, "p/a", body)
+	}
+	_ = putVersioned(t, b, ctx, bkt, "p/b", "b1")
+	_ = putVersioned(t, b, ctx, bkt, "q/c", "c1")
+
+	// Dedup: p/a appears once despite 3 versions.
+	require.Equal(t, []string{"p/a", "p/b", "q/c"}, listKeys(t, b, ctx, bkt, ""), "each key once (deduped)")
+
+	// Prefix filter.
+	require.Equal(t, []string{"p/a", "p/b"}, listKeys(t, b, ctx, bkt, "p/"))
+
+	// maxKeys cap.
+	capped, err := b.ListObjects(ctx, bkt, "", 2)
+	require.NoError(t, err)
+	require.Len(t, capped, 2, "maxKeys honored")
+
+	// Marker pagination: page after "p/a" yields p/b, q/c (truncation respected).
+	page, truncated, err := b.ListObjectsPage(ctx, bkt, "", "p/a", 1)
+	require.NoError(t, err)
+	require.Equal(t, []string{"p/b"}, objKeys(page))
+	require.True(t, truncated, "more entries remain after p/b")
+}
+
+// TestListObjects_LegacyFallbackNonVersioned proves a NON-versioned bucket still
+// lists via the legacy scatterGatherList path (unchanged): a plain PUT is visible.
+func TestListObjects_LegacyFallbackNonVersioned(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	const bkt, key = "plainbkt", "obj"
+	require.NoError(t, b.CreateBucket(ctx, bkt)) // no SetBucketVersioning → legacy path
+
+	_ = putVersioned(t, b, ctx, bkt, key, "body") // PutObject works on non-versioned too
+	require.Equal(t, []string{key}, listKeys(t, b, ctx, bkt, ""), "non-versioned LIST unchanged (legacy)")
+}
+
+// TestListObjects_CtxFlagFalseForcesLegacy pins the activation boundary the other
+// way: a versioning-enabled bucket whose ctx flag is explicitly stamped FALSE
+// (e.g. a suspended decision propagated from the edge) takes the legacy
+// scatterGatherList path, so a hard-deleted-latest stays visible via the stale
+// latest-only blob — proving the branch reads the ctx flag, not just local state.
+func TestListObjects_CtxFlagFalseForcesLegacy(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	const bkt, key = "vbkt", "obj"
+	enabled := context.Background()
+	require.NoError(t, b.CreateBucket(enabled, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+
+	_ = putVersioned(t, b, enabled, bkt, key, "content-v1")
+	vid2 := putVersioned(t, b, enabled, bkt, key, "content-v2")
+	require.NoError(t, b.DeleteObjectVersion(bkt, key, vid2)) // hard-delete latest
+
+	// ctx flag FALSE → legacy path → stale latest-only blob (v2) still visible.
+	legacyCtx := ContextWithBucketVersioning(context.Background(), false)
+	objs, err := b.ListObjects(legacyCtx, bkt, "", 1000)
+	require.NoError(t, err)
+	require.Len(t, objs, 1, "legacy path returns the stale latest-only entry")
+	require.Equal(t, vid2, objs[0].VersionID, "ctx-flag-false forces legacy → shows the hard-deleted latest (boundary pinned)")
+}
+
+// objKeys extracts keys from a []*storage.Object page.
+func objKeys(objs []*storage.Object) []string {
+	keys := make([]string, 0, len(objs))
+	for _, o := range objs {
+		keys = append(keys, o.Key)
+	}
+	return keys
 }
 
 // TestScanQuorumMetaVersions_RPC proves the per-version bucket walker RPC
