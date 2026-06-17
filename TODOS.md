@@ -58,6 +58,33 @@
   latest pointer dangling, and a subsequent `HEAD`/`GET` (which reads quorum-meta first,
   object_version.go:33-44) can still return the deleted latest version. This is **pre-existing** (long
   predates the Q5 generation-walk fix) and orthogonal to generation routing — Q5 deliberately did not
-  touch delete-side quorum-meta semantics. Surfaced by the Q5 plan gate. Fix: on a versioned hard-delete
-  that removes the quorum-meta-pointed version, recompute/advance (or clear) the quorum-meta latest
-  pointer to the next surviving version.
+  touch delete-side quorum-meta semantics. Surfaced by the Q5 plan gate.
+
+  **[EPIC — deferred] This is NOT a one-line "clear the stale pointer" fix.** Deep investigation (2026-06-17)
+  found both obvious fixes are flawed, because `LIST` (`scatterGatherList`, quorum_meta.go:872) scans
+  quorum-meta ONLY and never falls back to the FSM:
+  - **delete-only** (drop the stale blob): HEAD/GET become correct via the FSM fallback
+    (`lat:`→`obj:<next>`, object_get.go:301-313) with zero corruption/LWW risk — but the rolled-back
+    latest then **vanishes from LIST** until the next write (LIST is quorum-meta-only), so LIST and GET
+    disagree.
+  - **promote** (delete the stale blob, then re-publish the previous version's blob): makes LIST correct
+    too, but (1) there is no inverse seam and `PutObjectMetaCmd` is **lossy** (no `Coalesced`/`IsAppendable`
+    fields, which `objectMeta` has) → reconstructing a blob for appendable/coalesced objects corrupts them;
+    (2) in a **mixed-type version chain** (e.g. v1 appendable = FSM-only with no quorum blob, v2 a plain PUT)
+    promote writes a lossy blob and HEAD then mis-reads v1 as non-appendable — strictly **worse** than
+    delete-only, whose FSM fallback is correct; (3) the promoted older version carries an older `ModTime`
+    that **loses** `quorumMetaBlobWins` (quorum_meta.go:120, ModTime>VersionID>MetaSeq) against any stale
+    blob that survived a best-effort delete on an unreachable node → the deleted version resurfaces
+    (the same LWW-vs-older-version tension that got the non-latest EC-redundancy migration reverted);
+    (4) a delete-then-write concurrency window; (5) under Q5's per-generation fan-out the backend
+    `DeleteObjectVersion` runs N× → promote thrash.
+
+  **Recommended direction for the epic:** instead of promote, make `scatterGatherList` (LIST) **fall back
+  to / merge the FSM** for keys absent from quorum-meta, then pair it with delete-only. That sidesteps
+  promote's lossy-cmd reconstruction AND the LWW older-ModTime hole entirely, at the cost of a Phase-4
+  index-free-LIST architecture change. This is entangled with the same quorum-meta-only-LIST +
+  LWW-vs-older-version root tension as the non-latest EC-redundancy epic above, so the two are best
+  designed together.
+
+  Cluster-only (single-node uses the erasure backend with no quorum-meta). Repro: `PUT v1` → `PUT v2`
+  → `DELETE ?versionId=<v2>` → `HEAD` returns the deleted v2 instead of v1.
