@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.613.0] - 2026-06-17
+
+### Fixed
+- **`ListObjects` is now per-version-authoritative on versioning-enabled buckets (foundation slice
+  S2b PR-B).** S2a/PR-A made `HEAD`/`GET` derive the latest version from the per-version quorum-meta
+  blobs, but `ListObjects` still scatter-gathered the legacy latest-only blobs — so after
+  `DELETE ?versionId=<latest>` the object kept appearing in a LIST (with the stale deleted version)
+  even though `HEAD`/`GET` correctly returned the previous version. LIST now derives each key's latest
+  live version by scanning the per-version blobs across all placement generations (new
+  `ScanQuorumMetaVersionsBucket` walker + `ScanQuorumMetaVersions` RPC, max-VersionID per key,
+  tombstone-excluded), closing the HEAD/GET-vs-LIST window. The derive is scoped to the S3 LIST edge:
+  it activates only when the bucket-versioning decision was stamped into the request context at the
+  server edge (mirroring PUT and the read paths), so internal LIST consumers (the `DeleteBucket`
+  empty-check, vfs/nfs4/p9/metrics) keep their existing quorum-acked latest-only view and a best-effort
+  per-version write failure cannot make `DeleteBucket` drop a non-empty bucket. `scatterGatherList`,
+  `ListObjectVersions`, non-versioned buckets, internal buckets, and single-node paths are unchanged.
+
 ## [0.0.612.0] - 2026-06-17
 
 ### Fixed

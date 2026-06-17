@@ -30,15 +30,23 @@
       because the gate read the wrong (local group) store; now Epic A read consistency is active in
       clusters. Copy-source reads now use the SOURCE bucket's decision. (Note: `applyCopyObjectTags`'s
       source `GetObjectTags` is a separate non-versioning-gated path — out of scope, flagged.)
-    - **S2b PR-B — ListObjects per-version derive (NEXT).** `ScanQuorumMetaVersionsBucket` walker
+    - **S2b PR-B — ListObjects per-version derive — DONE (this PR).** `ScanQuorumMetaVersionsBucket` walker
       (robust `WalkDir`-all-files + group-by-decoded-`cmd.Key`, since keys contain `/`; O(total versions))
       + `ScanQuorumMetaVersions` RPC + `listObjectsPerVersion` (all-groups fan-out, max-vid, marker-exclude)
-      + branch the three object_list.go methods on versioning-Enabled, using `objectFromCmd`. **Do NOT
-      touch `scatterGatherList`/`ScanQuorumMetaBucket`** (`ScanObjectMetaEntries` + 3 legacy consumers stay
-      latest-only). Closes the S2a→S2b HEAD-vs-LIST window. Benchmark before S4 (O(total versions) per LIST).
-      Also: per-version orphan reconciliation (scrubber removes blobs whose FSM record is gone — separate
-      slice). ListObjectVersions stays
-    FSM-backed (deferrable to S4).
+      + branch the three object_list.go methods (via `listLatestEntries`) on versioning-Enabled, using
+      `objectFromCmd`. **Did NOT touch `scatterGatherList`/`ScanQuorumMetaBucket`** (`ScanObjectMetaEntries`
+      + 3 legacy consumers stay latest-only). Closes the S2a→S2b HEAD-vs-LIST window. **Code-gate fix
+      (data-loss):** the derive is gated on the STAMPED ctx flag ONLY (`bucketVersioningFromContext`:
+      resolved && enabled), NOT `bucketVersioningEnabled`'s local-read fallback — otherwise unstamped
+      internal consumers (DeleteBucket empty-check, vfs/nfs4/p9/metrics) would activate the derive, and a
+      best-effort per-version write failure could make the derive omit a live object → DeleteBucket deletes
+      a non-empty bucket. Stamped-only scopes the derive to the S3 LIST edge (PR-A re-stamps on forward).
+      Residuals (tracked): (a) best-effort per-version write → transient HEAD/LIST divergence on partial
+      write failure, reconciled by S3 backfill; (b) `deriveLatestVersion` (HEAD) lacks the MetaSeq tiebreak
+      the LIST walker uses. Benchmark before S4 (O(total versions) per LIST). ListObjectVersions stays
+      FSM-backed (deferrable to S4).
+    - **S2b residual — per-version orphan reconciliation scrubber** (removes blobs whose FSM record is gone;
+      also closes residual (a) above) — separate slice, not yet scheduled.
   - **S3 — migrate existing data** (legacy latest-only blob + FSM per-version records → per-version blobs).
   - **S4 — cutover: per-version sole authority; remove FSM object-meta path** (`CmdPutObjectMeta`/`apply*`/
     `obj:`/`lat:`), repoint scrubber/snapshot. **Appendable/coalesced carve-out:** those objects bypass

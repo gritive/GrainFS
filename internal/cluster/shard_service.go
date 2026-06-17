@@ -599,6 +599,8 @@ func (s *ShardService) handleRPC(payload []byte) []byte {
 		return s.handleQuorumMetaRead(sr)
 	case "ScanQuorumMeta":
 		return s.handleScanQuorumMeta(sr)
+	case "ScanQuorumMetaVersions":
+		return s.handleScanQuorumMetaVersions(sr)
 	case "ReadQuorumMetaVersions":
 		return s.handleQuorumMetaVersionsRead(sr)
 	case "DeleteQuorumMetaVersion":
@@ -662,6 +664,23 @@ func (s *ShardService) handleScanQuorumMeta(sr *shardRequest) []byte {
 	for i := range entries {
 		blob, eerr := EncodeCommand(CmdPutObjectMeta, entries[i])
 		if eerr == nil {
+			blobs = append(blobs, blob)
+		}
+	}
+	return s.okResponse(packBlobList(blobs))
+}
+
+// handleScanQuorumMetaVersions serves a ScanQuorumMetaVersions RPC: walks the
+// local per-version subtree for the bucket (sr.Key = prefix), groups by decoded
+// key, and returns each per-key max-VersionID cmd as a packBlobList payload.
+func (s *ShardService) handleScanQuorumMetaVersions(sr *shardRequest) []byte {
+	entries, err := s.ScanQuorumMetaVersionsBucket(sr.Bucket, sr.Key) // Key field = prefix
+	if err != nil {
+		return s.errorResponse(err.Error())
+	}
+	blobs := make([][]byte, 0, len(entries))
+	for i := range entries {
+		if blob, eerr := EncodeCommand(CmdPutObjectMeta, entries[i]); eerr == nil {
 			blobs = append(blobs, blob)
 		}
 	}
