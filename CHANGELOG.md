@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.609.0] - 2026-06-17
+
+### Fixed
+- **`DeleteObjectVersion` now deletes versions whose metadata lives in an older
+  placement generation (clusters grown from single-node).** A per-version record
+  (`obj:bucket/key/versionID`) is sharded into the one group the key hashes to at
+  the generation the version was written; after the cluster grows, that key hashes
+  to a different group, so a pre-growth version's record stays in the original
+  group. `DeleteObjectVersion` routed only to the newest generation, so deleting
+  such an old version silently did nothing. It now fans the delete out across all
+  placement generations (deduped); `applyDeleteObjectVersion` is idempotent, so
+  non-resident generation groups no-op and the resident older-generation group
+  deletes the record. Single-generation clusters are unaffected (exactly one
+  delete, byte-identical to before).
+
 ## [0.0.608.0] - 2026-06-17
 
 ### Added
