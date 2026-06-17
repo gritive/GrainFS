@@ -856,7 +856,7 @@ func (c *ClusterCoordinator) ListAllObjects() ([]storage.SnapshotObject, error) 
 				// snapshot must not fail just because one blob is currently
 				// unreadable (e.g. mid-write, EC-stored without a plain-file
 				// fallback) — fall back to the version-listing fields.
-				if rc, obj, err := c.GetObjectVersion(bucket, version.Key, version.VersionID); err == nil {
+				if rc, obj, err := c.GetObjectVersion(context.Background(), bucket, version.Key, version.VersionID); err == nil {
 					_ = rc.Close()
 					snap.ETag = obj.ETag
 					snap.Size = obj.Size
@@ -990,6 +990,13 @@ func bucketVersioningFromContext(ctx context.Context) (enabled bool, resolved bo
 	return v, ok
 }
 
+// BucketVersioningFromContext is the exported accessor for the stamped
+// versioning decision. Used by the server edge (and tests) to inspect whether
+// the authoritative versioning flag was threaded into ctx.
+func BucketVersioningFromContext(ctx context.Context) (enabled bool, resolved bool) {
+	return bucketVersioningFromContext(ctx)
+}
+
 func topologyForwardWriteError(group ShardGroupEntry, err error) error {
 	if err == nil || !errors.Is(err, ErrNoReachablePeer) || len(group.PeerIDs) == 0 {
 		return err
@@ -1085,9 +1092,8 @@ func (c *ClusterCoordinator) GetObject(ctx context.Context, bucket, key string) 
 }
 
 func (c *ClusterCoordinator) GetObjectVersion(
-	bucket, key, versionID string,
+	ctx context.Context, bucket, key, versionID string,
 ) (io.ReadCloser, *storage.Object, error) {
-	ctx := context.Background()
 	// S4-4c: index-free (see GetObject). Local serve only when authoritative;
 	// otherwise forward to the placement-group leader.
 	// S7-4c: a specific versionID lives in exactly one generation; probeRead
@@ -1148,8 +1154,7 @@ func (c *ClusterCoordinator) HeadObject(ctx context.Context, bucket, key string)
 	return obj, err
 }
 
-func (c *ClusterCoordinator) HeadObjectVersion(bucket, key, versionID string) (*storage.Object, error) {
-	ctx := context.Background()
+func (c *ClusterCoordinator) HeadObjectVersion(ctx context.Context, bucket, key, versionID string) (*storage.Object, error) {
 	// S7-4c: probe generations newest-first for the specific version (one
 	// attempt at a single generation).
 	var obj *storage.Object

@@ -383,7 +383,7 @@ func (b *DistributedBackend) blobExists(bucket, key, versionID string) bool {
 		})
 	}
 	if versionID != "" {
-		if rc, _, err := b.GetObjectVersion(bucket, key, versionID); err == nil {
+		if rc, _, err := b.GetObjectVersion(context.Background(), bucket, key, versionID); err == nil {
 			_ = rc.Close()
 			return true
 		}

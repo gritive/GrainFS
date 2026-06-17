@@ -21,20 +21,20 @@ func (o *Operations) GetBucketVersioning(bucket string) (string, error) {
 	return plan.bucketVersioner.GetBucketVersioning(bucket)
 }
 
-func (o *Operations) GetObjectVersion(bucket, key, versionID string) (io.ReadCloser, *Object, error) {
+func (o *Operations) GetObjectVersion(ctx context.Context, bucket, key, versionID string) (io.ReadCloser, *Object, error) {
 	plan := o.planForCall()
 	if plan.versionedGetter == nil {
 		return nil, nil, UnsupportedOperationError{Op: "GetObjectVersion", Reason: UnsupportedReasonNoAdapter}
 	}
-	return plan.versionedGetter.GetObjectVersion(bucket, key, versionID)
+	return plan.versionedGetter.GetObjectVersion(ctx, bucket, key, versionID)
 }
 
-func (o *Operations) HeadObjectVersion(bucket, key, versionID string) (*Object, error) {
+func (o *Operations) HeadObjectVersion(ctx context.Context, bucket, key, versionID string) (*Object, error) {
 	plan := o.planForCall()
 	if plan.versionedHeader == nil {
 		return nil, UnsupportedOperationError{Op: "HeadObjectVersion", Reason: UnsupportedReasonNoAdapter}
 	}
-	return plan.versionedHeader.HeadObjectVersion(bucket, key, versionID)
+	return plan.versionedHeader.HeadObjectVersion(ctx, bucket, key, versionID)
 }
 
 func (o *Operations) ListObjectVersions(bucket, prefix string, maxKeys int) ([]*ObjectVersion, error) {

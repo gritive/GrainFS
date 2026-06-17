@@ -242,7 +242,7 @@ var _ = Describe("Forward receiver integration", func() {
 		Expect(reply).NotTo(BeNil())
 		Expect(parseReplyStatus(reply)).To(Succeed())
 
-		_, _, err = gb.GetObjectVersion("bk", "k", obj.VersionID)
+		_, _, err = gb.GetObjectVersion(context.Background(), "bk", "k", obj.VersionID)
 		Expect(err).To(MatchError(storage.ErrObjectNotFound))
 	})
 

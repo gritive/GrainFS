@@ -45,14 +45,14 @@ func TestVersionedBucket_OldVersionReadable(t *testing.T) {
 	require.Equal(t, []byte("content-v2"), gotL)
 
 	// Old-version read returns v1 (RED today: 404).
-	rc1, _, err := b.GetObjectVersion(bkt, key, vid1)
+	rc1, _, err := b.GetObjectVersion(context.Background(), bkt, key, vid1)
 	require.NoError(t, err, "GET of an older version must not 404 — versioning must retain it")
 	got1, _ := io.ReadAll(rc1)
 	rc1.Close()
 	require.Equal(t, []byte("content-v1"), got1)
 
 	// Newer version still readable by id too.
-	rc2, _, err := b.GetObjectVersion(bkt, key, vid2)
+	rc2, _, err := b.GetObjectVersion(context.Background(), bkt, key, vid2)
 	require.NoError(t, err)
 	got2, _ := io.ReadAll(rc2)
 	rc2.Close()

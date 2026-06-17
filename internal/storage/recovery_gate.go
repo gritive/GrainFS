@@ -96,20 +96,20 @@ func (g *RecoveryWriteGate) GetBucketVersioning(bucket string) (string, error) {
 
 func (g *RecoveryWriteGate) SetBucketVersioning(string, string) error { return g.err }
 
-func (g *RecoveryWriteGate) GetObjectVersion(bucket, key, versionID string) (io.ReadCloser, *Object, error) {
+func (g *RecoveryWriteGate) GetObjectVersion(ctx context.Context, bucket, key, versionID string) (io.ReadCloser, *Object, error) {
 	v, ok := g.Backend.(VersionedGetter)
 	if !ok {
 		return nil, nil, ErrSnapshotNotSupported
 	}
-	return v.GetObjectVersion(bucket, key, versionID)
+	return v.GetObjectVersion(ctx, bucket, key, versionID)
 }
 
-func (g *RecoveryWriteGate) HeadObjectVersion(bucket, key, versionID string) (*Object, error) {
+func (g *RecoveryWriteGate) HeadObjectVersion(ctx context.Context, bucket, key, versionID string) (*Object, error) {
 	v, ok := g.Backend.(VersionedHeader)
 	if !ok {
 		return nil, ErrSnapshotNotSupported
 	}
-	return v.HeadObjectVersion(bucket, key, versionID)
+	return v.HeadObjectVersion(ctx, bucket, key, versionID)
 }
 
 func (g *RecoveryWriteGate) ListObjectVersions(bucket, prefix string, maxKeys int) ([]*ObjectVersion, error) {

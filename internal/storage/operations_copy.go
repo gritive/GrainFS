@@ -246,7 +246,7 @@ func (o *Operations) headCopySource(ctx context.Context, plan operationsPlan, re
 		if plan.versionedHeader == nil {
 			return nil, UnsupportedOperationError{Op: "HeadObjectVersion", Reason: UnsupportedReasonNoAdapter}
 		}
-		return plan.versionedHeader.HeadObjectVersion(ref.Bucket, ref.Key, ref.VersionID)
+		return plan.versionedHeader.HeadObjectVersion(ctx, ref.Bucket, ref.Key, ref.VersionID)
 	}
 	return o.backend.HeadObject(ctx, ref.Bucket, ref.Key)
 }
@@ -256,7 +256,7 @@ func (o *Operations) openCopySource(ctx context.Context, plan operationsPlan, re
 		if plan.versionedGetter == nil {
 			return nil, nil, UnsupportedOperationError{Op: "GetObjectVersion", Reason: UnsupportedReasonNoAdapter}
 		}
-		return plan.versionedGetter.GetObjectVersion(ref.Bucket, ref.Key, ref.VersionID)
+		return plan.versionedGetter.GetObjectVersion(ctx, ref.Bucket, ref.Key, ref.VersionID)
 	}
 	return o.backend.GetObject(ctx, ref.Bucket, ref.Key)
 }

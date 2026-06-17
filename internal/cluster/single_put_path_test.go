@@ -162,7 +162,7 @@ func TestSinglePutPath_VersionedRead_ChunkedAndEmpty(t *testing.T) {
 			require.NoError(t, err)
 			require.NotEmpty(t, obj.Segments)
 
-			rc, _, gerr := b.GetObjectVersion("b", "v-"+tc.name, obj.VersionID)
+			rc, _, gerr := b.GetObjectVersion(context.Background(), "b", "v-"+tc.name, obj.VersionID)
 			require.NoError(t, gerr)
 			defer rc.Close()
 			got, readErr := io.ReadAll(rc)

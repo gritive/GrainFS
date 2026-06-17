@@ -15,12 +15,12 @@ import (
 // HeadObjectVersion returns metadata for a specific version. Returns
 // storage.ErrObjectNotFound if the version doesn't exist or is a delete marker.
 //
-// This satisfies storage.VersionedHeader (no ctx). The coordinator/forward-
-// receiver read path that carries the authoritative bucket-versioning stamp
-// uses headObjectVersionCtx so the per-version gate can resolve from ctx; a
-// direct in-process call (no stamp) falls back to a local versioning read.
-func (b *DistributedBackend) HeadObjectVersion(bucket, key, versionID string) (*storage.Object, error) {
-	return b.headObjectVersionCtx(context.Background(), bucket, key, versionID)
+// This satisfies storage.VersionedHeader. The server edge stamps the
+// authoritative bucket-versioning decision into ctx (mirroring PUT) so the
+// per-version gate inside headObjectMetaV can resolve it; an in-process call
+// with an unstamped ctx falls back to a local versioning read.
+func (b *DistributedBackend) HeadObjectVersion(ctx context.Context, bucket, key, versionID string) (*storage.Object, error) {
+	return b.headObjectVersionCtx(ctx, bucket, key, versionID)
 }
 
 // headObjectVersionCtx is the ctx-threaded HeadObjectVersion used by callers
@@ -152,10 +152,10 @@ func (b *DistributedBackend) headObjectMetaV(ctx context.Context, bucket, key, v
 // storage.ErrObjectNotFound if the version doesn't exist. For delete markers,
 // returns ErrMethodNotAllowed to mirror the erasure backend's behavior.
 //
-// Satisfies storage.VersionedGetter (no ctx). See HeadObjectVersion — the
-// stamp-carrying read path uses getObjectVersionCtx.
-func (b *DistributedBackend) GetObjectVersion(bucket, key, versionID string) (io.ReadCloser, *storage.Object, error) {
-	return b.getObjectVersionCtx(context.Background(), bucket, key, versionID)
+// Satisfies storage.VersionedGetter. See HeadObjectVersion — ctx carries the
+// authoritative bucket-versioning stamp set at the server edge.
+func (b *DistributedBackend) GetObjectVersion(ctx context.Context, bucket, key, versionID string) (io.ReadCloser, *storage.Object, error) {
+	return b.getObjectVersionCtx(ctx, bucket, key, versionID)
 }
 
 // getObjectVersionCtx is the ctx-threaded GetObjectVersion used by callers that
