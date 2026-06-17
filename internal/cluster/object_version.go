@@ -30,14 +30,17 @@ func (b *DistributedBackend) headObjectMetaV(bucket, key, versionID string) (*st
 		return nil, PlacementMeta{}, err
 	}
 	// S2a: per-version-authoritative specific-version read. On a versioning-enabled
-	// bucket, the per-version store is authoritative for a KEY that has any
-	// per-version blob (spec predicate boundary: legacy fallback iff the KEY has
-	// ZERO per-version blobs). So a hit returns/folds; a miss on a key that DOES
-	// have other version blobs is a genuine 404 — NOT a legacy fallback, which
-	// would resurrect a hard-deleted version from the stale latest-only blob
-	// (the latest-only blob is not maintained on hard-delete-of-latest).
-	if !storage.IsInternalBucket(bucket) && b.bucketVersioningEnabled(ctx, bucket) {
-		if cmds, verr := b.readQuorumMetaVersions(bucket, key); verr == nil && len(cmds) > 0 {
+	// bucket the per-version store is the primary source: a hit returns/folds.
+	// On a MISS we fall through to the BadgerDB ObjectMetaKeyV FSM read ONLY,
+	// SKIPPING the stale latest-only readQuorumMeta block below — that step would
+	// resurrect a hard-deleted version from the latest-only blob (not maintained
+	// on hard-delete-of-latest). The FSM read is safe: applyDeleteObjectVersion
+	// deletes the ObjectMetaKeyV record, so a hard-deleted version still 404s,
+	// while a mixed-era pre-S1 version (FSM record only, no per-version blob —
+	// S1's blob write is versioning+post-S1 gated) correctly resolves.
+	versioningEnabled := !storage.IsInternalBucket(bucket) && b.bucketVersioningEnabled(ctx, bucket)
+	if versioningEnabled {
+		if cmds, verr := b.readQuorumMetaVersions(bucket, key); verr == nil {
 			for _, cmd := range cmds {
 				if cmd.VersionID != versionID {
 					continue
@@ -48,13 +51,14 @@ func (b *DistributedBackend) headObjectMetaV(bucket, key, versionID string) (*st
 				obj, pm := objectAndPlacementFromCmd(cmd)
 				return obj, pm, nil
 			}
-			// key has per-version blobs but not this version → genuine not-found.
-			return nil, PlacementMeta{}, storage.ErrObjectNotFound
 		}
-		// zero per-version blobs for the key → legacy fallback below
+		// per-version MISS → fall through to the FSM ObjectMetaKeyV read below,
+		// skipping the latest-only readQuorumMeta block.
 	}
 	// Phase 3: quorum meta is the primary source for non-internal user objects.
-	if !storage.IsInternalBucket(bucket) {
+	// Skipped for versioning-enabled buckets (handled above) so a per-version
+	// miss never resurrects a stale latest-only blob.
+	if !storage.IsInternalBucket(bucket) && !versioningEnabled {
 		if obj, pm, err := b.readQuorumMeta(bucket, key); err == nil && obj.VersionID == versionID {
 			// Fold delete markers to 405, mirroring the BadgerDB fallback below
 			// (deleteMarkerETag → ErrMethodNotAllowed) and this method's contract.
@@ -193,7 +197,11 @@ func (b *DistributedBackend) DeleteObjectVersion(bucket, key, versionID string) 
 	// version's placement nodes come from its own blob; absent (legacy) → skip.
 	// Fail-closed: a lingering blob on a missed node would resurface the version.
 	if b.shardSvc != nil {
-		if cmd, ok, _ := b.readQuorumMetaVersion(bucket, key, versionID); ok {
+		cmd, ok, rerr := b.readQuorumMetaVersion(bucket, key, versionID)
+		if rerr != nil {
+			return fmt.Errorf("resolve per-version blob for delete %s/%s@%s: %w", bucket, key, versionID, rerr)
+		}
+		if ok {
 			if derr := b.deleteQuorumMetaVersionQuorum(ctx, bucket, key, versionID, cmd.NodeIDs); derr != nil {
 				return fmt.Errorf("delete per-version blob %s/%s@%s: %w", bucket, key, versionID, derr)
 			}

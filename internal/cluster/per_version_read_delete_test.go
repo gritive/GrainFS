@@ -293,6 +293,38 @@ func TestDeleteObjectVersion_DualDeletesPerVersionBlob(t *testing.T) {
 	require.ErrorIs(t, gerr, storage.ErrObjectNotFound)
 }
 
+// TestGetObjectVersion_MixedEraPreS1FSMOnly proves a versioning-enabled key that
+// straddles the S1 boundary still resolves a pre-S1 version that exists ONLY as a
+// BadgerDB ObjectMetaKeyV FSM record (no per-version blob, because S1's blob write
+// is versioning+post-S1 gated). The key ALSO has a post-S1 version WITH a
+// per-version blob, so the buggy predicate (per-version MISS on a key with other
+// blobs → 404) would 404 the pre-S1 version. RED: GET/HEAD of the pre-S1 version
+// returns ErrObjectNotFound; GREEN after the FSM-only fallback fix.
+func TestGetObjectVersion_MixedEraPreS1FSMOnly(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	const bkt, key = "vbkt", "obj"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+
+	// Pre-S1 version: FSM ObjectMetaKeyV record ONLY, no per-version blob.
+	// PreserveLatest avoids touching the latest pointer so the post-S1 PUT wins it.
+	const preS1Vid = "019ed400-0000-7000-8000-000000000001"
+	require.NoError(t, b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket: bkt, Key: key, VersionID: preS1Vid, ETag: "etag-preS1",
+		Size: 11, ContentType: "text/plain", PreserveLatest: true,
+	}))
+
+	// Post-S1 version: normal versioned PUT → writes a per-version blob.
+	_ = putVersioned(t, b, ctx, bkt, key, "content-postS1")
+
+	// The pre-S1 version (FSM-only, no blob) must still resolve, not 404.
+	hv, err := b.HeadObjectVersion(bkt, key, preS1Vid)
+	require.NoError(t, err, "pre-S1 FSM-only version must resolve (RED: 404 from per-version-miss predicate)")
+	require.Equal(t, preS1Vid, hv.VersionID)
+	require.Equal(t, "etag-preS1", hv.ETag)
+}
+
 // TestS2a_EpicA_ReadDeleteEndToEnd is the Epic A core: versioned PUT v1+v2,
 // HEAD=v2; DELETE v2 → HEAD=v1, GET ?versionId=v2 → 404, GET(latest)=v1 body;
 // then DELETE v1 → HEAD=404.
