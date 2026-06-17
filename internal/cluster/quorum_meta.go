@@ -22,6 +22,8 @@ import (
 // write rides the same I/O path (same spindle/NVMe).
 const quorumMetaSubDir = ".quorum_meta"
 
+const quorumMetaVersionsSubDir = ".quorum_meta_versions"
+
 // quorumMetaWriteTimeout bounds the synchronous quorum meta write. A node that
 // does not ack within this window is treated as failed; the write succeeds as
 // long as a quorum (K data shards) of nodes acked.
@@ -360,6 +362,49 @@ func (s *ShardService) writeQuorumMetaLocal(bucket, key string, data []byte) err
 	}
 	if err := os.Rename(tmpName, target); err != nil {
 		return fmt.Errorf("quorum meta rename: %w", err)
+	}
+	return nil
+}
+
+// writeQuorumMetaVersionLocal durably writes an immutable per-version quorum-meta
+// blob under {dataDirs[0]}/.quorum_meta_versions/{bucket}/{versionSubpath}, where
+// versionSubpath is path.Join(key, versionID). It mirrors writeQuorumMetaLocal
+// (path-traversal guard + atomic temp+fsync+rename) but uses the separate
+// per-version subtree, so {key} is always a directory (holding {vid} files) and
+// never collides with the latest-only leaf file in .quorum_meta.
+func (s *ShardService) writeQuorumMetaVersionLocal(bucket, versionSubpath string, data []byte) error {
+	if len(s.dataDirs) == 0 {
+		return fmt.Errorf("quorum meta version: no data dir")
+	}
+	root := filepath.Join(s.dataDirs[0], quorumMetaVersionsSubDir)
+	target := filepath.Join(root, bucket, versionSubpath)
+	rel, err := filepath.Rel(root, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("quorum meta version: path %q escapes root", versionSubpath)
+	}
+	dir := filepath.Dir(target)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("quorum meta version mkdir: %w", err)
+	}
+	tmp, err := os.CreateTemp(dir, ".qmeta-*.tmp")
+	if err != nil {
+		return fmt.Errorf("quorum meta version tmp create: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("quorum meta version write: %w", err)
+	}
+	if err := directio.Sync(tmp); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("quorum meta version fsync: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("quorum meta version tmp close: %w", err)
+	}
+	if err := os.Rename(tmpName, target); err != nil {
+		return fmt.Errorf("quorum meta version rename: %w", err)
 	}
 	return nil
 }
