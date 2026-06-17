@@ -65,4 +65,16 @@ func TestForwardReceiver_ReStampsVersioningState(t *testing.T) {
 	// ENABLED: receiver re-stamps → per-version derive → rolled-back latest v1.
 	require.Equal(t, vid1, headVia(versioningStateEnabled),
 		"the ENABLED stamp must cross the wire and activate the per-version derive → v1")
+
+	// A forwarded GET ?versionId=<deleted v2> must 404 (its per-version blob was
+	// purged by DeleteObjectVersion). The ENABLED stamp crosses the wire so the
+	// receiver skips the stale latest-only resurrection path.
+	gvPayload := encodeForwardPayload("g1", raftpb.ForwardOpGetObjectVersion,
+		buildGetObjectVersionArgs(bkt, key, vid2, versioningStateEnabled))
+	gvReply, err := rcv.Handle(gvPayload)
+	require.NoError(t, err)
+	require.NotNil(t, gvReply)
+	require.Equal(t, raftpb.ForwardStatusNoSuchKey,
+		raftpb.GetRootAsForwardReply(gvReply, 0).Status(),
+		"forwarded GET of the hard-deleted version must 404")
 }
