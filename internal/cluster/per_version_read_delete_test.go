@@ -260,3 +260,47 @@ func TestHeadObject_LegacyFallbackNoPerVersionBlob(t *testing.T) {
 	rc.Close()
 	require.Equal(t, []byte(body), got)
 }
+
+// TestDeleteObjectVersion_DualDeletesPerVersionBlob proves DeleteObjectVersion
+// also removes the per-version blob: after deleting v2, HeadObject re-derives v1,
+// the v2 per-version blob is gone, and GetObjectVersion(v2) → 404.
+func TestDeleteObjectVersion_DualDeletesPerVersionBlob(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	const bkt, key = "vbkt", "obj"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+
+	vid1 := putVersioned(t, b, ctx, bkt, key, "content-v1")
+	vid2 := putVersioned(t, b, ctx, bkt, key, "content-v2")
+
+	require.NoError(t, b.DeleteObjectVersion(bkt, key, vid2))
+
+	// HeadObject re-derives latest = v1 (v2's per-version blob gone).
+	head, err := b.HeadObject(ctx, bkt, key)
+	require.NoError(t, err)
+	require.Equal(t, vid1, head.VersionID, "after hard-deleting v2, HEAD must re-derive v1")
+
+	// The v2 per-version blob is no longer enumerated.
+	cmds, err := b.readQuorumMetaVersions(bkt, key)
+	require.NoError(t, err)
+	for _, c := range cmds {
+		require.NotEqual(t, vid2, c.VersionID, "v2 per-version blob must be deleted")
+	}
+
+	// GetObjectVersion(v2) → 404.
+	_, _, gerr := b.GetObjectVersion(bkt, key, vid2)
+	require.ErrorIs(t, gerr, storage.ErrObjectNotFound)
+}
+
+// TestDeleteQuorumMetaVersionQuorum_FailClosed proves the fan-out is fail-closed:
+// a placement node whose delete fails (unreachable transport) surfaces an error,
+// unlike the swallow-all deleteQuorumMetaQuorum.
+func TestDeleteQuorumMetaVersionQuorum_FailClosed(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	// "deadnode" is non-self; the single-node shardSvc has a nil transport, so the
+	// DeleteQuorumMetaVersion RPC to it fails → the fan-out must return that error.
+	err := b.deleteQuorumMetaVersionQuorum(ctx, "bkt", "k", "v1", []string{"deadnode"})
+	require.Error(t, err, "fail-closed: an unreachable placement node must surface an error")
+}

@@ -30,17 +30,28 @@ func (b *DistributedBackend) headObjectMetaV(bucket, key, versionID string) (*st
 		return nil, PlacementMeta{}, err
 	}
 	// S2a: per-version-authoritative specific-version read. On a versioning-enabled
-	// bucket, read the version's own per-version blob directly (all-groups fan-out).
-	// Miss → legacy fallback below.
+	// bucket, the per-version store is authoritative for a KEY that has any
+	// per-version blob (spec predicate boundary: legacy fallback iff the KEY has
+	// ZERO per-version blobs). So a hit returns/folds; a miss on a key that DOES
+	// have other version blobs is a genuine 404 — NOT a legacy fallback, which
+	// would resurrect a hard-deleted version from the stale latest-only blob
+	// (the latest-only blob is not maintained on hard-delete-of-latest).
 	if !storage.IsInternalBucket(bucket) && b.bucketVersioningEnabled(ctx, bucket) {
-		if cmd, ok, verr := b.readQuorumMetaVersion(bucket, key, versionID); verr == nil && ok {
-			if cmd.IsDeleteMarker {
-				return nil, PlacementMeta{}, storage.ErrMethodNotAllowed
+		if cmds, verr := b.readQuorumMetaVersions(bucket, key); verr == nil && len(cmds) > 0 {
+			for _, cmd := range cmds {
+				if cmd.VersionID != versionID {
+					continue
+				}
+				if cmd.IsDeleteMarker {
+					return nil, PlacementMeta{}, storage.ErrMethodNotAllowed
+				}
+				obj, pm := objectAndPlacementFromCmd(cmd)
+				return obj, pm, nil
 			}
-			obj, pm := objectAndPlacementFromCmd(cmd)
-			return obj, pm, nil
+			// key has per-version blobs but not this version → genuine not-found.
+			return nil, PlacementMeta{}, storage.ErrObjectNotFound
 		}
-		// not found in per-version store → legacy fallback below
+		// zero per-version blobs for the key → legacy fallback below
 	}
 	// Phase 3: quorum meta is the primary source for non-internal user objects.
 	if !storage.IsInternalBucket(bucket) {
@@ -169,11 +180,26 @@ func (b *DistributedBackend) DeleteObjectVersion(bucket, key, versionID string) 
 	}
 	// Local data cleanup: best-effort (ENOENT is fine — FSM apply is the source of truth).
 	_ = os.Remove(b.objectPathV(bucket, key, versionID))
-	return b.propose(ctx, CmdDeleteObjectVersion, DeleteObjectVersionCmd{
+	if err := b.propose(ctx, CmdDeleteObjectVersion, DeleteObjectVersionCmd{
 		Bucket:    bucket,
 		Key:       key,
 		VersionID: versionID,
-	})
+	}); err != nil {
+		return err
+	}
+	// S2a dual-delete: also purge the per-version blob so derive-by-scan stops
+	// reading the hard-deleted version. Gated on blob-presence (NOT versioning):
+	// a suspended/re-enabled bucket's enabled-era blobs must still be purged. The
+	// version's placement nodes come from its own blob; absent (legacy) → skip.
+	// Fail-closed: a lingering blob on a missed node would resurface the version.
+	if b.shardSvc != nil {
+		if cmd, ok, _ := b.readQuorumMetaVersion(bucket, key, versionID); ok {
+			if derr := b.deleteQuorumMetaVersionQuorum(ctx, bucket, key, versionID, cmd.NodeIDs); derr != nil {
+				return fmt.Errorf("delete per-version blob %s/%s@%s: %w", bucket, key, versionID, derr)
+			}
+		}
+	}
+	return nil
 }
 
 // ListObjectVersions returns every version (including delete markers) under

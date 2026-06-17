@@ -766,6 +766,77 @@ func (s *ShardService) deleteQuorumMetaLocal(bucket, key string) error {
 	return nil
 }
 
+// deleteQuorumMetaVersionLocal removes the local per-version blob for
+// (bucket, key, versionID) under .quorum_meta_versions/{bucket}/{key}/{vid}.
+// Absent file is not an error (idempotent). Mirrors deleteQuorumMetaLocal.
+func (s *ShardService) deleteQuorumMetaVersionLocal(bucket, key, versionID string) error {
+	if len(s.dataDirs) == 0 {
+		return nil
+	}
+	root := filepath.Join(s.dataDirs[0], quorumMetaVersionsSubDir)
+	target := filepath.Join(root, bucket, key, versionID)
+	rel, err := filepath.Rel(root, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("quorum meta version delete: path %q/%q escapes root", key, versionID)
+	}
+	err = os.Remove(target)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("quorum meta version delete: %w", err)
+	}
+	return nil
+}
+
+// DeleteQuorumMetaVersion removes a per-version blob on a remote placement node.
+// Mirrors DeleteQuorumMeta; the receiver runs deleteQuorumMetaVersionLocal.
+// versionSubpath rides the envelope key field as path.Join(key, versionID).
+func (s *ShardService) DeleteQuorumMetaVersion(ctx context.Context, addr, bucket, key, versionID string) error {
+	if s.transport == nil {
+		return fmt.Errorf("quorum meta version: no transport")
+	}
+	envb := buildShardEnvelope("DeleteQuorumMetaVersion", bucket, path.Join(key, versionID), 0, nil)
+	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
+	respEnvelope, err := s.callShardRPC(ctx, addr, envb)
+	if err != nil {
+		return fmt.Errorf("delete quorum meta version on %s: %w", addr, err)
+	}
+	rpcType, _, err := unmarshalEnvelope(respEnvelope)
+	if err != nil {
+		return fmt.Errorf("unmarshal quorum meta version delete response: %w", err)
+	}
+	if rpcType == "Error" {
+		return fmt.Errorf("remote quorum meta version delete error from %s", addr)
+	}
+	return nil
+}
+
+// deleteQuorumMetaVersionQuorum deletes a version's blob on every placement node.
+// FAIL-CLOSED (unlike deleteQuorumMetaQuorum): returns the first error so a
+// lingering blob on a missed node cannot resurface the deleted version via
+// derive-by-scan.
+func (b *DistributedBackend) deleteQuorumMetaVersionQuorum(ctx context.Context, bucket, key, versionID string, nodeIDs []string) error {
+	if b.shardSvc == nil {
+		return nil
+	}
+	self := b.currentSelfAddr()
+	dctx, cancel := context.WithTimeout(ctx, quorumMetaWriteTimeout)
+	defer cancel()
+	var firstErr error
+	for _, node := range nodeIDs {
+		var err error
+		if node == self {
+			err = b.shardSvc.deleteQuorumMetaVersionLocal(bucket, key, versionID)
+		} else if addr, rerr := b.shardSvc.resolvePeerAddress(node); rerr == nil {
+			err = b.shardSvc.DeleteQuorumMetaVersion(dctx, addr, bucket, key, versionID)
+		} else {
+			err = rerr
+		}
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
 // decodeQuorumMetaCmdBlob decodes a raw quorum meta blob to a PutObjectMetaCmd.
 func (s *ShardService) decodeQuorumMetaCmdBlob(data []byte) (PutObjectMetaCmd, error) {
 	cmd, err := DecodeCommand(data)

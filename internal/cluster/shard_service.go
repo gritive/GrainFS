@@ -601,6 +601,8 @@ func (s *ShardService) handleRPC(payload []byte) []byte {
 		return s.handleScanQuorumMeta(sr)
 	case "ReadQuorumMetaVersions":
 		return s.handleQuorumMetaVersionsRead(sr)
+	case "DeleteQuorumMetaVersion":
+		return s.handleQuorumMetaVersionDelete(sr)
 	default:
 		return s.errorResponse("unknown shard RPC: " + rpcType)
 	}
@@ -680,6 +682,30 @@ func (s *ShardService) handleQuorumMetaVersionsRead(sr *shardRequest) []byte {
 		}
 	}
 	return s.okResponse(packBlobList(blobs))
+}
+
+// handleQuorumMetaVersionDelete serves a DeleteQuorumMetaVersion RPC: removes the
+// local per-version blob. sr.Key carries path.Join(key, versionID); the trailing
+// segment is the versionID. Absent file is not an error (idempotent).
+func (s *ShardService) handleQuorumMetaVersionDelete(sr *shardRequest) []byte {
+	key, versionID := splitVersionSubpath(sr.Key)
+	if versionID == "" {
+		return s.errorResponse("quorum meta version delete: missing version id")
+	}
+	if err := s.deleteQuorumMetaVersionLocal(sr.Bucket, key, versionID); err != nil {
+		return s.errorResponse(err.Error())
+	}
+	return s.okResponse(nil)
+}
+
+// splitVersionSubpath splits a path.Join(key, versionID) value into (key, vid)
+// at the final slash. A value with no slash returns ("", value) (no key).
+func splitVersionSubpath(subpath string) (string, string) {
+	i := strings.LastIndex(subpath, "/")
+	if i < 0 {
+		return "", subpath
+	}
+	return subpath[:i], subpath[i+1:]
 }
 
 // marshalResponseDirect serializes an RPCMessage without pool-and-copy.
