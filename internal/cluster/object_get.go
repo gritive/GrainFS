@@ -203,6 +203,21 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 		return nil, PlacementMeta{}, err
 	}
 
+	// S2a: per-version-authoritative latest derive. On a versioning-enabled
+	// bucket, derive latest by scanning the per-version blobs (all-groups
+	// fan-out, spanning generations). Zero blobs → legacy fallback below.
+	if !storage.IsInternalBucket(bucket) && b.bucketVersioningEnabled(ctx, bucket) {
+		if cmds, verr := b.readQuorumMetaVersions(bucket, key); verr == nil && len(cmds) > 0 {
+			latest, live := deriveLatestVersion(cmds)
+			if !live {
+				return nil, PlacementMeta{}, storage.ErrObjectNotFound
+			}
+			obj, pm := objectAndPlacementFromCmd(latest)
+			return obj, pm, nil
+		}
+		// zero per-version blobs → legacy fallback (existing readQuorumMeta + BadgerDB below)
+	}
+
 	// Phase 3: non-internal user objects are stored in the quorum meta store.
 	// Internal buckets (bucket routing via raft) still use BadgerDB.
 	if !storage.IsInternalBucket(bucket) {

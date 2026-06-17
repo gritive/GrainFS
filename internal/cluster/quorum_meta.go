@@ -440,6 +440,164 @@ func (s *ShardService) writeQuorumMetaVersionLocal(bucket, versionSubpath string
 	return nil
 }
 
+// readQuorumMetaVersionsLocal returns the decoded per-version blobs for one key
+// from .quorum_meta_versions/{bucket}/{key}/{vid}. Absent dir → empty, no error.
+func (s *ShardService) readQuorumMetaVersionsLocal(bucket, key string) ([]PutObjectMetaCmd, error) {
+	if len(s.dataDirs) == 0 {
+		return nil, nil
+	}
+	root := filepath.Join(s.dataDirs[0], quorumMetaVersionsSubDir)
+	dir := filepath.Join(root, bucket, key)
+	if rel, err := filepath.Rel(root, dir); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return nil, fmt.Errorf("quorum meta versions: key %q escapes root", key)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	out := make([]PutObjectMetaCmd, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() || isQuorumMetaTempName(e.Name()) {
+			continue
+		}
+		data, rerr := os.ReadFile(filepath.Join(dir, e.Name()))
+		if rerr != nil {
+			continue // tolerate a transient unreadable blob
+		}
+		cmd, derr := s.decodeQuorumMetaCmdBlob(data)
+		if derr != nil {
+			continue
+		}
+		out = append(out, cmd)
+	}
+	return out, nil
+}
+
+// ReadQuorumMetaVersions fans the per-key version list to a remote placement node.
+func (s *ShardService) ReadQuorumMetaVersions(ctx context.Context, addr, bucket, key string) ([]PutObjectMetaCmd, error) {
+	if s.transport == nil {
+		return nil, fmt.Errorf("quorum meta versions: no transport")
+	}
+	envb := buildShardEnvelope("ReadQuorumMetaVersions", bucket, key, 0, nil)
+	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
+	respEnvelope, err := s.callShardRPC(ctx, addr, envb)
+	if err != nil {
+		return nil, fmt.Errorf("read quorum meta versions from %s: %w", addr, err)
+	}
+	rpcType, data, err := unmarshalEnvelope(respEnvelope)
+	if err != nil {
+		return nil, err
+	}
+	if rpcType == "Error" {
+		return nil, fmt.Errorf("remote quorum meta versions error from %s", addr)
+	}
+	if len(data) == 0 {
+		return nil, nil // empty payload = key has no per-version blobs on this node
+	}
+	blobs, uerr := unpackBlobList(data) // NOTE: two-return (quorum_meta.go ~886)
+	if uerr != nil {
+		return nil, uerr
+	}
+	out := make([]PutObjectMetaCmd, 0, len(blobs))
+	for _, blob := range blobs {
+		if cmd, derr := s.decodeQuorumMetaCmdBlob(blob); derr == nil {
+			out = append(out, cmd)
+		}
+	}
+	return out, nil
+}
+
+// readQuorumMetaVersions unions a key's per-version blobs across ALL placement
+// groups (every generation) by fanning ReadQuorumMetaVersions to ShardGroups()
+// peers + self, deduped by VersionID. Unconditional all-groups fan-out (mirrors
+// fetchQuorumMetaFromPeers) — NOT the multiGeneration-gated fast path.
+func (b *DistributedBackend) readQuorumMetaVersions(bucket, key string) ([]PutObjectMetaCmd, error) {
+	if b.shardSvc == nil {
+		return nil, nil
+	}
+	byVID := map[string]PutObjectMetaCmd{}
+	// keep the higher-MetaSeq blob for a same-VID replica (mirrors quorumMetaBlobWins's
+	// MetaSeq tiebreak so a relocation re-write wins deterministically).
+	put := func(c PutObjectMetaCmd) {
+		if ex, ok := byVID[c.VersionID]; !ok || c.MetaSeq >= ex.MetaSeq {
+			byVID[c.VersionID] = c
+		}
+	}
+	// self
+	if local, err := b.shardSvc.readQuorumMetaVersionsLocal(bucket, key); err == nil {
+		for _, c := range local {
+			put(c)
+		}
+	}
+	self := b.currentSelfAddr()
+	seen := map[string]bool{self: true}
+	ctx, cancel := context.WithTimeout(context.Background(), quorumMetaReadTimeout)
+	defer cancel()
+	if b.shardGroup != nil {
+		for _, g := range b.shardGroup.ShardGroups() {
+			for _, p := range g.PeerIDs {
+				if seen[p] {
+					continue
+				}
+				seen[p] = true
+				addr, aerr := b.shardSvc.resolvePeerAddress(p)
+				if aerr != nil {
+					continue
+				}
+				remote, rerr := b.shardSvc.ReadQuorumMetaVersions(ctx, addr, bucket, key)
+				if rerr != nil {
+					continue // partial tolerated (see spec predicate boundary)
+				}
+				for _, c := range remote {
+					put(c)
+				}
+			}
+		}
+	}
+	out := make([]PutObjectMetaCmd, 0, len(byVID))
+	for _, c := range byVID {
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+// readQuorumMetaVersion returns the single per-version blob for (bucket, key,
+// versionID), found via the all-groups fan-out (NOT local-only) so a reachable
+// replica is located even when the local node isn't a placement node. Returns
+// (cmd, true, nil) on a hit, (zero, false, nil) on a miss.
+func (b *DistributedBackend) readQuorumMetaVersion(bucket, key, versionID string) (PutObjectMetaCmd, bool, error) {
+	cmds, err := b.readQuorumMetaVersions(bucket, key)
+	if err != nil {
+		return PutObjectMetaCmd{}, false, err
+	}
+	for _, c := range cmds {
+		if c.VersionID == versionID {
+			return c, true, nil
+		}
+	}
+	return PutObjectMetaCmd{}, false, nil
+}
+
+// deriveLatestVersion returns the max-VersionID blob and whether the object's
+// latest state is live (false = no versions OR latest is a delete marker).
+func deriveLatestVersion(cmds []PutObjectMetaCmd) (PutObjectMetaCmd, bool) {
+	var latest PutObjectMetaCmd
+	found := false
+	for _, c := range cmds {
+		if !found || c.VersionID > latest.VersionID {
+			latest = c
+			found = true
+		}
+	}
+	if !found || latest.IsDeleteMarker {
+		return PutObjectMetaCmd{}, false
+	}
+	return latest, true
+}
+
 // isQuorumMetaTempName reports whether a directory entry is an in-flight
 // atomic-publish temp file (os.CreateTemp(dir, ".qmeta-*.tmp") above). Store
 // walkers MUST skip these: the temp lives in the same directory as its rename
@@ -488,6 +646,15 @@ func (s *ShardService) decodeQuorumMetaBlob(data []byte) (*storage.Object, Place
 	if err != nil {
 		return nil, PlacementMeta{}, fmt.Errorf("quorum meta decode put cmd: %w", err)
 	}
+	obj, placement := objectAndPlacementFromCmd(putCmd)
+	return obj, placement, nil
+}
+
+// objectAndPlacementFromCmd builds a storage.Object and PlacementMeta from a
+// decoded PutObjectMetaCmd. Factored out of decodeQuorumMetaBlob so the
+// per-version read hooks (headObjectMeta/headObjectMetaV) build identical
+// objects/placement (layout dispatch + EC reads behave the same).
+func objectAndPlacementFromCmd(putCmd PutObjectMetaCmd) (*storage.Object, PlacementMeta) {
 	m := buildPutObjectMeta(putCmd)
 	obj := &storage.Object{
 		Key:              m.Key,
@@ -522,7 +689,7 @@ func (s *ShardService) decodeQuorumMetaBlob(data []byte) (*storage.Object, Place
 		NodeIDs:          cloneStringSlice(m.NodeIDs),
 		PlacementGroupID: m.PlacementGroupID,
 	}
-	return obj, placement, nil
+	return obj, placement
 }
 
 // readQuorumMetaLocalDecoded reads and decodes the quorum meta blob for
@@ -597,6 +764,77 @@ func (s *ShardService) deleteQuorumMetaLocal(bucket, key string) error {
 		return fmt.Errorf("quorum meta delete: %w", err)
 	}
 	return nil
+}
+
+// deleteQuorumMetaVersionLocal removes the local per-version blob for
+// (bucket, key, versionID) under .quorum_meta_versions/{bucket}/{key}/{vid}.
+// Absent file is not an error (idempotent). Mirrors deleteQuorumMetaLocal.
+func (s *ShardService) deleteQuorumMetaVersionLocal(bucket, key, versionID string) error {
+	if len(s.dataDirs) == 0 {
+		return nil
+	}
+	root := filepath.Join(s.dataDirs[0], quorumMetaVersionsSubDir)
+	target := filepath.Join(root, bucket, key, versionID)
+	rel, err := filepath.Rel(root, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("quorum meta version delete: path %q/%q escapes root", key, versionID)
+	}
+	err = os.Remove(target)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("quorum meta version delete: %w", err)
+	}
+	return nil
+}
+
+// DeleteQuorumMetaVersion removes a per-version blob on a remote placement node.
+// Mirrors DeleteQuorumMeta; the receiver runs deleteQuorumMetaVersionLocal.
+// versionSubpath rides the envelope key field as path.Join(key, versionID).
+func (s *ShardService) DeleteQuorumMetaVersion(ctx context.Context, addr, bucket, key, versionID string) error {
+	if s.transport == nil {
+		return fmt.Errorf("quorum meta version: no transport")
+	}
+	envb := buildShardEnvelope("DeleteQuorumMetaVersion", bucket, path.Join(key, versionID), 0, nil)
+	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
+	respEnvelope, err := s.callShardRPC(ctx, addr, envb)
+	if err != nil {
+		return fmt.Errorf("delete quorum meta version on %s: %w", addr, err)
+	}
+	rpcType, _, err := unmarshalEnvelope(respEnvelope)
+	if err != nil {
+		return fmt.Errorf("unmarshal quorum meta version delete response: %w", err)
+	}
+	if rpcType == "Error" {
+		return fmt.Errorf("remote quorum meta version delete error from %s", addr)
+	}
+	return nil
+}
+
+// deleteQuorumMetaVersionQuorum deletes a version's blob on every placement node.
+// FAIL-CLOSED (unlike deleteQuorumMetaQuorum): returns the first error so a
+// lingering blob on a missed node cannot resurface the deleted version via
+// derive-by-scan.
+func (b *DistributedBackend) deleteQuorumMetaVersionQuorum(ctx context.Context, bucket, key, versionID string, nodeIDs []string) error {
+	if b.shardSvc == nil {
+		return nil
+	}
+	self := b.currentSelfAddr()
+	dctx, cancel := context.WithTimeout(ctx, quorumMetaWriteTimeout)
+	defer cancel()
+	var firstErr error
+	for _, node := range nodeIDs {
+		var err error
+		if node == self {
+			err = b.shardSvc.deleteQuorumMetaVersionLocal(bucket, key, versionID)
+		} else if addr, rerr := b.shardSvc.resolvePeerAddress(node); rerr == nil {
+			err = b.shardSvc.DeleteQuorumMetaVersion(dctx, addr, bucket, key, versionID)
+		} else {
+			err = rerr
+		}
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 // decodeQuorumMetaCmdBlob decodes a raw quorum meta blob to a PutObjectMetaCmd.
