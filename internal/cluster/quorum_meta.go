@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -21,6 +22,8 @@ import (
 // metadata is durably stored. Sibling to shard files on the same device so the
 // write rides the same I/O path (same spindle/NVMe).
 const quorumMetaSubDir = ".quorum_meta"
+
+const quorumMetaVersionsSubDir = ".quorum_meta_versions"
 
 // quorumMetaWriteTimeout bounds the synchronous quorum meta write. A node that
 // does not ack within this window is treated as failed; the write succeeds as
@@ -78,7 +81,7 @@ func (b *DistributedBackend) writeQuorumMeta(ctx context.Context, cmd PutObjectM
 	}
 	wctx, cancel := context.WithTimeout(ctx, quorumMetaWriteTimeout)
 	defer cancel()
-	return fanOutQuorumMeta(wctx, cmd.NodeIDs, k, func(fctx context.Context, node string) error {
+	latestErr := fanOutQuorumMeta(wctx, cmd.NodeIDs, k, func(fctx context.Context, node string) error {
 		if node == self {
 			return b.shardSvc.writeQuorumMetaLocal(cmd.Bucket, cmd.Key, blob)
 		}
@@ -88,6 +91,36 @@ func (b *DistributedBackend) writeQuorumMeta(ctx context.Context, cmd PutObjectM
 		}
 		return b.shardSvc.WriteQuorumMeta(fctx, addr, cmd.Bucket, cmd.Key, blob)
 	})
+	if latestErr != nil {
+		return latestErr
+	}
+	// S1: also write an immutable per-version blob to the separate
+	// .quorum_meta_versions subtree, best-effort — a failure here must NOT fail the
+	// PUT (the latest-only write already succeeded; reads ignore this subtree until
+	// S2, and S3 backfills any gaps). Same placement nodes, same K-of-N. Gated on
+	// versioning-enabled, mirroring the FSM per-version propose at :60: non-versioned
+	// buckets retain no version history (and are already quorum-meta-only / off-raft
+	// via the latest-only blob), so a per-version blob there would be pure garbage.
+	if cmd.VersionID != "" && b.bucketVersioningEnabled(ctx, cmd.Bucket) {
+		verSubpath := path.Join(cmd.Key, cmd.VersionID)
+		vctx, vcancel := context.WithTimeout(ctx, quorumMetaWriteTimeout)
+		defer vcancel()
+		if verr := fanOutQuorumMeta(vctx, cmd.NodeIDs, k, func(fctx context.Context, node string) error {
+			if node == self {
+				return b.shardSvc.writeQuorumMetaVersionLocal(cmd.Bucket, verSubpath, blob)
+			}
+			addr, rerr := b.shardSvc.resolvePeerAddress(node)
+			if rerr != nil {
+				return rerr
+			}
+			return b.shardSvc.WriteQuorumMetaVersion(fctx, addr, cmd.Bucket, verSubpath, blob)
+		}); verr != nil {
+			b.logger.Warn().
+				Str("bucket", cmd.Bucket).Str("key", cmd.Key).Str("version", cmd.VersionID).
+				Err(verr).Msg("per-version quorum-meta write failed (best-effort)")
+		}
+	}
+	return nil
 }
 
 // readQuorumMeta reads object metadata from the local quorum store, falling
@@ -364,6 +397,49 @@ func (s *ShardService) writeQuorumMetaLocal(bucket, key string, data []byte) err
 	return nil
 }
 
+// writeQuorumMetaVersionLocal durably writes an immutable per-version quorum-meta
+// blob under {dataDirs[0]}/.quorum_meta_versions/{bucket}/{versionSubpath}, where
+// versionSubpath is path.Join(key, versionID). It mirrors writeQuorumMetaLocal
+// (path-traversal guard + atomic temp+fsync+rename) but uses the separate
+// per-version subtree, so {key} is always a directory (holding {vid} files) and
+// never collides with the latest-only leaf file in .quorum_meta.
+func (s *ShardService) writeQuorumMetaVersionLocal(bucket, versionSubpath string, data []byte) error {
+	if len(s.dataDirs) == 0 {
+		return fmt.Errorf("quorum meta version: no data dir")
+	}
+	root := filepath.Join(s.dataDirs[0], quorumMetaVersionsSubDir)
+	target := filepath.Join(root, bucket, versionSubpath)
+	rel, err := filepath.Rel(root, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("quorum meta version: path %q escapes root", versionSubpath)
+	}
+	dir := filepath.Dir(target)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("quorum meta version mkdir: %w", err)
+	}
+	tmp, err := os.CreateTemp(dir, ".qmeta-*.tmp")
+	if err != nil {
+		return fmt.Errorf("quorum meta version tmp create: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("quorum meta version write: %w", err)
+	}
+	if err := directio.Sync(tmp); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("quorum meta version fsync: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("quorum meta version tmp close: %w", err)
+	}
+	if err := os.Rename(tmpName, target); err != nil {
+		return fmt.Errorf("quorum meta version rename: %w", err)
+	}
+	return nil
+}
+
 // isQuorumMetaTempName reports whether a directory entry is an in-flight
 // atomic-publish temp file (os.CreateTemp(dir, ".qmeta-*.tmp") above). Store
 // walkers MUST skip these: the temp lives in the same directory as its rename
@@ -601,6 +677,30 @@ func (s *ShardService) WriteQuorumMeta(ctx context.Context, addr, bucket, key st
 	}
 	if rpcType == "Error" {
 		return fmt.Errorf("remote quorum meta error from %s", addr)
+	}
+	return nil
+}
+
+// WriteQuorumMetaVersion sends an immutable per-version quorum-meta blob to a
+// remote placement node. versionSubpath is path.Join(key, versionID); it rides
+// the existing shard envelope's key field (no schema change) and the receiver
+// writes it under the .quorum_meta_versions subtree.
+func (s *ShardService) WriteQuorumMetaVersion(ctx context.Context, addr, bucket, versionSubpath string, data []byte) error {
+	if s.transport == nil {
+		return fmt.Errorf("quorum meta version: no transport")
+	}
+	envb := buildShardEnvelope("WriteQuorumMetaVersion", bucket, versionSubpath, 0, data)
+	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
+	respEnvelope, err := s.callShardRPC(ctx, addr, envb)
+	if err != nil {
+		return fmt.Errorf("write quorum meta version to %s: %w", addr, err)
+	}
+	rpcType, _, err := unmarshalEnvelope(respEnvelope)
+	if err != nil {
+		return fmt.Errorf("unmarshal quorum meta version response: %w", err)
+	}
+	if rpcType == "Error" {
+		return fmt.Errorf("remote quorum meta version error from %s", addr)
 	}
 	return nil
 }

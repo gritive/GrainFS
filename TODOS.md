@@ -2,6 +2,31 @@
 
 ## Follow-ups
 
+- **[EPIC] Per-version quorum-meta foundation — move versioned object metadata off data-raft.**
+  Completes the data-raft bypass for versioning: quorum-meta stores immutable PER-VERSION blobs
+  (`.quorum_meta_versions/{bucket}/{key}/{vid}`, RDH-placed, K-of-N replicated), so version history lives
+  in the no-raft world. **Keystone:** "latest" is derive-by-scan (max live VersionID; generation-walk on
+  grown clusters) — no mutable latest pointer, so the LWW-vs-older-ModTime tension that blocked both
+  deferred epics below simply does not exist. This foundation **subsumes** the two items that follow:
+  versioned hard-delete/LIST consistency becomes S2, and non-latest EC-redundancy durability becomes S5
+  (per-version metadata is now replicable → genesis records survive node loss via re-fan-out, not a
+  flaky cross-group raft migration). Roadmap (each slice = own spec→plan→PR):
+  - **S1 — per-version dual-WRITE — DONE (this PR).** `writeQuorumMeta` also fans out the per-version
+    blob (best-effort, versioning-gated, behavior-neutral; reads/scans/LIST untouched).
+  - **S2 — read/LIST/delete switch to per-version** (derive-by-scan latest + generation-walk; legacy
+    fallback). Solves versioned-delete + LIST consistency for new objects. **Includes per-version blob
+    reclamation on DELETE** (S1 leaves per-version blobs un-GC'd by design — code-gate MINOR).
+  - **S3 — migrate existing data** (legacy latest-only blob + FSM per-version records → per-version blobs).
+  - **S4 — cutover: per-version sole authority; remove FSM object-meta path** (`CmdPutObjectMeta`/`apply*`/
+    `obj:`/`lat:`), repoint scrubber/snapshot. **Appendable/coalesced carve-out:** those objects bypass
+    quorum-meta (append.go:158-166; `PutObjectMetaCmd` lacks `IsAppendable`/`Coalesced`) → stay
+    FSM-authoritative, so the FSM object path is retained ONLY for them (confirm before S4). raft out of
+    PUT/GET for non-appendable objects.
+  - **S5 — Epic B:** genesis per-version meta re-fan-out + data re-encode (reuse EC-redundancy sweep).
+  Spec/keystone detail: docs/superpowers/specs/2026-06-17-per-version-quorum-meta-foundation-design.md
+  (root worktree, git-ignored). Non-versioned buckets are already quorum-meta-only (latest-only blob,
+  no FSM propose) — untouched by this epic.
+
 - **[EPIC] Retroactive EC-redundancy upgrade for NON-LATEST versions (versioning-enabled buckets).**
   The shipped sweep (v0.0.608.0) upgrades non-redundant (1+0) genesis objects but is **latest-version
   only**. Old non-latest 1+0 versions in a versioning-enabled cluster that started single-node stay
