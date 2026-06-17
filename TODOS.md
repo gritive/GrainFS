@@ -39,12 +39,25 @@
   fail-closed), leader-agnostic or convergence-guaranteed migration driving, and a deterministic
   per-version readiness signal.
 
-  **Orthogonal pre-existing bug to fix alongside (Q5).** `DeleteObjectVersion` routes via
+  **Orthogonal pre-existing bug (Q5) — FIXED independently.** `DeleteObjectVersion` routed via
   `RouteObjectRead`/`currentGroupIDs()` = newest-generation ONLY (no generation walk), so a user delete
-  of a *pre-migration* old version misses its resident (older-gen) record and is a no-op today. The
-  migration makes old-version deletes start working (the record moves to the newest-gen group), but a
-  proper fix routes `DeleteObjectVersion` via the generation walk like `probeRead`.
+  of a *pre-migration* old version missed its resident (older-gen) record and was a no-op. Fixed by a
+  deduped generation fan-out (`routeReadGenerations`) in `ClusterCoordinator.DeleteObjectVersion` —
+  `applyDeleteObjectVersion` is idempotent, so non-resident generation groups no-op and the resident
+  older-gen group deletes the record. This is shipped separately from the EPIC; old non-latest version
+  deletes now work without waiting on the migration.
 
   Scope: this is genuinely a multi-group per-version-record consistency subsystem, not a sweep tweak.
   Common deployments (versioning disabled, or form-then-write / `--bootstrap-expect-nodes`) are
   unaffected — this gap is "single-node start + versioning enabled + old non-latest 1+0 versions" only.
+
+- **DeleteObjectVersion of the *latest* version leaves a stale quorum-meta latest pointer.**
+  `DeleteObjectVersion` (internal/cluster/object_version.go) deletes only the data-raft FSM per-version
+  record (`obj:bucket/key/versionID`); it never updates quorum-meta, whose `bucket/key` blob holds the
+  latest pointer. So `DELETE ?versionId=<latest>` removes the version record but leaves the quorum-meta
+  latest pointer dangling, and a subsequent `HEAD`/`GET` (which reads quorum-meta first,
+  object_version.go:33-44) can still return the deleted latest version. This is **pre-existing** (long
+  predates the Q5 generation-walk fix) and orthogonal to generation routing — Q5 deliberately did not
+  touch delete-side quorum-meta semantics. Surfaced by the Q5 plan gate. Fix: on a versioned hard-delete
+  that removes the quorum-meta-pointed version, recompute/advance (or clear) the quorum-meta latest
+  pointer to the next surviving version.
