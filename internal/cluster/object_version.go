@@ -29,6 +29,19 @@ func (b *DistributedBackend) headObjectMetaV(bucket, key, versionID string) (*st
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, PlacementMeta{}, err
 	}
+	// S2a: per-version-authoritative specific-version read. On a versioning-enabled
+	// bucket, read the version's own per-version blob directly (all-groups fan-out).
+	// Miss → legacy fallback below.
+	if !storage.IsInternalBucket(bucket) && b.bucketVersioningEnabled(ctx, bucket) {
+		if cmd, ok, verr := b.readQuorumMetaVersion(bucket, key, versionID); verr == nil && ok {
+			if cmd.IsDeleteMarker {
+				return nil, PlacementMeta{}, storage.ErrMethodNotAllowed
+			}
+			obj, pm := objectAndPlacementFromCmd(cmd)
+			return obj, pm, nil
+		}
+		// not found in per-version store → legacy fallback below
+	}
 	// Phase 3: quorum meta is the primary source for non-internal user objects.
 	if !storage.IsInternalBucket(bucket) {
 		if obj, pm, err := b.readQuorumMeta(bucket, key); err == nil && obj.VersionID == versionID {

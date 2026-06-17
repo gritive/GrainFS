@@ -1,13 +1,29 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"path/filepath"
 	"testing"
 
+	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/stretchr/testify/require"
 )
+
+// putVersioned PUTs a body on a versioning-enabled bucket and returns the vid.
+func putVersioned(t *testing.T, b *DistributedBackend, ctx context.Context, bkt, key, body string) string {
+	t.Helper()
+	sz := int64(len(body))
+	obj, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{
+		Bucket: bkt, Key: key, Body: bytes.NewReader([]byte(body)),
+		ContentType: "text/plain", SizeHint: &sz,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, obj.VersionID)
+	return obj.VersionID
+}
 
 // TestReadQuorumMetaVersionsLocal_ListsKeyVersions proves the local lister
 // enumerates every per-version blob under .quorum_meta_versions/{bucket}/{key}/.
@@ -125,4 +141,122 @@ func TestDeriveLatestVersion_MarkerAsLatestIsDeleted(t *testing.T) {
 	// Empty set → not live either.
 	_, liveEmpty := deriveLatestVersion(nil)
 	require.False(t, liveEmpty)
+}
+
+// TestHeadObjectMeta_PerVersionHookOverridesLegacyLatest proves the read hook is
+// authoritative: when the per-version store holds a NEWER version (v2) than the
+// legacy latest-only blob (v1) — the situation after a cross-generation write or
+// a per-version-store-ahead state — HeadObject derives v2, not the stale legacy
+// v1. RED before the hook: headObjectMeta returns the legacy latest-only v1.
+func TestHeadObjectMeta_PerVersionHookOverridesLegacyLatest(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	const bkt, key = "vbkt", "obj"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+
+	// Legacy latest-only blob says v1 (older); per-version store has v1 AND a
+	// newer v2 that the latest-only blob never saw.
+	v1Blob, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: bkt, Key: key, VersionID: "019ed400-0000-7000-8000-000000000001", ETag: "etag-v1", NodeIDs: []string{"self"}, ECData: 1})
+	require.NoError(t, err)
+	require.NoError(t, b.shardSvc.writeQuorumMetaLocal(bkt, key, v1Blob)) // legacy latest-only = v1
+	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal(bkt, filepath.Join(key, "019ed400-0000-7000-8000-000000000001"), v1Blob))
+	v2Blob, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: bkt, Key: key, VersionID: "019ed400-0000-7000-8000-000000000002", ETag: "etag-v2", NodeIDs: []string{"self"}, ECData: 1})
+	require.NoError(t, err)
+	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal(bkt, filepath.Join(key, "019ed400-0000-7000-8000-000000000002"), v2Blob))
+
+	head, err := b.HeadObject(ctx, bkt, key)
+	require.NoError(t, err)
+	require.Equal(t, "etag-v2", head.ETag, "per-version derive must win over stale legacy latest-only blob")
+}
+
+// TestHeadObject_PerVersionDerivesLatest proves HeadObject derives latest by
+// scan over per-version blobs: PUT v1, v2 → HeadObject returns v2.
+func TestHeadObject_PerVersionDerivesLatest(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	const bkt, key = "vbkt", "obj"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+
+	_ = putVersioned(t, b, ctx, bkt, key, "content-v1")
+	vid2 := putVersioned(t, b, ctx, bkt, key, "content-v2")
+
+	head, err := b.HeadObject(ctx, bkt, key)
+	require.NoError(t, err)
+	require.Equal(t, vid2, head.VersionID, "HEAD must derive latest = v2 from per-version blobs")
+}
+
+// TestGetObjectVersion_PerVersionDirectRead proves GetObjectVersion(v1) resolves
+// the older version from its own per-version blob.
+func TestGetObjectVersion_PerVersionDirectRead(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	const bkt, key = "vbkt", "obj"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+
+	vid1 := putVersioned(t, b, ctx, bkt, key, "content-v1")
+	_ = putVersioned(t, b, ctx, bkt, key, "content-v2")
+
+	hv, err := b.HeadObjectVersion(bkt, key, vid1)
+	require.NoError(t, err)
+	require.Equal(t, vid1, hv.VersionID)
+
+	rc, _, err := b.GetObjectVersion(bkt, key, vid1)
+	require.NoError(t, err)
+	got, _ := io.ReadAll(rc)
+	rc.Close()
+	require.Equal(t, []byte("content-v1"), got)
+}
+
+// TestHeadObject_DeleteMarkerAsLatest404 proves a soft-delete (delete marker is
+// the newest per-version blob) makes HeadObject return 404.
+func TestHeadObject_DeleteMarkerAsLatest404(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	const bkt, key = "vbkt", "obj"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+
+	vid1 := putVersioned(t, b, ctx, bkt, key, "content-v1")
+	require.NoError(t, b.DeleteObject(ctx, bkt, key)) // soft-delete → marker as latest
+
+	_, err := b.HeadObject(ctx, bkt, key)
+	require.ErrorIs(t, err, storage.ErrObjectNotFound, "delete marker as latest → HEAD 404")
+
+	// The live older version is still readable by id.
+	rc, _, err := b.GetObjectVersion(bkt, key, vid1)
+	require.NoError(t, err)
+	got, _ := io.ReadAll(rc)
+	rc.Close()
+	require.Equal(t, []byte("content-v1"), got)
+}
+
+// TestHeadObject_LegacyFallbackNoPerVersionBlob proves an object with zero
+// per-version blobs (legacy/non-versioned) still resolves via the legacy
+// quorum-meta path — behavior-safety for pre-S1 objects.
+func TestHeadObject_LegacyFallbackNoPerVersionBlob(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	const bkt, key = "legacybkt", "obj"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	// Non-versioned bucket: PUT writes only the latest-only blob, no per-version blobs.
+	body := "legacy-body"
+	sz := int64(len(body))
+	put, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{
+		Bucket: bkt, Key: key, Body: bytes.NewReader([]byte(body)),
+		ContentType: "text/plain", SizeHint: &sz,
+	})
+	require.NoError(t, err)
+
+	head, err := b.HeadObject(ctx, bkt, key)
+	require.NoError(t, err, "legacy object (no per-version blob) must resolve via fallback")
+	require.Equal(t, put.ETag, head.ETag)
+
+	rc, _, err := b.GetObject(ctx, bkt, key)
+	require.NoError(t, err)
+	got, _ := io.ReadAll(rc)
+	rc.Close()
+	require.Equal(t, []byte(body), got)
 }

@@ -564,6 +564,23 @@ func (b *DistributedBackend) readQuorumMetaVersions(bucket, key string) ([]PutOb
 	return out, nil
 }
 
+// readQuorumMetaVersion returns the single per-version blob for (bucket, key,
+// versionID), found via the all-groups fan-out (NOT local-only) so a reachable
+// replica is located even when the local node isn't a placement node. Returns
+// (cmd, true, nil) on a hit, (zero, false, nil) on a miss.
+func (b *DistributedBackend) readQuorumMetaVersion(bucket, key, versionID string) (PutObjectMetaCmd, bool, error) {
+	cmds, err := b.readQuorumMetaVersions(bucket, key)
+	if err != nil {
+		return PutObjectMetaCmd{}, false, err
+	}
+	for _, c := range cmds {
+		if c.VersionID == versionID {
+			return c, true, nil
+		}
+	}
+	return PutObjectMetaCmd{}, false, nil
+}
+
 // deriveLatestVersion returns the max-VersionID blob and whether the object's
 // latest state is live (false = no versions OR latest is a delete marker).
 func deriveLatestVersion(cmds []PutObjectMetaCmd) (PutObjectMetaCmd, bool) {
@@ -629,6 +646,15 @@ func (s *ShardService) decodeQuorumMetaBlob(data []byte) (*storage.Object, Place
 	if err != nil {
 		return nil, PlacementMeta{}, fmt.Errorf("quorum meta decode put cmd: %w", err)
 	}
+	obj, placement := objectAndPlacementFromCmd(putCmd)
+	return obj, placement, nil
+}
+
+// objectAndPlacementFromCmd builds a storage.Object and PlacementMeta from a
+// decoded PutObjectMetaCmd. Factored out of decodeQuorumMetaBlob so the
+// per-version read hooks (headObjectMeta/headObjectMetaV) build identical
+// objects/placement (layout dispatch + EC reads behave the same).
+func objectAndPlacementFromCmd(putCmd PutObjectMetaCmd) (*storage.Object, PlacementMeta) {
 	m := buildPutObjectMeta(putCmd)
 	obj := &storage.Object{
 		Key:              m.Key,
@@ -663,7 +689,7 @@ func (s *ShardService) decodeQuorumMetaBlob(data []byte) (*storage.Object, Place
 		NodeIDs:          cloneStringSlice(m.NodeIDs),
 		PlacementGroupID: m.PlacementGroupID,
 	}
-	return obj, placement, nil
+	return obj, placement
 }
 
 // readQuorumMetaLocalDecoded reads and decodes the quorum meta blob for
