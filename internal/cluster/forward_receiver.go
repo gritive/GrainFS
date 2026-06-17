@@ -400,8 +400,8 @@ func (r *ForwardReceiver) handlePutObjectStream(dg *DataGroup, args []byte, body
 }
 
 func (r *ForwardReceiver) handleGetObjectRead(dg *DataGroup, args []byte) ([]byte, io.ReadCloser) {
-	ctx := context.Background()
 	ga := raftpb.GetRootAsGetObjectArgs(args, 0)
+	ctx := contextWithVersioningState(context.Background(), ga.VersioningState())
 	if err := waitForwardReadFence(ctx, dg.Backend()); err != nil {
 		return statusReply(mapErrorToStatus(err)), nil
 	}
@@ -473,8 +473,8 @@ func (r *backendReadAtStream) Read(p []byte) (int, error) {
 func (r *backendReadAtStream) Close() error { return nil }
 
 func (r *ForwardReceiver) handleGetObject(dg *DataGroup, args []byte) []byte {
-	ctx := context.Background()
 	ga := raftpb.GetRootAsGetObjectArgs(args, 0)
+	ctx := contextWithVersioningState(context.Background(), ga.VersioningState())
 	if err := waitForwardReadFence(ctx, dg.Backend()); err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
@@ -498,8 +498,8 @@ func (r *ForwardReceiver) handleGetObject(dg *DataGroup, args []byte) []byte {
 }
 
 func (r *ForwardReceiver) handleGetObjectVersionRead(dg *DataGroup, args []byte) ([]byte, io.ReadCloser) {
-	ctx := context.Background()
 	ga := raftpb.GetRootAsGetObjectVersionArgs(args, 0)
+	ctx := contextWithVersioningState(context.Background(), ga.VersioningState())
 	rc, obj, err := dg.Backend().getObjectVersionCtx(ctx, string(ga.Bucket()), string(ga.Key()), string(ga.VersionId()))
 	if err != nil {
 		return statusReply(mapErrorToStatus(err)), nil
@@ -508,8 +508,8 @@ func (r *ForwardReceiver) handleGetObjectVersionRead(dg *DataGroup, args []byte)
 }
 
 func (r *ForwardReceiver) handleGetObjectVersion(dg *DataGroup, args []byte) []byte {
-	ctx := context.Background()
 	ga := raftpb.GetRootAsGetObjectVersionArgs(args, 0)
+	ctx := contextWithVersioningState(context.Background(), ga.VersioningState())
 	rc, obj, err := dg.Backend().getObjectVersionCtx(ctx, string(ga.Bucket()), string(ga.Key()), string(ga.VersionId()))
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
@@ -530,8 +530,8 @@ func (r *ForwardReceiver) handleGetObjectVersion(dg *DataGroup, args []byte) []b
 }
 
 func (r *ForwardReceiver) handleHeadObject(dg *DataGroup, args []byte) []byte {
-	ctx := context.Background()
 	ha := raftpb.GetRootAsHeadObjectArgs(args, 0)
+	ctx := contextWithVersioningState(context.Background(), ha.VersioningState())
 	if err := waitForwardReadFence(ctx, dg.Backend()); err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
@@ -556,8 +556,8 @@ func waitForwardReadFence(ctx context.Context, gb *GroupBackend) error {
 }
 
 func (r *ForwardReceiver) handleHeadObjectVersion(dg *DataGroup, args []byte) []byte {
-	ctx := context.Background()
 	ha := raftpb.GetRootAsHeadObjectVersionArgs(args, 0)
+	ctx := contextWithVersioningState(context.Background(), ha.VersioningState())
 	bucket := string(ha.Bucket())
 	obj, err := dg.Backend().headObjectVersionCtx(ctx, bucket, string(ha.Key()), string(ha.VersionId()))
 	if err != nil {
@@ -629,8 +629,8 @@ func (r *ForwardReceiver) handleDeleteObjectVersion(dg *DataGroup, args []byte) 
 }
 
 func (r *ForwardReceiver) handleListObjects(dg *DataGroup, args []byte) []byte {
-	ctx := context.Background()
 	la := raftpb.GetRootAsListObjectsArgs(args, 0)
+	ctx := contextWithVersioningState(context.Background(), la.VersioningState())
 	bucket := string(la.Bucket())
 	prefix := string(la.Prefix())
 	marker := string(la.Marker())
@@ -673,8 +673,8 @@ func (r *ForwardReceiver) handleListObjectVersions(dg *DataGroup, args []byte) [
 }
 
 func (r *ForwardReceiver) handleWalkObjects(dg *DataGroup, args []byte) []byte {
-	ctx := context.Background()
 	wa := raftpb.GetRootAsWalkObjectsArgs(args, 0)
+	ctx := contextWithVersioningState(context.Background(), wa.VersioningState())
 	var objs []*storage.Object
 	err := dg.Backend().WalkObjects(ctx, string(wa.Bucket()), string(wa.Prefix()), func(o *storage.Object) error {
 		objs = append(objs, o)

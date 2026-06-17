@@ -96,6 +96,9 @@ table PutObjectArgs {
 table GetObjectArgs {
   bucket:string;
   key:string;
+  // Versioning tri-state stamped at the S3 edge; mirrors PutObjectArgs
+  // (0=unknown/old-peer, 1=disabled, 2=enabled). Appended for wire compat.
+  versioning_state:ubyte;
 }
 
 table ReadAtArgs {
@@ -109,17 +112,23 @@ table GetObjectVersionArgs {
   bucket:string;
   key:string;
   version_id:string;
+  // Versioning tri-state stamped at the S3 edge (see PutObjectArgs). Appended.
+  versioning_state:ubyte;
 }
 
 table HeadObjectArgs {
   bucket:string;
   key:string;
+  // Versioning tri-state stamped at the S3 edge (see PutObjectArgs). Appended.
+  versioning_state:ubyte;
 }
 
 table HeadObjectVersionArgs {
   bucket:string;
   key:string;
   version_id:string;
+  // Versioning tri-state stamped at the S3 edge (see PutObjectArgs). Appended.
+  versioning_state:ubyte;
 }
 
 table DeleteObjectArgs {
@@ -157,6 +166,8 @@ table ListObjectsArgs {
   prefix:string;
   max_keys:int32;
   marker:string;
+  // Versioning tri-state stamped at the S3 edge (see PutObjectArgs). Appended.
+  versioning_state:ubyte;
 }
 
 table ListObjectVersionsArgs {
@@ -168,6 +179,8 @@ table ListObjectVersionsArgs {
 table WalkObjectsArgs {
   bucket:string;
   prefix:string;
+  // Versioning tri-state stamped at the S3 edge (see PutObjectArgs). Appended.
+  versioning_state:ubyte;
 }
 
 table CreateMultipartUploadArgs {

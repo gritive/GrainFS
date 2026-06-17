@@ -99,7 +99,7 @@ func TestForwardNativeWire(t *testing.T) {
 
 	// (2a) Read forward round-trip — GetObject (whole object).
 	reply, rc, err := sender.SendReadStream(ctx, []string{addr}, "group-1",
-		raftpb.ForwardOpGetObject, buildGetObjectArgs("bucket", "wire-key"))
+		raftpb.ForwardOpGetObject, buildGetObjectArgs("bucket", "wire-key", versioningStateUnknown))
 	require.NoError(t, err)
 	require.Equal(t, raftpb.ForwardStatusOK, raftpb.GetRootAsForwardReply(reply, 0).Status())
 	got, err := io.ReadAll(rc)

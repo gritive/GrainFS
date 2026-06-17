@@ -93,7 +93,7 @@ var _ = Describe("Forward receiver integration", func() {
 		obj, err := gb.PutObject(context.Background(), "bk", "large", bytes.NewReader(bytes.Repeat([]byte("x"), testForwardReplyBytesLimit+1)), "application/octet-stream")
 		Expect(err).NotTo(HaveOccurred())
 
-		payload := encodeForwardPayload("g1", raftpb.ForwardOpGetObjectVersion, buildGetObjectVersionArgs("bk", "large", obj.VersionID))
+		payload := encodeForwardPayload("g1", raftpb.ForwardOpGetObjectVersion, buildGetObjectVersionArgs("bk", "large", obj.VersionID, versioningStateUnknown))
 		reply, _ := rcv.Handle(payload)
 		Expect(reply).NotTo(BeNil())
 
@@ -112,7 +112,7 @@ var _ = Describe("Forward receiver integration", func() {
 		obj, err := gb.PutObject(context.Background(), "bk", "large", bytes.NewReader(body), "application/octet-stream")
 		Expect(err).NotTo(HaveOccurred())
 
-		payload := encodeForwardPayload("g1", raftpb.ForwardOpGetObjectVersion, buildGetObjectVersionArgs("bk", "large", obj.VersionID))
+		payload := encodeForwardPayload("g1", raftpb.ForwardOpGetObjectVersion, buildGetObjectVersionArgs("bk", "large", obj.VersionID, versioningStateUnknown))
 		reply, streamBody, _ := rcv.HandleRead(payload)
 		Expect(reply).NotTo(BeNil())
 		Expect(streamBody).NotTo(BeNil())
@@ -255,7 +255,7 @@ var _ = Describe("Forward receiver integration", func() {
 		obj, err := gb.PutObject(context.Background(), "bk", "k", bytes.NewReader([]byte("v1")), "text/plain")
 		Expect(err).NotTo(HaveOccurred())
 
-		payload := encodeForwardPayload("g1", raftpb.ForwardOpGetObjectVersion, buildGetObjectVersionArgs("bk", "k", obj.VersionID))
+		payload := encodeForwardPayload("g1", raftpb.ForwardOpGetObjectVersion, buildGetObjectVersionArgs("bk", "k", obj.VersionID, versioningStateUnknown))
 		reply, _ := rcv.Handle(payload)
 		Expect(reply).NotTo(BeNil())
 
@@ -306,7 +306,7 @@ var _ = Describe("Forward receiver integration", func() {
 		gb := WrapDistributedBackend("g1", mockDist)
 		mgr.Add(NewDataGroupWithBackend("g1", []string{"node1"}, gb))
 
-		payload := encodeForwardPayload("g1", raftpb.ForwardOpHeadObjectVersion, buildHeadObjectVersionArgs("hv-bucket", "hv-key", "vid-1"))
+		payload := encodeForwardPayload("g1", raftpb.ForwardOpHeadObjectVersion, buildHeadObjectVersionArgs("hv-bucket", "hv-key", "vid-1", versioningStateUnknown))
 		reply, _ := rcv.Handle(payload)
 		Expect(reply).NotTo(BeNil())
 

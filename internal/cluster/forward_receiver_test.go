@@ -46,7 +46,7 @@ func TestContextForForwardedGroupCarriesPlacementEntry(t *testing.T) {
 
 func TestForwardReceiver_UnknownGroup_NotVoter(t *testing.T) {
 	rcv, _ := setupReceiver(t, "self")
-	payload := encodeForwardPayload("g99", raftpb.ForwardOpHeadObject, buildHeadObjectArgs("b", "k"))
+	payload := encodeForwardPayload("g99", raftpb.ForwardOpHeadObject, buildHeadObjectArgs("b", "k", versioningStateUnknown))
 	reply, _ := rcv.Handle(payload)
 	require.NotNil(t, reply)
 	fr := raftpb.GetRootAsForwardReply(reply, 0)
@@ -75,7 +75,7 @@ func TestForwardReceiver_NonLeaderVoter_ReturnsHint(t *testing.T) {
 
 	mgr.Add(NewDataGroupWithBackend("g1", []string{"self", "peer-A"}, gb))
 
-	payload := encodeForwardPayload("g1", raftpb.ForwardOpHeadObject, buildHeadObjectArgs("b", "k"))
+	payload := encodeForwardPayload("g1", raftpb.ForwardOpHeadObject, buildHeadObjectArgs("b", "k", versioningStateUnknown))
 
 	reply, _ := rcv.Handle(payload)
 	require.NotNil(t, reply)

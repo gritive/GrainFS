@@ -77,8 +77,20 @@ func (rcv *ListObjectsArgs) Marker() []byte {
 	return nil
 }
 
+func (rcv *ListObjectsArgs) VersioningState() byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
+	if o != 0 {
+		return rcv._tab.GetByte(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *ListObjectsArgs) MutateVersioningState(n byte) bool {
+	return rcv._tab.MutateByteSlot(12, n)
+}
+
 func ListObjectsArgsStart(builder *flatbuffers.Builder) {
-	builder.StartObject(4)
+	builder.StartObject(5)
 }
 func ListObjectsArgsAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -91,6 +103,9 @@ func ListObjectsArgsAddMaxKeys(builder *flatbuffers.Builder, maxKeys int32) {
 }
 func ListObjectsArgsAddMarker(builder *flatbuffers.Builder, marker flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(3, flatbuffers.UOffsetT(marker), 0)
+}
+func ListObjectsArgsAddVersioningState(builder *flatbuffers.Builder, versioningState byte) {
+	builder.PrependByteSlot(4, versioningState, 0)
 }
 func ListObjectsArgsEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

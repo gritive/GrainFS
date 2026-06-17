@@ -109,7 +109,7 @@ func TestBucketForwardOpSpecsInstallReceiverHandlers(t *testing.T) {
 func TestForwardReceiverRejectsStreamKindMismatchBeforeGroupLookup(t *testing.T) {
 	rcv, _ := setupReceiver(t, "self")
 
-	framePayload := encodeForwardPayload("missing", raftpb.ForwardOpHeadObject, buildHeadObjectArgs("b", "k"))
+	framePayload := encodeForwardPayload("missing", raftpb.ForwardOpHeadObject, buildHeadObjectArgs("b", "k", versioningStateUnknown))
 	body := bytes.NewBufferString("stream body")
 	bodyReply, _ := rcv.HandleBody(framePayload, body)
 	requireForwardStatus(t, bodyReply, raftpb.ForwardStatusInternal)
@@ -124,7 +124,7 @@ func TestForwardReceiverRejectsStreamKindMismatchBeforeGroupLookup(t *testing.T)
 	requireForwardStatus(t, readReply, raftpb.ForwardStatusInternal)
 	require.Nil(t, readBody)
 
-	readPayload := encodeForwardPayload("missing", raftpb.ForwardOpGetObject, buildGetObjectArgs("b", "k"))
+	readPayload := encodeForwardPayload("missing", raftpb.ForwardOpGetObject, buildGetObjectArgs("b", "k", versioningStateUnknown))
 	body = bytes.NewBufferString("stream body")
 	bodyReply, _ = rcv.HandleBody(readPayload, body)
 	requireForwardStatus(t, bodyReply, raftpb.ForwardStatusInternal)
@@ -134,7 +134,7 @@ func TestForwardReceiverRejectsStreamKindMismatchBeforeGroupLookup(t *testing.T)
 func TestForwardReceiverAllowedStreamKindReachesGroupLookup(t *testing.T) {
 	rcv, _ := setupReceiver(t, "self")
 
-	framePayload := encodeForwardPayload("missing", raftpb.ForwardOpHeadObject, buildHeadObjectArgs("b", "k"))
+	framePayload := encodeForwardPayload("missing", raftpb.ForwardOpHeadObject, buildHeadObjectArgs("b", "k", versioningStateUnknown))
 	frameReply, _ := rcv.Handle(framePayload)
 	requireForwardStatus(t, frameReply, raftpb.ForwardStatusNotVoter)
 
@@ -142,7 +142,7 @@ func TestForwardReceiverAllowedStreamKindReachesGroupLookup(t *testing.T) {
 	bodyReply, _ := rcv.HandleBody(bodyPayload, bytes.NewBufferString("stream body"))
 	requireForwardStatus(t, bodyReply, raftpb.ForwardStatusNotVoter)
 
-	readPayload := encodeForwardPayload("missing", raftpb.ForwardOpGetObject, buildGetObjectArgs("b", "k"))
+	readPayload := encodeForwardPayload("missing", raftpb.ForwardOpGetObject, buildGetObjectArgs("b", "k", versioningStateUnknown))
 	readReply, readBody, _ := rcv.HandleRead(readPayload)
 	requireForwardStatus(t, readReply, raftpb.ForwardStatusNotVoter)
 	require.Nil(t, readBody)

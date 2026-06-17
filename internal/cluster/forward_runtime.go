@@ -258,7 +258,7 @@ func (r forwardRuntime) listObjects(ctx context.Context, target RouteTarget, buc
 	if r.sender == nil {
 		return nil, false, ErrCoordinatorNoRouter
 	}
-	args := buildListObjectsArgs(bucket, prefix, marker, int32(maxKeys))
+	args := buildListObjectsArgs(bucket, prefix, marker, int32(maxKeys), versioningStateFromContext(ctx))
 	reply, err := r.sender.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpListObjects, args)
 	if err != nil {
 		return nil, false, err
@@ -293,7 +293,7 @@ func (r forwardRuntime) walkObjects(ctx context.Context, target RouteTarget, buc
 	if r.sender == nil {
 		return ErrCoordinatorNoRouter
 	}
-	args := buildWalkObjectsArgs(bucket, prefix)
+	args := buildWalkObjectsArgs(bucket, prefix, versioningStateFromContext(ctx))
 	reply, err := r.sender.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpWalkObjects, args)
 	if err != nil {
 		return err

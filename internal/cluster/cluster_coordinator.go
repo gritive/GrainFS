@@ -1080,7 +1080,7 @@ func (c *ClusterCoordinator) GetObject(ctx context.Context, bucket, key string) 
 			rc, obj = r, o
 			return nil
 		}
-		args := buildGetObjectArgs(bucket, key)
+		args := buildGetObjectArgs(bucket, key, versioningStateFromContext(ctx))
 		r, o, e := c.forwardRuntime().readObject(ctx, target, raftpb.ForwardOpGetObject, args)
 		if e != nil {
 			return e
@@ -1114,7 +1114,7 @@ func (c *ClusterCoordinator) GetObjectVersion(
 			rc, obj = r, o
 			return nil
 		}
-		args := buildGetObjectVersionArgs(bucket, key, versionID)
+		args := buildGetObjectVersionArgs(bucket, key, versionID, versioningStateFromContext(ctx))
 		r, o, e := c.forwardRuntime().readObject(ctx, target, raftpb.ForwardOpGetObjectVersion, args)
 		if e != nil {
 			return e
@@ -1143,7 +1143,7 @@ func (c *ClusterCoordinator) HeadObject(ctx context.Context, bucket, key string)
 			obj = o
 			return nil
 		}
-		args := buildHeadObjectArgs(bucket, key)
+		args := buildHeadObjectArgs(bucket, key, versioningStateFromContext(ctx))
 		o, e := c.forwardRuntime().headObject(ctx, target, raftpb.ForwardOpHeadObject, args, bucket, key)
 		if e != nil {
 			return e
@@ -1169,7 +1169,7 @@ func (c *ClusterCoordinator) HeadObjectVersion(ctx context.Context, bucket, key,
 			obj = o
 			return nil
 		}
-		args := buildHeadObjectVersionArgs(bucket, key, versionID)
+		args := buildHeadObjectVersionArgs(bucket, key, versionID, versioningStateFromContext(ctx))
 		o, e := c.forwardRuntime().headObject(ctx, target, raftpb.ForwardOpHeadObjectVersion, args, bucket, key)
 		if e != nil {
 			return e
