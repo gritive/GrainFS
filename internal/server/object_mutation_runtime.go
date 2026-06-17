@@ -91,6 +91,11 @@ func (s *Server) completeMultipartObject(ctx context.Context, bucket, key, uploa
 }
 
 func (s *Server) copyObjectWithMutation(ctx context.Context, req storage.CopyObjectRequest) (*storage.CopyObjectResult, error) {
+	// ctx is stamped for the DESTINATION bucket (the copy's write reaches the
+	// same per-group commit path as a PUT). The SOURCE per-version read must be
+	// gated by the SOURCE bucket's versioning decision, so re-stamp a separate
+	// ctx for the source bucket and thread it down for the source read only.
+	req.SourceVersioningCtx = s.ctxWithBucketVersioning(ctx, req.Source.Bucket)
 	result, err := s.ops.CopyObject(ctx, req)
 	if err != nil {
 		return nil, err
