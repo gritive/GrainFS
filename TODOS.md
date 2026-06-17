@@ -13,9 +13,19 @@
   flaky cross-group raft migration). Roadmap (each slice = own spec→plan→PR):
   - **S1 — per-version dual-WRITE — DONE (this PR).** `writeQuorumMeta` also fans out the per-version
     blob (best-effort, versioning-gated, behavior-neutral; reads/scans/LIST untouched).
-  - **S2 — read/LIST/delete switch to per-version** (derive-by-scan latest + generation-walk; legacy
-    fallback). Solves versioned-delete + LIST consistency for new objects. **Includes per-version blob
-    reclamation on DELETE** (S1 leaves per-version blobs un-GC'd by design — code-gate MINOR).
+  - **S2a — HEAD/GET switch + dual-delete — DONE (this PR).** HEAD/GET (latest derive-by-scan +
+    specific-version direct) per-version-authoritative (versioning-Enabled gated, all-groups fan-out
+    union NOT probeRead, legacy/mixed-era → FSM `ObjectMetaKeyV` fallback); `DeleteObjectVersion`
+    fail-closed dual-deletes the per-version blob. Solves Epic A versioned-hard-delete HEAD/GET
+    consistency for versioned objects. Known transitional limits (documented in the S2a spec): per-read
+    O(#versions) enumeration cost (benchmark gate before S4); genesis-1+0 split-placement partial-union
+    stale-latest (removed by S5); HEAD-vs-LIST divergence for hard-deleted-latest until S2b.
+  - **S2b — ListObjects switch to per-version** (group-by-key max-live-vid; the key/vid split must use
+    the decoded `meta.Key` since keys contain `/`). **MUST be a true per-version derive, NOT a
+    latest-only-blob consumer** — the latest-only blob is not maintained on hard-delete-of-latest, so
+    legacy LIST is stale for that case; S2b closes the S2a→S2b HEAD-vs-LIST window. Also: per-version
+    orphan reconciliation (scrubber removes blobs whose FSM record is gone). ListObjectVersions stays
+    FSM-backed (deferrable to S4).
   - **S3 — migrate existing data** (legacy latest-only blob + FSM per-version records → per-version blobs).
   - **S4 — cutover: per-version sole authority; remove FSM object-meta path** (`CmdPutObjectMeta`/`apply*`/
     `obj:`/`lat:`), repoint scrubber/snapshot. **Appendable/coalesced carve-out:** those objects bypass

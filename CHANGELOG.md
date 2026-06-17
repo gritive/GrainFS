@@ -1,6 +1,17 @@
 # Changelog
 
-## [0.0.610.0] - 2026-06-17
+## [0.0.611.0] - 2026-06-17
+
+### Fixed
+- **Versioned hard-delete consistency: `HEAD`/`GET` are now per-version-authoritative (foundation slice
+  S2a).** On versioning-enabled buckets, `HEAD`/`GET` (latest and `?versionId=`) now resolve from the
+  per-version quorum-meta blobs introduced in S1 via derive-by-scan (latest = max live VersionID),
+  unioned across all placement generations, and `DeleteObjectVersion` now fail-closed dual-deletes the
+  per-version blob. Result: after `DELETE ?versionId=<latest>`, `HEAD`/`GET` correctly return the
+  previous version (and `GET ?versionId=<deleted>` returns 404) instead of the stale deleted version.
+  Objects with no per-version blob (non-versioned buckets, pre-S1 / not-yet-migrated versions) fall back
+  to the unchanged metadata path, so legacy and mixed-era reads are preserved. `ListObjects` LIST
+  consistency for this case follows in S2b; `ListObjectVersions` is unchanged (already correct).
 
 ### Added
 - **Per-version quorum-meta dual-write (foundation slice S1).** Every write to a versioning-enabled
