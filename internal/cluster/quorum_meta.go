@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -80,7 +81,7 @@ func (b *DistributedBackend) writeQuorumMeta(ctx context.Context, cmd PutObjectM
 	}
 	wctx, cancel := context.WithTimeout(ctx, quorumMetaWriteTimeout)
 	defer cancel()
-	return fanOutQuorumMeta(wctx, cmd.NodeIDs, k, func(fctx context.Context, node string) error {
+	latestErr := fanOutQuorumMeta(wctx, cmd.NodeIDs, k, func(fctx context.Context, node string) error {
 		if node == self {
 			return b.shardSvc.writeQuorumMetaLocal(cmd.Bucket, cmd.Key, blob)
 		}
@@ -90,6 +91,36 @@ func (b *DistributedBackend) writeQuorumMeta(ctx context.Context, cmd PutObjectM
 		}
 		return b.shardSvc.WriteQuorumMeta(fctx, addr, cmd.Bucket, cmd.Key, blob)
 	})
+	if latestErr != nil {
+		return latestErr
+	}
+	// S1: also write an immutable per-version blob to the separate
+	// .quorum_meta_versions subtree, best-effort — a failure here must NOT fail the
+	// PUT (the latest-only write already succeeded; reads ignore this subtree until
+	// S2, and S3 backfills any gaps). Same placement nodes, same K-of-N. Gated on
+	// versioning-enabled, mirroring the FSM per-version propose at :60: non-versioned
+	// buckets retain no version history (and are already quorum-meta-only / off-raft
+	// via the latest-only blob), so a per-version blob there would be pure garbage.
+	if cmd.VersionID != "" && b.bucketVersioningEnabled(ctx, cmd.Bucket) {
+		verSubpath := path.Join(cmd.Key, cmd.VersionID)
+		vctx, vcancel := context.WithTimeout(ctx, quorumMetaWriteTimeout)
+		defer vcancel()
+		if verr := fanOutQuorumMeta(vctx, cmd.NodeIDs, k, func(fctx context.Context, node string) error {
+			if node == self {
+				return b.shardSvc.writeQuorumMetaVersionLocal(cmd.Bucket, verSubpath, blob)
+			}
+			addr, rerr := b.shardSvc.resolvePeerAddress(node)
+			if rerr != nil {
+				return rerr
+			}
+			return b.shardSvc.WriteQuorumMetaVersion(fctx, addr, cmd.Bucket, verSubpath, blob)
+		}); verr != nil {
+			b.logger.Warn().
+				Str("bucket", cmd.Bucket).Str("key", cmd.Key).Str("version", cmd.VersionID).
+				Err(verr).Msg("per-version quorum-meta write failed (best-effort)")
+		}
+	}
+	return nil
 }
 
 // readQuorumMeta reads object metadata from the local quorum store, falling

@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -55,4 +56,50 @@ func TestWriteQuorumMetaVersion_RPC(t *testing.T) {
 	got, err := os.ReadFile(filepath.Join(dirB, "shards", quorumMetaVersionsSubDir, "bkt", "k", "vid-1"))
 	require.NoError(t, err, "remote node must have written the per-version blob")
 	require.Equal(t, data, got)
+}
+
+// TestWriteQuorumMeta_AlsoWritesPerVersion proves a versioned PUT writes the
+// per-version blob (immutable: two versions → two blobs), and that the existing
+// latest-only behavior is unchanged.
+func TestWriteQuorumMeta_AlsoWritesPerVersion(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(ctx, "bucket"))
+	require.NoError(t, b.SetBucketVersioning("bucket", "Enabled"))
+
+	put1, err := b.PutObject(ctx, "bucket", "obj", bytes.NewReader(bytes.Repeat([]byte("a"), 128)), "application/octet-stream")
+	require.NoError(t, err)
+	put2, err := b.PutObject(ctx, "bucket", "obj", bytes.NewReader(bytes.Repeat([]byte("b"), 128)), "application/octet-stream")
+	require.NoError(t, err)
+
+	root := b.shardSvc.dataDirs[0]
+	for _, vid := range []string{put1.VersionID, put2.VersionID} {
+		p := filepath.Join(root, quorumMetaVersionsSubDir, "bucket", "obj", vid)
+		_, statErr := os.Stat(p)
+		require.NoError(t, statErr, "per-version blob must exist for version %s at %s", vid, p)
+	}
+
+	// Latest-only blob still present and HeadObject unchanged (behavior-neutral).
+	head, err := b.HeadObject(ctx, "bucket", "obj")
+	require.NoError(t, err)
+	require.Equal(t, put2.VersionID, head.VersionID)
+}
+
+// TestWriteQuorumMeta_PerVersionFailureDoesNotFailPut proves the per-version
+// write is best-effort: if its subtree can't be created, PutObject still succeeds.
+func TestWriteQuorumMeta_PerVersionFailureDoesNotFailPut(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(ctx, "bucket"))
+	require.NoError(t, b.SetBucketVersioning("bucket", "Enabled"))
+
+	// Plant a FILE where the version dir for key "obj" must be, so MkdirAll fails
+	// ("not a directory") for the per-version write.
+	root := b.shardSvc.dataDirs[0]
+	blocker := filepath.Join(root, quorumMetaVersionsSubDir, "bucket", "obj")
+	require.NoError(t, os.MkdirAll(filepath.Dir(blocker), 0o755))
+	require.NoError(t, os.WriteFile(blocker, []byte("x"), 0o644))
+
+	_, err := b.PutObject(ctx, "bucket", "obj", bytes.NewReader([]byte("data")), "application/octet-stream")
+	require.NoError(t, err, "per-version write failure must not fail the PUT (best-effort)")
 }
