@@ -199,11 +199,11 @@ func TestGetObjectVersion_PerVersionDirectRead(t *testing.T) {
 	vid1 := putVersioned(t, b, ctx, bkt, key, "content-v1")
 	_ = putVersioned(t, b, ctx, bkt, key, "content-v2")
 
-	hv, err := b.HeadObjectVersion(bkt, key, vid1)
+	hv, err := b.HeadObjectVersion(context.Background(), bkt, key, vid1)
 	require.NoError(t, err)
 	require.Equal(t, vid1, hv.VersionID)
 
-	rc, _, err := b.GetObjectVersion(bkt, key, vid1)
+	rc, _, err := b.GetObjectVersion(context.Background(), bkt, key, vid1)
 	require.NoError(t, err)
 	got, _ := io.ReadAll(rc)
 	rc.Close()
@@ -226,7 +226,7 @@ func TestHeadObject_DeleteMarkerAsLatest404(t *testing.T) {
 	require.ErrorIs(t, err, storage.ErrObjectNotFound, "delete marker as latest → HEAD 404")
 
 	// The live older version is still readable by id.
-	rc, _, err := b.GetObjectVersion(bkt, key, vid1)
+	rc, _, err := b.GetObjectVersion(context.Background(), bkt, key, vid1)
 	require.NoError(t, err)
 	got, _ := io.ReadAll(rc)
 	rc.Close()
@@ -289,7 +289,7 @@ func TestDeleteObjectVersion_DualDeletesPerVersionBlob(t *testing.T) {
 	}
 
 	// GetObjectVersion(v2) → 404.
-	_, _, gerr := b.GetObjectVersion(bkt, key, vid2)
+	_, _, gerr := b.GetObjectVersion(context.Background(), bkt, key, vid2)
 	require.ErrorIs(t, gerr, storage.ErrObjectNotFound)
 }
 
@@ -319,7 +319,7 @@ func TestGetObjectVersion_MixedEraPreS1FSMOnly(t *testing.T) {
 	_ = putVersioned(t, b, ctx, bkt, key, "content-postS1")
 
 	// The pre-S1 version (FSM-only, no blob) must still resolve, not 404.
-	hv, err := b.HeadObjectVersion(bkt, key, preS1Vid)
+	hv, err := b.HeadObjectVersion(context.Background(), bkt, key, preS1Vid)
 	require.NoError(t, err, "pre-S1 FSM-only version must resolve (RED: 404 from per-version-miss predicate)")
 	require.Equal(t, preS1Vid, hv.VersionID)
 	require.Equal(t, "etag-preS1", hv.ETag)
@@ -348,7 +348,7 @@ func TestS2a_EpicA_ReadDeleteEndToEnd(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, vid1, head.VersionID, "HEAD re-derives v1 after deleting v2")
 
-	_, _, gverr := b.GetObjectVersion(bkt, key, vid2)
+	_, _, gverr := b.GetObjectVersion(context.Background(), bkt, key, vid2)
 	require.ErrorIs(t, gverr, storage.ErrObjectNotFound)
 
 	rc, _, err := b.GetObject(ctx, bkt, key)

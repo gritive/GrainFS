@@ -14,8 +14,22 @@ import (
 
 // HeadObjectVersion returns metadata for a specific version. Returns
 // storage.ErrObjectNotFound if the version doesn't exist or is a delete marker.
-func (b *DistributedBackend) HeadObjectVersion(bucket, key, versionID string) (*storage.Object, error) {
-	obj, _, err := b.headObjectMetaV(bucket, key, versionID)
+//
+// This satisfies storage.VersionedHeader. The server edge stamps the
+// authoritative bucket-versioning decision into ctx (mirroring PUT) so the
+// per-version gate inside headObjectMetaV can resolve it; an in-process call
+// with an unstamped ctx falls back to a local versioning read.
+func (b *DistributedBackend) HeadObjectVersion(ctx context.Context, bucket, key, versionID string) (*storage.Object, error) {
+	return b.headObjectVersionCtx(ctx, bucket, key, versionID)
+}
+
+// headObjectVersionCtx is the ctx-threaded HeadObjectVersion used by callers
+// that stamp the bucket-versioning decision into ctx (coordinator + forward
+// receiver). The stamp must reach bucketVersioningEnabled inside headObjectMetaV
+// or the per-version read path stays inactive on a non-meta-group / forwarded
+// read (the latent S2a multi-group bug this PR fixes).
+func (b *DistributedBackend) headObjectVersionCtx(ctx context.Context, bucket, key, versionID string) (*storage.Object, error) {
+	obj, _, err := b.headObjectMetaV(ctx, bucket, key, versionID)
 	return obj, err
 }
 
@@ -24,8 +38,11 @@ func (b *DistributedBackend) HeadObjectVersion(bucket, key, versionID string) (*
 // version and storage.ErrMethodNotAllowed for a delete-marker version (S3
 // semantics — the server handler maps that to a 405 with x-amz-delete-marker).
 // Parallels headObjectMeta, which does the same for the latest version.
-func (b *DistributedBackend) headObjectMetaV(bucket, key, versionID string) (*storage.Object, PlacementMeta, error) {
-	ctx := context.Background()
+//
+// ctx carries the authoritative bucket-versioning stamp (when the caller is the
+// coordinator / forward receiver); bucketVersioningEnabled resolves it before
+// falling back to a local store read.
+func (b *DistributedBackend) headObjectMetaV(ctx context.Context, bucket, key, versionID string) (*storage.Object, PlacementMeta, error) {
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, PlacementMeta{}, err
 	}
@@ -134,9 +151,17 @@ func (b *DistributedBackend) headObjectMetaV(bucket, key, versionID string) (*st
 // GetObjectVersion reads a specific version's data. Returns
 // storage.ErrObjectNotFound if the version doesn't exist. For delete markers,
 // returns ErrMethodNotAllowed to mirror the erasure backend's behavior.
-func (b *DistributedBackend) GetObjectVersion(bucket, key, versionID string) (io.ReadCloser, *storage.Object, error) {
-	ctx := context.Background()
-	obj, meta, err := b.headObjectMetaV(bucket, key, versionID)
+//
+// Satisfies storage.VersionedGetter. See HeadObjectVersion — ctx carries the
+// authoritative bucket-versioning stamp set at the server edge.
+func (b *DistributedBackend) GetObjectVersion(ctx context.Context, bucket, key, versionID string) (io.ReadCloser, *storage.Object, error) {
+	return b.getObjectVersionCtx(ctx, bucket, key, versionID)
+}
+
+// getObjectVersionCtx is the ctx-threaded GetObjectVersion used by callers that
+// stamp the bucket-versioning decision into ctx (coordinator + forward receiver).
+func (b *DistributedBackend) getObjectVersionCtx(ctx context.Context, bucket, key, versionID string) (io.ReadCloser, *storage.Object, error) {
+	obj, meta, err := b.headObjectMetaV(ctx, bucket, key, versionID)
 	if err != nil {
 		return nil, nil, err
 	}

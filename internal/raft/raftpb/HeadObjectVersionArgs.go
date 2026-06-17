@@ -65,8 +65,20 @@ func (rcv *HeadObjectVersionArgs) VersionId() []byte {
 	return nil
 }
 
+func (rcv *HeadObjectVersionArgs) VersioningState() byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		return rcv._tab.GetByte(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *HeadObjectVersionArgs) MutateVersioningState(n byte) bool {
+	return rcv._tab.MutateByteSlot(10, n)
+}
+
 func HeadObjectVersionArgsStart(builder *flatbuffers.Builder) {
-	builder.StartObject(3)
+	builder.StartObject(4)
 }
 func HeadObjectVersionArgsAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -76,6 +88,9 @@ func HeadObjectVersionArgsAddKey(builder *flatbuffers.Builder, key flatbuffers.U
 }
 func HeadObjectVersionArgsAddVersionId(builder *flatbuffers.Builder, versionId flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(2, flatbuffers.UOffsetT(versionId), 0)
+}
+func HeadObjectVersionArgsAddVersioningState(builder *flatbuffers.Builder, versioningState byte) {
+	builder.PrependByteSlot(3, versioningState, 0)
 }
 func HeadObjectVersionArgsEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

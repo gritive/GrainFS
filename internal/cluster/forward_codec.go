@@ -137,13 +137,16 @@ func decodePutObjectUserMetadata(pa *raftpb.PutObjectArgs) map[string]string {
 	return m
 }
 
-func buildGetObjectArgs(bucket, key string) []byte {
+func buildGetObjectArgs(bucket, key string, versioningState byte) []byte {
 	b := flatbuffers.NewBuilder(64)
 	bk := b.CreateString(bucket)
 	k := b.CreateString(key)
 	raftpb.GetObjectArgsStart(b)
 	raftpb.GetObjectArgsAddBucket(b, bk)
 	raftpb.GetObjectArgsAddKey(b, k)
+	if versioningState != versioningStateUnknown {
+		raftpb.GetObjectArgsAddVersioningState(b, versioningState)
+	}
 	b.Finish(raftpb.GetObjectArgsEnd(b))
 	return b.FinishedBytes()
 }
@@ -161,7 +164,7 @@ func buildReadAtArgs(bucket, key string, offset, length int64) []byte {
 	return b.FinishedBytes()
 }
 
-func buildGetObjectVersionArgs(bucket, key, versionID string) []byte {
+func buildGetObjectVersionArgs(bucket, key, versionID string, versioningState byte) []byte {
 	b := flatbuffers.NewBuilder(96)
 	bk := b.CreateString(bucket)
 	k := b.CreateString(key)
@@ -170,11 +173,14 @@ func buildGetObjectVersionArgs(bucket, key, versionID string) []byte {
 	raftpb.GetObjectVersionArgsAddBucket(b, bk)
 	raftpb.GetObjectVersionArgsAddKey(b, k)
 	raftpb.GetObjectVersionArgsAddVersionId(b, vid)
+	if versioningState != versioningStateUnknown {
+		raftpb.GetObjectVersionArgsAddVersioningState(b, versioningState)
+	}
 	b.Finish(raftpb.GetObjectVersionArgsEnd(b))
 	return b.FinishedBytes()
 }
 
-func buildHeadObjectVersionArgs(bucket, key, versionID string) []byte {
+func buildHeadObjectVersionArgs(bucket, key, versionID string, versioningState byte) []byte {
 	b := flatbuffers.NewBuilder(96)
 	bk := b.CreateString(bucket)
 	k := b.CreateString(key)
@@ -183,17 +189,23 @@ func buildHeadObjectVersionArgs(bucket, key, versionID string) []byte {
 	raftpb.HeadObjectVersionArgsAddBucket(b, bk)
 	raftpb.HeadObjectVersionArgsAddKey(b, k)
 	raftpb.HeadObjectVersionArgsAddVersionId(b, vid)
+	if versioningState != versioningStateUnknown {
+		raftpb.HeadObjectVersionArgsAddVersioningState(b, versioningState)
+	}
 	b.Finish(raftpb.HeadObjectVersionArgsEnd(b))
 	return b.FinishedBytes()
 }
 
-func buildHeadObjectArgs(bucket, key string) []byte {
+func buildHeadObjectArgs(bucket, key string, versioningState byte) []byte {
 	b := flatbuffers.NewBuilder(64)
 	bk := b.CreateString(bucket)
 	k := b.CreateString(key)
 	raftpb.HeadObjectArgsStart(b)
 	raftpb.HeadObjectArgsAddBucket(b, bk)
 	raftpb.HeadObjectArgsAddKey(b, k)
+	if versioningState != versioningStateUnknown {
+		raftpb.HeadObjectArgsAddVersioningState(b, versioningState)
+	}
 	b.Finish(raftpb.HeadObjectArgsEnd(b))
 	return b.FinishedBytes()
 }
@@ -297,7 +309,7 @@ func buildDeleteObjectVersionArgs(bucket, key, versionID string) []byte {
 	return b.FinishedBytes()
 }
 
-func buildListObjectsArgs(bucket, prefix, marker string, maxKeys int32) []byte {
+func buildListObjectsArgs(bucket, prefix, marker string, maxKeys int32, versioningState byte) []byte {
 	b := flatbuffers.NewBuilder(64)
 	bk := b.CreateString(bucket)
 	pf := b.CreateString(prefix)
@@ -311,6 +323,9 @@ func buildListObjectsArgs(bucket, prefix, marker string, maxKeys int32) []byte {
 	raftpb.ListObjectsArgsAddMaxKeys(b, maxKeys)
 	if mk != 0 {
 		raftpb.ListObjectsArgsAddMarker(b, mk)
+	}
+	if versioningState != versioningStateUnknown {
+		raftpb.ListObjectsArgsAddVersioningState(b, versioningState)
 	}
 	b.Finish(raftpb.ListObjectsArgsEnd(b))
 	return b.FinishedBytes()
@@ -328,13 +343,16 @@ func buildListObjectVersionsArgs(bucket, prefix string, maxKeys int32) []byte {
 	return b.FinishedBytes()
 }
 
-func buildWalkObjectsArgs(bucket, prefix string) []byte {
+func buildWalkObjectsArgs(bucket, prefix string, versioningState byte) []byte {
 	b := flatbuffers.NewBuilder(64)
 	bk := b.CreateString(bucket)
 	pf := b.CreateString(prefix)
 	raftpb.WalkObjectsArgsStart(b)
 	raftpb.WalkObjectsArgsAddBucket(b, bk)
 	raftpb.WalkObjectsArgsAddPrefix(b, pf)
+	if versioningState != versioningStateUnknown {
+		raftpb.WalkObjectsArgsAddVersioningState(b, versioningState)
+	}
 	b.Finish(raftpb.WalkObjectsArgsEnd(b))
 	return b.FinishedBytes()
 }

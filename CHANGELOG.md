@@ -1,6 +1,19 @@
 # Changelog
 
-## [0.0.611.0] - 2026-06-17
+## [0.0.612.0] - 2026-06-17
+
+### Fixed
+- **Versioned reads are now per-version-authoritative in multi-group / multi-node clusters (foundation
+  slice S2b PR-A).** S2a (v0.0.611.0) made `HEAD`/`GET`/`GET ?versionId` derive from per-version metadata,
+  but the versioning gate read the local shard-group store while bucket versioning lives only on the
+  control-plane (meta-raft) backend — so for buckets not on the meta group, or any forwarded read, the
+  per-version path silently fell back to the legacy (stale) read. The bucket-versioning decision is now
+  resolved at the server edge (mirroring object PUT) and carried into the cluster via request context and
+  a `versioning_state` field on the read/list forward messages; the coordinator only reads the stamped
+  decision and never touches the control-plane backend on the data path. `GetObjectVersion`/
+  `HeadObjectVersion` gained a context parameter so the decision reaches the per-version gate, and a copy
+  whose source is a versioned object now resolves the source bucket's versioning decision (not the
+  destination's). Non-versioned, internal, and single-node paths are unchanged.
 
 ### Fixed
 - **Versioned hard-delete consistency: `HEAD`/`GET` are now per-version-authoritative (foundation slice

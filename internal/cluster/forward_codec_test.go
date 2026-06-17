@@ -196,7 +196,7 @@ func TestForwardObjectMeta_CarriesTags(t *testing.T) {
 }
 
 func TestBuildHeadObjectVersionArgs_Roundtrip(t *testing.T) {
-	bytes := buildHeadObjectVersionArgs("bk", "k", "vid-1")
+	bytes := buildHeadObjectVersionArgs("bk", "k", "vid-1", versioningStateUnknown)
 	args := raftpb.GetRootAsHeadObjectVersionArgs(bytes, 0)
 	require.Equal(t, "bk", string(args.Bucket()))
 	require.Equal(t, "k", string(args.Key()))

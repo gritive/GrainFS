@@ -45,11 +45,11 @@ func TestChunkedSegmentStore_RoutesAndReads(t *testing.T) {
 	t.Run("GetObjectVersion_ChunkedRoutesToSegmentStore", func(t *testing.T) {
 		require.NotEmpty(t, obj.VersionID)
 
-		versionHead, err := b.HeadObjectVersion(bucket, key, obj.VersionID)
+		versionHead, err := b.HeadObjectVersion(context.Background(), bucket, key, obj.VersionID)
 		require.NoError(t, err)
 		require.NotEmpty(t, versionHead.Segments)
 
-		rc, gotObj, err := b.GetObjectVersion(bucket, key, obj.VersionID)
+		rc, gotObj, err := b.GetObjectVersion(context.Background(), bucket, key, obj.VersionID)
 		require.NoError(t, err)
 		require.NotNil(t, gotObj)
 		defer rc.Close()

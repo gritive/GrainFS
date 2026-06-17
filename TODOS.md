@@ -20,11 +20,24 @@
     consistency for versioned objects. Known transitional limits (documented in the S2a spec): per-read
     O(#versions) enumeration cost (benchmark gate before S4); genesis-1+0 split-placement partial-union
     stale-latest (removed by S5); HEAD-vs-LIST divergence for hard-deleted-latest until S2b.
-  - **S2b — ListObjects switch to per-version** (group-by-key max-live-vid; the key/vid split must use
-    the decoded `meta.Key` since keys contain `/`). **MUST be a true per-version derive, NOT a
-    latest-only-blob consumer** — the latest-only blob is not maintained on hard-delete-of-latest, so
-    legacy LIST is stale for that case; S2b closes the S2a→S2b HEAD-vs-LIST window. Also: per-version
-    orphan reconciliation (scrubber removes blobs whose FSM record is gone). ListObjectVersions stays
+  - **S2b split into PR-A + PR-B** (plan gate: the cluster-gate fix is a cross-cutting prerequisite).
+    - **S2b PR-A — cluster-wide versioning-context propagation — DONE (this PR).** Stamps the bucket-
+      versioning decision at the SERVER edge (mirror PUT; coordinator must NOT read versioning on the
+      data path — `TestControlDataPlaneBoundary...` invariant) for all read/list handlers (GET/HEAD/
+      GET?vid/HEAD?vid/LIST), adds `ctx` to `storage.VersionedGetter`/`VersionedHeader`, carries a
+      `versioning_state` tri-state across the 6 read/list forward args. **Fixes a latent S2a (v0.0.611.0)
+      bug: versioned HEAD/GET were inactive (legacy stale fallback) in multi-group/multi-node clusters**
+      because the gate read the wrong (local group) store; now Epic A read consistency is active in
+      clusters. Copy-source reads now use the SOURCE bucket's decision. (Note: `applyCopyObjectTags`'s
+      source `GetObjectTags` is a separate non-versioning-gated path — out of scope, flagged.)
+    - **S2b PR-B — ListObjects per-version derive (NEXT).** `ScanQuorumMetaVersionsBucket` walker
+      (robust `WalkDir`-all-files + group-by-decoded-`cmd.Key`, since keys contain `/`; O(total versions))
+      + `ScanQuorumMetaVersions` RPC + `listObjectsPerVersion` (all-groups fan-out, max-vid, marker-exclude)
+      + branch the three object_list.go methods on versioning-Enabled, using `objectFromCmd`. **Do NOT
+      touch `scatterGatherList`/`ScanQuorumMetaBucket`** (`ScanObjectMetaEntries` + 3 legacy consumers stay
+      latest-only). Closes the S2a→S2b HEAD-vs-LIST window. Benchmark before S4 (O(total versions) per LIST).
+      Also: per-version orphan reconciliation (scrubber removes blobs whose FSM record is gone — separate
+      slice). ListObjectVersions stays
     FSM-backed (deferrable to S4).
   - **S3 — migrate existing data** (legacy latest-only blob + FSM per-version records → per-version blobs).
   - **S4 — cutover: per-version sole authority; remove FSM object-meta path** (`CmdPutObjectMeta`/`apply*`/

@@ -39,6 +39,15 @@ type CopyObjectRequest struct {
 	ACL               *uint8
 	TaggingDirective  TaggingDirective
 	Tags              []Tag
+	// SourceVersioningCtx carries the SOURCE bucket's authoritative
+	// versioning decision (stamped at the S3 edge). The destination write
+	// rides the ctx passed to CopyObject (stamped for the destination), but the
+	// SOURCE per-version read must be gated by the SOURCE bucket — these differ
+	// when copying a ?versionId source into a non-versioned destination. When
+	// nil the source read falls back to the call ctx. Storage treats it as an
+	// opaque carrier (the edge resolves the decision; storage never reads
+	// versioning itself across the control/data-plane boundary).
+	SourceVersioningCtx context.Context
 }
 
 type CopyObjectResult struct {
@@ -72,7 +81,16 @@ func (o *Operations) copyObject(ctx context.Context, req CopyObjectRequest) (*Co
 	req = normalizeCopyObjectRequest(req)
 	plan := o.planForCall()
 
-	srcObj, err := o.headCopySource(ctx, plan, req.Source)
+	// The SOURCE per-version read is gated by the SOURCE bucket's versioning
+	// decision, which the S3 edge stamps onto req.SourceVersioningCtx. The
+	// destination write keeps ctx (stamped for the destination). When the edge
+	// did not supply a source ctx (in-process callers/tests), fall back to ctx.
+	srcCtx := req.SourceVersioningCtx
+	if srcCtx == nil {
+		srcCtx = ctx
+	}
+
+	srcObj, err := o.headCopySource(srcCtx, plan, req.Source)
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +158,7 @@ func (o *Operations) copyObject(ctx context.Context, req CopyObjectRequest) (*Co
 		return result, nil
 	}
 
-	rc, _, err := o.openCopySource(ctx, plan, req.Source)
+	rc, _, err := o.openCopySource(srcCtx, plan, req.Source)
 	if err != nil {
 		return nil, err
 	}
@@ -246,7 +264,7 @@ func (o *Operations) headCopySource(ctx context.Context, plan operationsPlan, re
 		if plan.versionedHeader == nil {
 			return nil, UnsupportedOperationError{Op: "HeadObjectVersion", Reason: UnsupportedReasonNoAdapter}
 		}
-		return plan.versionedHeader.HeadObjectVersion(ref.Bucket, ref.Key, ref.VersionID)
+		return plan.versionedHeader.HeadObjectVersion(ctx, ref.Bucket, ref.Key, ref.VersionID)
 	}
 	return o.backend.HeadObject(ctx, ref.Bucket, ref.Key)
 }
@@ -256,7 +274,7 @@ func (o *Operations) openCopySource(ctx context.Context, plan operationsPlan, re
 		if plan.versionedGetter == nil {
 			return nil, nil, UnsupportedOperationError{Op: "GetObjectVersion", Reason: UnsupportedReasonNoAdapter}
 		}
-		return plan.versionedGetter.GetObjectVersion(ref.Bucket, ref.Key, ref.VersionID)
+		return plan.versionedGetter.GetObjectVersion(ctx, ref.Bucket, ref.Key, ref.VersionID)
 	}
 	return o.backend.GetObject(ctx, ref.Bucket, ref.Key)
 }

@@ -18,12 +18,12 @@ func TestOperationsVersioningDelegatesToAdapters(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "Enabled", state)
 
-	rc, obj, err := ops.GetObjectVersion("b", "k", "v1")
+	rc, obj, err := ops.GetObjectVersion(context.Background(), "b", "k", "v1")
 	require.NoError(t, err)
 	require.NoError(t, rc.Close())
 	require.Equal(t, "v1", obj.VersionID)
 
-	head, err := ops.HeadObjectVersion("b", "k", "v1")
+	head, err := ops.HeadObjectVersion(context.Background(), "b", "k", "v1")
 	require.NoError(t, err)
 	require.Equal(t, "v1", head.VersionID)
 
@@ -67,10 +67,10 @@ func TestOperationsVersioningUnsupportedWithoutAdapters(t *testing.T) {
 	err = ops.SetBucketVersioning("b", "Enabled")
 	requireUnsupportedOp(t, err, "SetBucketVersioning", UnsupportedReasonNoAdapter)
 
-	_, _, err = ops.GetObjectVersion("b", "k", "v1")
+	_, _, err = ops.GetObjectVersion(context.Background(), "b", "k", "v1")
 	requireUnsupportedOp(t, err, "GetObjectVersion", UnsupportedReasonNoAdapter)
 
-	_, err = ops.HeadObjectVersion("b", "k", "v1")
+	_, err = ops.HeadObjectVersion(context.Background(), "b", "k", "v1")
 	requireUnsupportedOp(t, err, "HeadObjectVersion", UnsupportedReasonNoAdapter)
 
 	_, err = ops.ListObjectVersions("b", "", 1000)
@@ -104,12 +104,12 @@ func (b *versioningBackend) GetBucketVersioning(bucket string) (string, error) {
 	return "Enabled", nil
 }
 
-func (b *versioningBackend) GetObjectVersion(bucket, key, versionID string) (io.ReadCloser, *Object, error) {
+func (b *versioningBackend) GetObjectVersion(ctx context.Context, bucket, key, versionID string) (io.ReadCloser, *Object, error) {
 	b.calls = append(b.calls, "getversion:"+bucket+"/"+key+":"+versionID)
 	return io.NopCloser(strings.NewReader("")), &Object{Key: key, VersionID: versionID}, nil
 }
 
-func (b *versioningBackend) HeadObjectVersion(bucket, key, versionID string) (*Object, error) {
+func (b *versioningBackend) HeadObjectVersion(ctx context.Context, bucket, key, versionID string) (*Object, error) {
 	b.calls = append(b.calls, "headversion:"+bucket+"/"+key+":"+versionID)
 	return &Object{Key: key, VersionID: versionID}, nil
 }

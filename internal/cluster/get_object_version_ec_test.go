@@ -26,7 +26,7 @@ func TestGetObjectVersion_ReconstructsEC(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, obj.VersionID, "EC PutObject must assign a versionID")
 
-	rc, got, err := backend.GetObjectVersion("bucket", "key", obj.VersionID)
+	rc, got, err := backend.GetObjectVersion(context.Background(), "bucket", "key", obj.VersionID)
 	require.NoError(t, err, "GetObjectVersion must reconstruct the EC-stored version, not fail on a missing plain file")
 	defer rc.Close()
 	body, err := io.ReadAll(rc)

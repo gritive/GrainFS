@@ -856,7 +856,7 @@ func (c *ClusterCoordinator) ListAllObjects() ([]storage.SnapshotObject, error) 
 				// snapshot must not fail just because one blob is currently
 				// unreadable (e.g. mid-write, EC-stored without a plain-file
 				// fallback) — fall back to the version-listing fields.
-				if rc, obj, err := c.GetObjectVersion(bucket, version.Key, version.VersionID); err == nil {
+				if rc, obj, err := c.GetObjectVersion(context.Background(), bucket, version.Key, version.VersionID); err == nil {
 					_ = rc.Close()
 					snap.ETag = obj.ETag
 					snap.Size = obj.Size
@@ -990,6 +990,13 @@ func bucketVersioningFromContext(ctx context.Context) (enabled bool, resolved bo
 	return v, ok
 }
 
+// BucketVersioningFromContext is the exported accessor for the stamped
+// versioning decision. Used by the server edge (and tests) to inspect whether
+// the authoritative versioning flag was threaded into ctx.
+func BucketVersioningFromContext(ctx context.Context) (enabled bool, resolved bool) {
+	return bucketVersioningFromContext(ctx)
+}
+
 func topologyForwardWriteError(group ShardGroupEntry, err error) error {
 	if err == nil || !errors.Is(err, ErrNoReachablePeer) || len(group.PeerIDs) == 0 {
 		return err
@@ -1073,7 +1080,7 @@ func (c *ClusterCoordinator) GetObject(ctx context.Context, bucket, key string) 
 			rc, obj = r, o
 			return nil
 		}
-		args := buildGetObjectArgs(bucket, key)
+		args := buildGetObjectArgs(bucket, key, versioningStateFromContext(ctx))
 		r, o, e := c.forwardRuntime().readObject(ctx, target, raftpb.ForwardOpGetObject, args)
 		if e != nil {
 			return e
@@ -1085,9 +1092,8 @@ func (c *ClusterCoordinator) GetObject(ctx context.Context, bucket, key string) 
 }
 
 func (c *ClusterCoordinator) GetObjectVersion(
-	bucket, key, versionID string,
+	ctx context.Context, bucket, key, versionID string,
 ) (io.ReadCloser, *storage.Object, error) {
-	ctx := context.Background()
 	// S4-4c: index-free (see GetObject). Local serve only when authoritative;
 	// otherwise forward to the placement-group leader.
 	// S7-4c: a specific versionID lives in exactly one generation; probeRead
@@ -1101,14 +1107,14 @@ func (c *ClusterCoordinator) GetObjectVersion(
 		if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
 			return err
 		} else if gb != nil {
-			r, o, e := gb.GetObjectVersion(bucket, key, versionID)
+			r, o, e := gb.getObjectVersionCtx(ctx, bucket, key, versionID)
 			if e != nil {
 				return e
 			}
 			rc, obj = r, o
 			return nil
 		}
-		args := buildGetObjectVersionArgs(bucket, key, versionID)
+		args := buildGetObjectVersionArgs(bucket, key, versionID, versioningStateFromContext(ctx))
 		r, o, e := c.forwardRuntime().readObject(ctx, target, raftpb.ForwardOpGetObjectVersion, args)
 		if e != nil {
 			return e
@@ -1137,7 +1143,7 @@ func (c *ClusterCoordinator) HeadObject(ctx context.Context, bucket, key string)
 			obj = o
 			return nil
 		}
-		args := buildHeadObjectArgs(bucket, key)
+		args := buildHeadObjectArgs(bucket, key, versioningStateFromContext(ctx))
 		o, e := c.forwardRuntime().headObject(ctx, target, raftpb.ForwardOpHeadObject, args, bucket, key)
 		if e != nil {
 			return e
@@ -1148,8 +1154,7 @@ func (c *ClusterCoordinator) HeadObject(ctx context.Context, bucket, key string)
 	return obj, err
 }
 
-func (c *ClusterCoordinator) HeadObjectVersion(bucket, key, versionID string) (*storage.Object, error) {
-	ctx := context.Background()
+func (c *ClusterCoordinator) HeadObjectVersion(ctx context.Context, bucket, key, versionID string) (*storage.Object, error) {
 	// S7-4c: probe generations newest-first for the specific version (one
 	// attempt at a single generation).
 	var obj *storage.Object
@@ -1157,14 +1162,14 @@ func (c *ClusterCoordinator) HeadObjectVersion(bucket, key, versionID string) (*
 		if gb, err := c.runtimeState().localExec.ResolveRead(ctx, target); err != nil {
 			return err
 		} else if gb != nil {
-			o, e := gb.HeadObjectVersion(bucket, key, versionID)
+			o, e := gb.headObjectVersionCtx(ctx, bucket, key, versionID)
 			if e != nil {
 				return e
 			}
 			obj = o
 			return nil
 		}
-		args := buildHeadObjectVersionArgs(bucket, key, versionID)
+		args := buildHeadObjectVersionArgs(bucket, key, versionID, versioningStateFromContext(ctx))
 		o, e := c.forwardRuntime().headObject(ctx, target, raftpb.ForwardOpHeadObjectVersion, args, bucket, key)
 		if e != nil {
 			return e

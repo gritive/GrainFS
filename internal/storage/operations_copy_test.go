@@ -453,7 +453,7 @@ func (b *semanticCopyBackend) GetObject(_ context.Context, bucket, key string) (
 	return io.NopCloser(strings.NewReader(b.body)), cloneObject(b.head), nil
 }
 
-func (b *semanticCopyBackend) HeadObjectVersion(bucket, key, versionID string) (*Object, error) {
+func (b *semanticCopyBackend) HeadObjectVersion(ctx context.Context, bucket, key, versionID string) (*Object, error) {
 	b.calls = append(b.calls, "headversion:"+bucket+"/"+key+":"+versionID)
 	if b.headVersion != nil {
 		return cloneObject(b.headVersion), nil
@@ -466,7 +466,7 @@ func (b *semanticCopyBackend) HeadObjectVersion(bucket, key, versionID string) (
 	return obj, nil
 }
 
-func (b *semanticCopyBackend) GetObjectVersion(bucket, key, versionID string) (io.ReadCloser, *Object, error) {
+func (b *semanticCopyBackend) GetObjectVersion(ctx context.Context, bucket, key, versionID string) (io.ReadCloser, *Object, error) {
 	b.calls = append(b.calls, "getversion:"+bucket+"/"+key+":"+versionID)
 	if b.headVersion != nil {
 		return io.NopCloser(strings.NewReader(b.body)), cloneObject(b.headVersion), nil

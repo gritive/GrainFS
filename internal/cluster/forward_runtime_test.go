@@ -30,7 +30,7 @@ func TestForwardRuntimeReadObjectUsesReadStream(t *testing.T) {
 		context.Background(),
 		RouteTarget{GroupID: "g1", Peers: []string{"peer-a"}},
 		raftpb.ForwardOpGetObject,
-		buildGetObjectArgs("bk", "k"),
+		buildGetObjectArgs("bk", "k", versioningStateUnknown),
 	)
 	require.NoError(t, err)
 	defer rc.Close()
@@ -96,7 +96,7 @@ func TestForwardRuntimeHeadObjectDecodesFrameReply(t *testing.T) {
 		context.Background(),
 		RouteTarget{GroupID: "g1", Peers: []string{"peer-a"}},
 		raftpb.ForwardOpHeadObject,
-		buildHeadObjectArgs("bk", "k"),
+		buildHeadObjectArgs("bk", "k", versioningStateUnknown),
 		"bk",
 		"k",
 	)

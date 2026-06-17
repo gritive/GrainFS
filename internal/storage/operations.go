@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"sync/atomic"
@@ -66,11 +67,11 @@ type BucketVersioner interface {
 }
 
 type VersionedGetter interface {
-	GetObjectVersion(bucket, key, versionID string) (io.ReadCloser, *Object, error)
+	GetObjectVersion(ctx context.Context, bucket, key, versionID string) (io.ReadCloser, *Object, error)
 }
 
 type VersionedHeader interface {
-	HeadObjectVersion(bucket, key, versionID string) (*Object, error)
+	HeadObjectVersion(ctx context.Context, bucket, key, versionID string) (*Object, error)
 }
 
 type ObjectVersionLister interface {

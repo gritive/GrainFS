@@ -302,7 +302,7 @@ func (s *ForwardSender) ResolveLeaderPeers(ctx context.Context, peers []string, 
 	if cached := s.cachedLeader(groupID); cached != "" {
 		return preferForwardPeer(peers, cached)
 	}
-	payload := encodeForwardPayload(groupID, raftpb.ForwardOpHeadObject, buildHeadObjectArgs(bucket, key))
+	payload := encodeForwardPayload(groupID, raftpb.ForwardOpHeadObject, buildHeadObjectArgs(bucket, key, versioningStateUnknown))
 	for _, peer := range peers {
 		if err := ctx.Err(); err != nil {
 			return peers

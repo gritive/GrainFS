@@ -1770,7 +1770,7 @@ func TestClusterCoordinator_VersionedOps_LocalLeader(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEqual(t, v1.VersionID, v2.VersionID)
 
-	rc, gotV1, err := c.GetObjectVersion("bk", "k", v1.VersionID)
+	rc, gotV1, err := c.GetObjectVersion(context.Background(), "bk", "k", v1.VersionID)
 	require.NoError(t, err)
 	body, err := io.ReadAll(rc)
 	rc.Close()
@@ -1808,7 +1808,7 @@ func TestClusterCoordinator_GetObjectVersion_Forward(t *testing.T) {
 		"bk", []byte("v1"),
 	)
 
-	rc, obj, err := c.GetObjectVersion("bk", "k", "vid-1")
+	rc, obj, err := c.GetObjectVersion(context.Background(), "bk", "k", "vid-1")
 	require.NoError(t, err)
 	body, readErr := io.ReadAll(rc)
 	rc.Close()
@@ -1830,7 +1830,7 @@ func TestClusterCoordinator_HeadObjectVersion_Forward(t *testing.T) {
 		"bk",
 	)
 
-	obj, err := c.HeadObjectVersion("bk", "k", "vid-1")
+	obj, err := c.HeadObjectVersion(context.Background(), "bk", "k", "vid-1")
 	require.NoError(t, err)
 	require.Equal(t, "vid-1", obj.VersionID)
 	require.Equal(t, "etag-v1", obj.ETag)
@@ -1854,7 +1854,7 @@ func TestClusterCoordinator_GetObjectVersion_ForwardUsesReadStream(t *testing.T)
 	d.readBodyBy[raftpb.ForwardOpGetObjectVersion] = body
 	c.forward.WithReadStreamDialer(d.readStream)
 
-	rc, obj, err := c.GetObjectVersion("bk", "k", "vid-1")
+	rc, obj, err := c.GetObjectVersion(context.Background(), "bk", "k", "vid-1")
 	require.NoError(t, err)
 	got, readErr := io.ReadAll(rc)
 	rc.Close()

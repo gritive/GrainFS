@@ -330,7 +330,7 @@ func TestForwardSender_SendReadStreamReadinessRetryAddsDeadlineForBackgroundCall
 	}).WithReadStreamDialer(readDialer).WithReadinessRetry(500 * time.Millisecond)
 
 	reply, rc, err := s.SendReadStream(context.Background(), []string{"a", "b"}, "g",
-		raftpb.ForwardOpGetObject, buildGetObjectArgs("b", "k"))
+		raftpb.ForwardOpGetObject, buildGetObjectArgs("b", "k", versioningStateUnknown))
 	require.NoError(t, err)
 	require.NotEmpty(t, reply)
 	require.NoError(t, rc.Close())
@@ -701,7 +701,7 @@ func TestForwardSender_SendReadStreamUsesSeparateSlotPool(t *testing.T) {
 	<-started
 
 	reply, rc, err := s.SendReadStream(context.Background(), []string{"peer-a"}, "g",
-		raftpb.ForwardOpGetObject, buildGetObjectArgs("b", "k"))
+		raftpb.ForwardOpGetObject, buildGetObjectArgs("b", "k", versioningStateUnknown))
 	require.NoError(t, err)
 	require.NotNil(t, reply)
 	require.NoError(t, rc.Close())
@@ -730,7 +730,7 @@ func TestForwardSender_SendReadStreamStaleLeaderHintTriesRemainingPeer(t *testin
 	}).WithReadStreamDialer(readDialer)
 
 	reply, rc, err := s.SendReadStream(context.Background(), []string{"peer-a", "peer-b"}, "g",
-		raftpb.ForwardOpGetObject, buildGetObjectArgs("b", "k"))
+		raftpb.ForwardOpGetObject, buildGetObjectArgs("b", "k", versioningStateUnknown))
 
 	require.NoError(t, err)
 	require.NotNil(t, reply)
@@ -754,7 +754,7 @@ func TestForwardSender_SendReadStreamRetriesNotLeaderWithinCallerDeadline(t *tes
 	defer cancel()
 
 	reply, rc, err := s.SendReadStream(ctx, []string{"peer-a", "peer-b"}, "g",
-		raftpb.ForwardOpGetObject, buildGetObjectArgs("b", "k"))
+		raftpb.ForwardOpGetObject, buildGetObjectArgs("b", "k", versioningStateUnknown))
 
 	require.NoError(t, err)
 	require.NotNil(t, reply)

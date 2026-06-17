@@ -82,7 +82,7 @@ var _ = Describe("Object versioning integration", func() {
 		Expect(versions[0].IsLatest).To(BeTrue())
 		Expect(versions[1].IsDeleteMarker).To(BeFalse())
 
-		rc, got, err := b.GetObjectVersion(bucket, "k", versions[1].VersionID)
+		rc, got, err := b.GetObjectVersion(context.Background(), bucket, "k", versions[1].VersionID)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(readAll(rc)).To(Equal("v1"))
 		Expect(got.VersionID).To(Equal(versions[1].VersionID))
@@ -92,7 +92,7 @@ var _ = Describe("Object versioning integration", func() {
 		_, err := b.PutObject(ctx, bucket, "k", strings.NewReader("v1"), "text/plain")
 		Expect(err).NotTo(HaveOccurred())
 
-		_, _, err = b.GetObjectVersion(bucket, "k", "01ABCDEFGHIJKLMNOPQRSTUVWX")
+		_, _, err = b.GetObjectVersion(context.Background(), bucket, "k", "01ABCDEFGHIJKLMNOPQRSTUVWX")
 		Expect(err).To(MatchError(storage.ErrObjectNotFound))
 	})
 
@@ -110,7 +110,7 @@ var _ = Describe("Object versioning integration", func() {
 		Expect(versions[0].VersionID).To(Equal(o1.VersionID))
 		Expect(versions[0].IsLatest).To(BeTrue())
 
-		_, err = b.HeadObjectVersion(bucket, "k", o2.VersionID)
+		_, err = b.HeadObjectVersion(context.Background(), bucket, "k", o2.VersionID)
 		Expect(err).To(MatchError(storage.ErrObjectNotFound))
 	})
 
@@ -154,7 +154,7 @@ var _ = Describe("Object versioning integration", func() {
 		}
 		Expect(b.SetObjectTags(tagBucket, "k", obj.VersionID, tags)).To(Succeed())
 
-		got, err := b.HeadObjectVersion(tagBucket, "k", obj.VersionID)
+		got, err := b.HeadObjectVersion(context.Background(), tagBucket, "k", obj.VersionID)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(got).NotTo(BeNil())
 		Expect(got.Tags).To(Equal(tags))
