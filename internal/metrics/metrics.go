@@ -489,6 +489,21 @@ var (
 		Help: "Total delete failures during orphan segment sweep (excludes ENOENT).",
 	})
 
+	OrphanQuorumMetaVersionsFoundTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_scrub_orphan_quorum_meta_versions_found_total",
+		Help: "Total dangling per-version quorum-meta blobs newly tombstoned during scrubbing.",
+	})
+
+	OrphanQuorumMetaVersionsDeletedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_scrub_orphan_quorum_meta_versions_deleted_total",
+		Help: "Total dangling per-version quorum-meta blobs deleted by the scrubber.",
+	})
+
+	OrphanQuorumMetaVersionSweepCappedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_scrub_orphan_quorum_meta_version_sweep_capped_total",
+		Help: "Total per-version blobs deferred because the per-cycle cap was reached.",
+	})
+
 	// Phase 16 — Self-healing metrics.
 
 	HealEventsTotal = promauto.NewCounterVec(prometheus.CounterOpts{

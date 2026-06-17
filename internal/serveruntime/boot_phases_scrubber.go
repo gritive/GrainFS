@@ -182,6 +182,10 @@ func bootRecoveryAndScrubber(ctx context.Context, state *bootState) error {
 			gb := dg.Backend()
 			return gb != nil && gb.DistributedBackend != nil
 		})
+		// Also gates the per-version orphan-blob sweep
+		// (orphan_quorum_meta_version_walker.go): WalkOrphanQuorumMetaVersions calls
+		// orphanShardSweepAllowed() and reuses the same hosted-group/owning-group
+		// sources wired above — no separate wiring needed.
 		state.distBackend.SetOrphanShardSweepGate(func() bool { return true })
 		// Orphan-SEGMENT sweep: resolve each bucket to its owning group's backend so
 		// the per-bucket walk/scan/delete runs on that group's b.root subtree. nil
