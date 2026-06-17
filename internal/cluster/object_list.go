@@ -35,8 +35,18 @@ func objectFromCmd(cmd PutObjectMetaCmd) *storage.Object {
 // buckets, else the legacy latest-only scatter-gather. Both return sorted-by-key,
 // tombstone-excluded []PutObjectMetaCmd so the three LIST methods are identical
 // downstream. Internal buckets and non-versioned/suspended buckets keep legacy.
+//
+// The derive is gated on the STAMPED ctx flag ONLY (bucketVersioningFromContext),
+// not bucketVersioningEnabled's local-read fallback. The S3 LIST edge stamps the
+// ctx (PR-A: list_objects_runtime.go) and the forward receiver re-stamps it, so
+// the S3 path's ctx is always resolved → derive activates. Internal/non-S3 LIST
+// consumers (DeleteBucket empty-check, vfs/nfs4/p9/metrics) call with an
+// UNSTAMPED context.Background() → not resolved → legacy scatterGatherList (their
+// existing quorum-acked latest-only view). This keeps the derive scoped to the S3
+// LIST surface and avoids a DeleteBucket data-loss path where a best-effort
+// per-version write failure could make the derive omit a live object.
 func (b *DistributedBackend) listLatestEntries(ctx context.Context, bucket, prefix string) ([]PutObjectMetaCmd, error) {
-	if !storage.IsInternalBucket(bucket) && b.bucketVersioningEnabled(ctx, bucket) {
+	if enabled, resolved := bucketVersioningFromContext(ctx); !storage.IsInternalBucket(bucket) && resolved && enabled {
 		return b.listObjectsPerVersion(ctx, bucket, prefix)
 	}
 	return b.scatterGatherList(ctx, bucket, prefix)

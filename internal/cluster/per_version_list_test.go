@@ -94,7 +94,9 @@ func listKeys(t *testing.T, b *DistributedBackend, ctx context.Context, bkt, pre
 // the deleted-latest object stays visible. Then delete v1 too → key absent.
 func TestListObjects_PerVersionDerive_DivergenceRepro(t *testing.T) {
 	b := newSingleNode1Plus0ChunkCapable(t)
-	ctx := context.Background()
+	// The derive is gated on the STAMPED ctx (mirrors the real S3 LIST edge, which
+	// stamps via PR-A). Unstamped ctx routes legacy by design.
+	ctx := ContextWithBucketVersioning(context.Background(), true)
 	const bkt, key = "vbkt", "obj"
 	require.NoError(t, b.CreateBucket(ctx, bkt))
 	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
@@ -130,7 +132,7 @@ func TestListObjects_PerVersionDerive_DivergenceRepro(t *testing.T) {
 // key from LIST.
 func TestListObjects_PerVersionDerive_SoftDeleteExcluded(t *testing.T) {
 	b := newSingleNode1Plus0ChunkCapable(t)
-	ctx := context.Background()
+	ctx := ContextWithBucketVersioning(context.Background(), true) // stamped → derive (real S3 edge)
 	const bkt, key = "vbkt", "obj"
 	require.NoError(t, b.CreateBucket(ctx, bkt))
 	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
@@ -146,7 +148,7 @@ func TestListObjects_PerVersionDerive_SoftDeleteExcluded(t *testing.T) {
 // pagination is preserved (byte-compatible with scatterGatherList's contract).
 func TestListObjects_PerVersionDerive_DedupAndPagination(t *testing.T) {
 	b := newSingleNode1Plus0ChunkCapable(t)
-	ctx := context.Background()
+	ctx := ContextWithBucketVersioning(context.Background(), true) // stamped → derive (real S3 edge)
 	const bkt = "vbkt"
 	require.NoError(t, b.CreateBucket(ctx, bkt))
 	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
@@ -193,6 +195,13 @@ func TestListObjects_LegacyFallbackNonVersioned(t *testing.T) {
 // (e.g. a suspended decision propagated from the edge) takes the legacy
 // scatterGatherList path, so a hard-deleted-latest stays visible via the stale
 // latest-only blob — proving the branch reads the ctx flag, not just local state.
+//
+// It also pins the UNSTAMPED-versioning-enabled case: an internal/non-S3 LIST
+// consumer (DeleteBucket empty-check, vfs/nfs4/p9/metrics) calls with an
+// unstamped context.Background() even on an Enabled bucket. Because the derive is
+// gated on the STAMPED ctx ONLY (not the local-read fallback), the unstamped call
+// MUST route legacy too — otherwise a best-effort per-version write failure could
+// make the derive omit a live object on the DeleteBucket data-loss path.
 func TestListObjects_CtxFlagFalseForcesLegacy(t *testing.T) {
 	b := newSingleNode1Plus0ChunkCapable(t)
 	const bkt, key = "vbkt", "obj"
@@ -210,6 +219,12 @@ func TestListObjects_CtxFlagFalseForcesLegacy(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, objs, 1, "legacy path returns the stale latest-only entry")
 	require.Equal(t, vid2, objs[0].VersionID, "ctx-flag-false forces legacy → shows the hard-deleted latest (boundary pinned)")
+
+	// UNSTAMPED ctx on an Enabled bucket → legacy too (internal-consumer safety).
+	objs, err = b.ListObjects(context.Background(), bkt, "", 1000)
+	require.NoError(t, err)
+	require.Len(t, objs, 1, "unstamped path returns the stale latest-only entry (internal consumers stay legacy)")
+	require.Equal(t, vid2, objs[0].VersionID, "unstamped (not resolved) forces legacy even when bucket is Enabled (data-loss guard pinned)")
 }
 
 // TestListObjectsPerVersion_GenerationUnion proves the derive's all-groups
