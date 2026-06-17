@@ -105,18 +105,26 @@ func (b *DistributedBackend) readQuorumMeta(bucket, key string) (*storage.Object
 	return b.shardSvc.decodeQuorumMetaBlob(raw)
 }
 
-// quorumMetaBlobWins reports whether candidate (modA, verA) beats (modB, verB)
-// in the quorum-meta last-writer-wins comparison: higher ModTime wins; on an
-// equal ModTime (second granularity — see time.Now().Unix() writers) the
-// lexicographically greater VersionID wins. The VersionID tiebreak gives the
-// point-GET merge, the peer fan-out, and scatter-gather LIST a single
-// deterministic ordering so they agree on the winner of a same-second tie. It is
-// NOT a recency guarantee at second granularity — only deterministic agreement.
-func quorumMetaBlobWins(modA int64, verA string, modB int64, verB string) bool {
+// quorumMetaBlobWins reports whether candidate (modA, verA, seqA) beats
+// (modB, verB, seqB) in the quorum-meta last-writer-wins comparison. Priority
+// order: higher ModTime wins; on an equal ModTime (second granularity — see
+// time.Now().Unix() writers) the lexicographically greater VersionID wins; on
+// an equal ModTime AND VersionID the higher MetaSeq wins. The VersionID
+// tiebreak gives the point-GET merge, the peer fan-out, and scatter-gather LIST
+// a single deterministic ordering so they agree on the winner of a same-second
+// tie. The MetaSeq tiebreak is the lowest-priority discriminator: genuine
+// client writes always differ in ModTime/VersionID, so MetaSeq is only
+// consulted when a placement re-write (object relocation) preserves both — it
+// is behavior-neutral while every blob carries MetaSeq 0. None of these is a
+// recency guarantee at second granularity — only deterministic agreement.
+func quorumMetaBlobWins(modA int64, verA string, seqA uint64, modB int64, verB string, seqB uint64) bool {
 	if modA != modB {
 		return modA > modB
 	}
-	return verA > verB
+	if verA != verB {
+		return verA > verB
+	}
+	return seqA > seqB
 }
 
 // readQuorumMetaWinningRaw returns the raw quorum-meta blob that wins the LWW
@@ -182,7 +190,7 @@ func (b *DistributedBackend) pickQuorumMetaWinner(a, bRaw []byte) []byte {
 	case errB != nil:
 		return a
 	}
-	if quorumMetaBlobWins(cmdB.ModTime, cmdB.VersionID, cmdA.ModTime, cmdA.VersionID) {
+	if quorumMetaBlobWins(cmdB.ModTime, cmdB.VersionID, cmdB.MetaSeq, cmdA.ModTime, cmdA.VersionID, cmdA.MetaSeq) {
 		return bRaw
 	}
 	return a
@@ -220,6 +228,7 @@ func (b *DistributedBackend) fetchQuorumMetaFromPeers(bucket, key string) ([]byt
 		data      []byte
 		modTime   int64
 		versionID string
+		metaSeq   uint64
 	}
 	ch := make(chan peerResult, len(peers))
 	var wg sync.WaitGroup
@@ -241,12 +250,14 @@ func (b *DistributedBackend) fetchQuorumMetaFromPeers(bucket, key string) ([]byt
 			var (
 				modTime   int64
 				versionID string
+				metaSeq   uint64
 			)
 			if cmd, decErr := b.shardSvc.decodeQuorumMetaCmdBlob(data); decErr == nil {
 				modTime = cmd.ModTime
 				versionID = cmd.VersionID
+				metaSeq = cmd.MetaSeq
 			}
-			ch <- peerResult{data: data, modTime: modTime, versionID: versionID}
+			ch <- peerResult{data: data, modTime: modTime, versionID: versionID, metaSeq: metaSeq}
 		}()
 	}
 	go func() { wg.Wait(); close(ch) }()
@@ -257,7 +268,7 @@ func (b *DistributedBackend) fetchQuorumMetaFromPeers(bucket, key string) ([]byt
 	var best peerResult
 	hasBest := false
 	for r := range ch {
-		if !hasBest || quorumMetaBlobWins(r.modTime, r.versionID, best.modTime, best.versionID) {
+		if !hasBest || quorumMetaBlobWins(r.modTime, r.versionID, r.metaSeq, best.modTime, best.versionID, best.metaSeq) {
 			best = r
 			hasBest = true
 		}
@@ -914,7 +925,7 @@ func (b *DistributedBackend) scatterGatherList(ctx context.Context, bucket, pref
 	for range peerIDs {
 		r := <-ch
 		for _, e := range r.entries {
-			if cur, ok := lww[e.Key]; !ok || quorumMetaBlobWins(e.ModTime, e.VersionID, cur.ModTime, cur.VersionID) {
+			if cur, ok := lww[e.Key]; !ok || quorumMetaBlobWins(e.ModTime, e.VersionID, e.MetaSeq, cur.ModTime, cur.VersionID, cur.MetaSeq) {
 				lww[e.Key] = e
 			}
 		}

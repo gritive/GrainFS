@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.0.608.0] - 2026-06-17
+
+### Added
+- **Retroactive EC-redundancy upgrade: a background sweep relocates non-redundant
+  (1+0) objects into a redundant EC group after the cluster grows.** Objects written
+  while a cluster was genuinely single-node (genesis boot, no `--bootstrap-expect-nodes`)
+  land in a single-peer (1+0) group with no redundancy; once the cluster grows, a
+  single-node loss would lose them. The scrubber now detects such objects and
+  re-encodes them into a redundant wide EC group, preserving object identity
+  (key/version/ETag/size/content-type/user-metadata/tags/ACL **and LastModified**),
+  then lets the orphan-segment sweep reclaim the old shards. The relocation is
+  crash-safe (an interrupted re-write leaves reclaimable orphans and the object stays
+  readable via its old placement) and concurrency-safe (it preserves the original
+  ModTime, so a concurrent client write — carrying a newer ModTime — always wins the
+  quorum-meta last-writer-wins; a new internal `MetaSeq` tiebreak lets only the
+  identity-preserving re-write win the otherwise-exact tie). Latest-version-only; an
+  owner-kill e2e proves a relocated genesis object survives losing its original
+  single-owner node. New flags:
+  - `--ec-redundancy-upgrade` (default **on**; `=false` is the kill switch),
+  - `--ec-redundancy-upgrade-max` (default 8) — relocations per scrub cycle,
+  - `--ec-redundancy-upgrade-min-age` (default 5m) — minimum object age before
+    relocation, so the sweep never races an in-flight write.
+
+### Fixed
+- **`ScanObjects` reports each object's own EC profile on the FSM-resident scan
+  path.** The FSM `lat:` scan branch emitted the cluster's *current* EC config
+  instead of the object's recorded `ECData`/`ECParity`, so an object whose profile
+  differed from the current config (e.g. a versioned 1+0 object in a grown 4+2
+  cluster) was enumerated with the wrong shard count — mis-driving EC scrub and
+  hiding non-redundant objects from the new upgrade sweep. It now reports the
+  per-object profile, matching the quorum-meta scan branch.
+
 ## [0.0.607.0] - 2026-06-16
 
 ### Fixed

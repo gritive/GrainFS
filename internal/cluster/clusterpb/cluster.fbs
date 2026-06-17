@@ -138,6 +138,8 @@ table PutObjectMetaCmd {
   // Appended last for backward-compatible reading of old blobs (old decoder
   // returns acl=0 which is the correct private default).
   acl:uint8 = 0;
+  // Internal LWW tiebreak for placement re-writes; default 0 = original write.
+  meta_seq:uint64 = 0;
 }
 
 // SegmentMetaEntry carries the per-segment placement metadata for a chunked
@@ -269,6 +271,8 @@ table ObjectMeta {
   parts:[MultipartPartEntry];
   tags:[Tag];
   stripe_bytes:uint32 = 0;
+  // Internal LWW tiebreak for placement re-writes; default 0 = original write.
+  meta_seq:uint64 = 0;
 }
 
 // CoalescedShardRef references one coalesced blob produced by merging a

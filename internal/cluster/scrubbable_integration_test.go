@@ -65,6 +65,32 @@ var _ = Describe("Scrubbable integration", func() {
 			Expect(recs[0].ETag).To(Equal("etag-hello"))
 		})
 
+		It("reports a 1+0 object's own non-redundant EC profile (not the cluster config)", func() {
+			// Regression guard: a genesis single-node object is written 1+0; after the
+			// cluster grows to 2+1, ScanObjects must still emit ParityShards==0 so the
+			// EC-redundancy-upgrade sweep can detect it. Previously the FSM lat: branch
+			// reported the cluster config (2+1), silently hiding versioned 1+0 objects.
+			Expect(b.CreateBucket(context.Background(), "bkt")).To(Succeed())
+			meta, err := marshalObjectMeta(objectMeta{
+				Key: "single.txt", Size: 5, ContentType: "application/octet-stream",
+				ETag: "etag-single", LastModified: time.Now().Unix(), ECData: 1, ECParity: 0,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(db.Update(func(txn *badger.Txn) error {
+				if err := txn.Set(objectMetaKeyV("bkt", "single.txt", "01SINGLE"), meta); err != nil {
+					return err
+				}
+				return txn.Set(latestKey("bkt", "single.txt"), []byte("01SINGLE"))
+			})).To(Succeed())
+
+			ch, err := b.ScanObjects("bkt")
+			Expect(err).NotTo(HaveOccurred())
+			recs := scrubDrainObjectRecords(ch)
+			Expect(recs).To(HaveLen(1))
+			Expect(recs[0].DataShards).To(Equal(1))
+			Expect(recs[0].ParityShards).To(Equal(0))
+		})
+
 		It("preserves slash-containing keys while scanning", func() {
 			Expect(b.CreateBucket(context.Background(), "bkt")).To(Succeed())
 			writeScrubVersionedObjectMeta(b, db, "bkt", "folder/nested/file.bin", "01A", "etag-a", 100, nil)
@@ -369,6 +395,15 @@ var _ = Describe("Scrubbable integration", func() {
 
 func writeScrubVersionedObjectMeta(b *DistributedBackend, db *badger.DB, bucket, key, versionID, etag string, size int64, tags []storage.Tag) {
 	GinkgoHelper()
+	// Record a real 2+1 EC profile on the meta: ScanObjects now reports the
+	// object's OWN EC profile (meta.ECData/ECParity), not the cluster config, so a
+	// synthetic fixture must carry it to represent an EC object (matches the
+	// enableECForSpec(b, 2, 1) used across these specs). A delete-marker keeps no
+	// shards, so leave its EC profile zero.
+	var ecData, ecParity uint8 = 2, 1
+	if etag == deleteMarkerETag {
+		ecData, ecParity = 0, 0
+	}
 	meta, err := marshalObjectMeta(objectMeta{
 		Key:          key,
 		Size:         size,
@@ -376,6 +411,8 @@ func writeScrubVersionedObjectMeta(b *DistributedBackend, db *badger.DB, bucket,
 		ETag:         etag,
 		LastModified: time.Now().Unix(),
 		Tags:         tags,
+		ECData:       ecData,
+		ECParity:     ecParity,
 	})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(db.Update(func(txn *badger.Txn) error {

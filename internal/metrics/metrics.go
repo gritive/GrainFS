@@ -215,6 +215,20 @@ var (
 		Help: "Total plain objects skipped because max_migrations_per_cycle was reached.",
 	})
 
+	// ECRedundancyUpgradeRelocatedTotal counts non-redundant (1+0) EC objects
+	// relocated into a redundant placement group by the background sweep.
+	ECRedundancyUpgradeRelocatedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_ec_redundancy_upgrade_relocated_total",
+		Help: "Total non-redundant EC objects relocated into a redundant group by the background sweep.",
+	})
+
+	// ECRedundancyUpgradeFailedTotal counts relocate attempts that failed with a
+	// non-benign error (benign ErrRelocateSkipped is not counted).
+	ECRedundancyUpgradeFailedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_ec_redundancy_upgrade_failed_total",
+		Help: "Total EC redundancy-upgrade relocations that failed with a non-benign error.",
+	})
+
 	// ECScrubUnverifiedShardsTotal counts EC shards that were readable but
 	// could not be integrity-verified because they lack a CRC oracle.
 	ECScrubUnverifiedShardsTotal = promauto.NewCounterVec(prometheus.CounterOpts{

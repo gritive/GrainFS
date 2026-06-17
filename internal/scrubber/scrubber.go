@@ -207,6 +207,14 @@ func (s *BackgroundScrubber) hoistSegmentSources() (segByBucket map[string]map[s
 	return segByBucket, frozenByBucket, true
 }
 
+// RedundancyUpgrader is an optional interface a backend implements to relocate
+// non-redundant (1+0) EC objects — written while the cluster was single-node —
+// into a redundant placement group. The sweep runs at the end of each scrub
+// cycle when enabled, returning the count relocated.
+type RedundancyUpgrader interface {
+	RunRedundancyUpgradeSweep(ctx context.Context, maxPerCycle int, minAge time.Duration) (int, error)
+}
+
 // Migrator is an optional interface ECBackend can implement to enable plain→EC migration.
 // If the backend implements this, the scrubber will re-encode plain objects each cycle.
 type Migrator interface {
@@ -284,6 +292,14 @@ type BackgroundScrubber struct {
 	// without blocking each other.
 	mu           sync.RWMutex
 	lastStatuses map[string]ShardStatus // "bucket/key" → last observed status
+
+	// redundancyUpgradeEnabled gates the end-of-cycle EC redundancy-upgrade sweep
+	// (relocate 1+0 objects into a redundant group). Disabled by default; config
+	// wires it. redundancyUpgradeMaxPerCycle bounds relocations per cycle;
+	// redundancyUpgradeMinAge is the minimum object age before relocation.
+	redundancyUpgradeEnabled     bool
+	redundancyUpgradeMaxPerCycle int
+	redundancyUpgradeMinAge      time.Duration
 
 	// Replication-source registry. EC scrub keeps using the legacy runOnce
 	// path above; replication sources (volume blocks today, future internal
@@ -401,6 +417,17 @@ func (s *BackgroundScrubber) SetInterval(d time.Duration) {
 		}
 		s.resetCh <- d
 	}
+}
+
+// EnableRedundancyUpgrade turns on the end-of-cycle EC redundancy-upgrade sweep
+// and bounds relocations per cycle to maxPerCycle. minAge is the minimum object
+// age before the sweep relocates an object (avoids racing in-flight writes).
+// Must be called before Start. The sweep only runs when the backend implements
+// RedundancyUpgrader.
+func (s *BackgroundScrubber) EnableRedundancyUpgrade(maxPerCycle int, minAge time.Duration) {
+	s.redundancyUpgradeEnabled = true
+	s.redundancyUpgradeMaxPerCycle = maxPerCycle
+	s.redundancyUpgradeMinAge = minAge
 }
 
 // RegisterSource attaches a BlockSource/BlockVerifier pair for replication
@@ -727,6 +754,21 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 	// Optional: sweep orphan shard dirs left by migration crashes.
 	if walker, ok := s.backend.(OrphanWalkable); ok {
 		s.orphanSweep(walker, knownDirs)
+	}
+
+	// Optional: relocate non-redundant (1+0) EC objects into a redundant group.
+	// Runs only when enabled AND the backend implements RedundancyUpgrader.
+	// Fail-soft: a sweep error is recorded on the cycle span but does not abort.
+	if s.redundancyUpgradeEnabled {
+		if upgrader, ok := s.backend.(RedundancyUpgrader); ok {
+			n, err := upgrader.RunRedundancyUpgradeSweep(ctx, s.redundancyUpgradeMaxPerCycle, s.redundancyUpgradeMinAge)
+			if err != nil {
+				log.Warn().Err(err).Msg("scrub: redundancy-upgrade sweep failed")
+				cycleSpan.RecordError(err)
+			} else if n > 0 {
+				log.Info().Int("relocated", n).Msg("scrub: redundancy-upgrade sweep relocated objects")
+			}
+		}
 	}
 
 	s.stats.LastRun = time.Now()

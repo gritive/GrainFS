@@ -119,6 +119,13 @@ type PutObjectMetaCmd struct {
 	// ACL is the s3auth.ACLGrant bitmask. 0 = private (backward-compatible
 	// default; old encoded blobs decode to 0).
 	ACL uint8
+	// MetaSeq is the lowest-priority quorum-meta LWW tiebreak. When two blobs
+	// have an equal (ModTime, VersionID), the higher MetaSeq wins. Genuine
+	// client writes always differ in ModTime/VersionID, so MetaSeq is never
+	// consulted for them; it exists for placement re-writes (object relocation)
+	// that preserve the original ModTime AND VersionID. Default 0 = original
+	// write (behavior-neutral until the relocation feature writes >0).
+	MetaSeq uint64
 }
 
 // SegmentMetaEntry records the placement of one chunked-PUT segment. The

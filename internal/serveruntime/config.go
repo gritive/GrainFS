@@ -110,6 +110,15 @@ type Config struct {
 	// (age-gate only). Default 24h (matches snapshot retention 1h x 24).
 	SegmentGCRetention time.Duration
 
+	// EC-redundancy-upgrade sweep: relocate non-redundant (1+0) objects into a
+	// redundant EC group after the cluster grows. Default on; ECRedundancyUpgradeMax
+	// bounds relocations per scrub cycle (<=0 → default 8). ECRedundancyUpgradeMinAge
+	// is the minimum object age before relocation (avoids racing in-flight writes;
+	// 0 → relocate immediately, <0 → conservative default).
+	ECRedundancyUpgrade       bool
+	ECRedundancyUpgradeMax    int
+	ECRedundancyUpgradeMinAge time.Duration
+
 	// Audit Iceberg log lake
 	AuditIceberg        bool
 	AuditCommitInterval time.Duration

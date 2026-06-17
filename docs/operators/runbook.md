@@ -805,6 +805,44 @@ Walk/delete errors > 0 indicates filesystem permission or I/O issues.
 
 ---
 
+### EC-redundancy upgrade sweep (relocating genesis 1+0 objects)
+
+**What it does:** when a cluster that started genuinely single-node (genesis boot,
+no `--bootstrap-expect-nodes`) later grows, objects written during the single-node
+window live in a non-redundant `1+0` group — a single-node loss would lose them. The
+background sweep (default ON) detects these and re-encodes them into a redundant wide
+EC group, preserving identity (key/version/ETag/size/content-type/metadata/tags/ACL
+**and LastModified**). The old shards are reclaimed by the orphan-segment sweep above.
+
+**Track:**
+```bash
+curl http://<node>:9000/metrics | grep -E 'grainfs_ec_redundancy_upgrade_(relocated|failed)_total'
+```
+`relocated_total` rising then plateauing = the backlog of pre-growth `1+0` objects is
+being drained. `failed_total` rising = relocations are erroring (check logs for
+`redundancy-upgrade: relocate failed`); benign skips (object changed underneath / no
+longer a candidate) are NOT counted as failures.
+
+**Controls:**
+- `--ec-redundancy-upgrade=false` — kill switch (default on).
+- `--ec-redundancy-upgrade-max` (default 8) — relocations per scrub cycle; this moves
+  real data, so it is a deliberate slow drip. Raise only if the backlog drains too
+  slowly and foreground I/O has headroom.
+- `--ec-redundancy-upgrade-min-age` (default 5m) — an object must be at least this old
+  before relocation, so the sweep never races an in-flight write. `0` relocates
+  immediately (tests only).
+
+**Safety:** the sweep runs only on the caught-up leader of each group (no two nodes
+relocate the same object); an interrupted relocation leaves reclaimable orphans and
+the object stays readable via its old placement; and a concurrent client overwrite
+always wins (the relocation preserves the original ModTime, which loses the
+quorum-meta last-writer-wins to any newer write). Common multi-node patterns
+(form-then-write, `--bootstrap-expect-nodes`) never produce `1+0` objects, so the
+sweep is a no-op there. Non-latest versions in versioning-enabled buckets are not yet
+covered (tracked follow-up).
+
+---
+
 ## Host Deployment Procedures
 
 **Prerequisites:**

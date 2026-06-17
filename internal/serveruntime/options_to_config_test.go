@@ -41,14 +41,16 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 		P9Port:        1564,
 		EnableIceberg: true,
 
-		ScrubInterval:         7 * time.Second,
-		ScrubOrphanAge:        11 * time.Minute,
-		SegmentGCRetention:    17 * time.Minute,
-		DegradedInterval:      23 * time.Second,
-		LifecycleInterval:     29 * time.Second,
-		RaftLogGCInterval:     31 * time.Second,
-		RaftHeartbeatInterval: 37 * time.Millisecond,
-		RaftElectionTimeout:   41 * time.Millisecond,
+		ScrubInterval:          7 * time.Second,
+		ScrubOrphanAge:         11 * time.Minute,
+		SegmentGCRetention:     17 * time.Minute,
+		ECRedundancyUpgrade:    true,
+		ECRedundancyUpgradeMax: 13,
+		DegradedInterval:       23 * time.Second,
+		LifecycleInterval:      29 * time.Second,
+		RaftLogGCInterval:      31 * time.Second,
+		RaftHeartbeatInterval:  37 * time.Millisecond,
+		RaftElectionTimeout:    41 * time.Millisecond,
 
 		HealReceiptEnabled:        true,
 		HealReceiptPSK:            "sentinel-psk",
@@ -146,6 +148,8 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 
 	// Scrub / reshard / degraded.
 	require.Equal(t, opts.ScrubInterval, cfg.ScrubInterval)
+	require.Equal(t, opts.ECRedundancyUpgrade, cfg.ECRedundancyUpgrade)
+	require.Equal(t, opts.ECRedundancyUpgradeMax, cfg.ECRedundancyUpgradeMax)
 	require.Equal(t, opts.ScrubOrphanAge, cfg.ScrubOrphanAge)
 	require.Equal(t, opts.SegmentGCRetention, cfg.SegmentGCRetention)
 	require.Equal(t, opts.DegradedInterval, cfg.DegradedInterval)
