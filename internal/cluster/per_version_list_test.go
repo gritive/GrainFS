@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"path/filepath"
 	"testing"
@@ -209,6 +210,110 @@ func TestListObjects_CtxFlagFalseForcesLegacy(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, objs, 1, "legacy path returns the stale latest-only entry")
 	require.Equal(t, vid2, objs[0].VersionID, "ctx-flag-false forces legacy → shows the hard-deleted latest (boundary pinned)")
+}
+
+// TestListObjectsPerVersion_GenerationUnion proves the derive's all-groups
+// fan-out unions a key whose versions live on DIFFERENT generation groups: v1 on
+// group g1/node A, v2 on group g2/node B → LIST shows the key once with v2's
+// latest; planting a newer delete marker on a third write → key omitted. This is
+// the in-derive cross-generation behavior (mirrors TestS2a_GenerationUnion).
+func TestListObjectsPerVersion_GenerationUnion(t *testing.T) {
+	ctx := context.Background()
+	keeper, clusterID := testDEKKeeper(t)
+
+	trA := transport.MustNewHTTPTransport("test-cluster-psk")
+	trB := transport.MustNewHTTPTransport("test-cluster-psk")
+	require.NoError(t, trA.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, trB.Listen(ctx, "127.0.0.1:0"))
+	defer trA.Close()
+	defer trB.Close()
+
+	svcA := NewShardService(t.TempDir(), trA, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svcB := NewShardService(t.TempDir(), trB, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	trA.RegisterBufferedRoute(transport.RouteShardRPC, svcA.NativeRPCHandler())
+	trB.RegisterBufferedRoute(transport.RouteShardRPC, svcB.NativeRPCHandler())
+
+	const bkt, key = "bkt", "k"
+	const vid1 = "019ed400-0000-7000-8000-000000000001"
+	const vid2 = "019ed400-0000-7000-8000-000000000002"
+	const vid3 = "019ed400-0000-7000-8000-000000000003"
+	writeVerBlob(t, svcA, bkt, key, vid1, PutObjectMetaCmd{ETag: "e-v1"})
+	writeVerBlob(t, svcB, bkt, key, vid2, PutObjectMetaCmd{ETag: "e-v2"})
+
+	backendA := &DistributedBackend{
+		selfAddr: trA.LocalAddr(),
+		shardSvc: svcA,
+		shardGroup: &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+			"g1": {ID: "g1", PeerIDs: []string{trA.LocalAddr()}},
+			"g2": {ID: "g2", PeerIDs: []string{trB.LocalAddr()}},
+		}},
+	}
+
+	out, err := backendA.listObjectsPerVersion(ctx, bkt, "")
+	require.NoError(t, err)
+	require.Len(t, out, 1, "key unioned across generations, deduped to one")
+	require.Equal(t, key, out[0].Key)
+	require.Equal(t, vid2, out[0].VersionID, "latest across generations = v2 (max-vid, gen-1)")
+
+	// Newer delete marker (v3, on group g2) → key's global-max is a marker → omit.
+	writeVerBlob(t, svcB, bkt, key, vid3, PutObjectMetaCmd{IsDeleteMarker: true})
+	out, err = backendA.listObjectsPerVersion(ctx, bkt, "")
+	require.NoError(t, err)
+	require.Empty(t, out, "newest version is a delete marker → key omitted from LIST")
+}
+
+// TestClusterCoordinator_ListObjects_PerVersionForward is the multi-node forward
+// proof (mirrors the versioned_list_multigroup harness): a versioning-enabled
+// bucket assigned to a group, PUT v1+v2 via the coordinator with a
+// versioning-stamped ctx, hard-delete v2 (DeleteObjectVersion) → coordinator
+// ListObjects shows the key with v1 (the derive activated end-to-end via PR-A's
+// ctx stamp). RED-equivalent without the derive: legacy LIST shows v2.
+func TestClusterCoordinator_ListObjects_PerVersionForward(t *testing.T) {
+	gbA, _ := newTestFollowerGroupBackend(t, "ga", "self")
+	gbA.Node().Start()
+	stop := make(chan struct{})
+	go gbA.RunApplyLoop(stop)
+	t.Cleanup(func() { close(stop) })
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("ga", []string{"self"}, gbA))
+	router := NewRouter(mgr)
+	router.AssignBucket("vbkt", "ga")
+	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"ga": {ID: "ga", PeerIDs: []string{"self"}},
+	}}
+	ec := ECConfig{DataShards: 1, ParityShards: 0}
+	c := NewClusterCoordinator(&fakeBackend{}, mgr, router, meta, "self").WithECConfig(ec)
+
+	ctx := ContextWithBucketVersioning(context.Background(), true)
+	put := func(body string) string {
+		sz := int64(len(body))
+		obj, err := c.PutObjectWithRequest(ctx, storage.PutObjectRequest{
+			Bucket: "vbkt", Key: "obj", Body: bytes.NewReader([]byte(body)),
+			ContentType: "text/plain", SizeHint: &sz,
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, obj.VersionID)
+		return obj.VersionID
+	}
+	vid1 := put("content-v1")
+	vid2 := put("content-v2")
+
+	// Sanity: before delete, LIST shows the key (latest v2).
+	objs, err := c.ListObjects(ctx, "vbkt", "", 1000)
+	require.NoError(t, err)
+	require.Len(t, objs, 1)
+	require.Equal(t, vid2, objs[0].VersionID)
+
+	// Hard-delete the latest version through the coordinator.
+	require.NoError(t, c.DeleteObjectVersion("vbkt", "obj", vid2))
+
+	// Per-version LIST derive (activated by the stamped ctx) re-derives v1.
+	objs, err = c.ListObjects(ctx, "vbkt", "", 1000)
+	require.NoError(t, err)
+	require.Len(t, objs, 1, "key still present (v1 is live latest), not the stale v2")
+	require.Equal(t, "obj", objs[0].Key)
+	require.Equal(t, vid1, objs[0].VersionID, "coordinator LIST derives v1 across the forward path (PR-A stamp + derive)")
 }
 
 // objKeys extracts keys from a []*storage.Object page.
