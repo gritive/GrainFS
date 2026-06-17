@@ -293,6 +293,105 @@ func TestDeleteObjectVersion_DualDeletesPerVersionBlob(t *testing.T) {
 	require.ErrorIs(t, gerr, storage.ErrObjectNotFound)
 }
 
+// TestS2a_EpicA_ReadDeleteEndToEnd is the Epic A core: versioned PUT v1+v2,
+// HEAD=v2; DELETE v2 → HEAD=v1, GET ?versionId=v2 → 404, GET(latest)=v1 body;
+// then DELETE v1 → HEAD=404.
+func TestS2a_EpicA_ReadDeleteEndToEnd(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	const bkt, key = "vbkt", "obj"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+
+	vid1 := putVersioned(t, b, ctx, bkt, key, "content-v1")
+	vid2 := putVersioned(t, b, ctx, bkt, key, "content-v2")
+
+	head, err := b.HeadObject(ctx, bkt, key)
+	require.NoError(t, err)
+	require.Equal(t, vid2, head.VersionID)
+
+	require.NoError(t, b.DeleteObjectVersion(bkt, key, vid2))
+
+	head, err = b.HeadObject(ctx, bkt, key)
+	require.NoError(t, err)
+	require.Equal(t, vid1, head.VersionID, "HEAD re-derives v1 after deleting v2")
+
+	_, _, gverr := b.GetObjectVersion(bkt, key, vid2)
+	require.ErrorIs(t, gverr, storage.ErrObjectNotFound)
+
+	rc, _, err := b.GetObject(ctx, bkt, key)
+	require.NoError(t, err)
+	got, _ := io.ReadAll(rc)
+	rc.Close()
+	require.Equal(t, []byte("content-v1"), got, "GET latest returns v1 body")
+
+	// NOTE (spec Risks/notes — documented S2a limitation, NOT asserted here):
+	// deleting the LAST remaining version drops the key's per-version blobs to
+	// zero, so reads fall back to the legacy latest-only quorum-meta blob, which
+	// S2a does NOT maintain on hard-delete-of-latest (only PUT/soft-delete
+	// dual-write it; S2b switches LIST/latest off it entirely). So after deleting
+	// every version, HEAD/GET-by-id can still resolve the stale latest-only blob.
+	// That is out of S2a scope (and not a regression — pre-S2a it was wrong too).
+}
+
+// TestS2a_GenerationUnion_DeriveAndDelete proves derive-latest unions across
+// generations (v1 on group g1/node A, v2 on group g2/node B) — NOT a probeRead
+// short-circuit — and that hard-deleting v2 re-derives v1.
+func TestS2a_GenerationUnion_DeriveAndDelete(t *testing.T) {
+	ctx := context.Background()
+	keeper, clusterID := testDEKKeeper(t)
+
+	trA := transport.MustNewHTTPTransport("test-cluster-psk")
+	trB := transport.MustNewHTTPTransport("test-cluster-psk")
+	require.NoError(t, trA.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, trB.Listen(ctx, "127.0.0.1:0"))
+	defer trA.Close()
+	defer trB.Close()
+
+	svcA := NewShardService(t.TempDir(), trA, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svcB := NewShardService(t.TempDir(), trB, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	trA.RegisterBufferedRoute(transport.RouteShardRPC, svcA.NativeRPCHandler())
+	trB.RegisterBufferedRoute(transport.RouteShardRPC, svcB.NativeRPCHandler())
+
+	const bkt, key = "bkt", "k"
+	const vid1 = "019ed400-0000-7000-8000-000000000001"
+	const vid2 = "019ed400-0000-7000-8000-000000000002"
+	write := func(svc *ShardService, vid, node string) {
+		t.Helper()
+		blob, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: bkt, Key: key, VersionID: vid, ETag: "e-" + vid, NodeIDs: []string{node}, ECData: 1})
+		require.NoError(t, err)
+		require.NoError(t, svc.writeQuorumMetaVersionLocal(bkt, filepath.Join(key, vid), blob))
+	}
+	write(svcA, vid1, trA.LocalAddr())
+	write(svcB, vid2, trB.LocalAddr())
+
+	backendA := &DistributedBackend{
+		selfAddr: trA.LocalAddr(),
+		shardSvc: svcA,
+		shardGroup: &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+			"g1": {ID: "g1", PeerIDs: []string{trA.LocalAddr()}},
+			"g2": {ID: "g2", PeerIDs: []string{trB.LocalAddr()}},
+		}},
+	}
+
+	cmds, err := backendA.readQuorumMetaVersions(bkt, key)
+	require.NoError(t, err)
+	latest, live := deriveLatestVersion(cmds)
+	require.True(t, live)
+	require.Equal(t, vid2, latest.VersionID, "union across generations derives v2 (not probeRead short-circuit)")
+
+	// Hard-delete v2 on its placement node (group g2) via the fan-out, then re-derive.
+	v2cmd, ok, _ := backendA.readQuorumMetaVersion(bkt, key, vid2)
+	require.True(t, ok)
+	require.NoError(t, backendA.deleteQuorumMetaVersionQuorum(ctx, bkt, key, vid2, v2cmd.NodeIDs))
+
+	cmds, err = backendA.readQuorumMetaVersions(bkt, key)
+	require.NoError(t, err)
+	latest, live = deriveLatestVersion(cmds)
+	require.True(t, live)
+	require.Equal(t, vid1, latest.VersionID, "after deleting v2, union re-derives v1")
+}
+
 // TestDeleteQuorumMetaVersionQuorum_FailClosed proves the fan-out is fail-closed:
 // a placement node whose delete fails (unreachable transport) surfaces an error,
 // unlike the swallow-all deleteQuorumMetaQuorum.
