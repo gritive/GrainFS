@@ -368,6 +368,102 @@ func TestWalkPerVersionBackfillCandidates_SkipsAppendableAndCoalesced(t *testing
 	require.Empty(t, got, "appendable and coalesced versioned records must not be yielded as backfill candidates")
 }
 
+// TestWalkPerVersionBackfillCandidates_MarkerEmptyNodeIDsDerivesSiblingPlacement
+// verifies that a degraded delete-marker (ETag==deleteMarkerETag, NodeIDs==nil
+// — the result of a deleteObjectWithMarker call when no quorum-meta existed for
+// the prior version) is still yielded by the walker with NodeIDs populated from
+// a sibling version of the same key.
+//
+// Setup: a regular versioned PUT (has NodeIDs), then a RAW delete-marker FSM
+// record with empty NodeIDs injected directly (bypassing the normal
+// deleteObjectWithMarker which would call writeQuorumMeta and produce the
+// secondary CmdPutObjectMeta record that fills in NodeIDs). The marker's
+// per-version blob is removed so the walker sees it as missing.
+func TestWalkPerVersionBackfillCandidates_MarkerEmptyNodeIDsDerivesSiblingPlacement(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	const bkt, key = "vbkt-marker-sibling", "obj"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+
+	// Write a regular versioned PUT — this produces an FSM record with NodeIDs.
+	liveVID := putVersioned(t, b, ctx, bkt, key, "live-data")
+	// Capture the live version's NodeIDs from its FSM record.
+	var liveNodeIDs []string
+	require.NoError(t, b.store.View(func(txn MetadataTxn) error {
+		item, err := txn.Get(b.ks().ObjectMetaKeyV(bkt, key, liveVID))
+		if err != nil {
+			return err
+		}
+		raw, err := b.itemValueCopy(item)
+		if err != nil {
+			return err
+		}
+		m, err := unmarshalObjectMeta(raw)
+		if err != nil {
+			return err
+		}
+		liveNodeIDs = m.NodeIDs
+		return nil
+	}))
+	require.NotEmpty(t, liveNodeIDs, "live version must have NodeIDs")
+
+	// Write a RAW delete-marker FSM record with empty NodeIDs, simulating the
+	// degraded case where deleteObjectWithMarker skipped writeQuorumMeta because
+	// readQuorumMetaCmd returned no placement for the prior version.
+	const markerVID = "019756c0-17f8-7100-b7e4-a5ef7c2f9999"
+	markerRaw, err := marshalObjectMeta(objectMeta{Key: key, ETag: deleteMarkerETag})
+	require.NoError(t, err)
+	require.NoError(t, b.store.Update(func(txn MetadataTxn) error {
+		return txn.Set(b.ks().ObjectMetaKeyV(bkt, key, markerVID), markerRaw)
+	}))
+	// Simulate the missing per-version blob by never having written one — the
+	// marker VID blob path simply does not exist on disk.
+
+	var got []perVersionBackfillCandidate
+	require.NoError(t, b.walkPerVersionBackfillCandidates(bkt, nowUnixSec(), 0, func(c perVersionBackfillCandidate) error {
+		got = append(got, c)
+		return nil
+	}))
+
+	var found *perVersionBackfillCandidate
+	for i := range got {
+		if got[i].VersionID == markerVID {
+			found = &got[i]
+			break
+		}
+	}
+	require.NotNil(t, found, "walker must yield the degraded delete-marker candidate")
+	require.Equal(t, deleteMarkerETag, found.Meta.ETag, "candidate must carry deleteMarkerETag")
+	require.Equal(t, liveNodeIDs, found.Meta.NodeIDs, "walker must derive NodeIDs from the sibling live version")
+}
+
+// TestWalkPerVersionBackfillCandidates_MarkerNoSiblingPlacementSkipped verifies
+// that a degraded delete-marker (ETag==deleteMarkerETag, NodeIDs==nil) with NO
+// sibling version that has non-empty NodeIDs is NOT yielded by the walker.
+func TestWalkPerVersionBackfillCandidates_MarkerNoSiblingPlacementSkipped(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	const bkt, key = "vbkt-marker-no-sibling", "obj"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+
+	// Write ONLY a RAW delete-marker FSM record with empty NodeIDs and no sibling.
+	const markerVID = "019756c0-17f8-7100-b7e4-a5ef7c2f8888"
+	markerRaw, err := marshalObjectMeta(objectMeta{Key: key, ETag: deleteMarkerETag})
+	require.NoError(t, err)
+	require.NoError(t, b.store.Update(func(txn MetadataTxn) error {
+		return txn.Set(b.ks().ObjectMetaKeyV(bkt, key, markerVID), markerRaw)
+	}))
+
+	var got []perVersionBackfillCandidate
+	require.NoError(t, b.walkPerVersionBackfillCandidates(bkt, nowUnixSec(), 0, func(c perVersionBackfillCandidate) error {
+		got = append(got, c)
+		return nil
+	}))
+	require.Empty(t, got, "degraded delete-marker with no sibling placement must not be yielded")
+}
+
 // TestWalkPerVersionBackfillCandidates_IncludesDeleteMarker verifies that a
 // delete-marker version (ETag == deleteMarkerETag) is enumerated as a candidate
 // when its per-version blob is absent.

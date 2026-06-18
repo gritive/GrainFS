@@ -39,6 +39,43 @@ func uuidv7TimeUnix(vid string) int64 {
 	return ms / 1000
 }
 
+// lookupSiblingNodeIDs scans the per-version FSM records for bucket/key within
+// the supplied transaction and returns the NodeIDs from the first version whose
+// VID differs from skipVID and whose NodeIDs are non-empty. Returns nil if no
+// such sibling exists.
+//
+// Rationale: RDH placement is keyed by bucket/key, so every version of the same
+// object is placed on the same nodes. A degraded delete marker (empty NodeIDs)
+// can therefore borrow placement from any live sibling version.
+func lookupSiblingNodeIDs(txn MetadataTxn, gb *DistributedBackend, bucket, key, skipVID string) []string {
+	siblingPrefix := []byte("obj:" + bucket + "/" + key + "/")
+	var found []string
+	_ = gb.ks().scanGroupPrefix(txn, siblingPrefix, func(rawKey []byte, item MetaItem) error {
+		rest := strings.TrimPrefix(string(rawKey), "obj:"+bucket+"/"+key+"/")
+		vid := rest
+		if vid == skipVID {
+			return nil
+		}
+		if _, err := uuid.Parse(vid); err != nil {
+			return nil
+		}
+		raw, err := gb.itemValueCopy(item)
+		if err != nil {
+			return nil
+		}
+		m, err := unmarshalObjectMeta(raw)
+		if err != nil {
+			return nil
+		}
+		if len(m.NodeIDs) > 0 {
+			found = cloneStringSlice(m.NodeIDs)
+			return errStopScan
+		}
+		return nil
+	})
+	return found
+}
+
 // walkPerVersionBackfillCandidates iterates every FSM obj:{bucket}/{key}/{vid}
 // record across ALL locally-hosted generation-group stores, and calls fn for
 // each version whose per-version quorum-meta blob is ABSENT from disk and which
@@ -50,12 +87,16 @@ func uuidv7TimeUnix(vid string) int64 {
 //   - shardSvc is nil (no dataDir to check)
 //
 // Per-record skips (silent):
-//   - Meta.NodeIDs is empty (no placement → cannot fan out)
+//   - Meta.NodeIDs is empty AND record is not a delete marker (no placement → cannot fan out)
 //   - blob already present on disk (already backfilled — idempotency check)
 //   - VID UUIDv7 timestamp age < minAge seconds (too fresh)
 //
 // Delete-marker records (ETag == deleteMarkerETag) ARE yielded — they need a
-// per-version blob too.
+// per-version blob too. Degraded delete markers (NodeIDs == nil, which happens
+// when deleteObjectWithMarker skipped writeQuorumMeta because the prior version
+// had no quorum meta) have their NodeIDs derived from a sibling version of the
+// same key (lookupSiblingNodeIDs). If no sibling with placement exists, the
+// degraded marker is skipped.
 func (b *DistributedBackend) walkPerVersionBackfillCandidates(
 	bucket string,
 	now, minAge int64,
@@ -139,8 +180,20 @@ func (b *DistributedBackend) walkPerVersionBackfillCandidates(
 				}
 
 				// Skip versions with no placement — nothing to fan out to.
+				// Exception: degraded delete markers (ETag == deleteMarkerETag) may
+				// have empty NodeIDs when deleteObjectWithMarker skipped writeQuorumMeta
+				// because the prior version had no quorum meta. For those, derive
+				// placement from a sibling version of the same key.
 				if len(meta.NodeIDs) == 0 {
-					return nil
+					if meta.ETag != deleteMarkerETag {
+						return nil
+					}
+					// Try to derive NodeIDs from a sibling versioned record.
+					siblingIDs := lookupSiblingNodeIDs(txn, gb, bucket, key, vid)
+					if len(siblingIDs) == 0 {
+						return nil // no sibling placement found; cannot fan out
+					}
+					meta.NodeIDs = siblingIDs
 				}
 
 				// Idempotency: check whether the per-version blob exists on disk.
