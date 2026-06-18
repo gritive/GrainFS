@@ -8,10 +8,13 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-// objVersionRef identifies a specific object version.
-type objVersionRef struct {
+// ObjVersionRef identifies a specific object version for cutover reporting.
+type ObjVersionRef struct {
 	Bucket, Key, VersionID string
 }
+
+// objVersionRef is a package-internal alias kept for internal use.
+type objVersionRef = ObjVersionRef
 
 // cutoverReadiness summarizes per-version quorum-meta coverage for a bucket.
 type cutoverReadiness struct {
@@ -21,9 +24,9 @@ type cutoverReadiness struct {
 	Unknown  int // decode error or strict-readback error (fail-closed)
 	Excluded int // internal bucket, appendable, or coalesced (intentionally skipped)
 
-	GapRefs     []objVersionRef // capped at maxVerifyRefs
-	StuckRefs   []objVersionRef
-	UnknownRefs []objVersionRef
+	GapRefs     []ObjVersionRef // capped at maxVerifyRefs
+	StuckRefs   []ObjVersionRef
+	UnknownRefs []ObjVersionRef
 }
 
 // maxVerifyRefs is the maximum number of per-class refs collected before capping.

@@ -40,6 +40,15 @@ func WithExpandPlacement(fn ExpandPlacementFunc) Option {
 	}
 }
 
+// WithVerifyPerVersionCutover injects the per-version cutover-readiness
+// aggregator (S4a). Injected by serveruntime once *cluster.DistributedBackend
+// is constructed (bootOwnedGroupsAndEC → boot_phases_srvopts).
+func WithVerifyPerVersionCutover(fn VerifyPerVersionCutoverFunc) Option {
+	return func(s *Server) {
+		s.verifyPerVersionCutoverFn = fn
+	}
+}
+
 func WithReadIndexer(ri ReadIndexer) Option {
 	return func(s *Server) {
 		s.readIndexer = ri
