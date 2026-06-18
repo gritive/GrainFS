@@ -504,6 +504,28 @@ var (
 		Help: "Total per-version blobs deferred because the per-cycle cap was reached.",
 	})
 
+	// Foundation S3 — per-version blob backfill sweep metrics.
+
+	QuorumMetaVersionBackfillFoundTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_scrub_quorum_meta_versions_backfill_found_total",
+		Help: "Total per-version quorum-meta blob candidates found needing backfill.",
+	})
+
+	QuorumMetaVersionBackfillMigratedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_scrub_quorum_meta_versions_backfill_migrated_total",
+		Help: "Total per-version quorum-meta blobs successfully backfilled.",
+	})
+
+	QuorumMetaVersionBackfillCappedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_scrub_quorum_meta_versions_backfill_capped_total",
+		Help: "Total per-version backfill candidates deferred because the per-cycle cap was reached.",
+	})
+
+	QuorumMetaVersionBackfillErrorTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_scrub_quorum_meta_versions_backfill_error_total",
+		Help: "Total per-version backfill failures (per-object; sweep continues).",
+	})
+
 	// Phase 16 — Self-healing metrics.
 
 	HealEventsTotal = promauto.NewCounterVec(prometheus.CounterOpts{

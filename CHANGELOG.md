@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.0.615.0] - 2026-06-18
+
+### Added
+- **Background per-version metadata backfill sweep (foundation slice S3 — migrate existing data).**
+  S1 dual-writes a per-version quorum-meta blob (`.quorum_meta_versions/{bucket}/{key}/{vid}`) on every
+  versioned write, and S2 switched reads/LIST/version-list/delete to derive from those blobs with a
+  legacy/FSM fallback. S3 closes the gap for EXISTING objects: a new idempotent background sweep
+  (`per_version_backfill_walker.go` + `scrubber/per_version_backfill.go`, wired into the scrubber tick
+  beside the orphan version sweep) backfills the per-version blob for any versioned object written
+  before S1, or where S1's best-effort write failed, so the S4 cutover can later drop the FSM/legacy
+  fallback. It enumerates FSM `obj:{bucket}/{key}/{vid}` records across ALL locally-hosted
+  generation-group stores (a single-store scan would miss older-generation versions on a grown
+  cluster), yields only versions whose per-version blob is ABSENT on disk (direct `os.Stat` — it never
+  overwrites an existing blob), age-gates by the VersionID's UUIDv7 timestamp (not `LastModified`,
+  which is 0 for a fresh delete marker), and replays S1's K-of-N fan-out to the version's placement
+  nodes. Delete markers are backfilled with `IsDeleteMarker` reconstructed from the `ETag` sentinel;
+  a degraded marker whose placement was unreadable at delete time gets RDH-direct placement from its
+  owning group (sufficient because the tombstone metadata blob need only be discoverable by the
+  all-groups version readback, not byte-match a data write's shard placement). Appendable/coalesced
+  versions are skipped (the foundation carve-out — they stay FSM-authoritative), as are unversioned
+  `obj:` records and objects with no placement. New metrics:
+  `grainfs_scrub_quorum_meta_versions_backfill_{found,migrated,capped,error}_total`. Behavior-neutral
+  for current reads (S2's fallback already returns these versions); the backfill only changes the
+  source the derive-by-scan path resolves from.
+
 ## [0.0.614.0] - 2026-06-17
 
 ### Fixed
