@@ -125,6 +125,19 @@ func TestWriteQuorumMetaVersionLocal_OverwritesWhenCandidateWins(t *testing.T) {
 	require.Equal(t, newer, got, "higher-MetaSeq candidate must overwrite (relocation/RMW path)")
 }
 
+// TestWriteQuorumMetaLocal_SkipsWhenExistingWins verifies that a stale
+// blind-writer (e.g. leaderless backfill) cannot overwrite a newer on-disk blob
+// in the latest-only leaf writer.
+func TestWriteQuorumMetaLocal_SkipsWhenExistingWins(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	newer := mustEncodeMetaCmd(t, PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: "v2", ModTime: 200})
+	older := mustEncodeMetaCmd(t, PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: "v1", ModTime: 100})
+	require.NoError(t, b.shardSvc.writeQuorumMetaLocal("bkt", "k", newer))
+	require.NoError(t, b.shardSvc.writeQuorumMetaLocal("bkt", "k", older))
+	got, _ := os.ReadFile(filepath.Join(b.shardSvc.dataDirs[0], quorumMetaSubDir, "bkt", "k"))
+	require.Equal(t, newer, got)
+}
+
 // TestWriteQuorumMeta_PerVersionFailureDoesNotFailPut proves the per-version
 // write is best-effort: if its subtree can't be created, PutObject still succeeds.
 func TestWriteQuorumMeta_PerVersionFailureDoesNotFailPut(t *testing.T) {

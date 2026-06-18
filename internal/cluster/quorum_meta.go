@@ -391,6 +391,20 @@ func (s *ShardService) writeQuorumMetaLocal(bucket, key string, data []byte) err
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("quorum meta tmp close: %w", err)
 	}
+	// Write-time LWW guard: a blind-writer (e.g. leaderless backfill) must not
+	// clobber a newer on-disk blob. Absent file → no-op (the common case).
+	// Use strict "existing beats candidate" (not "candidate does not beat existing")
+	// so that read-modify-write mutations (ACL/tags) with equal ModTime/MetaSeq
+	// are never suppressed — only a strictly-newer on-disk blob causes a skip.
+	if existing, rerr := os.ReadFile(target); rerr == nil {
+		if cand, derr := s.decodeQuorumMetaCmdBlob(data); derr == nil {
+			if cur, derr2 := s.decodeQuorumMetaCmdBlob(existing); derr2 == nil {
+				if quorumMetaBlobWins(cur.ModTime, cur.VersionID, cur.MetaSeq, cand.ModTime, cand.VersionID, cand.MetaSeq) {
+					return nil // existing strictly wins — keep it, skip the rename
+				}
+			}
+		}
+	}
 	if err := os.Rename(tmpName, target); err != nil {
 		return fmt.Errorf("quorum meta rename: %w", err)
 	}
