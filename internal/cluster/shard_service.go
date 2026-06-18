@@ -66,6 +66,14 @@ type ShardService struct {
 	// be fsynced directly. Read live so a later EC reconfig is reflected. Nil
 	// (legacy callers / tests) never forces a direct fsync.
 	noRedundancy func() bool
+	// quorumMetaTargetLocks serializes the (LWW guard-read + os.Rename) critical
+	// section in writeQuorumMetaLocal and writeQuorumMetaVersionLocal on a
+	// per-target-path basis. Without this lock two concurrent writers to the same
+	// target can both observe the existing blob, both decide their candidate wins,
+	// and then race on the rename — allowing a lower-priority blob to land last
+	// and clobber the true LWW winner. The temp-create/write/fsync/close steps
+	// remain outside the lock (each writer uses a unique temp name; no contention).
+	quorumMetaTargetLocks pool.SyncMap[string, *sync.Mutex]
 }
 
 // ShardServiceOption is a functional option for ShardService.
@@ -148,6 +156,15 @@ func NewMultiRootShardService(dataDirs []string, tr shardTransport, opts ...Shar
 // DataDirs returns the active shard data directories.
 func (s *ShardService) DataDirs() []string {
 	return s.dataDirs
+}
+
+// quorumMetaTargetLock returns the per-target Mutex that serializes the
+// (LWW guard-read + os.Rename) critical section in the leaf writers. Mirrors
+// DistributedBackend.objectMetaRMWLock: LoadOrStore is atomic so concurrent
+// callers always converge on a single Mutex per target path.
+func (s *ShardService) quorumMetaTargetLock(target string) *sync.Mutex {
+	v, _ := s.quorumMetaTargetLocks.LoadOrStore(target, &sync.Mutex{})
+	return v
 }
 
 // getShardDir resolves the on-disk directory for an object's shard and rejects

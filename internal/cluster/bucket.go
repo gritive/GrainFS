@@ -404,6 +404,12 @@ func (b *DistributedBackend) SetObjectTagsPropose(bucket, key, versionID string,
 	// blob directly (read-modify-write) instead of proposing to data_raft.
 	if b.shardSvc != nil && !storage.IsInternalBucket(bucket) {
 		handled, err := func() (bool, error) {
+			// objectMetaRMWLock serializes the RMW only on THIS node. That is
+			// sufficient because ClusterCoordinator.SetObjectTags/SetObjectACL
+			// always forward the request to the OWNING peer, so all concurrent
+			// RMWs for the same object converge on one owner node. A residual
+			// cross-coordinator window exists only during ownership transitions;
+			// that is a pre-existing distributed limitation and is NOT regressed here.
 			lock := b.objectMetaRMWLock(bucket, key)
 			lock.Lock()
 			defer lock.Unlock() // releases at closure return, BEFORE any fall-through

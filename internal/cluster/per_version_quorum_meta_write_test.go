@@ -3,8 +3,10 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/transport"
@@ -121,7 +123,8 @@ func TestWriteQuorumMetaVersionLocal_OverwritesWhenCandidateWins(t *testing.T) {
 	newer := mustEncodeMetaCmd(t, PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: "vid-1", ModTime: 100, MetaSeq: 2}) // same ModTime/VID, higher MetaSeq
 	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal("bkt", sub, older))
 	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal("bkt", sub, newer))
-	got, _ := os.ReadFile(filepath.Join(b.shardSvc.dataDirs[0], quorumMetaVersionsSubDir, "bkt", "k", "vid-1"))
+	got, err := os.ReadFile(filepath.Join(b.shardSvc.dataDirs[0], quorumMetaVersionsSubDir, "bkt", "k", "vid-1"))
+	require.NoError(t, err)
 	require.Equal(t, newer, got, "higher-MetaSeq candidate must overwrite (relocation/RMW path)")
 }
 
@@ -134,8 +137,64 @@ func TestWriteQuorumMetaLocal_SkipsWhenExistingWins(t *testing.T) {
 	older := mustEncodeMetaCmd(t, PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: "v1", ModTime: 100})
 	require.NoError(t, b.shardSvc.writeQuorumMetaLocal("bkt", "k", newer))
 	require.NoError(t, b.shardSvc.writeQuorumMetaLocal("bkt", "k", older))
-	got, _ := os.ReadFile(filepath.Join(b.shardSvc.dataDirs[0], quorumMetaSubDir, "bkt", "k"))
+	got, err := os.ReadFile(filepath.Join(b.shardSvc.dataDirs[0], quorumMetaSubDir, "bkt", "k"))
+	require.NoError(t, err)
 	require.Equal(t, newer, got)
+}
+
+// TestWriteQuorumMetaVersionLocal_ConcurrentWritesLWWMax verifies that when N
+// goroutines concurrently call writeQuorumMetaVersionLocal for the same
+// (bucket, versionSubpath), the on-disk blob after all writes settles on the
+// blob with the highest MetaSeq (LWW winner). The same ModTime and VersionID
+// are used so MetaSeq is the sole discriminator, matching the relocation
+// re-write scenario. Runs with -race to expose the (guard-read, rename) window
+// that existed before the per-target lock was introduced.
+func TestWriteQuorumMetaVersionLocal_ConcurrentWritesLWWMax(t *testing.T) {
+	const N = 20
+	b := newTestDistributedBackend(t)
+	bucket := "bkt"
+	sub := filepath.Join("k", "vid-1")
+
+	// N blobs with same ModTime+VID but increasing MetaSeq (0 … N-1).
+	blobs := make([][]byte, N)
+	for i := range blobs {
+		blobs[i] = mustEncodeMetaCmd(t, PutObjectMetaCmd{
+			Bucket:    bucket,
+			Key:       "k",
+			VersionID: "vid-1",
+			ModTime:   1000,
+			MetaSeq:   uint64(i),
+		})
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(N)
+	start := make(chan struct{})
+	errs := make([]error, N)
+	for i := 0; i < N; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			<-start
+			errs[i] = b.shardSvc.writeQuorumMetaVersionLocal(bucket, sub, blobs[i])
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		require.NoError(t, err, "goroutine %d returned error", i)
+	}
+
+	// After all concurrent writes settle, the on-disk blob must be the LWW winner
+	// (MetaSeq == N-1). Without the per-target lock the guard-read/rename window
+	// allows a lower-MetaSeq winner to clobber the highest one.
+	got, err := os.ReadFile(filepath.Join(b.shardSvc.dataDirs[0], quorumMetaVersionsSubDir, bucket, "k", "vid-1"))
+	require.NoError(t, err)
+	cmd, err := b.shardSvc.decodeQuorumMetaCmdBlob(got)
+	require.NoError(t, err)
+	require.Equal(t, uint64(N-1), cmd.MetaSeq,
+		fmt.Sprintf("on-disk blob must be LWW winner (MetaSeq=%d), got MetaSeq=%d", N-1, cmd.MetaSeq))
 }
 
 // TestWriteQuorumMeta_PerVersionFailureDoesNotFailPut proves the per-version

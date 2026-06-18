@@ -23,15 +23,27 @@ func TestSetObjectTags_ConcurrentRMW_NoLostUpdate(t *testing.T) {
 
 	const n = 20
 	var wg sync.WaitGroup
+	// require.NoError inside a goroutine calls t.FailNow → runtime.Goexit, which
+	// only unwinds that goroutine (the failure can be missed or hang the test).
+	// Capture errors and assert on the main goroutine after Wait instead.
+	var mu sync.Mutex
+	var errs []error
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			tag := storage.Tag{Key: "k", Value: fmt.Sprintf("v%02d", i)}
-			require.NoError(t, b.SetObjectTags("bucket", "obj", "", []storage.Tag{tag}))
+			if err := b.SetObjectTags("bucket", "obj", "", []storage.Tag{tag}); err != nil {
+				mu.Lock()
+				errs = append(errs, err)
+				mu.Unlock()
+			}
 		}(i)
 	}
 	wg.Wait()
+	for _, e := range errs {
+		require.NoError(t, e)
+	}
 
 	cmd, err := b.readQuorumMetaCmd("bucket", "obj")
 	require.NoError(t, err)
@@ -80,6 +92,10 @@ func TestSetObjectACL_ConcurrentRMW_NoLostUpdate(t *testing.T) {
 
 	const n = 20
 	var wg sync.WaitGroup
+	// See TestSetObjectTags_ConcurrentRMW_NoLostUpdate: require inside a goroutine
+	// only unwinds that goroutine, so capture errors and assert after Wait.
+	var mu sync.Mutex
+	var errs []error
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func(i int) {
@@ -89,10 +105,17 @@ func TestSetObjectACL_ConcurrentRMW_NoLostUpdate(t *testing.T) {
 			if i%2 == 0 {
 				acl = uint8(s3auth.ACLPublicRead)
 			}
-			require.NoError(t, b.SetObjectACL("bucket", "obj", acl))
+			if err := b.SetObjectACL("bucket", "obj", acl); err != nil {
+				mu.Lock()
+				errs = append(errs, err)
+				mu.Unlock()
+			}
 		}(i)
 	}
 	wg.Wait()
+	for _, e := range errs {
+		require.NoError(t, e)
+	}
 
 	cmd, err := b.readQuorumMetaCmd("bucket", "obj")
 	require.NoError(t, err)
