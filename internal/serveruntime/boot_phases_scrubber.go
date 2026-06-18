@@ -206,6 +206,9 @@ func bootRecoveryAndScrubber(ctx context.Context, state *bootState) error {
 		if enabled, max := redundancyUpgradeMax(cfg); enabled {
 			sc.EnableRedundancyUpgrade(max, cfg.ECRedundancyUpgradeMinAge)
 		}
+		// Stale mpudone marker GC always runs with the scrubber (S4c-0 PR2 Task 5b):
+		// the marker keyspace is unbounded without it, so this is unconditional.
+		sc.EnableMultipartDoneSweep(256, 24*time.Hour)
 		sc.Start(ctx)
 
 		placementMonitors := NewPlacementMonitorRegistry()

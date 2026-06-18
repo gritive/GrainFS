@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -139,4 +140,55 @@ func TestCompleteMultipartUpload_MarkerMismatchErrors(t *testing.T) {
 	_, err = b.CompleteMultipartUpload(ctx, "b", "other", up.UploadID, []storage.Part{*part})
 	require.Error(t, err)
 	require.NotErrorIs(t, err, storage.ErrUploadNotFound)
+}
+
+// TestSweepStaleMultipartDoneMarkers verifies that SweepStaleMultipartDoneMarkers
+// deletes only markers older than minAge while leaving fresh markers intact.
+func TestSweepStaleMultipartDoneMarkers(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(ctx, "bkt"))
+
+	// Write a STALE marker: ModTime 48h in the past.
+	staleModTime := time.Now().Add(-48 * time.Hour).Unix()
+	completeViaFSM := func(uploadID string, modTime int64) {
+		t.Helper()
+		create, err := EncodeCommand(CmdCreateMultipartUpload, CreateMultipartUploadCmd{
+			UploadID: uploadID, Bucket: "bkt", Key: uploadID + ".bin",
+			ContentType: "application/octet-stream", CreatedAt: 100,
+		})
+		require.NoError(t, err)
+		require.NoError(t, b.fsm.Apply(create))
+
+		complete, err := EncodeCommand(CmdCompleteMultipart, CompleteMultipartCmd{
+			Bucket: "bkt", Key: uploadID + ".bin", UploadID: uploadID,
+			Size: 64, ContentType: "application/octet-stream",
+			ETag: "etag-" + uploadID, ModTime: modTime, VersionID: "v1",
+		})
+		require.NoError(t, err)
+		require.NoError(t, b.fsm.Apply(complete))
+	}
+
+	completeViaFSM("u-stale", staleModTime)
+	// Write a FRESH marker: ModTime = now.
+	completeViaFSM("u-fresh", time.Now().Unix())
+
+	// Sweep with 24h minAge: only the stale marker qualifies.
+	n, err := b.SweepStaleMultipartDoneMarkers(ctx, 256, 24*time.Hour)
+	require.NoError(t, err)
+	require.Equal(t, 1, n, "sweep must delete exactly 1 stale marker")
+
+	// Stale marker must be gone.
+	require.NoError(t, b.store.View(func(txn MetadataTxn) error {
+		_, err := txn.Get(b.ks().MultipartDoneKey("u-stale"))
+		require.ErrorIs(t, err, ErrMetaKeyNotFound, "stale marker must be deleted")
+		return nil
+	}))
+
+	// Fresh marker must survive.
+	require.NoError(t, b.store.View(func(txn MetadataTxn) error {
+		_, err := txn.Get(b.ks().MultipartDoneKey("u-fresh"))
+		require.NoError(t, err, "fresh marker must survive")
+		return nil
+	}))
 }

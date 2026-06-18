@@ -215,6 +215,15 @@ type RedundancyUpgrader interface {
 	RunRedundancyUpgradeSweep(ctx context.Context, maxPerCycle int, minAge time.Duration) (int, error)
 }
 
+// MultipartDoneSweeper is an optional interface a backend implements to GC
+// stale mpudone idempotency markers. The sweep runs at the end of each scrub
+// cycle, scanning local markers older than minAge and proposing a
+// CmdDeleteMultipartDone batch to remove them. Returns the count deleted.
+// Defined here (consumer) per the repo's "인터페이스는 사용처에서 정의" rule.
+type MultipartDoneSweeper interface {
+	SweepStaleMultipartDoneMarkers(ctx context.Context, maxPerCycle int, minAge time.Duration) (int, error)
+}
+
 // Migrator is an optional interface ECBackend can implement to enable plain→EC migration.
 // If the backend implements this, the scrubber will re-encode plain objects each cycle.
 type Migrator interface {
@@ -303,6 +312,12 @@ type BackgroundScrubber struct {
 	redundancyUpgradeEnabled     bool
 	redundancyUpgradeMaxPerCycle int
 	redundancyUpgradeMinAge      time.Duration
+
+	// multipartDoneSweepMaxPerCycle bounds the number of stale mpudone markers
+	// deleted per scrub cycle. multipartDoneSweepMinAge is the minimum marker
+	// age before deletion. Defaults: 256 / 24h (wired by EnableMultipartDoneSweep).
+	multipartDoneSweepMaxPerCycle int
+	multipartDoneSweepMinAge      time.Duration
 
 	// Replication-source registry. EC scrub keeps using the legacy runOnce
 	// path above; replication sources (volume blocks today, future internal
@@ -432,6 +447,15 @@ func (s *BackgroundScrubber) EnableRedundancyUpgrade(maxPerCycle int, minAge tim
 	s.redundancyUpgradeEnabled = true
 	s.redundancyUpgradeMaxPerCycle = maxPerCycle
 	s.redundancyUpgradeMinAge = minAge
+}
+
+// EnableMultipartDoneSweep turns on the end-of-cycle stale mpudone-marker GC
+// sweep. maxPerCycle bounds deletions per cycle; minAge is the minimum marker
+// age before deletion. Must be called before Start. The sweep only runs when
+// the backend implements MultipartDoneSweeper.
+func (s *BackgroundScrubber) EnableMultipartDoneSweep(maxPerCycle int, minAge time.Duration) {
+	s.multipartDoneSweepMaxPerCycle = maxPerCycle
+	s.multipartDoneSweepMinAge = minAge
 }
 
 // RegisterSource attaches a BlockSource/BlockVerifier pair for replication
@@ -787,6 +811,21 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 				cycleSpan.RecordError(err)
 			} else if n > 0 {
 				log.Info().Int("relocated", n).Msg("scrub: redundancy-upgrade sweep relocated objects")
+			}
+		}
+	}
+
+	// Optional: GC stale mpudone idempotency markers (foundation S4c-0 PR2 Task 5b).
+	// Runs only when enabled AND the backend implements MultipartDoneSweeper.
+	// Fail-soft: a sweep error is recorded on the cycle span but does not abort.
+	if s.multipartDoneSweepMaxPerCycle > 0 {
+		if sweeper, ok := s.backend.(MultipartDoneSweeper); ok {
+			n, err := sweeper.SweepStaleMultipartDoneMarkers(ctx, s.multipartDoneSweepMaxPerCycle, s.multipartDoneSweepMinAge)
+			if err != nil {
+				log.Warn().Err(err).Msg("scrub: multipart-done sweep failed")
+				cycleSpan.RecordError(err)
+			} else if n > 0 {
+				log.Info().Int("deleted", n).Msg("scrub: multipart-done sweep deleted stale markers")
 			}
 		}
 	}
