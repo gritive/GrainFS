@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -195,4 +196,28 @@ func (b *DistributedBackend) verifyPerVersionCutover(bucket string) (cutoverRead
 		return r, fmt.Errorf("verifyPerVersionCutover bucket %s: %w", bucket, err)
 	}
 	return r, nil
+}
+
+// ListCutoverBuckets returns the union of all locally-hosted generation
+// groups' buckets. Implements scrubber.PerVersionCutoverVerifiable.
+// Mirrors ListBackfillBuckets (delegates to SegmentSweepBuckets).
+func (b *DistributedBackend) ListCutoverBuckets(ctx context.Context) ([]string, error) {
+	return b.SegmentSweepBuckets(ctx)
+}
+
+// VerifyBucketCutover runs the read-only per-version coverage check for bucket
+// and returns a scrubber.CutoverReadiness tally. Implements
+// scrubber.PerVersionCutoverVerifiable.
+func (b *DistributedBackend) VerifyBucketCutover(_ context.Context, bucket string) (scrubber.CutoverReadiness, error) {
+	r, err := b.verifyPerVersionCutover(bucket)
+	if err != nil {
+		return scrubber.CutoverReadiness{}, err
+	}
+	return scrubber.CutoverReadiness{
+		Complete: r.Complete,
+		Gaps:     r.Gaps,
+		Stuck:    r.Stuck,
+		Unknown:  r.Unknown,
+		Excluded: r.Excluded,
+	}, nil
 }

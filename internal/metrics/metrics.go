@@ -526,6 +526,36 @@ var (
 		Help: "Total per-version backfill failures (per-object; sweep continues).",
 	})
 
+	// Foundation S4a — per-version cutover readiness gauges.
+	// Each gauge is set to the cluster-node-local sum across all hosted buckets
+	// by the background verification sweep. Alerting rule: gaps+stuck+unknown == 0
+	// across all nodes indicates cutover is safe.
+
+	PerVersionCutoverComplete = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "grainfs_per_version_cutover_complete",
+		Help: "Total versioned object versions with a readable per-version quorum-meta blob (cutover-ready).",
+	})
+
+	PerVersionCutoverGaps = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "grainfs_per_version_cutover_gaps",
+		Help: "Total versioned object versions missing a per-version blob but with resolvable placement (backfill can fix).",
+	})
+
+	PerVersionCutoverStuck = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "grainfs_per_version_cutover_stuck",
+		Help: "Total versioned object versions missing a per-version blob with unresolvable placement (manual intervention needed).",
+	})
+
+	PerVersionCutoverUnknown = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "grainfs_per_version_cutover_unknown",
+		Help: "Total versioned object versions that could not be classified due to decode or read errors (fail-closed).",
+	})
+
+	PerVersionCutoverExcluded = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "grainfs_per_version_cutover_excluded",
+		Help: "Total versioned object versions intentionally excluded from cutover verification (internal buckets, appendable, coalesced).",
+	})
+
 	// Phase 16 — Self-healing metrics.
 
 	HealEventsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
