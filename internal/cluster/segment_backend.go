@@ -42,15 +42,17 @@ type clusterSegmentBackend struct {
 
 	// Test seams. Production constructor leaves these nil; defaults route
 	// through b.shardGroup / newECObjectWriter / b.shardSvc.DeleteShards /
-	// b.writeQuorumMeta / b.propose. Tests inject all five to exercise
+	// b.writeQuorumMeta / b.propose. Tests inject all six to exercise
 	// putObjectChunked without a full RaftNode + ShardService.
-	writeSegmentFn    func(ctx context.Context, idx int, in writeSegmentInput) (PlacementRecord, string, string, error)
-	groupSelectorFn   func(bucket, key string, idx int, blobID string) (ShardGroupEntry, error)
-	deleteShardsFn    func(ctx context.Context, peer, bucket, shardKey string) error
-	proposeFn         func(ctx context.Context, cmdType CommandType, payload any) error
-	writeQuorumMetaFn func(ctx context.Context, cmd PutObjectMetaCmd) error
-	ecConfigFn        func() ECConfig
-	chunkSize         int
+	writeSegmentFn       func(ctx context.Context, idx int, in writeSegmentInput) (PlacementRecord, string, string, error)
+	groupSelectorFn      func(bucket, key string, idx int, blobID string) (ShardGroupEntry, error)
+	deleteShardsFn       func(ctx context.Context, peer, bucket, shardKey string) error
+	proposeFn            func(ctx context.Context, cmdType CommandType, payload any) error
+	writeQuorumMetaFn    func(ctx context.Context, cmd PutObjectMetaCmd) error
+	readDoneMarkerFn     func(uploadID string) (*multipartDone, error) // seam for phantom-winner guard
+	headObjectMetaVFn    func(ctx context.Context, bucket, key, versionID string) (*storage.Object, error)
+	ecConfigFn           func() ECConfig
+	chunkSize            int
 }
 
 // segmentPlacement captures the post-write placement metadata for one
@@ -429,6 +431,28 @@ func runChunkedPutWithParts(
 			preserveSegmentsOnProposeError = true
 		}
 		if commitErr == nil {
+			// Phantom-winner guard: after a successful propose, check who actually
+			// won this uploadID. If another concurrent completion committed first
+			// (its marker holds a different versionID), our FSM apply was a no-op
+			// — do NOT mirror our v2 into quorum-meta (that would publish a
+			// duplicate version). Instead return the winner's object. Our segment
+			// shards become orphans collected by the segment scrubber (same as
+			// relocation's old-blob handling); set committed=true to suppress the
+			// cleanup defer.
+			if marker, merr := csb.readDoneMarker(completeUploadID); merr != nil {
+				log.Warn().Err(merr).Str("bucket", bucket).Str("key", key).Str("upload_id", completeUploadID).
+					Msg("chunked multipart complete: done-marker readback failed; proceeding with mirror")
+			} else if marker != nil && marker.VersionID != versionID {
+				// Another completion won this uploadID. Suppress our mirror and
+				// return the winner's committed object.
+				committed = true // suppress cleanup defer — orphans go to scrubber
+				winObj, werr := csb.headObjectMetaVWinner(ctx, bucket, key, marker.VersionID)
+				if werr != nil {
+					return nil, fmt.Errorf("multipart complete: winner readback: %w", werr)
+				}
+				return winObj, nil
+			}
+
 			// LIST-visibility mirror into quorum-meta (Phase 4 index-free LIST
 			// scans it). Best-effort: the object is already durably committed
 			// above, so a mirror failure must NOT fail the op or trip the cleanup
@@ -505,6 +529,53 @@ func (c *clusterSegmentBackend) writeQuorumMeta(ctx context.Context, cmd PutObje
 		return c.writeQuorumMetaFn(ctx, cmd)
 	}
 	return c.b.writeQuorumMeta(ctx, cmd)
+}
+
+// readDoneMarker reads the mpudone marker for uploadID. Returns (nil, nil) when
+// the marker does not exist. Uses the test seam when injected; falls back to
+// the DistributedBackend's store.
+func (c *clusterSegmentBackend) readDoneMarker(uploadID string) (*multipartDone, error) {
+	if c.readDoneMarkerFn != nil {
+		return c.readDoneMarkerFn(uploadID)
+	}
+	if c.b == nil {
+		return nil, nil
+	}
+	var marker *multipartDone
+	if err := c.b.store.View(func(txn MetadataTxn) error {
+		item, err := txn.Get(c.b.ks().MultipartDoneKey(uploadID))
+		if err == ErrMetaKeyNotFound {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		raw, err := c.b.itemValueCopy(item)
+		if err != nil {
+			return err
+		}
+		m, err := unmarshalMultipartDone(raw)
+		if err != nil {
+			return err
+		}
+		marker = &m
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return marker, nil
+}
+
+// headObjectMetaVWinner reads a specific version for the winner-readback path.
+func (c *clusterSegmentBackend) headObjectMetaVWinner(ctx context.Context, bucket, key, versionID string) (*storage.Object, error) {
+	if c.headObjectMetaVFn != nil {
+		return c.headObjectMetaVFn(ctx, bucket, key, versionID)
+	}
+	if c.b == nil {
+		return nil, fmt.Errorf("multipart complete: winner readback: backend not wired")
+	}
+	obj, _, err := c.b.headObjectMetaV(ctx, bucket, key, versionID)
+	return obj, err
 }
 
 // chunkedChooseModTime returns ModTime according to the preserveModTime
