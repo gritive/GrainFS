@@ -5,10 +5,13 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
 	"github.com/google/uuid"
+
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // perVersionBackfillCandidate is an FSM obj: record that needs its per-version
@@ -143,6 +146,112 @@ func (b *DistributedBackend) walkPerVersionBackfillCandidates(
 		if scanErr != nil {
 			return fmt.Errorf("walkPerVersionBackfillCandidates bucket %s: %w", bucket, scanErr)
 		}
+	}
+	return nil
+}
+
+// segmentRefsToMetaEntries converts []storage.SegmentRef back to
+// []SegmentMetaEntry for use in a reconstructed PutObjectMetaCmd. The
+// SegmentIdx field is set from the slice position (matches the original
+// ordering established at write time by buildSegmentMetaEntries).
+//
+//nolint:unused // called by backfillPerVersionBlob; Task 3 adds the production caller.
+func segmentRefsToMetaEntries(refs []storage.SegmentRef) []SegmentMetaEntry {
+	if len(refs) == 0 {
+		return nil
+	}
+	out := make([]SegmentMetaEntry, len(refs))
+	for i, r := range refs {
+		out[i] = SegmentMetaEntry{
+			BlobID:           r.BlobID,
+			Size:             r.Size,
+			Checksum:         append([]byte(nil), r.Checksum...),
+			PlacementGroupID: r.PlacementGroupID,
+			ShardSize:        r.ShardSize,
+			SegmentIdx:       int32(i),
+			NodeIDs:          cloneStringSlice(r.NodeIDs),
+			ECData:           r.ECData,
+			ECParity:         r.ECParity,
+			StripeBytes:      r.StripeBytes,
+		}
+	}
+	return out
+}
+
+// backfillPerVersionBlob reconstructs a PutObjectMetaCmd from the candidate's
+// FSM objectMeta and fans the encoded blob out to the per-version quorum-meta
+// tree on every placement node. It mirrors S1's per-version fan-out block in
+// writeQuorumMeta (quorum_meta.go:104-122), reusing the exact same helpers.
+//
+// Correctness invariants:
+//   - IsDeleteMarker is reconstructed from the ETag sentinel (objectMeta has no
+//     dedicated flag; c.Meta.ETag == deleteMarkerETag is the only signal).
+//   - The blob is NOT written if it already exists on disk (idempotent;
+//     writeQuorumMetaVersionLocal uses os.Rename only when the target is
+//     absent — the walker's skip-if-exists gate also prevents redundant calls).
+//   - ExpectedETag and PreserveLatest are write-time-only fields absent from
+//     objectMeta; they are intentionally left at their zero values and are
+//     read-irrelevant.
+//
+//nolint:unused // invoked by per_version_backfill_walker_test.go; Task 3 will add the production caller.
+func (b *DistributedBackend) backfillPerVersionBlob(ctx context.Context, c perVersionBackfillCandidate) error {
+	cmd := PutObjectMetaCmd{
+		Bucket:           c.Bucket,
+		Key:              c.Key,
+		VersionID:        c.VersionID,
+		Size:             c.Meta.Size,
+		ContentType:      c.Meta.ContentType,
+		ETag:             c.Meta.ETag,
+		ModTime:          c.Meta.LastModified,
+		ECData:           c.Meta.ECData,
+		ECParity:         c.Meta.ECParity,
+		StripeBytes:      c.Meta.StripeBytes,
+		NodeIDs:          cloneStringSlice(c.Meta.NodeIDs),
+		PlacementGroupID: c.Meta.PlacementGroupID,
+		UserMetadata:     c.Meta.UserMetadata,
+		SSEAlgorithm:     c.Meta.SSEAlgorithm,
+		ACL:              c.Meta.ACL,
+		Tags:             append([]storage.Tag(nil), c.Meta.Tags...),
+		Parts:            append([]storage.MultipartPartEntry(nil), c.Meta.Parts...),
+		Segments:         segmentRefsToMetaEntries(c.Meta.Segments),
+		MetaSeq:          c.Meta.MetaSeq,
+		// Reconstruct the delete-marker flag from the ETag sentinel.
+		// objectMeta has no dedicated IsDeleteMarker field; deleteMarkerETag
+		// is the sole signal. Without this, a backfilled marker decodes as a
+		// live object and corrupts deriveLatestVersion.
+		IsDeleteMarker: c.Meta.ETag == deleteMarkerETag,
+		// ExpectedETag and PreserveLatest are write-time-only; absent from
+		// objectMeta and read-irrelevant — left at zero values.
+		//
+		// NOT carried: IsAppendable. PutObjectMetaCmd has no IsAppendable field
+		// (it lives only on objectMeta), so S1's blob ALSO decodes with
+		// IsAppendable=false — the backfill is field-equivalent to S1 here.
+		// Appendable-versioned objects are a documented foundation carve-out
+		// (future concern); see Task 3's caller.
+	}
+
+	blob, err := EncodeCommand(CmdPutObjectMeta, cmd)
+	if err != nil {
+		return fmt.Errorf("backfillPerVersionBlob encode %s/%s@%s: %w", c.Bucket, c.Key, c.VersionID, err)
+	}
+
+	self := b.currentSelfAddr()
+	k := max(1, int(c.Meta.ECData))
+	verSubpath := path.Join(c.Key, c.VersionID)
+
+	wctx, cancel := context.WithTimeout(ctx, quorumMetaWriteTimeout)
+	defer cancel()
+	if err := fanOutQuorumMeta(wctx, c.Meta.NodeIDs, k, func(fctx context.Context, node string) error {
+		if node == self {
+			return b.shardSvc.writeQuorumMetaVersionLocal(c.Bucket, verSubpath, blob)
+		}
+		addr, rerr := b.shardSvc.resolvePeerAddress(node)
+		if rerr != nil {
+			return rerr
+		}
+		return b.shardSvc.WriteQuorumMetaVersion(fctx, addr, c.Bucket, verSubpath, blob)
+	}); err != nil {
+		return fmt.Errorf("backfillPerVersionBlob fan-out %s/%s@%s: %w", c.Bucket, c.Key, c.VersionID, err)
 	}
 	return nil
 }

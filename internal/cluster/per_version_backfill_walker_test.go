@@ -111,6 +111,144 @@ func TestWalkPerVersionBackfillCandidates_NoopOnUnversionedBucket(t *testing.T) 
 	require.False(t, called, "walker must be a no-op for an unversioned bucket")
 }
 
+// deleteVersioned performs a soft-delete on a versioned bucket and returns the
+// delete-marker VersionID.
+func deleteVersioned(t *testing.T, b *DistributedBackend, bkt, key string) string {
+	t.Helper()
+	vid, err := b.deleteObjectWithMarker(context.Background(), bkt, key)
+	require.NoError(t, err)
+	require.NotEmpty(t, vid)
+	return vid
+}
+
+// decodePerVersionBlob reads the raw per-version quorum-meta blob from disk for
+// (bucket, key, versionID) and decodes it to a PutObjectMetaCmd using the same
+// path S2 uses (decodeQuorumMetaCmdBlob). This is the authoritative decoder for
+// backfill tests.
+func decodePerVersionBlob(t *testing.T, b *DistributedBackend, bucket, key, versionID string) PutObjectMetaCmd {
+	t.Helper()
+	require.NotNil(t, b.shardSvc)
+	dirs := b.shardSvc.DataDirs()
+	require.NotEmpty(t, dirs)
+	p := filepath.Join(dirs[0], quorumMetaVersionsSubDir, bucket, key, versionID)
+	data, err := os.ReadFile(p)
+	require.NoError(t, err, "per-version blob must exist at %s", p)
+	cmd, err := b.shardSvc.decodeQuorumMetaCmdBlob(data)
+	require.NoError(t, err)
+	return cmd
+}
+
+// TestBackfillPerVersionBlob_DecodesToReadRelevantFields verifies that after
+// removing S1's per-version blob and running backfillPerVersionBlob, the
+// re-written blob decodes to a PutObjectMetaCmd whose read-relevant fields
+// (those consumed by objectAndPlacementFromCmd and deriveLatestVersion) equal
+// the original S1-written blob's fields. Write-time-only fields (ExpectedETag,
+// PreserveLatest) are NOT asserted.
+func TestBackfillPerVersionBlob_DecodesToReadRelevantFields(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	const bkt, key = "vbkt", "obj"
+	require.NoError(t, b.CreateBucket(context.Background(), bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+	v1 := putVersioned(t, b, context.Background(), bkt, key, "one")
+
+	// Capture S1's blob decoded to a cmd, then delete the blob to force a backfill.
+	wantCmd := decodePerVersionBlob(t, b, bkt, key, v1)
+	removePerVersionBlob(t, b, bkt, key, v1)
+
+	var cand perVersionBackfillCandidate
+	require.NoError(t, b.walkPerVersionBackfillCandidates(bkt, nowUnixSec(), 0, func(c perVersionBackfillCandidate) error {
+		cand = c
+		return nil
+	}))
+	require.NotEmpty(t, cand.VersionID, "walker must yield the missing-blob version")
+	require.NoError(t, b.backfillPerVersionBlob(context.Background(), cand))
+
+	got := decodePerVersionBlob(t, b, bkt, key, v1)
+	// Read-relevant fields: everything consumed by objectAndPlacementFromCmd
+	// (quorum_meta.go:718) and deriveLatestVersion (:645).
+	// ExpectedETag / PreserveLatest are write-time-only and absent from objectMeta,
+	// so they are NOT asserted.
+	require.Equal(t, wantCmd.VersionID, got.VersionID)
+	require.Equal(t, wantCmd.Key, got.Key)
+	require.Equal(t, wantCmd.Bucket, got.Bucket)
+	require.Equal(t, wantCmd.ETag, got.ETag)
+	require.Equal(t, wantCmd.Size, got.Size)
+	require.Equal(t, wantCmd.ContentType, got.ContentType)
+	require.Equal(t, wantCmd.ModTime, got.ModTime)
+	require.Equal(t, wantCmd.ECData, got.ECData)
+	require.Equal(t, wantCmd.ECParity, got.ECParity)
+	require.Equal(t, wantCmd.StripeBytes, got.StripeBytes)
+	require.Equal(t, wantCmd.NodeIDs, got.NodeIDs)
+	require.Equal(t, wantCmd.PlacementGroupID, got.PlacementGroupID)
+	require.Equal(t, wantCmd.IsDeleteMarker, got.IsDeleteMarker)
+	require.Equal(t, wantCmd.MetaSeq, got.MetaSeq)
+	require.Equal(t, wantCmd.SSEAlgorithm, got.SSEAlgorithm)
+	require.Equal(t, wantCmd.ACL, got.ACL)
+	require.Equal(t, wantCmd.UserMetadata, got.UserMetadata)
+	require.Equal(t, wantCmd.Tags, got.Tags)
+	require.Equal(t, wantCmd.Parts, got.Parts)
+	require.Equal(t, wantCmd.Segments, got.Segments)
+}
+
+// TestBackfillPerVersionBlob_ReconstructsDeleteMarker verifies the
+// load-bearing correctness case: a delete-marker backfilled blob must decode
+// with IsDeleteMarker=true so deriveLatestVersion does not treat it as a live
+// object.
+func TestBackfillPerVersionBlob_ReconstructsDeleteMarker(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	const bkt, key = "vbkt", "obj"
+	require.NoError(t, b.CreateBucket(context.Background(), bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+	_ = putVersioned(t, b, context.Background(), bkt, key, "one")
+	mk := deleteVersioned(t, b, bkt, key) // soft-delete → marker version
+
+	removePerVersionBlob(t, b, bkt, key, mk)
+
+	var cand perVersionBackfillCandidate
+	require.NoError(t, b.walkPerVersionBackfillCandidates(bkt, nowUnixSec(), 0, func(c perVersionBackfillCandidate) error {
+		if c.VersionID == mk {
+			cand = c
+		}
+		return nil
+	}))
+	require.NotEmpty(t, cand.VersionID, "walker must yield the missing marker blob")
+	require.NoError(t, b.backfillPerVersionBlob(context.Background(), cand))
+
+	got := decodePerVersionBlob(t, b, bkt, key, mk)
+	require.True(t, got.IsDeleteMarker, "backfilled marker must decode as a delete marker")
+}
+
+// TestBackfillPerVersionBlob_IsIdempotent verifies that after a successful
+// backfill, walkPerVersionBackfillCandidates no longer yields the version (the
+// blob is present on disk — skip-if-exists). This is the no-overwrite
+// guarantee: S3 never re-writes an existing blob, so it cannot clobber S1's
+// fuller blob.
+func TestBackfillPerVersionBlob_IsIdempotent(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	const bkt, key = "vbkt", "obj"
+	require.NoError(t, b.CreateBucket(context.Background(), bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+	v1 := putVersioned(t, b, context.Background(), bkt, key, "one")
+	removePerVersionBlob(t, b, bkt, key, v1)
+
+	// First pass: walker yields, backfill writes the blob.
+	var cand perVersionBackfillCandidate
+	require.NoError(t, b.walkPerVersionBackfillCandidates(bkt, nowUnixSec(), 0, func(c perVersionBackfillCandidate) error {
+		cand = c
+		return nil
+	}))
+	require.NotEmpty(t, cand.VersionID)
+	require.NoError(t, b.backfillPerVersionBlob(context.Background(), cand))
+
+	// Second pass: walker must NOT yield the same version again (blob present).
+	var got []string
+	require.NoError(t, b.walkPerVersionBackfillCandidates(bkt, nowUnixSec(), 0, func(c perVersionBackfillCandidate) error {
+		got = append(got, c.VersionID)
+		return nil
+	}))
+	require.Empty(t, got, "walker must not re-yield a version whose blob was backfilled")
+}
+
 // TestWalkPerVersionBackfillCandidates_IncludesDeleteMarker verifies that a
 // delete-marker version (ETag == deleteMarkerETag) is enumerated as a candidate
 // when its per-version blob is absent.
