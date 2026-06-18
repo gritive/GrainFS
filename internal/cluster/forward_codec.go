@@ -331,7 +331,7 @@ func buildListObjectsArgs(bucket, prefix, marker string, maxKeys int32, versioni
 	return b.FinishedBytes()
 }
 
-func buildListObjectVersionsArgs(bucket, prefix string, maxKeys int32) []byte {
+func buildListObjectVersionsArgs(bucket, prefix string, maxKeys int32, versioningState byte) []byte {
 	b := flatbuffers.NewBuilder(64)
 	bk := b.CreateString(bucket)
 	pf := b.CreateString(prefix)
@@ -339,6 +339,9 @@ func buildListObjectVersionsArgs(bucket, prefix string, maxKeys int32) []byte {
 	raftpb.ListObjectVersionsArgsAddBucket(b, bk)
 	raftpb.ListObjectVersionsArgsAddPrefix(b, pf)
 	raftpb.ListObjectVersionsArgsAddMaxKeys(b, maxKeys)
+	if versioningState != versioningStateUnknown {
+		raftpb.ListObjectVersionsArgsAddVersioningState(b, versioningState)
+	}
 	b.Finish(raftpb.ListObjectVersionsArgsEnd(b))
 	return b.FinishedBytes()
 }

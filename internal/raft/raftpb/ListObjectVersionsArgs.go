@@ -69,8 +69,20 @@ func (rcv *ListObjectVersionsArgs) MutateMaxKeys(n int32) bool {
 	return rcv._tab.MutateInt32Slot(8, n)
 }
 
+func (rcv *ListObjectVersionsArgs) VersioningState() byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		return rcv._tab.GetByte(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *ListObjectVersionsArgs) MutateVersioningState(n byte) bool {
+	return rcv._tab.MutateByteSlot(10, n)
+}
+
 func ListObjectVersionsArgsStart(builder *flatbuffers.Builder) {
-	builder.StartObject(3)
+	builder.StartObject(4)
 }
 func ListObjectVersionsArgsAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -80,6 +92,9 @@ func ListObjectVersionsArgsAddPrefix(builder *flatbuffers.Builder, prefix flatbu
 }
 func ListObjectVersionsArgsAddMaxKeys(builder *flatbuffers.Builder, maxKeys int32) {
 	builder.PrependInt32Slot(2, maxKeys, 0)
+}
+func ListObjectVersionsArgsAddVersioningState(builder *flatbuffers.Builder, versioningState byte) {
+	builder.PrependByteSlot(3, versioningState, 0)
 }
 func ListObjectVersionsArgsEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
