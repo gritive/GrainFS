@@ -220,6 +220,19 @@ func (b *DistributedBackend) verifyPerVersionCutover(bucket string) (cutoverRead
 			//   3. EC: NodeIDs non-empty AND ECData > 0 AND len(NodeIDs)==ECData+ECParity
 			//      (same predicate as ResolvePlacement) → COMPLETE.
 			//   Otherwise → present blob but unreadable layout → UNKNOWN (fail-closed).
+			//
+			// SCOPE (precise): this checks that the per-version blob exists and
+			// DISPATCHES to the same read layout the pre-cutover read uses — i.e.
+			// the cutover does not REGRESS a currently-readable version into a 404.
+			// It deliberately does NOT re-verify deep segment/shard DATA readability
+			// (e.g. that every SegmentRef's shards are actually fetchable): the
+			// per-version blob carries the SAME refs S1 wrote to the FSM record (and
+			// S3 backfilled FROM it), so a segmented version's data-readability is
+			// IDENTICAL pre- and post-cutover. A version with malformed/unfetchable
+			// segment refs is already broken today via the FSM path; the cutover
+			// neither fixes nor regresses it, and surfacing it is the scrubber's job,
+			// not this gate's. The gate's guarantee is "cutover-safe" (no regression),
+			// not "every object is readable".
 			if cmd.IsDeleteMarker {
 				r.Complete++
 				return nil
