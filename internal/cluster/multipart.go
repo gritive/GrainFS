@@ -161,10 +161,31 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 
 	// Read upload metadata
 	var meta clusterMultipartMeta
+	var doneMarker *multipartDone
 	err := b.store.View(func(txn MetadataTxn) error {
 		item, err := txn.Get(b.ks().MultipartKey(uploadID))
 		if err == ErrMetaKeyNotFound {
-			return storage.ErrUploadNotFound
+			// Manifest is gone; check for a done marker (idempotent retry).
+			doneItem, derr := txn.Get(b.ks().MultipartDoneKey(uploadID))
+			if derr == ErrMetaKeyNotFound {
+				return storage.ErrUploadNotFound
+			}
+			if derr != nil {
+				return derr
+			}
+			raw, derr := b.itemValueCopy(doneItem)
+			if derr != nil {
+				return derr
+			}
+			marker, derr := unmarshalMultipartDone(raw)
+			if derr != nil {
+				return derr
+			}
+			if marker.Bucket != bucket || marker.Key != key {
+				return fmt.Errorf("multipart upload %s already completed for %s/%s", uploadID, marker.Bucket, marker.Key)
+			}
+			doneMarker = &marker
+			return nil
 		}
 		if err != nil {
 			return err
@@ -182,6 +203,14 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 	})
 	if err != nil {
 		return nil, err
+	}
+	// Idempotent retry: manifest is gone but marker exists; return committed object.
+	if doneMarker != nil {
+		obj, _, err := b.headObjectMetaV(ctx, bucket, key, doneMarker.VersionID)
+		if err != nil {
+			return nil, err
+		}
+		return obj, nil
 	}
 	if meta.PlacementGroupID != "" {
 		var ctxErr error

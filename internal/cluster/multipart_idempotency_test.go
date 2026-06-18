@@ -1,6 +1,8 @@
 package cluster
 
 import (
+	"bytes"
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -85,6 +87,56 @@ func TestFSM_CompleteMultipart_MismatchErrors(t *testing.T) {
 	})
 	require.NoError(t, err)
 	err = fsm.Apply(conflict)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, storage.ErrUploadNotFound)
+}
+
+// TestCompleteMultipartUpload_IdempotentRetryAfterSuccess verifies that a second
+// call to CompleteMultipartUpload with the same uploadID returns the already-committed
+// object (same VersionID/ETag/Size) instead of ErrUploadNotFound.
+func TestCompleteMultipartUpload_IdempotentRetryAfterSuccess(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(ctx, "bucket"))
+
+	up, err := b.CreateMultipartUpload(ctx, "bucket", "obj", "text/plain")
+	require.NoError(t, err)
+
+	part, err := b.UploadPart(ctx, "bucket", "obj", up.UploadID, 1, bytes.NewReader(bytes.Repeat([]byte("a"), 16)), "")
+	require.NoError(t, err)
+
+	obj1, err := b.CompleteMultipartUpload(ctx, "bucket", "obj", up.UploadID, []storage.Part{*part})
+	require.NoError(t, err)
+
+	// Retry: manifest is gone; marker must be found; return committed object.
+	obj2, err := b.CompleteMultipartUpload(ctx, "bucket", "obj", up.UploadID, []storage.Part{*part})
+	require.NoError(t, err, "retry after success must be idempotent, not ErrUploadNotFound")
+	require.Equal(t, obj1.VersionID, obj2.VersionID)
+	require.Equal(t, obj1.ETag, obj2.ETag)
+	require.Equal(t, obj1.Size, obj2.Size)
+}
+
+// TestCompleteMultipartUpload_MarkerMismatchErrors verifies that the client path
+// returns a descriptive (non-ErrUploadNotFound) error when the done marker's
+// (bucket,key) does not match the retry's (bucket,key) — mirroring the FSM contract
+// (applyCompleteMultipart), not silently collapsing a real conflict into a 404.
+func TestCompleteMultipartUpload_MarkerMismatchErrors(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(ctx, "b"))
+
+	up, err := b.CreateMultipartUpload(ctx, "b", "obj", "text/plain")
+	require.NoError(t, err)
+
+	part, err := b.UploadPart(ctx, "b", "obj", up.UploadID, 1, bytes.NewReader(bytes.Repeat([]byte("a"), 16)), "")
+	require.NoError(t, err)
+
+	_, err = b.CompleteMultipartUpload(ctx, "b", "obj", up.UploadID, []storage.Part{*part})
+	require.NoError(t, err)
+
+	// Retry with the SAME uploadID but a DIFFERENT key: manifest gone, marker
+	// bucket/key "b"/"obj" != "b"/"other" → must be a descriptive conflict error.
+	_, err = b.CompleteMultipartUpload(ctx, "b", "other", up.UploadID, []storage.Part{*part})
 	require.Error(t, err)
 	require.NotErrorIs(t, err, storage.ErrUploadNotFound)
 }
