@@ -434,6 +434,18 @@ func (s *ShardService) writeQuorumMetaVersionLocal(bucket, versionSubpath string
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("quorum meta version tmp close: %w", err)
 	}
+	// Write-time LWW guard: a blind-writer (e.g. leaderless backfill) must not
+	// clobber a newer on-disk blob. Absent file → no-op (the common case).
+	// decodeQuorumMetaCmdBlob is a method on *ShardService (the receiver `s` here).
+	if existing, rerr := os.ReadFile(target); rerr == nil {
+		if cand, derr := s.decodeQuorumMetaCmdBlob(data); derr == nil {
+			if cur, derr2 := s.decodeQuorumMetaCmdBlob(existing); derr2 == nil {
+				if !quorumMetaBlobWins(cand.ModTime, cand.VersionID, cand.MetaSeq, cur.ModTime, cur.VersionID, cur.MetaSeq) {
+					return nil // existing wins (or ties) — keep it, skip the rename
+				}
+			}
+		}
+	}
 	if err := os.Rename(tmpName, target); err != nil {
 		return fmt.Errorf("quorum meta version rename: %w", err)
 	}

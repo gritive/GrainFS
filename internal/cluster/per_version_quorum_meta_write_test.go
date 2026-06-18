@@ -85,6 +85,46 @@ func TestWriteQuorumMeta_AlsoWritesPerVersion(t *testing.T) {
 	require.Equal(t, put2.VersionID, head.VersionID)
 }
 
+// mustEncodeMetaCmd encodes a PutObjectMetaCmd to a quorum-meta blob for use in
+// tests. Reused across tasks.
+func mustEncodeMetaCmd(t *testing.T, cmd PutObjectMetaCmd) []byte {
+	t.Helper()
+	blob, err := EncodeCommand(CmdPutObjectMeta, cmd)
+	require.NoError(t, err)
+	return blob
+}
+
+// TestWriteQuorumMetaVersionLocal_SkipsWhenExistingWins verifies that a stale
+// blind-writer (e.g. leaderless backfill) cannot overwrite a newer on-disk blob.
+func TestWriteQuorumMetaVersionLocal_SkipsWhenExistingWins(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	sub := filepath.Join("k", "vid-1")
+
+	newer := mustEncodeMetaCmd(t, PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: "vid-1", ModTime: 200, MetaSeq: 2})
+	older := mustEncodeMetaCmd(t, PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: "vid-1", ModTime: 100, MetaSeq: 1})
+
+	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal("bkt", sub, newer))
+	// An older blind-writer (e.g. backfill) must NOT overwrite the newer on-disk blob.
+	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal("bkt", sub, older))
+
+	got, err := os.ReadFile(filepath.Join(b.shardSvc.dataDirs[0], quorumMetaVersionsSubDir, "bkt", "k", "vid-1"))
+	require.NoError(t, err)
+	require.Equal(t, newer, got, "older blind-write must be skipped; newer blob preserved")
+}
+
+// TestWriteQuorumMetaVersionLocal_OverwritesWhenCandidateWins verifies that a
+// strictly-newer candidate (higher MetaSeq) correctly overwrites the on-disk blob.
+func TestWriteQuorumMetaVersionLocal_OverwritesWhenCandidateWins(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	sub := filepath.Join("k", "vid-1")
+	older := mustEncodeMetaCmd(t, PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: "vid-1", ModTime: 100, MetaSeq: 1})
+	newer := mustEncodeMetaCmd(t, PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: "vid-1", ModTime: 100, MetaSeq: 2}) // same ModTime/VID, higher MetaSeq
+	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal("bkt", sub, older))
+	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal("bkt", sub, newer))
+	got, _ := os.ReadFile(filepath.Join(b.shardSvc.dataDirs[0], quorumMetaVersionsSubDir, "bkt", "k", "vid-1"))
+	require.Equal(t, newer, got, "higher-MetaSeq candidate must overwrite (relocation/RMW path)")
+}
+
 // TestWriteQuorumMeta_PerVersionFailureDoesNotFailPut proves the per-version
 // write is best-effort: if its subtree can't be created, PutObject still succeeds.
 func TestWriteQuorumMeta_PerVersionFailureDoesNotFailPut(t *testing.T) {
