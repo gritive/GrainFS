@@ -58,7 +58,27 @@
       injection) — landed with a deterministic `internal/cluster` integration test
       (`TestPerVersionOrphanReconcile_StopsDeriveByScanResurface`) instead, since a clean blob-injection
       seam through the S3 edge does not yet exist and multi-node e2e is resource-flaky.
-  - **S3 — migrate existing data** (legacy latest-only blob + FSM per-version records → per-version blobs).
+  - **S3 — migrate existing data — DONE (this PR).** Background, idempotent per-version blob backfill
+    sweep (`per_version_backfill_walker.go` + `scrubber/per_version_backfill.go`, wired into the scrubber
+    tick beside the orphan version sweep). Enumerates FSM `obj:{bucket}/{key}/{vid}` records across ALL
+    locally-hosted generation-group stores (`hostedGroupBackends()` — a single-store scan would miss
+    older-generation versions), yields versions whose per-version blob is ABSENT on disk (direct `os.Stat`
+    idempotency, NEVER overwrites an existing blob), age-gated by the VersionID's UUIDv7 timestamp (NOT
+    `LastModified`, which is 0 for fresh markers), and replays S1's fan-out (`backfillPerVersionBlob` →
+    `writeQuorumMetaVersionLocal`/`WriteQuorumMetaVersion` to `objectMeta.NodeIDs`). Metrics:
+    `grainfs_scrub_quorum_meta_versions_backfill_{found,migrated,capped,error}_total`. **Correctness
+    boundaries handled (codex code-gate):** (1) `IsDeleteMarker` reconstructed from `ETag==deleteMarkerETag`
+    (objectMeta has no such field) so a backfilled marker reads as deleted; (2) field-equivalence not
+    byte-identical — `ExpectedETag`/`PreserveLatest`/`IsAppendable`/`Coalesced` are not in `objectMeta`,
+    all read-irrelevant for normal versioned objects; (3) appendable/coalesced versions SKIPPED (the spec
+    carve-out — they get no per-version blob); (4) unversioned `obj:` records (key may end in a UUID-looking
+    segment) rejected via `meta.Key == parsedKey`; (5) **empty-NodeIDs degraded delete markers** (placement
+    unreadable at delete time) get RDH-direct placement (`deriveMarkerPlacement` — owning-group peers + EC
+    config) — correct because the tombstone metadata blob need only be DISCOVERABLE by the all-groups
+    `readQuorumMetaVersions` readback, not byte-match a data write's shard placement. **S4 verification
+    note:** S4's "after migration verified" gate must confirm per-version blob completeness before removing
+    the FSM fallback (the backfill is best-effort; e.g. a key whose placement is wholly unresolvable, or a
+    version whose owning group is hosted on no live node, is not reachable by this per-node sweep).
   - **S4 — cutover: per-version sole authority; remove FSM object-meta path** (`CmdPutObjectMeta`/`apply*`/
     `obj:`/`lat:`), repoint scrubber/snapshot. **Appendable/coalesced carve-out:** those objects bypass
     quorum-meta (append.go:158-166; `PutObjectMetaCmd` lacks `IsAppendable`/`Coalesced`) → stay
