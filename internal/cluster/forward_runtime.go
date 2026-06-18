@@ -278,7 +278,7 @@ func (r forwardRuntime) listObjectVersions(ctx context.Context, target RouteTarg
 	if r.sender == nil {
 		return nil, ErrCoordinatorNoRouter
 	}
-	args := buildListObjectVersionsArgs(bucket, prefix, int32(maxKeys), versioningStateUnknown)
+	args := buildListObjectVersionsArgs(bucket, prefix, int32(maxKeys), versioningStateFromContext(ctx))
 	// peersForTarget backfills peers when routeGroup returned none (self was the
 	// leader at route time) and a leader-flip then made ResolveRead defer to a
 	// forward — without this the multi-group fan-out would dial an empty peer set.
