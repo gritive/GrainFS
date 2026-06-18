@@ -79,11 +79,34 @@
     note:** S4's "after migration verified" gate must confirm per-version blob completeness before removing
     the FSM fallback (the backfill is best-effort; e.g. a key whose placement is wholly unresolvable, or a
     version whose owning group is hosted on no live node, is not reachable by this per-node sweep).
-  - **S4 — cutover: per-version sole authority; remove FSM object-meta path** (`CmdPutObjectMeta`/`apply*`/
-    `obj:`/`lat:`), repoint scrubber/snapshot. **Appendable/coalesced carve-out:** those objects bypass
-    quorum-meta (append.go:158-166; `PutObjectMetaCmd` lacks `IsAppendable`/`Coalesced`) → stay
-    FSM-authoritative, so the FSM object path is retained ONLY for them (confirm before S4). raft out of
-    PUT/GET for non-appendable objects.
+  - **S4a — cutover-readiness VERIFICATION gate — DONE (this PR).** Non-breaking, read-only. S4 cutover is
+    data-loss-risky without proving completeness first (S3 backfill is best-effort), so this gate ships
+    BEFORE any removal. `verifyPerVersionCutover` classifies every FSM `obj:` version (across hosted
+    generation groups, Enabled+Suspended buckets, non-appendable, non-internal) COMPLETE / GAP /
+    STUCK / UNKNOWN / EXCLUDED. **Completeness = decoded STRICT readback matching the EXACT post-cutover
+    read** (`readQuorumMetaVersionsStrict` + layout-dispatch parity vs `getObjectVersionCtx`: marker OK /
+    Segments / EC-resolvable) — NOT a local `os.Stat`. **Fail-closed everywhere** (decode/panic/readback/
+    versioning-read/scan errors → UNKNOWN or a returned error → not-ready): per-node gauges
+    `grainfs_per_version_cutover_{complete,gaps,stuck,unknown,excluded,verify_errors}` (verify_errors
+    starts at 1, → 0 only after a fully-clean completed sweep, so default-zero/partial/failed sweeps read
+    not-ready), background scrubber-tick sweep, and node-local admin CLI `grainfs cluster verify-per-version`
+    (JSON over adminapi, exit non-zero on gaps+stuck+unknown). **Cutover-ready = `gaps+stuck+unknown+
+    verify_errors == 0` on EVERY node** (sum/per-node aggregation). **SCOPE the breaking S4 slices must
+    respect**: this gate covers the versioned (Enabled/Suspended) non-appendable per-version-blob fallback
+    ONLY. It does NOT cover the non-versioned latest-only-blob path or appendable/coalesced (FSM
+    carve-out); the cutover must NOT remove fallbacks this gate does not check without extending it first.
+    The gate verifies cutover does not REGRESS readability (layout dispatch), not deep segment-data
+    integrity (identical pre/post cutover — scrubber's job).
+  - **S4b — repoint reads to per-version blobs (FSM fallback retained as safety net).** Repoint
+    `ListObjectVersions` (still FSM-`lat:`/`obj:`-backed, object_version.go) + `ScanObjects` (`lat:` walk) to
+    the per-version-blob source, behavior-neutral with the FSM fallback kept. Separate slice.
+  - **S4c — cutover: per-version sole authority; remove FSM object-meta path** (`CmdPutObjectMeta`/`apply*`/
+    `obj:`/`lat:`), repoint scrubber/snapshot. **GATED on S4a reading clean** (`gaps+stuck+unknown+
+    verify_errors == 0` cluster-wide, confirmed STABLE). **Appendable/coalesced carve-out:** those objects
+    bypass quorum-meta (append.go:158-166; `PutObjectMetaCmd` lacks `IsAppendable`/`Coalesced`) → stay
+    FSM-authoritative, so the FSM object path is retained ONLY for them. raft out of PUT/GET for
+    non-appendable objects. **Must NOT remove the non-versioned latest-only-blob fallback** (out of S4a's
+    verification scope) without extending S4a.
   - **S5 — Epic B:** genesis per-version meta re-fan-out + data re-encode (reuse EC-redundancy sweep).
   Spec/keystone detail: docs/superpowers/specs/2026-06-17-per-version-quorum-meta-foundation-design.md
   (root worktree, git-ignored). Non-versioned buckets are already quorum-meta-only (latest-only blob,

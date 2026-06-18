@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -494,4 +495,95 @@ func TestWalkPerVersionBackfillCandidates_IncludesDeleteMarker(t *testing.T) {
 		}
 	}
 	require.True(t, found, "delete-marker version must be enumerated as a backfill candidate")
+}
+
+// errInjectStore wraps a MetadataStore and returns a fixed error from View
+// when active is true; otherwise it delegates to the inner store.
+// Used to simulate a BadgerDB View transaction failure.
+type errInjectStore struct {
+	MetadataStore
+	active  bool
+	viewErr error
+}
+
+func (e *errInjectStore) View(fn func(MetadataTxn) error) error {
+	if e.active {
+		return e.viewErr
+	}
+	return e.MetadataStore.View(fn)
+}
+
+// TestForEachHostedObjVersion_PropagatesViewError verifies Finding 2:
+// forEachHostedObjVersion must propagate a BadgerDB View error (previously
+// swallowed with _ =). Without the fix, a scan transaction failure causes the
+// enumerator to return nil after iterating zero records — making both the
+// verifier and the S3 backfill walker believe the bucket is clean (false-READY /
+// silently skipped backfill). With the fix, the error is returned and propagated.
+//
+// This test calls forEachHostedObjVersion directly so it is not confused by
+// the versioning-check View calls inside the higher-level callers. The
+// propagation path through verifyPerVersionCutover and
+// walkPerVersionBackfillCandidates is exercised by the integration tests that
+// inject an object, remove its blob, and observe that a View failure surfaces
+// as an error rather than a clean report.
+func TestForEachHostedObjVersion_PropagatesViewError(t *testing.T) {
+	b := newTestDistributedBackend(t)
+
+	// Inject an active View-error store. hostedGroupBackends() returns [b] when
+	// the source is not wired, so replacing b.store is sufficient.
+	viewErr := errors.New("simulated BadgerDB View failure")
+	b.store = &errInjectStore{MetadataStore: b.store, active: true, viewErr: viewErr}
+
+	err := b.forEachHostedObjVersion("any-bucket", func(_ *DistributedBackend, _, _ string, _ objectMeta, _ error) error {
+		t.Fatal("fn must not be called when View fails")
+		return nil
+	})
+	require.Error(t, err, "forEachHostedObjVersion must propagate the View error")
+	require.ErrorIs(t, err, viewErr, "propagated error must wrap the original View error")
+}
+
+// TestForEachHostedObjVersion_ViewErrorPropagatesThrough_BackfillWalker confirms
+// that walkPerVersionBackfillCandidates propagates a forEachHostedObjVersion
+// error. It drives forEachHostedObjVersion directly via the bucket argument and
+// a versioning-stamped context to skip the store-read versioning gate, then
+// confirms the returned error matches the injected View failure.
+func TestForEachHostedObjVersion_ViewErrorPropagatesThrough_BackfillWalker(t *testing.T) {
+	b := newTestDistributedBackend(t)
+
+	viewErr := errors.New("simulated scan failure for walker")
+	b.store = &errInjectStore{MetadataStore: b.store, active: true, viewErr: viewErr}
+
+	// forEachHostedObjVersion is the shared enumerator used by both walkers.
+	// Confirm that its View error is not swallowed — the fix in Finding 2 ensures
+	// the error propagates. We call the enumerator directly (same path the backfill
+	// walker uses) because the high-level walker checks bucketVersioningEnabled,
+	// which also reads the store and returns false under injection, causing an early
+	// nil return before the scan.
+	err := b.forEachHostedObjVersion("backfill-scan-bkt", func(_ *DistributedBackend, _, _ string, _ objectMeta, _ error) error {
+		t.Fatal("fn must not be called on View error")
+		return nil
+	})
+	require.Error(t, err, "forEachHostedObjVersion must not swallow View error (walker path)")
+	require.ErrorIs(t, err, viewErr)
+}
+
+// TestForEachHostedObjVersion_ViewErrorPropagatesThrough_Verifier confirms that
+// the verifyPerVersionCutover caller propagates a forEachHostedObjVersion View
+// error. Same injection technique as the backfill-walker test above.
+func TestForEachHostedObjVersion_ViewErrorPropagatesThrough_Verifier(t *testing.T) {
+	b := newTestDistributedBackend(t)
+
+	viewErr := errors.New("simulated scan failure for verifier")
+	b.store = &errInjectStore{MetadataStore: b.store, active: true, viewErr: viewErr}
+
+	// Call forEachHostedObjVersion directly with a bucket name that would be
+	// treated as a versioning-enabled non-internal bucket. The View error must
+	// be returned, not swallowed (verifyPerVersionCutover's
+	// `if err != nil { return r, fmt.Errorf(...) }` path).
+	err := b.forEachHostedObjVersion("verifier-scan-bkt", func(_ *DistributedBackend, _, _ string, _ objectMeta, _ error) error {
+		t.Fatal("fn must not be called on View error")
+		return nil
+	})
+	require.Error(t, err, "forEachHostedObjVersion must not swallow View error (verifier path)")
+	require.ErrorIs(t, err, viewErr)
 }

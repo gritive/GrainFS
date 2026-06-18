@@ -79,6 +79,107 @@ func deriveMarkerPlacement(gb *DistributedBackend, key string) ([]string, ECConf
 	return PlacementForNodes(ecCfg, nodes, shardKey), ecCfg
 }
 
+// forEachHostedObjVersion iterates every FSM obj:{bucket}/{key}/{vid} record
+// across all locally-hosted generation-group stores, calling fn for each.
+//
+// The fn receives a non-nil decodeErr when the raw FSM value cannot be read or
+// decoded; meta is zero-valued in that case. The fn receives a nil decodeErr
+// and a populated meta when the record is a confirmed versioned entry whose
+// decoded meta.Key matches the parsed key segment (the unversioned-slash-key
+// guard). Returning errStopScan from fn halts the current group's scan cleanly.
+//
+// Guards applied by this enumerator (silent skip, NOT propagated to fn):
+//   - slash < 0 (legacy unversioned record, no version suffix)
+//   - uuid.Parse(vid) fails (pre-versioning unversioned key with slash)
+//   - decode succeeds but meta.Key != key (unversioned key whose last segment is a valid UUID)
+func (b *DistributedBackend) forEachHostedObjVersion(
+	bucket string,
+	fn func(gb *DistributedBackend, key, versionID string, meta objectMeta, decodeErr error) error,
+) error {
+	rawObjPrefix := []byte("obj:" + bucket + "/")
+	for _, gb := range b.hostedGroupBackends() {
+		if gb == nil {
+			continue
+		}
+		var scanErr error
+		viewErr := gb.store.View(func(txn MetadataTxn) error {
+			return gb.ks().scanGroupPrefix(txn, rawObjPrefix, func(rawKey []byte, item MetaItem) error {
+				rest := strings.TrimPrefix(string(rawKey), "obj:"+bucket+"/")
+				slash := strings.LastIndex(rest, "/")
+				if slash < 0 {
+					// Legacy unversioned record — not a versioned entry.
+					return nil
+				}
+				key := rest[:slash]
+				vid := rest[slash+1:]
+
+				// UUID guard: VIDs are always UUIDv7. If the vid segment does not
+				// parse as a UUID, this is a pre-versioning (unversioned) FSM record
+				// whose object key contains a slash (e.g. obj:bkt/a/b → mis-parsed
+				// key="a", vid="b"). Skip it silently.
+				if _, uuidErr := uuid.Parse(vid); uuidErr != nil {
+					return nil
+				}
+
+				// Decode FSM record; pass decode errors to fn (fail-closed).
+				raw, err := gb.itemValueCopy(item)
+				if err != nil {
+					if ferr := fn(gb, key, vid, objectMeta{}, err); ferr != nil {
+						scanErr = ferr
+						return errStopScan
+					}
+					return nil
+				}
+				// unmarshalObjectMeta's fbSafe recover covers only the root parse
+				// (GetRootAsObjectMeta). FlatBuffers FIELD accessors (NodeIdsLength,
+				// Segments, Coalesced, …) panic OUTSIDE that recover on a record that
+				// parses as a root but carries a bad vtable/vector offset. Wrap the
+				// whole decode so such a panic becomes a decodeErr — the verifier then
+				// fail-closes to UNKNOWN and the S3 backfill fn silently skips, rather
+				// than crashing the sweep.
+				meta, err := func() (m objectMeta, e error) {
+					defer func() {
+						if r := recover(); r != nil {
+							e = fmt.Errorf("unmarshalObjectMeta panic: %v", r)
+						}
+					}()
+					return unmarshalObjectMeta(raw)
+				}()
+				if err != nil {
+					if ferr := fn(gb, key, vid, objectMeta{}, err); ferr != nil {
+						scanErr = ferr
+						return errStopScan
+					}
+					return nil
+				}
+
+				// Authoritative key-type discriminator: for a genuine versioned
+				// record (obj:bkt/key/vid) the decoded meta.Key equals the parsed
+				// key segment. For a mis-parsed unversioned record whose object key
+				// ends in a UUID (e.g. obj:bkt/a/<uuid>) the decoded meta.Key is
+				// the FULL real key ("a/<uuid>"), which differs from the parsed key
+				// segment ("a"). Skip the latter silently.
+				if meta.Key != key {
+					return nil
+				}
+
+				if ferr := fn(gb, key, vid, meta, nil); ferr != nil {
+					scanErr = ferr
+					return errStopScan
+				}
+				return nil
+			})
+		})
+		if scanErr != nil {
+			return fmt.Errorf("forEachHostedObjVersion bucket %s: %w", bucket, scanErr)
+		}
+		if viewErr != nil {
+			return fmt.Errorf("forEachHostedObjVersion bucket %s scan: %w", bucket, viewErr)
+		}
+	}
+	return nil
+}
+
 // walkPerVersionBackfillCandidates iterates every FSM obj:{bucket}/{key}/{vid}
 // record across ALL locally-hosted generation-group stores, and calls fn for
 // each version whose per-version quorum-meta blob is ABSENT from disk and which
@@ -123,116 +224,65 @@ func (b *DistributedBackend) walkPerVersionBackfillCandidates(
 	}
 	versionRoot := filepath.Join(dataDirs[0], quorumMetaVersionsSubDir)
 
-	rawObjPrefix := []byte("obj:" + bucket + "/")
-
-	for _, gb := range b.hostedGroupBackends() {
-		if gb == nil {
-			continue
+	return b.forEachHostedObjVersion(bucket, func(gb *DistributedBackend, key, vid string, meta objectMeta, decodeErr error) error {
+		if decodeErr != nil {
+			return nil // transient or undecodable; skip silently
 		}
-		var scanErr error
-		_ = gb.store.View(func(txn MetadataTxn) error {
-			return gb.ks().scanGroupPrefix(txn, rawObjPrefix, func(rawKey []byte, item MetaItem) error {
-				rest := strings.TrimPrefix(string(rawKey), "obj:"+bucket+"/")
-				slash := strings.LastIndex(rest, "/")
-				if slash < 0 {
-					// Legacy unversioned record — not a versioned candidate.
-					return nil
-				}
-				key := rest[:slash]
-				vid := rest[slash+1:]
 
-				// UUID guard: VIDs are always UUIDv7. If the vid segment does not
-				// parse as a UUID, this is a pre-versioning (unversioned) FSM record
-				// whose object key contains a slash (e.g. obj:bkt/a/b → mis-parsed
-				// key="a", vid="b"). Skip it to avoid fanning out a garbage-keyed blob.
-				if _, uuidErr := uuid.Parse(vid); uuidErr != nil {
-					return nil
-				}
+		// Age gate: derive from UUIDv7 timestamp (LastModified may be 0 for markers).
+		vidAge := now - uuidv7TimeUnix(vid)
+		if vidAge < minAge {
+			return nil
+		}
 
-				// Age gate: derive from UUIDv7 timestamp (LastModified may be 0 for markers).
-				vidAge := now - uuidv7TimeUnix(vid)
-				if vidAge < minAge {
-					return nil
-				}
+		// Appendable/coalesced carve-out (foundation spec): AppendObject
+		// objects are FSM-authoritative and must not receive a per-version
+		// quorum-meta blob from S3. Backfilling them would reconstruct a
+		// blob with IsAppendable=false (PutObjectMetaCmd has no such field),
+		// causing GetObjectVersion to see "no readable layout" and fail.
+		if meta.IsAppendable || len(meta.Coalesced) > 0 {
+			return nil
+		}
 
-				// Decode FSM record.
-				raw, err := gb.itemValueCopy(item)
-				if err != nil {
-					return nil // transient; skip
-				}
-				meta, err := unmarshalObjectMeta(raw)
-				if err != nil {
-					return nil // undecodable; skip
-				}
-
-				// Authoritative key-type discriminator: for a genuine versioned
-				// record (obj:bkt/key/vid) the decoded meta.Key equals the parsed
-				// key segment. For a mis-parsed unversioned record whose object key
-				// ends in a UUID (e.g. obj:bkt/a/<uuid>) the decoded meta.Key is
-				// the FULL real key ("a/<uuid>"), which differs from the parsed key
-				// segment ("a"). Skip the latter to avoid writing phantom blobs.
-				if meta.Key != key {
-					return nil
-				}
-
-				// Appendable/coalesced carve-out (foundation spec): AppendObject
-				// objects are FSM-authoritative and must not receive a per-version
-				// quorum-meta blob from S3. Backfilling them would reconstruct a
-				// blob with IsAppendable=false (PutObjectMetaCmd has no such field),
-				// causing GetObjectVersion to see "no readable layout" and fail.
-				if meta.IsAppendable || len(meta.Coalesced) > 0 {
-					return nil
-				}
-
-				// Skip versions with no placement — nothing to fan out to.
-				// Exception: degraded delete markers (ETag == deleteMarkerETag) may
-				// have empty NodeIDs when deleteObjectWithMarker skipped writeQuorumMeta
-				// because the prior version had no quorum meta. For those, derive
-				// placement via RDH-direct: the same (group peer set, EC config, key)
-				// triple a WRITE uses, so the marker lands on the same nodes as its
-				// sibling live versions.
-				if len(meta.NodeIDs) == 0 {
-					if meta.ETag != deleteMarkerETag {
-						return nil
-					}
-					// Derive NodeIDs and ECConfig from the owning group's topology.
-					nodeIDs, ecCfg := deriveMarkerPlacement(gb, key)
-					if len(nodeIDs) == 0 {
-						return nil // unresolvable placement; skip
-					}
-					meta.NodeIDs = nodeIDs
-					meta.ECData = uint8(ecCfg.DataShards)
-					meta.ECParity = uint8(ecCfg.ParityShards)
-				}
-
-				// Idempotency: check whether the per-version blob exists on disk.
-				// Use os.Stat per VID rather than ScanQuorumMetaVersionsBucket
-				// (which returns only the max-VID per key and would hide present
-				// non-latest blobs).
-				blobPath := filepath.Join(versionRoot, bucket, key, vid)
-				if _, statErr := os.Stat(blobPath); statErr == nil {
-					// Blob already present — skip.
-					return nil
-				}
-
-				// Yield the candidate.
-				if ferr := fn(perVersionBackfillCandidate{
-					Bucket:    bucket,
-					Key:       key,
-					VersionID: vid,
-					Meta:      meta,
-				}); ferr != nil {
-					scanErr = ferr
-					return errStopScan
-				}
+		// Skip versions with no placement — nothing to fan out to.
+		// Exception: degraded delete markers (ETag == deleteMarkerETag) may
+		// have empty NodeIDs when deleteObjectWithMarker skipped writeQuorumMeta
+		// because the prior version had no quorum meta. For those, derive
+		// placement via RDH-direct: the same (group peer set, EC config, key)
+		// triple a WRITE uses, so the marker lands on the same nodes as its
+		// sibling live versions.
+		if len(meta.NodeIDs) == 0 {
+			if meta.ETag != deleteMarkerETag {
 				return nil
-			})
-		})
-		if scanErr != nil {
-			return fmt.Errorf("walkPerVersionBackfillCandidates bucket %s: %w", bucket, scanErr)
+			}
+			// Derive NodeIDs and ECConfig from the owning group's topology.
+			nodeIDs, ecCfg := deriveMarkerPlacement(gb, key)
+			if len(nodeIDs) == 0 {
+				return nil // unresolvable placement; skip
+			}
+			meta.NodeIDs = nodeIDs
+			meta.ECData = uint8(ecCfg.DataShards)
+			meta.ECParity = uint8(ecCfg.ParityShards)
 		}
-	}
-	return nil
+
+		// Idempotency: check whether the per-version blob exists on disk.
+		// Use os.Stat per VID rather than ScanQuorumMetaVersionsBucket
+		// (which returns only the max-VID per key and would hide present
+		// non-latest blobs).
+		blobPath := filepath.Join(versionRoot, bucket, key, vid)
+		if _, statErr := os.Stat(blobPath); statErr == nil {
+			// Blob already present — skip.
+			return nil
+		}
+
+		// Yield the candidate.
+		return fn(perVersionBackfillCandidate{
+			Bucket:    bucket,
+			Key:       key,
+			VersionID: vid,
+			Meta:      meta,
+		})
+	})
 }
 
 // segmentRefsToMetaEntries converts []storage.SegmentRef back to

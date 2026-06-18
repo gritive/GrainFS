@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.0.616.0] - 2026-06-18
+
+### Added
+- **Per-version cutover-readiness verification gate (foundation slice S4a).** A NON-BREAKING, read-only
+  safety gate that reports whether every versioned non-appendable object's FSM `obj:{bucket}/{key}/{vid}`
+  record has a per-version quorum-meta blob readable via the post-cutover read path — the precondition the
+  later breaking S4 cutover (which removes the FSM read/write fallback) needs before it can run, since the
+  S3 backfill is best-effort. `verifyPerVersionCutover` walks FSM `obj:` records across all locally-hosted
+  generation groups (Enabled AND Suspended buckets — Suspended buckets retain versioned history) and
+  classifies each version COMPLETE / GAP / STUCK / UNKNOWN / EXCLUDED (appendable/coalesced/internal stay
+  FSM-authoritative). **Completeness is the exact post-cutover read criterion, not a local `os.Stat`**: the
+  VersionID must be present and decoded in a STRICT all-groups readback (`readQuorumMetaVersionsStrict`,
+  which surfaces errors the tolerant runtime readback skips) AND the decoded metadata must dispatch to the
+  same readable layout `getObjectVersionCtx` uses (delete-marker, segments, or EC-resolvable). **Fail-closed
+  throughout**: any decode/panic (a recover guard converts a corrupt FlatBuffers record to UNKNOWN),
+  strict-readback, versioning-state-read, or scan error classifies as UNKNOWN or returns an error — never a
+  silent COMPLETE. Surfaced three ways: per-node Prometheus gauges
+  `grainfs_per_version_cutover_{complete,gaps,stuck,unknown,excluded,verify_errors}` (verify_errors starts
+  at 1 and reaches 0 only after a fully clean completed sweep, so a never-run/partial/failed sweep reads
+  not-ready), a background scrubber-tick verification sweep, and a node-local admin CLI
+  `grainfs cluster verify-per-version` (JSON over the admin API; exit non-zero if gaps+stuck+unknown>0).
+  Cutover-ready = `gaps+stuck+unknown+verify_errors == 0` on every node. Removes nothing; the breaking
+  cutover (S4b repoint, S4c removal) is deferred and gated on this reading clean.
+
 ## [0.0.615.0] - 2026-06-18
 
 ### Added
