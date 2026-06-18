@@ -2,6 +2,7 @@ package scrubber
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -146,4 +147,79 @@ func TestPerVersionCutoverVerifySweep_ListBucketsError(t *testing.T) {
 
 	require.GreaterOrEqual(t, testutil.ToFloat64(metrics.PerVersionCutoverVerifyErrors), 1.0,
 		"verify_errors must be ≥1 when ListCutoverBuckets fails (not left stale-zero)")
+}
+
+// blockingCutoverVerifiable blocks VerifyBucketCutover until released, so a
+// concurrent Prometheus scrape landing during the sweep observes the
+// mid-sweep state of the gauges.
+type blockingCutoverVerifiable struct {
+	buckets   []string
+	readiness map[string]CutoverReadiness
+	// gate is closed to unblock VerifyBucketCutover calls.
+	gate chan struct{}
+	// scraped is closed by the test goroutine once it has read the gauge.
+	scraped chan struct{}
+}
+
+func (f *blockingCutoverVerifiable) ListCutoverBuckets(_ context.Context) ([]string, error) {
+	return f.buckets, nil
+}
+
+func (f *blockingCutoverVerifiable) VerifyBucketCutover(_ context.Context, bucket string) (CutoverReadiness, error) {
+	// Signal that the sweep is in-flight, then block until the test scrapes.
+	close(f.scraped)
+	<-f.gate
+	if r, ok := f.readiness[bucket]; ok {
+		return r, nil
+	}
+	return CutoverReadiness{}, nil
+}
+
+// TestPerVersionCutoverVerifySweep_ScrapeAtomicFailClosed verifies the
+// scrape-atomic pessimistic-start invariant: a Prometheus scrape that lands
+// while the sweep is blocked inside VerifyBucketCutover must NOT observe a
+// false READY (verify_errors == 0). The pessimistic Set(1) at the start of
+// the sweep guarantees that any mid-sweep scrape sees verify_errors ≥ 1.
+func TestPerVersionCutoverVerifySweep_ScrapeAtomicFailClosed(t *testing.T) {
+	gate := make(chan struct{})
+	scraped := make(chan struct{})
+
+	f := &blockingCutoverVerifiable{
+		buckets: []string{"bkt1"},
+		readiness: map[string]CutoverReadiness{
+			"bkt1": {Complete: 5},
+		},
+		gate:    gate,
+		scraped: scraped,
+	}
+	s := &BackgroundScrubber{}
+
+	// Reset the gauge to 0 before the test.
+	metrics.PerVersionCutoverVerifyErrors.Set(0)
+	require.Equal(t, 0.0, testutil.ToFloat64(metrics.PerVersionCutoverVerifyErrors),
+		"precondition: gauge must start at 0")
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		s.perVersionCutoverVerifySweep(contextForTest(), f)
+	}()
+
+	// Wait until the sweep is blocked inside VerifyBucketCutover (mid-sweep).
+	<-scraped
+
+	// A scrape landing here must see verify_errors ≥ 1 (pessimistic sentinel).
+	require.GreaterOrEqual(t, testutil.ToFloat64(metrics.PerVersionCutoverVerifyErrors), 1.0,
+		"mid-sweep scrape must see verify_errors ≥ 1 (pessimistic sentinel must be set)")
+
+	// Unblock the sweep and wait for completion.
+	close(gate)
+	wg.Wait()
+
+	// After a clean sweep, verify_errors must be 0 (READY).
+	require.Equal(t, 0.0, testutil.ToFloat64(metrics.PerVersionCutoverVerifyErrors),
+		"after clean sweep, verify_errors must be 0")
+	require.Equal(t, 5.0, testutil.ToFloat64(metrics.PerVersionCutoverComplete),
+		"complete count must match after clean sweep")
 }

@@ -102,7 +102,7 @@ func (b *DistributedBackend) forEachHostedObjVersion(
 			continue
 		}
 		var scanErr error
-		_ = gb.store.View(func(txn MetadataTxn) error {
+		viewErr := gb.store.View(func(txn MetadataTxn) error {
 			return gb.ks().scanGroupPrefix(txn, rawObjPrefix, func(rawKey []byte, item MetaItem) error {
 				rest := strings.TrimPrefix(string(rawKey), "obj:"+bucket+"/")
 				slash := strings.LastIndex(rest, "/")
@@ -172,6 +172,9 @@ func (b *DistributedBackend) forEachHostedObjVersion(
 		})
 		if scanErr != nil {
 			return fmt.Errorf("forEachHostedObjVersion bucket %s: %w", bucket, scanErr)
+		}
+		if viewErr != nil {
+			return fmt.Errorf("forEachHostedObjVersion bucket %s scan: %w", bucket, viewErr)
 		}
 	}
 	return nil

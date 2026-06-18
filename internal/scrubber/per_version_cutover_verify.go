@@ -47,6 +47,11 @@ type PerVersionCutoverVerifiable interface {
 //
 // ctx is threaded so the sweep is cancellable on scrubber shutdown.
 func (s *BackgroundScrubber) perVersionCutoverVerifySweep(ctx context.Context, v PerVersionCutoverVerifiable) {
+	// Pessimistic sentinel: mark not-ready for the entire duration of the sweep
+	// so a Prometheus scrape mid-sweep never observes a false READY (all-zero)
+	// state. The real count is published atomically at the very end.
+	metrics.PerVersionCutoverVerifyErrors.Set(1)
+
 	var verifyErrors float64
 
 	buckets, err := v.ListCutoverBuckets(ctx)
@@ -78,5 +83,8 @@ func (s *BackgroundScrubber) perVersionCutoverVerifySweep(ctx context.Context, v
 	metrics.PerVersionCutoverStuck.Set(float64(total.Stuck))
 	metrics.PerVersionCutoverUnknown.Set(float64(total.Unknown))
 	metrics.PerVersionCutoverExcluded.Set(float64(total.Excluded))
+	// Publish the real verify_errors count last. A clean sweep sets this to 0,
+	// which is the only way the gate can read READY. Any mid-sweep scrape still
+	// sees the pessimistic 1 set at the top of the function.
 	metrics.PerVersionCutoverVerifyErrors.Set(verifyErrors)
 }
