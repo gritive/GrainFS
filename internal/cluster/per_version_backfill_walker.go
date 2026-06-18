@@ -39,41 +39,27 @@ func uuidv7TimeUnix(vid string) int64 {
 	return ms / 1000
 }
 
-// lookupSiblingNodeIDs scans the per-version FSM records for bucket/key within
-// the supplied transaction and returns the NodeIDs from the first version whose
-// VID differs from skipVID and whose NodeIDs are non-empty. Returns nil if no
-// such sibling exists.
+// deriveMarkerPlacement computes the RDH-direct NodeIDs and ECConfig for a
+// delete marker with empty NodeIDs. The derivation uses the owning group's peer
+// set and EC config — the same inputs a WRITE uses — so the result is
+// identical to what the marker's sibling live versions use.
 //
-// Rationale: RDH placement is keyed by bucket/key, so every version of the same
-// object is placed on the same nodes. A degraded delete marker (empty NodeIDs)
-// can therefore borrow placement from any live sibling version.
-func lookupSiblingNodeIDs(txn MetadataTxn, gb *DistributedBackend, bucket, key, skipVID string) []string {
-	siblingPrefix := []byte("obj:" + bucket + "/" + key + "/")
-	var found []string
-	_ = gb.ks().scanGroupPrefix(txn, siblingPrefix, func(rawKey []byte, item MetaItem) error {
-		rest := strings.TrimPrefix(string(rawKey), "obj:"+bucket+"/"+key+"/")
-		vid := rest
-		if vid == skipVID {
-			return nil
-		}
-		if _, err := uuid.Parse(vid); err != nil {
-			return nil
-		}
-		raw, err := gb.itemValueCopy(item)
-		if err != nil {
-			return nil
-		}
-		m, err := unmarshalObjectMeta(raw)
-		if err != nil {
-			return nil
-		}
-		if len(m.NodeIDs) > 0 {
-			found = cloneStringSlice(m.NodeIDs)
-			return errStopScan
-		}
-		return nil
-	})
-	return found
+// The placement key is ecObjectShardKey(key, "") — the unversioned shard key —
+// matching deleteObjectWithMarker's readQuorumMetaCmd(bucket, key) lookup.
+//
+// Returns (nil, ECConfig{}) if the EC config or node list is unresolvable
+// (DataShards == 0 or empty node list); the caller must skip the candidate.
+func deriveMarkerPlacement(gb *DistributedBackend, key string) ([]string, ECConfig) {
+	ecCfg := gb.currentECConfig()
+	if ecCfg.DataShards == 0 {
+		return nil, ECConfig{}
+	}
+	nodes := gb.configuredNodeList()
+	if len(nodes) == 0 {
+		return nil, ECConfig{}
+	}
+	shardKey := ecObjectShardKey(key, "")
+	return PlacementForNodes(ecCfg, nodes, shardKey), ecCfg
 }
 
 // walkPerVersionBackfillCandidates iterates every FSM obj:{bucket}/{key}/{vid}
@@ -183,17 +169,21 @@ func (b *DistributedBackend) walkPerVersionBackfillCandidates(
 				// Exception: degraded delete markers (ETag == deleteMarkerETag) may
 				// have empty NodeIDs when deleteObjectWithMarker skipped writeQuorumMeta
 				// because the prior version had no quorum meta. For those, derive
-				// placement from a sibling version of the same key.
+				// placement via RDH-direct: the same (group peer set, EC config, key)
+				// triple a WRITE uses, so the marker lands on the same nodes as its
+				// sibling live versions.
 				if len(meta.NodeIDs) == 0 {
 					if meta.ETag != deleteMarkerETag {
 						return nil
 					}
-					// Try to derive NodeIDs from a sibling versioned record.
-					siblingIDs := lookupSiblingNodeIDs(txn, gb, bucket, key, vid)
-					if len(siblingIDs) == 0 {
-						return nil // no sibling placement found; cannot fan out
+					// Derive NodeIDs and ECConfig from the owning group's topology.
+					nodeIDs, ecCfg := deriveMarkerPlacement(gb, key)
+					if len(nodeIDs) == 0 {
+						return nil // unresolvable placement; skip
 					}
-					meta.NodeIDs = siblingIDs
+					meta.NodeIDs = nodeIDs
+					meta.ECData = uint8(ecCfg.DataShards)
+					meta.ECParity = uint8(ecCfg.ParityShards)
 				}
 
 				// Idempotency: check whether the per-version blob exists on disk.

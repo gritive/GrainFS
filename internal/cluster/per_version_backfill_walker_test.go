@@ -368,57 +368,44 @@ func TestWalkPerVersionBackfillCandidates_SkipsAppendableAndCoalesced(t *testing
 	require.Empty(t, got, "appendable and coalesced versioned records must not be yielded as backfill candidates")
 }
 
-// TestWalkPerVersionBackfillCandidates_MarkerEmptyNodeIDsDerivesSiblingPlacement
-// verifies that a degraded delete-marker (ETag==deleteMarkerETag, NodeIDs==nil
-// — the result of a deleteObjectWithMarker call when no quorum-meta existed for
-// the prior version) is still yielded by the walker with NodeIDs populated from
-// a sibling version of the same key.
+// TestWalkPerVersionBackfillCandidates_MarkerEmptyNodeIDsDerivesPlacement
+// verifies that a degraded delete-marker (ETag==deleteMarkerETag, NodeIDs==nil)
+// is yielded with NodeIDs and ECData derived via RDH-direct placement rather
+// than a sibling scan. The placement must equal PlacementForNodes computed from
+// the owning group's peer set and EC config, and ECData must equal the group's
+// DataShards value (NOT 1).
 //
-// Setup: a regular versioned PUT (has NodeIDs), then a RAW delete-marker FSM
-// record with empty NodeIDs injected directly (bypassing the normal
-// deleteObjectWithMarker which would call writeQuorumMeta and produce the
-// secondary CmdPutObjectMeta record that fills in NodeIDs). The marker's
-// per-version blob is removed so the walker sees it as missing.
-func TestWalkPerVersionBackfillCandidates_MarkerEmptyNodeIDsDerivesSiblingPlacement(t *testing.T) {
+// Setup: write a live versioned PUT (establishes the key's placement group), then
+// inject a RAW delete-marker FSM record with empty NodeIDs and empty ECData
+// directly (simulating the degraded case where deleteObjectWithMarker skipped
+// writeQuorumMeta). Assert that the walker yields the marker with the
+// RDH-derived NodeIDs and ECData.
+func TestWalkPerVersionBackfillCandidates_MarkerEmptyNodeIDsDerivesPlacement(t *testing.T) {
 	ctx := context.Background()
 	b := newTestDistributedBackend(t)
-	const bkt, key = "vbkt-marker-sibling", "obj"
+	const bkt, key = "vbkt-marker-rdh", "obj"
 	require.NoError(t, b.CreateBucket(ctx, bkt))
 	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
 
-	// Write a regular versioned PUT — this produces an FSM record with NodeIDs.
-	liveVID := putVersioned(t, b, ctx, bkt, key, "live-data")
-	// Capture the live version's NodeIDs from its FSM record.
-	var liveNodeIDs []string
-	require.NoError(t, b.store.View(func(txn MetadataTxn) error {
-		item, err := txn.Get(b.ks().ObjectMetaKeyV(bkt, key, liveVID))
-		if err != nil {
-			return err
-		}
-		raw, err := b.itemValueCopy(item)
-		if err != nil {
-			return err
-		}
-		m, err := unmarshalObjectMeta(raw)
-		if err != nil {
-			return err
-		}
-		liveNodeIDs = m.NodeIDs
-		return nil
-	}))
-	require.NotEmpty(t, liveNodeIDs, "live version must have NodeIDs")
+	// Write a regular versioned PUT to ensure the bucket/key exist in the group.
+	_ = putVersioned(t, b, ctx, bkt, key, "live-data")
 
-	// Write a RAW delete-marker FSM record with empty NodeIDs, simulating the
-	// degraded case where deleteObjectWithMarker skipped writeQuorumMeta because
-	// readQuorumMetaCmd returned no placement for the prior version.
-	const markerVID = "019756c0-17f8-7100-b7e4-a5ef7c2f9999"
+	// Compute the expected placement using the same RDH formula the fix uses.
+	ecCfg := b.currentECConfig()
+	nodes := b.configuredNodeList()
+	shardKey := ecObjectShardKey(key, "")
+	wantNodeIDs := PlacementForNodes(ecCfg, nodes, shardKey)
+	require.NotEmpty(t, wantNodeIDs, "test backend must produce a non-empty placement")
+
+	// Inject a RAW delete-marker FSM record with empty NodeIDs and ECData==0,
+	// simulating the degraded path (deleteObjectWithMarker with no prior quorum meta).
+	const markerVID = "019756c0-17f8-7100-b7e4-a5ef7c2fa001"
 	markerRaw, err := marshalObjectMeta(objectMeta{Key: key, ETag: deleteMarkerETag})
 	require.NoError(t, err)
 	require.NoError(t, b.store.Update(func(txn MetadataTxn) error {
 		return txn.Set(b.ks().ObjectMetaKeyV(bkt, key, markerVID), markerRaw)
 	}))
-	// Simulate the missing per-version blob by never having written one — the
-	// marker VID blob path simply does not exist on disk.
+	// No per-version blob exists for markerVID — never written.
 
 	var got []perVersionBackfillCandidate
 	require.NoError(t, b.walkPerVersionBackfillCandidates(bkt, nowUnixSec(), 0, func(c perVersionBackfillCandidate) error {
@@ -435,21 +422,30 @@ func TestWalkPerVersionBackfillCandidates_MarkerEmptyNodeIDsDerivesSiblingPlacem
 	}
 	require.NotNil(t, found, "walker must yield the degraded delete-marker candidate")
 	require.Equal(t, deleteMarkerETag, found.Meta.ETag, "candidate must carry deleteMarkerETag")
-	require.Equal(t, liveNodeIDs, found.Meta.NodeIDs, "walker must derive NodeIDs from the sibling live version")
+	require.Equal(t, wantNodeIDs, found.Meta.NodeIDs, "walker must derive NodeIDs via RDH-direct placement")
+	require.Equal(t, ecCfg.DataShards, int(found.Meta.ECData), "walker must set ECData from group EC config, not 1")
 }
 
-// TestWalkPerVersionBackfillCandidates_MarkerNoSiblingPlacementSkipped verifies
-// that a degraded delete-marker (ETag==deleteMarkerETag, NodeIDs==nil) with NO
-// sibling version that has non-empty NodeIDs is NOT yielded by the walker.
-func TestWalkPerVersionBackfillCandidates_MarkerNoSiblingPlacementSkipped(t *testing.T) {
+// TestWalkPerVersionBackfillCandidates_MarkerUnresolvablePlacementSkipped
+// verifies that a degraded delete-marker (ETag==deleteMarkerETag, NodeIDs==nil)
+// is NOT yielded when the RDH derivation cannot produce a placement — i.e. the
+// group's EC config has DataShards==0 (unresolvable) or the node list is empty.
+//
+// This is tested by writing the marker into a backend whose EC config is
+// deliberately zeroed so PlacementForNodes returns nothing useful. The walker
+// must skip the marker rather than yielding it with empty NodeIDs.
+func TestWalkPerVersionBackfillCandidates_MarkerUnresolvablePlacementSkipped(t *testing.T) {
 	ctx := context.Background()
 	b := newTestDistributedBackend(t)
-	const bkt, key = "vbkt-marker-no-sibling", "obj"
+	const bkt, key = "vbkt-marker-no-placement", "obj"
 	require.NoError(t, b.CreateBucket(ctx, bkt))
 	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
 
-	// Write ONLY a RAW delete-marker FSM record with empty NodeIDs and no sibling.
-	const markerVID = "019756c0-17f8-7100-b7e4-a5ef7c2f8888"
+	// Force the EC config to DataShards==0 so RDH derivation is unresolvable.
+	b.SetECConfig(ECConfig{DataShards: 0, ParityShards: 0})
+
+	// Inject a RAW delete-marker FSM record with empty NodeIDs.
+	const markerVID = "019756c0-17f8-7100-b7e4-a5ef7c2fa002"
 	markerRaw, err := marshalObjectMeta(objectMeta{Key: key, ETag: deleteMarkerETag})
 	require.NoError(t, err)
 	require.NoError(t, b.store.Update(func(txn MetadataTxn) error {
@@ -461,7 +457,7 @@ func TestWalkPerVersionBackfillCandidates_MarkerNoSiblingPlacementSkipped(t *tes
 		got = append(got, c)
 		return nil
 	}))
-	require.Empty(t, got, "degraded delete-marker with no sibling placement must not be yielded")
+	require.Empty(t, got, "degraded delete-marker with unresolvable RDH placement must not be yielded")
 }
 
 // TestWalkPerVersionBackfillCandidates_IncludesDeleteMarker verifies that a
