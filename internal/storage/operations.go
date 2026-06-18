@@ -75,7 +75,7 @@ type VersionedHeader interface {
 }
 
 type ObjectVersionLister interface {
-	ListObjectVersions(bucket, prefix string, maxKeys int) ([]*ObjectVersion, error)
+	ListObjectVersions(ctx context.Context, bucket, prefix string, maxKeys int) ([]*ObjectVersion, error)
 }
 
 type ObjectVersionDeleter interface {

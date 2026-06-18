@@ -25,7 +25,7 @@ import (
 type ObjectDeleter interface {
 	DeleteObject(ctx context.Context, bucket, key string) error
 	DeleteObjectVersion(bucket, key, versionID string) error
-	ListObjectVersions(bucket, prefix string, maxKeys int) ([]*storage.ObjectVersion, error)
+	ListObjectVersions(ctx context.Context, bucket, prefix string, maxKeys int) ([]*storage.ObjectVersion, error)
 	AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error
 	MultipartUploadPartCount(bucket, key, uploadID string) (int, error)
 }

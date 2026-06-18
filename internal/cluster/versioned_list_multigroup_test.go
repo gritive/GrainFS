@@ -74,14 +74,14 @@ func TestClusterCoordinator_ListObjectVersions_FansOutAcrossGroups(t *testing.T)
 
 	// Placement assertion: the two keys really landed in DIFFERENT groups, so
 	// the fan-out is genuinely exercised (otherwise the test is vacuous).
-	aLocal, err := gbA.ListObjectVersions("vbkt", "", 0)
+	aLocal, err := gbA.ListObjectVersions(context.Background(), "vbkt", "", 0)
 	require.NoError(t, err)
-	bLocal, err := gbB.ListObjectVersions("vbkt", "", 0)
+	bLocal, err := gbB.ListObjectVersions(context.Background(), "vbkt", "", 0)
 	require.NoError(t, err)
 	require.NotEmpty(t, aLocal, "keyA must live in group ga")
 	require.NotEmpty(t, bLocal, "keyB must live in group gb")
 
-	versions, err := c.ListObjectVersions("vbkt", "", 0)
+	versions, err := c.ListObjectVersions(ctx, "vbkt", "", 0)
 	require.NoError(t, err)
 	got := map[string][]string{}
 	latest := map[string]string{}
@@ -151,7 +151,7 @@ func TestListObjectVersions_SplitKeyNoLocalLatest(t *testing.T) {
 		PreserveLatest: true,
 	}))
 
-	versions, err := b.ListObjectVersions(bkt, "", 0)
+	versions, err := b.ListObjectVersions(ctx, bkt, "", 0)
 	require.NoError(t, err)
 	require.Len(t, versions, 1)
 	got := versions[0]

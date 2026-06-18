@@ -53,7 +53,7 @@ var _ = Describe("Object versioning integration", func() {
 		o2, err := b.PutObject(ctx, bucket, "k", strings.NewReader("v2-longer"), "text/plain")
 		Expect(err).NotTo(HaveOccurred())
 
-		versions, err := b.ListObjectVersions(bucket, "k", 0)
+		versions, err := b.ListObjectVersions(ctx, bucket, "k", 0)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(versions).To(HaveLen(2))
 		Expect(versions[0].VersionID).To(Equal(o2.VersionID))
@@ -75,7 +75,7 @@ var _ = Describe("Object versioning integration", func() {
 		_, err = b.HeadObject(ctx, bucket, "k")
 		Expect(err).To(MatchError(storage.ErrObjectNotFound))
 
-		versions, err := b.ListObjectVersions(bucket, "k", 0)
+		versions, err := b.ListObjectVersions(ctx, bucket, "k", 0)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(versions).To(HaveLen(2))
 		Expect(versions[0].IsDeleteMarker).To(BeTrue())
@@ -104,7 +104,7 @@ var _ = Describe("Object versioning integration", func() {
 
 		Expect(b.DeleteObjectVersion(bucket, "k", o2.VersionID)).To(Succeed())
 
-		versions, err := b.ListObjectVersions(bucket, "k", 0)
+		versions, err := b.ListObjectVersions(ctx, bucket, "k", 0)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(versions).To(HaveLen(1))
 		Expect(versions[0].VersionID).To(Equal(o1.VersionID))

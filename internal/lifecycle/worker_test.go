@@ -101,7 +101,7 @@ func (m *mockDeleter) DeleteObjectVersion(bucket, key, versionID string) error {
 	return nil
 }
 
-func (m *mockDeleter) ListObjectVersions(bucket, prefix string, _ int) ([]*storage.ObjectVersion, error) {
+func (m *mockDeleter) ListObjectVersions(_ context.Context, bucket, prefix string, _ int) ([]*storage.ObjectVersion, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.listObjectVersionsCalls++
@@ -176,7 +176,7 @@ func (b *operationsLifecycleBackend) DeleteObjectVersion(bucket, key, versionID 
 	return nil
 }
 
-func (b *operationsLifecycleBackend) ListObjectVersions(bucket, prefix string, _ int) ([]*storage.ObjectVersion, error) {
+func (b *operationsLifecycleBackend) ListObjectVersions(_ context.Context, bucket, prefix string, _ int) ([]*storage.ObjectVersion, error) {
 	return b.versions, nil
 }
 

@@ -69,7 +69,7 @@ type fakeMPUDeleter struct {
 
 func (d *fakeMPUDeleter) DeleteObject(_ context.Context, _, _ string) error { return nil }
 func (d *fakeMPUDeleter) DeleteObjectVersion(_, _, _ string) error          { return nil }
-func (d *fakeMPUDeleter) ListObjectVersions(_, _ string, _ int) ([]*storage.ObjectVersion, error) {
+func (d *fakeMPUDeleter) ListObjectVersions(_ context.Context, _, _ string, _ int) ([]*storage.ObjectVersion, error) {
 	return nil, nil
 }
 

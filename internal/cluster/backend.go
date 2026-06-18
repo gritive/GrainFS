@@ -147,6 +147,7 @@ type DistributedBackend struct {
 	incidentRecorder                 IncidentRecorder                    // nil disables zero-ops incident recording
 	testBeforeChunkedMultipartCommit func() error                        // test-only hook for chunked multipart commit preflight
 	testBeforeAppendSegmentWrite     func()                              // test-only hook after append pre-check before segment write
+	testOnListObjectVersionsCtx      func(ctx context.Context)          // test-only hook: called with the ctx passed to ListObjectVersions
 
 	// shardCache caches reconstructed/fetched EC shards. Sits in front of
 	// getObjectEC's per-shard fan-out: a full hit (every needed shard

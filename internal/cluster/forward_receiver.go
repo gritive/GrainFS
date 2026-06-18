@@ -665,7 +665,7 @@ func (r *ForwardReceiver) handleListObjectVersions(dg *DataGroup, args []byte) [
 	if err := waitForwardReadFence(ctx, dg.Backend()); err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
-	versions, err := dg.Backend().ListObjectVersions(string(la.Bucket()), string(la.Prefix()), int(la.MaxKeys()))
+	versions, err := dg.Backend().ListObjectVersions(ctx, string(la.Bucket()), string(la.Prefix()), int(la.MaxKeys()))
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}
