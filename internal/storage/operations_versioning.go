@@ -37,12 +37,12 @@ func (o *Operations) HeadObjectVersion(ctx context.Context, bucket, key, version
 	return plan.versionedHeader.HeadObjectVersion(ctx, bucket, key, versionID)
 }
 
-func (o *Operations) ListObjectVersions(bucket, prefix string, maxKeys int) ([]*ObjectVersion, error) {
+func (o *Operations) ListObjectVersions(ctx context.Context, bucket, prefix string, maxKeys int) ([]*ObjectVersion, error) {
 	plan := o.planForCall()
 	if plan.objectVersionLister == nil {
 		return nil, UnsupportedOperationError{Op: "ListObjectVersions", Reason: UnsupportedReasonNoAdapter}
 	}
-	return plan.objectVersionLister.ListObjectVersions(bucket, prefix, maxKeys)
+	return plan.objectVersionLister.ListObjectVersions(ctx, bucket, prefix, maxKeys)
 }
 
 func (o *Operations) DeleteObjectVersion(bucket, key, versionID string) error {

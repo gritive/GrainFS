@@ -108,7 +108,7 @@ var _ = Describe("Snapshot integration", func() {
 		Expect(stale).To(BeEmpty())
 		Expect(count).To(Equal(1))
 
-		versions, err := b.ListObjectVersions("legacy-wal", "inc.txt", 10)
+		versions, err := b.ListObjectVersions(context.Background(), "legacy-wal", "inc.txt", 10)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(versions).To(HaveLen(1))
 		Expect(versions[0].VersionID).To(Equal(obj.VersionID))
@@ -264,7 +264,7 @@ var _ = Describe("Snapshot integration", func() {
 		Expect(stale).To(BeEmpty())
 		Expect(count).To(Equal(len(snap)))
 
-		versions, err := b.ListObjectVersions("hist", "doc.txt", 10)
+		versions, err := b.ListObjectVersions(context.Background(), "hist", "doc.txt", 10)
 		Expect(err).NotTo(HaveOccurred())
 		ids := objectVersionsByID(versions)
 		Expect(ids).To(HaveKey(v1.VersionID))

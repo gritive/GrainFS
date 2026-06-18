@@ -100,6 +100,25 @@
   - **S4b — repoint reads to per-version blobs (FSM fallback retained as safety net).** Repoint
     `ListObjectVersions` (still FSM-`lat:`/`obj:`-backed, object_version.go) + `ScanObjects` (`lat:` walk) to
     the per-version-blob source, behavior-neutral with the FSM fallback kept. Separate slice.
+    - **S4b PR-A — DONE (versioning-ctx plumbing, behavior-neutral).** Threaded a stamped version-history
+      decision through the `ListObjectVersions` path (interface ctx param; `ListObjectVersionsArgs.versioning_state`
+      wire field; forward sender/receiver; `ctxWithVersionHistory` edge resolver = `Enabled||Suspended`). Backend
+      still does the FSM scan — nothing reads the flag yet.
+    - **S4b PR-B — the actual per-version derive (TODO).** Add the missing all-versions-all-keys bucket enumerator
+      over `.quorum_meta_versions` (`ScanQuorumMetaVersionsBucket` is max-VID-per-key only), build `storage.ObjectVersion`
+      (IsLatest via per-key max-VID + `reconcileVersionIsLatest`; delete markers via `IsDeleteMarker`/`deleteMarkerETag`),
+      gate on the stamped flag, FSM fallback. **Two hazards the S4b PR-A code-gate (Claude+codex adversarial) flagged —
+      PR-B MUST handle, do not assume PR-A solved them:** (1) **Rolling-upgrade wire-compat:** an old peer omits
+      `versioning_state` → receiver reads `versioningStateUnknown` → unstamped → local/FSM fallback. Behavior-neutral
+      while the flag is unread, but once PR-B's derive consumes it, old-sender→new-receiver during a rolling upgrade
+      could return PARTIAL version history with HTTP 200. PR-B needs a capability gate or explicit fail-closed handling
+      before the flag becomes authoritative. (2) **`Suspended` bool dual-meaning:** `ctxWithVersionHistory` stamps the
+      shared `bucketVersionedCtxKey` bool TRUE for `Suspended` (history-bearing), but the SAME bool means Enabled-only
+      on the ListObjects/commit paths (`object_list.go:49`, `quorum_meta.go:44`). Safe today (path-scoped by convention;
+      the versions backend never reads it), but PR-B must use the Enabled-or-Suspended semantic when it reads the flag
+      inside the versions derive, and must NOT route this ctx into an Enabled-only consumer.
+    - **S4b lifecycle/recovery flag (PR-B):** lifecycle expiration + recovery-gate call `ListObjectVersions` with an
+      unstamped `context.Background()` → FSM path. PR-B must decide whether they need the derive (stamp at their entry).
   - **S4c — cutover: per-version sole authority; remove FSM object-meta path** (`CmdPutObjectMeta`/`apply*`/
     `obj:`/`lat:`), repoint scrubber/snapshot. **GATED on S4a reading clean** (`gaps+stuck+unknown+
     verify_errors == 0` cluster-wide, confirmed STABLE). **Appendable/coalesced carve-out:** those objects

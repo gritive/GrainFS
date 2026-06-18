@@ -228,6 +228,20 @@ func TestBuildPutObjectArgs_RoundtripVersioningState(t *testing.T) {
 	}
 }
 
+func TestBuildListObjectVersionsArgs_RoundTripsVersioningState(t *testing.T) {
+	args := buildListObjectVersionsArgs("vbucket", "p/", 50, versioningStateEnabled)
+	la := raftpb.GetRootAsListObjectVersionsArgs(args, 0)
+	if got := string(la.Bucket()); got != "vbucket" {
+		t.Fatalf("bucket = %q", got)
+	}
+	if got := la.MaxKeys(); got != 50 {
+		t.Fatalf("maxKeys = %d", got)
+	}
+	if got := la.VersioningState(); got != versioningStateEnabled {
+		t.Fatalf("versioningState = %d, want %d", got, versioningStateEnabled)
+	}
+}
+
 // TestVersioningStateContextRoundtrip proves the context↔wire mapping: an
 // authoritative enabled/disabled decision round-trips, while unknown leaves the
 // context unresolved so the commit path falls back to a local read.

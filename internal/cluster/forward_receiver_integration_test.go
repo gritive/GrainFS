@@ -214,7 +214,7 @@ var _ = Describe("Forward receiver integration", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(gb.DeleteObject(context.Background(), "bk", "k")).To(Succeed())
 
-		payload := encodeForwardPayload("g1", raftpb.ForwardOpListObjectVersions, buildListObjectVersionsArgs("bk", "k", 100))
+		payload := encodeForwardPayload("g1", raftpb.ForwardOpListObjectVersions, buildListObjectVersionsArgs("bk", "k", 100, versioningStateUnknown))
 		reply, _ := rcv.Handle(payload)
 		Expect(reply).NotTo(BeNil())
 

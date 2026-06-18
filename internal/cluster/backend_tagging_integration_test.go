@@ -49,7 +49,7 @@ var _ = Describe("Backend tagging integration", func() {
 		want := []storage.Tag{{Key: "env", Value: "prod"}, {Key: "owner", Value: "alice"}}
 		Expect(b.SetObjectTags(bucket, "tagged.txt", "", want)).To(Succeed())
 
-		versions, err := b.ListObjectVersions(bucket, "", 100)
+		versions, err := b.ListObjectVersions(ctx, bucket, "", 100)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(versions).To(HaveLen(1))
 		Expect(versions[0].Key).To(Equal("tagged.txt"))

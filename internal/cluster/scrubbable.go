@@ -435,7 +435,7 @@ func (b *DistributedBackend) ScanObjectsGrouped(bucket string) (<-chan storage.O
 	go func() {
 		defer close(out)
 		// maxKeys=0 disables truncation in ListObjectVersions.
-		versions, err := b.ListObjectVersions(bucket, "", 0)
+		versions, err := b.ListObjectVersions(context.Background(), bucket, "", 0)
 		if err != nil {
 			return
 		}

@@ -27,7 +27,7 @@ func TestOperationsVersioningDelegatesToAdapters(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "v1", head.VersionID)
 
-	versions, err := ops.ListObjectVersions("b", "k", 1000)
+	versions, err := ops.ListObjectVersions(context.Background(), "b", "k", 1000)
 	require.NoError(t, err)
 	require.Len(t, versions, 1)
 
@@ -73,7 +73,7 @@ func TestOperationsVersioningUnsupportedWithoutAdapters(t *testing.T) {
 	_, err = ops.HeadObjectVersion(context.Background(), "b", "k", "v1")
 	requireUnsupportedOp(t, err, "HeadObjectVersion", UnsupportedReasonNoAdapter)
 
-	_, err = ops.ListObjectVersions("b", "", 1000)
+	_, err = ops.ListObjectVersions(context.Background(), "b", "", 1000)
 	requireUnsupportedOp(t, err, "ListObjectVersions", UnsupportedReasonNoAdapter)
 
 	err = ops.DeleteObjectVersion("b", "k", "v1")
@@ -114,7 +114,7 @@ func (b *versioningBackend) HeadObjectVersion(ctx context.Context, bucket, key, 
 	return &Object{Key: key, VersionID: versionID}, nil
 }
 
-func (b *versioningBackend) ListObjectVersions(bucket, prefix string, maxKeys int) ([]*ObjectVersion, error) {
+func (b *versioningBackend) ListObjectVersions(_ context.Context, bucket, prefix string, maxKeys int) ([]*ObjectVersion, error) {
 	b.calls = append(b.calls, "listversions:"+bucket+":"+prefix+":1000")
 	return []*ObjectVersion{{Key: prefix, VersionID: "v1"}}, nil
 }

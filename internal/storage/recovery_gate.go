@@ -112,12 +112,12 @@ func (g *RecoveryWriteGate) HeadObjectVersion(ctx context.Context, bucket, key, 
 	return v.HeadObjectVersion(ctx, bucket, key, versionID)
 }
 
-func (g *RecoveryWriteGate) ListObjectVersions(bucket, prefix string, maxKeys int) ([]*ObjectVersion, error) {
+func (g *RecoveryWriteGate) ListObjectVersions(ctx context.Context, bucket, prefix string, maxKeys int) ([]*ObjectVersion, error) {
 	v, ok := g.Backend.(ObjectVersionLister)
 	if !ok {
 		return nil, ErrSnapshotNotSupported
 	}
-	return v.ListObjectVersions(bucket, prefix, maxKeys)
+	return v.ListObjectVersions(ctx, bucket, prefix, maxKeys)
 }
 
 func (g *RecoveryWriteGate) DeleteObjectVersion(string, string, string) error { return g.err }

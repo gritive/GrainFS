@@ -81,6 +81,20 @@ func (s *Server) ctxWithBucketVersioning(ctx context.Context, bucket string) con
 	return ctx
 }
 
+// ctxWithVersionHistory stamps "this bucket can hold version history" =
+// versioning is Enabled OR Suspended (a Suspended bucket retains every version
+// created while Enabled). Distinct from ctxWithBucketVersioning, which stamps
+// Enabled-only for the latest-only ListObjects derive. Same predicate S4a uses
+// (per_version_cutover_verify.go:172). The stamped ctx flows only into
+// ListObjectVersions, so the bool's "history-bearing" meaning here never
+// collides with the Enabled-only meaning on the ListObjects path.
+func (s *Server) ctxWithVersionHistory(ctx context.Context, bucket string) context.Context {
+	if state, err := s.ops.GetBucketVersioning(bucket); err == nil {
+		return cluster.ContextWithBucketVersioning(ctx, state == "Enabled" || state == "Suspended")
+	}
+	return ctx
+}
+
 func (s *Server) completeMultipartObject(ctx context.Context, bucket, key, uploadID string, parts []storage.Part) (*storage.PutObjectResult, error) {
 	result, err := s.ops.CompleteMultipartUploadWithResult(ctx, bucket, key, uploadID, parts)
 	if err != nil {

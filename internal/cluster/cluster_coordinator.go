@@ -830,7 +830,7 @@ func (c *ClusterCoordinator) ListAllObjects() ([]storage.SnapshotObject, error) 
 				Msg("snapshot metadata listing skipped system bucket")
 			continue
 		}
-		versions, err := c.ListObjectVersions(bucket, "", 0)
+		versions, err := c.ListObjectVersions(context.Background(), bucket, "", 0)
 		if err != nil {
 			return nil, err
 		}
@@ -1275,9 +1275,8 @@ func (c *ClusterCoordinator) ListObjectsPage(ctx context.Context, bucket, prefix
 // across ALL shard groups, unions each group's local FSM enumeration, and
 // reconciles a single authoritative IsLatest per key.
 func (c *ClusterCoordinator) ListObjectVersions(
-	bucket, prefix string, maxKeys int,
+	ctx context.Context, bucket, prefix string, maxKeys int,
 ) ([]*storage.ObjectVersion, error) {
-	ctx := context.Background()
 	state := c.runtimeState()
 	groups := c.shardGroupsForVersionedList()
 	// Internal buckets are single-group and unversioned; with ≤1 group the
@@ -1322,7 +1321,7 @@ func (c *ClusterCoordinator) listObjectVersionsSingleGroup(
 	if gb, err := state.localExec.ResolveRead(ctx, target); err != nil {
 		return nil, err
 	} else if gb != nil {
-		return gb.ListObjectVersions(bucket, prefix, maxKeys)
+		return gb.ListObjectVersions(ctx, bucket, prefix, maxKeys)
 	}
 	return c.forwardRuntime().listObjectVersions(ctx, target, bucket, prefix, maxKeys)
 }
@@ -1351,7 +1350,7 @@ func (c *ClusterCoordinator) fanOutListObjectVersions(
 			if gb, err := state.localExec.ResolveRead(ctx, target); err != nil {
 				ch <- groupResult{err: err}
 			} else if gb != nil {
-				vs, lerr := gb.ListObjectVersions(bucket, prefix, maxKeys)
+				vs, lerr := gb.ListObjectVersions(ctx, bucket, prefix, maxKeys)
 				ch <- groupResult{versions: vs, err: lerr}
 			} else {
 				vs, ferr := c.forwardRuntime().listObjectVersions(ctx, target, bucket, prefix, maxKeys)

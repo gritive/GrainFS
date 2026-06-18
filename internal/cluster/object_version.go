@@ -239,8 +239,10 @@ func (b *DistributedBackend) DeleteObjectVersion(bucket, key, versionID string) 
 // the given prefix, sorted newest-first. When maxKeys > 0 the result is
 // truncated. VersionIDs are UUIDv7 (k-sortable ASC by ms timestamp), so we
 // sort DESC to get newest-first. Matches server.ObjectVersionLister.
-func (b *DistributedBackend) ListObjectVersions(bucket, prefix string, maxKeys int) ([]*storage.ObjectVersion, error) {
-	ctx := context.Background()
+func (b *DistributedBackend) ListObjectVersions(ctx context.Context, bucket, prefix string, maxKeys int) ([]*storage.ObjectVersion, error) {
+	if b.testOnListObjectVersionsCtx != nil {
+		b.testOnListObjectVersionsCtx(ctx)
+	}
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, err
 	}

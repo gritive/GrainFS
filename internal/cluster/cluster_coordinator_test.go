@@ -1778,7 +1778,7 @@ func TestClusterCoordinator_VersionedOps_LocalLeader(t *testing.T) {
 	require.Equal(t, v1.VersionID, gotV1.VersionID)
 	require.Equal(t, "v1", string(body))
 
-	versions, err := c.ListObjectVersions("bk", "", 100)
+	versions, err := c.ListObjectVersions(context.Background(), "bk", "", 100)
 	require.NoError(t, err)
 	require.Len(t, versions, 2)
 	require.Equal(t, v2.VersionID, versions[0].VersionID)
@@ -1787,13 +1787,13 @@ func TestClusterCoordinator_VersionedOps_LocalLeader(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, markerID)
 
-	versions, err = c.ListObjectVersions("bk", "", 100)
+	versions, err = c.ListObjectVersions(context.Background(), "bk", "", 100)
 	require.NoError(t, err)
 	require.Len(t, versions, 3)
 	require.True(t, versions[0].IsDeleteMarker)
 
 	require.NoError(t, c.DeleteObjectVersion("bk", "k", v1.VersionID))
-	versions, err = c.ListObjectVersions("bk", "", 100)
+	versions, err = c.ListObjectVersions(context.Background(), "bk", "", 100)
 	require.NoError(t, err)
 	require.Len(t, versions, 2)
 	for _, v := range versions {
@@ -1900,7 +1900,7 @@ func TestClusterCoordinator_ListObjectVersions_ForwardPreservesVersionFlags(t *t
 		},
 	})
 
-	versions, err := c.ListObjectVersions("bk", "k", 100)
+	versions, err := c.ListObjectVersions(context.Background(), "bk", "k", 100)
 	require.NoError(t, err)
 	require.Len(t, versions, 2)
 	require.True(t, versions[0].IsLatest)

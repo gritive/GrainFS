@@ -60,7 +60,7 @@ func TestVersionedBucket_OldVersionReadable(t *testing.T) {
 
 	// ListObjectVersions must enumerate BOTH versions (old + latest), exactly
 	// one marked IsLatest (vid2). Old versions live as per-version FSM keys.
-	versions, err := b.ListObjectVersions(bkt, "", 0)
+	versions, err := b.ListObjectVersions(context.Background(), bkt, "", 0)
 	require.NoError(t, err)
 	seen := map[string]bool{}
 	latest := 0
