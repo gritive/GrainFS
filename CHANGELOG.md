@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.617.0] - 2026-06-18
+
+### Changed
+- **Cluster-wide bucket-versioning context for `ListObjectVersions` (foundation slice S4b PR-A).** A
+  BEHAVIOR-NEUTRAL plumbing change that threads an authoritative, edge-stamped version-history decision
+  through the entire `ListObjectVersions` read path, so the later per-version derive (S4b PR-B) can gate on
+  it without the read/commit backend ever reading control-plane bucket-versioning state itself. Mirrors the
+  S2b PR-A mechanism already used for `ListObjects`. Changes: `ListObjectVersions` gains a leading
+  `ctx context.Context` parameter across the `storage.ObjectVersionLister` interface and every implementer
+  (cluster `DistributedBackend`, `Operations`, `RecoveryWriteGate`, lifecycle) and is threaded through
+  `ClusterCoordinator` instead of a fresh `context.Background()`; a `versioning_state` field is appended to
+  the `ListObjectVersionsArgs` forward RPC FlatBuffers message, populated by the forward sender from the ctx
+  and re-stamped by the receiver (old peers that omit it decode as unknown → local fallback, exactly today's
+  behavior); and a new `Server.ctxWithVersionHistory` stamps the decision at the S3 `?versions` edge using
+  `Enabled || Suspended` (version history can exist), NOT the Enabled-only `ctxWithBucketVersioning` — so a
+  Suspended bucket's version history is not dropped once the flag becomes authoritative. The backend still
+  serves results from the existing FSM `obj:`/`lat:` scan; nothing reads the new flag yet, so
+  `GET /<bucket>?versions` responses are byte-identical.
+
 ## [0.0.616.0] - 2026-06-18
 
 ### Added
