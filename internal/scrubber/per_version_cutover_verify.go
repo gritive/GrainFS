@@ -34,15 +34,26 @@ type PerVersionCutoverVerifiable interface {
 }
 
 // perVersionCutoverVerifySweep iterates all hosted buckets, sums the per-bucket
-// CutoverReadiness tallies, and SETs each of the five readiness gauges to the
-// summed value. It is read-only: no writes or deletes. Fail-soft per bucket: a
-// verify error on one bucket is logged and that bucket's records are uncounted,
-// but the sweep continues to the next bucket. ctx is threaded so the sweep is
-// cancellable on scrubber shutdown (matches the backfill sweep signature).
+// CutoverReadiness tallies, and SETs each readiness gauge to the summed value.
+// It is read-only: no writes or deletes.
+//
+// Fail-closed on verification errors: a verify error on one bucket is logged,
+// that bucket's records are uncounted (partial totals are unsafe for the gate),
+// and verifyErrors is incremented. verifyErrors is always SET before returning —
+// even when ListCutoverBuckets itself fails — so a list/verify failure never
+// leaves the gauges at stale-zero, which would look like a false READY.
+//
+// Gate semantics: gaps+stuck+unknown+verify_errors == 0 across all nodes ⇒ safe.
+//
+// ctx is threaded so the sweep is cancellable on scrubber shutdown.
 func (s *BackgroundScrubber) perVersionCutoverVerifySweep(ctx context.Context, v PerVersionCutoverVerifiable) {
+	var verifyErrors float64
+
 	buckets, err := v.ListCutoverBuckets(ctx)
 	if err != nil {
 		log.Warn().Err(err).Msg("scrub: per-version cutover verify list buckets failed")
+		verifyErrors = 1
+		metrics.PerVersionCutoverVerifyErrors.Set(verifyErrors)
 		return
 	}
 
@@ -52,6 +63,7 @@ func (s *BackgroundScrubber) perVersionCutoverVerifySweep(ctx context.Context, v
 		if verr != nil {
 			log.Warn().Str("bucket", bucket).Err(verr).
 				Msg("scrub: per-version cutover verify failed for bucket (records uncounted)")
+			verifyErrors++
 			continue
 		}
 		total.Complete += r.Complete
@@ -66,4 +78,5 @@ func (s *BackgroundScrubber) perVersionCutoverVerifySweep(ctx context.Context, v
 	metrics.PerVersionCutoverStuck.Set(float64(total.Stuck))
 	metrics.PerVersionCutoverUnknown.Set(float64(total.Unknown))
 	metrics.PerVersionCutoverExcluded.Set(float64(total.Excluded))
+	metrics.PerVersionCutoverVerifyErrors.Set(verifyErrors)
 }

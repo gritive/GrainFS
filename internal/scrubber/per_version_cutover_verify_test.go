@@ -92,3 +92,58 @@ func TestPerVersionCutoverVerifySweep_NoBuckets(t *testing.T) {
 	require.InDelta(t, 0.0, testutil.ToFloat64(metrics.PerVersionCutoverUnknown), 0.001)
 	require.InDelta(t, 0.0, testutil.ToFloat64(metrics.PerVersionCutoverExcluded), 0.001)
 }
+
+// fakeCutoverVerifiableWithListErr is a PerVersionCutoverVerifiable whose
+// ListCutoverBuckets always returns an error.
+type fakeCutoverVerifiableWithListErr struct {
+	listErr error
+}
+
+func (f *fakeCutoverVerifiableWithListErr) ListCutoverBuckets(_ context.Context) ([]string, error) {
+	return nil, f.listErr
+}
+
+func (f *fakeCutoverVerifiableWithListErr) VerifyBucketCutover(_ context.Context, _ string) (CutoverReadiness, error) {
+	return CutoverReadiness{}, nil
+}
+
+// TestPerVersionCutoverVerifySweep_BucketVerifyError asserts that when one
+// bucket's VerifyBucketCutover returns an error, verify_errors gauge is ≥ 1
+// and the sweep continues (the other bucket's counts ARE set).
+func TestPerVersionCutoverVerifySweep_BucketVerifyError(t *testing.T) {
+	f := &fakeCutoverVerifiable{
+		buckets: []string{"bkt-err", "bkt-ok"},
+		readiness: map[string]CutoverReadiness{
+			"bkt-ok": {Complete: 3, Gaps: 1},
+		},
+		verifyErr: map[string]error{
+			"bkt-err": context.DeadlineExceeded,
+		},
+	}
+	s := &BackgroundScrubber{}
+
+	s.perVersionCutoverVerifySweep(contextForTest(), f)
+
+	// The erroring bucket must be counted in verify_errors.
+	require.GreaterOrEqual(t, testutil.ToFloat64(metrics.PerVersionCutoverVerifyErrors), 1.0,
+		"verify_errors must be ≥1 when a bucket verify fails")
+	// The successful bucket's counts must still be reflected.
+	require.InDelta(t, 3.0, testutil.ToFloat64(metrics.PerVersionCutoverComplete), 0.001, "complete from good bucket")
+	require.InDelta(t, 1.0, testutil.ToFloat64(metrics.PerVersionCutoverGaps), 0.001, "gaps from good bucket")
+}
+
+// TestPerVersionCutoverVerifySweep_ListBucketsError asserts that when
+// ListCutoverBuckets returns an error, verify_errors gauge is set ≥1 (not left
+// stale-zero). This prevents a list failure from looking like a false READY.
+func TestPerVersionCutoverVerifySweep_ListBucketsError(t *testing.T) {
+	f := &fakeCutoverVerifiableWithListErr{listErr: context.DeadlineExceeded}
+	s := &BackgroundScrubber{}
+
+	// Pre-set the gauge to 0 so we can distinguish "was set to 0" from "never set".
+	metrics.PerVersionCutoverVerifyErrors.Set(0)
+
+	s.perVersionCutoverVerifySweep(contextForTest(), f)
+
+	require.GreaterOrEqual(t, testutil.ToFloat64(metrics.PerVersionCutoverVerifyErrors), 1.0,
+		"verify_errors must be ≥1 when ListCutoverBuckets fails (not left stale-zero)")
+}

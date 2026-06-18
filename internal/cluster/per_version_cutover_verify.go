@@ -36,6 +36,15 @@ const maxVerifyRefs = 100
 // error on any local read/decode failure or peer RPC error, rather than
 // silently skipping. The verifier uses this to fail-closed to Unknown instead
 // of silently treating an unreadable node as "no versions here".
+//
+// Known limitation: a per-version blob that is physically present but contains
+// a corrupt payload is misclassified as GAP or STUCK rather than UNKNOWN.
+// readQuorumMetaVersionsLocal and the RPC client both drop per-blob decode
+// failures internally before this function sees the results, so a corrupt-but-
+// present blob appears as "VID absent". This is SAFE — GAP and STUCK are both
+// not-ready states, so no false-READY signal is produced — but it is less
+// precise than UNKNOWN would be. Fixing this would require propagating per-blob
+// decode errors up through the local reader and RPC path.
 func (b *DistributedBackend) readQuorumMetaVersionsStrict(bucket, key string) ([]PutObjectMetaCmd, error) {
 	if b.shardSvc == nil {
 		return nil, fmt.Errorf("readQuorumMetaVersionsStrict: no shard service")

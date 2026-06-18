@@ -528,8 +528,8 @@ var (
 
 	// Foundation S4a — per-version cutover readiness gauges.
 	// Each gauge is set to the cluster-node-local sum across all hosted buckets
-	// by the background verification sweep. Alerting rule: gaps+stuck+unknown == 0
-	// across all nodes indicates cutover is safe.
+	// by the background verification sweep. Alerting rule:
+	// gaps+stuck+unknown+verify_errors == 0 across all nodes indicates cutover is safe.
 
 	PerVersionCutoverComplete = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "grainfs_per_version_cutover_complete",
@@ -554,6 +554,11 @@ var (
 	PerVersionCutoverExcluded = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "grainfs_per_version_cutover_excluded",
 		Help: "Total versioned object versions intentionally excluded from cutover verification (internal buckets, appendable, coalesced).",
+	})
+
+	PerVersionCutoverVerifyErrors = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "grainfs_per_version_cutover_verify_errors",
+		Help: "Number of sweep verification errors (list-buckets failure counts as 1; each failed bucket counts as 1). Non-zero blocks cutover: gaps+stuck+unknown+verify_errors == 0 across all nodes is required.",
 	})
 
 	// Phase 16 — Self-healing metrics.
