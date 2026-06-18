@@ -1567,3 +1567,14 @@ table DropClusterKeyAcceptCmd {
   stamped_voters:[string];
   stamped_config_index:uint64;
 }
+
+// MultipartDone is the on-disk idempotency marker written when a CompleteMultipartUpload
+// is committed.  Retried completes with a matching upload_id can short-circuit and return
+// the already-committed result without re-running the full assembly.
+table MultipartDone {
+  upload_id:string;
+  bucket:string;
+  key:string;
+  version_id:string;
+  mod_time:long;
+}
