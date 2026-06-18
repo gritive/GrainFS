@@ -94,6 +94,36 @@ func TestWalkPerVersionBackfillCandidates_SkipsYoungerThanMinAge(t *testing.T) {
 	require.Empty(t, got, "version younger than minAge must be skipped")
 }
 
+// TestWalkPerVersionBackfillCandidates_SkipsUnversionedSlashKey verifies that a
+// pre-versioning (unversioned) FSM record whose object key contains a slash is
+// NOT yielded as a backfill candidate. Without the UUID guard, the walker
+// mis-parses such a record (e.g. obj:bkt/a/b → key="a", vid="b") and would
+// fan out a garbage-keyed per-version blob.
+func TestWalkPerVersionBackfillCandidates_SkipsUnversionedSlashKey(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	const bkt = "vbkt-slash"
+	const slashKey = "a/b" // unversioned key containing a slash
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+
+	// Write a raw unversioned FSM record (ObjectMetaKey, not ObjectMetaKeyV) for
+	// a key that contains a slash, simulating a pre-versioning object that was
+	// written before the bucket had versioning enabled.
+	raw, err := marshalObjectMeta(objectMeta{Key: slashKey, ETag: "etag1", ECData: 4, NodeIDs: []string{"n1"}})
+	require.NoError(t, err)
+	require.NoError(t, b.store.Update(func(txn MetadataTxn) error {
+		return txn.Set(b.ks().ObjectMetaKey(bkt, slashKey), raw)
+	}))
+
+	var got []string
+	require.NoError(t, b.walkPerVersionBackfillCandidates(bkt, nowUnixSec(), 0, func(c perVersionBackfillCandidate) error {
+		got = append(got, c.VersionID)
+		return nil
+	}))
+	require.Empty(t, got, "unversioned record with slash in key must not be yielded as a backfill candidate")
+}
+
 // TestWalkPerVersionBackfillCandidates_NoopOnUnversionedBucket verifies that the
 // walker is a no-op when the bucket does not have versioning enabled.
 func TestWalkPerVersionBackfillCandidates_NoopOnUnversionedBucket(t *testing.T) {

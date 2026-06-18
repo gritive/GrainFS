@@ -95,6 +95,14 @@ func (b *DistributedBackend) walkPerVersionBackfillCandidates(
 				key := rest[:slash]
 				vid := rest[slash+1:]
 
+				// UUID guard: VIDs are always UUIDv7. If the vid segment does not
+				// parse as a UUID, this is a pre-versioning (unversioned) FSM record
+				// whose object key contains a slash (e.g. obj:bkt/a/b → mis-parsed
+				// key="a", vid="b"). Skip it to avoid fanning out a garbage-keyed blob.
+				if _, uuidErr := uuid.Parse(vid); uuidErr != nil {
+					return nil
+				}
+
 				// Age gate: derive from UUIDv7 timestamp (LastModified may be 0 for markers).
 				vidAge := now - uuidv7TimeUnix(vid)
 				if vidAge < minAge {
@@ -180,9 +188,21 @@ func segmentRefsToMetaEntries(refs []storage.SegmentRef) []SegmentMetaEntry {
 // Correctness invariants:
 //   - IsDeleteMarker is reconstructed from the ETag sentinel (objectMeta has no
 //     dedicated flag; c.Meta.ETag == deleteMarkerETag is the only signal).
-//   - The blob is NOT written if it already exists on disk (idempotent;
-//     writeQuorumMetaVersionLocal uses os.Rename only when the target is
-//     absent — the walker's skip-if-exists gate also prevents redundant calls).
+//   - writeQuorumMetaVersionLocal writes UNCONDITIONALLY via os.Rename (it has
+//     no existence check). Idempotency / no-overwrite on the LOCAL node is
+//     enforced solely by the walker's os.Stat gate in
+//     walkPerVersionBackfillCandidates, which skips candidates whose blob is
+//     already present before yielding them here.
+//   - The existence gate is LOCAL-NODE-ONLY. fanOutQuorumMeta writes to ALL
+//     placement nodes, and both the local write and the remote
+//     WriteQuorumMetaVersion handler overwrite unconditionally. A peer that
+//     already holds the blob may therefore have it overwritten with this
+//     field-equivalent reconstruction. This is safe today because per-version
+//     blobs are immutable and the reconstruction is read-field-equivalent (the
+//     only diverging fields — ExpectedETag and PreserveLatest — are
+//     write-time-only and read-irrelevant). S4 cutover must confirm no read
+//     path consumes those dropped write-time fields before relying on this
+//     assumption.
 //   - ExpectedETag and PreserveLatest are write-time-only fields absent from
 //     objectMeta; they are intentionally left at their zero values and are
 //     read-irrelevant.
