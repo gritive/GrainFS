@@ -194,10 +194,13 @@ func TestPerVersionCutoverVerifySweep_ScrapeAtomicFailClosed(t *testing.T) {
 	}
 	s := &BackgroundScrubber{}
 
-	// Reset the gauge to 0 before the test.
+	// Reset the gauge to 0 before the test to isolate mid-sweep behavior from
+	// the process-startup default (which is 1 — not-ready until a clean sweep).
+	// The sweep's own pessimistic Set(1) must fire even when the gauge is already
+	// 0, so we confirm the Set(0) took effect before launching the goroutine.
 	metrics.PerVersionCutoverVerifyErrors.Set(0)
 	require.Equal(t, 0.0, testutil.ToFloat64(metrics.PerVersionCutoverVerifyErrors),
-		"precondition: gauge must start at 0")
+		"precondition: gauge was explicitly reset to 0 for this test")
 
 	var wg sync.WaitGroup
 	wg.Add(1)

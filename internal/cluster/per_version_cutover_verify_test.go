@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -350,6 +351,35 @@ func TestVerifyPerVersionCutover_UnknownWhenBlobPresentButLayoutUnreadable(t *te
 	require.Zero(t, r.Gaps+r.Stuck)
 	require.Len(t, r.UnknownRefs, 1)
 	require.Equal(t, vid, r.UnknownRefs[0].VersionID, "UnknownRefs must name the broken-layout VID")
+}
+
+// TestVerifyPerVersionCutover_FailClosedOnVersioningReadError verifies Finding 1:
+// when GetBucketVersioning returns a store error (not ErrMetaKeyNotFound), the
+// verifier must return that error — not silently treat the bucket as non-versioned
+// and return zero readiness. A false-READY signal on a failed versioning read
+// could allow a cutover that corrupts or loses all versioned objects in the bucket.
+//
+// The test injects a BadgerDB View error via errInjectStore (defined in
+// per_version_backfill_walker_test.go). With the store erroring, any View call —
+// including the GetBucketVersioning View — returns the injected error. The bucket
+// is not an internal bucket, so the internal-bucket fast-path does not trigger,
+// and the code reaches the versioning-state read.
+func TestVerifyPerVersionCutover_FailClosedOnVersioningReadError(t *testing.T) {
+	b := newTestDistributedBackend(t)
+
+	// Inject a View error AFTER the backend is fully set up. Because the store
+	// errors on ALL View calls, GetBucketVersioning will see the error. The old
+	// code (using bucketVersioningEnabled) would silently return false, leading to
+	// a zero-readiness non-error return. The fix must propagate the error.
+	storeErr := errors.New("simulated BadgerDB View failure for versioning read")
+	b.store = &errInjectStore{MetadataStore: b.store, active: true, viewErr: storeErr}
+
+	// The bucket name must NOT be an internal bucket (IsInternalBucket must be false)
+	// so the code reaches the versioning-state read rather than the fast-path.
+	_, err := b.verifyPerVersionCutover("versioned-bucket-read-error")
+
+	require.Error(t, err, "verifyPerVersionCutover must return an error when GetBucketVersioning fails")
+	require.ErrorIs(t, err, storeErr, "returned error must wrap the original store error (fail-closed)")
 }
 
 // intToHexSuffix formats an int as a 4-char hex string for use in test UUIDs.

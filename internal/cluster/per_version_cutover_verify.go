@@ -152,8 +152,16 @@ func (b *DistributedBackend) verifyPerVersionCutover(bucket string) (cutoverRead
 		return r, nil
 	}
 
-	ctx := context.Background()
-	if !b.bucketVersioningEnabled(ctx, bucket) {
+	// Use GetBucketVersioning directly so a store error fails closed (returns an
+	// error to the caller) rather than silently treating the bucket as
+	// "not versioned" and skipping it. bucketVersioningEnabled collapses a store
+	// error to false — that is intentional for the runtime write path but
+	// unsafe here: a false-negative would contribute to a false-READY signal.
+	vstate, verr := b.GetBucketVersioning(bucket)
+	if verr != nil {
+		return r, fmt.Errorf("verifyPerVersionCutover get versioning for bucket %s: %w", bucket, verr)
+	}
+	if vstate != "Enabled" {
 		return r, nil
 	}
 

@@ -558,7 +558,7 @@ var (
 
 	PerVersionCutoverVerifyErrors = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "grainfs_per_version_cutover_verify_errors",
-		Help: "Number of sweep verification errors (list-buckets failure counts as 1; each failed bucket counts as 1). Non-zero blocks cutover: gaps+stuck+unknown+verify_errors == 0 across all nodes is required.",
+		Help: "Number of sweep verification errors (list-buckets failure counts as 1; each failed bucket counts as 1). Non-zero blocks cutover: gaps+stuck+unknown+verify_errors == 0 across all nodes is required. Initialized to 1 at process start; reaches 0 only after a completed clean sweep.",
 	})
 
 	// Phase 16 — Self-healing metrics.
@@ -667,3 +667,11 @@ var (
 		Buckets: []float64{0, 1, 2, 3, 5, 10},
 	})
 )
+
+func init() {
+	// PerVersionCutoverVerifyErrors starts at 1 ("not ready") so that a
+	// Prometheus scrape before the first sweep has ever completed does NOT read
+	// gaps+stuck+unknown+verify_errors == 0 (which would be a false-READY). The
+	// gauge reaches 0 only after a completed clean sweep.
+	PerVersionCutoverVerifyErrors.Set(1)
+}
