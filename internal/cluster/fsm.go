@@ -59,6 +59,11 @@ const (
 	// so the per-node post-apply hook fires with the node's store already
 	// clean. Gen is a log hint only — the re-Kick is gen-agnostic. S7-1a-2.
 	CmdFSMValueResealDone CommandType = 42
+	// CmdDeleteMultipartDone is a deterministic raft-proposed batch delete of
+	// mpudone:{uploadID} idempotency markers.  Proposed by the periodic GC
+	// sweep (Task 5b) after confirming each upload is old enough to GC.
+	// Using a raft command (rather than a TTL) keeps all replicas consistent.
+	CmdDeleteMultipartDone CommandType = 43
 )
 
 // Command is a serializable FSM command for Raft log entries.
@@ -194,6 +199,12 @@ type ResealFSMValuesCmd struct {
 // post-apply hook is gen-agnostic. S7-1a-2.
 type FSMValueResealDoneCmd struct {
 	Gen uint32
+}
+
+// DeleteMultipartDoneCmd is the payload for CmdDeleteMultipartDone: a batch of
+// upload IDs whose mpudone idempotency markers should be deleted.
+type DeleteMultipartDoneCmd struct {
+	UploadIDs []string
 }
 
 type CreateMultipartUploadCmd struct {

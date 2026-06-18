@@ -1578,3 +1578,11 @@ table MultipartDone {
   version_id:string;
   mod_time:long;
 }
+
+// DeleteMultipartDoneCmd (cmd 43): deterministic raft-proposed batch delete of
+// mpudone idempotency markers.  Proposed by the periodic GC sweep (Task 5b)
+// after confirming the upload is sufficiently old.  Using a raft command (rather
+// than a TTL) keeps all replicas consistent.
+table DeleteMultipartDoneCmd {
+  upload_ids:[string];
+}

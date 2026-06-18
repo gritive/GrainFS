@@ -154,6 +154,8 @@ func (f *FSM) ApplyTxn(txn MetadataTxn, raw []byte) error {
 		// preceding CmdResealFSMValues batches in raft order. Gen is carried
 		// for logging/observability only — the re-Kick is gen-agnostic. S7-1a-2.
 		return nil
+	case CmdDeleteMultipartDone:
+		return f.applyDeleteMultipartDone(txn, cmd.Data)
 	default:
 		log.Warn().Uint8("type", uint8(cmd.Type)).Msg("fsm: unknown command type")
 		return nil
@@ -557,6 +559,22 @@ func (f *FSM) applyAbortMultipart(txn MetadataTxn, data []byte) error {
 		return nil
 	}
 	return err
+}
+
+// applyDeleteMultipartDone handles CmdDeleteMultipartDone: it batch-deletes
+// mpudone idempotency markers for the listed upload IDs.  Missing markers are
+// silently ignored so the command is idempotent across retries.
+func (f *FSM) applyDeleteMultipartDone(txn MetadataTxn, data []byte) error {
+	c, err := decodeDeleteMultipartDoneCmd(data)
+	if err != nil {
+		return err
+	}
+	for _, id := range c.UploadIDs {
+		if derr := txn.Delete(f.keys.MultipartDoneKey(id)); derr != nil && derr != ErrMetaKeyNotFound {
+			return derr
+		}
+	}
+	return nil
 }
 
 func (f *FSM) applySetBucketPolicy(txn MetadataTxn, data []byte) error {

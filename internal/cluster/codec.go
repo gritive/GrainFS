@@ -1567,6 +1567,8 @@ func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
 		return encodeResealFSMValuesCmd(payload.(ResealFSMValuesCmd))
 	case CmdFSMValueResealDone:
 		return encodeFSMValueResealDoneCmd(payload.(FSMValueResealDoneCmd))
+	case CmdDeleteMultipartDone:
+		return encodeDeleteMultipartDoneCmd(payload.(DeleteMultipartDoneCmd))
 	default:
 		return nil, fmt.Errorf("unknown command type: %d", cmdType)
 	}
@@ -1673,6 +1675,34 @@ func decodeFSMValueResealDoneCmd(data []byte) (FSMValueResealDoneCmd, error) {
 		return FSMValueResealDoneCmd{}, err
 	}
 	return FSMValueResealDoneCmd{Gen: t.Gen()}, nil
+}
+
+func encodeDeleteMultipartDoneCmd(c DeleteMultipartDoneCmd) ([]byte, error) {
+	b := clusterBuilderPool.Get()
+	var idsOff flatbuffers.UOffsetT
+	if len(c.UploadIDs) > 0 {
+		idsOff = buildStringVector(b, c.UploadIDs, clusterpb.DeleteMultipartDoneCmdStartUploadIdsVector)
+	}
+	clusterpb.DeleteMultipartDoneCmdStart(b)
+	if len(c.UploadIDs) > 0 {
+		clusterpb.DeleteMultipartDoneCmdAddUploadIds(b, idsOff)
+	}
+	return fbFinish(b, clusterpb.DeleteMultipartDoneCmdEnd(b)), nil
+}
+
+func decodeDeleteMultipartDoneCmd(data []byte) (DeleteMultipartDoneCmd, error) {
+	t, err := fbSafe(data, func(d []byte) *clusterpb.DeleteMultipartDoneCmd {
+		return clusterpb.GetRootAsDeleteMultipartDoneCmd(d, 0)
+	})
+	if err != nil {
+		return DeleteMultipartDoneCmd{}, err
+	}
+	n := t.UploadIdsLength()
+	ids := make([]string, n)
+	for i := 0; i < n; i++ {
+		ids[i] = string(t.UploadIds(i))
+	}
+	return DeleteMultipartDoneCmd{UploadIDs: ids}, nil
 }
 
 func encodePutShardPlacementCmd(c PutShardPlacementCmd) ([]byte, error) {
