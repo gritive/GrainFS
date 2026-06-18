@@ -1168,6 +1168,48 @@ func unmarshalClusterMultipartMeta(data []byte) (clusterMultipartMeta, error) {
 	}, nil
 }
 
+// --- MultipartDone codec ---
+
+// multipartDone records that a multipart upload has been finalized.
+type multipartDone struct {
+	UploadID  string
+	Bucket    string
+	Key       string
+	VersionID string
+	ModTime   int64
+}
+
+func marshalMultipartDone(m multipartDone) ([]byte, error) {
+	b := clusterBuilderPool.Get()
+	uploadIDOff := b.CreateString(m.UploadID)
+	bucketOff := b.CreateString(m.Bucket)
+	keyOff := b.CreateString(m.Key)
+	versionIDOff := b.CreateString(m.VersionID)
+	clusterpb.MultipartDoneStart(b)
+	clusterpb.MultipartDoneAddUploadId(b, uploadIDOff)
+	clusterpb.MultipartDoneAddBucket(b, bucketOff)
+	clusterpb.MultipartDoneAddKey(b, keyOff)
+	clusterpb.MultipartDoneAddVersionId(b, versionIDOff)
+	clusterpb.MultipartDoneAddModTime(b, m.ModTime)
+	return fbFinish(b, clusterpb.MultipartDoneEnd(b)), nil
+}
+
+func unmarshalMultipartDone(data []byte) (multipartDone, error) {
+	t, err := fbSafe(data, func(d []byte) *clusterpb.MultipartDone {
+		return clusterpb.GetRootAsMultipartDone(d, 0)
+	})
+	if err != nil {
+		return multipartDone{}, fmt.Errorf("unmarshal MultipartDone: %w", err)
+	}
+	return multipartDone{
+		UploadID:  string(t.UploadId()),
+		Bucket:    string(t.Bucket()),
+		Key:       string(t.Key()),
+		VersionID: string(t.VersionId()),
+		ModTime:   t.ModTime(),
+	}, nil
+}
+
 // --- MigrateShard / MigrationDone codec ---
 
 func encodeMigrateShardCmd(c MigrateShardFSMCmd) ([]byte, error) {
