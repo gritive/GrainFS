@@ -125,7 +125,10 @@ func (b *DistributedBackend) VerifyPerVersionCutover(bucket string) (CutoverRead
 //   - Excluded: internal bucket, appendable, or coalesced (intentionally skipped).
 //
 // Fast-path: internal buckets → count all FSM obj: records as Excluded.
-// Non-versioning-enabled buckets → return zero readiness (nothing to verify).
+// Never-versioned buckets (state empty/"Unversioned") → return zero readiness.
+// Suspended buckets are IN SCOPE: they retain versioned history from when they
+// were Enabled, and the S4a cutover removes the FSM fallback those versions
+// rely on — skipping them would produce a false-READY signal.
 //
 // Scope: this gate validates the per-version-blob fallback path for
 // versioning-enabled, non-internal, non-appendable objects only. The future S4
@@ -161,7 +164,12 @@ func (b *DistributedBackend) verifyPerVersionCutover(bucket string) (cutoverRead
 	if verr != nil {
 		return r, fmt.Errorf("verifyPerVersionCutover get versioning for bucket %s: %w", bucket, verr)
 	}
-	if vstate != "Enabled" {
+	// Suspended buckets retain all versioned objects written while the bucket was
+	// Enabled. Suspending versioning does NOT delete that history. The S4a cutover
+	// removes the FSM ObjectMetaKeyV fallback those versions rely on, so Suspended
+	// buckets are IN SCOPE and must be verified. Skip ONLY never-versioned buckets
+	// (state is empty / "Unversioned" — versioning was never turned on).
+	if vstate != "Enabled" && vstate != "Suspended" {
 		return r, nil
 	}
 

@@ -382,6 +382,37 @@ func TestVerifyPerVersionCutover_FailClosedOnVersioningReadError(t *testing.T) {
 	require.ErrorIs(t, err, storeErr, "returned error must wrap the original store error (fail-closed)")
 }
 
+// TestVerifyPerVersionCutover_VerifiesSuspendedBucket verifies that a bucket
+// whose versioning was Enabled and then Suspended is still verified — NOT skipped.
+//
+// Suspended buckets retain all versioned objects written while Enabled. The S4a
+// cutover removes the FSM ObjectMetaKeyV fallback that those versions rely on.
+// Suspending versioning does NOT delete that history, so Suspended buckets are
+// IN SCOPE for the cutover gate. If we skip them we emit a false-READY signal.
+func TestVerifyPerVersionCutover_VerifiesSuspendedBucket(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	const bkt, key = "cvbkt-suspended", "obj"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+
+	// Enable versioning and write a versioned object (gets a per-version blob).
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+	v1 := putVersioned(t, b, ctx, bkt, key, "v1-body")
+
+	// Remove the per-version blob to create a gap.
+	removePerVersionBlob(t, b, bkt, key, v1)
+
+	// Suspend versioning — this does NOT delete the existing versioned history.
+	require.NoError(t, b.SetBucketVersioning(bkt, "Suspended"))
+
+	// The verifier must still classify the bucket (Gaps==1), NOT skip it (zero).
+	r, err := b.verifyPerVersionCutover(bkt)
+	require.NoError(t, err)
+	require.Equal(t, 1, r.Gaps+r.Stuck, "Suspended bucket with missing blob must not be skipped — Gaps or Stuck must be 1")
+	require.Zero(t, r.Complete, "no complete blobs expected (blob was removed)")
+	require.Zero(t, r.Unknown, "no unknown expected")
+}
+
 // intToHexSuffix formats an int as a 4-char hex string for use in test UUIDs.
 func intToHexSuffix(i int) string {
 	return "0000"[len(intHex(i)):] + intHex(i)
