@@ -39,16 +39,33 @@ func uuidv7TimeUnix(vid string) int64 {
 	return ms / 1000
 }
 
-// deriveMarkerPlacement computes the RDH-direct NodeIDs and ECConfig for a
-// delete marker with empty NodeIDs. The derivation uses the owning group's peer
-// set and EC config — the same inputs a WRITE uses — so the result is
-// identical to what the marker's sibling live versions use.
+// deriveMarkerPlacement computes NodeIDs + ECConfig for a delete marker whose
+// FSM record carries no placement (the degraded case where deleteObjectWithMarker
+// could not read the prior version's quorum-meta at delete time, so NodeIDs was
+// left empty). It places the marker's per-version metadata blob on the owning
+// group's current peer set.
 //
-// The placement key is ecObjectShardKey(key, "") — the unversioned shard key —
-// matching deleteObjectWithMarker's readQuorumMetaCmd(bucket, key) lookup.
+// Why this placement is correct for a TOMBSTONE (it deliberately does NOT
+// reproduce a data write's exact shard placement, and need not): a delete marker
+// has no data shards, so the only thing its per-version blob must satisfy is
+// DISCOVERABILITY by the derive-by-scan read. readQuorumMetaVersions
+// (quorum_meta.go:517) fans out to EVERY ShardGroups() peer and unions whatever
+// .quorum_meta_versions/{bucket}/{key}/ blobs each holds — it is NOT keyed to the
+// object's specific NodeIDs. The owning group's peers are ShardGroups() members,
+// so a marker blob written here is found by that readback and correctly resolves
+// as the latest delete-marker (hiding any older live version). A real data write
+// keys placement by ecObjectShardKey(key, versionID) / segment keys and a real
+// marker copies existing.NodeIDs; matching those byte-for-byte is unnecessary for
+// a tombstone's metadata blob (and impossible when the placement was never
+// recorded — that is precisely why NodeIDs is empty here).
 //
-// Returns (nil, ECConfig{}) if the EC config or node list is unresolvable
-// (DataShards == 0 or empty node list); the caller must skip the candidate.
+// ECData = the owning group's current EC config: a marker carries no data, so
+// ECData only sets the K-of-N write-quorum strength (k = max(1, ECData)) for the
+// metadata blob, not any data-shard count. Current-group config is the right
+// durability target for a freshly written blob.
+//
+// Returns (nil, ECConfig{}) if unresolvable (DataShards == 0 or empty node list);
+// the caller skips the candidate (the writer cannot fan out to zero nodes).
 func deriveMarkerPlacement(gb *DistributedBackend, key string) ([]string, ECConfig) {
 	ecCfg := gb.currentECConfig()
 	if ecCfg.DataShards == 0 {
@@ -80,9 +97,11 @@ func deriveMarkerPlacement(gb *DistributedBackend, key string) ([]string, ECConf
 // Delete-marker records (ETag == deleteMarkerETag) ARE yielded — they need a
 // per-version blob too. Degraded delete markers (NodeIDs == nil, which happens
 // when deleteObjectWithMarker skipped writeQuorumMeta because the prior version
-// had no quorum meta) have their NodeIDs derived from a sibling version of the
-// same key (lookupSiblingNodeIDs). If no sibling with placement exists, the
-// degraded marker is skipped.
+// had no readable quorum meta at delete time) have their placement + ECConfig
+// derived RDH-direct from the owning group (deriveMarkerPlacement) — sufficient
+// because the tombstone blob need only be DISCOVERABLE by the all-groups
+// readQuorumMetaVersions readback, not byte-match a data write's shard placement
+// (see deriveMarkerPlacement). If placement is unresolvable, the marker is skipped.
 func (b *DistributedBackend) walkPerVersionBackfillCandidates(
 	bucket string,
 	now, minAge int64,
