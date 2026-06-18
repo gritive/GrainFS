@@ -352,18 +352,27 @@ func (b *DistributedBackend) SetObjectACLPropose(bucket, key string, acl uint8) 
 	// Phase 3: for objects written via quorum meta, update the quorum meta
 	// blob directly (read-modify-write) instead of proposing to data_raft.
 	if b.shardSvc != nil && !storage.IsInternalBucket(bucket) {
-		cmd, err := b.readQuorumMetaCmd(bucket, key)
-		if err == nil {
-			cmd.ACL = acl
-			if werr := b.writeQuorumMeta(ctx, cmd); werr != nil {
-				return fmt.Errorf("set object acl quorum: %w", werr)
+		handled, err := func() (bool, error) {
+			lock := b.objectMetaRMWLock(bucket, key)
+			lock.Lock()
+			defer lock.Unlock() // releases at closure return, BEFORE any fall-through
+			cmd, err := b.readQuorumMetaCmd(bucket, key)
+			if err == nil {
+				cmd.ACL = acl
+				cmd.MetaSeq++ // strictly win the (ModTime,VersionID) LWW tie; serialized by the lock
+				if werr := b.writeQuorumMeta(ctx, cmd); werr != nil {
+					return true, fmt.Errorf("set object acl quorum: %w", werr)
+				}
+				return true, nil // handled on the quorum path
 			}
-			return nil
+			if !errors.Is(err, storage.ErrObjectNotFound) {
+				return true, fmt.Errorf("set object acl quorum read: %w", err)
+			}
+			return false, nil // ErrObjectNotFound: pre-Phase-3 object; fall through to raft (lock already released)
+		}()
+		if handled {
+			return err
 		}
-		if !errors.Is(err, storage.ErrObjectNotFound) {
-			return fmt.Errorf("set object acl quorum read: %w", err)
-		}
-		// ErrObjectNotFound: pre-Phase-3 object; fall through to raft.
 	}
 	return b.propose(ctx, CmdSetObjectACL, SetObjectACLCmd{
 		Bucket: bucket,
@@ -394,18 +403,33 @@ func (b *DistributedBackend) SetObjectTagsPropose(bucket, key, versionID string,
 	// Phase 3: for objects written via quorum meta, update the quorum meta
 	// blob directly (read-modify-write) instead of proposing to data_raft.
 	if b.shardSvc != nil && !storage.IsInternalBucket(bucket) {
-		cmd, err := b.readQuorumMetaCmd(bucket, key)
-		if err == nil {
-			cmd.Tags = append([]storage.Tag(nil), tags...)
-			if werr := b.writeQuorumMeta(ctx, cmd); werr != nil {
-				return fmt.Errorf("set object tags quorum: %w", werr)
+		handled, err := func() (bool, error) {
+			// objectMetaRMWLock serializes the RMW only on THIS node. That is
+			// sufficient because ClusterCoordinator.SetObjectTags/SetObjectACL
+			// always forward the request to the OWNING peer, so all concurrent
+			// RMWs for the same object converge on one owner node. A residual
+			// cross-coordinator window exists only during ownership transitions;
+			// that is a pre-existing distributed limitation and is NOT regressed here.
+			lock := b.objectMetaRMWLock(bucket, key)
+			lock.Lock()
+			defer lock.Unlock() // releases at closure return, BEFORE any fall-through
+			cmd, err := b.readQuorumMetaCmd(bucket, key)
+			if err == nil {
+				cmd.Tags = append([]storage.Tag(nil), tags...)
+				cmd.MetaSeq++ // strictly win the (ModTime,VersionID) LWW tie; serialized by the lock
+				if werr := b.writeQuorumMeta(ctx, cmd); werr != nil {
+					return true, fmt.Errorf("set object tags quorum: %w", werr)
+				}
+				return true, nil // handled on the quorum path
 			}
-			return nil
+			if !errors.Is(err, storage.ErrObjectNotFound) {
+				return true, fmt.Errorf("set object tags quorum read: %w", err)
+			}
+			return false, nil // ErrObjectNotFound: pre-Phase-3 object; fall through to raft (lock already released)
+		}()
+		if handled {
+			return err
 		}
-		if !errors.Is(err, storage.ErrObjectNotFound) {
-			return fmt.Errorf("set object tags quorum read: %w", err)
-		}
-		// ErrObjectNotFound: pre-Phase-3 object; fall through to raft.
 	}
 	return b.propose(ctx, CmdSetObjectTags, SetObjectTagsCmd{
 		Bucket:    bucket,

@@ -142,6 +142,7 @@ type DistributedBackend struct {
 	ecConfigSnapshot                 atomic.Pointer[ECConfig]
 	runtimeSnapshot                  atomic.Pointer[backendRuntimeSnapshot]
 	shardLocks                       pool.SyncMap[string, *sync.RWMutex] // scrubbable.go: per-(bucket,key) RWMutex for ReadShard/WriteShard
+	objectMetaRMWLocks               pool.SyncMap[string, *sync.RWMutex] // per-(bucket,key) serialization for tag/ACL/relocation quorum-meta RMW
 	multipartLocks                   sync.Map                            // map[uploadID]*sync.RWMutex; serializes part writes against complete/abort cleanup
 	appendLocks                      [appendLockStripeCount]sync.Mutex   // striped owner-side admission locks for same-object AppendObject
 	incidentRecorder                 IncidentRecorder                    // nil disables zero-ops incident recording
@@ -1335,6 +1336,14 @@ func (b *DistributedBackend) partPath(uploadID string, partNumber int) string {
 func (b *DistributedBackend) multipartLifecycleLock(uploadID string) *sync.RWMutex {
 	v, _ := b.multipartLocks.LoadOrStore(uploadID, &sync.RWMutex{})
 	return v.(*sync.RWMutex)
+}
+
+// objectMetaRMWLock serializes read-modify-write of an object's quorum-meta
+// blob (tag/ACL mutation, relocation re-write) on the owning coordinator so a
+// second RMW reads the first's result instead of clobbering it.
+func (b *DistributedBackend) objectMetaRMWLock(bucket, key string) *sync.RWMutex {
+	v, _ := b.objectMetaRMWLocks.LoadOrStore(bucket+"\x00"+key, &sync.RWMutex{})
+	return v
 }
 
 // Node returns the RaftNode interface for leadership and raft control.

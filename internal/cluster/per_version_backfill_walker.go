@@ -319,21 +319,22 @@ func segmentRefsToMetaEntries(refs []storage.SegmentRef) []SegmentMetaEntry {
 // Correctness invariants:
 //   - IsDeleteMarker is reconstructed from the ETag sentinel (objectMeta has no
 //     dedicated flag; c.Meta.ETag == deleteMarkerETag is the only signal).
-//   - writeQuorumMetaVersionLocal writes UNCONDITIONALLY via os.Rename (it has
-//     no existence check). Idempotency / no-overwrite on the LOCAL node is
-//     enforced solely by the walker's os.Stat gate in
-//     walkPerVersionBackfillCandidates, which skips candidates whose blob is
-//     already present before yielding them here.
-//   - The existence gate is LOCAL-NODE-ONLY. fanOutQuorumMeta writes to ALL
-//     placement nodes, and both the local write and the remote
-//     WriteQuorumMetaVersion handler overwrite unconditionally. A peer that
-//     already holds the blob may therefore have it overwritten with this
-//     field-equivalent reconstruction. This is safe today because per-version
-//     blobs are immutable and the reconstruction is read-field-equivalent (the
-//     only diverging fields — ExpectedETag and PreserveLatest — are
-//     write-time-only and read-irrelevant). S4 cutover must confirm no read
-//     path consumes those dropped write-time fields before relying on this
-//     assumption.
+//   - writeQuorumMetaVersionLocal applies a write-time LWW guard (S4c-0 PR1):
+//     before renaming it decodes the existing on-disk blob and SKIPS the write
+//     when the existing wins quorumMetaBlobWins(ModTime,VersionID,MetaSeq). So a
+//     stale backfill reconstruction (which carries the FSM-derived MetaSeq) is
+//     skipped whenever a newer RMW/relocation blob already exists — this closes
+//     the leaderless-backfill-vs-RMW lost-update. The walker's os.Stat gate in
+//     walkPerVersionBackfillCandidates still skips already-present candidates
+//     before yielding them here, so the guard's decode is a no-op in the common
+//     (absent-blob) case.
+//   - The guard runs on BOTH the local write and the remote
+//     WriteQuorumMetaVersion handler (both funnel through the same leaf), so a
+//     peer that already holds a NEWER blob is no longer clobbered by this
+//     field-equivalent reconstruction. A peer holding an OLDER or tied blob is
+//     overwritten, which is safe: per-version blobs are read-field-equivalent
+//     here (the only diverging fields — ExpectedETag and PreserveLatest — are
+//     write-time-only and read-irrelevant).
 //   - ExpectedETag and PreserveLatest are write-time-only fields absent from
 //     objectMeta; they are intentionally left at their zero values and are
 //     read-irrelevant.

@@ -53,6 +53,10 @@ func relocationStillEligible(cur PutObjectMetaCmd, in relocateInput, clusterRedu
 // placement via a CAS-honoring FSM propose. OLD shards are never deleted here; a
 // separate orphan-segment sweep reclaims them. LATEST-VERSION-ONLY.
 func (b *DistributedBackend) relocateObjectToRedundantGroup(ctx context.Context, in relocateInput) error {
+	lock := b.objectMetaRMWLock(in.Bucket, in.Key)
+	lock.Lock()
+	defer lock.Unlock()
+
 	cur, err := b.readQuorumMetaCmd(in.Bucket, in.Key)
 	if err != nil {
 		return err

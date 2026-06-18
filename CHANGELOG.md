@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.0.618.0] - 2026-06-19
+
+### Fixed
+- **Quorum-meta metadata lost-update closed (tag/ACL/relocation/backfill) — foundation S4c-0 prerequisite.**
+  Concurrent metadata writers to the same object could silently lose a mutation: two `PutObjectTagging` /
+  `PutObjectAcl` read the same per-version blob and both wrote it (last rename wins, one update dropped),
+  and a leaderless backfill or an object relocation could clobber a newer blob with a stale reconstruction.
+  Three mechanisms close it, all in `internal/cluster`:
+  - A **write-time LWW guard** in both quorum-meta leaf writers (`writeQuorumMetaLocal`,
+    `writeQuorumMetaVersionLocal`): before the atomic rename, decode the existing on-disk blob and skip the
+    write when it already wins `quorumMetaBlobWins(ModTime, VersionID, MetaSeq)`. The per-version writer
+    skips on tie (immutable blobs); the latest writer overwrites on tie (mutable, RMW-written).
+  - The guard's read-then-rename is made **atomic per target** via a new per-target `sync.Mutex`
+    (`ShardService.quorumMetaTargetLocks`), so a stale writer can no longer read-then-clobber between a
+    concurrent writer's rename. Covers local fan-out, relocation, backfill, and the remote
+    `WriteQuorumMeta` / `WriteQuorumMetaVersion` RPC handlers.
+  - A shared per-`(bucket,key)` meta-RMW lock (`DistributedBackend.objectMetaRMWLock`) serializes
+    `SetObjectTags` / `SetObjectACL` and relocation, and the tag/ACL RMW now bumps `MetaSeq` so a serialized
+    write strictly wins. The lock relies on `SetObjectTags` / `SetObjectACL` forwarding to the owning peer;
+    the cross-coordinator window during ownership transitions is a pre-existing distributed limit, not
+    regressed by this change.
+
+  No on-disk format change and no user-facing API change. The next S4c-0 PRs (MPU completion idempotency,
+  ACL versionID plumbing) and the S4c cutover slices build on this.
+
 ## [0.0.617.0] - 2026-06-18
 
 ### Changed
