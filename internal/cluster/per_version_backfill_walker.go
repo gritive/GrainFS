@@ -8,17 +8,17 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // perVersionBackfillCandidate is an FSM obj: record that needs its per-version
 // quorum-meta blob written (the blob is absent from disk). Tasks 2-3 consume
 // this to fan out the write and drive the sweep.
-//
-//nolint:unused // consumed by walkPerVersionBackfillCandidates and per_version_backfill_walker_test.go.
 type perVersionBackfillCandidate struct {
 	Bucket, Key, VersionID string
 	Meta                   objectMeta
@@ -27,8 +27,6 @@ type perVersionBackfillCandidate struct {
 // uuidv7TimeUnix extracts the 48-bit Unix millisecond timestamp embedded in a
 // UUIDv7 string and returns it as Unix seconds. Returns 0 if the string is not
 // a valid UUID (fail-open: the caller's age gate treats age 0 as epoch → old).
-//
-//nolint:unused // called by walkPerVersionBackfillCandidates.
 func uuidv7TimeUnix(vid string) int64 {
 	id, err := uuid.Parse(vid)
 	if err != nil {
@@ -58,8 +56,6 @@ func uuidv7TimeUnix(vid string) int64 {
 //
 // Delete-marker records (ETag == deleteMarkerETag) ARE yielded — they need a
 // per-version blob too.
-//
-//nolint:unused // invoked by per_version_backfill_walker_test.go; Tasks 2-3 will add the production caller.
 func (b *DistributedBackend) walkPerVersionBackfillCandidates(
 	bucket string,
 	now, minAge int64,
@@ -154,8 +150,6 @@ func (b *DistributedBackend) walkPerVersionBackfillCandidates(
 // []SegmentMetaEntry for use in a reconstructed PutObjectMetaCmd. The
 // SegmentIdx field is set from the slice position (matches the original
 // ordering established at write time by buildSegmentMetaEntries).
-//
-//nolint:unused // called by backfillPerVersionBlob; Task 3 adds the production caller.
 func segmentRefsToMetaEntries(refs []storage.SegmentRef) []SegmentMetaEntry {
 	if len(refs) == 0 {
 		return nil
@@ -192,8 +186,6 @@ func segmentRefsToMetaEntries(refs []storage.SegmentRef) []SegmentMetaEntry {
 //   - ExpectedETag and PreserveLatest are write-time-only fields absent from
 //     objectMeta; they are intentionally left at their zero values and are
 //     read-irrelevant.
-//
-//nolint:unused // invoked by per_version_backfill_walker_test.go; Task 3 will add the production caller.
 func (b *DistributedBackend) backfillPerVersionBlob(ctx context.Context, c perVersionBackfillCandidate) error {
 	cmd := PutObjectMetaCmd{
 		Bucket:           c.Bucket,
@@ -254,4 +246,42 @@ func (b *DistributedBackend) backfillPerVersionBlob(ctx context.Context, c perVe
 		return fmt.Errorf("backfillPerVersionBlob fan-out %s/%s@%s: %w", c.Bucket, c.Key, c.VersionID, err)
 	}
 	return nil
+}
+
+// defaultBackfillMinAge is the minimum version age before the backfill sweep
+// considers it a candidate. Mirrors the orphan/redundancy sweep age gates.
+const defaultBackfillMinAge = 5 * time.Minute
+
+// ListBackfillBuckets returns the union of all locally-hosted generation
+// groups' buckets, mirroring SegmentSweepBuckets. Implements scrubber.PerVersionBackfillable.
+func (b *DistributedBackend) ListBackfillBuckets(ctx context.Context) ([]string, error) {
+	return b.SegmentSweepBuckets(ctx)
+}
+
+// WalkPerVersionBackfillCandidates calls fn for each versioned object record
+// whose per-version quorum-meta blob is absent. Implements scrubber.PerVersionBackfillable.
+// The Opaque field of each BackfillCandidate carries the perVersionBackfillCandidate
+// so BackfillPerVersionBlob avoids a second metadata lookup.
+func (b *DistributedBackend) WalkPerVersionBackfillCandidates(ctx context.Context, bucket string, fn func(scrubber.BackfillCandidate) error) error {
+	now := time.Now().Unix()
+	minAge := int64(defaultBackfillMinAge / time.Second)
+	return b.walkPerVersionBackfillCandidates(bucket, now, minAge, func(c perVersionBackfillCandidate) error {
+		return fn(scrubber.BackfillCandidate{
+			Bucket:    c.Bucket,
+			Key:       c.Key,
+			VersionID: c.VersionID,
+			Opaque:    c,
+		})
+	})
+}
+
+// BackfillPerVersionBlob fans out the missing per-version blob to the
+// object's placement nodes. Uses the Opaque field (set by WalkPerVersionBackfillCandidates)
+// to avoid a second metadata lookup. Implements scrubber.PerVersionBackfillable.
+func (b *DistributedBackend) BackfillPerVersionBlob(ctx context.Context, c scrubber.BackfillCandidate) error {
+	cand, ok := c.Opaque.(perVersionBackfillCandidate)
+	if !ok {
+		return fmt.Errorf("BackfillPerVersionBlob %s/%s@%s: missing opaque candidate", c.Bucket, c.Key, c.VersionID)
+	}
+	return b.backfillPerVersionBlob(ctx, cand)
 }
