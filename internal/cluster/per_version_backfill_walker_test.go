@@ -279,6 +279,95 @@ func TestBackfillPerVersionBlob_IsIdempotent(t *testing.T) {
 	require.Empty(t, got, "walker must not re-yield a version whose blob was backfilled")
 }
 
+// TestWalkPerVersionBackfillCandidates_SkipsUnversionedUUIDSuffixKey verifies
+// that an UNVERSIONED FSM record whose object key's last segment is a valid UUID
+// (e.g. key = "a/<uuidv7>") is NOT yielded as a backfill candidate.
+//
+// Without the meta.Key == parsedKey guard, uuid.Parse accepts the UUID suffix,
+// the walker mis-parses key="a" / vid="<uuid>", and yields a phantom candidate.
+func TestWalkPerVersionBackfillCandidates_SkipsUnversionedUUIDSuffixKey(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	const bkt = "vbkt-uuid-suffix"
+	// key whose last path segment is a valid UUIDv7 — stored as an UNVERSIONED record.
+	const uuidSuffix = "019756c0-17f8-7000-b7e4-a5ef7c2f1234"
+	uuidSuffixKey := "a/" + uuidSuffix
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+
+	// Write a raw UNVERSIONED FSM record (ObjectMetaKey, not ObjectMetaKeyV).
+	// The meta.Key == full key "a/<uuid>", not just "a".
+	raw, err := marshalObjectMeta(objectMeta{
+		Key:     uuidSuffixKey,
+		ETag:    "etag-uuid-suffix",
+		ECData:  4,
+		NodeIDs: []string{"n1"},
+	})
+	require.NoError(t, err)
+	require.NoError(t, b.store.Update(func(txn MetadataTxn) error {
+		return txn.Set(b.ks().ObjectMetaKey(bkt, uuidSuffixKey), raw)
+	}))
+
+	var got []string
+	require.NoError(t, b.walkPerVersionBackfillCandidates(bkt, nowUnixSec(), 0, func(c perVersionBackfillCandidate) error {
+		got = append(got, c.VersionID)
+		return nil
+	}))
+	require.Empty(t, got, "unversioned record with UUID-suffix key must not be yielded as a backfill candidate")
+}
+
+// TestWalkPerVersionBackfillCandidates_SkipsAppendableAndCoalesced verifies
+// that versioned FSM records with IsAppendable=true or non-empty Coalesced are
+// NOT yielded as backfill candidates (foundation spec appendable/coalesced
+// carve-out: these stay FSM-authoritative and must not get a per-version blob).
+func TestWalkPerVersionBackfillCandidates_SkipsAppendableAndCoalesced(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	const bkt = "vbkt-appendable"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+
+	const (
+		keyAppendable = "append-obj"
+		vidAppendable = "019756c0-17f8-7000-b7e4-a5ef7c2f0001"
+		keyCoalesced  = "coalesced-obj"
+		vidCoalesced  = "019756c0-17f8-7000-b7e4-a5ef7c2f0002"
+	)
+
+	// Write a versioned record with IsAppendable=true.
+	rawAppendable, err := marshalObjectMeta(objectMeta{
+		Key:          keyAppendable,
+		ETag:         "etag-appendable",
+		ECData:       4,
+		NodeIDs:      []string{"n1"},
+		IsAppendable: true,
+	})
+	require.NoError(t, err)
+	require.NoError(t, b.store.Update(func(txn MetadataTxn) error {
+		return txn.Set(b.ks().ObjectMetaKeyV(bkt, keyAppendable, vidAppendable), rawAppendable)
+	}))
+
+	// Write a versioned record with non-empty Coalesced.
+	rawCoalesced, err := marshalObjectMeta(objectMeta{
+		Key:       keyCoalesced,
+		ETag:      "etag-coalesced",
+		ECData:    4,
+		NodeIDs:   []string{"n1"},
+		Coalesced: []CoalescedShardRef{{CoalescedID: "cid1", Size: 100, ETag: "ce1"}},
+	})
+	require.NoError(t, err)
+	require.NoError(t, b.store.Update(func(txn MetadataTxn) error {
+		return txn.Set(b.ks().ObjectMetaKeyV(bkt, keyCoalesced, vidCoalesced), rawCoalesced)
+	}))
+
+	var got []string
+	require.NoError(t, b.walkPerVersionBackfillCandidates(bkt, nowUnixSec(), 0, func(c perVersionBackfillCandidate) error {
+		got = append(got, c.VersionID)
+		return nil
+	}))
+	require.Empty(t, got, "appendable and coalesced versioned records must not be yielded as backfill candidates")
+}
+
 // TestWalkPerVersionBackfillCandidates_IncludesDeleteMarker verifies that a
 // delete-marker version (ETag == deleteMarkerETag) is enumerated as a candidate
 // when its per-version blob is absent.

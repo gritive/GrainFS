@@ -119,6 +119,25 @@ func (b *DistributedBackend) walkPerVersionBackfillCandidates(
 					return nil // undecodable; skip
 				}
 
+				// Authoritative key-type discriminator: for a genuine versioned
+				// record (obj:bkt/key/vid) the decoded meta.Key equals the parsed
+				// key segment. For a mis-parsed unversioned record whose object key
+				// ends in a UUID (e.g. obj:bkt/a/<uuid>) the decoded meta.Key is
+				// the FULL real key ("a/<uuid>"), which differs from the parsed key
+				// segment ("a"). Skip the latter to avoid writing phantom blobs.
+				if meta.Key != key {
+					return nil
+				}
+
+				// Appendable/coalesced carve-out (foundation spec): AppendObject
+				// objects are FSM-authoritative and must not receive a per-version
+				// quorum-meta blob from S3. Backfilling them would reconstruct a
+				// blob with IsAppendable=false (PutObjectMetaCmd has no such field),
+				// causing GetObjectVersion to see "no readable layout" and fail.
+				if meta.IsAppendable || len(meta.Coalesced) > 0 {
+					return nil
+				}
+
 				// Skip versions with no placement — nothing to fan out to.
 				if len(meta.NodeIDs) == 0 {
 					return nil
