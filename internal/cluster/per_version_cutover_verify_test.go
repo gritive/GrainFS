@@ -1,0 +1,315 @@
+package cluster
+
+import (
+	"context"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/storage"
+)
+
+// TestVerifyPerVersionCutover_CompleteWhenAllBlobsPresent verifies that a
+// versioning-enabled bucket where every version has a per-version blob returns
+// readiness.Complete == number of versions and all gap/stuck/unknown counts zero.
+func TestVerifyPerVersionCutover_CompleteWhenAllBlobsPresent(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	const bkt, key = "cvbkt", "obj"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+	putVersioned(t, b, ctx, bkt, key, "v1-body")
+	putVersioned(t, b, ctx, bkt, key, "v2-body")
+
+	r, err := b.verifyPerVersionCutover(bkt)
+	require.NoError(t, err)
+	require.Equal(t, 2, r.Complete, "both versions must report Complete when blobs are present")
+	require.Zero(t, r.Gaps, "no gaps expected")
+	require.Zero(t, r.Stuck, "no stuck expected")
+	require.Zero(t, r.Unknown, "no unknown expected")
+}
+
+// TestVerifyPerVersionCutover_NoopOnUnversionedBucket verifies that a bucket
+// without versioning enabled returns zero readiness (nothing to verify).
+func TestVerifyPerVersionCutover_NoopOnUnversionedBucket(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	const bkt = "plain-cvbkt"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+
+	r, err := b.verifyPerVersionCutover(bkt)
+	require.NoError(t, err)
+	require.Zero(t, r.Complete)
+	require.Zero(t, r.Gaps)
+	require.Zero(t, r.Stuck)
+	require.Zero(t, r.Unknown)
+	require.Zero(t, r.Excluded)
+}
+
+// TestVerifyPerVersionCutover_GapWhenBlobMissingWithPlacement verifies that a
+// version whose per-version blob is absent (but has placement) is counted as Gap.
+// Gap means: quorum-meta coverage missing AND placement is resolvable (backfill
+// can fix it). Since the single-node test backend has resolvable placement, a
+// blob removed from disk produces a Gap.
+func TestVerifyPerVersionCutover_GapWhenBlobMissingWithPlacement(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	const bkt, key = "cvbkt-gap", "obj"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+	v1 := putVersioned(t, b, ctx, bkt, key, "v1-body")
+	putVersioned(t, b, ctx, bkt, key, "v2-body") // stays complete
+
+	// Remove v1's blob to create a gap.
+	removePerVersionBlob(t, b, bkt, key, v1)
+
+	r, err := b.verifyPerVersionCutover(bkt)
+	require.NoError(t, err)
+	// v1 missing → Gap (placement resolvable in single-node backend).
+	// v2 present → Complete.
+	require.Equal(t, 1, r.Complete, "v2 must be Complete")
+	require.Equal(t, 1, r.Gaps+r.Stuck, "v1 must be Gap or Stuck (missing from quorum-meta)")
+	require.Zero(t, r.Unknown, "no unknown expected")
+	// GapRefs or StuckRefs must contain v1.
+	allMissingRefs := append(r.GapRefs, r.StuckRefs...)
+	var foundV1 bool
+	for _, ref := range allMissingRefs {
+		if ref.VersionID == v1 {
+			foundV1 = true
+		}
+	}
+	require.True(t, foundV1, "v1 must appear in GapRefs or StuckRefs")
+}
+
+// TestVerifyPerVersionCutover_ExcludesAppendableAndCoalesced verifies that
+// appendable and coalesced versioned records are counted as Excluded.
+func TestVerifyPerVersionCutover_ExcludesAppendableAndCoalesced(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	const bkt = "cvbkt-appendable"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+
+	const (
+		keyAppendable = "append-obj"
+		vidAppendable = "019756c0-17f8-7000-b7e4-a5ef7c2f0001"
+		keyCoalesced  = "coalesced-obj"
+		vidCoalesced  = "019756c0-17f8-7000-b7e4-a5ef7c2f0002"
+	)
+	rawAppendable, err := marshalObjectMeta(objectMeta{
+		Key: keyAppendable, ETag: "etag-app", ECData: 4, NodeIDs: []string{"n1"}, IsAppendable: true,
+	})
+	require.NoError(t, err)
+	require.NoError(t, b.store.Update(func(txn MetadataTxn) error {
+		return txn.Set(b.ks().ObjectMetaKeyV(bkt, keyAppendable, vidAppendable), rawAppendable)
+	}))
+	rawCoalesced, err := marshalObjectMeta(objectMeta{
+		Key:       keyCoalesced,
+		ETag:      "etag-coal",
+		ECData:    4,
+		NodeIDs:   []string{"n1"},
+		Coalesced: []CoalescedShardRef{{CoalescedID: "cid1", Size: 100, ETag: "ce1"}},
+	})
+	require.NoError(t, err)
+	require.NoError(t, b.store.Update(func(txn MetadataTxn) error {
+		return txn.Set(b.ks().ObjectMetaKeyV(bkt, keyCoalesced, vidCoalesced), rawCoalesced)
+	}))
+
+	r, err := b.verifyPerVersionCutover(bkt)
+	require.NoError(t, err)
+	require.Equal(t, 2, r.Excluded, "appendable and coalesced must be Excluded")
+	require.Zero(t, r.Complete+r.Gaps+r.Stuck+r.Unknown)
+}
+
+// TestVerifyPerVersionCutover_InternalBucketExcludesAll verifies that internal
+// buckets count all FSM obj: records as Excluded without error.
+func TestVerifyPerVersionCutover_InternalBucketExcludesAll(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+
+	// Use a known internal bucket name (prefixed with __grainfs_).
+	// Must bypass reserved-name check as internal buckets cannot be created via public API.
+	internalBkt := "__grainfs_audit"
+	require.True(t, storage.IsInternalBucket(internalBkt), "must be internal")
+	require.NoError(t, b.CreateBucketBypassReserved(ctx, internalBkt))
+
+	// Write two fake versioned FSM records for the internal bucket.
+	for _, vid := range []string{"019756c0-17f8-7000-b7e4-a5ef7c2f0010", "019756c0-17f8-7000-b7e4-a5ef7c2f0011"} {
+		raw, err := marshalObjectMeta(objectMeta{Key: "k", ETag: "e1", ECData: 4, NodeIDs: []string{"n1"}})
+		require.NoError(t, err)
+		require.NoError(t, b.store.Update(func(txn MetadataTxn) error {
+			return txn.Set(b.ks().ObjectMetaKeyV(internalBkt, "k", vid), raw)
+		}))
+	}
+
+	r, err := b.verifyPerVersionCutover(internalBkt)
+	require.NoError(t, err)
+	require.Equal(t, 2, r.Excluded, "internal bucket records must all be Excluded")
+	require.Zero(t, r.Complete+r.Gaps+r.Stuck+r.Unknown)
+}
+
+// TestVerifyPerVersionCutover_UnknownOnDecodeError verifies that a record with
+// a corrupt FSM value (undecodable raw) is counted as Unknown (fail-closed).
+func TestVerifyPerVersionCutover_UnknownOnDecodeError(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	const bkt = "cvbkt-corrupt"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+
+	// Write an undecodable versioned FSM record. An empty byte slice reliably
+	// triggers fbSafe's "empty data" error path without risking a FlatBuffers
+	// field-access panic on garbage heap data.
+	const vid = "019756c0-17f8-7000-b7e4-a5ef7c2f0099"
+	require.NoError(t, b.store.Update(func(txn MetadataTxn) error {
+		return txn.Set(b.ks().ObjectMetaKeyV(bkt, "corrupt-key", vid), []byte{})
+	}))
+
+	r, err := b.verifyPerVersionCutover(bkt)
+	require.NoError(t, err)
+	require.Equal(t, 1, r.Unknown, "corrupt record must be counted as Unknown")
+	require.Zero(t, r.Complete+r.Gaps+r.Stuck)
+	require.Len(t, r.UnknownRefs, 1)
+	require.Equal(t, vid, r.UnknownRefs[0].VersionID)
+}
+
+// TestVerifyPerVersionCutover_CompleteIncludesDeleteMarker verifies that a
+// delete marker version with a present per-version blob is counted as Complete.
+func TestVerifyPerVersionCutover_CompleteIncludesDeleteMarker(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	const bkt, key = "cvbkt-marker", "obj"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+	putVersioned(t, b, ctx, bkt, key, "live-data")
+	deleteVersioned(t, b, bkt, key)
+
+	r, err := b.verifyPerVersionCutover(bkt)
+	require.NoError(t, err)
+	// Both the live version and the delete marker have blobs → 2 Complete.
+	require.Equal(t, 2, r.Complete, "live version + delete marker must both be Complete")
+	require.Zero(t, r.Gaps+r.Stuck+r.Unknown)
+}
+
+// TestVerifyPerVersionCutover_MaxVerifyRefsCapAtMaxVerifyRefs verifies that
+// GapRefs/StuckRefs/UnknownRefs are capped at maxVerifyRefs.
+func TestVerifyPerVersionCutover_MaxVerifyRefsCapAtMaxVerifyRefs(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	const bkt = "cvbkt-captest"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+
+	// Write maxVerifyRefs+5 corrupt records to exceed the cap.
+	total := maxVerifyRefs + 5
+	for i := 0; i < total; i++ {
+		vid := "019756c0-17f8-7000-b7e4-a5ef7c2f" + intToHexSuffix(i)
+		require.NoError(t, b.store.Update(func(txn MetadataTxn) error {
+			return txn.Set(b.ks().ObjectMetaKeyV(bkt, "k", vid), []byte("bad"))
+		}))
+	}
+
+	r, err := b.verifyPerVersionCutover(bkt)
+	require.NoError(t, err)
+	require.Equal(t, total, r.Unknown, "all corrupt records must be counted in Unknown")
+	require.LessOrEqual(t, len(r.UnknownRefs), maxVerifyRefs, "UnknownRefs must be capped at maxVerifyRefs")
+}
+
+// writeRawNonAppendableNoPlacementObjVersion writes a RAW versioned FSM obj:
+// record that is non-appendable, non-marker, with EMPTY NodeIDs (no resolvable
+// placement). Modeled on the _SkipsEmptyNodeIDs raw-store write in
+// per_version_backfill_walker_test.go.
+func writeRawNonAppendableNoPlacementObjVersion(t *testing.T, b *DistributedBackend, bucket, key, vid string) {
+	t.Helper()
+	raw, err := marshalObjectMeta(objectMeta{Key: key, ETag: "e-stuck", ECData: 0, NodeIDs: nil})
+	require.NoError(t, err)
+	require.NoError(t, b.store.Update(func(txn MetadataTxn) error {
+		return txn.Set(b.ks().ObjectMetaKeyV(bucket, key, vid), raw)
+	}))
+}
+
+// refKeys maps a slice of objVersionRef to their object keys.
+func refKeys(refs []objVersionRef) []string {
+	out := make([]string, len(refs))
+	for i, r := range refs {
+		out[i] = r.Key
+	}
+	return out
+}
+
+// TestVerifyPerVersionCutover_StuckOnNoPlacement verifies the dedicated Stuck
+// path: a raw non-appendable, non-marker versioned record with empty NodeIDs and
+// no per-version blob. The strict readback misses the VID (no blob), and the
+// record is neither a marker nor has placement → STUCK (not Gap).
+func TestVerifyPerVersionCutover_StuckOnNoPlacement(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	const bkt, key = "cvbkt-stuck", "stuck"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+
+	const vid = "019756c0-17f8-7000-b7e4-a5ef7c2fb001"
+	writeRawNonAppendableNoPlacementObjVersion(t, b, bkt, key, vid)
+
+	r, err := b.verifyPerVersionCutover(bkt)
+	require.NoError(t, err)
+	require.Equal(t, 1, r.Stuck, "empty-NodeIDs non-marker record must be Stuck")
+	require.Zero(t, r.Gaps, "must not be classified as Gap")
+	require.Zero(t, r.Complete+r.Unknown+r.Excluded)
+	require.Contains(t, refKeys(r.StuckRefs), key, "StuckRefs must name the stuck key")
+}
+
+// TestVerifyPerVersionCutover_UnknownOnPanicCorruptRecord proves the panic guard
+// in forEachHostedObjVersion: a raw obj: value crafted to PANIC inside a
+// FlatBuffers FIELD accessor (NOT just the root parse) becomes a decodeErr →
+// UNKNOWN, and NO panic escapes verifyPerVersionCutover.
+func TestVerifyPerVersionCutover_UnknownOnPanicCorruptRecord(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	const bkt, key = "cvbkt-panic", "panic-key"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+
+	// Craft a buffer that passes GetRootAsObjectMeta (which only reads the root
+	// table offset at bytes[0:4]) but panics at a FIELD accessor. A 4-byte buffer
+	// whose root-offset points at byte 0 makes the vtable lookup read a soffset
+	// that drives the table position out of bounds → panic when NodeIdsLength()
+	// (or any accessor) dereferences the vtable. fbSafe only recovers the root
+	// parse, so without the field-accessor recover this would crash the sweep.
+	corrupt := []byte{0x04, 0x00, 0x00, 0x00}
+	const vid = "019756c0-17f8-7000-b7e4-a5ef7c2fc001"
+	require.NoError(t, b.store.Update(func(txn MetadataTxn) error {
+		return txn.Set(b.ks().ObjectMetaKeyV(bkt, key, vid), corrupt)
+	}))
+
+	// Must NOT panic — the recover guard converts the field-accessor panic to an
+	// error that classifies as Unknown.
+	r, err := b.verifyPerVersionCutover(bkt)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, r.Unknown, 1, "panic-corrupt record must classify as Unknown")
+	require.Zero(t, r.Complete+r.Gaps+r.Stuck)
+}
+
+// intToHexSuffix formats an int as a 4-char hex string for use in test UUIDs.
+func intToHexSuffix(i int) string {
+	return "0000"[len(intHex(i)):] + intHex(i)
+}
+
+func intHex(i int) string {
+	const hextable = "0123456789abcdef"
+	if i == 0 {
+		return "0000"
+	}
+	var buf [4]byte
+	pos := 3
+	for i > 0 && pos >= 0 {
+		buf[pos] = hextable[i&0xf]
+		i >>= 4
+		pos--
+	}
+	for pos >= 0 {
+		buf[pos] = '0'
+		pos--
+	}
+	return string(buf[:])
+}
