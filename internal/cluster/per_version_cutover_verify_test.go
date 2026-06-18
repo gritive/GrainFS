@@ -290,6 +290,68 @@ func TestVerifyPerVersionCutover_UnknownOnPanicCorruptRecord(t *testing.T) {
 	require.Zero(t, r.Complete+r.Gaps+r.Stuck)
 }
 
+// TestVerifyPerVersionCutover_UnknownWhenBlobPresentButLayoutUnreadable verifies
+// Finding 1: a per-version blob that is present and decodable in the strict
+// readback union but carries an unresolvable layout (no segments, no NodeIDs,
+// ECData=0, not a delete marker) is classified UNKNOWN — fail-closed — because
+// getObjectVersionCtx would return "no readable layout" (404) for this version
+// after cutover. It must NOT be classified COMPLETE.
+//
+// Construction: we bypass PutObject and write a per-version quorum-meta blob
+// directly (using EncodeCommand + writeQuorumMetaVersionLocal) with a
+// PutObjectMetaCmd that has no segments, no NodeIDs, and ECData=0. The FSM
+// ObjectMetaKeyV record is also written so forEachHostedObjVersion yields it.
+// The strict readback finds the blob (the per-version file exists); the layout
+// check then determines it is unreadable → UNKNOWN.
+func TestVerifyPerVersionCutover_UnknownWhenBlobPresentButLayoutUnreadable(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	const bkt, key = "cvbkt-broken-layout", "broken"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+
+	const vid = "019756c0-17f8-7000-b7e4-a5ef7c2fd001"
+
+	// Write an FSM ObjectMetaKeyV record so forEachHostedObjVersion yields the VID.
+	rawFSM, err := marshalObjectMeta(objectMeta{
+		Key:     key,
+		ETag:    "etag-broken",
+		ECData:  0,   // ECData=0 → unresolvable
+		NodeIDs: nil, // no placement
+	})
+	require.NoError(t, err)
+	require.NoError(t, b.store.Update(func(txn MetadataTxn) error {
+		return txn.Set(b.ks().ObjectMetaKeyV(bkt, key, vid), rawFSM)
+	}))
+
+	// Write a per-version quorum-meta blob with a broken layout: no segments,
+	// no NodeIDs, ECData=0, not a delete marker. readQuorumMetaVersionsStrict
+	// will find this blob, decode it, and return the cmd. The layout check must
+	// then classify it UNKNOWN because none of the readable-layout predicates hold.
+	cmd := PutObjectMetaCmd{
+		Bucket:    bkt,
+		Key:       key,
+		VersionID: vid,
+		ETag:      "etag-broken",
+		ECData:    0,   // ECData=0 → placementConfig returns error → unresolvable
+		NodeIDs:   nil, // no NodeIDs → ResolvePlacement returns ErrNotEC
+		Segments:  nil, // no segments → SegmentReader path unavailable
+		// IsDeleteMarker: false (default) → delete-marker fast-path skipped
+	}
+	blob, err := EncodeCommand(CmdPutObjectMeta, cmd)
+	require.NoError(t, err)
+	require.NotNil(t, b.shardSvc, "shardSvc must be available")
+	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal(bkt, key+"/"+vid, blob))
+
+	r, err := b.verifyPerVersionCutover(bkt)
+	require.NoError(t, err)
+	require.Equal(t, 1, r.Unknown, "present blob with unreadable layout must be UNKNOWN, not COMPLETE")
+	require.Zero(t, r.Complete, "must not classify as Complete — would 404 after cutover")
+	require.Zero(t, r.Gaps+r.Stuck)
+	require.Len(t, r.UnknownRefs, 1)
+	require.Equal(t, vid, r.UnknownRefs[0].VersionID, "UnknownRefs must name the broken-layout VID")
+}
+
 // intToHexSuffix formats an int as a 4-char hex string for use in test UUIDs.
 func intToHexSuffix(i int) string {
 	return "0000"[len(intHex(i)):] + intHex(i)

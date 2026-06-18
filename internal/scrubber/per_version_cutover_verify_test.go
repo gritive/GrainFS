@@ -10,6 +10,9 @@ import (
 	"github.com/gritive/GrainFS/internal/metrics"
 )
 
+// contextForTest returns a background context for use in sweep tests.
+func contextForTest() context.Context { return context.Background() }
+
 // fakeCutoverVerifiable is an in-memory PerVersionCutoverVerifiable for testing.
 type fakeCutoverVerifiable struct {
 	buckets   []string
@@ -42,7 +45,7 @@ func TestPerVersionCutoverVerifySweep_SumsAcrossBuckets(t *testing.T) {
 	}
 	s := &BackgroundScrubber{}
 
-	s.perVersionCutoverVerifySweep(f)
+	s.perVersionCutoverVerifySweep(contextForTest(), f)
 
 	require.InDelta(t, 15.0, testutil.ToFloat64(metrics.PerVersionCutoverComplete), 0.001, "complete")
 	require.InDelta(t, 3.0, testutil.ToFloat64(metrics.PerVersionCutoverGaps), 0.001, "gaps")
@@ -65,7 +68,7 @@ func TestPerVersionCutoverVerifySweep_FailSoftPerBucket(t *testing.T) {
 	s := &BackgroundScrubber{}
 
 	// Should not panic; should set gauges to bkt2's values only.
-	s.perVersionCutoverVerifySweep(f)
+	s.perVersionCutoverVerifySweep(contextForTest(), f)
 
 	require.InDelta(t, 7.0, testutil.ToFloat64(metrics.PerVersionCutoverComplete), 0.001, "complete")
 	require.InDelta(t, 0.0, testutil.ToFloat64(metrics.PerVersionCutoverGaps), 0.001, "gaps")
@@ -81,7 +84,7 @@ func TestPerVersionCutoverVerifySweep_NoBuckets(t *testing.T) {
 	s := &BackgroundScrubber{}
 
 	// Must not panic; all gauges stay at 0.
-	s.perVersionCutoverVerifySweep(f)
+	s.perVersionCutoverVerifySweep(contextForTest(), f)
 
 	require.InDelta(t, 0.0, testutil.ToFloat64(metrics.PerVersionCutoverComplete), 0.001)
 	require.InDelta(t, 0.0, testutil.ToFloat64(metrics.PerVersionCutoverGaps), 0.001)

@@ -37,9 +37,9 @@ type PerVersionCutoverVerifiable interface {
 // CutoverReadiness tallies, and SETs each of the five readiness gauges to the
 // summed value. It is read-only: no writes or deletes. Fail-soft per bucket: a
 // verify error on one bucket is logged and that bucket's records are uncounted,
-// but the sweep continues to the next bucket.
-func (s *BackgroundScrubber) perVersionCutoverVerifySweep(v PerVersionCutoverVerifiable) {
-	ctx := context.Background()
+// but the sweep continues to the next bucket. ctx is threaded so the sweep is
+// cancellable on scrubber shutdown (matches the backfill sweep signature).
+func (s *BackgroundScrubber) perVersionCutoverVerifySweep(ctx context.Context, v PerVersionCutoverVerifiable) {
 	buckets, err := v.ListCutoverBuckets(ctx)
 	if err != nil {
 		log.Warn().Err(err).Msg("scrub: per-version cutover verify list buckets failed")

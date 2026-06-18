@@ -773,7 +773,7 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 
 	// Optional: update per-version cutover readiness gauges (foundation S4a).
 	if v, ok := s.backend.(PerVersionCutoverVerifiable); ok {
-		s.perVersionCutoverVerifySweep(v)
+		s.perVersionCutoverVerifySweep(ctx, v)
 	}
 
 	// Optional: relocate non-redundant (1+0) EC objects into a redundant group.

@@ -105,14 +105,26 @@ func (b *DistributedBackend) VerifyPerVersionCutover(bucket string) (CutoverRead
 // safety precondition). It is read-only: no writes, no deletes.
 //
 // Classification:
-//   - Complete: VID found in readQuorumMetaVersionsStrict union.
+//   - Complete: VID found in readQuorumMetaVersionsStrict union AND the decoded
+//     cmd yields a readable layout (segments present, EC-resolvable, or delete
+//     marker). A blob that is present but carries an unresolvable layout is
+//     classified Unknown (fail-closed) — it would 404 after cutover.
 //   - Gap:      VID missing AND placement is resolvable (backfill can fix).
 //   - Stuck:    VID missing AND placement is unresolvable (no NodeIDs).
-//   - Unknown:  decode error or strict-readback error (fail-closed).
+//   - Unknown:  decode error, strict-readback error, or present-but-unreadable
+//     layout (fail-closed).
 //   - Excluded: internal bucket, appendable, or coalesced (intentionally skipped).
 //
 // Fast-path: internal buckets → count all FSM obj: records as Excluded.
 // Non-versioning-enabled buckets → return zero readiness (nothing to verify).
+//
+// Scope: this gate validates the per-version-blob fallback path for
+// versioning-enabled, non-internal, non-appendable objects only. The future S4
+// cutover slice MUST NOT remove any FSM fallback not covered here (specifically:
+// non-versioned latest-only-blob objects (headObjectMeta / object_get.go ~:224)
+// and appendable/coalesced objects) without first extending this verifier —
+// otherwise "all nodes report 0 gaps" would be a false-ready signal for those
+// object classes.
 func (b *DistributedBackend) verifyPerVersionCutover(bucket string) (cutoverReadiness, error) {
 	var r cutoverReadiness
 
@@ -137,8 +149,10 @@ func (b *DistributedBackend) verifyPerVersionCutover(bucket string) (cutoverRead
 	}
 
 	// Per-key memoization: one readQuorumMetaVersionsStrict call per key.
+	// Stores VID → decoded PutObjectMetaCmd so the layout check uses the
+	// already-decoded cmd without an extra RPC.
 	type keyResult struct {
-		vids map[string]bool
+		cmds map[string]PutObjectMetaCmd // VID → decoded cmd
 		err  error
 	}
 	keyCache := map[string]*keyResult{}
@@ -159,11 +173,11 @@ func (b *DistributedBackend) verifyPerVersionCutover(bucket string) (cutoverRead
 		// Real versioned non-appendable record: check quorum-meta coverage.
 		kr, cached := keyCache[key]
 		if !cached {
-			cmds, qerr := b.readQuorumMetaVersionsStrict(bucket, key)
-			kr = &keyResult{vids: map[string]bool{}, err: qerr}
+			strictCmds, qerr := b.readQuorumMetaVersionsStrict(bucket, key)
+			kr = &keyResult{cmds: map[string]PutObjectMetaCmd{}, err: qerr}
 			if qerr == nil {
-				for _, c := range cmds {
-					kr.vids[c.VersionID] = true
+				for _, c := range strictCmds {
+					kr.cmds[c.VersionID] = c
 				}
 			}
 			keyCache[key] = kr
@@ -173,8 +187,29 @@ func (b *DistributedBackend) verifyPerVersionCutover(bucket string) (cutoverRead
 			addRef(&r.UnknownRefs, key, vid)
 			return nil
 		}
-		if kr.vids[vid] {
-			r.Complete++
+		if cmd, found := kr.cmds[vid]; found {
+			// VID is present in the strict readback union. Verify the decoded cmd
+			// yields a readable layout — matching getObjectVersionCtx's dispatch:
+			//   1. Delete marker (IsDeleteMarker) → COMPLETE (caller gets 405, not 404).
+			//   2. Non-zero Segments → SegmentReader path → COMPLETE.
+			//   3. EC: NodeIDs non-empty AND ECData > 0 AND len(NodeIDs)==ECData+ECParity
+			//      (same predicate as ResolvePlacement) → COMPLETE.
+			//   Otherwise → present blob but unreadable layout → UNKNOWN (fail-closed).
+			if cmd.IsDeleteMarker {
+				r.Complete++
+				return nil
+			}
+			if len(cmd.Segments) > 0 {
+				r.Complete++
+				return nil
+			}
+			if len(cmd.NodeIDs) > 0 && cmd.ECData > 0 && len(cmd.NodeIDs) == int(cmd.ECData)+int(cmd.ECParity) {
+				r.Complete++
+				return nil
+			}
+			// Present but no readable layout — would 404 after cutover.
+			r.Unknown++
+			addRef(&r.UnknownRefs, key, vid)
 			return nil
 		}
 

@@ -8,6 +8,12 @@ import (
 	"github.com/gritive/GrainFS/internal/server"
 )
 
+// maxAggregatedRefs is the global cap on each aggregated ref list in the
+// all-buckets response. Per-bucket lists are capped at cluster.maxVerifyRefs
+// (100); across numBuckets×100 strings the JSON response can grow unbounded.
+// This cap keeps it manageable regardless of bucket count.
+const maxAggregatedRefs = 100
+
 // makeVerifyPerVersionCutoverFunc builds the server-injected closure that
 // aggregates per-version quorum-meta coverage across this node's hosted-group
 // buckets (S4a cutover gate). Returns nil when distBackend is absent
@@ -43,9 +49,9 @@ func makeVerifyPerVersionCutoverFunc(b *cluster.DistributedBackend) server.Verif
 			total.Stuck += r.Stuck
 			total.Unknown += r.Unknown
 			total.Excluded += r.Excluded
-			total.GapRefs = appendRefStrings(total.GapRefs, r.GapRefs)
-			total.StuckRefs = appendRefStrings(total.StuckRefs, r.StuckRefs)
-			total.UnknownRefs = appendRefStrings(total.UnknownRefs, r.UnknownRefs)
+			total.GapRefs = capAppendRefStrings(total.GapRefs, r.GapRefs, maxAggregatedRefs)
+			total.StuckRefs = capAppendRefStrings(total.StuckRefs, r.StuckRefs, maxAggregatedRefs)
+			total.UnknownRefs = capAppendRefStrings(total.UnknownRefs, r.UnknownRefs, maxAggregatedRefs)
 		}
 		return total, nil
 	}
@@ -77,7 +83,15 @@ func refSliceToStrings(refs []cluster.ObjVersionRef) []string {
 	return out
 }
 
-// appendRefStrings appends ref strings from src to dst (already strings).
-func appendRefStrings(dst []string, refs []cluster.ObjVersionRef) []string {
-	return append(dst, refSliceToStrings(refs)...)
+// capAppendRefStrings appends ref strings from src to dst up to globalCap total.
+// Once dst reaches globalCap, additional refs are silently dropped so the
+// aggregated response stays bounded across many buckets.
+func capAppendRefStrings(dst []string, refs []cluster.ObjVersionRef, globalCap int) []string {
+	for _, ref := range refs {
+		if len(dst) >= globalCap {
+			break
+		}
+		dst = append(dst, ref.Bucket+"/"+ref.Key+"@"+ref.VersionID)
+	}
+	return dst
 }
