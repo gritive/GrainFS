@@ -1013,6 +1013,46 @@ func (s *ShardService) ScanQuorumMetaVersions(ctx context.Context, addr, bucket,
 	return out, nil
 }
 
+// ScanQuorumMetaVersionsAll queries one peer for EVERY per-version quorum-meta
+// blob under the bucket (no max-per-key collapse), via the ScanQuorumMetaVersionsAll
+// RPC. Mirrors ScanQuorumMetaVersions but returns all versions. FAIL-CLOSED: a peer
+// "Error" reply — including an un-upgraded peer that doesn't know the msgType — is
+// fatal; consumers of the all-version enumeration must NOT degrade to a partial
+// result (a missed orphan blob / version would be unsafe), unlike the partial-
+// tolerant max-per-key read.
+func (s *ShardService) ScanQuorumMetaVersionsAll(ctx context.Context, addr, bucket, prefix string) ([]PutObjectMetaCmd, error) {
+	if s.transport == nil {
+		return nil, fmt.Errorf("scan quorum meta versions all: no transport")
+	}
+	envb := buildShardEnvelope("ScanQuorumMetaVersionsAll", bucket, prefix, 0, nil, 0)
+	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
+	respEnvelope, err := s.callShardRPC(ctx, addr, envb)
+	if err != nil {
+		return nil, fmt.Errorf("scan quorum meta versions all from %s: %w", addr, err)
+	}
+	rpcType, data, err := unmarshalEnvelope(respEnvelope)
+	if err != nil {
+		return nil, fmt.Errorf("unmarshal scan quorum meta versions all response: %w", err)
+	}
+	if rpcType == "Error" {
+		return nil, fmt.Errorf("remote scan quorum meta versions all error from %s", addr)
+	}
+	if len(data) == 0 {
+		return nil, nil
+	}
+	blobs, uerr := unpackBlobList(data)
+	if uerr != nil {
+		return nil, fmt.Errorf("unpack scan quorum meta versions all response: %w", uerr)
+	}
+	out := make([]PutObjectMetaCmd, 0, len(blobs))
+	for _, blob := range blobs {
+		if cmd, derr := s.decodeQuorumMetaCmdBlob(blob); derr == nil {
+			out = append(out, cmd)
+		}
+	}
+	return out, nil
+}
+
 // deleteQuorumMetaLocal removes the local quorum meta file for (bucket, key).
 // Called by deleteObjectWithMarker after the raft CmdDeleteObject commit so
 // subsequent reads fall through to BadgerDB and find the delete marker.

@@ -3,8 +3,10 @@ package cluster
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 
+	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/stretchr/testify/require"
 )
 
@@ -158,4 +160,86 @@ func TestBackfillSkipForSoleAuth_Matrix(t *testing.T) {
 			require.Equal(t, tc.want, backfillSkipForSoleAuth(tc.state, tc.err))
 		})
 	}
+}
+
+// --- S4c-a3 T3: all-versions peer RPC (round-trip + fail-closed) ---
+func TestScanQuorumMetaVersionsAll_RPCRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	keeper, clusterID := testDEKKeeper(t)
+
+	trSelf := transport.MustNewHTTPTransport("test-cluster-psk")
+	trPeer := transport.MustNewHTTPTransport("test-cluster-psk")
+	require.NoError(t, trSelf.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, trPeer.Listen(ctx, "127.0.0.1:0"))
+	defer trSelf.Close()
+	defer trPeer.Close()
+
+	svcSelf := NewShardService(t.TempDir(), trSelf, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svcPeer := NewShardService(t.TempDir(), trPeer, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	trPeer.RegisterBufferedRoute(transport.RouteShardRPC, svcPeer.NativeRPCHandler())
+
+	const bkt, key = "bkt", "a/b/c.txt"
+	// Three versions of one key on the PEER's per-version store.
+	for _, vid := range []string{
+		"019ed400-0000-7000-8000-000000000001",
+		"019ed400-0000-7000-8000-000000000002",
+		"019ed400-0000-7000-8000-000000000003",
+	} {
+		blob, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: bkt, Key: key, VersionID: vid, ETag: "e-" + vid})
+		require.NoError(t, err)
+		require.NoError(t, svcPeer.writeQuorumMetaVersionLocal(bkt, filepath.Join(key, vid), blob, 0))
+	}
+
+	peerAddr := trPeer.LocalAddr()
+
+	// All-version RPC: every version is enumerated.
+	all, err := svcSelf.ScanQuorumMetaVersionsAll(ctx, peerAddr, bkt, "")
+	require.NoError(t, err)
+	gotAll := map[string]bool{}
+	for _, c := range all {
+		gotAll[c.VersionID] = true
+	}
+	require.Len(t, all, 3, "all-version RPC must return every per-version blob")
+	require.Equal(t, map[string]bool{
+		"019ed400-0000-7000-8000-000000000001": true,
+		"019ed400-0000-7000-8000-000000000002": true,
+		"019ed400-0000-7000-8000-000000000003": true,
+	}, gotAll)
+
+	// Max-per-key RPC on the SAME peer/data returns exactly 1 (proves the new RPC
+	// is distinct and correctly wired to the all-version local scan).
+	maxPerKey, err := svcSelf.ScanQuorumMetaVersions(ctx, peerAddr, bkt, "")
+	require.NoError(t, err)
+	require.Len(t, maxPerKey, 1, "max-per-key RPC collapses one key to its newest version")
+	require.Equal(t, "019ed400-0000-7000-8000-000000000003", maxPerKey[0].VersionID)
+}
+
+// TestScanQuorumMetaVersionsAll_FailClosedOnUnsupported proves the send is
+// fail-closed: a peer that returns an "Error" reply for the new msgType (an
+// un-upgraded peer that doesn't know "ScanQuorumMetaVersionsAll") surfaces a
+// NON-NIL error, NOT a silent empty result.
+func TestScanQuorumMetaVersionsAll_FailClosedOnUnsupported(t *testing.T) {
+	ctx := context.Background()
+	keeper, clusterID := testDEKKeeper(t)
+
+	trSelf := transport.MustNewHTTPTransport("test-cluster-psk")
+	trPeer := transport.MustNewHTTPTransport("test-cluster-psk")
+	require.NoError(t, trSelf.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, trPeer.Listen(ctx, "127.0.0.1:0"))
+	defer trSelf.Close()
+	defer trPeer.Close()
+
+	svcSelf := NewShardService(t.TempDir(), trSelf, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svcPeer := NewShardService(t.TempDir(), trPeer, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+
+	// Simulate an UN-UPGRADED peer: its shard route replies "Error" for the new
+	// msgType exactly as the pre-T3 default dispatch case would have
+	// (errorResponse → marshalResponseDirect("Error", ...)).
+	trPeer.RegisterBufferedRoute(transport.RouteShardRPC, func(payload []byte) ([]byte, error) {
+		return svcPeer.errorResponse("unknown shard RPC: ScanQuorumMetaVersionsAll"), nil
+	})
+
+	out, err := svcSelf.ScanQuorumMetaVersionsAll(ctx, trPeer.LocalAddr(), "bkt", "")
+	require.Error(t, err, "fail-closed: peer Error reply must surface a non-nil error")
+	require.Nil(t, out, "fail-closed: must NOT degrade to an empty all-version result")
 }

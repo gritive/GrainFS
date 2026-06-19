@@ -646,6 +646,8 @@ func (s *ShardService) handleRPC(payload []byte) []byte {
 		return s.handleScanQuorumMeta(sr)
 	case "ScanQuorumMetaVersions":
 		return s.handleScanQuorumMetaVersions(sr)
+	case "ScanQuorumMetaVersionsAll":
+		return s.handleScanQuorumMetaVersionsAll(sr)
 	case "ReadQuorumMetaVersions":
 		return s.handleQuorumMetaVersionsRead(sr)
 	case "DeleteQuorumMetaVersion":
@@ -720,6 +722,24 @@ func (s *ShardService) handleScanQuorumMeta(sr *shardRequest) []byte {
 // key, and returns each per-key max-VersionID cmd as a packBlobList payload.
 func (s *ShardService) handleScanQuorumMetaVersions(sr *shardRequest) []byte {
 	entries, err := s.ScanQuorumMetaVersionsBucket(sr.Bucket, sr.Key) // Key field = prefix
+	if err != nil {
+		return s.errorResponse(err.Error())
+	}
+	blobs := make([][]byte, 0, len(entries))
+	for i := range entries {
+		if blob, eerr := EncodeCommand(CmdPutObjectMeta, entries[i]); eerr == nil {
+			blobs = append(blobs, blob)
+		}
+	}
+	return s.okResponse(packBlobList(blobs))
+}
+
+// handleScanQuorumMetaVersionsAll serves a ScanQuorumMetaVersionsAll RPC: walks
+// the local per-version subtree for the bucket (sr.Key = prefix) and returns
+// EVERY decoded per-version cmd (no max-per-key grouping) as a packBlobList
+// payload. Mirrors handleScanQuorumMetaVersions but uses the all-version scan.
+func (s *ShardService) handleScanQuorumMetaVersionsAll(sr *shardRequest) []byte {
+	entries, err := s.ScanQuorumMetaVersionsBucketAll(sr.Bucket, sr.Key) // Key field = prefix
 	if err != nil {
 		return s.errorResponse(err.Error())
 	}
