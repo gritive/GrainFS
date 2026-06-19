@@ -34,7 +34,7 @@ func TestWriteQuorumMetaLocal_ConcurrentWriteReadNeverTorn(t *testing.T) {
 	require.NoError(t, err)
 
 	// Seed so the file always exists; readers should only ever see a full blob.
-	require.NoError(t, svc.writeQuorumMetaLocal("b", "k", blob))
+	require.NoError(t, svc.writeQuorumMetaLocal("b", "k", blob, 0))
 
 	const writers, reads = 4, 4000
 	var wg sync.WaitGroup
@@ -50,7 +50,7 @@ func TestWriteQuorumMetaLocal_ConcurrentWriteReadNeverTorn(t *testing.T) {
 				case <-stop:
 					return
 				default:
-					_ = svc.writeQuorumMetaLocal("b", "k", blob)
+					_ = svc.writeQuorumMetaLocal("b", "k", blob, 0)
 				}
 			}
 		}()

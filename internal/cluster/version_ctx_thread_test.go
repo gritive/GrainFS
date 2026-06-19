@@ -31,7 +31,7 @@ func TestHeadObjectVersionCtx_StampReachesGate(t *testing.T) {
 		Bucket: bkt, Key: key, VersionID: vid, ETag: "etag-v1", NodeIDs: []string{"self"}, ECData: 1,
 	})
 	require.NoError(t, err)
-	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal(bkt, filepath.Join(key, vid), blob))
+	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal(bkt, filepath.Join(key, vid), blob, 0))
 
 	// No stamp: the gate falls back to the local (Unversioned) store → per-version
 	// path is skipped → 404 (sanity that the blob alone is not enough).

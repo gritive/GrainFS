@@ -160,7 +160,8 @@ func (b *DistributedBackend) DeleteOrphanQuorumMetaVersion(bucket, key, versionI
 	if exists, certain := b.versionRecordExistsAllHosted(bucket, key, versionID); exists || !certain {
 		return nil // now live or uncertain → do not delete
 	}
-	return b.shardSvc.deleteQuorumMetaVersionLocal(bucket, key, versionID)
+	epoch, _ := b.GetBucketSoleAuthEpoch(bucket)
+	return b.shardSvc.deleteQuorumMetaVersionLocal(bucket, key, versionID, epoch)
 }
 
 // Compile-time assertion: DistributedBackend satisfies the scrubber interface.

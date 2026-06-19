@@ -325,6 +325,13 @@ func (b *DistributedBackend) GetBucketSoleAuthority(bucket string) (string, erro
 // GetBucketSoleAuthEpoch returns the stored monotonic soleauth epoch for the
 // bucket. Absent key (the soleauth state has never advanced) returns 0.
 func (b *DistributedBackend) GetBucketSoleAuthEpoch(bucket string) (uint32, error) {
+	// No metadata store wired (narrow data-plane test backends, or a node whose
+	// store is not yet attached) → epoch 0: the fence is dormant, so the quorum-
+	// meta leaves admit every write. This mirrors the caller contract (read error
+	// → 0 defensively) and keeps the off-path panic-free.
+	if b.store == nil {
+		return 0, nil
+	}
 	var epoch uint32
 	err := b.store.View(func(txn MetadataTxn) error {
 		item, err := txn.Get(b.ks().BucketSoleAuthEpochKey(bucket))

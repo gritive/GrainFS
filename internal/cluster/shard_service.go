@@ -79,7 +79,20 @@ type ShardService struct {
 	// quorum-meta leaves take the bucket READ-lock so an in-flight flip fences
 	// concurrent writes. DORMANT until the leaves are wired (Task 4).
 	bucketSoleAuthLocks pool.SyncMap[string, *sync.RWMutex]
+	// soleAuthEpochFn returns the live per-bucket committed sole-authority epoch
+	// (0 when never flipped). The quorum-meta leaves consult it under the bucket
+	// RLock to reject a stale wire epoch. Set ONCE at startup by SetShardService
+	// (via SetSoleAuthEpochFn) before the service serves any RPC/coordinator
+	// traffic, so the plain-field read on the apply-independent leaf goroutines
+	// is safe by happens-before: the wiring write precedes every leaf read.
+	soleAuthEpochFn func(string) uint32
 }
+
+// SetSoleAuthEpochFn wires the live committed-epoch reader the quorum-meta
+// leaves consult under the bucket RLock. Set once at startup (SetShardService)
+// before traffic; the happens-before of that single wiring write makes the
+// plain-field read on later leaf goroutines race-free.
+func (s *ShardService) SetSoleAuthEpochFn(fn func(string) uint32) { s.soleAuthEpochFn = fn }
 
 // ShardServiceOption is a functional option for ShardService.
 type ShardServiceOption func(*ShardService)
@@ -646,7 +659,7 @@ func (s *ShardService) handleRPC(payload []byte) []byte {
 // durably writes it locally (write + fsync). Failures are reported to the
 // caller so the PUT can fail the quorum check.
 func (s *ShardService) handleQuorumMetaWrite(sr *shardRequest) []byte {
-	if err := s.writeQuorumMetaLocal(sr.Bucket, sr.Key, sr.Data); err != nil {
+	if err := s.writeQuorumMetaLocal(sr.Bucket, sr.Key, sr.Data, sr.AdmittedSoleAuthEpoch); err != nil {
 		return s.errorResponse(err.Error())
 	}
 	return s.okResponse(nil)
@@ -656,7 +669,7 @@ func (s *ShardService) handleQuorumMetaWrite(sr *shardRequest) []byte {
 // durably writes it under the .quorum_meta_versions subtree. sr.Key carries
 // path.Join(key, versionID).
 func (s *ShardService) handleQuorumMetaVersionWrite(sr *shardRequest) []byte {
-	if err := s.writeQuorumMetaVersionLocal(sr.Bucket, sr.Key, sr.Data); err != nil {
+	if err := s.writeQuorumMetaVersionLocal(sr.Bucket, sr.Key, sr.Data, sr.AdmittedSoleAuthEpoch); err != nil {
 		return s.errorResponse(err.Error())
 	}
 	return s.okResponse(nil)
@@ -665,7 +678,7 @@ func (s *ShardService) handleQuorumMetaVersionWrite(sr *shardRequest) []byte {
 // handleQuorumMetaDelete serves a DeleteQuorumMeta RPC: removes the local quorum
 // meta file for (bucket, key). Absent file is not an error (idempotent cleanup).
 func (s *ShardService) handleQuorumMetaDelete(sr *shardRequest) []byte {
-	if err := s.deleteQuorumMetaLocal(sr.Bucket, sr.Key); err != nil {
+	if err := s.deleteQuorumMetaLocal(sr.Bucket, sr.Key, sr.AdmittedSoleAuthEpoch); err != nil {
 		return s.errorResponse(err.Error())
 	}
 	return s.okResponse(nil)
@@ -743,7 +756,7 @@ func (s *ShardService) handleQuorumMetaVersionDelete(sr *shardRequest) []byte {
 	if versionID == "" {
 		return s.errorResponse("quorum meta version delete: missing version id")
 	}
-	if err := s.deleteQuorumMetaVersionLocal(sr.Bucket, key, versionID); err != nil {
+	if err := s.deleteQuorumMetaVersionLocal(sr.Bucket, key, versionID, sr.AdmittedSoleAuthEpoch); err != nil {
 		return s.errorResponse(err.Error())
 	}
 	return s.okResponse(nil)

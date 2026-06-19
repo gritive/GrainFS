@@ -2,6 +2,8 @@ package cluster
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -239,4 +241,84 @@ func TestShardEnvelope_EpochRoundTrip(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, uint32(0), sr.AdmittedSoleAuthEpoch)
 	})
+}
+
+// TestSoleAuthEpochStale exercises the leaf reject predicate. It fires only
+// once the bucket has been flipped (local > 0) AND the wire epoch is older.
+func TestSoleAuthEpochStale(t *testing.T) {
+	cases := []struct {
+		local, wire uint32
+		want        bool
+	}{
+		{0, 0, false}, // dormant: never flipped
+		{0, 5, false}, // dormant: never flipped (wire ahead is irrelevant at 0)
+		{3, 5, false}, // wire newer than local: accept
+		{5, 5, false}, // equal: accept
+		{5, 3, true},  // wire older: reject
+		{5, 0, true},  // wire is the default-0 (un-threaded caller) under a flipped bucket: reject
+	}
+	for _, c := range cases {
+		require.Equalf(t, c.want, soleAuthEpochStale(c.local, c.wire),
+			"soleAuthEpochStale(%d,%d)", c.local, c.wire)
+	}
+}
+
+// validQuorumMetaBlob encodes a minimal decodable PutObjectMetaCmd blob so the
+// leaf's write-time LWW guard (which decodes the blob) is satisfied.
+func validQuorumMetaBlob(t *testing.T, bucket, key string) []byte {
+	t.Helper()
+	blob, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket: bucket, Key: key, ETag: "e", Size: 1, ModTime: 1,
+	})
+	require.NoError(t, err)
+	return blob
+}
+
+// TestLeaf_RejectsStaleEpoch verifies a per-version leaf rejects a stale wire
+// epoch BEFORE touching the filesystem (no file is created on reject), and
+// accepts an equal or newer wire epoch.
+func TestLeaf_RejectsStaleEpoch(t *testing.T) {
+	svc, _ := newTestShardService(t)
+	svc.SetSoleAuthEpochFn(func(string) uint32 { return 5 })
+
+	const bucket, key, vid = "b", "k", "v"
+	sub := filepath.Join(key, vid)
+	blob := validQuorumMetaBlob(t, bucket, key)
+	target := filepath.Join(svc.dataDirs[0], quorumMetaVersionsSubDir, bucket, key, vid)
+
+	// Stale wire epoch (3 < 5) → reject, and the reject precedes the FS op.
+	err := svc.writeQuorumMetaVersionLocal(bucket, sub, blob, 3)
+	require.ErrorIs(t, err, errStaleSoleAuthEpoch)
+	_, statErr := os.Stat(target)
+	require.True(t, os.IsNotExist(statErr), "reject must precede the FS write (no file)")
+
+	// Equal epoch (5) → accept.
+	require.NoError(t, svc.writeQuorumMetaVersionLocal(bucket, sub, blob, 5))
+	_, statErr = os.Stat(target)
+	require.NoError(t, statErr, "accepted write must create the file")
+
+	// Newer epoch (6) → accept (idempotent re-write).
+	require.NoError(t, svc.writeQuorumMetaVersionLocal(bucket, sub, blob, 6))
+}
+
+// TestLeaf_DormantAcceptsAll verifies that at local epoch 0 (callback returns 0,
+// or nil callback) all four leaves accept regardless of the admitted epoch.
+func TestLeaf_DormantAcceptsAll(t *testing.T) {
+	for _, name := range []string{"zero-callback", "nil-callback"} {
+		t.Run(name, func(t *testing.T) {
+			svc, _ := newTestShardService(t)
+			if name == "zero-callback" {
+				svc.SetSoleAuthEpochFn(func(string) uint32 { return 0 })
+			} // nil-callback: leave soleAuthEpochFn unset
+
+			const bucket, key, vid = "b", "k", "v"
+			wblob := validQuorumMetaBlob(t, bucket, key)
+			// Writers accept any admitted epoch while dormant.
+			require.NoError(t, svc.writeQuorumMetaLocal(bucket, key, wblob, 99))
+			require.NoError(t, svc.writeQuorumMetaVersionLocal(bucket, filepath.Join(key, vid), wblob, 99))
+			// Deleters: absent file is idempotent; any admitted epoch accepted.
+			require.NoError(t, svc.deleteQuorumMetaLocal(bucket, key, 99))
+			require.NoError(t, svc.deleteQuorumMetaVersionLocal(bucket, key, vid, 99))
+		})
+	}
 }

@@ -20,7 +20,7 @@ func writeVerBlob(t *testing.T, svc *ShardService, bucket, key, vid string, c Pu
 	c.VersionID = vid
 	blob, err := EncodeCommand(CmdPutObjectMeta, c)
 	require.NoError(t, err)
-	require.NoError(t, svc.writeQuorumMetaVersionLocal(bucket, filepath.Join(key, vid), blob))
+	require.NoError(t, svc.writeQuorumMetaVersionLocal(bucket, filepath.Join(key, vid), blob, 0))
 }
 
 // TestScanQuorumMetaVersionsBucket_GroupsByDecodedKey proves the walker returns

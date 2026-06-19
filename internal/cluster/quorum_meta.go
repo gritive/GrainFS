@@ -73,6 +73,10 @@ func (b *DistributedBackend) writeQuorumMeta(ctx context.Context, cmd PutObjectM
 		return fmt.Errorf("quorum meta write encode: %w", err)
 	}
 	self := b.currentSelfAddr()
+	// Live sole-authority epoch for the fence: read once at the top and thread it
+	// to every local leaf + peer send. Ignore the error (→ 0) so a transient read
+	// never fails a write while the fence is off (every prod bucket is epoch 0).
+	epoch, _ := b.GetBucketSoleAuthEpoch(cmd.Bucket)
 	// K-of-N write quorum: ECData nodes must ack. Parity nodes are best-effort.
 	// Any node that misses the write can still read via fetchQuorumMetaFromPeers.
 	k := int(cmd.ECData)
@@ -83,13 +87,13 @@ func (b *DistributedBackend) writeQuorumMeta(ctx context.Context, cmd PutObjectM
 	defer cancel()
 	latestErr := fanOutQuorumMeta(wctx, cmd.NodeIDs, k, func(fctx context.Context, node string) error {
 		if node == self {
-			return b.shardSvc.writeQuorumMetaLocal(cmd.Bucket, cmd.Key, blob)
+			return b.shardSvc.writeQuorumMetaLocal(cmd.Bucket, cmd.Key, blob, epoch)
 		}
 		addr, rerr := b.shardSvc.resolvePeerAddress(node)
 		if rerr != nil {
 			return rerr
 		}
-		return b.shardSvc.WriteQuorumMeta(fctx, addr, cmd.Bucket, cmd.Key, blob)
+		return b.shardSvc.WriteQuorumMeta(fctx, addr, cmd.Bucket, cmd.Key, blob, epoch)
 	})
 	if latestErr != nil {
 		return latestErr
@@ -107,13 +111,13 @@ func (b *DistributedBackend) writeQuorumMeta(ctx context.Context, cmd PutObjectM
 		defer vcancel()
 		if verr := fanOutQuorumMeta(vctx, cmd.NodeIDs, k, func(fctx context.Context, node string) error {
 			if node == self {
-				return b.shardSvc.writeQuorumMetaVersionLocal(cmd.Bucket, verSubpath, blob)
+				return b.shardSvc.writeQuorumMetaVersionLocal(cmd.Bucket, verSubpath, blob, epoch)
 			}
 			addr, rerr := b.shardSvc.resolvePeerAddress(node)
 			if rerr != nil {
 				return rerr
 			}
-			return b.shardSvc.WriteQuorumMetaVersion(fctx, addr, cmd.Bucket, verSubpath, blob)
+			return b.shardSvc.WriteQuorumMetaVersion(fctx, addr, cmd.Bucket, verSubpath, blob, epoch)
 		}); verr != nil {
 			b.logger.Warn().
 				Str("bucket", cmd.Bucket).Str("key", cmd.Key).Str("version", cmd.VersionID).
@@ -352,7 +356,7 @@ func fanOutQuorumMeta(ctx context.Context, nodes []string, k int, dispatch func(
 // writeQuorumMetaLocal durably writes the encoded quorum meta blob for
 // (bucket, key) under {dataDirs[0]}/.quorum_meta/{bucket}/{key}. One fsync —
 // same durability cost as the shard write it co-locates with.
-func (s *ShardService) writeQuorumMetaLocal(bucket, key string, data []byte) error {
+func (s *ShardService) writeQuorumMetaLocal(bucket, key string, data []byte, admittedEpoch uint32) error {
 	if len(s.dataDirs) == 0 {
 		return fmt.Errorf("quorum meta: no data dir")
 	}
@@ -361,6 +365,16 @@ func (s *ShardService) writeQuorumMetaLocal(bucket, key string, data []byte) err
 	rel, err := filepath.Rel(root, target)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return fmt.Errorf("quorum meta: key %q escapes root", key)
+	}
+	// Fence: hold the bucket RLock across the epoch check + the per-target
+	// critical section + the FS op. A concurrent flip (T2) takes the bucket
+	// WLock, so it cannot interleave; lock order is bucket-RLock (outer) →
+	// target-Mutex (inner), no cycle. Dormant at epoch 0.
+	bmu := s.bucketSoleAuthLock(bucket)
+	bmu.RLock()
+	defer bmu.RUnlock()
+	if s.soleAuthEpochFn != nil && soleAuthEpochStale(s.soleAuthEpochFn(bucket), admittedEpoch) {
+		return errStaleSoleAuthEpoch
 	}
 	dir := filepath.Dir(target)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -427,7 +441,7 @@ func (s *ShardService) writeQuorumMetaLocal(bucket, key string, data []byte) err
 // (path-traversal guard + atomic temp+fsync+rename) but uses the separate
 // per-version subtree, so {key} is always a directory (holding {vid} files) and
 // never collides with the latest-only leaf file in .quorum_meta.
-func (s *ShardService) writeQuorumMetaVersionLocal(bucket, versionSubpath string, data []byte) error {
+func (s *ShardService) writeQuorumMetaVersionLocal(bucket, versionSubpath string, data []byte, admittedEpoch uint32) error {
 	if len(s.dataDirs) == 0 {
 		return fmt.Errorf("quorum meta version: no data dir")
 	}
@@ -436,6 +450,14 @@ func (s *ShardService) writeQuorumMetaVersionLocal(bucket, versionSubpath string
 	rel, err := filepath.Rel(root, target)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return fmt.Errorf("quorum meta version: path %q escapes root", versionSubpath)
+	}
+	// Fence: bucket RLock wraps the epoch check + per-target Mutex + FS op
+	// (see writeQuorumMetaLocal). Dormant at epoch 0.
+	bmu := s.bucketSoleAuthLock(bucket)
+	bmu.RLock()
+	defer bmu.RUnlock()
+	if s.soleAuthEpochFn != nil && soleAuthEpochStale(s.soleAuthEpochFn(bucket), admittedEpoch) {
+		return errStaleSoleAuthEpoch
 	}
 	dir := filepath.Dir(target)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -938,7 +960,7 @@ func (s *ShardService) ScanQuorumMetaVersions(ctx context.Context, addr, bucket,
 // subsequent reads fall through to BadgerDB and find the delete marker.
 // Errors are silently ignored: the raft marker is the source of truth; a
 // stale quorum meta file is handled on the next read.
-func (s *ShardService) deleteQuorumMetaLocal(bucket, key string) error {
+func (s *ShardService) deleteQuorumMetaLocal(bucket, key string, admittedEpoch uint32) error {
 	if len(s.dataDirs) == 0 {
 		return nil
 	}
@@ -947,6 +969,14 @@ func (s *ShardService) deleteQuorumMetaLocal(bucket, key string) error {
 	rel, err := filepath.Rel(root, target)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return fmt.Errorf("quorum meta delete: key %q escapes root", key)
+	}
+	// Fence: bucket RLock wraps the epoch check + the FS remove (see
+	// writeQuorumMetaLocal). Dormant at epoch 0.
+	bmu := s.bucketSoleAuthLock(bucket)
+	bmu.RLock()
+	defer bmu.RUnlock()
+	if s.soleAuthEpochFn != nil && soleAuthEpochStale(s.soleAuthEpochFn(bucket), admittedEpoch) {
+		return errStaleSoleAuthEpoch
 	}
 	err = os.Remove(target)
 	if err != nil && !os.IsNotExist(err) {
@@ -958,7 +988,7 @@ func (s *ShardService) deleteQuorumMetaLocal(bucket, key string) error {
 // deleteQuorumMetaVersionLocal removes the local per-version blob for
 // (bucket, key, versionID) under .quorum_meta_versions/{bucket}/{key}/{vid}.
 // Absent file is not an error (idempotent). Mirrors deleteQuorumMetaLocal.
-func (s *ShardService) deleteQuorumMetaVersionLocal(bucket, key, versionID string) error {
+func (s *ShardService) deleteQuorumMetaVersionLocal(bucket, key, versionID string, admittedEpoch uint32) error {
 	if len(s.dataDirs) == 0 {
 		return nil
 	}
@@ -967,6 +997,14 @@ func (s *ShardService) deleteQuorumMetaVersionLocal(bucket, key, versionID strin
 	rel, err := filepath.Rel(root, target)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return fmt.Errorf("quorum meta version delete: path %q/%q escapes root", key, versionID)
+	}
+	// Fence: bucket RLock wraps the epoch check + the FS remove (see
+	// writeQuorumMetaLocal). Dormant at epoch 0.
+	bmu := s.bucketSoleAuthLock(bucket)
+	bmu.RLock()
+	defer bmu.RUnlock()
+	if s.soleAuthEpochFn != nil && soleAuthEpochStale(s.soleAuthEpochFn(bucket), admittedEpoch) {
+		return errStaleSoleAuthEpoch
 	}
 	err = os.Remove(target)
 	if err != nil && !os.IsNotExist(err) {
@@ -978,11 +1016,11 @@ func (s *ShardService) deleteQuorumMetaVersionLocal(bucket, key, versionID strin
 // DeleteQuorumMetaVersion removes a per-version blob on a remote placement node.
 // Mirrors DeleteQuorumMeta; the receiver runs deleteQuorumMetaVersionLocal.
 // versionSubpath rides the envelope key field as path.Join(key, versionID).
-func (s *ShardService) DeleteQuorumMetaVersion(ctx context.Context, addr, bucket, key, versionID string) error {
+func (s *ShardService) DeleteQuorumMetaVersion(ctx context.Context, addr, bucket, key, versionID string, admittedEpoch uint32) error {
 	if s.transport == nil {
 		return fmt.Errorf("quorum meta version: no transport")
 	}
-	envb := buildShardEnvelope("DeleteQuorumMetaVersion", bucket, path.Join(key, versionID), 0, nil, 0)
+	envb := buildShardEnvelope("DeleteQuorumMetaVersion", bucket, path.Join(key, versionID), 0, nil, admittedEpoch)
 	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
 	respEnvelope, err := s.callShardRPC(ctx, addr, envb)
 	if err != nil {
@@ -1007,15 +1045,16 @@ func (b *DistributedBackend) deleteQuorumMetaVersionQuorum(ctx context.Context, 
 		return nil
 	}
 	self := b.currentSelfAddr()
+	epoch, _ := b.GetBucketSoleAuthEpoch(bucket)
 	dctx, cancel := context.WithTimeout(ctx, quorumMetaWriteTimeout)
 	defer cancel()
 	var firstErr error
 	for _, node := range nodeIDs {
 		var err error
 		if node == self {
-			err = b.shardSvc.deleteQuorumMetaVersionLocal(bucket, key, versionID)
+			err = b.shardSvc.deleteQuorumMetaVersionLocal(bucket, key, versionID, epoch)
 		} else if addr, rerr := b.shardSvc.resolvePeerAddress(node); rerr == nil {
-			err = b.shardSvc.DeleteQuorumMetaVersion(dctx, addr, bucket, key, versionID)
+			err = b.shardSvc.DeleteQuorumMetaVersion(dctx, addr, bucket, key, versionID, epoch)
 		} else {
 			err = rerr
 		}
@@ -1088,11 +1127,11 @@ func (b *DistributedBackend) readQuorumMetaCmd(bucket, key string) (PutObjectMet
 
 // WriteQuorumMeta sends the quorum meta blob to a remote placement node via the
 // shard transport (mirrors WriteShadowMeta but routes to the primary handler).
-func (s *ShardService) WriteQuorumMeta(ctx context.Context, addr, bucket, key string, data []byte) error {
+func (s *ShardService) WriteQuorumMeta(ctx context.Context, addr, bucket, key string, data []byte, admittedEpoch uint32) error {
 	if s.transport == nil {
 		return fmt.Errorf("quorum meta: no transport")
 	}
-	envb := buildShardEnvelope("WriteQuorumMeta", bucket, key, 0, data, 0)
+	envb := buildShardEnvelope("WriteQuorumMeta", bucket, key, 0, data, admittedEpoch)
 	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
 	respEnvelope, err := s.callShardRPC(ctx, addr, envb)
 	if err != nil {
@@ -1112,11 +1151,11 @@ func (s *ShardService) WriteQuorumMeta(ctx context.Context, addr, bucket, key st
 // remote placement node. versionSubpath is path.Join(key, versionID); it rides
 // the existing shard envelope's key field (no schema change) and the receiver
 // writes it under the .quorum_meta_versions subtree.
-func (s *ShardService) WriteQuorumMetaVersion(ctx context.Context, addr, bucket, versionSubpath string, data []byte) error {
+func (s *ShardService) WriteQuorumMetaVersion(ctx context.Context, addr, bucket, versionSubpath string, data []byte, admittedEpoch uint32) error {
 	if s.transport == nil {
 		return fmt.Errorf("quorum meta version: no transport")
 	}
-	envb := buildShardEnvelope("WriteQuorumMetaVersion", bucket, versionSubpath, 0, data, 0)
+	envb := buildShardEnvelope("WriteQuorumMetaVersion", bucket, versionSubpath, 0, data, admittedEpoch)
 	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
 	respEnvelope, err := s.callShardRPC(ctx, addr, envb)
 	if err != nil {
@@ -1134,11 +1173,11 @@ func (s *ShardService) WriteQuorumMetaVersion(ctx context.Context, addr, bucket,
 
 // DeleteQuorumMeta removes the quorum-meta replica for (bucket, key) on a remote
 // placement node. Mirrors WriteQuorumMeta; the receiver runs deleteQuorumMetaLocal.
-func (s *ShardService) DeleteQuorumMeta(ctx context.Context, addr, bucket, key string) error {
+func (s *ShardService) DeleteQuorumMeta(ctx context.Context, addr, bucket, key string, admittedEpoch uint32) error {
 	if s.transport == nil {
 		return fmt.Errorf("quorum meta: no transport")
 	}
-	envb := buildShardEnvelope("DeleteQuorumMeta", bucket, key, 0, nil, 0)
+	envb := buildShardEnvelope("DeleteQuorumMeta", bucket, key, 0, nil, admittedEpoch)
 	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
 	respEnvelope, err := s.callShardRPC(ctx, addr, envb)
 	if err != nil {
@@ -1165,8 +1204,9 @@ func (b *DistributedBackend) deleteQuorumMetaQuorum(ctx context.Context, bucket,
 	if b.shardSvc == nil {
 		return
 	}
+	epoch, _ := b.GetBucketSoleAuthEpoch(bucket)
 	if len(nodeIDs) == 0 {
-		_ = b.shardSvc.deleteQuorumMetaLocal(bucket, key)
+		_ = b.shardSvc.deleteQuorumMetaLocal(bucket, key, epoch)
 		return
 	}
 	self := b.currentSelfAddr()
@@ -1174,14 +1214,14 @@ func (b *DistributedBackend) deleteQuorumMetaQuorum(ctx context.Context, bucket,
 	defer cancel()
 	for _, node := range nodeIDs {
 		if node == self {
-			_ = b.shardSvc.deleteQuorumMetaLocal(bucket, key)
+			_ = b.shardSvc.deleteQuorumMetaLocal(bucket, key, epoch)
 			continue
 		}
 		addr, rerr := b.shardSvc.resolvePeerAddress(node)
 		if rerr != nil {
 			continue
 		}
-		_ = b.shardSvc.DeleteQuorumMeta(dctx, addr, bucket, key)
+		_ = b.shardSvc.DeleteQuorumMeta(dctx, addr, bucket, key, epoch)
 	}
 }
 
