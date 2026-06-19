@@ -53,6 +53,20 @@ func (b *DistributedBackend) listAllObjects(strict bool) ([]storage.SnapshotObje
 	}
 	var result []storage.SnapshotObject
 	for _, bucket := range buckets {
+		saState, saErr := b.GetBucketSoleAuthority(bucket)
+		if saErr != nil {
+			return nil, fmt.Errorf("list objects soleauth %s: %w", bucket, saErr)
+		}
+		if saState == soleAuthOn {
+			// INVARIANT (v9 scope): only Enabled buckets are ever soleauth=on, so the
+			// per-version tree is this bucket's sole authority. S4c-d enforces Enabled-only.
+			objs, oerr := b.captureSoleAuthBucketObjects(bucket) // strict; errors fail capture even in tolerant mode
+			if oerr != nil {
+				return nil, oerr
+			}
+			result = append(result, objs...)
+			continue
+		}
 		if err := b.store.View(func(txn MetadataTxn) error {
 			latest := make(map[string]string)
 			rawLatPrefix := []byte("lat:" + bucket + "/")
@@ -431,6 +445,87 @@ func (b *DistributedBackend) blobExistsForRestore(snap storage.SnapshotObject) b
 		}
 	}
 	return b.blobExists(snap.Bucket, snap.Key, snap.VersionID)
+}
+
+// captureSoleAuthBucketObjects captures every per-version blob for a soleauth-on
+// bucket via the FAIL-CLOSED strict enumerator. Each PutObjectMetaCmd is mapped
+// to a storage.SnapshotObject with full fidelity: placement (NodeIDs, ECData,
+// ECParity, StripeBytes, PlacementGroupID), UserMetadata, Parts, Segments, Tags,
+// ACL, MetaSeq — all copied (not aliased). IsLatest is max-VersionID per key
+// over all blobs (markers included), matching the LWW semantics of
+// readQuorumMetaVersions.
+func (b *DistributedBackend) captureSoleAuthBucketObjects(bucket string) ([]storage.SnapshotObject, error) {
+	if b.shardSvc == nil {
+		return nil, fmt.Errorf("capture soleauth bucket %s: no shard service", bucket)
+	}
+	cmds, err := b.shardSvc.scanQuorumMetaVersionsBucketAllStrict(bucket, "")
+	if err != nil {
+		return nil, fmt.Errorf("capture soleauth bucket %s: %w", bucket, err)
+	}
+
+	// First pass: find the max VersionID per key (markers included).
+	maxVID := make(map[string]string, len(cmds))
+	for _, cmd := range cmds {
+		if cur, ok := maxVID[cmd.Key]; !ok || cmd.VersionID > cur {
+			maxVID[cmd.Key] = cmd.VersionID
+		}
+	}
+
+	// Second pass: map each PutObjectMetaCmd to a SnapshotObject.
+	out := make([]storage.SnapshotObject, 0, len(cmds))
+	for _, cmd := range cmds {
+		// Copy UserMetadata (do not alias).
+		var userMeta map[string]string
+		if len(cmd.UserMetadata) > 0 {
+			userMeta = make(map[string]string, len(cmd.UserMetadata))
+			for k, v := range cmd.UserMetadata {
+				userMeta[k] = v
+			}
+		}
+		// Copy Parts slice (do not alias).
+		var parts []storage.MultipartPartEntry
+		if len(cmd.Parts) > 0 {
+			parts = append([]storage.MultipartPartEntry(nil), cmd.Parts...)
+		}
+		// Copy Tags slice (do not alias).
+		var tags []storage.Tag
+		if len(cmd.Tags) > 0 {
+			tags = append([]storage.Tag(nil), cmd.Tags...)
+		}
+		// Copy NodeIDs slice (do not alias).
+		var nodeIDs []string
+		if len(cmd.NodeIDs) > 0 {
+			nodeIDs = append([]string(nil), cmd.NodeIDs...)
+		}
+		etag := cmd.ETag
+		if cmd.IsDeleteMarker {
+			etag = deleteMarkerETag
+		}
+		out = append(out, storage.SnapshotObject{
+			Bucket:           bucket,
+			Key:              cmd.Key,
+			ETag:             etag,
+			Size:             cmd.Size,
+			ContentType:      cmd.ContentType,
+			Modified:         cmd.ModTime,
+			VersionID:        cmd.VersionID,
+			IsDeleteMarker:   cmd.IsDeleteMarker,
+			IsLatest:         maxVID[cmd.Key] == cmd.VersionID,
+			ACL:              cmd.ACL,
+			SSEAlgorithm:     cmd.SSEAlgorithm,
+			NodeIDs:          nodeIDs,
+			ECData:           cmd.ECData,
+			ECParity:         cmd.ECParity,
+			StripeBytes:      cmd.StripeBytes,
+			PlacementGroupID: cmd.PlacementGroupID,
+			MetaSeq:          cmd.MetaSeq,
+			UserMetadata:     userMeta,
+			Parts:            parts,
+			Tags:             tags,
+			Segments:         segmentMetaEntriesToRefs(cmd.Segments),
+		})
+	}
+	return out, nil
 }
 
 // coalescedRefsFromMeta maps cluster CoalescedShardRef → storage.CoalescedRef,
