@@ -135,9 +135,19 @@ func (b *DistributedBackend) ListAllBuckets() ([]storage.SnapshotBucket, error) 
 		if err != nil {
 			return nil, fmt.Errorf("get bucket versioning %s: %w", bucket, err)
 		}
+		saState, err := b.GetBucketSoleAuthority(bucket)
+		if err != nil {
+			return nil, fmt.Errorf("get bucket soleauth %s: %w", bucket, err)
+		}
+		// Store "off" as empty so the JSON field is omitted (omitempty) for the
+		// common case where soleauth was never set.
+		if saState == soleAuthOff {
+			saState = ""
+		}
 		out = append(out, storage.SnapshotBucket{
 			Name:            bucket,
 			VersioningState: state,
+			SoleAuthState:   saState,
 		})
 	}
 	return out, nil
@@ -159,6 +169,19 @@ func (b *DistributedBackend) RestoreBuckets(buckets []storage.SnapshotBucket) er
 				return fmt.Errorf("restore bucket %s: %w", bucket.Name, err)
 			}
 		}
+		// Compute the soleauth reconciliation plan BEFORE mutating versioning, so
+		// an impossible downgrade (stale pre-cutover snapshot over a terminal 'on'
+		// bucket) or a corrupted snapshot value fails loudly without leaving the
+		// bucket's versioning state half-restored.
+		curSA, err := b.GetBucketSoleAuthority(bucket.Name)
+		if err != nil {
+			return fmt.Errorf("read bucket soleauth %s: %w", bucket.Name, err)
+		}
+		saPlan, err := planRestoreBucketSoleAuth(curSA, bucket.SoleAuthState)
+		if err != nil {
+			return fmt.Errorf("restore bucket soleauth %s: %w", bucket.Name, err)
+		}
+
 		state := bucket.VersioningState
 		if state == "" {
 			state = "Unversioned"
@@ -169,8 +192,68 @@ func (b *DistributedBackend) RestoreBuckets(buckets []storage.SnapshotBucket) er
 		}); err != nil {
 			return fmt.Errorf("restore bucket versioning %s: %w", bucket.Name, err)
 		}
+		// Apply the pre-validated soleauth plan (guard-permitted transitions only).
+		for _, st := range saPlan {
+			if err := b.propose(ctx, CmdSetBucketSoleAuthority, SetBucketSoleAuthorityCmd{
+				Bucket: bucket.Name,
+				State:  st,
+			}); err != nil {
+				return fmt.Errorf("restore bucket soleauth %s %s: %w", st, bucket.Name, err)
+			}
+		}
 	}
 	return nil
+}
+
+// planRestoreBucketSoleAuth returns the ordered soleauth states to propose to
+// reconcile a bucket's live state (curSA) toward the snapshot's recorded target,
+// using only guard-permitted transitions. It is a pure function (no proposals)
+// so the caller can detect an impossible downgrade or corrupted value before
+// mutating any other bucket state. target "" means the default off. soleauth is
+// one-way only at the COMMITTED end: 'on' is terminal, but 'pending' may abort
+// back to 'off' (soleauth.go). A snapshot that demands a downgrade OUT of the
+// terminal 'on' state cannot be honored and returns an error.
+func planRestoreBucketSoleAuth(curSA, target string) ([]string, error) {
+	if target == "" {
+		target = soleAuthOff
+	}
+	terminalConflict := fmt.Errorf("snapshot state %q cannot downgrade terminal current state %q", target, curSA)
+	switch target {
+	case soleAuthOff:
+		switch curSA {
+		case soleAuthOff: // idempotent
+			return nil, nil
+		case soleAuthPending: // abort: pending -> off (guard-permitted)
+			return []string{soleAuthOff}, nil
+		default: // soleAuthOn — terminal, cannot downgrade
+			return nil, terminalConflict
+		}
+	case soleAuthPending:
+		switch curSA {
+		case soleAuthOff: // forward: off -> pending
+			return []string{soleAuthPending}, nil
+		case soleAuthPending: // idempotent
+			return nil, nil
+		default: // soleAuthOn — terminal, cannot downgrade
+			return nil, terminalConflict
+		}
+	case soleAuthOn:
+		switch curSA {
+		case soleAuthOff: // forward walk off -> pending -> on
+			return []string{soleAuthPending, soleAuthOn}, nil
+		case soleAuthPending: // forward: pending -> on
+			return []string{soleAuthOn}, nil
+		case soleAuthOn: // idempotent
+			return nil, nil
+		default:
+			return nil, fmt.Errorf("invalid current soleauth state %q", curSA)
+		}
+	default:
+		// A snapshot blob is read directly from disk and never passes the
+		// apply-time state validator, so a corrupted/manual value must fail
+		// loudly here rather than silently leave the bucket unchanged.
+		return nil, fmt.Errorf("invalid snapshot state %q", target)
+	}
 }
 
 // RestoreObjects implements storage.Snapshotable.

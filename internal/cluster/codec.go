@@ -1299,6 +1299,29 @@ func decodeSetBucketVersioningCmd(data []byte) (SetBucketVersioningCmd, error) {
 	}, nil
 }
 
+func encodeSetBucketSoleAuthorityCmd(c SetBucketSoleAuthorityCmd) ([]byte, error) {
+	b := clusterBuilderPool.Get()
+	bucketOff := b.CreateString(c.Bucket)
+	stateOff := b.CreateString(c.State)
+	clusterpb.SetBucketSoleAuthorityCmdStart(b)
+	clusterpb.SetBucketSoleAuthorityCmdAddBucket(b, bucketOff)
+	clusterpb.SetBucketSoleAuthorityCmdAddState(b, stateOff)
+	return fbFinish(b, clusterpb.SetBucketSoleAuthorityCmdEnd(b)), nil
+}
+
+func decodeSetBucketSoleAuthorityCmd(data []byte) (SetBucketSoleAuthorityCmd, error) {
+	t, err := fbSafe(data, func(d []byte) *clusterpb.SetBucketSoleAuthorityCmd {
+		return clusterpb.GetRootAsSetBucketSoleAuthorityCmd(d, 0)
+	})
+	if err != nil {
+		return SetBucketSoleAuthorityCmd{}, err
+	}
+	return SetBucketSoleAuthorityCmd{
+		Bucket: string(t.Bucket()),
+		State:  string(t.State()),
+	}, nil
+}
+
 func encodeSetObjectACLCmd(c SetObjectACLCmd) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 	bucketOff := b.CreateString(c.Bucket)
@@ -1569,6 +1592,8 @@ func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
 		return encodeFSMValueResealDoneCmd(payload.(FSMValueResealDoneCmd))
 	case CmdDeleteMultipartDone:
 		return encodeDeleteMultipartDoneCmd(payload.(DeleteMultipartDoneCmd))
+	case CmdSetBucketSoleAuthority:
+		return encodeSetBucketSoleAuthorityCmd(payload.(SetBucketSoleAuthorityCmd))
 	default:
 		return nil, fmt.Errorf("unknown command type: %d", cmdType)
 	}

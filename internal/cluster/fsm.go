@@ -64,6 +64,10 @@ const (
 	// sweep (Task 5b) after confirming each upload is old enough to GC.
 	// Using a raft command (rather than a TTL) keeps all replicas consistent.
 	CmdDeleteMultipartDone CommandType = 43
+	// CmdSetBucketSoleAuthority persists the per-bucket sole-authority tri-state
+	// flag (off → pending → on). Inert foundation for the S4c cutover; no
+	// production code reads it yet. S4c-a1.
+	CmdSetBucketSoleAuthority CommandType = 44
 )
 
 // Command is a serializable FSM command for Raft log entries.
@@ -295,6 +299,21 @@ type SetBucketVersioningCmd struct {
 	Bucket string
 	State  string // "Enabled" | "Suspended"
 }
+
+// SetBucketSoleAuthorityCmd persists the per-bucket sole-authority tri-state.
+// State is one of soleAuthOff ("off"), soleAuthPending ("pending"), soleAuthOn ("on").
+// One-way guard (off→pending→on; pending→off abort; on is terminal) is enforced in apply.
+type SetBucketSoleAuthorityCmd struct {
+	Bucket string
+	State  string
+}
+
+// soleAuth* are the valid tri-state values for the sole-authority flag.
+const (
+	soleAuthOff     = "off"
+	soleAuthPending = "pending"
+	soleAuthOn      = "on"
+)
 
 // SetObjectACLCmd updates the ACL bitmask for an existing object.
 type SetObjectACLCmd struct {

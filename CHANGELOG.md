@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.0.620.0] - 2026-06-19
+
+### Added
+- **Per-bucket `soleauth` tri-state flag — inert cutover foundation (S4c-a1).** Adds the one-way
+  `soleauth` state machine (`off` → `pending` → `on`, with `pending` → `off` as a cutover abort and
+  `on` terminal) that later S4c slices will use to make per-version quorum-meta blobs the sole
+  authority for non-appendable versioned objects. This slice is deliberately **inert**: the flag is
+  wired only into its own command, apply, backend, and snapshot paths and is read by nothing in the
+  object read/write/fence paths, so the fence-arming and LIST-rewrite slices land as their own
+  reviewable changes. All in `internal/cluster`:
+  - New raft command `CmdSetBucketSoleAuthority` (FlatBuffers `SetBucketSoleAuthorityCmd`, codec
+    round-trip) and key `soleauth:{bucket}`, mirroring `SetBucketVersioning`.
+  - `applySetBucketSoleAuthority` enforces the one-way transition guard (`soleAuthTransitionAllowed`)
+    and rejects an invalid state; backend `SetBucketSoleAuthority`/`Propose` + `GetBucketSoleAuthority`
+    (absent key = `off`), with the refusal surfaced as an apply error.
+  - Snapshot persists `soleauth` on `SnapshotBucket` and restores it on `RestoreBuckets`, faithfully
+    reconciling restore-onto-existing in both directions via guard-permitted transitions (a live
+    `pending` bucket aborts back to `off`; a stale snapshot that would downgrade a terminal `on`
+    bucket fails loudly), with the reconciliation pre-validated before versioning is mutated so a
+    rejected restore never leaves a half-restored bucket.
+
+  No on-disk format change for existing data and no user-facing API change (the flag has no admin
+  surface yet; that arrives with the flag-on WRITE slice).
+
 ## [0.0.619.0] - 2026-06-19
 
 ### Fixed
