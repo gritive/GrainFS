@@ -190,3 +190,82 @@ func TestRestoreObjects_SoleAuthOff_Unchanged(t *testing.T) {
 	require.Empty(t, stale)
 	require.Equal(t, 1, count)
 }
+
+// TestRestoreObjects_SoleAuthOn_PurgesAbsent proves that RestoreObjects, for a
+// soleauth-on bucket, purges every on-disk version blob absent from the snapshot
+// BEFORE writing the restore entries. A newer absent blob (v9) must be deleted so
+// max-VID derive yields the kept snapshot version (v1) as IsLatest.
+func TestRestoreObjects_SoleAuthOn_PurgesAbsent(t *testing.T) {
+	b := newSnapshotTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "vb"))
+
+	// Seed BEFORE cutover to soleAuthOn (seeding requires writeQuorumMetaVersionLocal
+	// which checks the epoch fence; must happen before the fence is armed).
+	seedVersionBlob(t, b, "vb", "k", "v1", PutObjectMetaCmd{
+		ETag: "keep", ModTime: 100, ECData: 2, ECParity: 1, NodeIDs: []string{"n1", "n2", "n3"},
+	})
+	seedVersionBlob(t, b, "vb", "k", "v9", PutObjectMetaCmd{
+		ETag: "absent", ModTime: 900, ECData: 2, ECParity: 1, NodeIDs: []string{"n1", "n2", "n3"},
+	})
+
+	setVersioningForTest(t, b, "vb", "Enabled")
+	setSoleAuthForTest(t, b, "vb", soleAuthOn)
+
+	// Snapshot only contains v1 (IsLatest=true, IsDeleteMarker=true to skip blob check).
+	snap := []storage.SnapshotObject{{
+		Bucket: "vb", Key: "k", VersionID: "v1", ETag: "keep", Modified: 100,
+		ECData: 2, ECParity: 1, NodeIDs: []string{"n1", "n2", "n3"}, IsLatest: true,
+		IsDeleteMarker: true,
+	}}
+	_, _, err := b.RestoreObjects(snap)
+	require.NoError(t, err)
+
+	// v9 must have been purged; only v1 remains.
+	gv, rErr := b.shardSvc.readQuorumMetaVersionsLocal("vb", "k")
+	require.NoError(t, rErr)
+	require.Len(t, gv, 1, "v9 must be purged; only v1 remains")
+	require.Equal(t, "v1", gv[0].VersionID, "the remaining blob must be v1")
+}
+
+// TestRestoreObjects_SoleAuthOn_PurgesAbsent_PresentKept proves that a version
+// present in BOTH the on-disk blobs and the snapshot is NOT deleted by the purge.
+func TestRestoreObjects_SoleAuthOn_PurgesAbsent_PresentKept(t *testing.T) {
+	b := newSnapshotTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "vb3"))
+
+	// Seed BEFORE cutover (epoch fence).
+	// Seed v1 (in snapshot) and v2 (in snapshot) — both must survive.
+	// v3 is absent from snapshot and must be purged.
+	seedVersionBlob(t, b, "vb3", "k", "v1", PutObjectMetaCmd{
+		ETag: "e1", ModTime: 100, ECData: 2, ECParity: 1, NodeIDs: []string{"n1", "n2", "n3"},
+	})
+	seedVersionBlob(t, b, "vb3", "k", "v2", PutObjectMetaCmd{
+		ETag: "e2", ModTime: 200, ECData: 2, ECParity: 1, NodeIDs: []string{"n1", "n2", "n3"},
+	})
+	seedVersionBlob(t, b, "vb3", "k", "v3", PutObjectMetaCmd{
+		ETag: "absent", ModTime: 300, ECData: 2, ECParity: 1, NodeIDs: []string{"n1", "n2", "n3"},
+	})
+
+	setVersioningForTest(t, b, "vb3", "Enabled")
+	setSoleAuthForTest(t, b, "vb3", soleAuthOn)
+
+	snap := []storage.SnapshotObject{
+		{Bucket: "vb3", Key: "k", VersionID: "v1", ETag: "e1", Modified: 100,
+			ECData: 2, ECParity: 1, NodeIDs: []string{"n1", "n2", "n3"}, IsDeleteMarker: true},
+		{Bucket: "vb3", Key: "k", VersionID: "v2", ETag: "e2", Modified: 200,
+			ECData: 2, ECParity: 1, NodeIDs: []string{"n1", "n2", "n3"}, IsLatest: true, IsDeleteMarker: true},
+	}
+	_, _, err := b.RestoreObjects(snap)
+	require.NoError(t, err)
+
+	gv, rErr := b.shardSvc.readQuorumMetaVersionsLocal("vb3", "k")
+	require.NoError(t, rErr)
+	require.Len(t, gv, 2, "v1 and v2 must survive; only v3 is purged")
+	vids := make([]string, 0, len(gv))
+	for _, v := range gv {
+		vids = append(vids, v.VersionID)
+	}
+	require.ElementsMatch(t, []string{"v1", "v2"}, vids, "both kept versions must remain")
+}

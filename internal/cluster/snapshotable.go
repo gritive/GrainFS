@@ -428,7 +428,21 @@ func (b *DistributedBackend) restoreSoleAuthBucketObjects(bucket string, objects
 	mu.Lock()
 	defer mu.Unlock()
 
-	// (Task 6 inserts the absent-blob purge here.)
+	// Purge every on-disk per-version blob absent from want before writing the
+	// restore entries. Fail-closed: any scan or delete error aborts the restore so
+	// a transiently-unreadable wanted blob is never mis-purged (strict enumerator).
+	existing, scanErr := b.shardSvc.scanQuorumMetaVersionsBucketAllStrict(bucket, "")
+	if scanErr != nil {
+		return 0, fmt.Errorf("restore purge scan %s: %w", bucket, scanErr)
+	}
+	for _, c := range existing {
+		if _, keep := want[bucket+"\x00"+c.Key+"\x00"+c.VersionID]; keep {
+			continue
+		}
+		if err := b.shardSvc.deleteQuorumMetaVersionLocalForceLocked(bucket, c.Key, c.VersionID); err != nil {
+			return 0, fmt.Errorf("restore purge %s/%s@%s: %w", bucket, c.Key, c.VersionID, err)
+		}
+	}
 
 	var count int
 	for _, snap := range objects {
