@@ -44,7 +44,52 @@ func TestVerifyPerVersionCutover_NoopOnUnversionedBucket(t *testing.T) {
 	require.Zero(t, r.Gaps)
 	require.Zero(t, r.Stuck)
 	require.Zero(t, r.Unknown)
-	require.Zero(t, r.Excluded)
+	// A never-versioned bucket is cutover-INELIGIBLE (deferred epic). It must
+	// carry a definitive Ineligible signal so the readiness verdict can never
+	// read it as READY — independent of any object-count.
+	require.Equal(t, 1, r.Ineligible, "never-versioned bucket must be flagged Ineligible")
+}
+
+// TestVerifyPerVersionCutover_IneligibleOnLegacyRecordBucket guards the exact
+// false-READY hole codex flagged: forEachHostedObjVersion silently skips legacy
+// unversioned obj: records (no version suffix), so counting Excluded via that
+// iterator would return all-zero counts for a never-versioned bucket that DOES
+// hold legacy objects — presenting as READY. The Ineligible flag must fire
+// regardless of (un-iterable) contents.
+func TestVerifyPerVersionCutover_IneligibleOnLegacyRecordBucket(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	const bkt = "legacy-cvbkt"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+
+	// Write a LEGACY unversioned obj: record (obj:bkt/k, no version suffix) —
+	// forEachHostedObjVersion skips these (slash<0), so an Excluded-count would
+	// be 0 and a counts-only verdict would read READY.
+	raw, err := marshalObjectMeta(objectMeta{Key: "k", ETag: "e1"})
+	require.NoError(t, err)
+	require.NoError(t, b.store.Update(func(txn MetadataTxn) error {
+		return txn.Set(b.ks().ObjectMetaKey(bkt, "k"), raw)
+	}))
+
+	r, err := b.verifyPerVersionCutover(bkt)
+	require.NoError(t, err)
+	require.Equal(t, 1, r.Ineligible, "legacy-only never-versioned bucket must be flagged Ineligible, not READY")
+	require.Zero(t, r.Gaps+r.Stuck+r.Unknown, "no false not-ready counts; Ineligible carries the verdict")
+}
+
+// TestVerifyPerVersionCutover_IneligibleOnSuspendedBucket asserts Suspended
+// buckets (versioned history, but not Enabled) are also cutover-ineligible.
+func TestVerifyPerVersionCutover_IneligibleOnSuspendedBucket(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	const bkt = "susp-cvbkt"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Suspended"))
+
+	r, err := b.verifyPerVersionCutover(bkt)
+	require.NoError(t, err)
+	require.Equal(t, 1, r.Ineligible, "Suspended bucket must be flagged Ineligible")
 }
 
 // TestVerifyPerVersionCutover_GapWhenBlobMissingWithPlacement verifies that a
@@ -412,10 +457,10 @@ func TestVerifyPerVersionCutover_NonEnabledExcluded(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 0, rs.Complete)
 	require.Equal(t, 0, rs.Gaps+rs.Stuck+rs.Unknown)
-	require.Greater(t, rs.Excluded, 0, "Suspended bucket: hosted objects must be counted Excluded, not verified")
+	require.Equal(t, 1, rs.Ineligible, "Suspended bucket must be flagged Ineligible (definitive not-ready), not verified")
 
-	// plain: never-versioned bucket — forEachHostedObjVersion yields nothing,
-	// so all tallies are zero (Excluded==0 is also acceptable: no false-READY).
+	// plain: never-versioned bucket — must also be flagged Ineligible, regardless
+	// of (un-iterable legacy) contents, so it can never present as READY.
 	const plainBkt = "cvbkt-plain-excl"
 	require.NoError(t, b.CreateBucket(ctx, plainBkt))
 
@@ -423,6 +468,7 @@ func TestVerifyPerVersionCutover_NonEnabledExcluded(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 0, rp.Complete)
 	require.Equal(t, 0, rp.Gaps+rp.Stuck+rp.Unknown)
+	require.Equal(t, 1, rp.Ineligible, "never-versioned bucket must be flagged Ineligible")
 }
 
 // TestVerifyPerVersionCutover_SuspendedBucketIsExcluded verifies that a bucket
@@ -447,10 +493,11 @@ func TestVerifyPerVersionCutover_SuspendedBucketIsExcluded(t *testing.T) {
 	// Suspend versioning — this does NOT delete the existing versioned history.
 	require.NoError(t, b.SetBucketVersioning(bkt, "Suspended"))
 
-	// After S4c-b: Suspended bucket must count its object as Excluded, not Gap.
+	// After S4c-b: Suspended bucket must be flagged Ineligible (definitive
+	// not-ready), not verified per-version — no Gap from the removed blob.
 	r, err := b.verifyPerVersionCutover(bkt)
 	require.NoError(t, err)
-	require.Equal(t, 1, r.Excluded, "Suspended bucket object must be Excluded, not verified")
+	require.Equal(t, 1, r.Ineligible, "Suspended bucket must be flagged Ineligible, not verified")
 	require.Zero(t, r.Gaps+r.Stuck, "Suspended bucket must not produce Gap or Stuck (cutover-ineligible)")
 	require.Zero(t, r.Complete)
 	require.Zero(t, r.Unknown)

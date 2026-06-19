@@ -23,6 +23,13 @@ type cutoverReadiness struct {
 	Stuck    int // VID missing AND placement unresolvable
 	Unknown  int // decode error or strict-readback error (fail-closed)
 	Excluded int // internal bucket, appendable, or coalesced (intentionally skipped)
+	// Ineligible counts cutover-INELIGIBLE buckets (non-Enabled: Suspended or
+	// never-versioned — a deferred epic per v9 §6). It is a definitive per-bucket
+	// flag set from the bucket's versioning state, NOT an object count, so a
+	// never-versioned bucket whose legacy records the version-iterator silently
+	// skips can never present as READY. The readiness verdict MUST treat
+	// Ineligible > 0 as not-ready.
+	Ineligible int
 
 	GapRefs     []ObjVersionRef // capped at maxVerifyRefs
 	StuckRefs   []ObjVersionRef
@@ -164,14 +171,18 @@ func (b *DistributedBackend) verifyPerVersionCutover(bucket string) (cutoverRead
 	}
 	// S4c cutover is scoped to Enabled buckets (spec v9 §6). Suspended and
 	// never-versioned buckets are cutover-INELIGIBLE: their non-versioned/legacy
-	// authority model is a deferred epic. Count their hosted objects as Excluded
-	// (like internal buckets) so the gate never reads a non-Enabled bucket as
-	// READY. S4c-d's flip command independently refuses non-Enabled buckets.
+	// authority model is a deferred epic. Flag the bucket Ineligible (a definitive
+	// per-bucket signal) so the gate never reads a non-Enabled bucket as READY.
+	//
+	// We do NOT count contents via forEachHostedObjVersion here: that iterator
+	// silently skips legacy unversioned obj: records (no version suffix) and
+	// non-UUID VIDs, so an Excluded object-count could be 0 for a never-versioned
+	// bucket that holds legacy objects — a counts-only verdict would then read
+	// READY (codex code-gate [P2]). The Ineligible flag is independent of any
+	// (un-iterable) object-count. S4c-d's flip command independently refuses
+	// non-Enabled buckets.
 	if vstate != "Enabled" {
-		_ = b.forEachHostedObjVersion(bucket, func(_ *DistributedBackend, _, _ string, _ objectMeta, _ error) error {
-			r.Excluded++
-			return nil
-		})
+		r.Ineligible++
 		return r, nil
 	}
 
@@ -292,10 +303,11 @@ func (b *DistributedBackend) VerifyBucketCutover(_ context.Context, bucket strin
 		return scrubber.CutoverReadiness{}, err
 	}
 	return scrubber.CutoverReadiness{
-		Complete: r.Complete,
-		Gaps:     r.Gaps,
-		Stuck:    r.Stuck,
-		Unknown:  r.Unknown,
-		Excluded: r.Excluded,
+		Complete:   r.Complete,
+		Gaps:       r.Gaps,
+		Stuck:      r.Stuck,
+		Unknown:    r.Unknown,
+		Excluded:   r.Excluded,
+		Ineligible: r.Ineligible,
 	}, nil
 }

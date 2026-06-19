@@ -556,6 +556,11 @@ var (
 		Help: "Total versioned object versions intentionally excluded from cutover verification (internal buckets, appendable, coalesced).",
 	})
 
+	PerVersionCutoverIneligible = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "grainfs_per_version_cutover_ineligible",
+		Help: "Number of cutover-INELIGIBLE buckets observed (non-Enabled: Suspended or never-versioned — a deferred epic). Observability only: this does NOT block the cluster-wide coverage gate (ineligible buckets are normal). Per-bucket flip-eligibility is enforced by the CLI verify and the S4c-d flip command, both of which refuse non-Enabled buckets.",
+	})
+
 	PerVersionCutoverVerifyErrors = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "grainfs_per_version_cutover_verify_errors",
 		Help: "Number of sweep verification errors (list-buckets failure counts as 1; each failed bucket counts as 1). Non-zero blocks cutover: gaps+stuck+unknown+verify_errors == 0 across all nodes is required. Initialized to 1 at process start; reaches 0 only after a completed clean sweep.",

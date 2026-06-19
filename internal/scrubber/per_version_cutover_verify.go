@@ -17,6 +17,13 @@ type CutoverReadiness struct {
 	Stuck    int // VID missing AND placement unresolvable
 	Unknown  int // decode error or strict-readback error (fail-closed)
 	Excluded int // internal bucket, appendable, or coalesced (intentionally skipped)
+	// Ineligible counts cutover-INELIGIBLE buckets (non-Enabled: Suspended or
+	// never-versioned — a deferred epic). Observability only at the cluster-wide
+	// metrics gate: it is NOT part of the blocking condition (ineligible buckets
+	// are normal; blocking on them would never let the coverage gate read ready).
+	// Per-bucket flip-eligibility is enforced by the CLI verify (Ineligible > 0
+	// → not-ready) and the S4c-d flip command.
+	Ineligible int
 }
 
 // PerVersionCutoverVerifiable is the optional backend extension for verifying
@@ -44,6 +51,10 @@ type PerVersionCutoverVerifiable interface {
 // leaves the gauges at stale-zero, which would look like a false READY.
 //
 // Gate semantics: gaps+stuck+unknown+verify_errors == 0 across all nodes ⇒ safe.
+// Ineligible is published for observability only and is intentionally NOT part of
+// this blocking condition: non-Enabled buckets are normal, so blocking on them
+// would never let the cluster-wide coverage gate read ready. Per-bucket
+// flip-eligibility (rejecting non-Enabled) is the CLI verify's and S4c-d flip's job.
 //
 // ctx is threaded so the sweep is cancellable on scrubber shutdown.
 func (s *BackgroundScrubber) perVersionCutoverVerifySweep(ctx context.Context, v PerVersionCutoverVerifiable) {
@@ -76,6 +87,7 @@ func (s *BackgroundScrubber) perVersionCutoverVerifySweep(ctx context.Context, v
 		total.Stuck += r.Stuck
 		total.Unknown += r.Unknown
 		total.Excluded += r.Excluded
+		total.Ineligible += r.Ineligible
 	}
 
 	metrics.PerVersionCutoverComplete.Set(float64(total.Complete))
@@ -83,6 +95,7 @@ func (s *BackgroundScrubber) perVersionCutoverVerifySweep(ctx context.Context, v
 	metrics.PerVersionCutoverStuck.Set(float64(total.Stuck))
 	metrics.PerVersionCutoverUnknown.Set(float64(total.Unknown))
 	metrics.PerVersionCutoverExcluded.Set(float64(total.Excluded))
+	metrics.PerVersionCutoverIneligible.Set(float64(total.Ineligible))
 	// Publish the real verify_errors count last. A clean sweep sets this to 0,
 	// which is the only way the gate can read READY. Any mid-sweep scrape still
 	// sees the pessimistic 1 set at the top of the function.

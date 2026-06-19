@@ -40,8 +40,8 @@ func TestPerVersionCutoverVerifySweep_SumsAcrossBuckets(t *testing.T) {
 	f := &fakeCutoverVerifiable{
 		buckets: []string{"bkt1", "bkt2"},
 		readiness: map[string]CutoverReadiness{
-			"bkt1": {Complete: 10, Gaps: 2, Stuck: 1, Unknown: 0, Excluded: 3},
-			"bkt2": {Complete: 5, Gaps: 1, Stuck: 0, Unknown: 2, Excluded: 7},
+			"bkt1": {Complete: 10, Gaps: 2, Stuck: 1, Unknown: 0, Excluded: 3, Ineligible: 1},
+			"bkt2": {Complete: 5, Gaps: 1, Stuck: 0, Unknown: 2, Excluded: 7, Ineligible: 0},
 		},
 	}
 	s := &BackgroundScrubber{}
@@ -53,6 +53,7 @@ func TestPerVersionCutoverVerifySweep_SumsAcrossBuckets(t *testing.T) {
 	require.InDelta(t, 1.0, testutil.ToFloat64(metrics.PerVersionCutoverStuck), 0.001, "stuck")
 	require.InDelta(t, 2.0, testutil.ToFloat64(metrics.PerVersionCutoverUnknown), 0.001, "unknown")
 	require.InDelta(t, 10.0, testutil.ToFloat64(metrics.PerVersionCutoverExcluded), 0.001, "excluded")
+	require.InDelta(t, 1.0, testutil.ToFloat64(metrics.PerVersionCutoverIneligible), 0.001, "ineligible")
 }
 
 func TestPerVersionCutoverVerifySweep_FailSoftPerBucket(t *testing.T) {
