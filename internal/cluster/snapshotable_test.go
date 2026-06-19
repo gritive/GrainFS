@@ -162,6 +162,52 @@ func TestRestoreObjects_SoleAuthOn_StaleSkip(t *testing.T) {
 	require.Empty(t, gv, "no quorum-meta blob must be written for a stale (absent-data) object")
 }
 
+// TestRestoreObjects_SoleAuthOn_StaleSkip_ExactVersion proves that the on-path
+// presence check is EXACT-VERSION, not a latest-content shortcut. A snapshot
+// version "v-aaa" whose own data blob is ABSENT must be recorded stale and NOT
+// force-written, even when a strictly-newer live version "v-bbb" with IDENTICAL
+// content (same ETag/Size — a re-upload of the same bytes) exists and is the
+// derived latest. The HeadObject(latest) ETag/Size shortcut in blobExistsForRestore
+// would falsely vouch v-aaa as present (latest "v-bbb" matches v-aaa's snapshot
+// ETag/Size), publishing authoritative per-version metadata that points at data
+// shares this node never had — a dangling, unreadable version. The on-path must
+// bypass that shortcut.
+func TestRestoreObjects_SoleAuthOn_StaleSkip_ExactVersion(t *testing.T) {
+	b := newSnapshotTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "vex"))
+
+	// Two per-version blobs for the SAME key with IDENTICAL content ("dup"/4):
+	// v-aaa (older) and v-bbb (newer = derived latest by max-VID). Re-upload of
+	// the same bytes is a legitimate way two distinct versions share ETag/Size.
+	seedVersionBlob(t, b, "vex", "k", "v-aaa", PutObjectMetaCmd{ETag: "dup", Size: 4, ModTime: 100})
+	seedVersionBlob(t, b, "vex", "k", "v-bbb", PutObjectMetaCmd{ETag: "dup", Size: 4, ModTime: 200})
+	setVersioningForTest(t, b, "vex", "Enabled")
+	setSoleAuthForTest(t, b, "vex", soleAuthOn)
+
+	// Real data blob ONLY for v-bbb (the live latest). v-aaa's data is ABSENT on
+	// this node — exactly the case the exact-version check must catch.
+	p := b.objectPathV("vex", "k", "v-bbb")
+	require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
+	require.NoError(t, os.WriteFile(p, []byte("dupx"), 0o644))
+
+	// Snapshot carries BOTH versions (both in want → purge keeps both), each with
+	// the shared ETag/Size. v-aaa's data is absent; v-bbb's is present.
+	snap := []storage.SnapshotObject{
+		{Bucket: "vex", Key: "k", VersionID: "v-aaa", ETag: "dup", Size: 4, Modified: 100},
+		{Bucket: "vex", Key: "k", VersionID: "v-bbb", ETag: "dup", Size: 4, Modified: 200, IsLatest: true},
+	}
+
+	count, stale, err := b.RestoreObjects(snap)
+	require.NoError(t, err)
+	// v-aaa absent → stale, skipped. v-bbb present → written. The latest-content
+	// shortcut must NOT vouch v-aaa just because live latest v-bbb matches it.
+	require.Equal(t, 1, count, "only v-bbb (data present) must be force-written; v-aaa (data absent) skipped")
+	require.Len(t, stale, 1, "v-aaa must be recorded stale despite identical-content newer latest")
+	require.Equal(t, "k", stale[0].Key)
+	require.Equal(t, "dup", stale[0].ExpectedETag)
+}
+
 // TestRestoreObjects_SoleAuthOff_Unchanged proves that the off-path behaviour is
 // byte-identical: existing resolveRestoreObjectVersionIDs + CmdPutObjectMeta
 // re-propose still runs for off-bucket objects, and the function returns the

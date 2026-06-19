@@ -479,10 +479,19 @@ func (b *DistributedBackend) restoreSoleAuthBucketObjects(bucket string, objects
 		if snap.Bucket != bucket || snap.VersionID == "" {
 			continue
 		}
-		// Stale-blob verification (codex plan-gate [P1]): mirror the off path
-		// (snapshotable.go:315) — do NOT publish authoritative per-version metadata
-		// for a version whose data blob is missing on this node; record it stale and skip.
-		if !snap.IsDeleteMarker && !b.blobExistsForRestore(snap) {
+		// Stale-blob verification (codex plan-gate [P1]): do NOT publish
+		// authoritative per-version metadata for a version whose data blob is
+		// missing on this node; record it stale and skip.
+		//
+		// EXACT-VERSION check (codex code-gate [P1]): the on-path uses RAW VIDs
+		// (no resolveRestoreObjectVersionIDs rewriting), so presence MUST be
+		// verified at snap.VersionID exactly — NOT via blobExistsForRestore's
+		// HeadObject(latest) ETag/Size shortcut. That shortcut would falsely
+		// vouch an absent version whenever a strictly-newer live version with
+		// identical content (same ETag/Size — a re-upload) is the derived latest,
+		// publishing metadata that points at data shares this node never had.
+		// snap.VersionID is guaranteed non-empty (loop guard above).
+		if !snap.IsDeleteMarker && !b.blobExists(snap.Bucket, snap.Key, snap.VersionID) {
 			*stale = append(*stale, storage.StaleBlob{
 				Bucket:       snap.Bucket,
 				Key:          snap.Key,
