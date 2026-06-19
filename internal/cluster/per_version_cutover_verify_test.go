@@ -382,14 +382,56 @@ func TestVerifyPerVersionCutover_FailClosedOnVersioningReadError(t *testing.T) {
 	require.ErrorIs(t, err, storeErr, "returned error must wrap the original store error (fail-closed)")
 }
 
-// TestVerifyPerVersionCutover_VerifiesSuspendedBucket verifies that a bucket
-// whose versioning was Enabled and then Suspended is still verified — NOT skipped.
+// TestVerifyPerVersionCutover_NonEnabledExcluded verifies that non-Enabled
+// buckets are cutover-ineligible (S4c v9 §6): a Suspended bucket counts its
+// hosted versioned objects as Excluded and never produces a Complete/Gap/Stuck/
+// Unknown result; a never-versioned bucket yields all zeros (nothing to count).
 //
-// Suspended buckets retain all versioned objects written while Enabled. The S4a
-// cutover removes the FSM ObjectMetaKeyV fallback that those versions rely on.
-// Suspending versioning does NOT delete that history, so Suspended buckets are
-// IN SCOPE for the cutover gate. If we skip them we emit a false-READY signal.
-func TestVerifyPerVersionCutover_VerifiesSuspendedBucket(t *testing.T) {
+// This is the S4c-b correctness gate: before this fix, Suspended buckets ran
+// the full per-version verify and a zero-record never-versioned bucket returned
+// all-zeros, which the Gaps+Stuck+Unknown==0 gate reads as READY.
+func TestVerifyPerVersionCutover_NonEnabledExcluded(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+
+	// susp: was Enabled, has a versioned FSM record, now Suspended.
+	const suspBkt, suspKey = "cvbkt-susp-excl", "obj"
+	const suspVID = "019756c0-17f8-7000-b7e4-a5ef7c2fe001"
+	require.NoError(t, b.CreateBucket(ctx, suspBkt))
+	require.NoError(t, b.SetBucketVersioning(suspBkt, "Enabled"))
+	// Seed a versioned FSM record directly (mirrors pattern in _ExcludesAppendableAndCoalesced).
+	rawSusp, err := marshalObjectMeta(objectMeta{Key: suspKey, ETag: "etag-susp", ECData: 4, NodeIDs: []string{"n1"}})
+	require.NoError(t, err)
+	require.NoError(t, b.store.Update(func(txn MetadataTxn) error {
+		return txn.Set(b.ks().ObjectMetaKeyV(suspBkt, suspKey, suspVID), rawSusp)
+	}))
+	// Suspend versioning — hosted versioned history is retained.
+	require.NoError(t, b.SetBucketVersioning(suspBkt, "Suspended"))
+
+	rs, err := b.verifyPerVersionCutover(suspBkt)
+	require.NoError(t, err)
+	require.Equal(t, 0, rs.Complete)
+	require.Equal(t, 0, rs.Gaps+rs.Stuck+rs.Unknown)
+	require.Greater(t, rs.Excluded, 0, "Suspended bucket: hosted objects must be counted Excluded, not verified")
+
+	// plain: never-versioned bucket — forEachHostedObjVersion yields nothing,
+	// so all tallies are zero (Excluded==0 is also acceptable: no false-READY).
+	const plainBkt = "cvbkt-plain-excl"
+	require.NoError(t, b.CreateBucket(ctx, plainBkt))
+
+	rp, err := b.verifyPerVersionCutover(plainBkt)
+	require.NoError(t, err)
+	require.Equal(t, 0, rp.Complete)
+	require.Equal(t, 0, rp.Gaps+rp.Stuck+rp.Unknown)
+}
+
+// TestVerifyPerVersionCutover_SuspendedBucketIsExcluded verifies that a bucket
+// whose versioning was Enabled and then Suspended has its hosted versioned
+// objects counted as Excluded — not verified per-version. S4c v9 §6 scopes the
+// cutover to Enabled buckets; Suspended is a deferred epic.
+//
+// Replaces the pre-S4c-b expectation that Suspended buckets were IN SCOPE.
+func TestVerifyPerVersionCutover_SuspendedBucketIsExcluded(t *testing.T) {
 	ctx := context.Background()
 	b := newTestDistributedBackend(t)
 	const bkt, key = "cvbkt-suspended", "obj"
@@ -399,18 +441,19 @@ func TestVerifyPerVersionCutover_VerifiesSuspendedBucket(t *testing.T) {
 	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
 	v1 := putVersioned(t, b, ctx, bkt, key, "v1-body")
 
-	// Remove the per-version blob to create a gap.
+	// Remove the per-version blob — if this were still in scope it would be a Gap.
 	removePerVersionBlob(t, b, bkt, key, v1)
 
 	// Suspend versioning — this does NOT delete the existing versioned history.
 	require.NoError(t, b.SetBucketVersioning(bkt, "Suspended"))
 
-	// The verifier must still classify the bucket (Gaps==1), NOT skip it (zero).
+	// After S4c-b: Suspended bucket must count its object as Excluded, not Gap.
 	r, err := b.verifyPerVersionCutover(bkt)
 	require.NoError(t, err)
-	require.Equal(t, 1, r.Gaps+r.Stuck, "Suspended bucket with missing blob must not be skipped — Gaps or Stuck must be 1")
-	require.Zero(t, r.Complete, "no complete blobs expected (blob was removed)")
-	require.Zero(t, r.Unknown, "no unknown expected")
+	require.Equal(t, 1, r.Excluded, "Suspended bucket object must be Excluded, not verified")
+	require.Zero(t, r.Gaps+r.Stuck, "Suspended bucket must not produce Gap or Stuck (cutover-ineligible)")
+	require.Zero(t, r.Complete)
+	require.Zero(t, r.Unknown)
 }
 
 // intToHexSuffix formats an int as a 4-char hex string for use in test UUIDs.
