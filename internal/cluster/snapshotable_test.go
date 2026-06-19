@@ -247,6 +247,32 @@ func TestRestoreObjects_SoleAuthOn_StaleSkip_LegacyPlainFile(t *testing.T) {
 	require.Empty(t, gv, "no per-version blob must be published for the absent version")
 }
 
+// TestBlobExistsExactVersion_ECAnyShardIndex proves the EC presence check
+// considers EVERY shard index, not a fixed shard_0. In a multi-node EC spread
+// each node is assigned a different shard subset, so a node holding (e.g.)
+// shard_3 but not shard_0 still holds its local share and must be vouched —
+// otherwise restore would record it stale and silently drop that node's share.
+func TestBlobExistsExactVersion_ECAnyShardIndex(t *testing.T) {
+	b := newSnapshotTestBackend(t)
+	// 6-node 4+2 EC → NumShards 6, clusterSize 6 → IsActive true.
+	nodes := []string{"test-node", "n2", "n3", "n4", "n5", "n6"}
+	b.SetClusterTopology(nodes, ECConfig{DataShards: 4, ParityShards: 2})
+
+	// Write ONLY shard_3 for the exact version (this node's assigned share);
+	// shard_0 is intentionally absent.
+	paths := b.ShardPaths("ecb", "k", "v-ec", 6)
+	require.Len(t, paths, 6)
+	require.NoError(t, os.MkdirAll(filepath.Dir(paths[3]), 0o755))
+	require.NoError(t, os.WriteFile(paths[3], []byte("shard-3-bytes"), 0o644))
+
+	require.True(t, b.blobExistsExactVersion("ecb", "k", "v-ec"),
+		"a node holding shard_3 (not shard_0) must be vouched as present")
+
+	// A different exact version with no local shard at all → absent.
+	require.False(t, b.blobExistsExactVersion("ecb", "k", "v-absent"),
+		"a version with no local shard must be absent")
+}
+
 // TestRestoreObjects_SoleAuthOff_Unchanged proves that the off-path behaviour is
 // byte-identical: existing resolveRestoreObjectVersionIDs + CmdPutObjectMeta
 // re-propose still runs for off-bucket objects, and the function returns the

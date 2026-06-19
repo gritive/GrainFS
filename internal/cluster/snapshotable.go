@@ -643,28 +643,42 @@ func (b *DistributedBackend) blobExistsForRestore(snap storage.SnapshotObject) b
 	return b.blobExists(snap.Bucket, snap.Key, snap.VersionID)
 }
 
-// blobExistsExactVersion reports whether this node holds the data for the EXACT
-// (bucket, key, versionID). Unlike blobExists it (1) never resolves an empty VID
-// from the lat: pointer and (2) never falls back to the legacy unversioned
-// objectPath plain file nor to a same-key latest-content match. The soleauth-on
-// restore path operates on raw, exact version IDs and must record a version as
-// stale when its OWN shares are missing — it must not vouch a missing version's
-// data via a sibling version (latest content) or a pre-versioning plain file, or
-// it would publish authoritative per-version metadata pointing at absent shares
-// (a dangling, unreadable version). versionID is guaranteed non-empty by callers.
+// blobExistsExactVersion reports whether THIS NODE holds its local share of the
+// data for the EXACT (bucket, key, versionID).
+//
+// Per-node restore contract (spec v8 §Snapshot): soleauth-on snapshot/restore is
+// strictly per-node — each node restores its OWN local K-of-N share, the
+// cluster-wide picture is the union of all nodes' shares, and under-replication
+// (fewer than ECData shards cluster-wide) is healed by the scrubber sweep, NOT at
+// restore time. A single node CANNOT determine cluster-wide EC reconstructability
+// by local stat alone (it holds only its assigned shard subset, often one shard).
+// So the restore-time presence check is deliberately LOCAL: "does this node hold
+// its share?" — if yes, publish this node's authoritative per-version metadata;
+// the sweep reconciles cluster-wide reconstructability separately.
+//
+// Unlike blobExists it (1) never resolves an empty VID from the lat: pointer and
+// (2) never falls back to the legacy unversioned objectPath plain file nor to a
+// same-key latest-content match — the restore path uses raw, exact version IDs
+// and must not vouch a missing version via a sibling version or a pre-versioning
+// plain file (which would publish metadata for a version this node has no share
+// of — a spurious entry). versionID is guaranteed non-empty by callers.
 func (b *DistributedBackend) blobExistsExactVersion(bucket, key, versionID string) bool {
 	if versionID == "" {
 		return false
 	}
-	// Versioned full-object path for this exact version.
+	// Versioned full-object path for this exact version (non-EC / replicated).
 	if _, err := os.Stat(b.objectPathV(bucket, key, versionID)); err == nil {
 		return true
 	}
-	// EC shard path: presence of shard_0 for this exact version is sufficient.
+	// EC: this node holds its share if ANY shard for the exact version is present
+	// locally. We check EVERY shard index, not a fixed shard_0: in a multi-node EC
+	// spread each node is assigned a DIFFERENT shard subset, so a node holding
+	// (say) shard_3 but not shard_0 still holds its share and must publish its
+	// metadata. Checking only shard_0 would record such a node stale and silently
+	// drop its share. (Cluster-wide reconstructability remains the sweep's job.)
 	if b.currentECConfig().IsActive(len(b.configuredNodeList())) {
-		paths := b.ShardPaths(bucket, key, versionID, b.currentECConfig().NumShards())
-		if len(paths) > 0 {
-			if _, err := os.Stat(paths[0]); err == nil {
+		for _, p := range b.ShardPaths(bucket, key, versionID, b.currentECConfig().NumShards()) {
+			if _, err := os.Stat(p); err == nil {
 				return true
 			}
 		}
