@@ -96,11 +96,15 @@ func writeFutureSnapshotAPIFile(t *testing.T, path string) {
 
 	// Write a legacy plaintext GFSNAP01 file with a future minReader version
 	// (bypasses envelope — exercises the legacy read-compat shim).
+	//
+	// minReader MUST exceed currentSnapshotReaderFormat (bumped to 2 in S4c-b T8)
+	// to exercise the unsupported-format path; use 3 (one beyond the current
+	// reader). writerFormat is informational and stays at the current writer (2).
 	f, err := os.Create(path)
 	require.NoError(t, err)
 	_, err = f.Write([]byte("GFSNAP01"))
 	require.NoError(t, err)
-	require.NoError(t, binary.Write(f, binary.BigEndian, uint32(2)))
+	require.NoError(t, binary.Write(f, binary.BigEndian, uint32(3)))
 	require.NoError(t, binary.Write(f, binary.BigEndian, uint32(2)))
 	require.NoError(t, binary.Write(f, binary.BigEndian, time.Now().UnixNano()))
 
