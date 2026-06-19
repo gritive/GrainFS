@@ -133,6 +133,9 @@ func (ks *stateKeyspace) BucketKey(bucket string) []byte    { return ks.Key([]by
 func (ks *stateKeyspace) BucketPolicyKey(b string) []byte   { return ks.Key([]byte("policy:" + b)) }
 func (ks *stateKeyspace) BucketVerKey(b string) []byte      { return ks.Key([]byte("bucketver:" + b)) }
 func (ks *stateKeyspace) BucketSoleAuthKey(b string) []byte { return ks.Key([]byte("soleauth:" + b)) }
+func (ks *stateKeyspace) BucketSoleAuthEpochKey(b string) []byte {
+	return ks.Key([]byte("soleauthepoch:" + b))
+}
 func (ks *stateKeyspace) ObjectMetaKey(b, k string) []byte {
 	return ks.Key([]byte("obj:" + b + "/" + k))
 }

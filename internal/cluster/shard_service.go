@@ -74,7 +74,25 @@ type ShardService struct {
 	// and clobber the true LWW winner. The temp-create/write/fsync/close steps
 	// remain outside the lock (each writer uses a unique temp name; no contention).
 	quorumMetaTargetLocks pool.SyncMap[string, *sync.Mutex]
+	// bucketSoleAuthLocks holds the per-bucket fence RWMutex. The flip
+	// (applySetBucketSoleAuthority) takes the bucket WRITE-lock; later the
+	// quorum-meta leaves take the bucket READ-lock so an in-flight flip fences
+	// concurrent writes. DORMANT until the leaves are wired (Task 4).
+	bucketSoleAuthLocks pool.SyncMap[string, *sync.RWMutex]
+	// soleAuthEpochFn returns the live per-bucket committed sole-authority epoch
+	// (0 when never flipped). The quorum-meta leaves consult it under the bucket
+	// RLock to reject a stale wire epoch. Set ONCE at startup by SetShardService
+	// (via SetSoleAuthEpochFn) before the service serves any RPC/coordinator
+	// traffic, so the plain-field read on the apply-independent leaf goroutines
+	// is safe by happens-before: the wiring write precedes every leaf read.
+	soleAuthEpochFn func(string) uint32
 }
+
+// SetSoleAuthEpochFn wires the live committed-epoch reader the quorum-meta
+// leaves consult under the bucket RLock. Set once at startup (SetShardService)
+// before traffic; the happens-before of that single wiring write makes the
+// plain-field read on later leaf goroutines race-free.
+func (s *ShardService) SetSoleAuthEpochFn(fn func(string) uint32) { s.soleAuthEpochFn = fn }
 
 // ShardServiceOption is a functional option for ShardService.
 type ShardServiceOption func(*ShardService)
@@ -164,6 +182,15 @@ func (s *ShardService) DataDirs() []string {
 // callers always converge on a single Mutex per target path.
 func (s *ShardService) quorumMetaTargetLock(target string) *sync.Mutex {
 	v, _ := s.quorumMetaTargetLocks.LoadOrStore(target, &sync.Mutex{})
+	return v
+}
+
+// bucketSoleAuthLock returns the per-bucket fence RWMutex that the soleauth
+// flip write-locks (and, once wired, the quorum-meta leaves read-lock). Mirrors
+// quorumMetaTargetLock: LoadOrStore is atomic so concurrent callers always
+// converge on a single RWMutex per bucket.
+func (s *ShardService) bucketSoleAuthLock(bucket string) *sync.RWMutex {
+	v, _ := s.bucketSoleAuthLocks.LoadOrStore(bucket, &sync.RWMutex{})
 	return v
 }
 
@@ -270,7 +297,7 @@ func (s *ShardService) Ping(ctx context.Context, peer string) error {
 	if s.transport == nil {
 		return fmt.Errorf("shard service: no transport")
 	}
-	b := buildShardEnvelope("Ping", "_grainfs_health", "_ping", 0, nil)
+	b := buildShardEnvelope("Ping", "_grainfs_health", "_ping", 0, nil, 0)
 	defer func() { b.Reset(); shardBuilderPool.Put(b) }()
 	_, err = s.callShardRPC(ctx, peerAddr, b)
 	return err
@@ -309,7 +336,7 @@ func (s *ShardService) WriteShard(ctx context.Context, peer, bucket, key string,
 		return fmt.Errorf("shard service: no transport")
 	}
 	buildStart := time.Now()
-	envb := buildShardEnvelope("WriteShard", bucket, key, int32(shardIdx), data)
+	envb := buildShardEnvelope("WriteShard", bucket, key, int32(shardIdx), data, 0)
 	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
 	ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteBuild, buildStart, PutTraceStageFields{
 		Bytes:            int64(len(data)),
@@ -427,7 +454,7 @@ func (s *ShardService) ReadShard(ctx context.Context, peer, bucket, key string, 
 	if s.transport == nil {
 		return nil, fmt.Errorf("shard service: no transport")
 	}
-	envb := buildShardEnvelope("ReadShard", bucket, key, int32(shardIdx), nil)
+	envb := buildShardEnvelope("ReadShard", bucket, key, int32(shardIdx), nil, 0)
 	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
 	respEnvelope, err := s.callShardRPC(ctx, peerAddr, envb)
 	if err != nil {
@@ -465,7 +492,7 @@ func (s *ShardService) ReadShardRange(ctx context.Context, peer, bucket, key str
 	var rangePayload [16]byte
 	binary.BigEndian.PutUint64(rangePayload[0:8], uint64(offset))
 	binary.BigEndian.PutUint64(rangePayload[8:16], uint64(length))
-	envb := buildShardEnvelope("ReadShardRange", bucket, key, int32(shardIdx), rangePayload[:])
+	envb := buildShardEnvelope("ReadShardRange", bucket, key, int32(shardIdx), rangePayload[:], 0)
 	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
 	respEnvelope, err := s.callShardRPC(ctx, peerAddr, envb)
 	if err != nil {
@@ -538,7 +565,7 @@ func (s *ShardService) DeleteShards(ctx context.Context, peer, bucket, key strin
 	if s.transport == nil {
 		return fmt.Errorf("shard service: no transport")
 	}
-	envb := buildShardEnvelope("DeleteShards", bucket, key, 0, nil)
+	envb := buildShardEnvelope("DeleteShards", bucket, key, 0, nil, 0)
 	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
 	_, err = s.callShardRPC(ctx, peerAddr, envb)
 	return err
@@ -546,7 +573,7 @@ func (s *ShardService) DeleteShards(ctx context.Context, peer, bucket, key strin
 
 // buildShardEnvelope builds an RPCMessage FlatBuffer wrapping a ShardRequest without make+copy.
 // Returns a Builder that MUST be Reset()+Put() to shardBuilderPool after use.
-func buildShardEnvelope(msgType, bucket, key string, shardIdx int32, data []byte) *flatbuffers.Builder {
+func buildShardEnvelope(msgType, bucket, key string, shardIdx int32, data []byte, admittedEpoch uint32) *flatbuffers.Builder {
 	// Build ShardRequest in b; b.FinishedBytes() points into b's internal buffer.
 	requestSize := len(data) + len(bucket) + len(key) + 128
 	b := getShardBuilder(requestSize)
@@ -563,6 +590,7 @@ func buildShardEnvelope(msgType, bucket, key string, shardIdx int32, data []byte
 	if len(data) > 0 {
 		pb.ShardRequestAddData(b, dataOff)
 	}
+	pb.ShardRequestAddAdmittedSoleauthEpoch(b, admittedEpoch)
 	b.Finish(pb.ShardRequestEnd(b))
 	srBytes := b.FinishedBytes()
 
@@ -631,7 +659,7 @@ func (s *ShardService) handleRPC(payload []byte) []byte {
 // durably writes it locally (write + fsync). Failures are reported to the
 // caller so the PUT can fail the quorum check.
 func (s *ShardService) handleQuorumMetaWrite(sr *shardRequest) []byte {
-	if err := s.writeQuorumMetaLocal(sr.Bucket, sr.Key, sr.Data); err != nil {
+	if err := s.writeQuorumMetaLocal(sr.Bucket, sr.Key, sr.Data, sr.AdmittedSoleAuthEpoch); err != nil {
 		return s.errorResponse(err.Error())
 	}
 	return s.okResponse(nil)
@@ -641,7 +669,7 @@ func (s *ShardService) handleQuorumMetaWrite(sr *shardRequest) []byte {
 // durably writes it under the .quorum_meta_versions subtree. sr.Key carries
 // path.Join(key, versionID).
 func (s *ShardService) handleQuorumMetaVersionWrite(sr *shardRequest) []byte {
-	if err := s.writeQuorumMetaVersionLocal(sr.Bucket, sr.Key, sr.Data); err != nil {
+	if err := s.writeQuorumMetaVersionLocal(sr.Bucket, sr.Key, sr.Data, sr.AdmittedSoleAuthEpoch); err != nil {
 		return s.errorResponse(err.Error())
 	}
 	return s.okResponse(nil)
@@ -650,7 +678,7 @@ func (s *ShardService) handleQuorumMetaVersionWrite(sr *shardRequest) []byte {
 // handleQuorumMetaDelete serves a DeleteQuorumMeta RPC: removes the local quorum
 // meta file for (bucket, key). Absent file is not an error (idempotent cleanup).
 func (s *ShardService) handleQuorumMetaDelete(sr *shardRequest) []byte {
-	if err := s.deleteQuorumMetaLocal(sr.Bucket, sr.Key); err != nil {
+	if err := s.deleteQuorumMetaLocal(sr.Bucket, sr.Key, sr.AdmittedSoleAuthEpoch); err != nil {
 		return s.errorResponse(err.Error())
 	}
 	return s.okResponse(nil)
@@ -728,7 +756,7 @@ func (s *ShardService) handleQuorumMetaVersionDelete(sr *shardRequest) []byte {
 	if versionID == "" {
 		return s.errorResponse("quorum meta version delete: missing version id")
 	}
-	if err := s.deleteQuorumMetaVersionLocal(sr.Bucket, key, versionID); err != nil {
+	if err := s.deleteQuorumMetaVersionLocal(sr.Bucket, key, versionID, sr.AdmittedSoleAuthEpoch); err != nil {
 		return s.errorResponse(err.Error())
 	}
 	return s.okResponse(nil)
@@ -790,10 +818,11 @@ func unmarshalShardRequest(data []byte) (req *shardRequest, err error) {
 	}()
 	t := pb.GetRootAsShardRequest(data, 0)
 	return &shardRequest{
-		Bucket:   string(t.Bucket()),
-		Key:      string(t.Key()),
-		ShardIdx: t.ShardIdx(),
-		Data:     t.DataBytes(),
+		Bucket:                string(t.Bucket()),
+		Key:                   string(t.Key()),
+		ShardIdx:              t.ShardIdx(),
+		Data:                  t.DataBytes(),
+		AdmittedSoleAuthEpoch: t.AdmittedSoleauthEpoch(),
 	}, nil
 }
 
@@ -803,6 +832,10 @@ type shardRequest struct {
 	Key      string
 	ShardIdx int32
 	Data     []byte
+	// AdmittedSoleAuthEpoch carries the originating coordinator's sole-authority
+	// epoch on a fenced quorum-meta write/delete. DORMANT (S4c-a2-A T3): every
+	// caller currently passes 0; Task 4 supplies the real epoch at fenced sites.
+	AdmittedSoleAuthEpoch uint32
 }
 
 func (s *ShardService) handleWrite(sr *shardRequest) []byte {

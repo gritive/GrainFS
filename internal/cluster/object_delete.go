@@ -70,7 +70,8 @@ func (b *DistributedBackend) deleteObjectWithMarker(ctx context.Context, bucket,
 				NodeIDs:        existing.NodeIDs,
 			})
 		} else if !errors.Is(qerr, storage.ErrObjectNotFound) && qerr != nil {
-			_ = b.shardSvc.deleteQuorumMetaLocal(bucket, key) // fallback: remove stale file
+			epoch, _ := b.GetBucketSoleAuthEpoch(bucket)
+			_ = b.shardSvc.deleteQuorumMetaLocal(bucket, key, epoch) // fallback: remove stale file
 		}
 	}
 	return markerID, nil

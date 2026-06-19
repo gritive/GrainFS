@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -46,6 +47,27 @@ type FSM struct {
 	// Protected by mu. Updated via SetCoalesceCfg (called from
 	// DistributedBackend.SetCoalesceConfig so the apply loop sees fresh caps).
 	coalesceCfg CoalesceConfig
+
+	// fenceLockFn resolves the per-bucket fence RWMutex that the soleauth flip
+	// (applySetBucketSoleAuthority) write-locks. Stored in an atomic.Pointer
+	// (NOT under mu): ApplyTxn dispatches applySetBucketSoleAuthority WITHOUT
+	// holding f.mu, so the apply-side read must be race-free without touching
+	// f.mu — taking f.mu there and then the bucket WLock would be a lock-order
+	// hazard. Set once at startup via SetFenceLock; nil on unit FSMs without a
+	// ShardService (the flip still applies, just unfenced).
+	fenceLockFn atomic.Pointer[func(string) *sync.RWMutex]
+}
+
+// SetFenceLock wires the per-bucket fence RWMutex accessor (svc.bucketSoleAuthLock)
+// so the soleauth flip can take the bucket WRITE-lock. Mirrors SetDEKKeeper as a
+// startup setter, but stores into an atomic.Pointer because the apply loop reads
+// it WITHOUT holding f.mu. A nil fn clears the hook (flip applies unfenced).
+func (f *FSM) SetFenceLock(fn func(string) *sync.RWMutex) {
+	if fn == nil {
+		f.fenceLockFn.Store(nil)
+		return
+	}
+	f.fenceLockFn.Store(&fn)
 }
 
 // SetMigrationHooks wires the FSM to the balancer/migration subsystem.
@@ -630,6 +652,16 @@ func (f *FSM) applySetBucketSoleAuthority(txn MetadataTxn, data []byte) error {
 	if c.State != soleAuthOff && c.State != soleAuthPending && c.State != soleAuthOn {
 		return fmt.Errorf("invalid soleauth state %q", c.State)
 	}
+	// Fence the mutation region under the per-bucket WRITE-lock so a later flip
+	// fences the quorum-meta leaves' READ-lock (Task 4). Read the accessor
+	// race-free from the atomic.Pointer (ApplyTxn dispatches us WITHOUT f.mu;
+	// taking f.mu here then the bucket WLock would be a lock-order hazard). Nil
+	// on unit FSMs without a ShardService — the flip still applies, unfenced.
+	if p := f.fenceLockFn.Load(); p != nil {
+		mu := (*p)(c.Bucket)
+		mu.Lock()
+		defer mu.Unlock()
+	}
 	cur := soleAuthOff
 	if item, gerr := txn.Get(f.keys.BucketSoleAuthKey(c.Bucket)); gerr == nil {
 		raw, e := item.ValueCopy(nil)
@@ -642,6 +674,26 @@ func (f *FSM) applySetBucketSoleAuthority(txn MetadataTxn, data []byte) error {
 	}
 	if !soleAuthTransitionAllowed(cur, c.State) {
 		return fmt.Errorf("soleauth transition refused for %s: %s -> %s (one-way off->pending->on; pending->off abort; on terminal)", c.Bucket, cur, c.State)
+	}
+	// Bump the monotonic epoch on a REAL state transition; idempotent same-state
+	// writes keep the epoch unchanged. FSM apply is single-goroutine and
+	// replicated, so the bump is identical on every node.
+	curEpoch := uint32(0)
+	if item, gerr := txn.Get(f.keys.BucketSoleAuthEpochKey(c.Bucket)); gerr == nil {
+		raw, e := item.ValueCopy(nil)
+		if e != nil {
+			return e
+		}
+		curEpoch = decodeSoleAuthEpoch(raw)
+	} else if gerr != ErrMetaKeyNotFound {
+		return gerr
+	}
+	newEpoch := curEpoch
+	if cur != c.State {
+		newEpoch = curEpoch + 1
+	}
+	if err := txn.Set(f.keys.BucketSoleAuthEpochKey(c.Bucket), encodeSoleAuthEpoch(newEpoch)); err != nil {
+		return err
 	}
 	return txn.Set(f.keys.BucketSoleAuthKey(c.Bucket), []byte(c.State))
 }

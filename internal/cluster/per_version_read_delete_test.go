@@ -33,7 +33,7 @@ func TestReadQuorumMetaVersionsLocal_ListsKeyVersions(t *testing.T) {
 	for _, vid := range []string{"v1", "v2"} {
 		blob, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: "bkt", Key: "a/b/c.txt", VersionID: vid, ETag: "e-" + vid})
 		require.NoError(t, err)
-		require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal("bkt", filepath.Join("a/b/c.txt", vid), blob))
+		require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal("bkt", filepath.Join("a/b/c.txt", vid), blob, 0))
 	}
 	cmds, err := b.shardSvc.readQuorumMetaVersionsLocal("bkt", "a/b/c.txt")
 	require.NoError(t, err)
@@ -64,7 +64,7 @@ func TestReadQuorumMetaVersions_RPC(t *testing.T) {
 	for _, vid := range []string{"v1", "v2"} {
 		blob, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: vid, ETag: "e-" + vid})
 		require.NoError(t, err)
-		require.NoError(t, svcB.writeQuorumMetaVersionLocal("bkt", filepath.Join("k", vid), blob))
+		require.NoError(t, svcB.writeQuorumMetaVersionLocal("bkt", filepath.Join("k", vid), blob, 0))
 	}
 
 	cmds, err := svcA.ReadQuorumMetaVersions(ctx, trB.LocalAddr(), "bkt", "k")
@@ -100,7 +100,7 @@ func TestReadQuorumMetaVersions_UnionsAcrossGroups(t *testing.T) {
 		t.Helper()
 		blob, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: vid, ETag: "e-" + vid})
 		require.NoError(t, err)
-		require.NoError(t, svc.writeQuorumMetaVersionLocal("bkt", filepath.Join("k", vid), blob))
+		require.NoError(t, svc.writeQuorumMetaVersionLocal("bkt", filepath.Join("k", vid), blob, 0))
 	}
 	// v1 on node A (group g1), v2 on node B (group g2 — a second generation).
 	write(svcA, "v1")
@@ -159,11 +159,11 @@ func TestHeadObjectMeta_PerVersionHookOverridesLegacyLatest(t *testing.T) {
 	// newer v2 that the latest-only blob never saw.
 	v1Blob, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: bkt, Key: key, VersionID: "019ed400-0000-7000-8000-000000000001", ETag: "etag-v1", NodeIDs: []string{"self"}, ECData: 1})
 	require.NoError(t, err)
-	require.NoError(t, b.shardSvc.writeQuorumMetaLocal(bkt, key, v1Blob)) // legacy latest-only = v1
-	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal(bkt, filepath.Join(key, "019ed400-0000-7000-8000-000000000001"), v1Blob))
+	require.NoError(t, b.shardSvc.writeQuorumMetaLocal(bkt, key, v1Blob, 0)) // legacy latest-only = v1
+	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal(bkt, filepath.Join(key, "019ed400-0000-7000-8000-000000000001"), v1Blob, 0))
 	v2Blob, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: bkt, Key: key, VersionID: "019ed400-0000-7000-8000-000000000002", ETag: "etag-v2", NodeIDs: []string{"self"}, ECData: 1})
 	require.NoError(t, err)
-	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal(bkt, filepath.Join(key, "019ed400-0000-7000-8000-000000000002"), v2Blob))
+	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal(bkt, filepath.Join(key, "019ed400-0000-7000-8000-000000000002"), v2Blob, 0))
 
 	head, err := b.HeadObject(ctx, bkt, key)
 	require.NoError(t, err)
@@ -392,7 +392,7 @@ func TestS2a_GenerationUnion_DeriveAndDelete(t *testing.T) {
 		t.Helper()
 		blob, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: bkt, Key: key, VersionID: vid, ETag: "e-" + vid, NodeIDs: []string{node}, ECData: 1})
 		require.NoError(t, err)
-		require.NoError(t, svc.writeQuorumMetaVersionLocal(bkt, filepath.Join(key, vid), blob))
+		require.NoError(t, svc.writeQuorumMetaVersionLocal(bkt, filepath.Join(key, vid), blob, 0))
 	}
 	write(svcA, vid1, trA.LocalAddr())
 	write(svcB, vid2, trB.LocalAddr())

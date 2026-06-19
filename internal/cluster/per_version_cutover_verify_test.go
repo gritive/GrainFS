@@ -342,7 +342,7 @@ func TestVerifyPerVersionCutover_UnknownWhenBlobPresentButLayoutUnreadable(t *te
 	blob, err := EncodeCommand(CmdPutObjectMeta, cmd)
 	require.NoError(t, err)
 	require.NotNil(t, b.shardSvc, "shardSvc must be available")
-	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal(bkt, key+"/"+vid, blob))
+	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal(bkt, key+"/"+vid, blob, 0))
 
 	r, err := b.verifyPerVersionCutover(bkt)
 	require.NoError(t, err)

@@ -13,6 +13,11 @@ table ShardRequest {
   key:string;
   shard_idx:int32;
   data:[ubyte];
+  // S4c-a2-A: originating coordinator's sole-authority epoch carried on a
+  // fenced quorum-meta write/delete. Additive (last field) → old peers omit it
+  // and decode the FlatBuffers default 0. DORMANT until Task 4 supplies a
+  // nonzero value at fenced sites; every current caller passes 0.
+  admitted_soleauth_epoch:uint32;
 }
 
 enum LogEntryType : byte {

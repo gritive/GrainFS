@@ -382,18 +382,19 @@ func (b *DistributedBackend) backfillPerVersionBlob(ctx context.Context, c perVe
 	self := b.currentSelfAddr()
 	k := max(1, int(c.Meta.ECData))
 	verSubpath := path.Join(c.Key, c.VersionID)
+	epoch, _ := b.GetBucketSoleAuthEpoch(c.Bucket)
 
 	wctx, cancel := context.WithTimeout(ctx, quorumMetaWriteTimeout)
 	defer cancel()
 	if err := fanOutQuorumMeta(wctx, c.Meta.NodeIDs, k, func(fctx context.Context, node string) error {
 		if node == self {
-			return b.shardSvc.writeQuorumMetaVersionLocal(c.Bucket, verSubpath, blob)
+			return b.shardSvc.writeQuorumMetaVersionLocal(c.Bucket, verSubpath, blob, epoch)
 		}
 		addr, rerr := b.shardSvc.resolvePeerAddress(node)
 		if rerr != nil {
 			return rerr
 		}
-		return b.shardSvc.WriteQuorumMetaVersion(fctx, addr, c.Bucket, verSubpath, blob)
+		return b.shardSvc.WriteQuorumMetaVersion(fctx, addr, c.Bucket, verSubpath, blob, epoch)
 	}); err != nil {
 		return fmt.Errorf("backfillPerVersionBlob fan-out %s/%s@%s: %w", c.Bucket, c.Key, c.VersionID, err)
 	}

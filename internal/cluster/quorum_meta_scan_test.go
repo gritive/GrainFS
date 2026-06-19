@@ -36,7 +36,7 @@ func TestQuorumMetaScanners_SkipInFlightTempFiles(t *testing.T) {
 	}
 	blob, err := EncodeCommand(CmdPutObjectMeta, cmd)
 	require.NoError(t, err)
-	require.NoError(t, svc.writeQuorumMetaLocal("b", "obj", blob))
+	require.NoError(t, svc.writeQuorumMetaLocal("b", "obj", blob, 0))
 
 	// The in-flight temp: same directory, same content, not yet renamed.
 	bucketDir := filepath.Join(svc.dataDirs[0], quorumMetaSubDir, "b")

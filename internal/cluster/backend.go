@@ -445,6 +445,11 @@ func (b *DistributedBackend) SetShardService(svc *ShardService, allNodes []strin
 	b.shardSvc = svc
 	if b.fsm != nil && svc != nil {
 		b.fsm.SetDEKKeeper(svc.DEKKeeper(), svc.ClusterID())
+		b.fsm.SetFenceLock(svc.bucketSoleAuthLock)
+		svc.SetSoleAuthEpochFn(func(bucket string) uint32 {
+			e, _ := b.GetBucketSoleAuthEpoch(bucket)
+			return e
+		})
 	}
 	topology := newBackendTopology(allNodes)
 	b.selfAddr = topology.selfAddr
