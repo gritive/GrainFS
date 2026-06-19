@@ -643,6 +643,26 @@ func (f *FSM) applySetBucketSoleAuthority(txn MetadataTxn, data []byte) error {
 	if !soleAuthTransitionAllowed(cur, c.State) {
 		return fmt.Errorf("soleauth transition refused for %s: %s -> %s (one-way off->pending->on; pending->off abort; on terminal)", c.Bucket, cur, c.State)
 	}
+	// Bump the monotonic epoch on a REAL state transition; idempotent same-state
+	// writes keep the epoch unchanged. FSM apply is single-goroutine and
+	// replicated, so the bump is identical on every node.
+	curEpoch := uint32(0)
+	if item, gerr := txn.Get(f.keys.BucketSoleAuthEpochKey(c.Bucket)); gerr == nil {
+		raw, e := item.ValueCopy(nil)
+		if e != nil {
+			return e
+		}
+		curEpoch = decodeSoleAuthEpoch(raw)
+	} else if gerr != ErrMetaKeyNotFound {
+		return gerr
+	}
+	newEpoch := curEpoch
+	if cur != c.State {
+		newEpoch = curEpoch + 1
+	}
+	if err := txn.Set(f.keys.BucketSoleAuthEpochKey(c.Bucket), encodeSoleAuthEpoch(newEpoch)); err != nil {
+		return err
+	}
 	return txn.Set(f.keys.BucketSoleAuthKey(c.Bucket), []byte(c.State))
 }
 

@@ -322,6 +322,26 @@ func (b *DistributedBackend) GetBucketSoleAuthority(bucket string) (string, erro
 	return state, err
 }
 
+// GetBucketSoleAuthEpoch returns the stored monotonic soleauth epoch for the
+// bucket. Absent key (the soleauth state has never advanced) returns 0.
+func (b *DistributedBackend) GetBucketSoleAuthEpoch(bucket string) (uint32, error) {
+	var epoch uint32
+	err := b.store.View(func(txn MetadataTxn) error {
+		item, err := txn.Get(b.ks().BucketSoleAuthEpochKey(bucket))
+		if err == ErrMetaKeyNotFound {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		return item.Value(func(v []byte) error {
+			epoch = decodeSoleAuthEpoch(v)
+			return nil
+		})
+	})
+	return epoch, err
+}
+
 // SetBucketPolicy satisfies storage.PolicyBackend. The policy document is
 // replicated through Raft so every node observes the same bucket policy.
 func (b *DistributedBackend) SetBucketPolicy(bucket string, policyJSON []byte) error {

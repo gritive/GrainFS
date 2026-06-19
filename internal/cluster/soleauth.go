@@ -1,5 +1,24 @@
 package cluster
 
+import "encoding/binary"
+
+// encodeSoleAuthEpoch encodes the per-bucket soleauth epoch as a 4-byte
+// BigEndian uint32.
+func encodeSoleAuthEpoch(epoch uint32) []byte {
+	buf := make([]byte, 4)
+	binary.BigEndian.PutUint32(buf, epoch)
+	return buf
+}
+
+// decodeSoleAuthEpoch decodes a 4-byte BigEndian uint32 epoch. A malformed or
+// absent value (len != 4) decodes to 0.
+func decodeSoleAuthEpoch(raw []byte) uint32 {
+	if len(raw) != 4 {
+		return 0
+	}
+	return binary.BigEndian.Uint32(raw)
+}
+
 // soleAuthTransitionAllowed reports whether the one-way soleauth guard permits
 // the transition from → to. The allowed transitions are:
 //
