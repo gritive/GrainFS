@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"strings"
 
 	"github.com/gritive/GrainFS/internal/storage"
@@ -271,25 +272,64 @@ func planRestoreBucketSoleAuth(curSA, target string) ([]string, error) {
 }
 
 // RestoreObjects implements storage.Snapshotable.
-// It hard-deletes metadata versions absent from the snapshot, then reproposes
-// metadata for every snapshot version. Delete markers do not require blobs.
+// It hard-deletes metadata versions absent from the snapshot, then restores
+// each snapshot version. For soleauth-on buckets the per-version blob is
+// force-written directly under the quiesce lock (raw snapshot VIDs, no
+// resolveRestoreObjectVersionIDs). For off/pending buckets the existing
+// resolve+prune+CmdPutObjectMeta path is preserved byte-identical.
 func (b *DistributedBackend) RestoreObjects(objects []storage.SnapshotObject) (int, []storage.StaleBlob, error) {
 	ctx := context.Background()
-	objects = b.resolveRestoreObjectVersionIDs(objects)
-	// Index snapshot objects by bucket+key+version.
-	want := make(map[string]storage.SnapshotObject, len(objects))
-	for _, o := range objects {
-		want[o.Bucket+"\x00"+o.Key+"\x00"+o.VersionID] = o
-	}
 
-	type latEntry struct{ bucket, key, versionID string }
-	var toDelete []latEntry
-
+	// [P1] Partition on/off BEFORE resolveRestoreObjectVersionIDs.
+	// Computing onBuckets from live GetBucketSoleAuthority ensures we never
+	// run the VID-rewriting resolver on blob-authoritative on-buckets.
+	onBuckets := make(map[string]bool)
 	buckets, err := b.ListBuckets(ctx)
 	if err != nil {
 		return 0, nil, err
 	}
 	for _, bucket := range buckets {
+		saState, saErr := b.GetBucketSoleAuthority(bucket)
+		if saErr != nil {
+			return 0, nil, fmt.Errorf("restore soleauth %s: %w", bucket, saErr)
+		}
+		if saState == soleAuthOn {
+			onBuckets[bucket] = true
+		}
+	}
+
+	// Partition objects into on (soleauth-on) and off (everything else).
+	var onObjects, offObjects []storage.SnapshotObject
+	for _, o := range objects {
+		if onBuckets[o.Bucket] {
+			onObjects = append(onObjects, o)
+		} else {
+			offObjects = append(offObjects, o)
+		}
+	}
+
+	// OFF PATH: resolve VIDs from live metadata (existing behavior, byte-identical).
+	offObjects = b.resolveRestoreObjectVersionIDs(offObjects)
+	// Build the off-want map from RESOLVED off objects.
+	offWant := make(map[string]storage.SnapshotObject, len(offObjects))
+	for _, o := range offObjects {
+		offWant[o.Bucket+"\x00"+o.Key+"\x00"+o.VersionID] = o
+	}
+
+	// ON PATH: build want map from RAW snapshot VIDs (no resolve).
+	onWant := make(map[string]storage.SnapshotObject, len(onObjects))
+	for _, o := range onObjects {
+		onWant[o.Bucket+"\x00"+o.Key+"\x00"+o.VersionID] = o
+	}
+
+	// Prune stale FSM metadata for off-bucket objects absent from the snapshot.
+	// On-bucket objects have no FSM metadata (the per-version tree is authority).
+	type latEntry struct{ bucket, key, versionID string }
+	var toDelete []latEntry
+	for _, bucket := range buckets {
+		if onBuckets[bucket] {
+			continue // on-bucket: no FSM obj: records to prune
+		}
 		if err := b.store.View(func(txn MetadataTxn) error {
 			rawObjPrefix := []byte("obj:" + bucket + "/")
 			return b.ks().scanGroupPrefix(txn, rawObjPrefix, func(raw []byte, _ MetaItem) error {
@@ -300,7 +340,7 @@ func (b *DistributedBackend) RestoreObjects(objects []storage.SnapshotObject) (i
 				}
 				key := rest[:slash]
 				versionID := rest[slash+1:]
-				if _, wanted := want[bucket+"\x00"+key+"\x00"+versionID]; wanted {
+				if _, wanted := offWant[bucket+"\x00"+key+"\x00"+versionID]; wanted {
 					return nil
 				}
 				toDelete = append(toDelete, latEntry{bucket, key, versionID})
@@ -310,8 +350,6 @@ func (b *DistributedBackend) RestoreObjects(objects []storage.SnapshotObject) (i
 			return 0, nil, fmt.Errorf("scan bucket %s: %w", bucket, err)
 		}
 	}
-
-	// Hard-delete metadata for objects absent from the snapshot.
 	for _, d := range toDelete {
 		if err := b.propose(ctx, CmdDeleteObjectVersion, DeleteObjectVersionCmd{
 			Bucket:    d.bucket,
@@ -322,10 +360,10 @@ func (b *DistributedBackend) RestoreObjects(objects []storage.SnapshotObject) (i
 		}
 	}
 
-	// Verify and restore each snapshot object.
+	// Restore off-bucket objects via the existing FSM re-propose path.
 	var stale []storage.StaleBlob
 	var count int
-	for _, snap := range objects {
+	for _, snap := range offObjects {
 		if !snap.IsDeleteMarker && snap.VersionID != "" && !b.blobExistsForRestore(snap) {
 			stale = append(stale, storage.StaleBlob{
 				Bucket:       snap.Bucket,
@@ -357,7 +395,111 @@ func (b *DistributedBackend) RestoreObjects(objects []storage.SnapshotObject) (i
 		}
 		count++
 	}
+
+	// Restore on-bucket objects via the per-version force-write path.
+	// Group by bucket so the quiesce lock is held per-bucket (one at a time).
+	onByBucket := make(map[string][]storage.SnapshotObject)
+	for _, o := range onObjects {
+		onByBucket[o.Bucket] = append(onByBucket[o.Bucket], o)
+	}
+	for bucket, bktObjects := range onByBucket {
+		n, bktErr := b.restoreSoleAuthBucketObjects(bucket, bktObjects, onWant, &stale)
+		count += n
+		if bktErr != nil {
+			return count, stale, bktErr
+		}
+	}
+
 	return count, stale, nil
+}
+
+// restoreSoleAuthBucketObjects restores snapshot objects for a single soleauth-on
+// bucket by force-writing each per-version blob under the quiesce lock. The caller
+// passes the raw-VID onWant map (from snapshot, no VID-rewriting). Task 6 will
+// insert the absent-blob purge inside this helper before the restore loop.
+func (b *DistributedBackend) restoreSoleAuthBucketObjects(bucket string, objects []storage.SnapshotObject, want map[string]storage.SnapshotObject, stale *[]storage.StaleBlob) (int, error) {
+	if b.shardSvc == nil {
+		return 0, fmt.Errorf("restore soleauth %s: no shard service", bucket)
+	}
+	// INVARIANT (v9 scope): only Enabled buckets are ever soleauth=on, so the
+	// per-version tree is this bucket's sole authority. S4c-d's flip command
+	// enforces Enabled-only; dormant today (no bucket on in prod).
+	mu := b.shardSvc.bucketSoleAuthLock(bucket)
+	mu.Lock()
+	defer mu.Unlock()
+
+	// (Task 6 inserts the absent-blob purge here.)
+
+	var count int
+	for _, snap := range objects {
+		if snap.Bucket != bucket || snap.VersionID == "" {
+			continue
+		}
+		// Stale-blob verification (codex plan-gate [P1]): mirror the off path
+		// (snapshotable.go:315) — do NOT publish authoritative per-version metadata
+		// for a version whose data blob is missing on this node; record it stale and skip.
+		if !snap.IsDeleteMarker && !b.blobExistsForRestore(snap) {
+			*stale = append(*stale, storage.StaleBlob{
+				Bucket:       snap.Bucket,
+				Key:          snap.Key,
+				ExpectedETag: snap.ETag,
+			})
+			continue
+		}
+		blob, err := EncodeCommand(CmdPutObjectMeta, putObjectMetaCmdFromSnapshot(snap))
+		if err != nil {
+			return count, fmt.Errorf("restore encode %s/%s: %w", bucket, snap.Key, err)
+		}
+		if err := b.shardSvc.writeQuorumMetaVersionLocalForceLocked(bucket, path.Join(snap.Key, snap.VersionID), blob); err != nil {
+			return count, fmt.Errorf("restore blob %s/%s@%s: %w", bucket, snap.Key, snap.VersionID, err)
+		}
+		count++
+	}
+	return count, nil
+}
+
+// putObjectMetaCmdFromSnapshot builds a full-fidelity PutObjectMetaCmd from a
+// SnapshotObject captured by captureSoleAuthBucketObjects. All placement fields,
+// UserMetadata, Parts, Tags, and Segments are copied (not aliased). Segments are
+// converted from []storage.SegmentRef → []SegmentMetaEntry via the inverse
+// converter segmentRefsToMetaEntries (per_version_backfill_walker.go). SegmentIdx
+// is reconstructed as int32(i) by slice order, matching the forward conversion.
+func putObjectMetaCmdFromSnapshot(snap storage.SnapshotObject) PutObjectMetaCmd {
+	etag := snap.ETag
+	if snap.IsDeleteMarker {
+		etag = deleteMarkerETag
+	}
+	var userMeta map[string]string
+	if len(snap.UserMetadata) > 0 {
+		userMeta = make(map[string]string, len(snap.UserMetadata))
+		for k, v := range snap.UserMetadata {
+			userMeta[k] = v
+		}
+	}
+	return PutObjectMetaCmd{
+		Bucket:           snap.Bucket,
+		Key:              snap.Key,
+		VersionID:        snap.VersionID,
+		ETag:             etag,
+		Size:             snap.Size,
+		ContentType:      snap.ContentType,
+		ModTime:          snap.Modified,
+		ECData:           snap.ECData,
+		ECParity:         snap.ECParity,
+		StripeBytes:      snap.StripeBytes,
+		NodeIDs:          cloneStringSlice(snap.NodeIDs),
+		PlacementGroupID: snap.PlacementGroupID,
+		SSEAlgorithm:     snap.SSEAlgorithm,
+		ACL:              snap.ACL,
+		MetaSeq:          snap.MetaSeq,
+		IsDeleteMarker:   snap.IsDeleteMarker,
+		UserMetadata:     userMeta,
+		Parts:            append([]storage.MultipartPartEntry(nil), snap.Parts...),
+		Tags:             append([]storage.Tag(nil), snap.Tags...),
+		Segments:         segmentRefsToMetaEntries(snap.Segments),
+		// ExpectedETag and PreserveLatest are write-time-only fields absent from
+		// SnapshotObject; they are intentionally left at their zero values.
+	}
 }
 
 func (b *DistributedBackend) resolveRestoreObjectVersionIDs(objects []storage.SnapshotObject) []storage.SnapshotObject {
