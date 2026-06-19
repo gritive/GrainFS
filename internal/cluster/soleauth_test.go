@@ -379,9 +379,10 @@ func TestSnapshot_SoleAuthRestoreTerminalOnRefusesDowngrade(t *testing.T) {
 			bks, err := src.ListAllBuckets()
 			require.NoError(t, err)
 
-			// Live backend has cut the bucket over to terminal on.
+			// Live backend has versioning Enabled and is cut over to terminal on.
 			b := newTestDistributedBackend(t)
 			require.NoError(t, b.CreateBucket(ctx, "bucket"))
+			require.NoError(t, b.SetBucketVersioning("bucket", "Enabled"))
 			require.NoError(t, b.SetBucketSoleAuthority("bucket", soleAuthPending))
 			require.NoError(t, b.SetBucketSoleAuthority("bucket", soleAuthOn))
 
@@ -392,6 +393,11 @@ func TestSnapshot_SoleAuthRestoreTerminalOnRefusesDowngrade(t *testing.T) {
 			st, gerr := b.GetBucketSoleAuthority("bucket")
 			require.NoError(t, gerr)
 			require.Equal(t, soleAuthOn, st)
+			// The soleauth pre-check runs BEFORE versioning is touched, so the
+			// loud failure must NOT have half-restored versioning to the snapshot.
+			vst, verr := b.GetBucketVersioning("bucket")
+			require.NoError(t, verr)
+			require.Equal(t, "Enabled", vst)
 		})
 	}
 }
