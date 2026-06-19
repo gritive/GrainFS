@@ -936,6 +936,48 @@ func (s *ShardService) ScanQuorumMetaVersionsBucket(bucket, prefix string) ([]Pu
 	return out, nil
 }
 
+// ScanQuorumMetaVersionsBucketAll walks + decodes + prefix-filters IDENTICALLY to
+// ScanQuorumMetaVersionsBucket but is an ADDITIVE all-version enumerator — it
+// returns EVERY version blob (cost O(total versions on this node)) instead of the
+// per-key max. Consumed by S4c-b snapshot absent-blob purge + S4c-c flag-on LIST
+// (NOT yet wired). Do NOT reroute the max-per-key consumers (listObjectsPerVersion)
+// through it.
+func (s *ShardService) ScanQuorumMetaVersionsBucketAll(bucket, prefix string) ([]PutObjectMetaCmd, error) {
+	if len(s.dataDirs) == 0 {
+		return nil, nil
+	}
+	bucketRoot := filepath.Join(s.dataDirs[0], quorumMetaVersionsSubDir, bucket)
+	out := []PutObjectMetaCmd{}
+	err := filepath.WalkDir(bucketRoot, func(path string, d fs.DirEntry, werr error) error {
+		if werr != nil {
+			if os.IsNotExist(werr) {
+				return nil
+			}
+			return werr
+		}
+		if d.IsDir() || isQuorumMetaTempName(d.Name()) {
+			return nil
+		}
+		data, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return nil // tolerate a transient unreadable blob
+		}
+		cmd, derr := s.decodeQuorumMetaCmdBlob(data)
+		if derr != nil {
+			return nil
+		}
+		if prefix != "" && !strings.HasPrefix(cmd.Key, prefix) {
+			return nil
+		}
+		out = append(out, cmd)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ScanQuorumMetaVersions fans the per-version bucket walk to a remote node and
 // returns its per-key max-VersionID PutObjectMetaCmds (markers included).
 func (s *ShardService) ScanQuorumMetaVersions(ctx context.Context, addr, bucket, prefix string) ([]PutObjectMetaCmd, error) {
