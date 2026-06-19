@@ -226,6 +226,11 @@ func (b *DistributedBackend) RestoreBuckets(buckets []storage.SnapshotBucket) er
 				}
 			}
 			// curSA == soleAuthOn: idempotent, nothing to do.
+		default:
+			// A snapshot blob is read directly from disk and never passes the
+			// apply-time state validator, so a corrupted/manual value must fail
+			// loudly here rather than silently leave the bucket unchanged.
+			return fmt.Errorf("restore bucket soleauth %s: invalid snapshot state %q", bucket.Name, bucket.SoleAuthState)
 		}
 	}
 	return nil

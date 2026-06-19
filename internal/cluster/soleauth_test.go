@@ -65,9 +65,6 @@ func TestSoleAuthTransitionAllowed(t *testing.T) {
 	}
 }
 
-// bucketSoleAuthKey is a test-only helper mirroring bucketVerKey.
-func bucketSoleAuthKey(bucket string) []byte { return []byte("soleauth:" + bucket) }
-
 // newTestFSMForSoleAuth builds a fresh FSM with an empty keyspace for soleauth tests.
 func newTestFSMForSoleAuth(t *testing.T) *FSM {
 	t.Helper()
@@ -187,6 +184,13 @@ func TestFSM_SetBucketSoleAuthority_InvalidState(t *testing.T) {
 	err := applyCmdErr(t, fsm, CmdSetBucketSoleAuthority,
 		SetBucketSoleAuthorityCmd{Bucket: "b", State: "bogus"})
 	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid soleauth state")
+	// The rejected apply must not have persisted anything: the key stays absent.
+	require.NoError(t, fsm.db.View(func(txn MetadataTxn) error {
+		_, gerr := txn.Get([]byte("soleauth:b"))
+		require.ErrorIs(t, gerr, ErrMetaKeyNotFound)
+		return nil
+	}))
 }
 
 func TestFSM_SetBucketSoleAuthority_DefaultOff(t *testing.T) {
@@ -333,6 +337,28 @@ func TestSnapshot_SoleAuthRestorePendingIdempotent(t *testing.T) {
 	st, err := b.GetBucketSoleAuthority("bucket")
 	require.NoError(t, err)
 	require.Equal(t, soleAuthPending, st)
+}
+
+// TestSnapshot_SoleAuthRestoreInvalidState verifies that RestoreBuckets fails
+// loudly on a corrupted snapshot soleauth value rather than silently leaving the
+// bucket unchanged (the restore path reads the blob directly and never passes the
+// apply-time state validator).
+func TestSnapshot_SoleAuthRestoreInvalidState(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(ctx, "bucket"))
+
+	bks, err := b.ListAllBuckets()
+	require.NoError(t, err)
+	for i := range bks {
+		if bks[i].Name == "bucket" {
+			bks[i].SoleAuthState = "onn" // corrupted value, not in {off,pending,on}
+		}
+	}
+
+	err = b.RestoreBuckets(bks)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid snapshot state")
 }
 
 // TestSnapshot_SoleAuthDefaultOffOmitted verifies that a bucket that was never
