@@ -64,6 +64,7 @@ type operationsPlan struct {
 type BucketVersioner interface {
 	SetBucketVersioning(bucket, state string) error
 	GetBucketVersioning(bucket string) (string, error)
+	GetBucketSoleAuthEpoch(bucket string) (uint32, error)
 }
 
 type VersionedGetter interface {

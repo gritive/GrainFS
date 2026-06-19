@@ -21,6 +21,14 @@ func (o *Operations) GetBucketVersioning(bucket string) (string, error) {
 	return plan.bucketVersioner.GetBucketVersioning(bucket)
 }
 
+func (o *Operations) GetBucketSoleAuthEpoch(bucket string) (uint32, error) {
+	plan := o.planForCall()
+	if plan.bucketVersioner == nil {
+		return 0, UnsupportedOperationError{Op: "GetBucketSoleAuthEpoch", Reason: UnsupportedReasonNoAdapter}
+	}
+	return plan.bucketVersioner.GetBucketSoleAuthEpoch(bucket)
+}
+
 func (o *Operations) GetObjectVersion(ctx context.Context, bucket, key, versionID string) (io.ReadCloser, *Object, error) {
 	plan := o.planForCall()
 	if plan.versionedGetter == nil {

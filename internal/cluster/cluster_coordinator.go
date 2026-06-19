@@ -756,6 +756,17 @@ func (c *ClusterCoordinator) GetBucketVersioning(bucket string) (string, error) 
 	return v.GetBucketVersioning(bucket)
 }
 
+func (c *ClusterCoordinator) GetBucketSoleAuthEpoch(bucket string) (uint32, error) {
+	type soleAuthEpochReader interface {
+		GetBucketSoleAuthEpoch(bucket string) (uint32, error)
+	}
+	v, ok := c.base.(soleAuthEpochReader)
+	if !ok {
+		return 0, ErrCoordinatorNoRouter
+	}
+	return v.GetBucketSoleAuthEpoch(bucket)
+}
+
 func (c *ClusterCoordinator) SetBucketPolicy(bucket string, policyJSON []byte) error {
 	type proposer interface {
 		SetBucketPolicyPropose(bucket string, policyJSON []byte) error

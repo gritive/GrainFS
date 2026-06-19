@@ -95,6 +95,10 @@ func (b *mutableVersioningSoftDeleteBackend) GetBucketVersioning(bucket string) 
 	return b.state, nil
 }
 
+func (b *mutableVersioningSoftDeleteBackend) GetBucketSoleAuthEpoch(bucket string) (uint32, error) {
+	return 0, nil
+}
+
 func (b *mutableVersioningSoftDeleteBackend) DeleteObjectReturningMarker(bucket, key string) (string, error) {
 	b.softDeletes.Add(1)
 	if err := b.Backend.DeleteObject(context.Background(), bucket, key); err != nil {
