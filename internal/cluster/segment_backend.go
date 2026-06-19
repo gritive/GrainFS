@@ -44,15 +44,15 @@ type clusterSegmentBackend struct {
 	// through b.shardGroup / newECObjectWriter / b.shardSvc.DeleteShards /
 	// b.writeQuorumMeta / b.propose. Tests inject all six to exercise
 	// putObjectChunked without a full RaftNode + ShardService.
-	writeSegmentFn       func(ctx context.Context, idx int, in writeSegmentInput) (PlacementRecord, string, string, error)
-	groupSelectorFn      func(bucket, key string, idx int, blobID string) (ShardGroupEntry, error)
-	deleteShardsFn       func(ctx context.Context, peer, bucket, shardKey string) error
-	proposeFn            func(ctx context.Context, cmdType CommandType, payload any) error
-	writeQuorumMetaFn    func(ctx context.Context, cmd PutObjectMetaCmd) error
-	readDoneMarkerFn     func(uploadID string) (*multipartDone, error) // seam for phantom-winner guard
-	headObjectMetaVFn    func(ctx context.Context, bucket, key, versionID string) (*storage.Object, error)
-	ecConfigFn           func() ECConfig
-	chunkSize            int
+	writeSegmentFn    func(ctx context.Context, idx int, in writeSegmentInput) (PlacementRecord, string, string, error)
+	groupSelectorFn   func(bucket, key string, idx int, blobID string) (ShardGroupEntry, error)
+	deleteShardsFn    func(ctx context.Context, peer, bucket, shardKey string) error
+	proposeFn         func(ctx context.Context, cmdType CommandType, payload any) error
+	writeQuorumMetaFn func(ctx context.Context, cmd PutObjectMetaCmd) error
+	readDoneMarkerFn  func(uploadID string) (*multipartDone, error) // seam for phantom-winner guard
+	headObjectMetaVFn func(ctx context.Context, bucket, key, versionID string) (*storage.Object, error)
+	ecConfigFn        func() ECConfig
+	chunkSize         int
 }
 
 // segmentPlacement captures the post-write placement metadata for one
