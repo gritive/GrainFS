@@ -451,6 +451,39 @@ func (s *ShardService) writeQuorumMetaLocal(bucket, key string, data []byte, adm
 	return nil
 }
 
+// writeQuorumMetaVersionLocalCore is the lock-free, epoch-free, guard-free FS
+// core for per-version blob writes: mkdir + atomic temp+fsync+rename. It assumes
+// the caller has already validated the target path and holds whatever lock is
+// appropriate (bucket RLock for the normal guarded path; bucket WLock for the
+// force-locked restore path).
+func (s *ShardService) writeQuorumMetaVersionLocalCore(target string, data []byte) error {
+	dir := filepath.Dir(target)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("quorum meta version mkdir: %w", err)
+	}
+	tmp, err := os.CreateTemp(dir, ".qmeta-*.tmp")
+	if err != nil {
+		return fmt.Errorf("quorum meta version tmp create: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("quorum meta version write: %w", err)
+	}
+	if err := directio.Sync(tmp); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("quorum meta version fsync: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("quorum meta version tmp close: %w", err)
+	}
+	if err := os.Rename(tmpName, target); err != nil {
+		return fmt.Errorf("quorum meta version rename: %w", err)
+	}
+	return nil
+}
+
 // writeQuorumMetaVersionLocal durably writes an immutable per-version quorum-meta
 // blob under {dataDirs[0]}/.quorum_meta_versions/{bucket}/{versionSubpath}, where
 // versionSubpath is path.Join(key, versionID). It mirrors writeQuorumMetaLocal
@@ -475,27 +508,6 @@ func (s *ShardService) writeQuorumMetaVersionLocal(bucket, versionSubpath string
 	if s.soleAuthEpochFn != nil && soleAuthEpochStale(s.soleAuthEpochFn(bucket), admittedEpoch) {
 		return errStaleSoleAuthEpoch
 	}
-	dir := filepath.Dir(target)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("quorum meta version mkdir: %w", err)
-	}
-	tmp, err := os.CreateTemp(dir, ".qmeta-*.tmp")
-	if err != nil {
-		return fmt.Errorf("quorum meta version tmp create: %w", err)
-	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("quorum meta version write: %w", err)
-	}
-	if err := directio.Sync(tmp); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("quorum meta version fsync: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("quorum meta version tmp close: %w", err)
-	}
 	// Per-target lock: serializes the (guard-read + rename) critical section.
 	// Mirrors writeQuorumMetaLocal — see that function for the full rationale.
 	mu := s.quorumMetaTargetLock(target)
@@ -513,10 +525,26 @@ func (s *ShardService) writeQuorumMetaVersionLocal(bucket, versionSubpath string
 			}
 		}
 	}
-	if err := os.Rename(tmpName, target); err != nil {
-		return fmt.Errorf("quorum meta version rename: %w", err)
+	return s.writeQuorumMetaVersionLocalCore(target, data)
+}
+
+// writeQuorumMetaVersionLocalForceLocked writes the per-version blob without
+// acquiring the bucket RLock, skipping the epoch check, and bypassing the
+// write-time LWW guard. The caller MUST hold bucketSoleAuthLock(bucket).Lock().
+// This is the restore path: the snapshot restorer quiesces the bucket by holding
+// the write-lock, so a normal RLock would deadlock; and restore must be able to
+// revert a strictly-newer blob written after the snapshot was taken.
+func (s *ShardService) writeQuorumMetaVersionLocalForceLocked(bucket, versionSubpath string, data []byte) error {
+	if len(s.dataDirs) == 0 {
+		return fmt.Errorf("quorum meta version: no data dir")
 	}
-	return nil
+	root := filepath.Join(s.dataDirs[0], quorumMetaVersionsSubDir)
+	target := filepath.Join(root, bucket, versionSubpath)
+	rel, err := filepath.Rel(root, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("quorum meta version: path %q escapes root", versionSubpath)
+	}
+	return s.writeQuorumMetaVersionLocalCore(target, data)
 }
 
 // readQuorumMetaVersionsLocal returns the decoded per-version blobs for one key
@@ -1124,6 +1152,17 @@ func (s *ShardService) deleteQuorumMetaLocal(bucket, key string, admittedEpoch u
 	return nil
 }
 
+// deleteQuorumMetaVersionLocalCore is the lock-free, epoch-free FS core for
+// per-version blob removal. Absent file is not an error (idempotent). The caller
+// is responsible for holding the appropriate lock before calling.
+func (s *ShardService) deleteQuorumMetaVersionLocalCore(target string) error {
+	err := os.Remove(target)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("quorum meta version delete: %w", err)
+	}
+	return nil
+}
+
 // deleteQuorumMetaVersionLocal removes the local per-version blob for
 // (bucket, key, versionID) under .quorum_meta_versions/{bucket}/{key}/{vid}.
 // Absent file is not an error (idempotent). Mirrors deleteQuorumMetaLocal.
@@ -1145,11 +1184,24 @@ func (s *ShardService) deleteQuorumMetaVersionLocal(bucket, key, versionID strin
 	if s.soleAuthEpochFn != nil && soleAuthEpochStale(s.soleAuthEpochFn(bucket), admittedEpoch) {
 		return errStaleSoleAuthEpoch
 	}
-	err = os.Remove(target)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("quorum meta version delete: %w", err)
+	return s.deleteQuorumMetaVersionLocalCore(target)
+}
+
+// deleteQuorumMetaVersionLocalForceLocked removes the per-version blob without
+// acquiring the bucket RLock and skipping the epoch check. The caller MUST hold
+// bucketSoleAuthLock(bucket).Lock(). This is the restore path (see
+// writeQuorumMetaVersionLocalForceLocked for the rationale).
+func (s *ShardService) deleteQuorumMetaVersionLocalForceLocked(bucket, key, versionID string) error {
+	if len(s.dataDirs) == 0 {
+		return nil
 	}
-	return nil
+	root := filepath.Join(s.dataDirs[0], quorumMetaVersionsSubDir)
+	target := filepath.Join(root, bucket, key, versionID)
+	rel, err := filepath.Rel(root, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("quorum meta version delete: path %q/%q escapes root", key, versionID)
+	}
+	return s.deleteQuorumMetaVersionLocalCore(target)
 }
 
 // DeleteQuorumMetaVersion removes a per-version blob on a remote placement node.
