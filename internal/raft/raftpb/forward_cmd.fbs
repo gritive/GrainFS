@@ -91,6 +91,14 @@ table PutObjectArgs {
   // / unresolved → receiver falls back to a local read), 1=disabled,
   // 2=enabled. Appended for wire compatibility; old peers read it as 0.
   versioning_state:ubyte;
+  // Sole-authority epoch resolved at the S3 edge (which can read the bucket's
+  // replicated soleauthepoch:{b} value). The forward receiver's per-group
+  // commit backend must NOT read it itself (control/data-plane boundary), so
+  // this carries the originating node's authoritative epoch on a +1 wire
+  // encoding: 0=absent/unstamped (old peer / unresolved → receiver falls back
+  // to a local read), n (n≥1)=epoch n-1. Appended for wire compatibility; old
+  // peers read it as 0.
+  soleauth_epoch:uint32;
 }
 
 table GetObjectArgs {

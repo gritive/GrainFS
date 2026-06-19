@@ -997,6 +997,35 @@ func BucketVersioningFromContext(ctx context.Context) (enabled bool, resolved bo
 	return bucketVersioningFromContext(ctx)
 }
 
+type bucketSoleAuthEpochCtxKey struct{}
+
+// ContextWithBucketSoleAuthEpoch stamps the originating node's authoritative
+// sole-authority epoch for this PUT. The S3 handler resolves the bucket's
+// soleauthepoch:{b} value at the edge (the same place it can read replicated
+// bucket state) and stamps it so the per-group commit backend never has to read
+// it itself — that read would be a control/data-plane boundary violation (the
+// commit backend has no replicated soleauthepoch state). The decision also
+// rides the forward wire (PutObjectArgs.soleauth_epoch, +1 encoded) so a
+// forwarded PUT received by another node carries the same authoritative epoch.
+func ContextWithBucketSoleAuthEpoch(ctx context.Context, epoch uint32) context.Context {
+	return context.WithValue(ctx, bucketSoleAuthEpochCtxKey{}, epoch)
+}
+
+// bucketSoleAuthEpochFromContext returns the stamped sole-authority epoch and
+// whether it was resolved. resolved is false only when no edge/forward layer
+// stamped the context, in which case the caller falls back to a local read.
+func bucketSoleAuthEpochFromContext(ctx context.Context) (epoch uint32, resolved bool) {
+	v, ok := ctx.Value(bucketSoleAuthEpochCtxKey{}).(uint32)
+	return v, ok
+}
+
+// BucketSoleAuthEpochFromContext is the exported accessor for the stamped
+// sole-authority epoch. Used by the server edge (and tests) to inspect whether
+// the authoritative epoch was threaded into ctx.
+func BucketSoleAuthEpochFromContext(ctx context.Context) (epoch uint32, resolved bool) {
+	return bucketSoleAuthEpochFromContext(ctx)
+}
+
 func topologyForwardWriteError(group ShardGroupEntry, err error) error {
 	if err == nil || !errors.Is(err, ErrNoReachablePeer) || len(group.PeerIDs) == 0 {
 		return err
