@@ -41,6 +41,19 @@ type fakeBackend struct {
 	policy        []byte
 	mpuResult     []*storage.MultipartUpload
 	mpuErr        error
+	// soleAuthStates maps bucket name → soleauth state ("off"/"pending"/"on").
+	// Absent key returns soleAuthOff. Used by the snapshot guard tests.
+	soleAuthStates map[string]string
+}
+
+func (f *fakeBackend) GetBucketSoleAuthority(bucket string) (string, error) {
+	f.record(fmt.Sprintf("GetBucketSoleAuthority:%s", bucket))
+	if f.soleAuthStates != nil {
+		if s, ok := f.soleAuthStates[bucket]; ok {
+			return s, nil
+		}
+	}
+	return soleAuthOff, nil
 }
 
 func (f *fakeBackend) SetBucketVersioning(bucket, state string) error {
@@ -2944,4 +2957,145 @@ func TestAppendForward_BufferSaturation(t *testing.T) {
 func TestClusterCoordinator_ImplementsTagInterfaces(t *testing.T) {
 	var _ storage.ObjectTagsSetter = (*ClusterCoordinator)(nil)
 	var _ storage.ObjectTagsGetter = (*ClusterCoordinator)(nil)
+}
+
+// --- S4c-b fail-closed snapshot guard tests ---
+//
+// The following tests assert that the routed (multi-group) ClusterCoordinator
+// snapshot path refuses soleauth-on buckets rather than silently producing a
+// fidelity-less snapshot. The single-group fast-path (router==nil) is NOT
+// tested here — that delegates to DistributedBackend which already has its
+// own soleauth-aware capture path tested in snapshotable_soleauth_test.go.
+
+// newRoutedCoordinatorWithFakeBase returns a ClusterCoordinator with a real
+// DataGroupManager+Router (triggering the routed path) but with a fakeBackend
+// as the base. The bucket is assigned to "g1" so ListBuckets returns it.
+func newRoutedCoordinatorWithFakeBase(t *testing.T, base *fakeBackend, bucket string) *ClusterCoordinator {
+	t.Helper()
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroup("g1", []string{"peer-a"}))
+	router := NewRouter(mgr)
+	router.AssignBucket(bucket, "g1")
+	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"g1": {ID: "g1", PeerIDs: []string{"peer-a"}},
+	}}
+	return NewClusterCoordinator(base, mgr, router, meta, "self")
+}
+
+// TestClusterCoordinator_ListAllObjects_FailsClosedForSoleAuthOnBucket asserts
+// that ListAllObjects in the routed path returns an error (not a fidelity-less
+// snapshot) when a bucket is soleauth-on.
+func TestClusterCoordinator_ListAllObjects_FailsClosedForSoleAuthOnBucket(t *testing.T) {
+	base := &fakeBackend{
+		listResult: []string{"protected"},
+		soleAuthStates: map[string]string{
+			"protected": soleAuthOn,
+		},
+	}
+	c := newRoutedCoordinatorWithFakeBase(t, base, "protected")
+
+	_, err := c.ListAllObjects()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "soleauth-on")
+	require.Contains(t, err.Error(), "protected")
+	require.Contains(t, err.Error(), "S4c-d")
+}
+
+// TestClusterCoordinator_ListAllObjects_SucceedsForSoleAuthOffBucket asserts
+// that ListAllObjects in the routed path works normally for buckets that are
+// soleauth-off (not "on"). Uses an empty bucket to avoid needing a full
+// ListObjectVersions setup.
+func TestClusterCoordinator_ListAllObjects_SucceedsForSoleAuthOffBucket(t *testing.T) {
+	base := &fakeBackend{
+		listResult: []string{"normal"},
+		// soleAuthStates absent → fakeBackend returns soleAuthOff for all buckets
+	}
+	// Build a real GroupBackend so ListObjectVersions has somewhere to look.
+	gb := newTestGroupBackend(t, "g1")
+	require.NoError(t, gb.CreateBucket(context.Background(), "normal"))
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"self"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("normal", "g1")
+	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"g1": {ID: "g1", PeerIDs: []string{"self"}},
+	}}
+	c := NewClusterCoordinator(base, mgr, router, meta, "self")
+
+	objs, err := c.ListAllObjects()
+	require.NoError(t, err)
+	// Empty bucket — no objects — but must not error.
+	require.Empty(t, objs)
+}
+
+// TestClusterCoordinator_RestoreObjects_FailsClosedForSoleAuthOnBucket asserts
+// that RestoreObjects in the routed path returns an error (before mutating
+// anything) when any snapshot object's bucket is currently soleauth-on.
+func TestClusterCoordinator_RestoreObjects_FailsClosedForSoleAuthOnBucket(t *testing.T) {
+	base := &fakeBackend{
+		soleAuthStates: map[string]string{
+			"protected": soleAuthOn,
+		},
+	}
+	c := newRoutedCoordinatorWithFakeBase(t, base, "protected")
+
+	objects := []storage.SnapshotObject{
+		{Bucket: "protected", Key: "k1", VersionID: "v1", IsLatest: true},
+	}
+	restored, stale, err := c.RestoreObjects(objects)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "soleauth-on")
+	require.Contains(t, err.Error(), "protected")
+	require.Contains(t, err.Error(), "S4c-d")
+	// Nothing should have been restored — the guard fires before mutation.
+	require.Zero(t, restored)
+	require.Empty(t, stale)
+}
+
+// TestClusterCoordinator_RestoreObjects_SucceedsForSoleAuthOffBucket asserts
+// that RestoreObjects in the routed path does not reject objects in
+// soleauth-off buckets. The soleauth guard must NOT fire for "off" state.
+func TestClusterCoordinator_RestoreObjects_SucceedsForSoleAuthOffBucket(t *testing.T) {
+	base := &fakeBackend{
+		listResult: []string{"normal"},
+		// soleAuthStates absent → fakeBackend.GetBucketSoleAuthority returns soleAuthOff
+	}
+	// Build a real GroupBackend (node already started by newTestGroupBackend).
+	gb := newTestGroupBackend(t, "g1")
+	require.NoError(t, gb.CreateBucket(context.Background(), "normal"))
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("g1", []string{"test-node"}, gb))
+	router := NewRouter(mgr)
+	router.AssignBucket("normal", "g1")
+	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"g1": {ID: "g1", PeerIDs: []string{"test-node"}},
+	}}
+	c := NewClusterCoordinator(base, mgr, router, meta, "test-node").
+		WithECConfig(ECConfig{DataShards: 1, ParityShards: 0})
+
+	// Seed an object so RestoreObjects has something to actually restore.
+	v, err := gb.PutObject(context.Background(), "normal", "key", strings.NewReader("hello"), "text/plain")
+	require.NoError(t, err)
+
+	objects := []storage.SnapshotObject{
+		{
+			Bucket:    "normal",
+			Key:       "key",
+			VersionID: v.VersionID,
+			IsLatest:  true,
+			Size:      5,
+			Modified:  v.LastModified,
+		},
+	}
+	// The guard must not fire; RestoreObjects should not return a soleauth error.
+	_, _, err = c.RestoreObjects(objects)
+	// We only require the error is NOT a soleauth-guard error. The restore itself
+	// may succeed or fail for other reasons (quorum, routing) — we are testing
+	// that the fail-closed guard does not reject off-state buckets.
+	if err != nil {
+		require.NotContains(t, err.Error(), "soleauth-on",
+			"RestoreObjects must not reject soleauth-off bucket")
+	}
 }

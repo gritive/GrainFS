@@ -767,6 +767,21 @@ func (c *ClusterCoordinator) GetBucketSoleAuthEpoch(bucket string) (uint32, erro
 	return v.GetBucketSoleAuthEpoch(bucket)
 }
 
+// GetBucketSoleAuthority returns the live soleauth state for the bucket by
+// delegating to the base backend (DistributedBackend). Returns soleAuthOff
+// ("off") when the key is absent. Used by the cluster-wide snapshot guard to
+// detect soleauth-on buckets before attempting a cluster-wide capture.
+func (c *ClusterCoordinator) GetBucketSoleAuthority(bucket string) (string, error) {
+	type soleAuthorityReader interface {
+		GetBucketSoleAuthority(bucket string) (string, error)
+	}
+	v, ok := c.base.(soleAuthorityReader)
+	if !ok {
+		return "", ErrCoordinatorNoRouter
+	}
+	return v.GetBucketSoleAuthority(bucket)
+}
+
 func (c *ClusterCoordinator) SetBucketPolicy(bucket string, policyJSON []byte) error {
 	type proposer interface {
 		SetBucketPolicyPropose(bucket string, policyJSON []byte) error
@@ -841,6 +856,15 @@ func (c *ClusterCoordinator) ListAllObjects() ([]storage.SnapshotObject, error) 
 				Msg("snapshot metadata listing skipped system bucket")
 			continue
 		}
+		// Fail-closed guard: cluster-wide snapshot capture cannot correctly
+		// enumerate per-node per-version quorum-meta blobs for soleauth-on
+		// buckets. Per-node capture is required (S4c-d). Never silently produce
+		// a fidelity-less snapshot.
+		if saState, saErr := c.GetBucketSoleAuthority(bucket); saErr != nil {
+			return nil, fmt.Errorf("cluster-wide snapshot capture: soleauth state lookup failed for bucket %q: %w", bucket, saErr)
+		} else if saState == soleAuthOn {
+			return nil, fmt.Errorf("cluster-wide snapshot capture does not support soleauth-on bucket %q: per-node capture required (S4c-d)", bucket)
+		}
 		versions, err := c.ListObjectVersions(context.Background(), bucket, "", 0)
 		if err != nil {
 			return nil, err
@@ -898,6 +922,24 @@ func (c *ClusterCoordinator) RestoreObjects(objects []storage.SnapshotObject) (i
 			return 0, nil, storage.ErrSnapshotNotSupported
 		}
 		return snap.RestoreObjects(objects)
+	}
+
+	// Fail-closed guard: if any snapshot object's bucket is currently
+	// soleauth-on, refuse the whole restore before mutating anything.
+	// Per-node restore is required for soleauth-on buckets (S4c-d).
+	seen := make(map[string]struct{}, len(objects))
+	for _, obj := range objects {
+		if _, already := seen[obj.Bucket]; already {
+			continue
+		}
+		seen[obj.Bucket] = struct{}{}
+		saState, saErr := c.GetBucketSoleAuthority(obj.Bucket)
+		if saErr != nil {
+			return 0, nil, fmt.Errorf("cluster-wide snapshot restore: soleauth state lookup failed for bucket %q: %w", obj.Bucket, saErr)
+		}
+		if saState == soleAuthOn {
+			return 0, nil, fmt.Errorf("cluster-wide snapshot restore does not support soleauth-on bucket %q: per-node restore required (S4c-d)", obj.Bucket)
+		}
 	}
 
 	want := make(map[string]struct{}, len(objects))
