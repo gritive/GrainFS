@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.621.0] - 2026-06-19
+
+### Added
+- **Soleauth cutover fence — armed on the inter-node path, still dormant (S4c-a2-A).** Builds the
+  per-bucket fence the later sole-authority cutover relies on, wiring the inert `soleauth` flag
+  (added in 0.0.620.0) into the quorum-meta replication path. It stays **dormant**: every bucket is
+  `off` with epoch 0, and the reject predicate (`localEpoch > 0 && wireEpoch < localEpoch`) never
+  fires until a future slice (S4c-d) ships the admin flip. All in `internal/cluster` +
+  `internal/raft`:
+  - A per-bucket monotonic **soleauth epoch** (`soleauthepoch:{bucket}` FSM state), bumped on each
+    real state transition in `applySetBucketSoleAuthority` (deterministic across raft replicas).
+  - A per-bucket **fence `RWMutex`**: the flip apply write-locks the bucket (race-free accessor) so
+    the four quorum-meta leaves can read-lock it around their epoch check + fsync/rename.
+  - An additive `admitted_soleauth_epoch` scalar on the shard wire envelope (`ShardRequest`,
+    backward-compatible — old peers omit it → default 0).
+  - A **stale-epoch reject** at the four quorum-meta leaves, fed by a backend-injected committed-epoch
+    callback; every legitimate-mutation caller threads the live coordinator epoch so a flipped bucket
+    never false-rejects its own writes.
+
+  No on-disk format change for existing data and no user-facing API change. The S3-edge epoch stamp
+  (forwarded-PUT correctness) is deferred to S4c-a2-B; epoch snapshot/restore fidelity to S4c-b.
+
 ## [0.0.620.0] - 2026-06-19
 
 ### Added
