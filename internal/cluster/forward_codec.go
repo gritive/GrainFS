@@ -87,7 +87,7 @@ func contextWithSoleAuthEpochWire(ctx context.Context, wire uint32) context.Cont
 
 // --- Args builders (request side) ---
 
-func buildPutObjectArgsWithSSE(bucket, key, contentType string, body []byte, sseAlgorithm string, userMetadata map[string]string, contentMD5Hex string, acl uint8, versioningState byte) []byte {
+func buildPutObjectArgsWithSSE(bucket, key, contentType string, body []byte, sseAlgorithm string, userMetadata map[string]string, contentMD5Hex string, acl uint8, versioningState byte, soleAuthEpochWire uint32) []byte {
 	b := flatbuffers.NewBuilder(putObjectArgsBuilderSize(bucket, key, contentType, sseAlgorithm, len(body)))
 	bk := b.CreateString(bucket)
 	k := b.CreateString(key)
@@ -133,6 +133,9 @@ func buildPutObjectArgsWithSSE(bucket, key, contentType string, body []byte, sse
 	}
 	if versioningState != versioningStateUnknown {
 		raftpb.PutObjectArgsAddVersioningState(b, versioningState)
+	}
+	if soleAuthEpochWire != 0 {
+		raftpb.PutObjectArgsAddSoleauthEpoch(b, soleAuthEpochWire)
 	}
 	b.Finish(raftpb.PutObjectArgsEnd(b))
 	return b.FinishedBytes()

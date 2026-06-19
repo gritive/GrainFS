@@ -4,8 +4,30 @@ import (
 	"context"
 	"testing"
 
+	flatbuffers "github.com/google/flatbuffers/go"
+	"github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/stretchr/testify/require"
 )
+
+func TestPutObjectArgs_SoleAuthEpochRoundTrip(t *testing.T) {
+	// epochWire 6 → field carries 6.
+	args := buildPutObjectArgsWithSSE("b", "k", "", nil, "", nil, "", 0, 0 /*versioningState*/, 6 /*soleAuthEpochWire*/)
+	require.Equal(t, uint32(6), raftpb.GetRootAsPutObjectArgs(args, 0).SoleauthEpoch())
+
+	// epochWire 0 → field absent → default 0.
+	args = buildPutObjectArgsWithSSE("b", "k", "", nil, "", nil, "", 0, 0, 0)
+	require.Equal(t, uint32(0), raftpb.GetRootAsPutObjectArgs(args, 0).SoleauthEpoch())
+
+	// Old peer: args built directly without AddSoleauthEpoch → default 0.
+	b := flatbuffers.NewBuilder(64)
+	bk := b.CreateString("b")
+	k := b.CreateString("k")
+	raftpb.PutObjectArgsStart(b)
+	raftpb.PutObjectArgsAddBucket(b, bk)
+	raftpb.PutObjectArgsAddKey(b, k)
+	b.Finish(raftpb.PutObjectArgsEnd(b))
+	require.Equal(t, uint32(0), raftpb.GetRootAsPutObjectArgs(b.FinishedBytes(), 0).SoleauthEpoch())
+}
 
 func TestSoleAuthEpochContextRoundTrip(t *testing.T) {
 	epoch, resolved := bucketSoleAuthEpochFromContext(context.Background())
