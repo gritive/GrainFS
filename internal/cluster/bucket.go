@@ -513,6 +513,47 @@ func (b *DistributedBackend) SetObjectTagsPropose(bucket, key, versionID string,
 // FSM-consistent view; writes flow through Raft and replicate to every
 // node, so the local view is always current modulo replication lag.
 func (b *DistributedBackend) GetObjectTags(bucket, key, versionID string) ([]storage.Tag, error) {
+	// S4c-c-read1 T3: under soleauth=on the per-version blob is the SOLE
+	// AUTHORITY for a vid-bearing versioned object's tags. A blob MISS never
+	// falls through to a stale vid-bearing FSM record — blob absence for a
+	// versioned object is a 404 (no tags). Only carve-out classes
+	// (appendable/coalesced/legacy bare-unversioned) stay FSM-authoritative.
+	if on, err := b.soleAuthReadOn(bucket); err != nil {
+		return nil, err // fail closed
+	} else if on {
+		cmds, verr := b.readQuorumMetaVersions(bucket, key)
+		if verr != nil {
+			return nil, verr
+		}
+		var (
+			cmd  PutObjectMetaCmd
+			live bool
+		)
+		if versionID == "" {
+			cmd, live = deriveLatestVersion(cmds)
+		} else {
+			for _, c := range cmds {
+				if c.VersionID == versionID {
+					cmd, live = c, true
+					break
+				}
+			}
+		}
+		if live {
+			return append([]storage.Tag(nil), cmd.Tags...), nil
+		}
+		// per-version MISS (or only-not-live) under on → carve-out classes ONLY.
+		obj, _, carve, cerr := b.fsmCarveoutObject(bucket, key, versionID)
+		if cerr != nil {
+			return nil, cerr
+		}
+		if carve {
+			return append([]storage.Tag(nil), obj.Tags...), nil
+		}
+		// No vid-bearing-versioned FSM resurrection under sole authority.
+		return nil, storage.ErrObjectNotFound
+	}
+
 	var result []storage.Tag
 	err := b.store.View(func(txn MetadataTxn) error {
 		dbKey := b.ks().ObjectMetaKey(bucket, key)

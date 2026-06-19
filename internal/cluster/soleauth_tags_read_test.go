@@ -1,0 +1,150 @@
+package cluster
+
+import (
+	"context"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/storage"
+)
+
+// TestGetObjectTags_SoleAuthOn_BlobDerive proves that under soleauth=on the
+// per-version blob is the SOLE AUTHORITY for tags: latest (versionID=="") and a
+// specific-version read both return the blob's Tags, a stale vid-bearing FSM
+// record is NEVER resurrected (blob-absent versioned object → 404), carve-out
+// classes (appendable/coalesced/legacy bare-unversioned) fall back to FSM Tags,
+// and a soleauth read error propagates. The off path is byte-identical FSM.
+func TestGetObjectTags_SoleAuthOn_BlobDerive(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("latest via versionID== blob Tags", func(t *testing.T) {
+		b := newTestDistributedBackend(t)
+		require.NoError(t, b.CreateBucket(ctx, "vb"))
+		seedVersionBlob(t, b, "vb", "k", "v1", PutObjectMetaCmd{
+			Tags: []storage.Tag{{Key: "a", Value: "1"}},
+		})
+		seedVersionBlob(t, b, "vb", "k", "v2", PutObjectMetaCmd{
+			Tags:    []storage.Tag{{Key: "b", Value: "2"}},
+			MetaSeq: 1,
+		})
+		setVersioningForTest(t, b, "vb", "Enabled")
+		setSoleAuthForTest(t, b, "vb", soleAuthOn)
+
+		tags, err := b.GetObjectTags("vb", "k", "")
+		require.NoError(t, err)
+		require.Equal(t, []storage.Tag{{Key: "b", Value: "2"}}, tags, "latest derive picks max-VID blob's tags")
+	})
+
+	t.Run("specific-version blob Tags", func(t *testing.T) {
+		b := newTestDistributedBackend(t)
+		require.NoError(t, b.CreateBucket(ctx, "vb"))
+		seedVersionBlob(t, b, "vb", "k", "v1", PutObjectMetaCmd{
+			Tags: []storage.Tag{{Key: "a", Value: "1"}},
+		})
+		seedVersionBlob(t, b, "vb", "k", "v2", PutObjectMetaCmd{
+			Tags:    []storage.Tag{{Key: "b", Value: "2"}},
+			MetaSeq: 1,
+		})
+		setVersioningForTest(t, b, "vb", "Enabled")
+		setSoleAuthForTest(t, b, "vb", soleAuthOn)
+
+		tags, err := b.GetObjectTags("vb", "k", "v1")
+		require.NoError(t, err)
+		require.Equal(t, []storage.Tag{{Key: "a", Value: "1"}}, tags, "specific-version returns that blob's tags")
+	})
+
+	t.Run("blob absent but stale vid-bearing FSM record with Tags 404", func(t *testing.T) {
+		b := newTestDistributedBackend(t)
+		require.NoError(t, b.CreateBucket(ctx, "vb"))
+		// stale FSM versioned record carrying tags, NO per-version blob.
+		seedFSMObject(t, b, "vb", "k", "v1", objectMeta{
+			Key: "k", ETag: "e", Tags: []storage.Tag{{Key: "stale", Value: "yes"}},
+		}, true)
+		setVersioningForTest(t, b, "vb", "Enabled")
+		setSoleAuthForTest(t, b, "vb", soleAuthOn)
+
+		tags, err := b.GetObjectTags("vb", "k", "")
+		require.ErrorIs(t, err, storage.ErrObjectNotFound, "blob-absent versioned object is 404, never stale FSM tags")
+		require.Nil(t, tags)
+	})
+
+	t.Run("appendable carve-out FSM Tags", func(t *testing.T) {
+		b := newTestDistributedBackend(t)
+		require.NoError(t, b.CreateBucket(ctx, "ba"))
+		seedFSMObject(t, b, "ba", "k", "v1", objectMeta{
+			Key: "k", ETag: "e", IsAppendable: true,
+			Tags: []storage.Tag{{Key: "ap", Value: "1"}},
+		}, true)
+		setSoleAuthForTest(t, b, "ba", soleAuthOn)
+
+		tags, err := b.GetObjectTags("ba", "k", "")
+		require.NoError(t, err)
+		require.Equal(t, []storage.Tag{{Key: "ap", Value: "1"}}, tags)
+	})
+
+	t.Run("coalesced carve-out FSM Tags", func(t *testing.T) {
+		b := newTestDistributedBackend(t)
+		require.NoError(t, b.CreateBucket(ctx, "bc"))
+		seedFSMObject(t, b, "bc", "k", "v1", objectMeta{
+			Key: "k", ETag: "e",
+			Coalesced: []CoalescedShardRef{{CoalescedID: "c1", Size: 10}},
+			Tags:      []storage.Tag{{Key: "co", Value: "1"}},
+		}, true)
+		setSoleAuthForTest(t, b, "bc", soleAuthOn)
+
+		tags, err := b.GetObjectTags("bc", "k", "")
+		require.NoError(t, err)
+		require.Equal(t, []storage.Tag{{Key: "co", Value: "1"}}, tags)
+	})
+
+	t.Run("legacy bare-unversioned carve-out FSM Tags", func(t *testing.T) {
+		b := newTestDistributedBackend(t)
+		require.NoError(t, b.CreateBucket(ctx, "bl"))
+		// bare obj: record, NO lat: pointer, not appendable/coalesced.
+		seedFSMObject(t, b, "bl", "k", "", objectMeta{
+			Key: "k", ETag: "e",
+			Tags: []storage.Tag{{Key: "lg", Value: "1"}},
+		}, false)
+		setSoleAuthForTest(t, b, "bl", soleAuthOn)
+
+		tags, err := b.GetObjectTags("bl", "k", "")
+		require.NoError(t, err)
+		require.Equal(t, []storage.Tag{{Key: "lg", Value: "1"}}, tags)
+	})
+
+	t.Run("soleauth read error propagates", func(t *testing.T) {
+		b, db := newTestDistributedBackendWithDB(t)
+		require.NoError(t, b.CreateBucket(ctx, "berr"))
+		require.NoError(t, db.Close())
+		tags, err := b.GetObjectTags("berr", "k", "")
+		require.Error(t, err)
+		require.Nil(t, tags)
+	})
+}
+
+// TestGetObjectTags_SoleAuthOff_ByteIdenticalFSM proves the off (default) path
+// is the unchanged FSM read: a plain versioned FSM record's Tags are returned,
+// and a missing record is ErrObjectNotFound.
+func TestGetObjectTags_SoleAuthOff_ByteIdenticalFSM(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("plain versioned FSM Tags returned (off)", func(t *testing.T) {
+		b := newTestDistributedBackend(t)
+		require.NoError(t, b.CreateBucket(ctx, "off"))
+		seedFSMObject(t, b, "off", "k", "v1", objectMeta{
+			Key: "k", ETag: "e", Tags: []storage.Tag{{Key: "x", Value: "1"}},
+		}, false)
+		tags, err := b.GetObjectTags("off", "k", "v1")
+		require.NoError(t, err)
+		require.Equal(t, []storage.Tag{{Key: "x", Value: "1"}}, tags)
+	})
+
+	t.Run("missing record 404 (off)", func(t *testing.T) {
+		b := newTestDistributedBackend(t)
+		require.NoError(t, b.CreateBucket(ctx, "off2"))
+		tags, err := b.GetObjectTags("off2", "missing", "")
+		require.ErrorIs(t, err, storage.ErrObjectNotFound)
+		require.Nil(t, tags)
+	})
+}
