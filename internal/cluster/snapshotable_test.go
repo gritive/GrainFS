@@ -248,15 +248,16 @@ func TestRestoreObjects_SoleAuthOn_StaleSkip_LegacyPlainFile(t *testing.T) {
 }
 
 // TestBlobExistsExactVersion_ECAnyShardIndex proves the EC presence check
-// considers EVERY shard index, not a fixed shard_0. In a multi-node EC spread
-// each node is assigned a different shard subset, so a node holding (e.g.)
-// shard_3 but not shard_0 still holds its local share and must be vouched —
-// otherwise restore would record it stale and silently drop that node's share.
+// considers EVERY shard index, not a fixed shard_0 (a node holding shard_3 but
+// not shard_0 still holds its share), AND that it enumerates shards from the
+// SNAPSHOT's captured placement, not the live EC config. Here the live config is
+// deliberately drifted SMALL (1+0): the old shard_0/live-NumShards logic would
+// check only one index and miss shard_3; the snapshot placement (4+2 = 6 indices)
+// must drive the check so this node's share is not falsely dropped.
 func TestBlobExistsExactVersion_ECAnyShardIndex(t *testing.T) {
 	b := newSnapshotTestBackend(t)
-	// 6-node 4+2 EC → NumShards 6, clusterSize 6 → IsActive true.
-	nodes := []string{"test-node", "n2", "n3", "n4", "n5", "n6"}
-	b.SetClusterTopology(nodes, ECConfig{DataShards: 4, ParityShards: 2})
+	// Live config drifted to 1+0 (NumShards 1) — must NOT gate the check.
+	b.SetClusterTopology([]string{"test-node"}, ECConfig{DataShards: 1, ParityShards: 0})
 
 	// Write ONLY shard_3 for the exact version (this node's assigned share);
 	// shard_0 is intentionally absent.
@@ -265,11 +266,20 @@ func TestBlobExistsExactVersion_ECAnyShardIndex(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(paths[3]), 0o755))
 	require.NoError(t, os.WriteFile(paths[3], []byte("shard-3-bytes"), 0o644))
 
-	require.True(t, b.blobExistsExactVersion("ecb", "k", "v-ec"),
-		"a node holding shard_3 (not shard_0) must be vouched as present")
+	// Snapshot object carries the captured 4+2 placement.
+	present := storage.SnapshotObject{
+		Bucket: "ecb", Key: "k", VersionID: "v-ec",
+		ECData: 4, ECParity: 2, NodeIDs: []string{"test-node", "n2", "n3", "n4", "n5", "n6"},
+	}
+	require.True(t, b.blobExistsExactVersion(present),
+		"a node holding shard_3 (snapshot placement 4+2) must be vouched despite drifted live config")
 
 	// A different exact version with no local shard at all → absent.
-	require.False(t, b.blobExistsExactVersion("ecb", "k", "v-absent"),
+	absent := storage.SnapshotObject{
+		Bucket: "ecb", Key: "k", VersionID: "v-absent",
+		ECData: 4, ECParity: 2, NodeIDs: []string{"test-node", "n2", "n3", "n4", "n5", "n6"},
+	}
+	require.False(t, b.blobExistsExactVersion(absent),
 		"a version with no local shard must be absent")
 }
 

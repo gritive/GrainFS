@@ -492,7 +492,7 @@ func (b *DistributedBackend) restoreSoleAuthBucketObjects(bucket string, objects
 		// objectPath plain file. Either would publish authoritative per-version
 		// metadata pointing at data shares this node never had (a dangling,
 		// unreadable version). snap.VersionID is guaranteed non-empty (loop guard).
-		if !snap.IsDeleteMarker && !b.blobExistsExactVersion(snap.Bucket, snap.Key, snap.VersionID) {
+		if !snap.IsDeleteMarker && !b.blobExistsExactVersion(snap) {
 			*stale = append(*stale, storage.StaleBlob{
 				Bucket:       snap.Bucket,
 				Key:          snap.Key,
@@ -644,7 +644,7 @@ func (b *DistributedBackend) blobExistsForRestore(snap storage.SnapshotObject) b
 }
 
 // blobExistsExactVersion reports whether THIS NODE holds its local share of the
-// data for the EXACT (bucket, key, versionID).
+// data for the EXACT version described by snap.
 //
 // Per-node restore contract (spec v8 §Snapshot): soleauth-on snapshot/restore is
 // strictly per-node — each node restores its OWN local K-of-N share, the
@@ -656,31 +656,39 @@ func (b *DistributedBackend) blobExistsForRestore(snap storage.SnapshotObject) b
 // its share?" — if yes, publish this node's authoritative per-version metadata;
 // the sweep reconciles cluster-wide reconstructability separately.
 //
+// Shard enumeration uses the SNAPSHOT's captured placement (snap.ECData/ECParity,
+// or len(snap.NodeIDs) as a fallback), NOT the live EC config: the live config may
+// have drifted since capture (e.g. captured 4+2, cluster later reshaped), and a
+// node whose only local shard sits at an index outside the live NumShards() range
+// would otherwise be falsely judged absent and have its share dropped.
+//
 // Unlike blobExists it (1) never resolves an empty VID from the lat: pointer and
 // (2) never falls back to the legacy unversioned objectPath plain file nor to a
 // same-key latest-content match — the restore path uses raw, exact version IDs
 // and must not vouch a missing version via a sibling version or a pre-versioning
 // plain file (which would publish metadata for a version this node has no share
-// of — a spurious entry). versionID is guaranteed non-empty by callers.
-func (b *DistributedBackend) blobExistsExactVersion(bucket, key, versionID string) bool {
-	if versionID == "" {
+// of — a spurious entry). snap.VersionID is guaranteed non-empty by callers.
+func (b *DistributedBackend) blobExistsExactVersion(snap storage.SnapshotObject) bool {
+	if snap.VersionID == "" {
 		return false
 	}
 	// Versioned full-object path for this exact version (non-EC / replicated).
-	if _, err := os.Stat(b.objectPathV(bucket, key, versionID)); err == nil {
+	if _, err := os.Stat(b.objectPathV(snap.Bucket, snap.Key, snap.VersionID)); err == nil {
 		return true
 	}
 	// EC: this node holds its share if ANY shard for the exact version is present
-	// locally. We check EVERY shard index, not a fixed shard_0: in a multi-node EC
+	// locally. We check EVERY shard index (not a fixed shard_0): in a multi-node EC
 	// spread each node is assigned a DIFFERENT shard subset, so a node holding
 	// (say) shard_3 but not shard_0 still holds its share and must publish its
-	// metadata. Checking only shard_0 would record such a node stale and silently
-	// drop its share. (Cluster-wide reconstructability remains the sweep's job.)
-	if b.currentECConfig().IsActive(len(b.configuredNodeList())) {
-		for _, p := range b.ShardPaths(bucket, key, versionID, b.currentECConfig().NumShards()) {
-			if _, err := os.Stat(p); err == nil {
-				return true
-			}
+	// metadata. The shard count comes from the snapshot placement, decoupling this
+	// check from any post-capture live EC reshape.
+	numShards := int(snap.ECData) + int(snap.ECParity)
+	if numShards <= 0 {
+		numShards = len(snap.NodeIDs)
+	}
+	for _, p := range b.ShardPaths(snap.Bucket, snap.Key, snap.VersionID, numShards) {
+		if _, err := os.Stat(p); err == nil {
+			return true
 		}
 	}
 	return false
