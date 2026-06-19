@@ -26,6 +26,7 @@ func (s *Server) putObjectWithUserMetadataAndMD5(
 		err    error
 	)
 	ctx = s.ctxWithBucketVersioning(ctx, bucket)
+	ctx = s.ctxWithSoleAuthEpoch(ctx, bucket)
 	backendStart := time.Now()
 	result, err = s.ops.PutObjectWithRequestResult(ctx, storage.PutObjectRequest{
 		Bucket:         bucket,
@@ -58,6 +59,7 @@ func (s *Server) putObjectWithUserMetadataAndMD5(
 
 func (s *Server) putFormObject(ctx context.Context, bucket, key string, body io.Reader, contentType string) (*storage.PutObjectResult, error) {
 	ctx = s.ctxWithBucketVersioning(ctx, bucket)
+	ctx = s.ctxWithSoleAuthEpoch(ctx, bucket)
 	result, err := s.ops.PutObjectWithResult(ctx, bucket, key, body, contentType)
 	if err != nil {
 		return nil, err
@@ -77,6 +79,18 @@ func (s *Server) putFormObject(ctx context.Context, bucket, key string, body io.
 func (s *Server) ctxWithBucketVersioning(ctx context.Context, bucket string) context.Context {
 	if state, vErr := s.ops.GetBucketVersioning(bucket); vErr == nil {
 		return cluster.ContextWithBucketVersioning(ctx, state == "Enabled")
+	}
+	return ctx
+}
+
+// ctxWithSoleAuthEpoch resolves the bucket's committed soleauth epoch at the S3
+// edge and stamps it onto the context, so a forwarded PUT carries the
+// ORIGINATING node's authoritative epoch (the fence then rejects a write the
+// originator admitted under a stale epoch). A read error leaves the context
+// unstamped → the commit path falls back to a local read.
+func (s *Server) ctxWithSoleAuthEpoch(ctx context.Context, bucket string) context.Context {
+	if e, err := s.ops.GetBucketSoleAuthEpoch(bucket); err == nil {
+		return cluster.ContextWithBucketSoleAuthEpoch(ctx, e)
 	}
 	return ctx
 }

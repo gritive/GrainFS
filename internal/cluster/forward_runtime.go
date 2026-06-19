@@ -135,8 +135,9 @@ func (r forwardRuntime) putObject(
 	bodyReader := req.Body
 	contentType := req.ContentType
 	versioningState := versioningStateFromContext(ctx)
+	soleAuthEpochWire := soleAuthEpochToWire(ctx)
 	if r.sender.streamDialer != nil && shouldStreamForwardBody(bodyReader, r.maxBody) {
-		args := buildPutObjectArgsWithSSE(bucket, key, contentType, nil, req.SystemMetadata.SSEAlgorithm, req.UserMetadata, req.ContentMD5Hex, derefACL(req.ACL), versioningState)
+		args := buildPutObjectArgsWithSSE(bucket, key, contentType, nil, req.SystemMetadata.SSEAlgorithm, req.UserMetadata, req.ContentMD5Hex, derefACL(req.ACL), versioningState, soleAuthEpochWire)
 		ctx = ContextWithPutTrace(ctx, PutTraceRequest{
 			Bucket:      bucket,
 			Key:         key,
@@ -165,7 +166,7 @@ func (r forwardRuntime) putObject(
 	if err != nil {
 		return nil, err
 	}
-	args := buildPutObjectArgsWithSSE(bucket, key, contentType, body, req.SystemMetadata.SSEAlgorithm, req.UserMetadata, req.ContentMD5Hex, derefACL(req.ACL), versioningState)
+	args := buildPutObjectArgsWithSSE(bucket, key, contentType, body, req.SystemMetadata.SSEAlgorithm, req.UserMetadata, req.ContentMD5Hex, derefACL(req.ACL), versioningState, soleAuthEpochWire)
 	ctx = ContextWithPutTrace(ctx, PutTraceRequest{
 		Bucket:      bucket,
 		Key:         key,

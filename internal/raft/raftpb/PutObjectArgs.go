@@ -159,8 +159,20 @@ func (rcv *PutObjectArgs) MutateVersioningState(n byte) bool {
 	return rcv._tab.MutateByteSlot(20, n)
 }
 
+func (rcv *PutObjectArgs) SoleauthEpoch() uint32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
+	if o != 0 {
+		return rcv._tab.GetUint32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *PutObjectArgs) MutateSoleauthEpoch(n uint32) bool {
+	return rcv._tab.MutateUint32Slot(22, n)
+}
+
 func PutObjectArgsStart(builder *flatbuffers.Builder) {
-	builder.StartObject(9)
+	builder.StartObject(10)
 }
 func PutObjectArgsAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -194,6 +206,9 @@ func PutObjectArgsAddAcl(builder *flatbuffers.Builder, acl byte) {
 }
 func PutObjectArgsAddVersioningState(builder *flatbuffers.Builder, versioningState byte) {
 	builder.PrependByteSlot(8, versioningState, 0)
+}
+func PutObjectArgsAddSoleauthEpoch(builder *flatbuffers.Builder, soleauthEpoch uint32) {
+	builder.PrependUint32Slot(9, soleauthEpoch, 0)
 }
 func PutObjectArgsEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

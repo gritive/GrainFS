@@ -46,6 +46,10 @@ func (s *versioningStampSpy) SetBucketVersioning(bucket, state string) error {
 	return nil
 }
 
+func (s *versioningStampSpy) GetBucketSoleAuthEpoch(bucket string) (uint32, error) {
+	return 0, nil
+}
+
 func (s *versioningStampSpy) GetObjectVersion(ctx context.Context, bucket, key, versionID string) (io.ReadCloser, *storage.Object, error) {
 	s.getVersionStamped = ctxVersioningEnabled(ctx)
 	return io.NopCloser(nil), &storage.Object{Key: key, VersionID: versionID}, nil

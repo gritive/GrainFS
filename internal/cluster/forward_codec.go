@@ -61,9 +61,33 @@ func contextWithVersioningState(ctx context.Context, state byte) context.Context
 	}
 }
 
+// soleAuthEpochToWire maps a stamped sole-authority epoch to its +1 wire
+// encoding for PutObjectArgs.soleauth_epoch. 0 (the FlatBuffers default /
+// absent on old peers) means "unstamped" → the receiver leaves ctx unresolved
+// and falls back to a local read; n (n≥1) carries authoritative epoch n-1.
+// Unresolved context (no edge layer stamped it) encodes as 0.
+func soleAuthEpochToWire(ctx context.Context) uint32 {
+	e, ok := bucketSoleAuthEpochFromContext(ctx)
+	if !ok {
+		return 0
+	}
+	return e + 1
+}
+
+// contextWithSoleAuthEpochWire applies a received +1 wire value to the context.
+// Wire 0 leaves the context unresolved so the receiver's commit path falls back
+// to a local read (only reachable from an old peer that omits the field); wire
+// n (n≥1) stamps authoritative epoch n-1.
+func contextWithSoleAuthEpochWire(ctx context.Context, wire uint32) context.Context {
+	if wire == 0 {
+		return ctx
+	}
+	return ContextWithBucketSoleAuthEpoch(ctx, wire-1)
+}
+
 // --- Args builders (request side) ---
 
-func buildPutObjectArgsWithSSE(bucket, key, contentType string, body []byte, sseAlgorithm string, userMetadata map[string]string, contentMD5Hex string, acl uint8, versioningState byte) []byte {
+func buildPutObjectArgsWithSSE(bucket, key, contentType string, body []byte, sseAlgorithm string, userMetadata map[string]string, contentMD5Hex string, acl uint8, versioningState byte, soleAuthEpochWire uint32) []byte {
 	b := flatbuffers.NewBuilder(putObjectArgsBuilderSize(bucket, key, contentType, sseAlgorithm, len(body)))
 	bk := b.CreateString(bucket)
 	k := b.CreateString(key)
@@ -109,6 +133,9 @@ func buildPutObjectArgsWithSSE(bucket, key, contentType string, body []byte, sse
 	}
 	if versioningState != versioningStateUnknown {
 		raftpb.PutObjectArgsAddVersioningState(b, versioningState)
+	}
+	if soleAuthEpochWire != 0 {
+		raftpb.PutObjectArgsAddSoleauthEpoch(b, soleAuthEpochWire)
 	}
 	b.Finish(raftpb.PutObjectArgsEnd(b))
 	return b.FinishedBytes()

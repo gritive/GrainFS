@@ -28,6 +28,10 @@ func (s *listVersionsSpy) SetBucketVersioning(bucket, state string) error {
 	return nil
 }
 
+func (s *listVersionsSpy) GetBucketSoleAuthEpoch(bucket string) (uint32, error) {
+	return 0, nil
+}
+
 func (s *listVersionsSpy) ListObjectVersions(ctx context.Context, bucket, prefix string, maxKeys int) ([]*storage.ObjectVersion, error) {
 	s.seen = true
 	s.stamped = ctxVersioningEnabled(ctx)
