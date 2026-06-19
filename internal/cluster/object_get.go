@@ -203,6 +203,37 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 		return nil, PlacementMeta{}, err
 	}
 
+	// S4c-c-read1 T1: under soleauth=on the per-version blob tree is the SOLE
+	// AUTHORITY for vid-bearing versioned objects. Unlike the availability-first
+	// path below, a blob MISS here never falls through to readQuorumMeta
+	// (latest-only) or a stale vid-bearing FSM record — blob absence for a
+	// versioned object is a 404. Only carve-out classes
+	// (appendable/coalesced/legacy bare-unversioned) stay FSM-authoritative.
+	if on, err := b.soleAuthReadOn(bucket); err != nil {
+		return nil, PlacementMeta{}, err // fail closed
+	} else if on {
+		if cmds, verr := b.readQuorumMetaVersions(bucket, key); verr == nil && len(cmds) > 0 {
+			latest, live := deriveLatestVersion(cmds)
+			if live {
+				obj, pm := objectAndPlacementFromCmd(latest)
+				return obj, pm, nil
+			}
+			// derive found only delete-markers / not-live → object is gone (404),
+			// NOT a fallthrough to FSM.
+			return nil, PlacementMeta{}, storage.ErrObjectNotFound
+		}
+		// per-version MISS under on → carve-out classes ONLY.
+		obj, pm, carve, cerr := b.fsmCarveoutObject(bucket, key, "")
+		if cerr != nil {
+			return nil, PlacementMeta{}, cerr
+		}
+		if carve {
+			return obj, pm, nil
+		}
+		// No vid-bearing-versioned FSM resurrection under sole authority.
+		return nil, PlacementMeta{}, storage.ErrObjectNotFound
+	}
+
 	// S2a: per-version-authoritative latest derive. On a versioning-enabled
 	// bucket, derive latest by scanning the per-version blobs (all-groups
 	// fan-out, spanning generations). Zero blobs → legacy fallback below.

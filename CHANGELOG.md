@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.0.625.0] - 2026-06-20
+
+### Added
+- **Single-object read authority under `soleauth=on` — dormant cutover slice (S4c-c-read1), Enabled-only scope.**
+  The first READ-derive sub-slice of the S4c per-version sole-authority cutover. When a bucket's `soleauth`
+  state is `on` (a per-bucket tri-state; **never `on` in production yet** — the admin flip is a future slice),
+  the single-object read path treats the per-version quorum-meta blob tree as the **sole authority** instead of
+  the availability-first behavior (try blob, fall back to the FSM `obj:`/`lat:` record). In `internal/cluster`:
+  - **HEAD/GET (latest)**, **specific-version read**, and **GetObjectTags** each gain an `on` branch: derive from
+    the per-version blob; a blob-absent vid-bearing versioned object is a 404 (a stale FSM record is never
+    resurrected); a specific delete-marker version folds (405); a not-live latest is a 404.
+  - **Carve-out** classes stay FSM-authoritative under `on` (they have no per-version blob): appendable,
+    coalesced, and legacy unversioned bare records (`obj:{bucket}/{key}` with no version — pre-versioning objects
+    in an Enabled bucket). The classification is single-sourced in a shared helper (`fsmCarveoutObject`) so the
+    three readers cannot drift; bare-vs-versioned is resolved from which FSM key is actually read, not the
+    caller's versionID.
+  - A `GetBucketSoleAuthority` read error **fails closed** (the read errors out; it is never treated as `off`).
+
+  No user-facing behavior change (the `off`/`pending` path — every bucket today — is byte-identical; the `on`
+  branch is unreachable until the future flip). `GetObjectAcl` (latest and specific-version) is covered, since the
+  ACL rides in the object metadata these readers return. The all-version enumeration consumers (ListObjectVersions,
+  bucket emptiness/force-delete, scrubber ScanObjects) and the cluster-wide all-version fan-in are a separate
+  sub-slice (S4c-c-read2).
+
 ## [0.0.624.0] - 2026-06-20
 
 ### Added

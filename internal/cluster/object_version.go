@@ -46,6 +46,33 @@ func (b *DistributedBackend) headObjectMetaV(ctx context.Context, bucket, key, v
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, PlacementMeta{}, err
 	}
+	// S4c-c-read1 T2: under soleauth=on the per-version blob is the SOLE AUTHORITY
+	// for the exact requested versionID of a vid-bearing versioned object. Unlike
+	// the availability-first path below, a blob MISS here never falls through to a
+	// stale vid-bearing FSM record — blob absence for a versioned object is a 404.
+	// Only carve-out classes (appendable/coalesced/legacy bare-unversioned) stay
+	// FSM-authoritative.
+	if on, err := b.soleAuthReadOn(bucket); err != nil {
+		return nil, PlacementMeta{}, err // fail closed
+	} else if on {
+		if cmd, ok, verr := b.readQuorumMetaVersion(bucket, key, versionID); verr == nil && ok {
+			if cmd.IsDeleteMarker {
+				return nil, PlacementMeta{}, storage.ErrMethodNotAllowed
+			}
+			obj, pm := objectAndPlacementFromCmd(cmd)
+			return obj, pm, nil
+		}
+		// per-version MISS under on → carve-out classes ONLY.
+		obj, pm, carve, cerr := b.fsmCarveoutObject(bucket, key, versionID)
+		if cerr != nil {
+			return nil, PlacementMeta{}, cerr
+		}
+		if carve {
+			return obj, pm, nil
+		}
+		// No vid-bearing-versioned FSM resurrection under sole authority.
+		return nil, PlacementMeta{}, storage.ErrObjectNotFound
+	}
 	// S2a: per-version-authoritative specific-version read. On a versioning-enabled
 	// bucket the per-version store is the primary source: a hit returns/folds.
 	// On a MISS we fall through to the BadgerDB ObjectMetaKeyV FSM read ONLY,
