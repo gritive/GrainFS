@@ -74,6 +74,11 @@ type ShardService struct {
 	// and clobber the true LWW winner. The temp-create/write/fsync/close steps
 	// remain outside the lock (each writer uses a unique temp name; no contention).
 	quorumMetaTargetLocks pool.SyncMap[string, *sync.Mutex]
+	// bucketSoleAuthLocks holds the per-bucket fence RWMutex. The flip
+	// (applySetBucketSoleAuthority) takes the bucket WRITE-lock; later the
+	// quorum-meta leaves take the bucket READ-lock so an in-flight flip fences
+	// concurrent writes. DORMANT until the leaves are wired (Task 4).
+	bucketSoleAuthLocks pool.SyncMap[string, *sync.RWMutex]
 }
 
 // ShardServiceOption is a functional option for ShardService.
@@ -164,6 +169,15 @@ func (s *ShardService) DataDirs() []string {
 // callers always converge on a single Mutex per target path.
 func (s *ShardService) quorumMetaTargetLock(target string) *sync.Mutex {
 	v, _ := s.quorumMetaTargetLocks.LoadOrStore(target, &sync.Mutex{})
+	return v
+}
+
+// bucketSoleAuthLock returns the per-bucket fence RWMutex that the soleauth
+// flip write-locks (and, once wired, the quorum-meta leaves read-lock). Mirrors
+// quorumMetaTargetLock: LoadOrStore is atomic so concurrent callers always
+// converge on a single RWMutex per bucket.
+func (s *ShardService) bucketSoleAuthLock(bucket string) *sync.RWMutex {
+	v, _ := s.bucketSoleAuthLocks.LoadOrStore(bucket, &sync.RWMutex{})
 	return v
 }
 
