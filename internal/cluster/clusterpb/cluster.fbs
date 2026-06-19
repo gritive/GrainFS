@@ -1586,3 +1586,11 @@ table MultipartDone {
 table DeleteMultipartDoneCmd {
   upload_ids:[string];
 }
+
+// SetBucketSoleAuthorityCmd (cmd 44): per-bucket tri-state sole-authority flag.
+// State is one of "off", "pending", "on" (one-way: off→pending→on; pending→off abort).
+// Inert foundation for the S4c sole-authority cutover — no reader yet.
+table SetBucketSoleAuthorityCmd {
+  bucket:string;
+  state:string;
+}
