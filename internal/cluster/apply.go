@@ -136,6 +136,8 @@ func (f *FSM) ApplyTxn(txn MetadataTxn, raw []byte) error {
 		return f.applyDeleteObjectVersion(txn, cmd.Data)
 	case CmdSetBucketVersioning:
 		return f.applySetBucketVersioning(txn, cmd.Data)
+	case CmdSetBucketSoleAuthority:
+		return f.applySetBucketSoleAuthority(txn, cmd.Data)
 	case CmdSetObjectACL:
 		return f.applySetObjectACL(txn, cmd.Data)
 	case CmdSetObjectTags:
@@ -609,6 +611,39 @@ func (f *FSM) applySetBucketVersioning(txn MetadataTxn, data []byte) error {
 		return err
 	}
 	return txn.Set(f.keys.BucketVerKey(c.Bucket), []byte(c.State))
+}
+
+// applySetBucketSoleAuthority handles CmdSetBucketSoleAuthority: it enforces
+// the one-way tri-state guard (off→pending→on; pending→off abort; on terminal)
+// and writes the soleauth state raw to BucketSoleAuthKey — mirroring
+// applySetBucketVersioning which also writes the versioning state raw.
+func (f *FSM) applySetBucketSoleAuthority(txn MetadataTxn, data []byte) error {
+	c, err := decodeSetBucketSoleAuthorityCmd(data)
+	if err != nil {
+		return err
+	}
+	if _, err := txn.Get(f.keys.BucketKey(c.Bucket)); err == ErrMetaKeyNotFound {
+		return storage.ErrBucketNotFound
+	} else if err != nil {
+		return err
+	}
+	if c.State != soleAuthOff && c.State != soleAuthPending && c.State != soleAuthOn {
+		return fmt.Errorf("invalid soleauth state %q", c.State)
+	}
+	cur := soleAuthOff
+	if item, gerr := txn.Get(f.keys.BucketSoleAuthKey(c.Bucket)); gerr == nil {
+		raw, e := item.ValueCopy(nil)
+		if e != nil {
+			return e
+		}
+		cur = string(raw)
+	} else if gerr != ErrMetaKeyNotFound {
+		return gerr
+	}
+	if !soleAuthTransitionAllowed(cur, c.State) {
+		return fmt.Errorf("soleauth transition refused for %s: %s -> %s (one-way off->pending->on; pending->off abort; on terminal)", c.Bucket, cur, c.State)
+	}
+	return txn.Set(f.keys.BucketSoleAuthKey(c.Bucket), []byte(c.State))
 }
 
 func (f *FSM) applySetObjectACL(txn MetadataTxn, data []byte) error {
