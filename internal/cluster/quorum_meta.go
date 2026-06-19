@@ -936,6 +936,48 @@ func (s *ShardService) ScanQuorumMetaVersionsBucket(bucket, prefix string) ([]Pu
 	return out, nil
 }
 
+// ScanQuorumMetaVersionsBucketAll walks + decodes + prefix-filters IDENTICALLY to
+// ScanQuorumMetaVersionsBucket but is an ADDITIVE all-version enumerator — it
+// returns EVERY version blob (cost O(total versions on this node)) instead of the
+// per-key max. Consumed by S4c-b snapshot absent-blob purge + S4c-c flag-on LIST
+// (NOT yet wired). Do NOT reroute the max-per-key consumers (listObjectsPerVersion)
+// through it.
+func (s *ShardService) ScanQuorumMetaVersionsBucketAll(bucket, prefix string) ([]PutObjectMetaCmd, error) {
+	if len(s.dataDirs) == 0 {
+		return nil, nil
+	}
+	bucketRoot := filepath.Join(s.dataDirs[0], quorumMetaVersionsSubDir, bucket)
+	out := []PutObjectMetaCmd{}
+	err := filepath.WalkDir(bucketRoot, func(path string, d fs.DirEntry, werr error) error {
+		if werr != nil {
+			if os.IsNotExist(werr) {
+				return nil
+			}
+			return werr
+		}
+		if d.IsDir() || isQuorumMetaTempName(d.Name()) {
+			return nil
+		}
+		data, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return nil // tolerate a transient unreadable blob
+		}
+		cmd, derr := s.decodeQuorumMetaCmdBlob(data)
+		if derr != nil {
+			return nil
+		}
+		if prefix != "" && !strings.HasPrefix(cmd.Key, prefix) {
+			return nil
+		}
+		out = append(out, cmd)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ScanQuorumMetaVersions fans the per-version bucket walk to a remote node and
 // returns its per-key max-VersionID PutObjectMetaCmds (markers included).
 func (s *ShardService) ScanQuorumMetaVersions(ctx context.Context, addr, bucket, prefix string) ([]PutObjectMetaCmd, error) {
@@ -961,6 +1003,46 @@ func (s *ShardService) ScanQuorumMetaVersions(ctx context.Context, addr, bucket,
 	blobs, uerr := unpackBlobList(data) // NOTE: two-return
 	if uerr != nil {
 		return nil, fmt.Errorf("unpack scan quorum meta versions response: %w", uerr)
+	}
+	out := make([]PutObjectMetaCmd, 0, len(blobs))
+	for _, blob := range blobs {
+		if cmd, derr := s.decodeQuorumMetaCmdBlob(blob); derr == nil {
+			out = append(out, cmd)
+		}
+	}
+	return out, nil
+}
+
+// ScanQuorumMetaVersionsAll queries one peer for EVERY per-version quorum-meta
+// blob under the bucket (no max-per-key collapse), via the ScanQuorumMetaVersionsAll
+// RPC. Mirrors ScanQuorumMetaVersions but returns all versions. FAIL-CLOSED: a peer
+// "Error" reply — including an un-upgraded peer that doesn't know the msgType — is
+// fatal; consumers of the all-version enumeration must NOT degrade to a partial
+// result (a missed orphan blob / version would be unsafe), unlike the partial-
+// tolerant max-per-key read.
+func (s *ShardService) ScanQuorumMetaVersionsAll(ctx context.Context, addr, bucket, prefix string) ([]PutObjectMetaCmd, error) {
+	if s.transport == nil {
+		return nil, fmt.Errorf("scan quorum meta versions all: no transport")
+	}
+	envb := buildShardEnvelope("ScanQuorumMetaVersionsAll", bucket, prefix, 0, nil, 0)
+	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
+	respEnvelope, err := s.callShardRPC(ctx, addr, envb)
+	if err != nil {
+		return nil, fmt.Errorf("scan quorum meta versions all from %s: %w", addr, err)
+	}
+	rpcType, data, err := unmarshalEnvelope(respEnvelope)
+	if err != nil {
+		return nil, fmt.Errorf("unmarshal scan quorum meta versions all response: %w", err)
+	}
+	if rpcType == "Error" {
+		return nil, fmt.Errorf("remote scan quorum meta versions all error from %s", addr)
+	}
+	if len(data) == 0 {
+		return nil, nil
+	}
+	blobs, uerr := unpackBlobList(data)
+	if uerr != nil {
+		return nil, fmt.Errorf("unpack scan quorum meta versions all response: %w", uerr)
 	}
 	out := make([]PutObjectMetaCmd, 0, len(blobs))
 	for _, blob := range blobs {

@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.0.623.0] - 2026-06-19
+
+### Added
+- **Backfill soleauth-skip + all-versions quorum-meta enumerator — dormant cutover primitives (S4c-a3).**
+  Two foundations for the sole-authority cutover, both dormant in production (no bucket is ever
+  `pending`/`on` until a future slice ships the admin flip). In `internal/cluster`:
+  - The per-version backfill walker now **fail-CLOSES** for a bucket whose `soleauth` is `pending`/`on`
+    (a mid/post-cutover bucket must not have leaderless backfill writing per-version blobs under the
+    fence) — and also skips on a soleauth read error, so an unreadable state can never become a
+    write-under-fence.
+  - A true **all-versions** quorum-meta enumerator: `ScanQuorumMetaVersionsBucketAll` (local scan that
+    returns every version blob, not collapsed to the per-key max like `ScanQuorumMetaVersionsBucket`) +
+    a new `ScanQuorumMetaVersionsAll` peer RPC, **fail-closed** on an un-upgraded peer (a partial
+    all-version enumeration would miss orphan blobs/versions). It ships ahead of its consumers (later
+    slices' snapshot absent-blob purge + flag-on LIST) as a rolling-upgrade primitive, so the RPC is on
+    every node before any consumer fans out.
+
+  No on-disk format change, no wire/FlatBuffers change (the RPC reuses the existing shard envelope +
+  blob-list format), and no user-facing API change. The existing max-per-key scan and its LIST consumer
+  are untouched.
+
 ## [0.0.622.0] - 2026-06-19
 
 ### Added
