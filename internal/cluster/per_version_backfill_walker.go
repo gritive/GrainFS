@@ -215,6 +215,16 @@ func (b *DistributedBackend) walkPerVersionBackfillCandidates(
 	if !b.owningGroupHosted(bucket) {
 		return nil
 	}
+	// Soleauth pending/on: the bucket is mid/post-cutover; leaderless backfill must
+	// not write per-version blobs under the fence (the cutover relies on sole-
+	// authority writes only). FAIL-CLOSED: a soleauth READ error must ALSO skip —
+	// GetBucketSoleAuthority maps only an ABSENT key to "off"; a real error returns
+	// ("", err), so swallowing it would let a pending/on bucket backfill under the
+	// fence. Skipping on error is safe: backfill is periodic + idempotent (retried
+	// next cycle). Dormant: every prod bucket is off (no skip).
+	if sa, saErr := b.GetBucketSoleAuthority(bucket); backfillSkipForSoleAuth(sa, saErr) {
+		return nil
+	}
 	if b.shardSvc == nil {
 		return nil
 	}
@@ -283,6 +293,16 @@ func (b *DistributedBackend) walkPerVersionBackfillCandidates(
 			Meta:      meta,
 		})
 	})
+}
+
+// backfillSkipForSoleAuth decides whether the per-version backfill walker must
+// skip a bucket given its soleauth state and the error from reading it.
+// FAIL-CLOSED: a non-nil read error skips (a pending/on bucket must never
+// backfill under the fence; GetBucketSoleAuthority maps only an absent key to
+// "off", so a real error means the true state is unknown). A pending or on state
+// skips. Only an off state with no error proceeds.
+func backfillSkipForSoleAuth(state string, err error) bool {
+	return err != nil || state == soleAuthPending || state == soleAuthOn
 }
 
 // segmentRefsToMetaEntries converts []storage.SegmentRef back to
