@@ -64,6 +64,67 @@ func TestRestoreObjects_SoleAuthOn_RawVIDs(t *testing.T) {
 	require.True(t, gv[0].IsDeleteMarker, "restored blob must have IsDeleteMarker=true")
 }
 
+// TestRestoreObjects_SoleAuthOn_ForceRevertsNewerBlob proves the CENTRAL
+// correctness path: a NON-marker on-bucket object whose data blob IS present is
+// force-overwritten — reverting a strictly-NEWER live per-version blob to the
+// snapshot's OLDER one, beating the LWW guard that the normal guarded write path
+// would have blocked. This is the behavior the task exists for; the delete-marker
+// test above skips blobExistsForRestore, so this test exercises the real path.
+func TestRestoreObjects_SoleAuthOn_ForceRevertsNewerBlob(t *testing.T) {
+	b := newSnapshotTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "vbf"))
+
+	// Seed a NEWER live per-version blob (ETag "live-new", high ModTime/MetaSeq)
+	// BEFORE cutover. Under the guarded write path this would win LWW; force wins.
+	seedVersionBlob(t, b, "vbf", "k", "v1", PutObjectMetaCmd{
+		ETag:     "live-new",
+		ModTime:  500,
+		MetaSeq:  7,
+		ECData:   2,
+		ECParity: 1,
+		NodeIDs:  []string{"n1", "n2", "n3"},
+	})
+	setVersioningForTest(t, b, "vbf", "Enabled")
+	setSoleAuthForTest(t, b, "vbf", soleAuthOn)
+
+	// Seed a REAL filesystem data blob at the versioned path so blobExistsForRestore
+	// returns true (HeadObject returns ETag "live-new" != snap "snap-old", so it
+	// falls through to blobExists → os.Stat(objectPathV) hit). The stale branch is
+	// thus NOT taken and the force-write proceeds. Mirrors the off-path seeding in
+	// TestRestoreObjects_SoleAuthOff_Unchanged.
+	p := b.objectPathV("vbf", "k", "v1")
+	require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
+	require.NoError(t, os.WriteFile(p, []byte("data"), 0o644))
+
+	// Non-marker snapshot entry for the SAME (key, raw vid) with the OLDER ETag.
+	snap := []storage.SnapshotObject{{
+		Bucket:    "vbf",
+		Key:       "k",
+		VersionID: "v1",
+		ETag:      "snap-old",
+		Size:      4,
+		Modified:  100, // older than the live blob's 500
+		ECData:    2,
+		ECParity:  1,
+		NodeIDs:   []string{"n1", "n2", "n3"},
+		IsLatest:  true,
+	}}
+
+	count, stale, err := b.RestoreObjects(snap)
+	require.NoError(t, err)
+	require.Empty(t, stale, "non-marker object with present data blob must NOT be reported stale")
+	require.Equal(t, 1, count, "exactly one on-bucket object force-written")
+
+	// The force-write must have reverted the newer "live-new" blob to "snap-old".
+	// The guarded write path (writeQuorumMetaVersionLocal) would have KEPT "live-new"
+	// because it wins LWW (higher ModTime/MetaSeq). Force wins → "snap-old".
+	gv, rErr := b.shardSvc.readQuorumMetaVersionsLocal("vbf", "k")
+	require.NoError(t, rErr)
+	require.Len(t, gv, 1, "expected exactly one version blob for vbf/k")
+	require.Equal(t, "snap-old", gv[0].ETag, "force-overwrite must revert newer live blob to snapshot's older one")
+}
+
 // TestRestoreObjects_SoleAuthOn_StaleSkip proves that RestoreObjects records a
 // StaleBlob and does NOT write the per-version blob when a soleauth-on object's
 // data blob is absent from this node.
