@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.622.0] - 2026-06-19
+
+### Added
+- **Forwarded-PUT soleauth-epoch stamp — closes the forwarded-write fence window, still dormant (S4c-a2-B).**
+  Extends the dormant cutover fence (0.0.621.0) so a forwarded S3 PUT carries the **originating** node's
+  soleauth epoch on the forward wire, instead of the owner re-reading its own. During a future cutover this
+  fences a write that a lagging originator admitted under a stale epoch; today it stays dormant (every bucket
+  is epoch 0). Mirrors the existing bucket-versioning forward-stamp pattern. In `internal/cluster`,
+  `internal/server`, `internal/raft`:
+  - Additive `soleauth_epoch` scalar on the `PutObjectArgs` forward wire, with **+1 encoding** (0 = absent →
+    receiver falls back to a local read; n = epoch n-1) so a valid epoch 0 is distinguishable from "unstamped".
+    Backward-compatible (old peers omit it → default 0 → fallback).
+  - Context primitives `ContextWithBucketSoleAuthEpoch` + the wire codec, stamped at the S3 PUT edge
+    (`ctxWithSoleAuthEpoch` reading `Operations.GetBucketSoleAuthEpoch`), carried on the forward send, and
+    re-stamped on the forward receiver.
+  - `writeQuorumMeta` now prefers the context-stamped epoch over a local read (`resolveQuorumMetaEpoch`);
+    behavior-neutral for non-forwarded PUTs (same node).
+
+  No on-disk format change and no user-facing API change. The delete forward-wire epoch (deletes are still
+  fenced by the owner's local epoch) is tracked as a follow-up, consistent with the versioning forward stamp
+  being PUT-only.
+
 ## [0.0.621.0] - 2026-06-19
 
 ### Added
