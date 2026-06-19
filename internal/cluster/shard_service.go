@@ -284,7 +284,7 @@ func (s *ShardService) Ping(ctx context.Context, peer string) error {
 	if s.transport == nil {
 		return fmt.Errorf("shard service: no transport")
 	}
-	b := buildShardEnvelope("Ping", "_grainfs_health", "_ping", 0, nil)
+	b := buildShardEnvelope("Ping", "_grainfs_health", "_ping", 0, nil, 0)
 	defer func() { b.Reset(); shardBuilderPool.Put(b) }()
 	_, err = s.callShardRPC(ctx, peerAddr, b)
 	return err
@@ -323,7 +323,7 @@ func (s *ShardService) WriteShard(ctx context.Context, peer, bucket, key string,
 		return fmt.Errorf("shard service: no transport")
 	}
 	buildStart := time.Now()
-	envb := buildShardEnvelope("WriteShard", bucket, key, int32(shardIdx), data)
+	envb := buildShardEnvelope("WriteShard", bucket, key, int32(shardIdx), data, 0)
 	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
 	ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteBuild, buildStart, PutTraceStageFields{
 		Bytes:            int64(len(data)),
@@ -441,7 +441,7 @@ func (s *ShardService) ReadShard(ctx context.Context, peer, bucket, key string, 
 	if s.transport == nil {
 		return nil, fmt.Errorf("shard service: no transport")
 	}
-	envb := buildShardEnvelope("ReadShard", bucket, key, int32(shardIdx), nil)
+	envb := buildShardEnvelope("ReadShard", bucket, key, int32(shardIdx), nil, 0)
 	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
 	respEnvelope, err := s.callShardRPC(ctx, peerAddr, envb)
 	if err != nil {
@@ -479,7 +479,7 @@ func (s *ShardService) ReadShardRange(ctx context.Context, peer, bucket, key str
 	var rangePayload [16]byte
 	binary.BigEndian.PutUint64(rangePayload[0:8], uint64(offset))
 	binary.BigEndian.PutUint64(rangePayload[8:16], uint64(length))
-	envb := buildShardEnvelope("ReadShardRange", bucket, key, int32(shardIdx), rangePayload[:])
+	envb := buildShardEnvelope("ReadShardRange", bucket, key, int32(shardIdx), rangePayload[:], 0)
 	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
 	respEnvelope, err := s.callShardRPC(ctx, peerAddr, envb)
 	if err != nil {
@@ -552,7 +552,7 @@ func (s *ShardService) DeleteShards(ctx context.Context, peer, bucket, key strin
 	if s.transport == nil {
 		return fmt.Errorf("shard service: no transport")
 	}
-	envb := buildShardEnvelope("DeleteShards", bucket, key, 0, nil)
+	envb := buildShardEnvelope("DeleteShards", bucket, key, 0, nil, 0)
 	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
 	_, err = s.callShardRPC(ctx, peerAddr, envb)
 	return err
@@ -560,7 +560,7 @@ func (s *ShardService) DeleteShards(ctx context.Context, peer, bucket, key strin
 
 // buildShardEnvelope builds an RPCMessage FlatBuffer wrapping a ShardRequest without make+copy.
 // Returns a Builder that MUST be Reset()+Put() to shardBuilderPool after use.
-func buildShardEnvelope(msgType, bucket, key string, shardIdx int32, data []byte) *flatbuffers.Builder {
+func buildShardEnvelope(msgType, bucket, key string, shardIdx int32, data []byte, admittedEpoch uint32) *flatbuffers.Builder {
 	// Build ShardRequest in b; b.FinishedBytes() points into b's internal buffer.
 	requestSize := len(data) + len(bucket) + len(key) + 128
 	b := getShardBuilder(requestSize)
@@ -577,6 +577,7 @@ func buildShardEnvelope(msgType, bucket, key string, shardIdx int32, data []byte
 	if len(data) > 0 {
 		pb.ShardRequestAddData(b, dataOff)
 	}
+	pb.ShardRequestAddAdmittedSoleauthEpoch(b, admittedEpoch)
 	b.Finish(pb.ShardRequestEnd(b))
 	srBytes := b.FinishedBytes()
 
@@ -804,10 +805,11 @@ func unmarshalShardRequest(data []byte) (req *shardRequest, err error) {
 	}()
 	t := pb.GetRootAsShardRequest(data, 0)
 	return &shardRequest{
-		Bucket:   string(t.Bucket()),
-		Key:      string(t.Key()),
-		ShardIdx: t.ShardIdx(),
-		Data:     t.DataBytes(),
+		Bucket:                string(t.Bucket()),
+		Key:                   string(t.Key()),
+		ShardIdx:              t.ShardIdx(),
+		Data:                  t.DataBytes(),
+		AdmittedSoleAuthEpoch: t.AdmittedSoleauthEpoch(),
 	}, nil
 }
 
@@ -817,6 +819,10 @@ type shardRequest struct {
 	Key      string
 	ShardIdx int32
 	Data     []byte
+	// AdmittedSoleAuthEpoch carries the originating coordinator's sole-authority
+	// epoch on a fenced quorum-meta write/delete. DORMANT (S4c-a2-A T3): every
+	// caller currently passes 0; Task 4 supplies the real epoch at fenced sites.
+	AdmittedSoleAuthEpoch uint32
 }
 
 func (s *ShardService) handleWrite(sr *shardRequest) []byte {

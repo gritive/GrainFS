@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	flatbuffers "github.com/google/flatbuffers/go"
+	pb "github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -192,4 +194,49 @@ func TestFSM_Flip_HoldsFenceWriteLock(t *testing.T) {
 
 	// The transition actually landed.
 	require.Equal(t, uint32(1), fsmSoleAuthEpoch(t, fsm, bucket))
+}
+
+// TestShardEnvelope_EpochRoundTrip asserts the additive admitted_soleauth_epoch
+// scalar survives the build→unwrap→decode path on the shard wire envelope
+// (S4c-a2-A T3). It also pins the FlatBuffers default-0 behavior for both an
+// envelope built with epoch 0 and a bare ShardRequest from a hypothetical old
+// peer that omits the field entirely.
+func TestShardEnvelope_EpochRoundTrip(t *testing.T) {
+	t.Run("nonzero epoch round-trips", func(t *testing.T) {
+		envb := buildShardEnvelope("WriteQuorumMeta", "b", "k", 0, []byte("data"), 7)
+		defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
+
+		_, srData, err := unmarshalEnvelope(envb.FinishedBytes())
+		require.NoError(t, err)
+		sr, err := unmarshalShardRequest(srData)
+		require.NoError(t, err)
+		assert.Equal(t, uint32(7), sr.AdmittedSoleAuthEpoch)
+	})
+
+	t.Run("epoch 0 decodes 0", func(t *testing.T) {
+		envb := buildShardEnvelope("WriteQuorumMeta", "b", "k", 0, []byte("data"), 0)
+		defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
+
+		_, srData, err := unmarshalEnvelope(envb.FinishedBytes())
+		require.NoError(t, err)
+		sr, err := unmarshalShardRequest(srData)
+		require.NoError(t, err)
+		assert.Equal(t, uint32(0), sr.AdmittedSoleAuthEpoch)
+	})
+
+	t.Run("old peer omitting the field decodes default 0", func(t *testing.T) {
+		// Simulate an old peer: build a bare ShardRequest WITHOUT calling
+		// ShardRequestAddAdmittedSoleauthEpoch, so the field is absent on the wire.
+		b := flatbuffers.NewBuilder(64)
+		bucketOff := b.CreateString("b")
+		keyOff := b.CreateString("k")
+		pb.ShardRequestStart(b)
+		pb.ShardRequestAddBucket(b, bucketOff)
+		pb.ShardRequestAddKey(b, keyOff)
+		b.Finish(pb.ShardRequestEnd(b))
+
+		sr, err := unmarshalShardRequest(b.FinishedBytes())
+		require.NoError(t, err)
+		assert.Equal(t, uint32(0), sr.AdmittedSoleAuthEpoch)
+	})
 }

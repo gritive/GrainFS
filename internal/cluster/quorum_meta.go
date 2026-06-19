@@ -522,7 +522,7 @@ func (s *ShardService) ReadQuorumMetaVersions(ctx context.Context, addr, bucket,
 	if s.transport == nil {
 		return nil, fmt.Errorf("quorum meta versions: no transport")
 	}
-	envb := buildShardEnvelope("ReadQuorumMetaVersions", bucket, key, 0, nil)
+	envb := buildShardEnvelope("ReadQuorumMetaVersions", bucket, key, 0, nil, 0)
 	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
 	respEnvelope, err := s.callShardRPC(ctx, addr, envb)
 	if err != nil {
@@ -904,7 +904,7 @@ func (s *ShardService) ScanQuorumMetaVersions(ctx context.Context, addr, bucket,
 	if s.transport == nil {
 		return nil, fmt.Errorf("scan quorum meta versions: no transport")
 	}
-	envb := buildShardEnvelope("ScanQuorumMetaVersions", bucket, prefix, 0, nil)
+	envb := buildShardEnvelope("ScanQuorumMetaVersions", bucket, prefix, 0, nil, 0)
 	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
 	respEnvelope, err := s.callShardRPC(ctx, addr, envb)
 	if err != nil {
@@ -982,7 +982,7 @@ func (s *ShardService) DeleteQuorumMetaVersion(ctx context.Context, addr, bucket
 	if s.transport == nil {
 		return fmt.Errorf("quorum meta version: no transport")
 	}
-	envb := buildShardEnvelope("DeleteQuorumMetaVersion", bucket, path.Join(key, versionID), 0, nil)
+	envb := buildShardEnvelope("DeleteQuorumMetaVersion", bucket, path.Join(key, versionID), 0, nil, 0)
 	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
 	respEnvelope, err := s.callShardRPC(ctx, addr, envb)
 	if err != nil {
@@ -1056,7 +1056,7 @@ func (s *ShardService) ReadQuorumMetaRaw(ctx context.Context, addr, bucket, key 
 	if s.transport == nil {
 		return nil, fmt.Errorf("quorum meta read: no transport")
 	}
-	envb := buildShardEnvelope("ReadQuorumMeta", bucket, key, 0, nil)
+	envb := buildShardEnvelope("ReadQuorumMeta", bucket, key, 0, nil, 0)
 	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
 	respEnvelope, err := s.callShardRPC(ctx, addr, envb)
 	if err != nil {
@@ -1092,7 +1092,7 @@ func (s *ShardService) WriteQuorumMeta(ctx context.Context, addr, bucket, key st
 	if s.transport == nil {
 		return fmt.Errorf("quorum meta: no transport")
 	}
-	envb := buildShardEnvelope("WriteQuorumMeta", bucket, key, 0, data)
+	envb := buildShardEnvelope("WriteQuorumMeta", bucket, key, 0, data, 0)
 	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
 	respEnvelope, err := s.callShardRPC(ctx, addr, envb)
 	if err != nil {
@@ -1116,7 +1116,7 @@ func (s *ShardService) WriteQuorumMetaVersion(ctx context.Context, addr, bucket,
 	if s.transport == nil {
 		return fmt.Errorf("quorum meta version: no transport")
 	}
-	envb := buildShardEnvelope("WriteQuorumMetaVersion", bucket, versionSubpath, 0, data)
+	envb := buildShardEnvelope("WriteQuorumMetaVersion", bucket, versionSubpath, 0, data, 0)
 	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
 	respEnvelope, err := s.callShardRPC(ctx, addr, envb)
 	if err != nil {
@@ -1138,7 +1138,7 @@ func (s *ShardService) DeleteQuorumMeta(ctx context.Context, addr, bucket, key s
 	if s.transport == nil {
 		return fmt.Errorf("quorum meta: no transport")
 	}
-	envb := buildShardEnvelope("DeleteQuorumMeta", bucket, key, 0, nil)
+	envb := buildShardEnvelope("DeleteQuorumMeta", bucket, key, 0, nil, 0)
 	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
 	respEnvelope, err := s.callShardRPC(ctx, addr, envb)
 	if err != nil {
@@ -1333,7 +1333,7 @@ func (s *ShardService) ScanQuorumMeta(ctx context.Context, addr, bucket, prefix 
 	if s.transport == nil {
 		return nil, fmt.Errorf("scan quorum meta: no transport")
 	}
-	envb := buildShardEnvelope("ScanQuorumMeta", bucket, prefix, 0, nil)
+	envb := buildShardEnvelope("ScanQuorumMeta", bucket, prefix, 0, nil, 0)
 	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
 	respEnvelope, err := s.callShardRPC(ctx, addr, envb)
 	if err != nil {
