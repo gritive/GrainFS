@@ -208,6 +208,45 @@ func TestRestoreObjects_SoleAuthOn_StaleSkip_ExactVersion(t *testing.T) {
 	require.Equal(t, "dup", stale[0].ExpectedETag)
 }
 
+// TestRestoreObjects_SoleAuthOn_StaleSkip_LegacyPlainFile proves the exact-version
+// presence check does NOT vouch an absent snapshot version via a legacy
+// unversioned plain file (data/<bucket>/<key>, no version suffix). blobExists
+// falls through to os.Stat(objectPath(bucket,key)) for ANY versionID, which would
+// publish authoritative per-version metadata for a version whose exact shares are
+// missing. The on-path must use an exact-version-only check.
+func TestRestoreObjects_SoleAuthOn_StaleSkip_LegacyPlainFile(t *testing.T) {
+	b := newSnapshotTestBackend(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "vlg"))
+	setVersioningForTest(t, b, "vlg", "Enabled")
+	setSoleAuthForTest(t, b, "vlg", soleAuthOn)
+
+	// Seed ONLY a legacy unversioned plain file (no version suffix). The exact
+	// version "v-leg" has NO objectPathV/shard data on this node.
+	lp := b.objectPath("vlg", "k")
+	require.NoError(t, os.MkdirAll(filepath.Dir(lp), 0o755))
+	require.NoError(t, os.WriteFile(lp, []byte("legacy"), 0o644))
+
+	snap := []storage.SnapshotObject{{
+		Bucket:    "vlg",
+		Key:       "k",
+		VersionID: "v-leg",
+		ETag:      "etag-leg",
+		Size:      6,
+		Modified:  100,
+		IsLatest:  true,
+	}}
+
+	count, stale, err := b.RestoreObjects(snap)
+	require.NoError(t, err)
+	require.Zero(t, count, "absent exact version must NOT be force-written via a legacy plain file")
+	require.Len(t, stale, 1, "absent exact version must be recorded stale")
+	require.Equal(t, "k", stale[0].Key)
+
+	gv, _ := b.shardSvc.readQuorumMetaVersionsLocal("vlg", "k")
+	require.Empty(t, gv, "no per-version blob must be published for the absent version")
+}
+
 // TestRestoreObjects_SoleAuthOff_Unchanged proves that the off-path behaviour is
 // byte-identical: existing resolveRestoreObjectVersionIDs + CmdPutObjectMeta
 // re-propose still runs for off-bucket objects, and the function returns the

@@ -485,13 +485,14 @@ func (b *DistributedBackend) restoreSoleAuthBucketObjects(bucket string, objects
 		//
 		// EXACT-VERSION check (codex code-gate [P1]): the on-path uses RAW VIDs
 		// (no resolveRestoreObjectVersionIDs rewriting), so presence MUST be
-		// verified at snap.VersionID exactly — NOT via blobExistsForRestore's
-		// HeadObject(latest) ETag/Size shortcut. That shortcut would falsely
-		// vouch an absent version whenever a strictly-newer live version with
-		// identical content (same ETag/Size — a re-upload) is the derived latest,
-		// publishing metadata that points at data shares this node never had.
-		// snap.VersionID is guaranteed non-empty (loop guard above).
-		if !snap.IsDeleteMarker && !b.blobExists(snap.Bucket, snap.Key, snap.VersionID) {
+		// verified at snap.VersionID exactly via blobExistsExactVersion — NOT via
+		// blobExistsForRestore/blobExists, both of which vouch a missing version
+		// through a non-exact match: the HeadObject(latest) ETag/Size shortcut (a
+		// same-content re-uploaded sibling version) or the legacy unversioned
+		// objectPath plain file. Either would publish authoritative per-version
+		// metadata pointing at data shares this node never had (a dangling,
+		// unreadable version). snap.VersionID is guaranteed non-empty (loop guard).
+		if !snap.IsDeleteMarker && !b.blobExistsExactVersion(snap.Bucket, snap.Key, snap.VersionID) {
 			*stale = append(*stale, storage.StaleBlob{
 				Bucket:       snap.Bucket,
 				Key:          snap.Key,
@@ -640,6 +641,35 @@ func (b *DistributedBackend) blobExistsForRestore(snap storage.SnapshotObject) b
 		}
 	}
 	return b.blobExists(snap.Bucket, snap.Key, snap.VersionID)
+}
+
+// blobExistsExactVersion reports whether this node holds the data for the EXACT
+// (bucket, key, versionID). Unlike blobExists it (1) never resolves an empty VID
+// from the lat: pointer and (2) never falls back to the legacy unversioned
+// objectPath plain file nor to a same-key latest-content match. The soleauth-on
+// restore path operates on raw, exact version IDs and must record a version as
+// stale when its OWN shares are missing — it must not vouch a missing version's
+// data via a sibling version (latest content) or a pre-versioning plain file, or
+// it would publish authoritative per-version metadata pointing at absent shares
+// (a dangling, unreadable version). versionID is guaranteed non-empty by callers.
+func (b *DistributedBackend) blobExistsExactVersion(bucket, key, versionID string) bool {
+	if versionID == "" {
+		return false
+	}
+	// Versioned full-object path for this exact version.
+	if _, err := os.Stat(b.objectPathV(bucket, key, versionID)); err == nil {
+		return true
+	}
+	// EC shard path: presence of shard_0 for this exact version is sufficient.
+	if b.currentECConfig().IsActive(len(b.configuredNodeList())) {
+		paths := b.ShardPaths(bucket, key, versionID, b.currentECConfig().NumShards())
+		if len(paths) > 0 {
+			if _, err := os.Stat(paths[0]); err == nil {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // captureSoleAuthBucketObjects captures every per-version blob for a soleauth-on
