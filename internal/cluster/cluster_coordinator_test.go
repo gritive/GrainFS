@@ -3099,3 +3099,43 @@ func TestClusterCoordinator_RestoreObjects_SucceedsForSoleAuthOffBucket(t *testi
 			"RestoreObjects must not reject soleauth-off bucket")
 	}
 }
+
+// TestClusterCoordinator_RestoreBuckets_FailsClosedForSoleAuthOnBucket asserts
+// that RestoreBuckets refuses BEFORE any delegation when an incoming snapshot
+// bucket is soleauth-on. snapshot.Restore replays RestoreBuckets before
+// RestoreObjects; without this guard a soleauth-on snapshot would flip the
+// bucket to terminal `on` and then have its objects rejected by the
+// RestoreObjects guard, leaving a partial restore.
+func TestClusterCoordinator_RestoreBuckets_FailsClosedForSoleAuthOnBucket(t *testing.T) {
+	base := &fakeBackend{}
+	c := newRoutedCoordinatorWithFakeBase(t, base, "protected")
+
+	err := c.RestoreBuckets([]storage.SnapshotBucket{
+		{Name: "normal", SoleAuthState: soleAuthOff},
+		{Name: "protected", SoleAuthState: soleAuthOn},
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "soleauth-on")
+	require.Contains(t, err.Error(), "protected")
+	require.Contains(t, err.Error(), "S4c-d")
+	// The guard fires before delegating to the base — the base (which does not
+	// implement BucketSnapshotable) must never be reached, so we never see
+	// ErrSnapshotNotSupported.
+	require.NotErrorIs(t, err, storage.ErrSnapshotNotSupported)
+}
+
+// TestClusterCoordinator_RestoreBuckets_DelegatesForSoleAuthOffBuckets asserts
+// that with no soleauth-on bucket present the guard does not fire and the call
+// delegates to the base. The fakeBackend does not implement BucketSnapshotable,
+// so reaching delegation surfaces ErrSnapshotNotSupported — proving the guard
+// was passed (it did NOT short-circuit with a soleauth error).
+func TestClusterCoordinator_RestoreBuckets_DelegatesForSoleAuthOffBuckets(t *testing.T) {
+	base := &fakeBackend{}
+	c := newRoutedCoordinatorWithFakeBase(t, base, "normal")
+
+	err := c.RestoreBuckets([]storage.SnapshotBucket{
+		{Name: "normal", SoleAuthState: soleAuthOff},
+		{Name: "legacy"}, // empty SoleAuthState must also pass the guard
+	})
+	require.ErrorIs(t, err, storage.ErrSnapshotNotSupported)
+}

@@ -1006,6 +1006,19 @@ func (c *ClusterCoordinator) ListAllBuckets() ([]storage.SnapshotBucket, error) 
 // RestoreBuckets implements storage.BucketSnapshotable by delegating to the
 // base backend.
 func (c *ClusterCoordinator) RestoreBuckets(buckets []storage.SnapshotBucket) error {
+	// Fail-closed guard (BEFORE any delegation): snapshot.Restore replays
+	// RestoreBuckets BEFORE RestoreObjects (snapshot/manager.go). A routed
+	// cluster cannot correctly restore soleauth-on buckets cluster-wide
+	// (per-node capture/restore is required, S4c-d), and RestoreObjects already
+	// rejects them. Reject the whole bucket replay up front so a soleauth-on
+	// snapshot never flips a bucket to terminal `on` and then fails the object
+	// restore — that would leave a partial restore (bucket metadata mutated,
+	// objects absent).
+	for _, b := range buckets {
+		if b.SoleAuthState == soleAuthOn {
+			return fmt.Errorf("cluster-wide snapshot restore does not support soleauth-on bucket %q: per-node restore required (S4c-d)", b.Name)
+		}
+	}
 	snap, ok := c.base.(storage.BucketSnapshotable)
 	if !ok {
 		return storage.ErrSnapshotNotSupported
