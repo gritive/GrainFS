@@ -177,3 +177,41 @@ func TestManagerSeedsNextSeqFromLegacyGzipSnapshots(t *testing.T) {
 	_, err = os.Stat(filepath.Join(dir, "snapshot-100.json.zst"))
 	require.NoError(t, err)
 }
+
+func TestEncodeSnapshotFramed_SoleAuthOn_BumpsMinReader(t *testing.T) {
+	normal := &Snapshot{Seq: 1, BucketMeta: []storage.SnapshotBucket{{Name: "b"}}}
+	on := &Snapshot{Seq: 2, BucketMeta: []storage.SnapshotBucket{{Name: "b", SoleAuthState: "on"}}}
+	epochOnly := &Snapshot{Seq: 3, BucketMeta: []storage.SnapshotBucket{{Name: "b", SoleAuthEpoch: 5}}}
+
+	nb, err := encodeSnapshotFramed(normal)
+	require.NoError(t, err)
+	require.Equal(t, uint32(1), binary.BigEndian.Uint32(nb[8:12]), "normal snapshot must have minReader=1")
+
+	ob, err := encodeSnapshotFramed(on)
+	require.NoError(t, err)
+	require.Equal(t, uint32(2), binary.BigEndian.Uint32(ob[8:12]), "soleauth-on snapshot must have minReader=2")
+
+	eb, err := encodeSnapshotFramed(epochOnly)
+	require.NoError(t, err)
+	require.Equal(t, uint32(2), binary.BigEndian.Uint32(eb[8:12]), "soleauth epoch>0 snapshot must have minReader=2")
+}
+
+func TestReadSnapshotRefusesSoleAuthOnMinReader2(t *testing.T) {
+	// Frame a snapshot with minReader=2 and verify it's rejected when read by a
+	// reader that only supports format 1. We achieve this by constructing a raw
+	// GFSNAP01 header with minReader=2 against a reader whose currentSnapshotReaderFormat
+	// is still 1 (pre-bump). Since the production code now supports format 2 as
+	// well, we directly exercise the refusal path by crafting a header with
+	// minReader = currentSnapshotReaderFormat + 1.
+	dir := t.TempDir()
+	backend := &formatTestBackend{}
+	mgr := NewTestManager(t, dir, backend, "")
+	// Write a plaintext GFSNAP01 file with minReader = currentSnapshotReaderFormat+1.
+	// This simulates a future binary writing a snapshot that an old binary would refuse.
+	writeFutureSnapshotFile(t, mgr.path(1), testSnapshot(1), currentSnapshotReaderFormat+1)
+
+	_, _, err := mgr.Restore(1)
+	require.ErrorIs(t, err, ErrUnsupportedSnapshotFormat)
+	require.False(t, backend.restoreObjectsCalled)
+	require.False(t, backend.restoreBucketsCalled)
+}
