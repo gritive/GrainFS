@@ -113,6 +113,48 @@ func TestGetObjectTags_SoleAuthOn_BlobDerive(t *testing.T) {
 		require.Equal(t, []storage.Tag{{Key: "lg", Value: "1"}}, tags)
 	})
 
+	t.Run("latest delete-marker with blobs present → 404, NOT stale carve-out Tags", func(t *testing.T) {
+		// codex code-gate [P1]: per-version blobs exist and the max-VID is a
+		// delete marker (latest not-live). The versioned object is GONE → 404. A
+		// coexisting appendable FSM carve-out record must NOT be served instead.
+		b := newTestDistributedBackend(t)
+		require.NoError(t, b.CreateBucket(ctx, "bdm0"))
+		seedVersionBlob(t, b, "bdm0", "k", "v1", PutObjectMetaCmd{
+			Tags: []storage.Tag{{Key: "old", Value: "1"}},
+		})
+		seedVersionBlob(t, b, "bdm0", "k", "v2", PutObjectMetaCmd{
+			ETag: deleteMarkerETag, IsDeleteMarker: true, MetaSeq: 1,
+		})
+		// Stale appendable FSM carve-out at the same key (would be wrongly served
+		// by the buggy "only-not-live → carve-out" fallthrough).
+		seedFSMObject(t, b, "bdm0", "k", "vapp", objectMeta{
+			Key: "k", ETag: "app", IsAppendable: true,
+			Tags: []storage.Tag{{Key: "stale", Value: "x"}},
+		}, true)
+		setVersioningForTest(t, b, "bdm0", "Enabled")
+		setSoleAuthForTest(t, b, "bdm0", soleAuthOn)
+
+		tags, err := b.GetObjectTags("bdm0", "k", "")
+		require.ErrorIs(t, err, storage.ErrObjectNotFound, "latest delete-marker → 404, no carve-out fallthrough")
+		require.Nil(t, tags)
+	})
+
+	t.Run("specific delete-marker version → ErrMethodNotAllowed", func(t *testing.T) {
+		// codex code-gate [P2]: a specific-version tag read targeting a
+		// delete-marker blob must fold like T2's object read, not return Tags.
+		b := newTestDistributedBackend(t)
+		require.NoError(t, b.CreateBucket(ctx, "bdm1"))
+		seedVersionBlob(t, b, "bdm1", "k", "v1", PutObjectMetaCmd{
+			ETag: deleteMarkerETag, IsDeleteMarker: true,
+		})
+		setVersioningForTest(t, b, "bdm1", "Enabled")
+		setSoleAuthForTest(t, b, "bdm1", soleAuthOn)
+
+		tags, err := b.GetObjectTags("bdm1", "k", "v1")
+		require.ErrorIs(t, err, storage.ErrMethodNotAllowed)
+		require.Nil(t, tags)
+	})
+
 	t.Run("soleauth read error propagates", func(t *testing.T) {
 		b, db := newTestDistributedBackendWithDB(t)
 		require.NoError(t, b.CreateBucket(ctx, "berr"))

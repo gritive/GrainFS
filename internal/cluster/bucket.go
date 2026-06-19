@@ -525,24 +525,32 @@ func (b *DistributedBackend) GetObjectTags(bucket, key, versionID string) ([]sto
 		if verr != nil {
 			return nil, verr
 		}
-		var (
-			cmd  PutObjectMetaCmd
-			live bool
-		)
 		if versionID == "" {
-			cmd, live = deriveLatestVersion(cmds)
+			// Latest: per-version blobs present are authoritative. A not-live
+			// (delete-marker) latest means the versioned object is GONE → 404; do
+			// NOT fall through to a carve-out (codex code-gate [P1]). Only a true
+			// per-version MISS (no blobs for this key) is eligible for carve-out.
+			if len(cmds) > 0 {
+				cmd, live := deriveLatestVersion(cmds)
+				if live {
+					return append([]storage.Tag(nil), cmd.Tags...), nil
+				}
+				return nil, storage.ErrObjectNotFound
+			}
 		} else {
+			// Specific version: a matching blob is authoritative. A delete-marker
+			// blob folds like the object read (codex code-gate [P2]). A vid not in
+			// the blob tree falls to carve-out (mirrors T2 headObjectMetaV).
 			for _, c := range cmds {
 				if c.VersionID == versionID {
-					cmd, live = c, true
-					break
+					if c.IsDeleteMarker {
+						return nil, storage.ErrMethodNotAllowed
+					}
+					return append([]storage.Tag(nil), c.Tags...), nil
 				}
 			}
 		}
-		if live {
-			return append([]storage.Tag(nil), cmd.Tags...), nil
-		}
-		// per-version MISS (or only-not-live) under on → carve-out classes ONLY.
+		// per-version MISS under on → carve-out classes ONLY.
 		obj, _, carve, cerr := b.fsmCarveoutObject(bucket, key, versionID)
 		if cerr != nil {
 			return nil, cerr
