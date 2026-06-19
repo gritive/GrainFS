@@ -339,6 +339,63 @@ func TestSnapshot_SoleAuthRestorePendingIdempotent(t *testing.T) {
 	require.Equal(t, soleAuthPending, st)
 }
 
+// TestSnapshot_SoleAuthRestoreAbortPendingToOff verifies that restoring an "off"
+// snapshot over a live "pending" bucket faithfully rolls the bucket back to off
+// (the guard permits the pending->off abort), rather than silently leaving it
+// pending.
+func TestSnapshot_SoleAuthRestoreAbortPendingToOff(t *testing.T) {
+	ctx := context.Background()
+	// Snapshot a bucket while it is still off.
+	src := newTestDistributedBackend(t)
+	require.NoError(t, src.CreateBucket(ctx, "bucket"))
+	bks, err := src.ListAllBuckets()
+	require.NoError(t, err)
+
+	// Live backend has advanced the bucket to pending.
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(ctx, "bucket"))
+	require.NoError(t, b.SetBucketSoleAuthority("bucket", soleAuthPending))
+
+	// Restoring the off snapshot must abort pending->off.
+	require.NoError(t, b.RestoreBuckets(bks))
+	st, err := b.GetBucketSoleAuthority("bucket")
+	require.NoError(t, err)
+	require.Equal(t, soleAuthOff, st)
+}
+
+// TestSnapshot_SoleAuthRestoreTerminalOnRefusesDowngrade verifies that a stale
+// snapshot (off or pending) cannot downgrade a live bucket that has already
+// committed to the terminal "on" state — restore must fail loudly.
+func TestSnapshot_SoleAuthRestoreTerminalOnRefusesDowngrade(t *testing.T) {
+	ctx := context.Background()
+	for _, target := range []string{soleAuthOff, soleAuthPending} {
+		t.Run(target, func(t *testing.T) {
+			// Snapshot a bucket at `target`.
+			src := newTestDistributedBackend(t)
+			require.NoError(t, src.CreateBucket(ctx, "bucket"))
+			if target == soleAuthPending {
+				require.NoError(t, src.SetBucketSoleAuthority("bucket", soleAuthPending))
+			}
+			bks, err := src.ListAllBuckets()
+			require.NoError(t, err)
+
+			// Live backend has cut the bucket over to terminal on.
+			b := newTestDistributedBackend(t)
+			require.NoError(t, b.CreateBucket(ctx, "bucket"))
+			require.NoError(t, b.SetBucketSoleAuthority("bucket", soleAuthPending))
+			require.NoError(t, b.SetBucketSoleAuthority("bucket", soleAuthOn))
+
+			err = b.RestoreBuckets(bks)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "cannot downgrade terminal")
+			// The bucket must remain on (the failed restore changed nothing).
+			st, gerr := b.GetBucketSoleAuthority("bucket")
+			require.NoError(t, gerr)
+			require.Equal(t, soleAuthOn, st)
+		})
+	}
+}
+
 // TestSnapshot_SoleAuthRestoreInvalidState verifies that RestoreBuckets fails
 // loudly on a corrupted snapshot soleauth value rather than silently leaving the
 // bucket unchanged (the restore path reads the blob directly and never passes the

@@ -179,61 +179,83 @@ func (b *DistributedBackend) RestoreBuckets(buckets []storage.SnapshotBucket) er
 		}); err != nil {
 			return fmt.Errorf("restore bucket versioning %s: %w", bucket.Name, err)
 		}
-		// Restore soleauth state. The soleauth flag is ONE-WAY (off→pending→on,
-		// terminal at on), so restore can only ADVANCE the state forward, never
-		// roll it back. RestoreBuckets supports restore-onto-existing, so the
-		// bucket may already carry a soleauth state — read the CURRENT state and
-		// propose only the FORWARD steps still needed (skipping already-satisfied
-		// ones). Proposing a step the guard would refuse (e.g. an already-"on"
-		// bucket → pending) would abort the whole restore.
-		curSA, err := b.GetBucketSoleAuthority(bucket.Name)
-		if err != nil {
-			return fmt.Errorf("read bucket soleauth %s: %w", bucket.Name, err)
-		}
-		switch bucket.SoleAuthState {
-		case "", soleAuthOff:
-			// default; no action — and a one-way flag cannot roll an existing
-			// pending/on bucket back to off, so nothing to do regardless of curSA.
-		case soleAuthPending:
-			// Only off→pending is a valid forward step. If curSA is already
-			// pending or on, do nothing (pending==pending idempotent; on→pending
-			// is a downgrade the one-way flag cannot perform).
-			if curSA == soleAuthOff {
-				if err := b.propose(ctx, CmdSetBucketSoleAuthority, SetBucketSoleAuthorityCmd{
-					Bucket: bucket.Name,
-					State:  soleAuthPending,
-				}); err != nil {
-					return fmt.Errorf("restore bucket soleauth pending %s: %w", bucket.Name, err)
-				}
-			}
-		case soleAuthOn:
-			// Walk forward from curSA toward on, proposing only remaining steps.
-			if curSA == soleAuthOff {
-				if err := b.propose(ctx, CmdSetBucketSoleAuthority, SetBucketSoleAuthorityCmd{
-					Bucket: bucket.Name,
-					State:  soleAuthPending,
-				}); err != nil {
-					return fmt.Errorf("restore bucket soleauth pending %s: %w", bucket.Name, err)
-				}
-				curSA = soleAuthPending
-			}
-			if curSA == soleAuthPending {
-				if err := b.propose(ctx, CmdSetBucketSoleAuthority, SetBucketSoleAuthorityCmd{
-					Bucket: bucket.Name,
-					State:  soleAuthOn,
-				}); err != nil {
-					return fmt.Errorf("restore bucket soleauth on %s: %w", bucket.Name, err)
-				}
-			}
-			// curSA == soleAuthOn: idempotent, nothing to do.
-		default:
-			// A snapshot blob is read directly from disk and never passes the
-			// apply-time state validator, so a corrupted/manual value must fail
-			// loudly here rather than silently leave the bucket unchanged.
-			return fmt.Errorf("restore bucket soleauth %s: invalid snapshot state %q", bucket.Name, bucket.SoleAuthState)
+		// Restore soleauth state. soleauth is one-way only at the COMMITTED end:
+		// 'on' is terminal, but 'pending' may abort back to 'off' (soleauth.go).
+		// RestoreBuckets supports restore-onto-existing, so faithfully reconcile
+		// the CURRENT state toward the snapshot's recorded state using only
+		// guard-permitted transitions. A snapshot that demands a downgrade OUT of
+		// the terminal 'on' state (a stale pre-cutover snapshot over a cut-over
+		// bucket) cannot be honored and must fail loudly rather than silently
+		// leave the bucket 'on'.
+		if err := b.restoreBucketSoleAuth(ctx, bucket.Name, bucket.SoleAuthState); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// restoreBucketSoleAuth reconciles a bucket's live soleauth state toward the
+// snapshot's recorded target, advancing or aborting only via guard-permitted
+// transitions and failing loudly on an impossible downgrade or a corrupted
+// snapshot value. target "" means the default off.
+func (b *DistributedBackend) restoreBucketSoleAuth(ctx context.Context, bucketName, target string) error {
+	if target == "" {
+		target = soleAuthOff
+	}
+	curSA, err := b.GetBucketSoleAuthority(bucketName)
+	if err != nil {
+		return fmt.Errorf("read bucket soleauth %s: %w", bucketName, err)
+	}
+	set := func(state string) error {
+		if err := b.propose(ctx, CmdSetBucketSoleAuthority, SetBucketSoleAuthorityCmd{
+			Bucket: bucketName,
+			State:  state,
+		}); err != nil {
+			return fmt.Errorf("restore bucket soleauth %s %s: %w", state, bucketName, err)
+		}
+		return nil
+	}
+	terminalConflict := func() error {
+		return fmt.Errorf("restore bucket soleauth %s: snapshot state %q cannot downgrade terminal current state %q",
+			bucketName, target, curSA)
+	}
+	switch target {
+	case soleAuthOff:
+		switch curSA {
+		case soleAuthOff: // idempotent
+			return nil
+		case soleAuthPending: // abort: pending -> off (guard-permitted)
+			return set(soleAuthOff)
+		default: // soleAuthOn — terminal, cannot downgrade
+			return terminalConflict()
+		}
+	case soleAuthPending:
+		switch curSA {
+		case soleAuthOff: // forward: off -> pending
+			return set(soleAuthPending)
+		case soleAuthPending: // idempotent
+			return nil
+		default: // soleAuthOn — terminal, cannot downgrade
+			return terminalConflict()
+		}
+	case soleAuthOn:
+		// Walk forward from curSA toward on, proposing only remaining steps.
+		if curSA == soleAuthOff {
+			if err := set(soleAuthPending); err != nil {
+				return err
+			}
+			curSA = soleAuthPending
+		}
+		if curSA == soleAuthPending {
+			return set(soleAuthOn)
+		}
+		return nil // curSA == soleAuthOn: idempotent
+	default:
+		// A snapshot blob is read directly from disk and never passes the
+		// apply-time state validator, so a corrupted/manual value must fail
+		// loudly here rather than silently leave the bucket unchanged.
+		return fmt.Errorf("restore bucket soleauth %s: invalid snapshot state %q", bucketName, target)
+	}
 }
 
 // RestoreObjects implements storage.Snapshotable.
