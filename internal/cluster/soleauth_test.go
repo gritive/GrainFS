@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -197,4 +198,37 @@ func TestFSM_SetBucketSoleAuthority_DefaultOff(t *testing.T) {
 		assert.Equal(t, ErrMetaKeyNotFound, gerr, "absent key means soleAuthOff")
 		return nil
 	})
+}
+
+func TestDistributedBackend_SoleAuth_EndToEnd(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+
+	require.NoError(t, b.CreateBucket(ctx, "bucket"))
+
+	// Absent key defaults to "off".
+	st, err := b.GetBucketSoleAuthority("bucket")
+	require.NoError(t, err)
+	require.Equal(t, soleAuthOff, st)
+
+	// off -> pending
+	require.NoError(t, b.SetBucketSoleAuthority("bucket", soleAuthPending))
+	st, err = b.GetBucketSoleAuthority("bucket")
+	require.NoError(t, err)
+	require.Equal(t, soleAuthPending, st)
+
+	// pending -> on
+	require.NoError(t, b.SetBucketSoleAuthority("bucket", soleAuthOn))
+	st, err = b.GetBucketSoleAuthority("bucket")
+	require.NoError(t, err)
+	require.Equal(t, soleAuthOn, st)
+
+	// on -> off: refused (on is terminal)
+	err = b.SetBucketSoleAuthority("bucket", soleAuthOff)
+	require.Error(t, err, "transition on->off must be refused")
+
+	// State must remain "on" after the refused transition.
+	st, err = b.GetBucketSoleAuthority("bucket")
+	require.NoError(t, err)
+	require.Equal(t, soleAuthOn, st)
 }

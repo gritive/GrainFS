@@ -279,6 +279,49 @@ func (b *DistributedBackend) SetBucketVersioningPropose(bucket, state string) er
 	})
 }
 
+// SetBucketSoleAuthority pre-checks bucket existence locally then proposes a
+// soleauth state transition through Raft. This is the single-DistributedBackend
+// path (tests, single-node setups). The coordinator path uses
+// SetBucketSoleAuthorityPropose to bypass the local check.
+func (b *DistributedBackend) SetBucketSoleAuthority(bucket, state string) error {
+	ctx := context.Background()
+	if err := b.HeadBucket(ctx, bucket); err != nil {
+		return err
+	}
+	return b.SetBucketSoleAuthorityPropose(bucket, state)
+}
+
+// SetBucketSoleAuthorityPropose is the coordinator-facing entrypoint: it skips
+// the local bucket-existence pre-check because the coordinator has already run
+// a cluster-aware HeadBucket.
+func (b *DistributedBackend) SetBucketSoleAuthorityPropose(bucket, state string) error {
+	return b.propose(context.Background(), CmdSetBucketSoleAuthority, SetBucketSoleAuthorityCmd{
+		Bucket: bucket,
+		State:  state,
+	})
+}
+
+// GetBucketSoleAuthority returns the stored soleauth state for the bucket.
+// Absent key (no state has ever been set) returns soleAuthOff ("off").
+func (b *DistributedBackend) GetBucketSoleAuthority(bucket string) (string, error) {
+	var state string
+	err := b.store.View(func(txn MetadataTxn) error {
+		item, err := txn.Get(b.ks().BucketSoleAuthKey(bucket))
+		if err == ErrMetaKeyNotFound {
+			state = soleAuthOff
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		return item.Value(func(v []byte) error {
+			state = string(v)
+			return nil
+		})
+	})
+	return state, err
+}
+
 // SetBucketPolicy satisfies storage.PolicyBackend. The policy document is
 // replicated through Raft so every node observes the same bucket policy.
 func (b *DistributedBackend) SetBucketPolicy(bucket string, policyJSON []byte) error {
