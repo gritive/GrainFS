@@ -232,3 +232,135 @@ func TestDistributedBackend_SoleAuth_EndToEnd(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, soleAuthOn, st)
 }
+
+// TestSnapshot_SoleAuthRoundTrip verifies that a bucket set to "pending" is
+// captured by ListAllBuckets (SoleAuthState=="pending") and that RestoreBuckets
+// onto a fresh backend reproduces the "pending" state.
+func TestSnapshot_SoleAuthRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(ctx, "bucket"))
+	require.NoError(t, b.SetBucketSoleAuthority("bucket", soleAuthPending))
+
+	bks, err := b.ListAllBuckets()
+	require.NoError(t, err)
+
+	var found *storage.SnapshotBucket
+	for i := range bks {
+		if bks[i].Name == "bucket" {
+			found = &bks[i]
+		}
+	}
+	require.NotNil(t, found)
+	require.Equal(t, soleAuthPending, found.SoleAuthState)
+
+	// Restore onto a fresh backend.
+	b2 := newTestDistributedBackend(t)
+	require.NoError(t, b2.RestoreBuckets(bks))
+	st, err := b2.GetBucketSoleAuthority("bucket")
+	require.NoError(t, err)
+	require.Equal(t, soleAuthPending, st)
+}
+
+// TestSnapshot_SoleAuthRestoreOn verifies that a bucket set all the way to "on"
+// is captured and restored correctly. The one-way guard means a fresh restored
+// bucket (starting at off) must walk off->pending->on to reach the snapshot's
+// "on" state.
+func TestSnapshot_SoleAuthRestoreOn(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(ctx, "bucket"))
+	require.NoError(t, b.SetBucketSoleAuthority("bucket", soleAuthPending))
+	require.NoError(t, b.SetBucketSoleAuthority("bucket", soleAuthOn))
+
+	bks, err := b.ListAllBuckets()
+	require.NoError(t, err)
+
+	var found *storage.SnapshotBucket
+	for i := range bks {
+		if bks[i].Name == "bucket" {
+			found = &bks[i]
+		}
+	}
+	require.NotNil(t, found)
+	require.Equal(t, soleAuthOn, found.SoleAuthState)
+
+	// Restore onto a fresh backend; RestoreBuckets must walk off->pending->on.
+	b2 := newTestDistributedBackend(t)
+	require.NoError(t, b2.RestoreBuckets(bks))
+	st, err := b2.GetBucketSoleAuthority("bucket")
+	require.NoError(t, err)
+	require.Equal(t, soleAuthOn, st)
+}
+
+// TestSnapshot_SoleAuthRestoreIdempotent verifies that RestoreBuckets is
+// idempotent for the soleauth state: re-restoring a snapshot onto a backend
+// where the bucket is ALREADY at the snapshot's state must not propose a guard-
+// refused transition (e.g. on->pending) and must not error. RestoreBuckets
+// supports restore-onto-existing (CmdCreateBucket is guarded by ErrBucketNotFound).
+func TestSnapshot_SoleAuthRestoreIdempotent(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(ctx, "bucket"))
+	require.NoError(t, b.SetBucketSoleAuthority("bucket", soleAuthPending))
+	require.NoError(t, b.SetBucketSoleAuthority("bucket", soleAuthOn))
+
+	bks, err := b.ListAllBuckets()
+	require.NoError(t, err)
+
+	// Restore TWICE onto the SAME backend (bucket already "on"). The second
+	// restore must be a no-op for soleauth, not an on->pending refusal.
+	require.NoError(t, b.RestoreBuckets(bks))
+	require.NoError(t, b.RestoreBuckets(bks))
+	st, err := b.GetBucketSoleAuthority("bucket")
+	require.NoError(t, err)
+	require.Equal(t, soleAuthOn, st)
+}
+
+// TestSnapshot_SoleAuthRestorePendingIdempotent verifies re-restore of a
+// "pending" bucket is also a no-op (pending==pending idempotent).
+func TestSnapshot_SoleAuthRestorePendingIdempotent(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(ctx, "bucket"))
+	require.NoError(t, b.SetBucketSoleAuthority("bucket", soleAuthPending))
+
+	bks, err := b.ListAllBuckets()
+	require.NoError(t, err)
+
+	require.NoError(t, b.RestoreBuckets(bks))
+	require.NoError(t, b.RestoreBuckets(bks))
+	st, err := b.GetBucketSoleAuthority("bucket")
+	require.NoError(t, err)
+	require.Equal(t, soleAuthPending, st)
+}
+
+// TestSnapshot_SoleAuthDefaultOffOmitted verifies that a bucket that was never
+// given a soleauth state has SoleAuthState=="" in the snapshot (omitempty) and
+// that RestoreBuckets is a no-op for it (resulting state is still "off").
+func TestSnapshot_SoleAuthDefaultOffOmitted(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(ctx, "bucket"))
+
+	bks, err := b.ListAllBuckets()
+	require.NoError(t, err)
+
+	var found *storage.SnapshotBucket
+	for i := range bks {
+		if bks[i].Name == "bucket" {
+			found = &bks[i]
+		}
+	}
+	require.NotNil(t, found)
+	// "off" is the default; omitempty means the field is empty string in the struct
+	// (the JSON tag omits it, but the in-memory value is "" = treated as off).
+	require.Equal(t, "", found.SoleAuthState, "default off is stored as empty (omitempty)")
+
+	// Restore: no soleauth propose needed; result is still off.
+	b2 := newTestDistributedBackend(t)
+	require.NoError(t, b2.RestoreBuckets(bks))
+	st, err := b2.GetBucketSoleAuthority("bucket")
+	require.NoError(t, err)
+	require.Equal(t, soleAuthOff, st)
+}

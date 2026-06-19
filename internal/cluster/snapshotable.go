@@ -135,9 +135,19 @@ func (b *DistributedBackend) ListAllBuckets() ([]storage.SnapshotBucket, error) 
 		if err != nil {
 			return nil, fmt.Errorf("get bucket versioning %s: %w", bucket, err)
 		}
+		saState, err := b.GetBucketSoleAuthority(bucket)
+		if err != nil {
+			return nil, fmt.Errorf("get bucket soleauth %s: %w", bucket, err)
+		}
+		// Store "off" as empty so the JSON field is omitted (omitempty) for the
+		// common case where soleauth was never set.
+		if saState == soleAuthOff {
+			saState = ""
+		}
 		out = append(out, storage.SnapshotBucket{
 			Name:            bucket,
 			VersioningState: state,
+			SoleAuthState:   saState,
 		})
 	}
 	return out, nil
@@ -168,6 +178,54 @@ func (b *DistributedBackend) RestoreBuckets(buckets []storage.SnapshotBucket) er
 			State:  state,
 		}); err != nil {
 			return fmt.Errorf("restore bucket versioning %s: %w", bucket.Name, err)
+		}
+		// Restore soleauth state. The soleauth flag is ONE-WAY (off→pending→on,
+		// terminal at on), so restore can only ADVANCE the state forward, never
+		// roll it back. RestoreBuckets supports restore-onto-existing, so the
+		// bucket may already carry a soleauth state — read the CURRENT state and
+		// propose only the FORWARD steps still needed (skipping already-satisfied
+		// ones). Proposing a step the guard would refuse (e.g. an already-"on"
+		// bucket → pending) would abort the whole restore.
+		curSA, err := b.GetBucketSoleAuthority(bucket.Name)
+		if err != nil {
+			return fmt.Errorf("read bucket soleauth %s: %w", bucket.Name, err)
+		}
+		switch bucket.SoleAuthState {
+		case "", soleAuthOff:
+			// default; no action — and a one-way flag cannot roll an existing
+			// pending/on bucket back to off, so nothing to do regardless of curSA.
+		case soleAuthPending:
+			// Only off→pending is a valid forward step. If curSA is already
+			// pending or on, do nothing (pending==pending idempotent; on→pending
+			// is a downgrade the one-way flag cannot perform).
+			if curSA == soleAuthOff {
+				if err := b.propose(ctx, CmdSetBucketSoleAuthority, SetBucketSoleAuthorityCmd{
+					Bucket: bucket.Name,
+					State:  soleAuthPending,
+				}); err != nil {
+					return fmt.Errorf("restore bucket soleauth pending %s: %w", bucket.Name, err)
+				}
+			}
+		case soleAuthOn:
+			// Walk forward from curSA toward on, proposing only remaining steps.
+			if curSA == soleAuthOff {
+				if err := b.propose(ctx, CmdSetBucketSoleAuthority, SetBucketSoleAuthorityCmd{
+					Bucket: bucket.Name,
+					State:  soleAuthPending,
+				}); err != nil {
+					return fmt.Errorf("restore bucket soleauth pending %s: %w", bucket.Name, err)
+				}
+				curSA = soleAuthPending
+			}
+			if curSA == soleAuthPending {
+				if err := b.propose(ctx, CmdSetBucketSoleAuthority, SetBucketSoleAuthorityCmd{
+					Bucket: bucket.Name,
+					State:  soleAuthOn,
+				}); err != nil {
+					return fmt.Errorf("restore bucket soleauth on %s: %w", bucket.Name, err)
+				}
+			}
+			// curSA == soleAuthOn: idempotent, nothing to do.
 		}
 	}
 	return nil

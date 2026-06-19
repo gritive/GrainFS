@@ -237,11 +237,12 @@ type Snapshotable interface {
 }
 
 // SnapshotBucket is a point-in-time record of bucket-level metadata
-// (versioning state). Captured by BucketSnapshotable backends so snapshot
-// restores reproduce the full bucket configuration.
+// (versioning state, soleauth state). Captured by BucketSnapshotable backends
+// so snapshot restores reproduce the full bucket configuration.
 type SnapshotBucket struct {
 	Name            string `json:"name"`
 	VersioningState string `json:"versioning_state,omitempty"` // "Unversioned" | "Enabled" | "Suspended"
+	SoleAuthState   string `json:"soleauth_state,omitempty"`   // "" | "off" | "pending" | "on"
 }
 
 // BucketSnapshotable is an optional interface for backends that persist
