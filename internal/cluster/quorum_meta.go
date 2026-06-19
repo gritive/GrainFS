@@ -978,6 +978,47 @@ func (s *ShardService) ScanQuorumMetaVersionsBucketAll(bucket, prefix string) ([
 	return out, nil
 }
 
+// scanQuorumMetaVersionsBucketAllStrict is the FAIL-CLOSED twin of
+// ScanQuorumMetaVersionsBucketAll: it walks every per-version blob in bucket
+// and returns an error on the first unreadable or undecodable blob instead of
+// silently skipping it. Consumed by the soleauth-on snapshot capture path
+// where a skipped-then-recovered blob would be captured-absent then purged.
+func (s *ShardService) scanQuorumMetaVersionsBucketAllStrict(bucket, prefix string) ([]PutObjectMetaCmd, error) {
+	if len(s.dataDirs) == 0 {
+		return nil, nil
+	}
+	bucketRoot := filepath.Join(s.dataDirs[0], quorumMetaVersionsSubDir, bucket)
+	out := []PutObjectMetaCmd{}
+	err := filepath.WalkDir(bucketRoot, func(path string, d fs.DirEntry, werr error) error {
+		if werr != nil {
+			if os.IsNotExist(werr) {
+				return nil
+			}
+			return werr
+		}
+		if d.IsDir() || isQuorumMetaTempName(d.Name()) {
+			return nil
+		}
+		data, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return fmt.Errorf("strict version scan: read %s: %w", path, rerr)
+		}
+		cmd, derr := s.decodeQuorumMetaCmdBlob(data)
+		if derr != nil {
+			return fmt.Errorf("strict version scan: decode %s: %w", path, derr)
+		}
+		if prefix != "" && !strings.HasPrefix(cmd.Key, prefix) {
+			return nil
+		}
+		out = append(out, cmd)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ScanQuorumMetaVersions fans the per-version bucket walk to a remote node and
 // returns its per-key max-VersionID PutObjectMetaCmds (markers included).
 func (s *ShardService) ScanQuorumMetaVersions(ctx context.Context, addr, bucket, prefix string) ([]PutObjectMetaCmd, error) {

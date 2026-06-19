@@ -209,6 +209,18 @@ type SnapshotObject struct {
 	// files backward compatible.
 	Coalesced []CoalescedRef `json:"coalesced,omitempty"`
 	Tags      []Tag          `json:"tags,omitempty"`
+	// Populated only for soleauth-on capture (per-version blob authority). Restore
+	// replays the blob via the leaf writer and cannot re-derive these from the
+	// (removed) FSM record. Zero/nil for every other capture (off/pending path is
+	// byte-identical).
+	NodeIDs          []string             `json:"node_ids,omitempty"`
+	ECData           uint8                `json:"ec_data,omitempty"`
+	ECParity         uint8                `json:"ec_parity,omitempty"`
+	StripeBytes      uint32               `json:"stripe_bytes,omitempty"`
+	PlacementGroupID string               `json:"placement_group_id,omitempty"`
+	MetaSeq          uint64               `json:"meta_seq,omitempty"`
+	UserMetadata     map[string]string    `json:"user_metadata,omitempty"`
+	Parts            []MultipartPartEntry `json:"parts,omitempty"`
 }
 
 // SnapshotObjectRef is the minimal (bucket, key, versionID) identity of a
