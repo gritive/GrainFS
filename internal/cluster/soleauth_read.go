@@ -13,8 +13,8 @@ import (
 //
 // Returns (true, nil) iff the state is soleAuthOn; (false, nil) for off/pending.
 //
-//nolint:unused // S4c-c-read1 T0 foundation: wired into HEAD/GET, specific-version,
-// and GetObjectTags readers in T1/T2/T3; currently referenced by soleauth_read_test.go.
+// Wired into the HEAD/GET latest reader (headObjectMeta) in S4c-c-read1 T1;
+// the specific-version and GetObjectTags readers follow in T2/T3.
 func (b *DistributedBackend) soleAuthReadOn(bucket string) (bool, error) {
 	state, err := b.GetBucketSoleAuthority(bucket)
 	if err != nil {
@@ -50,8 +50,8 @@ func (b *DistributedBackend) soleAuthReadOn(bucket string) (bool, error) {
 //     appendable/coalesced test applies. If lat: is ABSENT but a bare
 //     obj:{bucket}/{key} record EXISTS → legacy unversioned carve-out.
 //
-//nolint:unused // S4c-c-read1 T0 foundation: wired into the three soleauth-on
-// readers in T1/T2/T3; currently referenced by soleauth_read_test.go.
+// Wired into the HEAD/GET latest reader (headObjectMeta) in S4c-c-read1 T1;
+// the specific-version and GetObjectTags readers follow in T2/T3.
 func (b *DistributedBackend) fsmCarveoutObject(bucket, key, versionID string) (*storage.Object, PlacementMeta, bool, error) {
 	var (
 		meta        objectMeta
@@ -131,8 +131,8 @@ func (b *DistributedBackend) fsmCarveoutObject(bucket, key, versionID string) (*
 // closure). Single-sourced here so the soleauth read carve-out path cannot
 // drift from the FSM fallback's object/placement shape.
 //
-//nolint:unused // S4c-c-read1 T0 foundation: invoked by fsmCarveoutObject (itself
-// dormant until T1/T2/T3 wire the readers); referenced by soleauth_read_test.go.
+// Invoked by fsmCarveoutObject, which is wired into headObjectMeta in
+// S4c-c-read1 T1.
 func objectAndPlacementFromObjectMeta(m objectMeta, versionID string) (*storage.Object, PlacementMeta) {
 	obj := &storage.Object{
 		Key:              m.Key,
