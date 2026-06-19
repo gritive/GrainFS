@@ -23,6 +23,13 @@ type cutoverReadiness struct {
 	Stuck    int // VID missing AND placement unresolvable
 	Unknown  int // decode error or strict-readback error (fail-closed)
 	Excluded int // internal bucket, appendable, or coalesced (intentionally skipped)
+	// Ineligible counts cutover-INELIGIBLE buckets (non-Enabled: Suspended or
+	// never-versioned — a deferred epic per v9 §6). It is a definitive per-bucket
+	// flag set from the bucket's versioning state, NOT an object count, so a
+	// never-versioned bucket whose legacy records the version-iterator silently
+	// skips can never present as READY. The readiness verdict MUST treat
+	// Ineligible > 0 as not-ready.
+	Ineligible int
 
 	GapRefs     []ObjVersionRef // capped at maxVerifyRefs
 	StuckRefs   []ObjVersionRef
@@ -125,10 +132,8 @@ func (b *DistributedBackend) VerifyPerVersionCutover(bucket string) (CutoverRead
 //   - Excluded: internal bucket, appendable, or coalesced (intentionally skipped).
 //
 // Fast-path: internal buckets → count all FSM obj: records as Excluded.
-// Never-versioned buckets (state empty/"Unversioned") → return zero readiness.
-// Suspended buckets are IN SCOPE: they retain versioned history from when they
-// were Enabled, and the S4a cutover removes the FSM fallback those versions
-// rely on — skipping them would produce a false-READY signal.
+// Non-Enabled buckets (Suspended or never-versioned) → count hosted objects as
+// Excluded (cutover-ineligible per S4c v9 §6); deferred epic.
 //
 // Scope: this gate validates the per-version-blob fallback path for
 // versioning-enabled, non-internal, non-appendable objects only. The future S4
@@ -164,12 +169,20 @@ func (b *DistributedBackend) verifyPerVersionCutover(bucket string) (cutoverRead
 	if verr != nil {
 		return r, fmt.Errorf("verifyPerVersionCutover get versioning for bucket %s: %w", bucket, verr)
 	}
-	// Suspended buckets retain all versioned objects written while the bucket was
-	// Enabled. Suspending versioning does NOT delete that history. The S4a cutover
-	// removes the FSM ObjectMetaKeyV fallback those versions rely on, so Suspended
-	// buckets are IN SCOPE and must be verified. Skip ONLY never-versioned buckets
-	// (state is empty / "Unversioned" — versioning was never turned on).
-	if vstate != "Enabled" && vstate != "Suspended" {
+	// S4c cutover is scoped to Enabled buckets (spec v9 §6). Suspended and
+	// never-versioned buckets are cutover-INELIGIBLE: their non-versioned/legacy
+	// authority model is a deferred epic. Flag the bucket Ineligible (a definitive
+	// per-bucket signal) so the gate never reads a non-Enabled bucket as READY.
+	//
+	// We do NOT count contents via forEachHostedObjVersion here: that iterator
+	// silently skips legacy unversioned obj: records (no version suffix) and
+	// non-UUID VIDs, so an Excluded object-count could be 0 for a never-versioned
+	// bucket that holds legacy objects — a counts-only verdict would then read
+	// READY (codex code-gate [P2]). The Ineligible flag is independent of any
+	// (un-iterable) object-count. S4c-d's flip command independently refuses
+	// non-Enabled buckets.
+	if vstate != "Enabled" {
+		r.Ineligible++
 		return r, nil
 	}
 
@@ -290,10 +303,11 @@ func (b *DistributedBackend) VerifyBucketCutover(_ context.Context, bucket strin
 		return scrubber.CutoverReadiness{}, err
 	}
 	return scrubber.CutoverReadiness{
-		Complete: r.Complete,
-		Gaps:     r.Gaps,
-		Stuck:    r.Stuck,
-		Unknown:  r.Unknown,
-		Excluded: r.Excluded,
+		Complete:   r.Complete,
+		Gaps:       r.Gaps,
+		Stuck:      r.Stuck,
+		Unknown:    r.Unknown,
+		Excluded:   r.Excluded,
+		Ineligible: r.Ineligible,
 	}, nil
 }

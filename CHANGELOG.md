@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.0.624.0] - 2026-06-20
+
+### Added
+- **Per-node soleauth-on snapshot/restore + verifier cutover-ineligibility — dormant cutover slice (S4c-b), Enabled-only scope.**
+  The snapshot/restore and readiness-verifier support for sole-authority buckets, dormant in production
+  (no bucket is ever `on` until a future slice ships the admin flip). **Scoped to Enabled (versioned)
+  buckets only**: the S4c-b plan/spec gates proved the non-versioned/Suspended authority model is a
+  separate unsolved problem, now a tracked deferred epic (the cutover refuses non-Enabled buckets).
+  In `internal/cluster`, `internal/scrubber`, `internal/server`, `internal/serveruntime`,
+  `internal/clusteradmin`, `internal/snapshot`, `internal/metrics`:
+  - **Verifier ineligibility.** Non-Enabled (Suspended / never-versioned) buckets are flagged with a
+    definitive per-bucket `Ineligible` signal keyed on the bucket's versioning state — NOT an object
+    count. The previous Excluded-count went through an iterator that silently skips legacy unversioned
+    records, so a legacy-only bucket could tally all-zero and read **READY** when it must not. Threaded
+    cluster → scrubber → server → CLI; `grainfs cluster verify-per-version` now treats
+    `gaps+stuck+unknown+ineligible > 0` as not-ready. A new `grainfs_per_version_cutover_ineligible`
+    gauge is published for observability but is intentionally OUT of the cluster-wide metrics blocking
+    gate (ineligible buckets are normal; blocking on them would never let coverage read ready).
+  - **Per-node snapshot capture/restore for `on` buckets.** Capture reads the per-version blob tree via
+    the fail-closed strict enumerator with full placement fidelity (NodeIDs / EC profile / StripeBytes /
+    PlacementGroupID / MetaSeq / UserMetadata / Parts); `IsLatest` is the max-VID per key. Restore uses
+    the raw snapshot VIDs (no rewrite), runs under the per-bucket fence write-lock (quiesce), **purges**
+    on-disk per-version blobs absent from the snapshot (first consumer of S4c-a3's all-versions strict
+    scan), and gates each write on an **exact-version, this-node-local** data-presence check
+    (`objectPathV` or any EC shard index enumerated from the snapshot's captured placement — never via a
+    legacy unversioned plain file, a same-content sibling version, or the live EC config). A version
+    whose local share is missing is recorded stale and skipped (its metadata is not published).
+  - **Soleauth-epoch restore fidelity.** Additive `SetBucketSoleAuthorityCmd.EpochFloor` (default 0,
+    backward-compatible) carried by restore and applied as a monotonic floor (`newEpoch = max(computed,
+    EpochFloor)`), so a restored bucket preserves its epoch instead of resetting to 0.
+  - **Snapshot format gate.** `minReader` bumps to 2 for any snapshot containing a bucket with
+    `SoleAuthState=="on"` or `SoleAuthEpoch>0`, so an older binary refuses such a snapshot; ordinary
+    snapshots stay at `minReader=1` and remain readable by old binaries.
+
+  The routed (multi-group) `ClusterCoordinator` snapshot path **fails closed** (refuses) for any
+  soleauth-on bucket — cluster-wide capture/restore cannot correctly handle per-node per-version shares;
+  a routed-cluster per-node snapshot path is a tracked S4c-d precondition. No user-facing behavior change
+  (all dormant); the only wire/format changes are additive and backward-compatible.
+
 ## [0.0.623.0] - 2026-06-19
 
 ### Added

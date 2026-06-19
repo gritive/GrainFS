@@ -850,3 +850,38 @@ func TestFSMValueResealDoneCmd_RoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint32(3), got.Gen)
 }
+
+// TestSetBucketSoleAuthorityCmd_EpochFloor_RoundTrip verifies that EpochFloor
+// survives encode→decode (FlatBuffers codec round-trip, S4c-b). A zero EpochFloor
+// (absent on old wire) must decode to 0 (FlatBuffers default).
+func TestSetBucketSoleAuthorityCmd_EpochFloor_RoundTrip(t *testing.T) {
+	t.Run("nonzero EpochFloor round-trips", func(t *testing.T) {
+		orig := SetBucketSoleAuthorityCmd{Bucket: "b", State: soleAuthOff, EpochFloor: 42}
+		raw, err := encodeSetBucketSoleAuthorityCmd(orig)
+		require.NoError(t, err)
+		got, err := decodeSetBucketSoleAuthorityCmd(raw)
+		require.NoError(t, err)
+		require.Equal(t, orig, got)
+	})
+	t.Run("zero EpochFloor round-trips as 0", func(t *testing.T) {
+		orig := SetBucketSoleAuthorityCmd{Bucket: "b", State: soleAuthPending, EpochFloor: 0}
+		raw, err := encodeSetBucketSoleAuthorityCmd(orig)
+		require.NoError(t, err)
+		got, err := decodeSetBucketSoleAuthorityCmd(raw)
+		require.NoError(t, err)
+		require.Equal(t, orig, got)
+	})
+	t.Run("backward-compat: EpochFloor=0 does not disturb Bucket/State fields", func(t *testing.T) {
+		// Old-encoded messages have EpochFloor omitted (default 0). Encoding with
+		// EpochFloor=0 is the closest we can test without a raw builder here;
+		// it exercises the same absent-field FlatBuffers decode path.
+		orig := SetBucketSoleAuthorityCmd{Bucket: "bucket", State: soleAuthOn, EpochFloor: 0}
+		raw, err := encodeSetBucketSoleAuthorityCmd(orig)
+		require.NoError(t, err)
+		got, err := decodeSetBucketSoleAuthorityCmd(raw)
+		require.NoError(t, err)
+		require.Equal(t, "bucket", got.Bucket)
+		require.Equal(t, soleAuthOn, got.State)
+		require.Equal(t, uint32(0), got.EpochFloor)
+	})
+}

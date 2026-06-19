@@ -80,6 +80,7 @@ type PerVersionCutoverReadiness struct {
 	Stuck       int      `json:"stuck"`
 	Unknown     int      `json:"unknown"`
 	Excluded    int      `json:"excluded"`
+	Ineligible  int      `json:"ineligible"`
 	GapRefs     []string `json:"gap_refs,omitempty"`
 	StuckRefs   []string `json:"stuck_refs,omitempty"`
 	UnknownRefs []string `json:"unknown_refs,omitempty"`

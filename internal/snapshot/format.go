@@ -36,10 +36,24 @@ var ErrUnsupportedSnapshotFormat = errors.New("unsupported snapshot format")
 var snapshotMagic = [8]byte{'G', 'F', 'S', 'N', 'A', 'P', '0', '1'}
 
 const (
-	currentSnapshotWriterFormat uint32 = 1
-	currentSnapshotReaderFormat uint32 = 1
+	currentSnapshotWriterFormat uint32 = 2
+	currentSnapshotReaderFormat uint32 = 2
 	snapshotHeaderLen                  = 8 + 4 + 4 + 8
 )
+
+// snapshotMinReader returns the minimum reader format version required to
+// correctly interpret snap. Snapshots carrying soleauth-on state or a nonzero
+// soleauth epoch require format 2 because old binaries would mis-restore them
+// (re-propose CmdPutObjectMeta without writing the blob). All other snapshots
+// remain at format 1 to preserve backward compatibility.
+func snapshotMinReader(snap *Snapshot) uint32 {
+	for i := range snap.BucketMeta {
+		if snap.BucketMeta[i].SoleAuthState == "on" || snap.BucketMeta[i].SoleAuthEpoch > 0 {
+			return 2
+		}
+	}
+	return 1
+}
 
 // encodeSnapshotFramed encodes snap into the GFSNAP01 framed format (magic +
 // versions + timestamp + zstd-JSON) and returns the raw bytes. This is the
@@ -47,7 +61,7 @@ const (
 func encodeSnapshotFramed(snap *Snapshot) ([]byte, error) {
 	var buf bytes.Buffer
 	buf.Write(snapshotMagic[:])
-	if err := binary.Write(&buf, binary.BigEndian, currentSnapshotReaderFormat); err != nil {
+	if err := binary.Write(&buf, binary.BigEndian, snapshotMinReader(snap)); err != nil {
 		return nil, err
 	}
 	if err := binary.Write(&buf, binary.BigEndian, currentSnapshotWriterFormat); err != nil {

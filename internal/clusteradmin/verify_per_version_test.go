@@ -117,6 +117,25 @@ func TestRunVerifyPerVersion_WithUnknown(t *testing.T) {
 	assert.Contains(t, out.String(), "err-key")
 }
 
+// TestRunVerifyPerVersion_WithIneligible asserts non-zero exit when a bucket is
+// cutover-INELIGIBLE (non-Enabled), even with zero gaps/stuck/unknown. A
+// counts-only verdict would have read READY (false-ready).
+func TestRunVerifyPerVersion_WithIneligible(t *testing.T) {
+	sock := startVerifyUDSStub(t, server.PerVersionCutoverReadiness{
+		Complete:   0,
+		Ineligible: 1,
+	})
+
+	var out bytes.Buffer
+	err := RunVerifyPerVersion(context.Background(), VerifyPerVersionCutoverOptions{
+		Endpoint: sock,
+		Out:      &out,
+	})
+	require.Error(t, err, "ineligible bucket must NOT read READY")
+	assert.Contains(t, err.Error(), "ineligible=1")
+	assert.Contains(t, out.String(), "ineligible: 1")
+}
+
 // TestRunVerifyPerVersion_BucketFilter verifies that --bucket is forwarded
 // as a query param to the server.
 func TestRunVerifyPerVersion_BucketFilter(t *testing.T) {

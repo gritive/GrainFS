@@ -49,6 +49,7 @@ func makeVerifyPerVersionCutoverFunc(b *cluster.DistributedBackend) server.Verif
 			total.Stuck += r.Stuck
 			total.Unknown += r.Unknown
 			total.Excluded += r.Excluded
+			total.Ineligible += r.Ineligible
 			total.GapRefs = capAppendRefStrings(total.GapRefs, r.GapRefs, maxAggregatedRefs)
 			total.StuckRefs = capAppendRefStrings(total.StuckRefs, r.StuckRefs, maxAggregatedRefs)
 			total.UnknownRefs = capAppendRefStrings(total.UnknownRefs, r.UnknownRefs, maxAggregatedRefs)
@@ -65,6 +66,7 @@ func toServerReadiness(r cluster.CutoverReadiness) server.PerVersionCutoverReadi
 		Stuck:       r.Stuck,
 		Unknown:     r.Unknown,
 		Excluded:    r.Excluded,
+		Ineligible:  r.Ineligible,
 		GapRefs:     refSliceToStrings(r.GapRefs),
 		StuckRefs:   refSliceToStrings(r.StuckRefs),
 		UnknownRefs: refSliceToStrings(r.UnknownRefs),

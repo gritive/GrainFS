@@ -48,6 +48,7 @@ func RunVerifyPerVersion(ctx context.Context, opts VerifyPerVersionCutoverOption
 	fmt.Fprintf(w, "  stuck:    %d\n", r.Stuck)
 	fmt.Fprintf(w, "  unknown:  %d\n", r.Unknown)
 	fmt.Fprintf(w, "  excluded: %d\n", r.Excluded)
+	fmt.Fprintf(w, "  ineligible: %d\n", r.Ineligible)
 
 	if len(r.GapRefs) > 0 {
 		fmt.Fprintln(w, "gap refs (backfillable):")
@@ -68,10 +69,14 @@ func RunVerifyPerVersion(ctx context.Context, opts VerifyPerVersionCutoverOption
 		}
 	}
 
-	fmt.Fprintln(w, "note: this node only — cluster-readiness requires every node to report 0 gaps+stuck+unknown")
+	fmt.Fprintln(w, "note: this node only — cluster-readiness requires every node to report 0 gaps+stuck+unknown+ineligible")
 
-	if r.Gaps+r.Stuck+r.Unknown > 0 {
-		return fmt.Errorf("cutover NOT ready: gaps=%d stuck=%d unknown=%d", r.Gaps, r.Stuck, r.Unknown)
+	// Ineligible > 0 blocks readiness: a cutover-ineligible (non-Enabled) bucket
+	// is a deferred epic and must never read as ready, regardless of object counts.
+	// This is the per-bucket flip-eligibility gate (S4c-d independently refuses
+	// non-Enabled buckets).
+	if r.Gaps+r.Stuck+r.Unknown+r.Ineligible > 0 {
+		return fmt.Errorf("cutover NOT ready: gaps=%d stuck=%d unknown=%d ineligible=%d", r.Gaps, r.Stuck, r.Unknown, r.Ineligible)
 	}
 	return nil
 }
