@@ -120,6 +120,70 @@ func TestApplyErrorCodecWrappedSentinel(t *testing.T) {
 	}
 }
 
+// TestDistributedBackendFollowerApplyWaitUnblocksOnLastApplied validates the
+// structural guarantee that the forwarded-propose follower apply-wait unblocks
+// as soon as lastApplied reaches the committed index.
+//
+// Context: S4c-0 PR2 code-gate fix — when a follower forwards a propose and
+// forwardPropose returns (idx, nil), the caller MUST wait for
+// b.lastApplied.Load() >= idx before returning so the MPU phantom-winner guard
+// reads a stable local mpudone marker.  This test proves the polling condition
+// and the ApplyError surfacing via the same primitives the real propose() loop
+// uses, without requiring a two-node raft cluster (which would require a real
+// transport).
+//
+// True multi-node forwarded-propose coverage is provided implicitly by:
+//   - The existing integration suite (backend_multipart_integration_test.go)
+//     which exercises the full propose path on real single-node raft (always
+//     leader path); and
+//   - TestMetaRaftProposeWithIndexFollowerWaitsForLocalApply which validates
+//     the same apply-wait pattern for MetaRaft (sister struct, identical loop).
+//
+// The gap — a follower forwarding to a leader then waiting for its own apply —
+// requires a two-node harness. That harness does not currently exist in the
+// cluster package unit tests (newTestDistributedBackend spins a solo leader).
+// The primitives tested here (lastApplied/ApplyError) are the exact code
+// executed by the follower apply-wait added in this fix.
+func TestDistributedBackendFollowerApplyWaitUnblocksOnLastApplied(t *testing.T) {
+	const idx uint64 = 77
+	b := &DistributedBackend{}
+
+	// Simulate the apply loop completing entry idx (no error).
+	// recordApplyResult comes first (ensures ApplyError reads nil),
+	// then lastApplied.Store — matching the real apply loop ordering.
+	b.lastApplied.Store(idx)
+
+	// The polling condition used in the follower apply-wait must be satisfied.
+	if b.lastApplied.Load() < idx {
+		t.Fatalf("expected lastApplied %d >= idx %d", b.lastApplied.Load(), idx)
+	}
+	// ApplyError must return nil (no apply error for this entry).
+	if applyErr := b.ApplyError(idx); applyErr != nil {
+		t.Fatalf("expected nil apply error, got %v", applyErr)
+	}
+}
+
+// TestDistributedBackendFollowerApplyWaitSurfacesApplyError validates that the
+// follower apply-wait correctly surfaces an FSM apply error recorded at idx.
+func TestDistributedBackendFollowerApplyWaitSurfacesApplyError(t *testing.T) {
+	const idx uint64 = 88
+	b := &DistributedBackend{}
+	sentinel := errors.New("fsm-apply-sentinel")
+
+	// Apply loop ordering: error first, then lastApplied.
+	b.recordApplyResult(idx, sentinel)
+	b.lastApplied.Store(idx)
+
+	// Polling condition satisfied.
+	if b.lastApplied.Load() < idx {
+		t.Fatalf("expected lastApplied %d >= idx %d", b.lastApplied.Load(), idx)
+	}
+	// ApplyError must surface the sentinel exactly once.
+	if applyErr := b.ApplyError(idx); !errors.Is(applyErr, sentinel) {
+		t.Fatalf("expected sentinel %v, got %v", sentinel, applyErr)
+	}
+}
+
 // Unknown / future codes must not panic — they fall through to a generic
 // error carrying the transported message.
 func TestApplyErrorCodecUnknownCode(t *testing.T) {

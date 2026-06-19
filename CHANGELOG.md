@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.0.619.0] - 2026-06-19
+
+### Fixed
+- **Multipart-complete idempotency — no duplicate version on a phantom-commit retry (foundation S4c-0).**
+  A `CompleteMultipartUpload` whose `CmdCompleteMultipart` raft propose timed out (phantom-commit) and
+  was retried could publish a SECOND completed version, and a retry-after-success returned
+  `ErrUploadNotFound` instead of the committed object. Closed with an FSM-visible `mpudone:{uploadID}`
+  marker, written in the same BadgerDB txn that deletes the upload manifest (`applyCompleteMultipart`):
+  - **Idempotent apply:** a second `CmdCompleteMultipart` for the same upload finds the manifest gone +
+    the marker present → no-ops (no duplicate `obj:{vid}`); a `(bucket,key)` mismatch returns a
+    descriptive error.
+  - **Idempotent client retry:** `CompleteMultipartUpload` whose manifest is gone returns the committed
+    object via `headObjectMetaV(marker.VersionID)` instead of `ErrUploadNotFound`.
+  - **Phantom-winner guard:** after the completion propose succeeds, the client reads the marker; if a
+    different completion won the upload, it skips the duplicate quorum-meta mirror and returns the
+    winner — preventing a second version from being mirrored (and, on versioning-enabled buckets, a
+    duplicate `CmdPutObjectMeta`).
+  - **Read-your-writes on forwarded proposes:** a follower that forwards a propose now waits for its own
+    local apply of the committed index (and surfaces apply errors), mirroring the leader path. This
+    makes the phantom-winner guard's local marker read reliable on every node.
+  - **Deterministic bounded GC:** a new raft command `CmdDeleteMultipartDone` + a periodic scrubber
+    sweep (enabled at boot, 24h retention, ≤256/cycle) GC the markers — a TTL would diverge replicas, so
+    deletion goes through raft.
+
+  The completion `VersionID` is still minted at completion time (UUIDv7, time-ordered) — NOT pinned at
+  create — so the per-version "max live VID = latest" derive is preserved. No on-disk format change and
+  no user-facing API change beyond the corrected idempotency semantics.
+
 ## [0.0.618.0] - 2026-06-19
 
 ### Fixed

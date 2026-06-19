@@ -380,7 +380,7 @@ func TestFSM_CompleteMultipartPersistsPartsSegmentsAndDeletesUpload(t *testing.T
 	require.NoError(t, err)
 }
 
-func TestFSM_CompleteMultipartRejectsDuplicateApply(t *testing.T) {
+func TestFSM_CompleteMultipart_IdempotentOnDuplicateApply(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
@@ -402,12 +402,12 @@ func TestFSM_CompleteMultipartRejectsDuplicateApply(t *testing.T) {
 		ContentType: "application/octet-stream", ETag: "second-etag", ModTime: 300, VersionID: "v2",
 	})
 	require.NoError(t, err)
-	require.ErrorIs(t, fsm.Apply(duplicate), storage.ErrUploadNotFound)
+	require.NoError(t, fsm.Apply(duplicate))
 
 	require.NoError(t, db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get(objectMetaKey("b", "mp.bin"))
 		require.NoError(t, err)
-		raw, err := item.ValueCopy(nil)
+		raw, err := fsm.itemValueCopy(item)
 		require.NoError(t, err)
 		meta, err := unmarshalObjectMeta(raw)
 		require.NoError(t, err)

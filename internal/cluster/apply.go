@@ -154,6 +154,8 @@ func (f *FSM) ApplyTxn(txn MetadataTxn, raw []byte) error {
 		// preceding CmdResealFSMValues batches in raft order. Gen is carried
 		// for logging/observability only — the re-Kick is gen-agnostic. S7-1a-2.
 		return nil
+	case CmdDeleteMultipartDone:
+		return f.applyDeleteMultipartDone(txn, cmd.Data)
 	default:
 		log.Warn().Uint8("type", uint8(cmd.Type)).Msg("fsm: unknown command type")
 		return nil
@@ -479,7 +481,27 @@ func (f *FSM) applyCompleteMultipart(txn MetadataTxn, data []byte) error {
 	mpuKey := f.keys.MultipartKey(c.UploadID)
 	item, err := txn.Get(mpuKey)
 	if err == ErrMetaKeyNotFound {
-		return storage.ErrUploadNotFound
+		// Manifest absent: check for a done marker written by a prior commit.
+		mb, merr := txn.Get(f.keys.MultipartDoneKey(c.UploadID))
+		if merr == ErrMetaKeyNotFound {
+			return storage.ErrUploadNotFound
+		}
+		if merr != nil {
+			return fmt.Errorf("get multipart done marker: %w", merr)
+		}
+		raw, merr := f.itemValueCopy(mb)
+		if merr != nil {
+			return fmt.Errorf("read multipart done marker: %w", merr)
+		}
+		marker, merr := unmarshalMultipartDone(raw)
+		if merr != nil {
+			return fmt.Errorf("unmarshal multipart done marker: %w", merr)
+		}
+		if marker.Bucket == c.Bucket && marker.Key == c.Key {
+			return nil // idempotent — prior commit won
+		}
+		return fmt.Errorf("complete multipart upload id %s already completed for %s/%s, got %s/%s",
+			c.UploadID, marker.Bucket, marker.Key, c.Bucket, c.Key)
 	}
 	if err != nil {
 		return err
@@ -508,6 +530,22 @@ func (f *FSM) applyCompleteMultipart(txn MetadataTxn, data []byte) error {
 			return err
 		}
 	}
+	// Write a done marker so that a retried apply of the same command is idempotent.
+	doneMarker := multipartDone{
+		UploadID:  c.UploadID,
+		Bucket:    c.Bucket,
+		Key:       c.Key,
+		VersionID: c.VersionID,
+		ModTime:   c.ModTime,
+	}
+	doneBytes, err := marshalMultipartDone(doneMarker)
+	if err != nil {
+		return fmt.Errorf("marshal multipart done marker: %w", err)
+	}
+	// mpudone marker is retained until GC sweeps it (S4c-0 PR2 Task 5) — it must outlive the client retry window.
+	if err := f.setValue(txn, f.keys.MultipartDoneKey(c.UploadID), doneBytes); err != nil {
+		return fmt.Errorf("set multipart done marker: %w", err)
+	}
 	return txn.Delete(mpuKey)
 }
 
@@ -521,6 +559,22 @@ func (f *FSM) applyAbortMultipart(txn MetadataTxn, data []byte) error {
 		return nil
 	}
 	return err
+}
+
+// applyDeleteMultipartDone handles CmdDeleteMultipartDone: it batch-deletes
+// mpudone idempotency markers for the listed upload IDs.  Missing markers are
+// silently ignored so the command is idempotent across retries.
+func (f *FSM) applyDeleteMultipartDone(txn MetadataTxn, data []byte) error {
+	c, err := decodeDeleteMultipartDoneCmd(data)
+	if err != nil {
+		return err
+	}
+	for _, id := range c.UploadIDs {
+		if derr := txn.Delete(f.keys.MultipartDoneKey(id)); derr != nil && derr != ErrMetaKeyNotFound {
+			return derr
+		}
+	}
+	return nil
 }
 
 func (f *FSM) applySetBucketPolicy(txn MetadataTxn, data []byte) error {

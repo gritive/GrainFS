@@ -142,6 +142,9 @@ func (ks *stateKeyspace) LatestKey(b, k string) []byte { return ks.Key([]byte("l
 func (ks *stateKeyspace) MultipartKey(uploadID string) []byte {
 	return ks.Key([]byte("mpu:" + uploadID))
 }
+func (ks *stateKeyspace) MultipartDoneKey(uploadID string) []byte {
+	return ks.Key([]byte("mpudone:" + uploadID))
+}
 func (ks *stateKeyspace) ShardPlacementKey(b, k string) []byte {
 	return ks.Key([]byte("placement:" + b + "/" + k))
 }

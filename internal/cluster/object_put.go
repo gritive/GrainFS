@@ -385,6 +385,32 @@ func (b *DistributedBackend) commitCompleteMultipartObjectWriteResult(
 		}
 		return nil, merr
 	}
+	// Phantom-winner guard: after a successful propose, check who actually won
+	// this uploadID. If another concurrent completion committed first (its
+	// marker holds a different versionID), our FSM apply was a no-op — do NOT
+	// mirror our version into quorum-meta (that would publish a duplicate
+	// version for versioning-enabled buckets). Return the winner's object;
+	// our shards become orphans collected by the segment scrubber.
+	var winnerObj *storage.Object
+	if marker, merr := b.readDoneMarker(uploadID); merr != nil {
+		log.Warn().Err(merr).Str("bucket", plan.Bucket).Str("key", plan.Key).Str("upload_id", uploadID).
+			Msg("multipart complete: done-marker readback failed; proceeding with mirror")
+	} else if marker != nil && marker.VersionID != plan.VersionID {
+		obj, herr := func() (*storage.Object, error) {
+			o, _, e := b.headObjectMetaV(ctx, plan.Bucket, plan.Key, marker.VersionID)
+			return o, e
+		}()
+		if herr != nil {
+			return nil, fmt.Errorf("multipart complete: winner readback: %w", herr)
+		}
+		winnerObj = obj
+	}
+	if winnerObj != nil {
+		ObservePutTraceStage(ctx, PutTraceStageDataRaftProposeMeta, stageStart, PutTraceStageFields{})
+		observePutStage(metricPath, "propose_meta", stageStart)
+		return winnerObj, nil
+	}
+
 	// LIST-visibility mirror into quorum-meta (best-effort; the object is already
 	// durably committed above). Must NOT delete shards or fail the op on error.
 	if merr := b.writeQuorumMeta(ctx, PutObjectMetaCmd{

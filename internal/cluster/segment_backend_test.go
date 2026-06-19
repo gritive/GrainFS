@@ -733,3 +733,144 @@ func TestPutObjectChunked_PartialFailRollsBackBlobs_ChunkerError(t *testing.T) {
 	assert.True(t, recordedAny,
 		"chunker error after segment 0 must have allowed at least one placement to be recorded")
 }
+
+// TestCompleteMultipart_PhantomWinnerGuard_SkipsMirrorWhenAnotherVIDWon guards
+// the BLOCK fixed by S4c-0 PR2: when a phantom-commit retry proposes
+// CmdCompleteMultipart with a NEW versionID (v2) but the FSM's no-op returns
+// nil (because the first complete already wrote the marker with v1), the client
+// path must NOT mirror v2 into quorum-meta (which would publish a duplicate
+// version). Instead it must return the WINNER's object (v1).
+//
+// RED: remove the phantom-winner guard from runChunkedPutWithParts — the test
+// observes a writeQuorumMeta call with versionID "v2-loser" and returned
+// object.VersionID "v2-loser" (not "v1-winner").
+//
+// GREEN: with the guard, no mirror is emitted and the returned object has the
+// winner's versionID "v1-winner".
+func TestCompleteMultipart_PhantomWinnerGuard_SkipsMirrorWhenAnotherVIDWon(t *testing.T) {
+	const (
+		uploadID      = "upload-phantom"
+		winnerVID     = "v1-winner"
+		loserVID      = "v2-loser"
+		bucket        = "bucket"
+		key           = "obj.bin"
+		winnerETag    = "etag-winner"
+		winnerModTime = int64(1000)
+	)
+
+	winnerObj := &storage.Object{
+		Key:          key,
+		VersionID:    winnerVID,
+		ETag:         winnerETag,
+		Size:         42,
+		LastModified: winnerModTime,
+	}
+
+	// Inject: done marker already holds the WINNER's versionID (v1-winner),
+	// simulating the state after the first complete's FSM apply committed.
+	deps := newFakeBackendWithGroups(fourPGFixture())
+
+	blobIDs := []string{uuid.Must(uuid.NewV7()).String()}
+	csb := newCSBWithDeps(deps, blobIDs)
+	csb.versionID = loserVID
+
+	// Wire the phantom-winner seams.
+	csb.readDoneMarkerFn = func(uid string) (*multipartDone, error) {
+		if uid != uploadID {
+			return nil, nil
+		}
+		return &multipartDone{
+			UploadID:  uploadID,
+			Bucket:    bucket,
+			Key:       key,
+			VersionID: winnerVID,
+		}, nil
+	}
+	csb.headObjectMetaVFn = func(ctx context.Context, b, k, v string) (*storage.Object, error) {
+		require.Equal(t, bucket, b)
+		require.Equal(t, key, k)
+		require.Equal(t, winnerVID, v, "winner readback must use marker's versionID")
+		return winnerObj, nil
+	}
+
+	// Run the chunked multipart complete with the LOSER versionID.
+	payload := bytes.Repeat([]byte("Z"), testChunkedPutChunkSize)
+	sp := makeSpool(t, payload)
+	body, err := sp.Open()
+	require.NoError(t, err)
+	defer body.Close()
+
+	parts := []storage.MultipartPartEntry{{PartNumber: 1, Size: int64(testChunkedPutChunkSize), ETag: "etag-1"}}
+	obj, err := runChunkedPutWithParts(context.Background(), csb, body,
+		bucket, key, loserVID, "application/octet-stream",
+		nil, "", 0, false, "", nil, parts, nil, uploadID)
+
+	require.NoError(t, err)
+	require.NotNil(t, obj)
+
+	// The WINNER's object must be returned, not the loser's.
+	assert.Equal(t, winnerVID, obj.VersionID,
+		"phantom-winner guard must return the winner's versionID, not the loser's")
+
+	// No quorum-meta mirror must be emitted for the loser versionID.
+	assert.Empty(t, deps.writeQuorumMetaCalls,
+		"phantom-winner guard must skip quorum-meta mirror to prevent duplicate version publication")
+
+	// The propose call (CmdCompleteMultipart) still happened — it was the
+	// FSM's no-op path that returned nil.
+	require.Len(t, deps.proposeCalls, 1)
+	assert.Equal(t, CmdCompleteMultipart, deps.proposeCalls[0].cmdType)
+	cmd := deps.proposeCalls[0].cmd.(CompleteMultipartCmd)
+	assert.Equal(t, loserVID, cmd.VersionID, "propose carries the loser's versionID (FSM's no-op gated it)")
+}
+
+// TestCompleteMultipart_PhantomWinnerGuard_ProceedsWhenSameVIDWon verifies that
+// the guard does NOT suppress the mirror when the marker holds the SAME
+// versionID as what was proposed (the happy path: this node won the race).
+func TestCompleteMultipart_PhantomWinnerGuard_ProceedsWhenSameVIDWon(t *testing.T) {
+	const (
+		uploadID = "upload-winner"
+		vid      = "v1"
+		bucket   = "bucket"
+		key      = "obj.bin"
+	)
+
+	deps := newFakeBackendWithGroups(fourPGFixture())
+	blobIDs := []string{uuid.Must(uuid.NewV7()).String()}
+	csb := newCSBWithDeps(deps, blobIDs)
+	csb.versionID = vid
+
+	// Marker holds the SAME versionID: this node won.
+	csb.readDoneMarkerFn = func(uid string) (*multipartDone, error) {
+		return &multipartDone{
+			UploadID:  uploadID,
+			Bucket:    bucket,
+			Key:       key,
+			VersionID: vid,
+		}, nil
+	}
+	// headObjectMetaVFn must NOT be called (same VID = winner proceeds normally).
+	csb.headObjectMetaVFn = func(ctx context.Context, b, k, v string) (*storage.Object, error) {
+		t.Errorf("headObjectMetaVFn must not be called when same versionID won")
+		return nil, fmt.Errorf("unexpected call")
+	}
+
+	payload := bytes.Repeat([]byte("W"), testChunkedPutChunkSize)
+	sp := makeSpool(t, payload)
+	body, err := sp.Open()
+	require.NoError(t, err)
+	defer body.Close()
+
+	parts := []storage.MultipartPartEntry{{PartNumber: 1, Size: int64(testChunkedPutChunkSize), ETag: "etag-1"}}
+	obj, err := runChunkedPutWithParts(context.Background(), csb, body,
+		bucket, key, vid, "application/octet-stream",
+		nil, "", 0, false, "", nil, parts, nil, uploadID)
+
+	require.NoError(t, err)
+	require.NotNil(t, obj)
+
+	// Mirror must have been emitted (normal winner path).
+	require.Len(t, deps.writeQuorumMetaCalls, 1,
+		"when same VID won, quorum-meta mirror must proceed")
+	assert.Equal(t, vid, deps.writeQuorumMetaCalls[0].VersionID)
+}

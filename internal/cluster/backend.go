@@ -1152,7 +1152,33 @@ func (b *DistributedBackend) propose(ctx context.Context, cmdType CommandType, p
 			for _, peer := range peers {
 				idx, err := b.forwardPropose(proposeCtx, peer, data)
 				if err == nil {
-					_ = idx
+					// Wait for this follower's local apply to catch up to the
+					// committed index before returning (read-your-writes). This
+					// makes the MPU phantom-winner guard reliable on follower
+					// nodes: the guard reads the LOCAL mpudone marker, which is
+					// only present once the winning entry has been applied here.
+					// Without this wait, a lagging follower could propose(v2),
+					// see forwardPropose succeed (v2 committed on leader), but
+					// then read an absent mpudone marker (v1's apply not yet
+					// landed locally) and mirror v2 — creating a duplicate.
+					//
+					// idx is the global raft log index returned by the leader's
+					// ProposeWait; b.lastApplied tracks the same log, so the
+					// comparison is direct.
+					for b.lastApplied.Load() < idx {
+						select {
+						case <-proposeCtx.Done():
+							if sentinel := proposeDeadlineSentinel(proposeCtx, "follower apply-wait"); sentinel != nil {
+								return sentinel
+							}
+							return proposeCtx.Err()
+						default:
+							time.Sleep(time.Millisecond)
+						}
+					}
+					if applyErr := b.ApplyError(idx); applyErr != nil {
+						return applyErr
+					}
 					return nil
 				}
 				lastErr = err

@@ -1168,6 +1168,48 @@ func unmarshalClusterMultipartMeta(data []byte) (clusterMultipartMeta, error) {
 	}, nil
 }
 
+// --- MultipartDone codec ---
+
+// multipartDone records that a multipart upload has been finalized.
+type multipartDone struct {
+	UploadID  string
+	Bucket    string
+	Key       string
+	VersionID string
+	ModTime   int64
+}
+
+func marshalMultipartDone(m multipartDone) ([]byte, error) {
+	b := clusterBuilderPool.Get()
+	uploadIDOff := b.CreateString(m.UploadID)
+	bucketOff := b.CreateString(m.Bucket)
+	keyOff := b.CreateString(m.Key)
+	versionIDOff := b.CreateString(m.VersionID)
+	clusterpb.MultipartDoneStart(b)
+	clusterpb.MultipartDoneAddUploadId(b, uploadIDOff)
+	clusterpb.MultipartDoneAddBucket(b, bucketOff)
+	clusterpb.MultipartDoneAddKey(b, keyOff)
+	clusterpb.MultipartDoneAddVersionId(b, versionIDOff)
+	clusterpb.MultipartDoneAddModTime(b, m.ModTime)
+	return fbFinish(b, clusterpb.MultipartDoneEnd(b)), nil
+}
+
+func unmarshalMultipartDone(data []byte) (multipartDone, error) {
+	t, err := fbSafe(data, func(d []byte) *clusterpb.MultipartDone {
+		return clusterpb.GetRootAsMultipartDone(d, 0)
+	})
+	if err != nil {
+		return multipartDone{}, fmt.Errorf("unmarshal MultipartDone: %w", err)
+	}
+	return multipartDone{
+		UploadID:  string(t.UploadId()),
+		Bucket:    string(t.Bucket()),
+		Key:       string(t.Key()),
+		VersionID: string(t.VersionId()),
+		ModTime:   t.ModTime(),
+	}, nil
+}
+
 // --- MigrateShard / MigrationDone codec ---
 
 func encodeMigrateShardCmd(c MigrateShardFSMCmd) ([]byte, error) {
@@ -1525,6 +1567,8 @@ func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
 		return encodeResealFSMValuesCmd(payload.(ResealFSMValuesCmd))
 	case CmdFSMValueResealDone:
 		return encodeFSMValueResealDoneCmd(payload.(FSMValueResealDoneCmd))
+	case CmdDeleteMultipartDone:
+		return encodeDeleteMultipartDoneCmd(payload.(DeleteMultipartDoneCmd))
 	default:
 		return nil, fmt.Errorf("unknown command type: %d", cmdType)
 	}
@@ -1631,6 +1675,34 @@ func decodeFSMValueResealDoneCmd(data []byte) (FSMValueResealDoneCmd, error) {
 		return FSMValueResealDoneCmd{}, err
 	}
 	return FSMValueResealDoneCmd{Gen: t.Gen()}, nil
+}
+
+func encodeDeleteMultipartDoneCmd(c DeleteMultipartDoneCmd) ([]byte, error) {
+	b := clusterBuilderPool.Get()
+	var idsOff flatbuffers.UOffsetT
+	if len(c.UploadIDs) > 0 {
+		idsOff = buildStringVector(b, c.UploadIDs, clusterpb.DeleteMultipartDoneCmdStartUploadIdsVector)
+	}
+	clusterpb.DeleteMultipartDoneCmdStart(b)
+	if len(c.UploadIDs) > 0 {
+		clusterpb.DeleteMultipartDoneCmdAddUploadIds(b, idsOff)
+	}
+	return fbFinish(b, clusterpb.DeleteMultipartDoneCmdEnd(b)), nil
+}
+
+func decodeDeleteMultipartDoneCmd(data []byte) (DeleteMultipartDoneCmd, error) {
+	t, err := fbSafe(data, func(d []byte) *clusterpb.DeleteMultipartDoneCmd {
+		return clusterpb.GetRootAsDeleteMultipartDoneCmd(d, 0)
+	})
+	if err != nil {
+		return DeleteMultipartDoneCmd{}, err
+	}
+	n := t.UploadIdsLength()
+	ids := make([]string, n)
+	for i := 0; i < n; i++ {
+		ids[i] = string(t.UploadIds(i))
+	}
+	return DeleteMultipartDoneCmd{UploadIDs: ids}, nil
 }
 
 func encodePutShardPlacementCmd(c PutShardPlacementCmd) ([]byte, error) {
