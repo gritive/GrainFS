@@ -1306,6 +1306,9 @@ func encodeSetBucketSoleAuthorityCmd(c SetBucketSoleAuthorityCmd) ([]byte, error
 	clusterpb.SetBucketSoleAuthorityCmdStart(b)
 	clusterpb.SetBucketSoleAuthorityCmdAddBucket(b, bucketOff)
 	clusterpb.SetBucketSoleAuthorityCmdAddState(b, stateOff)
+	if c.EpochFloor != 0 {
+		clusterpb.SetBucketSoleAuthorityCmdAddEpochFloor(b, c.EpochFloor)
+	}
 	return fbFinish(b, clusterpb.SetBucketSoleAuthorityCmdEnd(b)), nil
 }
 
@@ -1317,8 +1320,9 @@ func decodeSetBucketSoleAuthorityCmd(data []byte) (SetBucketSoleAuthorityCmd, er
 		return SetBucketSoleAuthorityCmd{}, err
 	}
 	return SetBucketSoleAuthorityCmd{
-		Bucket: string(t.Bucket()),
-		State:  string(t.State()),
+		Bucket:     string(t.Bucket()),
+		State:      string(t.State()),
+		EpochFloor: t.EpochFloor(),
 	}, nil
 }
 

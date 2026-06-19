@@ -1589,8 +1589,12 @@ table DeleteMultipartDoneCmd {
 
 // SetBucketSoleAuthorityCmd (cmd 44): per-bucket tri-state sole-authority flag.
 // State is one of "off", "pending", "on" (one-way: off→pending→on; pending→off abort).
-// Inert foundation for the S4c sole-authority cutover — no reader yet.
+// epoch_floor (S4c-b): monotonic floor for the stored soleauth epoch. When non-zero,
+// applySetBucketSoleAuthority raises the epoch to max(computed, epoch_floor). Used by
+// RestoreBuckets only, to repair the snapshot/restore fidelity gap caused by pending↔off
+// cycles that accumulate epoch bumps the transition-replay can't reproduce.
 table SetBucketSoleAuthorityCmd {
   bucket:string;
   state:string;
+  epoch_floor:uint32;
 }

@@ -126,3 +126,133 @@ func TestListAllObjects_SoleAuthOn_CapturesPerVersionWithFidelity(t *testing.T) 
 	require.True(t, v2obj.IsLatest)
 	require.Equal(t, "g1", v2obj.PlacementGroupID)
 }
+
+// TestListAllBuckets_SoleAuthEpoch_Captured verifies that ListAllBuckets sets
+// SoleAuthEpoch when the epoch is > 0, and omits it (leaves it 0) for a fresh
+// bucket that was never flipped.
+func TestListAllBuckets_SoleAuthEpoch_Captured(t *testing.T) {
+	b := newSnapshotTestBackend(t)
+	ctx := context.Background()
+
+	// "flipped": pending→off abort leaves epoch=2, state=off.
+	require.NoError(t, b.CreateBucket(ctx, "flipped"))
+	require.NoError(t, b.SetBucketSoleAuthority("flipped", soleAuthPending)) // epoch 1
+	require.NoError(t, b.SetBucketSoleAuthority("flipped", soleAuthOff))     // epoch 2 (abort)
+
+	// "fresh": never flipped, epoch stays 0.
+	require.NoError(t, b.CreateBucket(ctx, "fresh"))
+
+	buckets, err := b.ListAllBuckets()
+	require.NoError(t, err)
+
+	// Find each bucket in the result.
+	byName := make(map[string]storage.SnapshotBucket, len(buckets))
+	for _, bkt := range buckets {
+		byName[bkt.Name] = bkt
+	}
+
+	flipped, ok := byName["flipped"]
+	require.True(t, ok, "flipped bucket must appear in snapshot")
+	require.Equal(t, uint32(2), flipped.SoleAuthEpoch, "abort cycle epoch must be captured")
+
+	fresh, ok := byName["fresh"]
+	require.True(t, ok, "fresh bucket must appear in snapshot")
+	require.Equal(t, uint32(0), fresh.SoleAuthEpoch, "never-flipped bucket must have epoch 0")
+}
+
+// TestRestoreBuckets_EpochFloor_Monotonic verifies that RestoreBuckets raises
+// the stored epoch to the snapshot's SoleAuthEpoch floor even when the
+// transition-replay alone would land at a lower epoch.
+//
+// Scenario: the DESTINATION cluster is fresh (epoch 0). The snapshot records
+// SoleAuthEpoch=5 with state=off (the pending↔off abort case). After restore
+// the destination must have epoch ≥ 5.
+func TestRestoreBuckets_EpochFloor_Monotonic(t *testing.T) {
+	b := newSnapshotTestBackend(t)
+
+	snap := []storage.SnapshotBucket{{
+		Name:          "b",
+		SoleAuthState: "", // off (default)
+		SoleAuthEpoch: 5,  // accrued from prior pending↔off cycles
+	}}
+	require.NoError(t, b.RestoreBuckets(snap))
+
+	ep, err := b.GetBucketSoleAuthEpoch("b")
+	require.NoError(t, err)
+	require.Equal(t, uint32(5), ep, "restored epoch must equal the snapshot floor")
+}
+
+// TestRestoreBuckets_EpochFloor_DoesNotLower verifies that the floor is monotonic:
+// if the destination already has a higher epoch than the snapshot, the floor does
+// not lower it.
+func TestRestoreBuckets_EpochFloor_DoesNotLower(t *testing.T) {
+	b := newSnapshotTestBackend(t)
+	ctx := context.Background()
+
+	// Destination already has epoch 7 via real transitions.
+	require.NoError(t, b.CreateBucket(ctx, "b"))
+	require.NoError(t, b.SetBucketSoleAuthority("b", soleAuthPending)) // epoch 1
+	require.NoError(t, b.SetBucketSoleAuthority("b", soleAuthOff))     // epoch 2
+	require.NoError(t, b.SetBucketSoleAuthority("b", soleAuthPending)) // epoch 3
+	require.NoError(t, b.SetBucketSoleAuthority("b", soleAuthOff))     // epoch 4
+	require.NoError(t, b.SetBucketSoleAuthority("b", soleAuthPending)) // epoch 5
+	require.NoError(t, b.SetBucketSoleAuthority("b", soleAuthOff))     // epoch 6
+	require.NoError(t, b.SetBucketSoleAuthority("b", soleAuthPending)) // epoch 7
+
+	// Restore with a stale snapshot floor (3 < 7).
+	snap := []storage.SnapshotBucket{{
+		Name:          "b",
+		SoleAuthState: soleAuthPending,
+		SoleAuthEpoch: 3,
+	}}
+	require.NoError(t, b.RestoreBuckets(snap))
+
+	ep, err := b.GetBucketSoleAuthEpoch("b")
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, ep, uint32(7), "floor must not lower the epoch; destination keeps its higher value")
+}
+
+// TestPlanRestoreBucketSoleAuth verifies the soleauth state reconciliation plan
+// for all (curSA, target) combinations (pure function, no proposals).
+func TestPlanRestoreBucketSoleAuth(t *testing.T) {
+	cases := []struct {
+		cur, target string
+		wantPlan    []string
+		wantErr     bool
+	}{
+		// off target
+		{soleAuthOff, soleAuthOff, []string{}, false},
+		{soleAuthPending, soleAuthOff, []string{soleAuthOff}, false},
+		{soleAuthOn, soleAuthOff, nil, true}, // terminal cannot downgrade
+
+		// pending target
+		{soleAuthOff, soleAuthPending, []string{soleAuthPending}, false},
+		{soleAuthPending, soleAuthPending, []string{}, false},
+		{soleAuthOn, soleAuthPending, nil, true}, // terminal
+
+		// on target
+		{soleAuthOff, soleAuthOn, []string{soleAuthPending, soleAuthOn}, false},
+		{soleAuthPending, soleAuthOn, []string{soleAuthOn}, false},
+		{soleAuthOn, soleAuthOn, []string{}, false}, // idempotent
+
+		// empty target treated as off
+		{soleAuthOff, "", []string{}, false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		name := tc.cur + "->" + tc.target
+		t.Run(name, func(t *testing.T) {
+			plan, err := planRestoreBucketSoleAuth(tc.cur, tc.target)
+			if tc.wantErr {
+				require.Error(t, err, "expected error for %s", name)
+				return
+			}
+			require.NoError(t, err)
+			if tc.wantPlan == nil || len(tc.wantPlan) == 0 {
+				require.Empty(t, plan)
+			} else {
+				require.Equal(t, tc.wantPlan, plan)
+			}
+		})
+	}
+}

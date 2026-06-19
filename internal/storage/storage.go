@@ -255,6 +255,11 @@ type SnapshotBucket struct {
 	Name            string `json:"name"`
 	VersioningState string `json:"versioning_state,omitempty"` // "Unversioned" | "Enabled" | "Suspended"
 	SoleAuthState   string `json:"soleauth_state,omitempty"`   // "" | "off" | "pending" | "on"
+	// SoleAuthEpoch captures the monotonic soleauth epoch when > 0. On restore,
+	// it is applied as a floor via SetBucketSoleAuthorityCmd.EpochFloor to repair
+	// the fidelity gap: a pending↔off cycle accumulates bumps the transition-replay
+	// can't reproduce. Zero means the epoch was never advanced (omitted from JSON).
+	SoleAuthEpoch uint32 `json:"soleauth_epoch,omitempty"`
 }
 
 // BucketSnapshotable is an optional interface for backends that persist

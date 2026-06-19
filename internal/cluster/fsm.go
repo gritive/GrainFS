@@ -303,9 +303,22 @@ type SetBucketVersioningCmd struct {
 // SetBucketSoleAuthorityCmd persists the per-bucket sole-authority tri-state.
 // State is one of soleAuthOff ("off"), soleAuthPending ("pending"), soleAuthOn ("on").
 // One-way guard (off→pending→on; pending→off abort; on is terminal) is enforced in apply.
+//
+// EpochFloor is an additive monotonic floor for the stored soleauth epoch. When
+// non-zero, applySetBucketSoleAuthority raises the epoch to max(computed, EpochFloor).
+// It is only set by RestoreBuckets to repair the snapshot/restore fidelity gap: a
+// bucket that cycled pending↔off accumulates epoch bumps the transition-replay
+// can't reproduce, so a restored epoch could be LOWER than the original — admitting
+// stale wire epochs. The floor closes that gap without modifying the committed state.
+//
+// Mixed-version Raft safety: a non-zero EpochFloor is only ever emitted AFTER a
+// bucket has been flipped (soleauth epoch > 0), which requires the whole cluster to
+// have been upgraded first (spec §Rolling-upgrade). Therefore an epoch-floor restore
+// command is inherently post-upgrade; no runtime capability gate is needed.
 type SetBucketSoleAuthorityCmd struct {
-	Bucket string
-	State  string
+	Bucket     string
+	State      string
+	EpochFloor uint32 // monotonic floor for the stored soleauth epoch (snapshot-restore fidelity)
 }
 
 // soleAuth* are the valid tri-state values for the sole-authority flag.

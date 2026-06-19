@@ -57,14 +57,29 @@ func (rcv *SetBucketSoleAuthorityCmd) State() []byte {
 	return nil
 }
 
+func (rcv *SetBucketSoleAuthorityCmd) EpochFloor() uint32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(8))
+	if o != 0 {
+		return rcv._tab.GetUint32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *SetBucketSoleAuthorityCmd) MutateEpochFloor(n uint32) bool {
+	return rcv._tab.MutateUint32Slot(8, n)
+}
+
 func SetBucketSoleAuthorityCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(2)
+	builder.StartObject(3)
 }
 func SetBucketSoleAuthorityCmdAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
 }
 func SetBucketSoleAuthorityCmdAddState(builder *flatbuffers.Builder, state flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(1, flatbuffers.UOffsetT(state), 0)
+}
+func SetBucketSoleAuthorityCmdAddEpochFloor(builder *flatbuffers.Builder, epochFloor uint32) {
+	builder.PrependUint32Slot(2, epochFloor, 0)
 }
 func SetBucketSoleAuthorityCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

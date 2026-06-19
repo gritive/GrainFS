@@ -159,11 +159,21 @@ func (b *DistributedBackend) ListAllBuckets() ([]storage.SnapshotBucket, error) 
 		if saState == soleAuthOff {
 			saState = ""
 		}
-		out = append(out, storage.SnapshotBucket{
+		saEpoch, err := b.GetBucketSoleAuthEpoch(bucket)
+		if err != nil {
+			return nil, fmt.Errorf("get bucket soleauth epoch %s: %w", bucket, err)
+		}
+		// Capture epoch only when > 0 (omitempty in JSON). Zero means the bucket
+		// was never flipped; no floor is needed on restore.
+		snap := storage.SnapshotBucket{
 			Name:            bucket,
 			VersioningState: state,
 			SoleAuthState:   saState,
-		})
+		}
+		if saEpoch > 0 {
+			snap.SoleAuthEpoch = saEpoch
+		}
+		out = append(out, snap)
 	}
 	return out, nil
 }
@@ -214,6 +224,26 @@ func (b *DistributedBackend) RestoreBuckets(buckets []storage.SnapshotBucket) er
 				State:  st,
 			}); err != nil {
 				return fmt.Errorf("restore bucket soleauth %s %s: %w", st, bucket.Name, err)
+			}
+		}
+		// Restore the soleauth epoch as a monotonic floor to repair the
+		// snapshot/restore fidelity gap: a pending↔off cycle accumulates epoch bumps
+		// the transition-replay above cannot reproduce, so the restored epoch could
+		// be lower than the original — admitting stale wire epochs. The floor closes
+		// that gap by raising max(restored, snapshot.SoleAuthEpoch) without altering
+		// the committed state. Safe because a non-zero epoch only exists after a flip,
+		// which requires the whole cluster to be upgraded first (spec §Rolling-upgrade).
+		if bucket.SoleAuthEpoch > 0 {
+			finalState := bucket.SoleAuthState
+			if finalState == "" {
+				finalState = soleAuthOff
+			}
+			if err := b.propose(ctx, CmdSetBucketSoleAuthority, SetBucketSoleAuthorityCmd{
+				Bucket:     bucket.Name,
+				State:      finalState,
+				EpochFloor: bucket.SoleAuthEpoch,
+			}); err != nil {
+				return fmt.Errorf("restore bucket soleauth epoch floor %s: %w", bucket.Name, err)
 			}
 		}
 	}

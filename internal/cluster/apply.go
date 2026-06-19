@@ -692,6 +692,13 @@ func (f *FSM) applySetBucketSoleAuthority(txn MetadataTxn, data []byte) error {
 	if cur != c.State {
 		newEpoch = curEpoch + 1
 	}
+	// Apply the monotonic floor from snapshot-restore: raises the epoch to
+	// max(computed, EpochFloor) without modifying the committed state. This repairs
+	// the fidelity gap where a pending↔off cycle accumulated epoch bumps that the
+	// transition-replay alone cannot reproduce, preventing stale wire epochs.
+	if c.EpochFloor > newEpoch {
+		newEpoch = c.EpochFloor
+	}
 	if err := txn.Set(f.keys.BucketSoleAuthEpochKey(c.Bucket), encodeSoleAuthEpoch(newEpoch)); err != nil {
 		return err
 	}
