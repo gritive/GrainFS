@@ -29,6 +29,34 @@ func TestPutObjectArgs_SoleAuthEpochRoundTrip(t *testing.T) {
 	require.Equal(t, uint32(0), raftpb.GetRootAsPutObjectArgs(b.FinishedBytes(), 0).SoleauthEpoch())
 }
 
+// TestResolveQuorumMetaEpoch_PrefersContext verifies resolveQuorumMetaEpoch
+// prefers the context-stamped epoch (the originating node's authoritative value,
+// carried over the forward wire) over the local committed read, and falls back
+// to the local read when the context is unstamped.
+func TestResolveQuorumMetaEpoch_PrefersContext(t *testing.T) {
+	ctx := context.Background()
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(ctx, "bucket"))
+
+	// Drive the local committed epoch to 2: off -> pending (1) -> on (2).
+	require.NoError(t, b.SetBucketSoleAuthority("bucket", soleAuthPending))
+	require.NoError(t, b.SetBucketSoleAuthority("bucket", soleAuthOn))
+	local, err := b.GetBucketSoleAuthEpoch("bucket")
+	require.NoError(t, err)
+	require.Equal(t, uint32(2), local)
+
+	// Unstamped context → local committed epoch (2).
+	require.Equal(t, uint32(2), b.resolveQuorumMetaEpoch(context.Background(), "bucket"))
+
+	// Stamped context wins over the local 2.
+	stamped := ContextWithBucketSoleAuthEpoch(context.Background(), 7)
+	require.Equal(t, uint32(7), b.resolveQuorumMetaEpoch(stamped, "bucket"))
+
+	// A bucket never flipped (local epoch 0), unstamped context → 0.
+	require.NoError(t, b.CreateBucket(ctx, "fresh"))
+	require.Equal(t, uint32(0), b.resolveQuorumMetaEpoch(context.Background(), "fresh"))
+}
+
 func TestSoleAuthEpochContextRoundTrip(t *testing.T) {
 	epoch, resolved := bucketSoleAuthEpochFromContext(context.Background())
 	require.False(t, resolved, "background context must be unresolved")

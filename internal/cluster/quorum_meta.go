@@ -49,6 +49,21 @@ func (b *DistributedBackend) bucketVersioningEnabled(ctx context.Context, bucket
 	return err == nil && state == "Enabled"
 }
 
+// resolveQuorumMetaEpoch returns the soleauth epoch to fence this quorum-meta
+// write with: the context-stamped value (the ORIGINATING node's authoritative
+// epoch, set at the S3 edge and carried over the forward wire) when present,
+// else the local committed epoch. For a non-forwarded write the two are the
+// same node, so this is behavior-neutral; for a forwarded write it makes the
+// owner fence against the originator's epoch instead of re-reading its own.
+// Error-tolerant: a local read error yields 0 (the fence is off at epoch 0).
+func (b *DistributedBackend) resolveQuorumMetaEpoch(ctx context.Context, bucket string) uint32 {
+	if e, ok := bucketSoleAuthEpochFromContext(ctx); ok {
+		return e
+	}
+	e, _ := b.GetBucketSoleAuthEpoch(bucket)
+	return e
+}
+
 func (b *DistributedBackend) writeQuorumMeta(ctx context.Context, cmd PutObjectMetaCmd) error {
 	// Internal buckets stay on raft (control-plane; headObjectMeta reads BadgerDB
 	// for them). Non-internal user buckets use per-node quorum (data_raft bypass).
@@ -73,10 +88,11 @@ func (b *DistributedBackend) writeQuorumMeta(ctx context.Context, cmd PutObjectM
 		return fmt.Errorf("quorum meta write encode: %w", err)
 	}
 	self := b.currentSelfAddr()
-	// Live sole-authority epoch for the fence: read once at the top and thread it
-	// to every local leaf + peer send. Ignore the error (→ 0) so a transient read
-	// never fails a write while the fence is off (every prod bucket is epoch 0).
-	epoch, _ := b.GetBucketSoleAuthEpoch(cmd.Bucket)
+	// Sole-authority epoch for the fence: prefer the context-stamped value (the
+	// originating node's authoritative epoch, carried over the forward wire), else
+	// the local committed read. Resolved once at the top and threaded to every
+	// local leaf + peer send.
+	epoch := b.resolveQuorumMetaEpoch(ctx, cmd.Bucket)
 	// K-of-N write quorum: ECData nodes must ack. Parity nodes are best-effort.
 	// Any node that misses the write can still read via fetchQuorumMetaFromPeers.
 	k := int(cmd.ECData)
