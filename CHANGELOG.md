@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.632.0] - 2026-06-20
+
+### Fixed
+- **Bucket-name reuse — clear per-bucket state on delete, preserve the soleauth epoch floor (S4c-d
+  cutover precondition).** `applyDeleteBucket` deleted only the bucket existence record (`bucket:{b}`),
+  leaking the per-bucket policy, versioning, and soleauth state into a recreated same-name bucket. It now
+  also clears `policy:{b}`, `bucketver:{b}`, and the soleauth STATE (`soleauth:{b}`), so a recreated
+  bucket starts fresh (no inherited policy, unversioned, and not stuck in a prior incarnation's terminal
+  soleauth `on`). It **deliberately preserves** `soleauthepoch:{b}`: that epoch is a monotonic
+  cross-incarnation floor — clearing it would reset a recreated+reflipped bucket to epoch 1 and let a
+  dead incarnation's stale forwarded write pass the soleauth fence (`soleAuthEpochStale(1, 5)` is false),
+  the exact hazard the cutover fence prevents. The policy/versioning clears are live S3-correctness (a
+  new bucket inherits nothing); the soleauth state-clear + epoch-preserve are **DORMANT** (the flip is
+  unreachable today). Per-bucket state in other subsystems (lifecycle config, IAM bucket-upstream) lives
+  outside this FSM keyspace and is tracked as a separate cross-subsystem follow-up.
+
 ## [0.0.631.0] - 2026-06-20
 
 ### Fixed

@@ -304,7 +304,29 @@ func (f *FSM) applyDeleteBucket(txn MetadataTxn, data []byte) error {
 	if reservedname.IsReservedBucketName(c.Bucket) {
 		return fmt.Errorf("bucket name %q is reserved and cannot be deleted via public API", c.Bucket)
 	}
-	return txn.Delete(f.keys.BucketKey(c.Bucket))
+	// Clear the per-bucket state so a recreated same-name bucket starts fresh (S3
+	// semantics — a new bucket inherits nothing from a prior incarnation): the
+	// existence record, the bucket policy, the versioning state, and the soleauth
+	// STATE (so a deleted soleauth=on bucket does not come back stuck in terminal
+	// `on`). DELIBERATELY does NOT clear soleauthepoch:{b}: that epoch is a
+	// monotonic cross-incarnation floor — resetting it would let a dead
+	// incarnation's stale forwarded write pass the soleauth fence on the recreated
+	// bucket. Tolerate absent keys (most are unset on a plain bucket), mirroring
+	// applyDeleteObject. (Per-bucket state in other subsystems — lifecycle config,
+	// IAM bucket-upstream — lives outside this FSM keyspace and is tracked
+	// separately; object obj:/lat: records are GC'd by the orphan scrubber and
+	// DeleteBucket requires an empty bucket.)
+	for _, key := range [][]byte{
+		f.keys.BucketKey(c.Bucket),
+		f.keys.BucketPolicyKey(c.Bucket),
+		f.keys.BucketVerKey(c.Bucket),
+		f.keys.BucketSoleAuthKey(c.Bucket),
+	} {
+		if err := txn.Delete(key); err != nil && err != ErrMetaKeyNotFound {
+			return err
+		}
+	}
+	return nil
 }
 
 func (f *FSM) applyPutObjectMeta(txn MetadataTxn, data []byte) error {
