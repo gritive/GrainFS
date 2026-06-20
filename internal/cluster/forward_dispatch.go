@@ -148,6 +148,13 @@ var bucketForwardOpSpecs = map[raftpb.ForwardOp]bucketForwardOpSpec{
 		mutates:     true,
 		handleFrame: (*ForwardReceiver).handleDeleteObjectVersion,
 	},
+	raftpb.ForwardOpHardDeleteObject: {
+		op:          raftpb.ForwardOpHardDeleteObject,
+		name:        raftpb.ForwardOpHardDeleteObject.String(),
+		transport:   forwardFrameOnly,
+		mutates:     true,
+		handleFrame: (*ForwardReceiver).handleHardDeleteObject,
+	},
 	raftpb.ForwardOpListObjectVersions: {
 		op:          raftpb.ForwardOpListObjectVersions,
 		name:        raftpb.ForwardOpListObjectVersions.String(),

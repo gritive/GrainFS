@@ -29,7 +29,8 @@ enum ForwardOp : byte {
   AppendObject = 19,
   HeadObjectVersion = 20,  // reserved: matches origin/master 4722a758; do not reuse
   SetObjectTags = 21,
-  GetObjectTags = 22
+  GetObjectTags = 22,
+  HardDeleteObject = 23  // S4c-c-read2b: routed legacy-bare hard delete (CmdDeleteObject VID=""), on-gated
 }
 
 // Tag mirrors storagepb.Tag (key/value) for the Raft forward path.

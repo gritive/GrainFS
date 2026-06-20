@@ -99,16 +99,35 @@ func (b *DistributedBackend) HeadBucket(ctx context.Context, bucket string) erro
 }
 
 func (b *DistributedBackend) DeleteBucket(ctx context.Context, bucket string) error {
-	// Check existence and emptiness
-	err := b.store.View(func(txn MetadataTxn) error {
+	// Existence check (always).
+	if err := b.store.View(func(txn MetadataTxn) error {
 		_, err := txn.Get(b.ks().BucketKey(bucket))
 		if err == ErrMetaKeyNotFound {
 			return storage.ErrBucketNotFound
 		}
-		if err != nil {
-			return err
-		}
+		return err
+	}); err != nil {
+		return err
+	}
 
+	// Emptiness. Under soleauth=on the per-version blob tree (incl. delete
+	// markers) + carve-out FSM are the SOLE AUTHORITY; a stale non-carve-out FSM
+	// obj: record is non-authoritative and must NOT make an authoritatively-empty
+	// bucket look non-empty (the off-path obj: scan would). The authority probe
+	// does cluster RPC and opens its OWN store.View (via the carve-out scan), so
+	// it MUST run OUTSIDE any txn — never nest it under the existence View above.
+	if on, serr := b.soleAuthReadOn(bucket); serr != nil {
+		return serr // fail closed
+	} else if on {
+		vs, lerr := b.listObjectVersionsSoleAuth(bucket, "", 1)
+		if lerr != nil {
+			return lerr
+		}
+		if len(vs) > 0 {
+			return storage.ErrBucketNotEmpty
+		}
+	} else if err := b.store.View(func(txn MetadataTxn) error {
+		// off/pending: the existing FSM obj: prefix scan, verbatim.
 		prefix := b.ks().Prefix([]byte("obj:" + bucket + "/"))
 		it := txn.NewIterator(MetaIteratorOptions{PrefetchValues: true})
 		defer it.Close()
@@ -117,8 +136,7 @@ func (b *DistributedBackend) DeleteBucket(ctx context.Context, bucket string) er
 			return storage.ErrBucketNotEmpty
 		}
 		return nil
-	})
-	if err != nil {
+	}); err != nil {
 		return err
 	}
 
@@ -139,6 +157,17 @@ func (b *DistributedBackend) DeleteBucket(ctx context.Context, bucket string) er
 func (b *DistributedBackend) ForceDeleteBucket(ctx context.Context, bucket string) error {
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return err
+	}
+	// Under soleauth=on the per-version blob tree + carve-out FSM are the SOLE
+	// AUTHORITY: enumerate the deletion set from there (NOT the stale FSM obj:
+	// scan), purge blobs, and hard-delete carve-outs. Branch once at the top so
+	// off/pending keep the FSM-scan + two-pass forceDeleteObject verbatim (and
+	// never read soleauth per-object). This is the single-DistributedBackend
+	// (single-node / direct) path; the cluster path is ClusterCoordinator.
+	if on, serr := b.soleAuthReadOn(bucket); serr != nil {
+		return serr // fail closed
+	} else if on {
+		return b.forceDeleteBucketSoleAuth(ctx, bucket)
 	}
 	// Collect all obj: refs first so the Badger View is closed before any
 	// Raft propose. Calling propose inside db.View holds the MVCC snapshot for
@@ -248,6 +277,73 @@ func (b *DistributedBackend) forceDeleteObject(ctx context.Context, bucket, key,
 		Key:       key,
 		VersionID: "", // empty = legacy hard delete, no tombstone
 	})
+}
+
+// forceDeleteBucketSoleAuth is the soleauth=on leaf ForceDeleteBucket path
+// (single-node / direct backend). It enumerates the authoritative deletion set —
+// per-version blobs (incl. delete markers, fail-closed cluster-wide) + this
+// node's local carve-out FSM records (appendable/coalesced/legacy-bare) — then
+// removes each: vid-bearing entries via DeleteObjectVersion (S2a dual-delete
+// purges the per-version blob); legacy-bare (VersionID=="") via the hard-delete
+// path. Non-carve-out vid-bearing FSM records are NON-authoritative under `on`
+// and intentionally left as orphans (the orphan scrubber GCs them; they do not
+// count toward emptiness). Finishes with the blob-aware DeleteBucket.
+func (b *DistributedBackend) forceDeleteBucketSoleAuth(ctx context.Context, bucket string) error {
+	type objRef struct {
+		key       string
+		versionID string
+	}
+	var refs []objRef
+	seen := map[[2]string]bool{}
+	add := func(key, vid string) {
+		k := [2]string{key, vid}
+		if !seen[k] {
+			seen[k] = true
+			refs = append(refs, objRef{key: key, versionID: vid})
+		}
+	}
+	// Versioned blobs (every version, incl. delete markers), fail-closed.
+	cmds, err := b.scanQuorumMetaVersionsClusterAll(bucket, "")
+	if err != nil {
+		return fmt.Errorf("force delete (soleauth): enumerate blobs: %w", err)
+	}
+	for _, c := range cmds {
+		add(c.Key, c.VersionID)
+	}
+	// Local carve-out records (blob-wins collisions already excluded via `seen`).
+	carve, err := b.scanFsmCarveoutVersions(bucket, "", seen)
+	if err != nil {
+		return fmt.Errorf("force delete (soleauth): enumerate carve-out: %w", err)
+	}
+	for _, v := range carve {
+		add(v.Key, v.VersionID)
+	}
+	for _, ref := range refs {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if ref.versionID != "" {
+			if derr := b.DeleteObjectVersion(bucket, ref.key, ref.versionID); derr != nil {
+				return fmt.Errorf("force delete (soleauth): delete %q@%s: %w", ref.key, ref.versionID, derr)
+			}
+			continue
+		}
+		if derr := b.HardDeleteLegacyObject(ctx, bucket, ref.key); derr != nil {
+			return fmt.Errorf("force delete (soleauth): hard delete %q: %w", ref.key, derr)
+		}
+	}
+	return b.DeleteBucket(ctx, bucket)
+}
+
+// HardDeleteLegacyObject hard-deletes a legacy unversioned bare obj:{bucket}/{key}
+// record (CmdDeleteObject with VersionID="", apply.go hard-delete path) — NO
+// tombstone. Used ONLY by the soleauth=on force-delete path (leaf + the
+// coordinator's all-groups fan-out) to remove a legacy-bare carve-out; off-path
+// force-delete uses forceDeleteObject's legacy branch directly. Idempotent: a
+// no-op when the bare record is absent.
+func (b *DistributedBackend) HardDeleteLegacyObject(ctx context.Context, bucket, key string) error {
+	_ = os.Remove(b.objectPath(bucket, key))
+	return b.propose(ctx, CmdDeleteObject, DeleteObjectCmd{Bucket: bucket, Key: key, VersionID: ""})
 }
 
 // SetBucketVersioning satisfies server.BucketVersioner. Replicates the

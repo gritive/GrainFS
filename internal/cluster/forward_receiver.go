@@ -582,6 +582,18 @@ func (r *ForwardReceiver) handleDeleteObject(dg *DataGroup, args []byte) []byte 
 	}, bucket)
 }
 
+// handleHardDeleteObject serves the soleauth=on force-delete hard-delete of a
+// legacy-bare obj:{bucket}/{key} record (CmdDeleteObject VID="", NO tombstone) —
+// distinct from handleDeleteObject which writes a delete-marker tombstone.
+// Idempotent: a no-op when the bare record is absent on this group.
+func (r *ForwardReceiver) handleHardDeleteObject(dg *DataGroup, args []byte) []byte {
+	da := raftpb.GetRootAsDeleteObjectArgs(args, 0)
+	if err := dg.Backend().HardDeleteLegacyObject(context.Background(), string(da.Bucket()), string(da.Key())); err != nil {
+		return statusReply(mapErrorToStatus(err))
+	}
+	return buildOKReply()
+}
+
 func (r *ForwardReceiver) handleSetObjectACL(dg *DataGroup, args []byte) []byte {
 	sa := raftpb.GetRootAsSetObjectACLArgs(args, 0)
 	if err := dg.Backend().SetObjectACL(string(sa.Bucket()), string(sa.Key()), sa.Acl()); err != nil {

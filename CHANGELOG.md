@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.0.627.0] - 2026-06-20
+
+### Added
+- **Bucket emptiness + force-delete + scrubber object-scan authority under `soleauth=on` — dormant cutover slice
+  (S4c-c-read2b), Enabled-only scope; completes the S4c-c READ-derive stage.**
+  The remaining all-version / enumeration paths now treat the per-version quorum-meta blob tree as the authority
+  when a bucket's `soleauth` state is `on` (a per-bucket tri-state; **never `on` in production yet** — the admin
+  flip is a future slice). `off`/`pending` (every bucket today) is **byte-identical**; the `on` branches are
+  unreachable until the future flip. In `internal/cluster`:
+  - **`DeleteBucket` emptiness** under `on` derives from the cluster-wide per-version blobs (delete markers
+    included) plus carve-out FSM records, not the local FSM `obj:` prefix scan. A stale, non-authoritative
+    vid-bearing FSM record no longer falsely blocks the deletion of an authoritatively-empty bucket. The leaf runs
+    the authority probe outside the metadata read txn; the coordinator probes via `ListObjectVersions`.
+  - **`ForceDeleteBucket`** under `on` enumerates the authoritative deletion set cluster-wide (fail-closed) and
+    deletes each object routed to its owning group: versioned objects via the generation-aware delete that also
+    purges the per-version blob, and legacy unversioned bare records via a hard delete fanned out to every shard
+    group (idempotent, so the record is removed wherever it resides). A trailing blob-aware `DeleteBucket` is the
+    fail-closed completeness backstop. This adds one new internal, `on`-gated forward op (`HardDeleteObject`) for
+    the routed hard delete of a legacy-bare record (distinct from the tombstone-writing `DeleteObject`).
+  - **Scrubber `ScanObjects`** under `on` enumerates the EC scrub work-list (latest-version-per-key, repair-only,
+    local-node) from the per-version blob authority (strict, fail-closed — a corrupt blob surfaces synchronously)
+    plus local EC carve-out records, each reported with its own EC profile (a genesis 1+0 object stays 1+0) so the
+    redundancy-upgrade sweep still sees it.
+  - The carve-out record walk is now single-sourced (`forEachLocalCarveout`) so the `ListObjectVersions` on-branch
+    and the scrubber scan classify carve-out records (appendable / coalesced / legacy unversioned bare) through one
+    rule and cannot drift.
+
 ## [0.0.626.0] - 2026-06-20
 
 ### Added

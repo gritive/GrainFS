@@ -325,7 +325,10 @@ func TestClusterCoordinator_DeleteBucket_ChecksRoutedDataGroupBeforeBaseDelete(t
 
 	err := c.DeleteBucket(context.Background(), "bk1")
 	require.ErrorIs(t, err, storage.ErrBucketNotEmpty)
-	require.Empty(t, base.calls)
+	// The soleauth gate reads bucket state first (off → the legacy ListObjects
+	// emptiness probe); base.DeleteBucket is still NOT reached before the routed
+	// emptiness check fails.
+	require.Equal(t, []string{"GetBucketSoleAuthority:bk1"}, base.calls)
 	require.Len(t, d.calls, 1)
 	require.Equal(t, raftpb.ForwardOpListObjects, d.calls[0].op)
 }
@@ -345,7 +348,9 @@ func TestClusterCoordinator_DeleteBucket_UsesLocalSingletonGroupBeforeForward(t 
 		WithForwardSender(NewForwardSender(d.dial))
 
 	require.NoError(t, c.DeleteBucket(context.Background(), "empty-bucket"))
-	require.Equal(t, []string{"DeleteBucket:empty-bucket"}, base.calls)
+	// The soleauth gate reads bucket state first (off → legacy path), then the
+	// empty bucket delegates to base.DeleteBucket without forwarding.
+	require.Equal(t, []string{"GetBucketSoleAuthority:empty-bucket", "DeleteBucket:empty-bucket"}, base.calls)
 	require.Empty(t, d.calls)
 }
 

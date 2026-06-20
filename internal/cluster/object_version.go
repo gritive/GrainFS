@@ -492,9 +492,45 @@ func (b *DistributedBackend) listObjectVersionsSoleAuth(bucket, prefix string, m
 // the off-path leaf and fsmCarveoutObject.
 func (b *DistributedBackend) scanFsmCarveoutVersions(bucket, prefix string, blobSeen map[[2]string]bool) ([]*storage.ObjectVersion, error) {
 	var out []*storage.ObjectVersion
-	err := b.store.View(func(txn MetadataTxn) error {
-		// lat: pointers tell us which keys are versioned (have a vid-bearing
-		// latest) — a key with a lat: pointer can never be legacy-bare.
+	err := b.forEachLocalCarveout(bucket, prefix, func(key, vid string, bareLegacy, hasLat bool, m objectMeta) error {
+		if blobSeen[[2]string{key, vid}] {
+			return nil // blob wins the (Key,VID) collision
+		}
+		// A carve-out is its key's latest: bare-legacy has no version identity
+		// (IsLatest), and an appendable/coalesced record is stored as its key's
+		// single latest (lat: points at it). Mirrors the off-path leaf.
+		out = append(out, &storage.ObjectVersion{
+			Key:            key,
+			VersionID:      vid,
+			IsLatest:       bareLegacy || hasLat,
+			IsDeleteMarker: m.ETag == deleteMarkerETag,
+			LastModified:   m.LastModified,
+			ETag:           m.ETag,
+			Size:           m.Size,
+			Tags:           append([]storage.Tag(nil), m.Tags...),
+		})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// forEachLocalCarveout iterates THIS node's local FSM obj:/lat: records under
+// prefix and invokes visit for each CARVE-OUT-class record
+// (appendable/coalesced/legacy-bare per isFsmCarveoutClass). It resolves
+// (key, vid, bareLegacy) and whether the key has a lat: pointer the SAME way for
+// every consumer — the ListObjectVersions on-branch (scanFsmCarveoutVersions) and
+// the soleauth=on scrubber scan — so the carve-out classification cannot drift.
+// Plain vid-bearing versioned records and the slashless MIRROR of a versioned key
+// are skipped: a versioned appendable/coalesced object persists both obj:{b}/{k}
+// (mirror, vid="") and obj:{b}/{k}/{vid} with lat:{b}/{k}→vid; the mirror resolves
+// to (vid="", bareLegacy=false) because a lat: pointer exists, and the
+// authoritative carve-out is the versioned record. A genuine legacy-bare record
+// (bareLegacy=true, no lat:) is kept.
+func (b *DistributedBackend) forEachLocalCarveout(bucket, prefix string, visit func(key, vid string, bareLegacy, hasLat bool, m objectMeta) error) error {
+	return b.store.View(func(txn MetadataTxn) error {
 		hasLat := map[string]bool{}
 		rawLatPfx := []byte("lat:" + bucket + "/" + prefix)
 		latPrefix := b.ks().Prefix(rawLatPfx)
@@ -521,21 +557,9 @@ func (b *DistributedBackend) scanFsmCarveoutVersions(bucket, prefix string, blob
 			if merr != nil {
 				return merr
 			}
-			// Resolve key/vid and bare-legacy the same way the off-path leaf and
-			// fsmCarveoutObject do: a record is bare-legacy only when it is a
-			// slash-less obj: key with NO lat: pointer; a vid-bearing record whose
-			// stored meta.Key equals the parsed key is a genuine versioned record.
 			key, vid, bareLegacy := b.resolveFsmRecordIdentity(rest, m, hasLat)
-			// Skip the slashless MIRROR of a versioned key (codex code-gate [P2]):
-			// a versioned appendable/coalesced object persists both obj:{b}/{k}
-			// (slashless mirror, vid=="") and obj:{b}/{k}/{vid} with lat:{b}/{k}→vid.
-			// The mirror resolves to (vid=="", bareLegacy=false) because a lat:
-			// pointer exists; emitting it would duplicate the object as a bogus
-			// empty-VID row (and a 2nd IsLatest). The authoritative carve-out is the
-			// versioned record — mirror read1's fsmCarveoutObject, which follows lat:.
-			// A genuine legacy-bare record has bareLegacy=true (no lat:) and is kept.
 			if vid == "" && !bareLegacy {
-				continue
+				continue // slashless mirror of a versioned key
 			}
 			if !strings.HasPrefix(key, prefix) {
 				continue
@@ -543,30 +567,12 @@ func (b *DistributedBackend) scanFsmCarveoutVersions(bucket, prefix string, blob
 			if !isFsmCarveoutClass(m, bareLegacy) {
 				continue
 			}
-			if blobSeen[[2]string{key, vid}] {
-				continue // blob wins the (Key,VID) collision
+			if verr := visit(key, vid, bareLegacy, hasLat[key], m); verr != nil {
+				return verr
 			}
-			// A carve-out is its key's latest: bare-legacy has no version identity
-			// (IsLatest), and an appendable/coalesced record is stored as its key's
-			// single latest (lat: points at it). Mirrors the off-path leaf.
-			isLatest := bareLegacy || hasLat[key]
-			out = append(out, &storage.ObjectVersion{
-				Key:            key,
-				VersionID:      vid,
-				IsLatest:       isLatest,
-				IsDeleteMarker: m.ETag == deleteMarkerETag,
-				LastModified:   m.LastModified,
-				ETag:           m.ETag,
-				Size:           m.Size,
-				Tags:           append([]storage.Tag(nil), m.Tags...),
-			})
 		}
 		return nil
 	})
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
 }
 
 // resolveFsmRecordIdentity parses an FSM obj: record's rest-of-key into its S3

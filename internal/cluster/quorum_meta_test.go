@@ -8,10 +8,10 @@ import (
 )
 
 // TestForceLockedVersionLeaves proves the ForceLocked variants:
-// - writeQuorumMetaVersionLocalForceLocked bypasses the write-time LWW guard
-//   so an older blob (lower MetaSeq) can overwrite a strictly-newer on-disk blob
-//   when the caller holds the per-bucket write-lock.
-// - deleteQuorumMetaVersionLocalForceLocked removes the blob under the held lock.
+//   - writeQuorumMetaVersionLocalForceLocked bypasses the write-time LWW guard
+//     so an older blob (lower MetaSeq) can overwrite a strictly-newer on-disk blob
+//     when the caller holds the per-bucket write-lock.
+//   - deleteQuorumMetaVersionLocalForceLocked removes the blob under the held lock.
 func TestForceLockedVersionLeaves(t *testing.T) {
 	s := newShardServiceTestWithDataDir(t)
 	sub := path.Join("k", "v1")
