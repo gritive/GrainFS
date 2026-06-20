@@ -2,7 +2,6 @@ package server
 
 import (
 	"os"
-	"path/filepath"
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -12,7 +11,6 @@ import (
 
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/nodeconfig"
-	"github.com/gritive/GrainFS/internal/snapshot"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -113,27 +111,6 @@ func (s *Server) wireBroadcastLogger() {
 		multi := zerolog.MultiLevelWriter(os.Stderr, &broadcastWriter{hub: s.hub})
 		log.Logger = zerolog.New(multi).With().Timestamp().Logger()
 	})
-}
-
-func (s *Server) initSnapshotManager(ss ServerStorage) {
-	// An injected Manager (WithSnapshotManager — production shares the
-	// serveruntime auto-snapshotter's instance) is authoritative; do NOT build a
-	// second Manager over the same dir (that re-introduces the two-writer
-	// nextSeq seq-collision this wiring exists to prevent).
-	if s.snapMgr != nil {
-		return
-	}
-	if s.dataDir == "" {
-		return
-	}
-	if snap := ss.Snapshotable; snap != nil {
-		dir := filepath.Join(s.dataDir, "snapshots")
-		if mgr, err := snapshot.NewManager(dir, snap, s.snapshotKEK, s.snapshotClusterID); err == nil {
-			s.snapMgr = mgr
-		} else {
-			log.Warn().Err(err).Msg("snapshot manager init failed, snapshot endpoints will be unavailable")
-		}
-	}
 }
 
 func (s *Server) startRuntimeWorkers() {

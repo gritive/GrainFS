@@ -26,8 +26,6 @@ import (
 	"github.com/gritive/GrainFS/internal/server/iceberg"
 	"github.com/gritive/GrainFS/internal/server/incidentsvc"
 	"github.com/gritive/GrainFS/internal/server/receiptsvc"
-	"github.com/gritive/GrainFS/internal/server/snapshotsvc"
-	"github.com/gritive/GrainFS/internal/snapshot"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -117,22 +115,19 @@ type PolicyAuthorizer interface {
 
 // Server handles S3-compatible API requests using Hertz.
 type Server struct {
-	backend           storage.Backend
-	ops               *storage.Operations
-	readIndexer       ReadIndexer
-	raftSnapshots     RaftSnapshotter
-	dataDir           string
-	snapshotKEK       snapshot.KEKSource
-	snapshotClusterID [16]byte
-	snapMgr           *snapshot.Manager
-	scrubber          *scrubber.BackgroundScrubber
-	verifier          *s3auth.CachingVerifier
-	protocolCredAuth  *protocolCredentialAuth
-	iamStore          *iam.Store
-	iamAudit          *iam.AuditLogger
-	authz             *s3auth.RequestAuthorizer
-	policyAuthorizer  PolicyAuthorizer
-	mutations         *MutationBroker
+	backend          storage.Backend
+	ops              *storage.Operations
+	readIndexer      ReadIndexer
+	raftSnapshots    RaftSnapshotter
+	dataDir          string
+	scrubber         *scrubber.BackgroundScrubber
+	verifier         *s3auth.CachingVerifier
+	protocolCredAuth *protocolCredentialAuth
+	iamStore         *iam.Store
+	iamAudit         *iam.AuditLogger
+	authz            *s3auth.RequestAuthorizer
+	policyAuthorizer PolicyAuthorizer
+	mutations        *MutationBroker
 
 	hertz       *server.Hertz
 	tlsListener *HotTLSListener // §5 T43: SIGHUP-driven cert reload
@@ -168,7 +163,6 @@ type Server struct {
 	iceberg                   *iceberg.Handler
 	receipt                   *receiptsvc.Handler
 	incidentH                 *incidentsvc.Handler
-	snapshotH                 *snapshotsvc.Handler
 	proxyTrust                *ProxyTrust // §5 T45: trusted-proxy Forwarded / X-Forwarded-* validator
 
 	readAfterWriteRetryTimeout  time.Duration
@@ -182,8 +176,7 @@ type Server struct {
 }
 
 type ServerStorage struct {
-	Ops          *storage.Operations
-	Backend      storage.Backend
-	Snapshotable storage.Snapshotable
-	DBProvider   storage.DBProvider
+	Ops        *storage.Operations
+	Backend    storage.Backend
+	DBProvider storage.DBProvider
 }

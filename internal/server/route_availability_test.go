@@ -43,7 +43,6 @@ func TestRouteAvailabilityManifestDocumentsRegisteredOptionalFeatures(t *testing
 		{feature: routeFeatureBalancer, name: "balancer"},
 		{feature: routeFeatureScrubber, name: "scrubber"},
 		{feature: routeFeatureRaftSnapshot, name: "raft_snapshot"},
-		{feature: routeFeatureSnapshot, name: "snapshot"},
 		{feature: routeFeatureIceberg, name: "iceberg"},
 		{feature: routeFeatureLifecycle, name: "lifecycle"},
 		{feature: routeFeatureCluster, name: "cluster"},
@@ -92,9 +91,6 @@ func TestRouteFeatureRoutesVisibleRequiresDependencyForHiddenFeatures(t *testing
 	}
 	if !s.routeFeatureRoutesVisible(routeFeatureRaftSnapshot) {
 		t.Fatal("raft snapshot route should remain visible without snapshotter")
-	}
-	if !s.routeFeatureRoutesVisible(routeFeatureSnapshot) {
-		t.Fatal("snapshot routes should remain visible without snapshot manager")
 	}
 	if !s.routeFeatureRoutesVisible(routeFeatureIceberg) {
 		t.Fatal("iceberg routes should remain visible without catalog")

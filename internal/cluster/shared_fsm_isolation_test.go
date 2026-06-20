@@ -364,12 +364,12 @@ func TestSharedFSM_PrefixIsolation_AllPaths(t *testing.T) {
 			},
 		},
 		{
-			// ListAllObjects (snapshotable): A's view excludes B's objects.
-			name: "ListAllObjects_ScopedToGroup",
+			// ListAllObjectsStrict (live-version manifest): A's view excludes B's objects.
+			name: "ListAllObjectsStrict_ScopedToGroup",
 			exercise: func(t *testing.T) {
 				_, _, _, fA, fB, backendA, _ := setupTwoGroups(t)
 
-				// ListAllObjects iterates obj: versioned keys; need a VersionID.
+				// ListAllObjectsStrict iterates obj: versioned keys; need a VersionID.
 				raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
 					Bucket: bucket, Key: "snap-a", Size: 1, ContentType: "text/plain",
 					ETag: "A-snap", ModTime: 1, VersionID: "v1",
@@ -384,19 +384,19 @@ func TestSharedFSM_PrefixIsolation_AllPaths(t *testing.T) {
 				require.NoError(t, err)
 				require.NoError(t, fB.Apply(raw))
 
-				// Also create the bucket in A (needed for ListAllObjects → ListBuckets).
+				// Also create the bucket in A (needed for ListAllObjectsStrict → ListBuckets).
 				raw, err = EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
 				require.NoError(t, err)
 				_ = fA.Apply(raw)
 
-				objs, err := backendA.ListAllObjects()
+				objs, err := backendA.ListAllObjectsStrict()
 				require.NoError(t, err)
 				var keys []string
 				for _, o := range objs {
 					keys = append(keys, o.Key)
 				}
 				for _, k := range keys {
-					assert.NotEqual(t, "snap-b", k, "B's object must not appear in A's ListAllObjects")
+					assert.NotEqual(t, "snap-b", k, "B's object must not appear in A's ListAllObjectsStrict")
 				}
 				// A's object must be present (if versioned format is written).
 				// (snap-a is present only if at least one versioned key was written.)
@@ -406,7 +406,7 @@ func TestSharedFSM_PrefixIsolation_AllPaths(t *testing.T) {
 						found = true
 					}
 				}
-				assert.True(t, found, "A's snap-a must appear in ListAllObjects")
+				assert.True(t, found, "A's snap-a must appear in ListAllObjectsStrict")
 			},
 		},
 		// Shard placement (CmdPutShardPlacement / CmdDeleteShardPlacement) is

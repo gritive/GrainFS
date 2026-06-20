@@ -56,8 +56,6 @@ const DefaultMaxForwardReplyBytes = 64 * 1024 * 1024
 // far larger bodies. PutObject and UploadPart share this floor.
 const minForwardStreamBytes = 4 * 1024 * 1024 // 4 MiB (see BenchmarkForwardPutObjectWire)
 
-const auditBucketName = "grainfs-audit"
-
 // ErrCoordinatorNoRouter is returned when OpRouter is called on a
 // coordinator that was constructed without a router (test/solo-node configs
 // that should not be reaching the routing path).
@@ -85,10 +83,6 @@ func (p dataGroupManagerLeaderProbe) GroupLeaderIsSelf(groupID string) bool {
 	}
 	probe := b.leaderProbe()
 	return probe != nil && probe.IsLeader()
-}
-
-func isSnapshotSystemBucket(bucket string) bool {
-	return storage.IsInternalBucket(bucket) || bucket == auditBucketName
 }
 
 // dataGroupManagerLocalBackend adapts *DataGroupManager to LocalExecution's
@@ -934,199 +928,6 @@ func (c *ClusterCoordinator) DeleteBucketPolicy(bucket string) error {
 	return p.DeleteBucketPolicy(bucket)
 }
 
-// ListAllObjects implements storage.Snapshotable by enumerating bucket-routed
-// object versions across every cluster-wide bucket.
-func (c *ClusterCoordinator) ListAllObjects() ([]storage.SnapshotObject, error) {
-	if c.router == nil || c.groups == nil {
-		snap, ok := c.base.(storage.Snapshotable)
-		if !ok {
-			return nil, storage.ErrSnapshotNotSupported
-		}
-		return snap.ListAllObjects()
-	}
-	buckets, err := c.ListBuckets(context.Background())
-	if err != nil {
-		return nil, err
-	}
-	var out []storage.SnapshotObject
-	for _, bucket := range buckets {
-		if isSnapshotSystemBucket(bucket) {
-			log.Debug().
-				Str("event", "snapshot_list_skip_system_bucket").
-				Str("bucket", bucket).
-				Msg("snapshot metadata listing skipped system bucket")
-			continue
-		}
-		// Fail-closed guard: cluster-wide snapshot capture cannot correctly
-		// enumerate per-node per-version quorum-meta blobs for soleauth-on
-		// buckets. Per-node capture is required (S4c-d). Never silently produce
-		// a fidelity-less snapshot.
-		if saState, saErr := c.GetBucketSoleAuthority(bucket); saErr != nil {
-			return nil, fmt.Errorf("cluster-wide snapshot capture: soleauth state lookup failed for bucket %q: %w", bucket, saErr)
-		} else if saState == soleAuthOn {
-			return nil, fmt.Errorf("cluster-wide snapshot capture does not support soleauth-on bucket %q: per-node capture required (S4c-d)", bucket)
-		}
-		versions, err := c.ListObjectVersions(context.Background(), bucket, "", 0)
-		if err != nil {
-			return nil, err
-		}
-		for _, version := range versions {
-			snap := storage.SnapshotObject{
-				Bucket:         bucket,
-				Key:            version.Key,
-				ETag:           version.ETag,
-				Size:           version.Size,
-				Modified:       version.LastModified,
-				VersionID:      version.VersionID,
-				IsDeleteMarker: version.IsDeleteMarker,
-				IsLatest:       version.IsLatest,
-				// Tags copied (not aliased) so snapshot survives even if the
-				// enrichment block below is skipped (delete marker or
-				// GetObjectVersion error). Mirror of snapshotable.go fix in
-				// e7c7114d — otherwise the previously-fixed RestoreObjects
-				// Tags-forward path is dead code on the coordinator route.
-				Tags: append([]storage.Tag(nil), version.Tags...),
-			}
-			if !version.IsDeleteMarker {
-				// Enrich metadata from the data file when readable. A metadata
-				// snapshot must not fail just because one blob is currently
-				// unreadable (e.g. mid-write, EC-stored without a plain-file
-				// fallback) — fall back to the version-listing fields.
-				if rc, obj, err := c.GetObjectVersion(context.Background(), bucket, version.Key, version.VersionID); err == nil {
-					_ = rc.Close()
-					snap.ETag = obj.ETag
-					snap.Size = obj.Size
-					snap.ContentType = obj.ContentType
-					snap.Modified = obj.LastModified
-					snap.ACL = obj.ACL
-					// Parity with ACL enrichment: prefer the authoritative
-					// obj.Tags over the version-listing fallback when readable.
-					snap.Tags = append([]storage.Tag(nil), obj.Tags...)
-				} else {
-					log.Warn().Str("bucket", bucket).Str("key", version.Key).
-						Str("version", version.VersionID).Err(err).
-						Msg("ListAllObjects: object data unreadable, snapshotting metadata only")
-				}
-			}
-			out = append(out, snap)
-		}
-	}
-	return out, nil
-}
-
-// RestoreObjects implements storage.Snapshotable by routing object metadata
-// restore to the data group that owns each object's bucket.
-func (c *ClusterCoordinator) RestoreObjects(objects []storage.SnapshotObject) (int, []storage.StaleBlob, error) {
-	if c.router == nil || c.groups == nil {
-		snap, ok := c.base.(storage.Snapshotable)
-		if !ok {
-			return 0, nil, storage.ErrSnapshotNotSupported
-		}
-		return snap.RestoreObjects(objects)
-	}
-
-	// Fail-closed guard: if any snapshot object's bucket is currently
-	// soleauth-on, refuse the whole restore before mutating anything.
-	// Per-node restore is required for soleauth-on buckets (S4c-d).
-	seen := make(map[string]struct{}, len(objects))
-	for _, obj := range objects {
-		if _, already := seen[obj.Bucket]; already {
-			continue
-		}
-		seen[obj.Bucket] = struct{}{}
-		saState, saErr := c.GetBucketSoleAuthority(obj.Bucket)
-		if saErr != nil {
-			return 0, nil, fmt.Errorf("cluster-wide snapshot restore: soleauth state lookup failed for bucket %q: %w", obj.Bucket, saErr)
-		}
-		if saState == soleAuthOn {
-			return 0, nil, fmt.Errorf("cluster-wide snapshot restore does not support soleauth-on bucket %q: per-node restore required (S4c-d)", obj.Bucket)
-		}
-	}
-
-	want := make(map[string]struct{}, len(objects))
-	for _, obj := range objects {
-		want[obj.Bucket+"\x00"+obj.Key] = struct{}{}
-	}
-	current, err := c.ListAllObjects()
-	if err != nil {
-		return 0, nil, err
-	}
-	for _, obj := range current {
-		if _, ok := want[obj.Bucket+"\x00"+obj.Key]; ok {
-			continue
-		}
-		if err := c.DeleteObject(context.Background(), obj.Bucket, obj.Key); err != nil {
-			return 0, nil, err
-		}
-	}
-
-	byGroup := make(map[string][]storage.SnapshotObject)
-	for _, obj := range objects {
-		target, _, err := c.routeWriteOrBucket(obj.Bucket, obj.Key)
-		if err != nil {
-			return 0, nil, err
-		}
-		byGroup[target.GroupID] = append(byGroup[target.GroupID], obj)
-	}
-
-	var restored int
-	var stale []storage.StaleBlob
-	for groupID, groupObjects := range byGroup {
-		gb := c.localBackend(groupID)
-		if gb == nil {
-			return restored, stale, ErrCoordinatorNoRouter
-		}
-		count, groupStale, err := gb.RestoreObjects(groupObjects)
-		restored += count
-		stale = append(stale, groupStale...)
-		if err != nil {
-			log.Warn().
-				Str("event", "snapshot_restore_group_failed").
-				Str("group_id", groupID).
-				Int("objects", len(groupObjects)).
-				Int("restored", restored).
-				Int("stale_blobs", len(stale)).
-				Err(err).
-				Msg("snapshot restore failed while restoring placement group")
-			return restored, stale, err
-		}
-	}
-	return restored, stale, nil
-}
-
-// ListAllBuckets implements storage.BucketSnapshotable by delegating to the
-// base backend.
-func (c *ClusterCoordinator) ListAllBuckets() ([]storage.SnapshotBucket, error) {
-	snap, ok := c.base.(storage.BucketSnapshotable)
-	if !ok {
-		return nil, storage.ErrSnapshotNotSupported
-	}
-	return snap.ListAllBuckets()
-}
-
-// RestoreBuckets implements storage.BucketSnapshotable by delegating to the
-// base backend.
-func (c *ClusterCoordinator) RestoreBuckets(buckets []storage.SnapshotBucket) error {
-	// Fail-closed guard (BEFORE any delegation): snapshot.Restore replays
-	// RestoreBuckets BEFORE RestoreObjects (snapshot/manager.go). A routed
-	// cluster cannot correctly restore soleauth-on buckets cluster-wide
-	// (per-node capture/restore is required, S4c-d), and RestoreObjects already
-	// rejects them. Reject the whole bucket replay up front so a soleauth-on
-	// snapshot never flips a bucket to terminal `on` and then fails the object
-	// restore — that would leave a partial restore (bucket metadata mutated,
-	// objects absent).
-	for _, b := range buckets {
-		if b.SoleAuthState == soleAuthOn {
-			return fmt.Errorf("cluster-wide snapshot restore does not support soleauth-on bucket %q: per-node restore required (S4c-d)", b.Name)
-		}
-	}
-	snap, ok := c.base.(storage.BucketSnapshotable)
-	if !ok {
-		return storage.ErrSnapshotNotSupported
-	}
-	return snap.RestoreBuckets(buckets)
-}
-
 func contextWithObjectWritePlacement(ctx context.Context, group ShardGroupEntry) context.Context {
 	if len(group.PeerIDs) == 0 {
 		return ContextWithPlacementGroup(ctx, group.ID)
@@ -1576,8 +1377,7 @@ func (c *ClusterCoordinator) listObjectVersionsSingleGroup(
 // fanOutListObjectVersions queries every shard group's per-version FSM
 // concurrently (local backend or forwarded) and unions the results. Fail-closed:
 // a single group error fails the whole LIST rather than silently returning a
-// partial version set, which would look like data loss (snapshots also depend
-// on this via ListAllObjects).
+// partial version set, which would look like data loss.
 func (c *ClusterCoordinator) fanOutListObjectVersions(
 	ctx context.Context, state clusterCoordinatorRuntime, groups []ShardGroupEntry, bucket, prefix string, maxKeys int,
 ) ([]*storage.ObjectVersion, error) {

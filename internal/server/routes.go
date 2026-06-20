@@ -19,7 +19,6 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 	s.registerBalancerAPI(h)
 	s.registerLifecycleStatusAPI(h)
 	s.registerLifecycleTestCtlAPI(h)
-	s.snapshotH.Register(h, routePathAdminSnapshots, routePathSnapshotSeqRestore, routePathSnapshotSeq)
 	s.registerRaftSnapshotAPI(h)
 	s.registerScrubAPI(h)
 	s.registerDashboardHealthAPI(h)

@@ -1,0 +1,219 @@
+package cluster
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	"github.com/gritive/GrainFS/internal/storage"
+)
+
+// ListAllObjectsStrict enumerates every live object version (with Segments) for
+// the segment-GC known-set. It FAILS CLOSED on any unreadable/undecodable object
+// metadata (returns an error) so the scrubber skips its sweep rather than
+// deleting a segment whose object record it could not read.
+//
+// Multi-group: unions every locally-hosted group's live objects (each group
+// enumerates its OWN buckets via its own keyspace), so the segment-GC known-set
+// covers all hosted groups — a sibling group's live segment is never
+// false-orphaned. Fail-closed: any group's error fails the whole hoist. The sole
+// caller is the scrubber's hoistSegmentSources. Default (un-wired
+// hostedGroupBackendsSrc => []{b}) == this backend only (single-group).
+func (b *DistributedBackend) ListAllObjectsStrict() ([]storage.SnapshotObject, error) {
+	var out []storage.SnapshotObject
+	for _, gb := range b.hostedGroupBackends() {
+		if gb == nil {
+			return nil, fmt.Errorf("list all objects strict: hosted group backend is nil")
+		}
+		objs, err := gb.listAllObjectsForGC()
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, objs...)
+	}
+	return out, nil
+}
+
+// listAllObjectsForGC enumerates every versioned object record (non-latest
+// versions and delete markers included) for this backend's groups. It is
+// fail-closed: any unreadable/undecodable record returns an error so the
+// segment-GC known-set is never silently incomplete (which would let the sweep
+// orphan-delete a live segment).
+func (b *DistributedBackend) listAllObjectsForGC() ([]storage.SnapshotObject, error) {
+	ctx := context.Background()
+	buckets, err := b.ListBuckets(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var result []storage.SnapshotObject
+	for _, bucket := range buckets {
+		saState, saErr := b.GetBucketSoleAuthority(bucket)
+		if saErr != nil {
+			return nil, fmt.Errorf("list objects soleauth %s: %w", bucket, saErr)
+		}
+		if saState == soleAuthOn {
+			// INVARIANT (v9 scope): only Enabled buckets are ever soleauth=on, so the
+			// per-version tree is this bucket's sole authority. S4c-d enforces Enabled-only.
+			objs, oerr := b.listSoleAuthBucketObjectsForGC(bucket)
+			if oerr != nil {
+				return nil, oerr
+			}
+			result = append(result, objs...)
+			continue
+		}
+		if err := b.store.View(func(txn MetadataTxn) error {
+			latest := make(map[string]string)
+			rawLatPrefix := []byte("lat:" + bucket + "/")
+			if err := b.ks().scanGroupPrefix(txn, rawLatPrefix, func(raw []byte, item MetaItem) error {
+				key := string(raw[len(rawLatPrefix):])
+				_ = item.Value(func(v []byte) error {
+					latest[key] = string(v)
+					return nil
+				})
+				return nil
+			}); err != nil {
+				return err
+			}
+
+			rawObjPrefix := []byte("obj:" + bucket + "/")
+			return b.ks().scanGroupPrefix(txn, rawObjPrefix, func(raw []byte, item MetaItem) error {
+				rest := string(raw[len(rawObjPrefix):])
+				slash := strings.LastIndex(rest, "/")
+				if slash < 0 {
+					return nil
+				}
+				key := rest[:slash]
+				versionID := rest[slash+1:]
+				if key == "" || versionID == "" {
+					return nil
+				}
+				var meta objectMeta
+				v, err := b.itemValueCopy(item)
+				if err != nil {
+					return fmt.Errorf("gc known-set: read object meta %s/%s@%s: %w", bucket, key, versionID, err)
+				}
+				meta, err = unmarshalObjectMeta(v)
+				if err != nil {
+					return fmt.Errorf("gc known-set: decode object meta %s/%s@%s: %w", bucket, key, versionID, err)
+				}
+				result = append(result, storage.SnapshotObject{
+					Bucket:         bucket,
+					Key:            key,
+					ETag:           meta.ETag,
+					Size:           meta.Size,
+					ContentType:    meta.ContentType,
+					Modified:       meta.LastModified,
+					VersionID:      versionID,
+					IsDeleteMarker: meta.ETag == deleteMarkerETag,
+					IsLatest:       latest[key] == versionID,
+					ACL:            meta.ACL,
+					SSEAlgorithm:   meta.SSEAlgorithm,
+					// Tags copied (not aliased) — meta's backing bytes are reused
+					// by badger once the View tx returns. Mirror of LocalBackend
+					// fix in b64521bf so Tags survive the manifest enumeration.
+					Tags:      append([]storage.Tag(nil), meta.Tags...),
+					Segments:  append([]storage.SegmentRef(nil), meta.Segments...),
+					Coalesced: coalescedRefsFromMeta(meta.Coalesced),
+				})
+				return nil
+			})
+		}); err != nil {
+			return nil, fmt.Errorf("list objects in bucket %s: %w", bucket, err)
+		}
+	}
+	return result, nil
+}
+
+// listSoleAuthBucketObjectsForGC enumerates every per-version blob for a
+// soleauth-on bucket via the FAIL-CLOSED strict enumerator, mapping each
+// PutObjectMetaCmd to a storage.SnapshotObject with full fidelity (placement,
+// Segments, Tags, ACL). IsLatest is max-VersionID per key over all blobs
+// (markers included), matching the LWW semantics of readQuorumMetaVersions. It
+// is the soleauth-on branch of the segment-GC known-set: without it the sweep
+// would orphan-delete an on-bucket's live segments.
+func (b *DistributedBackend) listSoleAuthBucketObjectsForGC(bucket string) ([]storage.SnapshotObject, error) {
+	if b.shardSvc == nil {
+		return nil, fmt.Errorf("list soleauth bucket %s: no shard service", bucket)
+	}
+	cmds, err := b.shardSvc.scanQuorumMetaVersionsBucketAllStrict(bucket, "")
+	if err != nil {
+		return nil, fmt.Errorf("list soleauth bucket %s: %w", bucket, err)
+	}
+
+	// First pass: find the max VersionID per key (markers included).
+	maxVID := make(map[string]string, len(cmds))
+	for _, cmd := range cmds {
+		if cur, ok := maxVID[cmd.Key]; !ok || cmd.VersionID > cur {
+			maxVID[cmd.Key] = cmd.VersionID
+		}
+	}
+
+	// Second pass: map each PutObjectMetaCmd to a SnapshotObject.
+	out := make([]storage.SnapshotObject, 0, len(cmds))
+	for _, cmd := range cmds {
+		// Copy UserMetadata (do not alias).
+		var userMeta map[string]string
+		if len(cmd.UserMetadata) > 0 {
+			userMeta = make(map[string]string, len(cmd.UserMetadata))
+			for k, v := range cmd.UserMetadata {
+				userMeta[k] = v
+			}
+		}
+		// Copy Parts slice (do not alias).
+		var parts []storage.MultipartPartEntry
+		if len(cmd.Parts) > 0 {
+			parts = append([]storage.MultipartPartEntry(nil), cmd.Parts...)
+		}
+		// Copy Tags slice (do not alias).
+		var tags []storage.Tag
+		if len(cmd.Tags) > 0 {
+			tags = append([]storage.Tag(nil), cmd.Tags...)
+		}
+		// Copy NodeIDs slice (do not alias).
+		var nodeIDs []string
+		if len(cmd.NodeIDs) > 0 {
+			nodeIDs = append([]string(nil), cmd.NodeIDs...)
+		}
+		etag := cmd.ETag
+		if cmd.IsDeleteMarker {
+			etag = deleteMarkerETag
+		}
+		out = append(out, storage.SnapshotObject{
+			Bucket:           bucket,
+			Key:              cmd.Key,
+			ETag:             etag,
+			Size:             cmd.Size,
+			ContentType:      cmd.ContentType,
+			Modified:         cmd.ModTime,
+			VersionID:        cmd.VersionID,
+			IsDeleteMarker:   cmd.IsDeleteMarker,
+			IsLatest:         maxVID[cmd.Key] == cmd.VersionID,
+			ACL:              cmd.ACL,
+			SSEAlgorithm:     cmd.SSEAlgorithm,
+			NodeIDs:          nodeIDs,
+			ECData:           cmd.ECData,
+			ECParity:         cmd.ECParity,
+			StripeBytes:      cmd.StripeBytes,
+			PlacementGroupID: cmd.PlacementGroupID,
+			MetaSeq:          cmd.MetaSeq,
+			UserMetadata:     userMeta,
+			Parts:            parts,
+			Tags:             tags,
+			Segments:         segmentMetaEntriesToRefs(cmd.Segments),
+		})
+	}
+	return out, nil
+}
+
+// coalescedRefsFromMeta maps cluster CoalescedShardRef → storage.CoalescedRef,
+// carrying the coalesced-blob chunk identifier (the field ChunkLocators reads).
+func coalescedRefsFromMeta(in []CoalescedShardRef) []storage.CoalescedRef {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]storage.CoalescedRef, len(in))
+	for i, c := range in {
+		out[i] = storage.CoalescedRef{CoalescedID: c.CoalescedID}
+	}
+	return out
+}

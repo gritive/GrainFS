@@ -6,7 +6,7 @@ import (
 )
 
 // ManifestsFromSnapshotObjects converts the authoritative object-version manifest
-// set (as returned by ListAllObjects) into chunkref.Manifest inputs for
+// set (as returned by ListAllObjectsStrict) into chunkref.Manifest inputs for
 // chunkref.Rebuild. Cluster keeps no incremental refcount in the meta-Raft FSM
 // (ObjectIndexEntry carries no Segments); the RefTable is rebuilt on demand from
 // this manifest scan (spec: manifest = truth, refcount = rebuildable cache).

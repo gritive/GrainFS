@@ -14,6 +14,7 @@ import (
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/server/receiptsvc"
 	"github.com/gritive/GrainFS/internal/startuprecovery"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // redundancyUpgradeMax decides whether the EC-redundancy-upgrade sweep should
@@ -140,15 +141,15 @@ func bootRecoveryAndScrubber(ctx context.Context, state *bootState) error {
 		// owning group's backend, gated per-bucket on that group's caught-up state
 		// (only the caught-up leader of a group GCs its segments).
 		var segGCOpts []scrubber.ScrubberOption
-		if state.objSnapMgr != nil {
-			state.distBackend.SetFrozenSegmentPathSource(state.objSnapMgr.AllFrozenSegmentPaths)
-			segGCOpts = append(segGCOpts, scrubber.WithSegmentOrphanLog(state.distBackend.NewSegmentOrphanLog(), cfg.SegmentGCRetention))
-			// EC full-object orphan-SHARD sweep: snapshot-pinned full-object
-			// versions must stay known. Wired only when a snapshot Manager exists;
-			// absent => allFrozenObjectVersionDirs fails closed and the sweep
-			// never runs (no reclaim, but no risk of deleting a pinned version).
-			state.distBackend.SetFrozenObjectVersionSource(state.objSnapMgr.AllFrozenObjectVersions)
-		}
+		// The object-metadata snapshot feature was removed, so there are no
+		// snapshot-frozen segments/objects to pin. Wire EMPTY no-op frozen sources
+		// (NOT nil — a nil source fails closed and disables the whole sweep) so the
+		// segment GC and the EC orphan-shard reclaim keep running, judging every
+		// candidate against the live-version known-set (ListAllObjectsStrict) alone,
+		// which is the sole authority post-removal.
+		state.distBackend.SetFrozenSegmentPathSource(func() (map[string][]string, error) { return nil, nil })
+		segGCOpts = append(segGCOpts, scrubber.WithSegmentOrphanLog(state.distBackend.NewSegmentOrphanLog(), cfg.SegmentGCRetention))
+		state.distBackend.SetFrozenObjectVersionSource(func() ([]storage.SnapshotObjectRef, error) { return nil, nil })
 		// EC full-object orphan-shard sweep wiring. The shared ShardService
 		// dataDirs commingle every local group's shards (plus shards the balancer
 		// floated in from groups this node does not host — balancer.go is

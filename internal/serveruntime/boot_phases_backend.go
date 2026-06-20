@@ -118,18 +118,6 @@ func bootBackendWrap(ctx context.Context, state *bootState) error {
 		}
 	}
 
-	// Start auto-snapshotter for object-level snapshots (separate from Raft
-	// snapshots above). Snapshots provide point-in-time backup/restore and KEK
-	// sealing anchors.
-	if len(state.clusterID) != 16 {
-		return fmt.Errorf("boot: snapshot KEK wiring: cluster id len %d", len(state.clusterID))
-	}
-	objSnapMgr, err := StartAutoSnapshotterWhenReady(ctx, cfg.DataDir, backend, state.metaRaft.FSM().ClusterConfig(), state.kekStore, [16]byte(state.clusterID), 30*time.Second)
-	if err != nil {
-		log.Warn().Err(err).Msg("auto-snapshot init failed")
-	}
-	state.objSnapMgr = objSnapMgr
-
 	log.Info().Str("component", "server").Str("version", cfg.Version).
 		Str("node_id", state.nodeID).Str("raft_addr", state.raftAddr).Strs("peers", state.peers).
 		Str("addr", cfg.Addr).Str("data", cfg.DataDir).Msg("server started")
@@ -159,7 +147,5 @@ func logClusterConfigLoaded(cfg *cluster.ClusterConfig) {
 		Bool("alert-webhook-secret-set", len(cfg.AlertWebhookSecretWrapped()) > 0).
 		Float64("disk-warn-threshold", cfg.DiskWarnFrac()).
 		Float64("disk-critical-threshold", cfg.DiskCriticalFrac()).
-		Dur("snapshot-interval", cfg.SnapshotInterval()).
-		Int32("snapshot-retain", cfg.SnapshotRetain()).
 		Msg("cluster config loaded")
 }
