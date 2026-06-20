@@ -732,6 +732,75 @@ func (b *DistributedBackend) listObjectsPerVersion(ctx context.Context, bucket, 
 	return out, nil
 }
 
+// scanQuorumMetaVersionsClusterAll unions EVERY per-version quorum-meta blob in
+// the bucket across ALL placement groups (every generation), deduped by
+// (Key, VersionID) with a MetaSeq tiebreak. Unlike readQuorumMetaVersions
+// (single-key, dedup-by-VID) it is bucket-wide and all-version (no max-per-key
+// collapse). Unlike listObjectsPerVersion it is FAIL-CLOSED: a local strict-scan
+// error, a peer-address resolution error, or a peer RPC error is returned (NOT
+// skipped) — under sole authority a silently-truncated set is data loss. When
+// shardGroup == nil (single-node) the result is the local STRICT scan.
+//
+//nolint:unused // wired by T2 ListObjectVersions under sole authority
+func (b *DistributedBackend) scanQuorumMetaVersionsClusterAll(bucket, prefix string) ([]PutObjectMetaCmd, error) {
+	if b.shardSvc == nil {
+		return nil, nil
+	}
+	type vkey struct{ key, vid string }
+	byKey := map[vkey]PutObjectMetaCmd{}
+	// keep the higher-MetaSeq blob for a same-(Key,VID) replica (mirrors the
+	// MetaSeq tiebreak in readQuorumMetaVersions so a relocation re-write wins).
+	put := func(c PutObjectMetaCmd) {
+		k := vkey{c.Key, c.VersionID}
+		if ex, ok := byKey[k]; !ok || c.MetaSeq >= ex.MetaSeq {
+			byKey[k] = c
+		}
+	}
+	// self (STRICT, fail-closed)
+	local, lerr := b.shardSvc.scanQuorumMetaVersionsBucketAllStrict(bucket, prefix)
+	if lerr != nil {
+		return nil, lerr
+	}
+	for _, c := range local {
+		put(c)
+	}
+	if b.shardGroup == nil {
+		out := make([]PutObjectMetaCmd, 0, len(byKey))
+		for _, c := range byKey {
+			out = append(out, c)
+		}
+		return out, nil
+	}
+	self := b.currentSelfAddr()
+	seen := map[string]bool{self: true}
+	ctx, cancel := context.WithTimeout(context.Background(), quorumMetaReadTimeout)
+	defer cancel()
+	for _, g := range b.shardGroup.ShardGroups() {
+		for _, p := range g.PeerIDs {
+			if seen[p] {
+				continue
+			}
+			seen[p] = true
+			addr, aerr := b.shardSvc.resolvePeerAddress(p)
+			if aerr != nil {
+				return nil, aerr // fail-closed: cannot enumerate a peer → abort
+			}
+			remote, rerr := b.shardSvc.ScanQuorumMetaVersionsAll(ctx, addr, bucket, prefix)
+			if rerr != nil {
+				return nil, rerr // fail-closed: a partial set is silent data loss
+			}
+			for _, c := range remote {
+				put(c)
+			}
+		}
+	}
+	out := make([]PutObjectMetaCmd, 0, len(byKey))
+	for _, c := range byKey {
+		out = append(out, c)
+	}
+	return out, nil
+}
+
 // readQuorumMetaVersion returns the single per-version blob for (bucket, key,
 // versionID), found via the all-groups fan-out (NOT local-only) so a reachable
 // replica is located even when the local node isn't a placement node. Returns
