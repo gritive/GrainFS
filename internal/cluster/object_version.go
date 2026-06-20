@@ -526,6 +526,17 @@ func (b *DistributedBackend) scanFsmCarveoutVersions(bucket, prefix string, blob
 			// slash-less obj: key with NO lat: pointer; a vid-bearing record whose
 			// stored meta.Key equals the parsed key is a genuine versioned record.
 			key, vid, bareLegacy := b.resolveFsmRecordIdentity(rest, m, hasLat)
+			// Skip the slashless MIRROR of a versioned key (codex code-gate [P2]):
+			// a versioned appendable/coalesced object persists both obj:{b}/{k}
+			// (slashless mirror, vid=="") and obj:{b}/{k}/{vid} with lat:{b}/{k}→vid.
+			// The mirror resolves to (vid=="", bareLegacy=false) because a lat:
+			// pointer exists; emitting it would duplicate the object as a bogus
+			// empty-VID row (and a 2nd IsLatest). The authoritative carve-out is the
+			// versioned record — mirror read1's fsmCarveoutObject, which follows lat:.
+			// A genuine legacy-bare record has bareLegacy=true (no lat:) and is kept.
+			if vid == "" && !bareLegacy {
+				continue
+			}
 			if !strings.HasPrefix(key, prefix) {
 				continue
 			}

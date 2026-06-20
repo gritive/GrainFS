@@ -95,6 +95,41 @@ func TestListObjectVersionsSoleAuthOn(t *testing.T) {
 		require.Equal(t, "app", idx[[2]string{"ak", vidA1}].ETag)
 	})
 
+	t.Run("versioned appendable slashless mirror → no bogus empty-VID duplicate", func(t *testing.T) {
+		// codex code-gate [P2]: a versioned appendable object can persist BOTH the
+		// versioned key obj:b/ak/v1 (lat:b/ak→v1) AND a slashless mirror obj:b/ak.
+		// The bucket-wide carve-out scan must follow lat: (like read1's per-key
+		// fsmCarveoutObject) and emit ONLY the versioned (ak,v1) entry — NOT a
+		// spurious (ak,"") row (which would duplicate the object and yield two
+		// IsLatest=true rows for one key).
+		b := newTestDistributedBackend(t)
+		require.NoError(t, b.CreateBucket(ctx, "bmir"))
+		setVersioningForTest(t, b, "bmir", "Enabled")
+		// versioned appendable record + lat:bmir/ak→vidA1
+		seedFSMObject(t, b, "bmir", "ak", vidA1, objectMeta{Key: "ak", ETag: "app", IsAppendable: true}, true)
+		// slashless mirror obj:bmir/ak (appendable), WITHOUT touching lat:
+		seedFSMObject(t, b, "bmir", "ak", "", objectMeta{Key: "ak", ETag: "app", IsAppendable: true}, false)
+		setSoleAuthForTest(t, b, "bmir", soleAuthOn)
+
+		vs, err := b.ListObjectVersions(ctx, "bmir", "", 0)
+		require.NoError(t, err)
+		idx := versionByKeyVID(vs)
+		require.NotNil(t, idx[[2]string{"ak", vidA1}], "versioned appendable entry appears")
+		require.Nil(t, idx[[2]string{"ak", ""}], "slashless mirror must NOT emit a bogus empty-VID carve-out")
+		// Exactly one row for key "ak", and exactly one IsLatest.
+		var akRows, akLatest int
+		for _, v := range vs {
+			if v.Key == "ak" {
+				akRows++
+				if v.IsLatest {
+					akLatest++
+				}
+			}
+		}
+		require.Equal(t, 1, akRows, "exactly one version row for the appendable key")
+		require.Equal(t, 1, akLatest, "exactly one IsLatest=true row for the key")
+	})
+
 	t.Run("coalesced carve-out → appears", func(t *testing.T) {
 		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "bco"))
