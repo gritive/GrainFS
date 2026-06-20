@@ -55,7 +55,14 @@ func (b *DistributedBackend) headObjectMetaV(ctx context.Context, bucket, key, v
 	if on, err := b.soleAuthReadOn(bucket); err != nil {
 		return nil, PlacementMeta{}, err // fail closed
 	} else if on {
-		if cmd, ok, verr := b.readQuorumMetaVersion(bucket, key, versionID); verr == nil && ok {
+		// DECODE-STRICT: an undecodable blob anywhere under this key (incl. a corrupt
+		// sibling version) makes the version set untrustworthy → fail closed, do NOT
+		// fall through to the carve-out / a stale FSM record.
+		cmd, ok, verr := b.readQuorumMetaVersionDecodeStrict(bucket, key, versionID)
+		if verr != nil {
+			return nil, PlacementMeta{}, verr // fail closed
+		}
+		if ok {
 			if cmd.IsDeleteMarker {
 				return nil, PlacementMeta{}, storage.ErrMethodNotAllowed
 			}

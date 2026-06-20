@@ -583,6 +583,74 @@ func (s *ShardService) readQuorumMetaVersionsLocal(bucket, key string) ([]PutObj
 	return out, nil
 }
 
+// readQuorumMetaVersionsRawLocal reads the RAW per-version blob bytes for
+// (bucket, key) WITHOUT decoding — the fail-closed input for the read1
+// decode-strict reader. Unlike readQuorumMetaVersionsLocal it returns an error on
+// an os.ReadFile failure (a present-but-unreadable blob under sole authority must
+// fail closed, not be silently skipped); decoding (and its strictness) is the
+// caller's job. Absent dir → (nil, nil). Temp files + the key-escape guard are
+// handled identically to readQuorumMetaVersionsLocal.
+func (s *ShardService) readQuorumMetaVersionsRawLocal(bucket, key string) ([][]byte, error) {
+	if len(s.dataDirs) == 0 {
+		return nil, nil
+	}
+	root := filepath.Join(s.dataDirs[0], quorumMetaVersionsSubDir)
+	dir := filepath.Join(root, bucket, key)
+	if rel, err := filepath.Rel(root, dir); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return nil, fmt.Errorf("quorum meta versions: key %q escapes root", key)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	out := make([][]byte, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() || isQuorumMetaTempName(e.Name()) {
+			continue
+		}
+		data, rerr := os.ReadFile(filepath.Join(dir, e.Name()))
+		if rerr != nil {
+			return nil, fmt.Errorf("read per-version blob %s/%s/%s: %w", bucket, key, e.Name(), rerr)
+		}
+		out = append(out, data)
+	}
+	return out, nil
+}
+
+// ReadQuorumMetaVersionsRaw fans the per-key version list to a remote node and
+// returns the RAW blob bytes (no decode) so the caller can decode-strict. Mirrors
+// ReadQuorumMetaVersions but does NOT decode/drop — a corrupt blob is served as-is
+// (the decode-strictness lives in the read1 reader, not here or on the peer).
+func (s *ShardService) ReadQuorumMetaVersionsRaw(ctx context.Context, addr, bucket, key string) ([][]byte, error) {
+	if s.transport == nil {
+		return nil, fmt.Errorf("quorum meta versions raw: no transport")
+	}
+	envb := buildShardEnvelope("ReadQuorumMetaVersionsRaw", bucket, key, 0, nil, 0)
+	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
+	respEnvelope, err := s.callShardRPC(ctx, addr, envb)
+	if err != nil {
+		return nil, fmt.Errorf("read quorum meta versions raw from %s: %w", addr, err)
+	}
+	rpcType, data, err := unmarshalEnvelope(respEnvelope)
+	if err != nil {
+		return nil, err
+	}
+	if rpcType == "Error" {
+		return nil, fmt.Errorf("remote quorum meta versions raw error from %s", addr)
+	}
+	if len(data) == 0 {
+		return nil, nil // empty payload = key has no per-version blobs on this node
+	}
+	blobs, uerr := unpackBlobList(data)
+	if uerr != nil {
+		return nil, uerr
+	}
+	return blobs, nil
+}
+
 // ReadQuorumMetaVersions fans the per-key version list to a remote placement node.
 func (s *ShardService) ReadQuorumMetaVersions(ctx context.Context, addr, bucket, key string) ([]PutObjectMetaCmd, error) {
 	if s.transport == nil {
@@ -805,6 +873,94 @@ func (b *DistributedBackend) scanQuorumMetaVersionsClusterAll(bucket, prefix str
 // (cmd, true, nil) on a hit, (zero, false, nil) on a miss.
 func (b *DistributedBackend) readQuorumMetaVersion(bucket, key, versionID string) (PutObjectMetaCmd, bool, error) {
 	cmds, err := b.readQuorumMetaVersions(bucket, key)
+	if err != nil {
+		return PutObjectMetaCmd{}, false, err
+	}
+	for _, c := range cmds {
+		if c.VersionID == versionID {
+			return c, true, nil
+		}
+	}
+	return PutObjectMetaCmd{}, false, nil
+}
+
+// readQuorumMetaVersionsDecodeStrict is the read1 soleauth=on per-key reader:
+// DECODE-strict but availability-TOLERANT. A blob that fails to decode anywhere it
+// is SERVED (self, or any reachable peer) fails the whole read closed — so a
+// corrupt latest (max-VID) blob can NEVER be silently dropped and resurrect an
+// older live version (the read1 resurrection window). An unreachable / un-upgraded
+// / disk-erroring peer is TOLERATED (skipped) — it resurrects nothing (its blobs
+// are simply absent from the candidate set; the residual under-replication-AND-
+// unreachable window is gated out by S4c-d's verifier-clean + minReader=2 flip
+// preconditions). Self is always read strict (local read failure → fail closed).
+//
+// Distinct from the tolerant readQuorumMetaVersions (which silently drops per-blob
+// decode failures and is correct for the off-path / non-sole-authority consumers)
+// and from the verifier's availability-strict readQuorumMetaVersionsStrict.
+func (b *DistributedBackend) readQuorumMetaVersionsDecodeStrict(bucket, key string) ([]PutObjectMetaCmd, error) {
+	if b.shardSvc == nil {
+		return nil, nil
+	}
+	var rawBlobs [][]byte
+	// self — strict local read (a present-but-unreadable blob fails closed;
+	// decode happens once, strictly, in the loop below).
+	selfRaw, err := b.shardSvc.readQuorumMetaVersionsRawLocal(bucket, key)
+	if err != nil {
+		return nil, fmt.Errorf("decode-strict version read %s/%s: %w", bucket, key, err)
+	}
+	rawBlobs = append(rawBlobs, selfRaw...)
+	// peers — all-groups fan-out; tolerate an unreachable peer (a corrupt blob is
+	// caught wherever it IS served, below).
+	self := b.currentSelfAddr()
+	seen := map[string]bool{self: true}
+	ctx, cancel := context.WithTimeout(context.Background(), quorumMetaReadTimeout)
+	defer cancel()
+	if b.shardGroup != nil {
+		for _, g := range b.shardGroup.ShardGroups() {
+			for _, p := range g.PeerIDs {
+				if seen[p] {
+					continue
+				}
+				seen[p] = true
+				addr, aerr := b.shardSvc.resolvePeerAddress(p)
+				if aerr != nil {
+					continue // availability-tolerant
+				}
+				peerRaw, rerr := b.shardSvc.ReadQuorumMetaVersionsRaw(ctx, addr, bucket, key)
+				if rerr != nil {
+					continue // unreachable / un-upgraded / peer read error → tolerate
+				}
+				rawBlobs = append(rawBlobs, peerRaw...)
+			}
+		}
+	}
+	// strict decode + dedup (keep the higher-MetaSeq blob for a same-VID replica,
+	// mirroring readQuorumMetaVersions).
+	byVID := map[string]PutObjectMetaCmd{}
+	for _, blob := range rawBlobs {
+		cmd, derr := b.shardSvc.decodeQuorumMetaCmdBlob(blob)
+		if derr != nil {
+			// A served blob we cannot decode: its VID is unknown, so we cannot rule
+			// out that it WAS the authoritative latest. Fail closed.
+			return nil, fmt.Errorf("decode-strict version read %s/%s: %w", bucket, key, derr)
+		}
+		if ex, ok := byVID[cmd.VersionID]; !ok || cmd.MetaSeq >= ex.MetaSeq {
+			byVID[cmd.VersionID] = cmd
+		}
+	}
+	out := make([]PutObjectMetaCmd, 0, len(byVID))
+	for _, c := range byVID {
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+// readQuorumMetaVersionDecodeStrict is the specific-version twin of
+// readQuorumMetaVersion built on the decode-strict reader: a corrupt SIBLING
+// version under the same key fails the read closed (the version set is
+// untrustworthy if any blob under the key is undecodable).
+func (b *DistributedBackend) readQuorumMetaVersionDecodeStrict(bucket, key, versionID string) (PutObjectMetaCmd, bool, error) {
+	cmds, err := b.readQuorumMetaVersionsDecodeStrict(bucket, key)
 	if err != nil {
 		return PutObjectMetaCmd{}, false, err
 	}

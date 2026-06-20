@@ -617,7 +617,9 @@ func (b *DistributedBackend) GetObjectTags(bucket, key, versionID string) ([]sto
 	if on, err := b.soleAuthReadOn(bucket); err != nil {
 		return nil, err // fail closed
 	} else if on {
-		cmds, verr := b.readQuorumMetaVersions(bucket, key)
+		// DECODE-STRICT (mirrors the HEAD/GET on-branch): a corrupt per-version blob
+		// must fail closed rather than be dropped and silently return stale/no tags.
+		cmds, verr := b.readQuorumMetaVersionsDecodeStrict(bucket, key)
 		if verr != nil {
 			return nil, verr
 		}
