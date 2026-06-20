@@ -420,6 +420,12 @@ func (r *ForwardReceiver) handleReadAtRead(dg *DataGroup, args []byte) ([]byte, 
 	if ra.Offset() < 0 || length < 0 {
 		return statusReply(raftpb.ForwardStatusInternal), nil
 	}
+	// Fence BEFORE returning the stream so every later ReadAt resolution
+	// (backendReadAtStream.Read → ReadAt → headObjectMeta) is past the
+	// linearizable barrier and cannot read a stale local soleauth state.
+	if err := waitForwardReadFence(context.Background(), dg.Backend()); err != nil {
+		return statusReply(mapErrorToStatus(err)), nil
+	}
 	body := &backendReadAtStream{
 		ctx:     context.Background(),
 		backend: dg.Backend(),
@@ -436,6 +442,9 @@ func (r *ForwardReceiver) handleReadAt(dg *DataGroup, args []byte) []byte {
 	length := ra.Length()
 	if ra.Offset() < 0 || length < 0 || length > DefaultMaxForwardReplyBytes {
 		return statusReply(raftpb.ForwardStatusInternal)
+	}
+	if err := waitForwardReadFence(context.Background(), dg.Backend()); err != nil {
+		return statusReply(mapErrorToStatus(err))
 	}
 	buf, pooled := getForwardReadAtBuffer(length)
 	defer putForwardReadAtBuffer(buf, pooled)
@@ -502,6 +511,9 @@ func (r *ForwardReceiver) handleGetObject(dg *DataGroup, args []byte) []byte {
 func (r *ForwardReceiver) handleGetObjectVersionRead(dg *DataGroup, args []byte) ([]byte, io.ReadCloser) {
 	ga := raftpb.GetRootAsGetObjectVersionArgs(args, 0)
 	ctx := contextWithVersioningState(context.Background(), ga.VersioningState())
+	if err := waitForwardReadFence(ctx, dg.Backend()); err != nil {
+		return statusReply(mapErrorToStatus(err)), nil
+	}
 	rc, obj, err := dg.Backend().getObjectVersionCtx(ctx, string(ga.Bucket()), string(ga.Key()), string(ga.VersionId()))
 	if err != nil {
 		return statusReply(mapErrorToStatus(err)), nil
@@ -512,6 +524,9 @@ func (r *ForwardReceiver) handleGetObjectVersionRead(dg *DataGroup, args []byte)
 func (r *ForwardReceiver) handleGetObjectVersion(dg *DataGroup, args []byte) []byte {
 	ga := raftpb.GetRootAsGetObjectVersionArgs(args, 0)
 	ctx := contextWithVersioningState(context.Background(), ga.VersioningState())
+	if err := waitForwardReadFence(ctx, dg.Backend()); err != nil {
+		return statusReply(mapErrorToStatus(err))
+	}
 	rc, obj, err := dg.Backend().getObjectVersionCtx(ctx, string(ga.Bucket()), string(ga.Key()), string(ga.VersionId()))
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
@@ -560,6 +575,12 @@ func waitForwardReadFence(ctx context.Context, gb *GroupBackend) error {
 func (r *ForwardReceiver) handleHeadObjectVersion(dg *DataGroup, args []byte) []byte {
 	ha := raftpb.GetRootAsHeadObjectVersionArgs(args, 0)
 	ctx := contextWithVersioningState(context.Background(), ha.VersioningState())
+	// Read-fence (mirrors handleHeadObject): a lagging forwarded receiver must
+	// apply all committed writes before resolving — else it reads a stale local
+	// soleauth state and takes the wrong read1 authority branch.
+	if err := waitForwardReadFence(ctx, dg.Backend()); err != nil {
+		return statusReply(mapErrorToStatus(err))
+	}
 	bucket := string(ha.Bucket())
 	obj, err := dg.Backend().headObjectVersionCtx(ctx, bucket, string(ha.Key()), string(ha.VersionId()))
 	if err != nil {
@@ -624,6 +645,9 @@ func (r *ForwardReceiver) handleSetObjectTags(dg *DataGroup, args []byte) []byte
 
 func (r *ForwardReceiver) handleGetObjectTags(dg *DataGroup, args []byte) []byte {
 	ga := raftpb.GetRootAsGetObjectTagsArgs(args, 0)
+	if err := waitForwardReadFence(context.Background(), dg.Backend()); err != nil {
+		return statusReply(mapErrorToStatus(err))
+	}
 	tags, err := dg.Backend().GetObjectTags(string(ga.Bucket()), string(ga.Key()), string(ga.VersionId()))
 	if err != nil {
 		return statusReply(mapErrorToStatus(err))
