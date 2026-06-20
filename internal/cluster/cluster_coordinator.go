@@ -664,12 +664,29 @@ func (c *ClusterCoordinator) HeadBucket(ctx context.Context, bucket string) erro
 }
 func (c *ClusterCoordinator) DeleteBucket(ctx context.Context, bucket string) error {
 	if c.router != nil && c.meta != nil {
-		objects, err := c.ListObjects(ctx, bucket, "", 1)
-		if err != nil {
-			return err
-		}
-		if len(objects) > 0 {
-			return storage.ErrBucketNotEmpty
+		// Under soleauth=on, ListObjects (latest-live-only, delete markers
+		// excluded) is not the authority; use ListObjectVersions, which under `on`
+		// returns the cluster-wide per-version blobs (incl. delete markers) + every
+		// group's carve-out FSM records. len>0 (any version/marker/carve-out) =
+		// non-empty, matching the leaf. Fail-closed on the soleauth read.
+		if on, serr := c.bucketSoleAuthOn(bucket); serr != nil {
+			return serr
+		} else if on {
+			vs, err := c.ListObjectVersions(ctx, bucket, "", 1)
+			if err != nil {
+				return err
+			}
+			if len(vs) > 0 {
+				return storage.ErrBucketNotEmpty
+			}
+		} else {
+			objects, err := c.ListObjects(ctx, bucket, "", 1)
+			if err != nil {
+				return err
+			}
+			if len(objects) > 0 {
+				return storage.ErrBucketNotEmpty
+			}
 		}
 	}
 	return c.base.DeleteBucket(ctx, bucket)
@@ -678,7 +695,91 @@ func (c *ClusterCoordinator) DeleteBucket(ctx context.Context, bucket string) er
 // ForceDeleteBucket deletes all objects in the bucket and then removes it.
 // Unlike DeleteBucket, it does not fail when the bucket is non-empty.
 func (c *ClusterCoordinator) ForceDeleteBucket(ctx context.Context, bucket string) error {
+	// Under soleauth=on the deletion set spans groups (per-version blobs +
+	// per-group carve-outs) and must be deleted routed-to-its-owner — the
+	// single-leaf c.base path would skip remote groups. Orchestrate here when
+	// routing is wired; otherwise fall to the leaf (which has its own `on` branch).
+	if c.router != nil && c.meta != nil {
+		if on, serr := c.bucketSoleAuthOn(bucket); serr != nil {
+			return serr
+		} else if on {
+			return c.forceDeleteBucketSoleAuth(ctx, bucket)
+		}
+	}
 	return c.base.ForceDeleteBucket(ctx, bucket)
+}
+
+// forceDeleteBucketSoleAuth is the soleauth=on cluster force-delete: enumerate
+// the authoritative set cluster-wide (per-version blobs incl. markers + every
+// group's carve-outs, fail-closed), delete each routed to its owner — vid-bearing
+// via the generation-aware blob-purging DeleteObjectVersion, legacy-bare via the
+// all-groups hard-delete — then finish with the blob-aware DeleteBucket as the
+// fail-closed completeness backstop.
+func (c *ClusterCoordinator) forceDeleteBucketSoleAuth(ctx context.Context, bucket string) error {
+	versions, err := c.ListObjectVersions(ctx, bucket, "", 0)
+	if err != nil {
+		return fmt.Errorf("force delete (soleauth): enumerate: %w", err)
+	}
+	for _, v := range versions {
+		if v == nil {
+			continue
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if v.VersionID != "" {
+			if derr := c.DeleteObjectVersion(bucket, v.Key, v.VersionID); derr != nil {
+				return fmt.Errorf("force delete (soleauth): delete %q@%s: %w", v.Key, v.VersionID, derr)
+			}
+			continue
+		}
+		if derr := c.hardDeleteLegacyObject(ctx, bucket, v.Key); derr != nil {
+			return fmt.Errorf("force delete (soleauth): hard delete %q: %w", v.Key, derr)
+		}
+	}
+	return c.DeleteBucket(ctx, bucket)
+}
+
+// hardDeleteLegacyObject fans a CmdDeleteObject{VID:""} hard-delete out to the
+// bucket-assigned group AND every shard group (deduped). A legacy-bare record
+// written via the bucket-group fallback when EC was inactive lands on a group
+// NOT in the per-generation key hash, so a generation-routed delete would miss it
+// and the trailing DeleteBucket would loop forever. The empty-VID hard delete is
+// idempotent (no-op on a group lacking the record), so the all-group fan-out is
+// safe and convergent. soleauth=on force-delete only.
+func (c *ClusterCoordinator) hardDeleteLegacyObject(ctx context.Context, bucket, key string) error {
+	state := c.runtimeState()
+	args := buildDeleteObjectArgs(bucket, key)
+	seen := map[string]struct{}{}
+	del := func(target RouteTarget) error {
+		if _, dup := seen[target.GroupID]; dup {
+			return nil
+		}
+		seen[target.GroupID] = struct{}{}
+		if gb, rerr := state.localExec.ResolveWrite(ctx, target); rerr != nil {
+			return rerr
+		} else if gb != nil {
+			return gb.HardDeleteLegacyObject(ctx, bucket, key)
+		}
+		return c.forwardRuntime().mutateFrame(ctx, target, raftpb.ForwardOpHardDeleteObject, args)
+	}
+	// Bucket-assigned group (covers the EC-inactive fallback group + single-group).
+	if t, rerr := state.opRouter.RouteBucket(bucket); rerr == nil {
+		if derr := del(t); derr != nil {
+			return derr
+		}
+	}
+	// Every shard group (covers per-generation placement groups).
+	for _, g := range c.shardGroupsForVersionedList() {
+		t, rerr := state.opRouter.routeGroup(g.ID)
+		if rerr != nil {
+			return rerr
+		}
+		if derr := del(t); derr != nil {
+			return derr
+		}
+	}
+	return nil
 }
 
 func (c *ClusterCoordinator) ListBuckets(ctx context.Context) ([]string, error) {

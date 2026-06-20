@@ -63,6 +63,29 @@ func (b *DistributedBackend) ScanObjects(bucket string) (<-chan scrubber.ObjectR
 		return ch, nil
 	}
 
+	// soleauth=on: the FSM lat: walk is non-authoritative for plain versioned
+	// objects. Enumerate the EC scrub set from the per-version blob authority
+	// (LOCAL, latest-per-key) + local EC carve-out. The STRICT scan runs EAGERLY
+	// so a corrupt-blob error surfaces synchronously — ScanObjects returns
+	// (chan, error) before the goroutine, so a mid-stream error cannot be reported.
+	on, serr := b.soleAuthReadOn(bucket)
+	if serr != nil {
+		return nil, serr // fail closed
+	}
+	if on {
+		recs, rerr := b.scanObjectsSoleAuth(bucket)
+		if rerr != nil {
+			return nil, rerr
+		}
+		go func() {
+			defer close(ch)
+			for _, rec := range recs {
+				ch <- rec
+			}
+		}()
+		return ch, nil
+	}
+
 	go func() {
 		defer close(ch)
 		rawLatPrefix := []byte("lat:" + bucket + "/")
@@ -176,6 +199,76 @@ func (b *DistributedBackend) quorumMetaScrubRecords(bucket string, seen map[stri
 		})
 	}
 	return recs
+}
+
+// scanObjectsSoleAuth builds the soleauth=on EC scrub record set: the live
+// latest-per-key EC object from the LOCAL per-version blob authority (strict,
+// fail-closed) + local EC carve-out FSM records. Latest-version-per-key,
+// repair-only, local-node — the same model as the off-path lat: walk + quorum
+// merge, repointed to the blob authority. Reports each object's OWN EC profile
+// (a genesis 1+0 object stays 1+0) so the redundancy-upgrade sweep still sees it.
+func (b *DistributedBackend) scanObjectsSoleAuth(bucket string) ([]scrubber.ObjectRecord, error) {
+	if b.shardSvc == nil {
+		return nil, nil
+	}
+	// Local all-version blobs, STRICT (a corrupt/undecodable blob fails closed).
+	cmds, err := b.shardSvc.scanQuorumMetaVersionsBucketAllStrict(bucket, "")
+	if err != nil {
+		return nil, fmt.Errorf("scan objects (soleauth): %w", err)
+	}
+	// Collapse to latest (max-VID) per key; MetaSeq tiebreak on equal VID.
+	latest := map[string]PutObjectMetaCmd{}
+	for _, c := range cmds {
+		if ex, ok := latest[c.Key]; !ok || c.VersionID > ex.VersionID ||
+			(c.VersionID == ex.VersionID && c.MetaSeq >= ex.MetaSeq) {
+			latest[c.Key] = c
+		}
+	}
+	var recs []scrubber.ObjectRecord
+	seen := map[string]struct{}{}
+	for _, c := range latest {
+		seen[c.Key] = struct{}{}
+		if c.IsDeleteMarker || c.ETag == deleteMarkerETag {
+			continue // delete-marker latest — no shards to scrub
+		}
+		if c.ECData == 0 {
+			continue // non-EC object — no EC shards
+		}
+		recs = append(recs, scrubber.ObjectRecord{
+			Bucket:       bucket,
+			Key:          c.Key,
+			VersionID:    c.VersionID,
+			DataShards:   int(c.ECData),
+			ParityShards: int(c.ECParity),
+			ETag:         c.ETag,
+			LastModified: c.ModTime,
+		})
+	}
+	// Local EC carve-out FSM records (appendable/coalesced/legacy-bare), deduped
+	// by key against the blob latest set (blob wins). Reuse the shared carve-out
+	// walk so the classification matches ListObjectVersions exactly.
+	if err := b.forEachLocalCarveout(bucket, "", func(key, vid string, _, _ bool, m objectMeta) error {
+		if _, dup := seen[key]; dup {
+			return nil // blob latest already covers this key
+		}
+		if m.ECData == 0 {
+			return nil // no EC shards to scrub
+		}
+		seen[key] = struct{}{}
+		recs = append(recs, scrubber.ObjectRecord{
+			Bucket:       bucket,
+			Key:          key,
+			VersionID:    vid,
+			DataShards:   int(m.ECData),
+			ParityShards: int(m.ECParity),
+			ETag:         m.ETag,
+			LastModified: m.LastModified,
+		})
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return recs, nil
 }
 
 // ObjectExists returns true if key resolves to a live (non-tombstone)
