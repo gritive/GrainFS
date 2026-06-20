@@ -740,8 +740,6 @@ func (b *DistributedBackend) listObjectsPerVersion(ctx context.Context, bucket, 
 // error, a peer-address resolution error, or a peer RPC error is returned (NOT
 // skipped) — under sole authority a silently-truncated set is data loss. When
 // shardGroup == nil (single-node) the result is the local STRICT scan.
-//
-//nolint:unused // wired by T2 ListObjectVersions under sole authority
 func (b *DistributedBackend) scanQuorumMetaVersionsClusterAll(bucket, prefix string) ([]PutObjectMetaCmd, error) {
 	if b.shardSvc == nil {
 		return nil, nil

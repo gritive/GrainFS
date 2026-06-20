@@ -110,8 +110,7 @@ func (b *DistributedBackend) fsmCarveoutObject(bucket, key, versionID string) (*
 		return nil, PlacementMeta{}, false, nil
 	}
 
-	carveout := meta.IsAppendable || len(meta.Coalesced) > 0 || bareLegacy
-	if !carveout {
+	if !isFsmCarveoutClass(meta, bareLegacy) {
 		return nil, PlacementMeta{}, false, nil
 	}
 
@@ -123,6 +122,25 @@ func (b *DistributedBackend) fsmCarveoutObject(bucket, key, versionID string) (*
 	}
 	obj, pm := objectAndPlacementFromObjectMeta(meta, vid)
 	return obj, pm, true, nil
+}
+
+// isFsmCarveoutClass reports whether a decoded FSM objectMeta belongs to a
+// carve-out class that stays FSM-authoritative even under soleauth=on:
+//
+//  1. appendable  (meta.IsAppendable)
+//  2. coalesced   (len(meta.Coalesced) > 0)
+//  3. legacy unversioned "bare" record (bareLegacy — an obj:{bucket}/{key}
+//     record with NO lat: pointer, resolved by the caller from WHICH KEY was
+//     actually read, NOT from any versionID argument)
+//
+// SHARED PREDICATE: fsmCarveoutObject (single-object read, S4c-c-read1) and
+// DistributedBackend.ListObjectVersions's bucket-wide carve-out scan (S4c-c
+// T2) BOTH classify records through this one rule so the two paths cannot
+// drift. A plain vid-bearing versioned record (none of the three) is NOT a
+// carve-out: it is blob-authoritative under sole authority and a stale one
+// must never resurrect.
+func isFsmCarveoutClass(meta objectMeta, bareLegacy bool) bool {
+	return meta.IsAppendable || len(meta.Coalesced) > 0 || bareLegacy
 }
 
 // objectAndPlacementFromObjectMeta builds a storage.Object and PlacementMeta

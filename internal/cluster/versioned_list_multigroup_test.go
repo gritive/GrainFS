@@ -127,6 +127,31 @@ func TestReconcileVersionIsLatest(t *testing.T) {
 	require.Equal(t, "v5", latest["b"], "non-flagged newer version must not be promoted")
 }
 
+// TestDedupVersionsKeepFirst covers the coordinator's soleauth=on dedup: every
+// leaf returns the identical cluster-wide blob view (→ N× duplicates), which the
+// coordinator collapses by (Key,VersionID) keeping the first; carve-out keys
+// owned by one group never duplicate and survive intact.
+func TestDedupVersionsKeepFirst(t *testing.T) {
+	// Two leaves each returned the same two blob versions of key "k" (duplicated),
+	// plus group-A's local carve-out "ck" and group-B's local carve-out "bare".
+	versions := []*storage.ObjectVersion{
+		{Key: "k", VersionID: "v2", IsLatest: true, ETag: "blob-v2"},  // leaf A
+		{Key: "k", VersionID: "v1", IsLatest: false, ETag: "blob-v1"}, // leaf A
+		{Key: "ck", VersionID: "cv", IsLatest: true, ETag: "carve-A"}, // leaf A carve-out
+		{Key: "k", VersionID: "v2", IsLatest: true, ETag: "blob-v2"},  // leaf B dup
+		{Key: "k", VersionID: "v1", IsLatest: false, ETag: "blob-v1"}, // leaf B dup
+		{Key: "bare", VersionID: "", IsLatest: true, ETag: "carve-B"}, // leaf B carve-out
+	}
+	out := dedupVersionsKeepFirst(versions)
+
+	idx := versionByKeyVID(out)
+	require.Len(t, out, 4, "the two duplicated blob versions collapse; carve-outs survive")
+	require.Equal(t, "blob-v2", idx[[2]string{"k", "v2"}].ETag)
+	require.Equal(t, "blob-v1", idx[[2]string{"k", "v1"}].ETag)
+	require.Equal(t, "carve-A", idx[[2]string{"ck", "cv"}].ETag, "group-A carve-out kept")
+	require.Equal(t, "carve-B", idx[[2]string{"bare", ""}].ETag, "group-B carve-out kept")
+}
+
 // TestListObjectVersions_SplitKeyNoLocalLatest proves the leaf no longer emits a
 // corrupt legacy row for a versioned obj:{bucket}/{key}/{vid} record whose lat:
 // pointer is absent locally (cross-group key split, or a PreserveLatest write).
