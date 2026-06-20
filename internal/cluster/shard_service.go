@@ -737,9 +737,12 @@ func (s *ShardService) handleScanQuorumMetaVersions(sr *shardRequest) []byte {
 // handleScanQuorumMetaVersionsAll serves a ScanQuorumMetaVersionsAll RPC: walks
 // the local per-version subtree for the bucket (sr.Key = prefix) and returns
 // EVERY decoded per-version cmd (no max-per-key grouping) as a packBlobList
-// payload. Mirrors handleScanQuorumMetaVersions but uses the all-version scan.
+// payload. Mirrors handleScanQuorumMetaVersions but uses the FAIL-CLOSED
+// all-version scan: a per-blob read/decode failure returns an "Error" reply
+// (so the cluster-wide fan-in surfaces a non-nil error) instead of a
+// silently-truncated list. An ABSENT bucket stays an empty success.
 func (s *ShardService) handleScanQuorumMetaVersionsAll(sr *shardRequest) []byte {
-	entries, err := s.ScanQuorumMetaVersionsBucketAll(sr.Bucket, sr.Key) // Key field = prefix
+	entries, err := s.scanQuorumMetaVersionsBucketAllStrict(sr.Bucket, sr.Key) // Key field = prefix
 	if err != nil {
 		return s.errorResponse(err.Error())
 	}

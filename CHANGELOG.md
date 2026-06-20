@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.0.626.0] - 2026-06-20
+
+### Added
+- **Cluster-wide all-version fan-in + ListObjectVersions authority under `soleauth=on` — dormant cutover slice (S4c-c-read2a), Enabled-only scope.**
+  The first all-version-enumeration sub-slice of the S4c per-version sole-authority cutover. When a bucket's
+  `soleauth` state is `on` (a per-bucket tri-state; **never `on` in production yet** — the admin flip is a future
+  slice), `ListObjectVersions` derives the version listing from the per-version quorum-meta blob tree cluster-wide
+  instead of the FSM `obj:`/`lat:` records. In `internal/cluster`:
+  - A new cluster-wide, **end-to-end fail-closed** all-version blob enumerator: it fans the existing
+    `ScanQuorumMetaVersionsAll` peer RPC out across every shard group, merges by `(Key, VersionID)` (highest
+    MetaSeq wins), and returns an error on ANY local-scan / peer-resolve / peer-RPC / per-blob-decode failure
+    (a partial authoritative version list would be silent data loss). The peer handler now serves from the strict
+    local scan and the RPC client errors on a per-entry decode failure (both were silent skips).
+  - `ListObjectVersions` under `on`: the leaf returns the cluster-wide blob versions (IsLatest = per-key max
+    VersionID, a delete-marker latest still marked IsLatest, markers included) merged with this node's **local**
+    carve-out FSM records (appendable / coalesced / legacy unversioned bare records — via a carve-out predicate
+    shared with the single-object read path so the two cannot drift); a stale vid-bearing FSM record is dropped
+    (no resurrection), and a blob wins a `(Key, VersionID)` collision. The coordinator fans out, dedups by
+    `(Key, VersionID)`, sorts, and applies `maxKeys` once.
+  - No user-facing behavior change: the `off`/`pending` path (every bucket today) is **byte-identical**, and the
+    `on` branch is unreachable until the future flip. The remaining all-version consumers (bucket emptiness,
+    force-delete enumeration, scrubber object scan) are a separate sub-slice (S4c-c-read2b).
+
 ## [0.0.625.0] - 2026-06-20
 
 ### Added

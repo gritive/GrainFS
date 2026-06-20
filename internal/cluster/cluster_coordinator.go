@@ -1385,6 +1385,28 @@ func (c *ClusterCoordinator) ListObjectVersions(
 	if _, err := state.opRouter.RouteBucket(bucket); err != nil {
 		return nil, err
 	}
+	// S4c-c T2: under soleauth=on every leaf computes the SAME cluster-wide blob
+	// view (→ N× duplicated across groups) plus its own local carve-outs. Dedup
+	// by (Key,VID) keep-the-first (duplicates are byte-identical; ObjectVersion
+	// has no MetaSeq so keep-one is correct) and apply maxKeys ONCE — NOT
+	// reconcileVersionIsLatest (the blob view has no cross-group lat: split).
+	// Fail closed on the soleauth read.
+	if on, serr := c.bucketSoleAuthOn(bucket); serr != nil {
+		return nil, serr
+	} else if on {
+		// maxKeys=0 (untruncated) so per-leaf truncation can't underfill the
+		// deduped result; the real maxKeys is applied once below.
+		merged, err := c.fanOutListObjectVersions(ctx, state, groups, bucket, prefix, 0)
+		if err != nil {
+			return nil, err
+		}
+		merged = dedupVersionsKeepFirst(merged)
+		sortObjectVersions(merged)
+		if maxKeys > 0 && len(merged) > maxKeys {
+			merged = merged[:maxKeys]
+		}
+		return merged, nil
+	}
 	merged, err := c.fanOutListObjectVersions(ctx, state, groups, bucket, prefix, maxKeys)
 	if err != nil {
 		return nil, err
@@ -1395,6 +1417,35 @@ func (c *ClusterCoordinator) ListObjectVersions(
 		merged = merged[:maxKeys]
 	}
 	return merged, nil
+}
+
+// bucketSoleAuthOn reports whether the bucket's soleauth state is "on",
+// FAIL-CLOSED on a read error (mirrors DistributedBackend.soleAuthReadOn).
+func (c *ClusterCoordinator) bucketSoleAuthOn(bucket string) (bool, error) {
+	state, err := c.GetBucketSoleAuthority(bucket)
+	if err != nil {
+		return false, fmt.Errorf("read soleauth state for bucket %q: %w", bucket, err)
+	}
+	return state == soleAuthOn, nil
+}
+
+// dedupVersionsKeepFirst removes (Key,VersionID) duplicates, keeping the first
+// occurrence. Under soleauth=on every leaf returns the identical cluster-wide
+// blob view, so the blob entries are byte-identical duplicates across groups;
+// ObjectVersion carries no MetaSeq tiebreak, so keep-one is correct. Carve-out
+// keys are owned by exactly one group and never duplicate.
+func dedupVersionsKeepFirst(versions []*storage.ObjectVersion) []*storage.ObjectVersion {
+	seen := make(map[[2]string]bool, len(versions))
+	out := versions[:0]
+	for _, v := range versions {
+		k := [2]string{v.Key, v.VersionID}
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, v)
+	}
+	return out
 }
 
 // shardGroupsForVersionedList returns the cluster-wide shard group list (NOT
