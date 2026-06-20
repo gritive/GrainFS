@@ -650,6 +650,8 @@ func (s *ShardService) handleRPC(payload []byte) []byte {
 		return s.handleScanQuorumMetaVersionsAll(sr)
 	case "ReadQuorumMetaVersions":
 		return s.handleQuorumMetaVersionsRead(sr)
+	case "ReadQuorumMetaVersionsRaw":
+		return s.handleQuorumMetaVersionsReadRaw(sr)
 	case "DeleteQuorumMetaVersion":
 		return s.handleQuorumMetaVersionDelete(sr)
 	default:
@@ -751,6 +753,20 @@ func (s *ShardService) handleScanQuorumMetaVersionsAll(sr *shardRequest) []byte 
 		if blob, eerr := EncodeCommand(CmdPutObjectMeta, entries[i]); eerr == nil {
 			blobs = append(blobs, blob)
 		}
+	}
+	return s.okResponse(packBlobList(blobs))
+}
+
+// handleQuorumMetaVersionsReadRaw serves a ReadQuorumMetaVersionsRaw RPC: returns
+// the RAW per-version blob bytes for (bucket, key) WITHOUT decoding, so the caller
+// can decode-strict (a corrupt blob is served as-is, not dropped server-side — the
+// difference from handleQuorumMetaVersionsRead, which decode-drops). A local read
+// error → Error reply (the read1 decode-strict reader tolerates that as a peer
+// availability skip; a corrupt blob is caught at the caller's strict decode).
+func (s *ShardService) handleQuorumMetaVersionsReadRaw(sr *shardRequest) []byte {
+	blobs, err := s.readQuorumMetaVersionsRawLocal(sr.Bucket, sr.Key)
+	if err != nil {
+		return s.errorResponse(err.Error())
 	}
 	return s.okResponse(packBlobList(blobs))
 }

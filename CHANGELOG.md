@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.628.0] - 2026-06-20
+
+### Fixed
+- **Single-object reads under `soleauth=on` are now decode-strict — close a deleted-object resurrection window
+  (dormant S4c-d precondition).** When a bucket's `soleauth` state is `on` (a per-bucket cutover tri-state;
+  **never `on` in production yet** — the admin flip is a future slice), the single-object read paths (HEAD/GET of
+  the latest version, a specific-version read, and `GetObjectTags`) treated the per-version quorum-meta blob tree as
+  the sole authority but read it through a **tolerant** reader that **silently dropped a corrupt/undecodable blob**.
+  A corrupt delete-marker-latest blob would therefore be omitted, the latest-version derive would see only an older
+  live version, and the read would **resurrect a hard-deleted object**. These paths now read through a new
+  **decode-strict, availability-tolerant** reader: any per-version blob that fails to decode — served by this node or
+  any reachable peer — fails the read closed (no resurrection, no fallthrough to a stale FSM record), while an
+  unreachable / not-yet-upgraded / disk-erroring peer is still tolerated (no spurious unavailability from an unrelated
+  peer). Peers serve the raw blob bytes (a new internal read RPC) so corruption is caught at decode rather than
+  dropped en route. `off`/`pending` and every non-`on` consumer (the availability-first off-path derive, the delete
+  blob purge, the cutover verifier) keep the existing tolerant reader and are **byte-identical**. Dormant until the
+  cutover flip.
+
 ## [0.0.627.0] - 2026-06-20
 
 ### Added

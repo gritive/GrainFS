@@ -212,7 +212,15 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 	if on, err := b.soleAuthReadOn(bucket); err != nil {
 		return nil, PlacementMeta{}, err // fail closed
 	} else if on {
-		if cmds, verr := b.readQuorumMetaVersions(bucket, key); verr == nil && len(cmds) > 0 {
+		// DECODE-STRICT: a corrupt/undecodable per-version blob must NOT be silently
+		// dropped (which would let deriveLatestVersion resurrect an older live version
+		// past a corrupt delete-marker-latest). On the reader error, fail closed — do
+		// NOT fall through to the carve-out / an older-live version.
+		cmds, verr := b.readQuorumMetaVersionsDecodeStrict(bucket, key)
+		if verr != nil {
+			return nil, PlacementMeta{}, verr // fail closed
+		}
+		if len(cmds) > 0 {
 			latest, live := deriveLatestVersion(cmds)
 			if live {
 				obj, pm := objectAndPlacementFromCmd(latest)
