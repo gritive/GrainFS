@@ -301,24 +301,79 @@ func TestLeaf_RejectsStaleEpoch(t *testing.T) {
 	require.NoError(t, svc.writeQuorumMetaVersionLocal(bucket, sub, blob, 6))
 }
 
-// TestLeaf_DormantAcceptsAll verifies that at local epoch 0 (callback returns 0,
-// or nil callback) all four leaves accept regardless of the admitted epoch.
+// TestLeaf_DormantAcceptsAll verifies that with the epoch source READY and the
+// callback returning 0 (local epoch 0 — never flipped, every bucket today) all
+// four leaves accept regardless of the admitted epoch. (The nil/unwired callback
+// is now the boot-window fail-closed case — see TestLeaf_BootWindowFailsClosed.)
 func TestLeaf_DormantAcceptsAll(t *testing.T) {
-	for _, name := range []string{"zero-callback", "nil-callback"} {
-		t.Run(name, func(t *testing.T) {
-			svc, _ := newTestShardService(t)
-			if name == "zero-callback" {
-				svc.SetSoleAuthEpochFn(func(string) uint32 { return 0 })
-			} // nil-callback: leave soleAuthEpochFn unset
+	svc, _ := newTestShardService(t) // helper marks ready
+	svc.SetSoleAuthEpochFn(func(string) uint32 { return 0 })
 
-			const bucket, key, vid = "b", "k", "v"
-			wblob := validQuorumMetaBlob(t, bucket, key)
-			// Writers accept any admitted epoch while dormant.
-			require.NoError(t, svc.writeQuorumMetaLocal(bucket, key, wblob, 99))
-			require.NoError(t, svc.writeQuorumMetaVersionLocal(bucket, filepath.Join(key, vid), wblob, 99))
-			// Deleters: absent file is idempotent; any admitted epoch accepted.
-			require.NoError(t, svc.deleteQuorumMetaLocal(bucket, key, 99))
-			require.NoError(t, svc.deleteQuorumMetaVersionLocal(bucket, key, vid, 99))
-		})
+	const bucket, key, vid = "b", "k", "v"
+	wblob := validQuorumMetaBlob(t, bucket, key)
+	// Writers accept any admitted epoch while dormant (local epoch 0, not stale).
+	require.NoError(t, svc.writeQuorumMetaLocal(bucket, key, wblob, 99))
+	require.NoError(t, svc.writeQuorumMetaVersionLocal(bucket, filepath.Join(key, vid), wblob, 99))
+	// Deleters: absent file is idempotent; any admitted epoch accepted.
+	require.NoError(t, svc.deleteQuorumMetaLocal(bucket, key, 99))
+	require.NoError(t, svc.deleteQuorumMetaVersionLocal(bucket, key, vid, 99))
+}
+
+// TestLeaf_BootWindowFailsClosed covers the boot-window fence: a NOT-ready
+// ShardService (the shard RPC route can be live before the group-0 FSM is
+// confirmed caught up) fails closed for any non-zero admitted epoch on all four
+// leaves, while still admitting epoch-0 (legit boot-time replication). It also
+// covers that not-ready dominates a wired callback and that SetSoleAuthEpochFn(nil)
+// clears without a nil-func-call panic.
+func TestLeaf_BootWindowFailsClosed(t *testing.T) {
+	newNotReady := func(t *testing.T) *ShardService {
+		t.Helper()
+		keeper, clusterID := testDEKKeeper(t)
+		// NewShardService directly (NOT the helper) → soleAuthEpochReady defaults
+		// false: the boot window.
+		return NewShardService(t.TempDir(), nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 	}
+	const bucket, key, vid = "b", "k", "v"
+
+	t.Run("not ready: wire>0 fail-closed, wire=0 admitted (all four leaves)", func(t *testing.T) {
+		svc := newNotReady(t)
+		blob := validQuorumMetaBlob(t, bucket, key)
+		require.ErrorIs(t, svc.writeQuorumMetaLocal(bucket, key, blob, 5), errStaleSoleAuthEpoch)
+		require.NoError(t, svc.writeQuorumMetaLocal(bucket, key, blob, 0))
+		require.ErrorIs(t, svc.writeQuorumMetaVersionLocal(bucket, filepath.Join(key, vid), blob, 5), errStaleSoleAuthEpoch)
+		require.NoError(t, svc.writeQuorumMetaVersionLocal(bucket, filepath.Join(key, vid), blob, 0))
+		require.ErrorIs(t, svc.deleteQuorumMetaLocal(bucket, key, 5), errStaleSoleAuthEpoch)
+		require.NoError(t, svc.deleteQuorumMetaLocal(bucket, key, 0))
+		require.ErrorIs(t, svc.deleteQuorumMetaVersionLocal(bucket, key, vid, 5), errStaleSoleAuthEpoch)
+		require.NoError(t, svc.deleteQuorumMetaVersionLocal(bucket, key, vid, 0))
+	})
+
+	t.Run("not ready dominates a wired callback", func(t *testing.T) {
+		svc := newNotReady(t)
+		svc.SetSoleAuthEpochFn(func(string) uint32 { return 5 }) // wired but NOT ready
+		blob := validQuorumMetaBlob(t, bucket, key)
+		require.ErrorIs(t, svc.writeQuorumMetaLocal(bucket, key, blob, 5), errStaleSoleAuthEpoch)
+		require.NoError(t, svc.writeQuorumMetaLocal(bucket, key, blob, 0))
+	})
+
+	t.Run("ready + wired callback → live stale semantics", func(t *testing.T) {
+		svc := newNotReady(t)
+		svc.MarkSoleAuthEpochReady()
+		svc.SetSoleAuthEpochFn(func(string) uint32 { return 3 })
+		blob := validQuorumMetaBlob(t, bucket, key)
+		require.ErrorIs(t, svc.writeQuorumMetaLocal(bucket, key, blob, 2), errStaleSoleAuthEpoch) // stale: 2<3
+		require.NoError(t, svc.writeQuorumMetaLocal(bucket, key, blob, 3))                        // equal
+		require.NoError(t, svc.writeQuorumMetaLocal(bucket, key, blob, 4))                        // newer
+		require.ErrorIs(t, svc.writeQuorumMetaLocal(bucket, key, blob, 0), errStaleSoleAuthEpoch) // 0<3 is stale
+	})
+
+	t.Run("SetSoleAuthEpochFn(nil) clears without panic, re-fails-closed", func(t *testing.T) {
+		svc := newNotReady(t)
+		svc.MarkSoleAuthEpochReady()
+		svc.SetSoleAuthEpochFn(func(string) uint32 { return 3 })
+		svc.SetSoleAuthEpochFn(nil) // must store a nil pointer, not a non-nil ptr to a nil func
+		blob := validQuorumMetaBlob(t, bucket, key)
+		require.ErrorIs(t, svc.writeQuorumMetaLocal(bucket, key, blob, 5), errStaleSoleAuthEpoch)
+		require.NoError(t, svc.writeQuorumMetaLocal(bucket, key, blob, 0))
+	})
 }

@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.630.0] - 2026-06-20
+
+### Fixed
+- **Close the soleauth-fence boot-window — single-group (S4c-d cutover precondition).** The per-version
+  sole-authority cutover fences a quorum-meta write/delete that carries a STALE per-bucket "soleauth epoch" (one from a
+  coordinator a newer flip has since fenced out). During boot the shard RPC route goes live (so the leaf fence is
+  reachable) BEFORE the epoch source callback is wired, and the wired callback then reads a metadata store that lags
+  until the data-raft apply loop replays its committed backlog — so the fence was bypassed (admitted any epoch) during
+  that window. Once a bucket is flipped (a future slice), a restarting node could have admitted a stale write. The
+  fence now **fails closed for any non-zero admitted epoch until the node can reliably read its committed epoch** (the
+  callback is wired AND the group-0 FSM has applied its boot-committed backlog, established via a `ReadIndex` +
+  `WaitApplied` linearizability fence that retries through transient leader-loss); epoch-0 traffic (legit boot-time
+  replication; every bucket today) is still admitted. The epoch-source callback is now race-safe (atomic). **DORMANT**
+  (no bucket is ever flipped today). Scoped to single-group (group-0) clusters — see the multi-group note in the
+  development notes; for multi-group clusters this is strictly safer than before (fail-closed during boot) but not yet
+  complete.
+
 ## [0.0.629.0] - 2026-06-20
 
 ### Fixed

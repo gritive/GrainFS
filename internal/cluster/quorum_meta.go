@@ -389,8 +389,8 @@ func (s *ShardService) writeQuorumMetaLocal(bucket, key string, data []byte, adm
 	bmu := s.bucketSoleAuthLock(bucket)
 	bmu.RLock()
 	defer bmu.RUnlock()
-	if s.soleAuthEpochFn != nil && soleAuthEpochStale(s.soleAuthEpochFn(bucket), admittedEpoch) {
-		return errStaleSoleAuthEpoch
+	if err := s.rejectStaleSoleAuthEpoch(bucket, admittedEpoch); err != nil {
+		return err
 	}
 	dir := filepath.Dir(target)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -505,8 +505,8 @@ func (s *ShardService) writeQuorumMetaVersionLocal(bucket, versionSubpath string
 	bmu := s.bucketSoleAuthLock(bucket)
 	bmu.RLock()
 	defer bmu.RUnlock()
-	if s.soleAuthEpochFn != nil && soleAuthEpochStale(s.soleAuthEpochFn(bucket), admittedEpoch) {
-		return errStaleSoleAuthEpoch
+	if err := s.rejectStaleSoleAuthEpoch(bucket, admittedEpoch); err != nil {
+		return err
 	}
 	// Per-target lock: serializes the (guard-read + rename) critical section.
 	// Mirrors writeQuorumMetaLocal — see that function for the full rationale.
@@ -1373,8 +1373,8 @@ func (s *ShardService) deleteQuorumMetaLocal(bucket, key string, admittedEpoch u
 	bmu := s.bucketSoleAuthLock(bucket)
 	bmu.RLock()
 	defer bmu.RUnlock()
-	if s.soleAuthEpochFn != nil && soleAuthEpochStale(s.soleAuthEpochFn(bucket), admittedEpoch) {
-		return errStaleSoleAuthEpoch
+	if err := s.rejectStaleSoleAuthEpoch(bucket, admittedEpoch); err != nil {
+		return err
 	}
 	err = os.Remove(target)
 	if err != nil && !os.IsNotExist(err) {
@@ -1412,8 +1412,8 @@ func (s *ShardService) deleteQuorumMetaVersionLocal(bucket, key, versionID strin
 	bmu := s.bucketSoleAuthLock(bucket)
 	bmu.RLock()
 	defer bmu.RUnlock()
-	if s.soleAuthEpochFn != nil && soleAuthEpochStale(s.soleAuthEpochFn(bucket), admittedEpoch) {
-		return errStaleSoleAuthEpoch
+	if err := s.rejectStaleSoleAuthEpoch(bucket, admittedEpoch); err != nil {
+		return err
 	}
 	return s.deleteQuorumMetaVersionLocalCore(target)
 }

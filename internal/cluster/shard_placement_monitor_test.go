@@ -25,6 +25,10 @@ func newTestShardService(t *testing.T) (*ShardService, string) {
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	keeper, clusterID := testDEKKeeper(t)
 	svc := NewShardService(dir, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	// A directly-constructed test service has no boot backlog → mark the soleauth
+	// epoch source ready so the fence exercises the wired-fn logic (not the default
+	// fail-closed boot-window behavior).
+	svc.MarkSoleAuthEpochReady()
 	return svc, dir
 }
 
