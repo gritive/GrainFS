@@ -115,3 +115,36 @@ func TestHandleScanQuorumMetaVersionsAll_PropagatesStrictError(t *testing.T) {
 	require.Error(t, err, "fail-closed: a peer-side undecodable blob must surface a non-nil error")
 	require.Nil(t, out, "fail-closed: must NOT degrade to a silently-truncated list")
 }
+
+// TestScanQuorumMetaVersionsAll_FailsClosedOnClientDecodeError proves the
+// CLIENT side is also fail-closed end-to-end: a peer that returns an OK response
+// whose packed blob list contains an undecodable entry (e.g. in-transit
+// corruption, or a decode-version skew) must surface a non-nil error, NOT a
+// silently-truncated authoritative version list. (codex code-gate [P1].)
+func TestScanQuorumMetaVersionsAll_FailsClosedOnClientDecodeError(t *testing.T) {
+	ctx := context.Background()
+	keeper, clusterID := testDEKKeeper(t)
+
+	trSelf := transport.MustNewHTTPTransport("test-cluster-psk")
+	trPeer := transport.MustNewHTTPTransport("test-cluster-psk")
+	require.NoError(t, trSelf.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, trPeer.Listen(ctx, "127.0.0.1:0"))
+	defer trSelf.Close()
+	defer trPeer.Close()
+
+	svcSelf := NewShardService(t.TempDir(), trSelf, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svcPeer := NewShardService(t.TempDir(), trPeer, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+
+	good, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: "019ed400-0000-7000-8000-000000000001", ETag: "ok"})
+	require.NoError(t, err)
+	// Peer returns a well-formed OK response carrying one valid blob + one corrupt
+	// blob — exactly what a strict handler would never pack, but transit corruption
+	// can produce. The client must reject the whole response.
+	trPeer.RegisterBufferedRoute(transport.RouteShardRPC, func(_ []byte) ([]byte, error) {
+		return svcPeer.okResponse(packBlobList([][]byte{good, []byte("\x00corrupt-blob")})), nil
+	})
+
+	out, err := svcSelf.ScanQuorumMetaVersionsAll(ctx, trPeer.LocalAddr(), "bkt", "")
+	require.Error(t, err, "fail-closed: a client-side undecodable blob in an OK response must error")
+	require.Nil(t, out, "fail-closed: must NOT return a partial list")
+}

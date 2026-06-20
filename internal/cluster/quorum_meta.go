@@ -1182,9 +1182,17 @@ func (s *ShardService) ScanQuorumMetaVersionsAll(ctx context.Context, addr, buck
 	}
 	out := make([]PutObjectMetaCmd, 0, len(blobs))
 	for _, blob := range blobs {
-		if cmd, derr := s.decodeQuorumMetaCmdBlob(blob); derr == nil {
-			out = append(out, cmd)
+		// FAIL-CLOSED end-to-end (codex code-gate [P1]): a per-entry decode
+		// failure (in-transit corruption, decode-version skew) must NOT be
+		// silently skipped — that would return a partial authoritative version
+		// list, omitting versions from a soleauth-on listing. (The per-key-max
+		// tolerant clients keep skipping by design; this all-version path is the
+		// sole-authority enumerator and must fail closed.)
+		cmd, derr := s.decodeQuorumMetaCmdBlob(blob)
+		if derr != nil {
+			return nil, fmt.Errorf("decode scan quorum meta versions all response from %s: %w", addr, derr)
 		}
+		out = append(out, cmd)
 	}
 	return out, nil
 }
