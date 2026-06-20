@@ -438,6 +438,23 @@ func (b *DistributedBackend) SetECConfig(cfg ECConfig) {
 	b.publishRuntimeSnapshot(topology, cfg)
 }
 
+// soleAuthAuthorityGroupID is the placement group that holds the cluster-global
+// soleauth state. The flip (CmdSetBucketSoleAuthority) is always applied by this
+// group's FSM under its keyspace, and the coordinator always reads the epoch from
+// it; so the soleauth epoch reader the quorum-meta leaves consult MUST read THIS
+// group's keyspace.
+const soleAuthAuthorityGroupID = "group-0"
+
+// isSoleAuthEpochAuthority reports whether this backend holds the global soleauth
+// epoch state (so its keyspace is the correct source for the shared ShardService's
+// epoch reader). True for group-0 and for a legacy/identity single-group backend
+// (empty groupID — test/tooling, per GroupID()'s doc); false for a routed data
+// group, which shares the same ShardService and must NOT clobber the reader with a
+// closure over its own (epoch-less) keyspace.
+func (b *DistributedBackend) isSoleAuthEpochAuthority() bool {
+	return b.groupID == "" || b.groupID == soleAuthAuthorityGroupID
+}
+
 // SetShardService configures the distributed shard service for fan-out.
 // allNodes includes all cluster node addresses for placement (self first is
 // expected so the self address can be cached before the slice is sorted).
@@ -446,10 +463,20 @@ func (b *DistributedBackend) SetShardService(svc *ShardService, allNodes []strin
 	if b.fsm != nil && svc != nil {
 		b.fsm.SetDEKKeeper(svc.DEKKeeper(), svc.ClusterID())
 		b.fsm.SetFenceLock(svc.bucketSoleAuthLock)
-		svc.SetSoleAuthEpochFn(func(bucket string) uint32 {
-			e, _ := b.GetBucketSoleAuthEpoch(bucket)
-			return e
-		})
+		// Only the soleauth AUTHORITY backend may install the shared epoch reader.
+		// The soleauth epoch is group-0-global (the flip is applied by group-0's
+		// FSM under group-0's keyspace; the coordinator reads it from group-0). A
+		// routed data group ("group-N") shares this same ShardService and would
+		// otherwise OVERWRITE the reader with a closure over its OWN keyspace —
+		// where soleauthepoch:{b} does not exist (reads 0) — silently disabling the
+		// fence on a node that owns both group-0 and a data group. Skip non-authority
+		// groups so group-0's reader survives, order-independently.
+		if b.isSoleAuthEpochAuthority() {
+			svc.SetSoleAuthEpochFn(func(bucket string) uint32 {
+				e, _ := b.GetBucketSoleAuthEpoch(bucket)
+				return e
+			})
+		}
 	}
 	topology := newBackendTopology(allNodes)
 	b.selfAddr = topology.selfAddr
