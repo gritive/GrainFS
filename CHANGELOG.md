@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.0.631.0] - 2026-06-20
+
+### Fixed
+- **Multi-group soleauth epoch source — stop a routed data group from clobbering the fence's epoch
+  reader (S4c-d cutover precondition).** The per-version sole-authority fence on a quorum-meta leaf
+  consults one shared per-node epoch reader (`ShardService.soleAuthEpochFn`). The soleauth epoch is
+  **group-0-global**: the flip is applied by group-0's FSM under group-0's keyspace, and the coordinator
+  always reads the epoch from group-0 (group-0 is the cluster's "legacy data raft"). But the reader is
+  wired by **every** backend's `SetShardService` as a closure over *that* backend's keyspace: group-0
+  wires it correctly at boot, then a runtime-owned data group (`group-1`, …) on the same node calls
+  `SetShardService` on the **same shared** service and OVERWRITES the reader with a closure over its own
+  (epoch-less) keyspace — so the fence read epoch 0 for every bucket on a node owning group-0 plus a data
+  group, silently admitting a stale write. The epoch reader is now installed only by the soleauth
+  **authority** backend (group-0, or a legacy/identity single-group backend); a routed data group no
+  longer clobbers it (`SetDEKKeeper`/`SetFenceLock` stay wired for every group). Readiness is unchanged
+  (the single group-0 readiness gate is the correct cluster-wide signal; a non-group-0-member node stays
+  fail-closed via the gate, never fail-open). **DORMANT** (every admitted epoch is 0 today, so the fence
+  admits regardless — this removes a latent fail-open, not a live regression). Scoped to the clobber;
+  soleauth-epoch availability on non-group-0-member leaf nodes in stable node-ID deployments is tracked
+  as its own (larger) precondition.
+
 ## [0.0.630.0] - 2026-06-20
 
 ### Fixed
