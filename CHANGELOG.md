@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.629.0] - 2026-06-20
+
+### Fixed
+- **Raft-read-fence the forwarded version / tag / partial reads (S4c-d cutover precondition).** A coordinator that
+  doesn't own a bucket forwards the read to a peer that may be lagging in applying committed Raft entries. The
+  forwarded **latest** HEAD/GET and `ListObjectVersions` handlers already ran a `ReadIndex` + `WaitApplied`
+  linearizability fence before resolving, but the forwarded **specific-version** read (`HeadObjectVersion`,
+  `GetObjectVersion`), **`GetObjectTags`**, and **partial-read (`ReadAt`)** handlers did not — even though each
+  resolves through the same authority path that, under the per-version sole-authority cutover (`soleauth=on`), reads
+  the node's local cutover state. A lagging receiver could therefore read a stale local state and take the wrong
+  authority branch (e.g. resurrect a hard-deleted object). These six forwarded read handlers now run the same read
+  fence before resolving, bringing them to parity with the already-fenced latest-read handlers. A forwarded read on a
+  node that cannot obtain a `ReadIndex` now fails closed instead of returning possibly-stale data (identical to the
+  existing fenced handlers); when the receiver is current the result is unchanged.
+
 ## [0.0.628.0] - 2026-06-20
 
 ### Fixed
