@@ -1344,30 +1344,12 @@ KEK removal is two-phase: `grainfs encrypt kek retire --version N` marks an old
 KEK version draining, then `grainfs encrypt kek prune --version N` permanently
 removes it once every voter attests no active lease holds it.
 
-> **Prune-refusal for object snapshots is now ENFORCED.** `grainfs encrypt kek prune`
-> refuses if any voter reports a retained object-metadata snapshot
-> (`<data>/snapshots/snapshot-*.json.zst`) sealed under the target version. The error
-> names the blocking node and count, e.g.:
-> `KEKPrune: node 127.0.0.1:7001 has 2 retained object snapshot(s) sealed under version 1`
->
-> Both cluster-metadata (Raft FSM) and object-metadata snapshots embed a per-snapshot
-> ephemeral DEK wrapped by the KEK version active at snapshot time. Data DEKs are
-> rewrapped automatically before retire; **object snapshots are not** — they are sealed
-> once and never rewrapped. Pruning the KEK version while a snapshot references it
-> would make that snapshot permanently unreadable on restore.
->
-> Pre-prune checklist (defense-in-depth; the automatic guard below catches remaining cases):
-> 1. Confirm `grainfs_snapshot_legacy_plaintext_reads_total` has been flat at zero
->    across a full snapshot cycle (runtime signal that all active snapshots are
->    enveloped — necessary but not sufficient alone).
-> 2. Review your snapshot retention policy: if you keep snapshots older than the last
->    KEK rotation, those snapshots reference the old version. Delete them or let them
->    expire before pruning.
-> 3. Then prune: `grainfs encrypt kek prune --version N`. The cluster automatically
->    refuses prune if any voter still holds a snapshot sealed under version N — delete
->    the snapshot and retry.
+> **Note:** the object-metadata snapshot feature was removed, so there is no longer an
+> object-snapshot prune-refusal — no object snapshot can pin a KEK version. The KEK-lease
+> attestation still carries a snapshot-ref count, but it is always 0. The raft-store-key
+> guard below remains the active prune-refusal mechanism.
 
-> **Prune-refusal for raft-store keys is also enforced.** If a node's
+> **Prune-refusal for raft-store keys is enforced.** If a node's
 > `keys.d/raft-store.key.enc` is still sealed under the target KEK version,
 > prune fails with an error naming the raft-store sidecar. KEK rotation rewraps
 > this sidecar automatically; retry prune after the rotation has applied on all

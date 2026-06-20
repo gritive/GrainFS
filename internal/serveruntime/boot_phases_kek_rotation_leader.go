@@ -33,7 +33,6 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/nodeconfig"
-	"github.com/gritive/GrainFS/internal/snapshot"
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
@@ -88,15 +87,14 @@ func bootKEKRotationLeader(state *bootState) error {
 	state.metaRaft.FSM().SetAuditSink(auditFile)
 	state.AddCleanup(func() { _ = auditFile.Close() })
 
-	// snapshotsDir is the node-local directory where object snapshots are stored.
-	// snapshot.CountSnapshotsSealedUnderKEK scans this directory to count
-	// snapshots that reference a given KEK version (prune refusal guard).
-	snapshotsDir := filepath.Join(state.cfg.DataDir, "snapshots")
 	snapRefCount := func(version uint32) (uint64, error) {
 		if err := checkRaftStoreKeyPruneRef(state, version); err != nil {
 			return 0, err
 		}
-		return snapshot.CountSnapshotsSealedUnderKEK(snapshotsDir, version)
+		// The object-metadata snapshot feature was removed, so no object snapshot
+		// can reference a KEK version: the count is always 0. The raft-store-key
+		// prune-ref guard above is retained (it gates raft-store key pruning).
+		return 0, nil
 	}
 
 	// 2. Peer probe RPC handlers. Register on the shared cluster transport so a

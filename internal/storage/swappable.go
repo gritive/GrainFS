@@ -202,35 +202,3 @@ func (sb *SwappableBackend) MultipartUploadPartCount(bucket, key, uploadID strin
 	}
 	return 0, nil
 }
-
-// ListAllObjects implements Snapshotable by delegating to the inner backend.
-func (sb *SwappableBackend) ListAllObjects() ([]SnapshotObject, error) {
-	if snap, ok := (*sb.inner.Load()).(Snapshotable); ok {
-		return snap.ListAllObjects()
-	}
-	return nil, ErrSnapshotNotSupported
-}
-
-// RestoreObjects implements Snapshotable by delegating to the inner backend.
-func (sb *SwappableBackend) RestoreObjects(objects []SnapshotObject) (int, []StaleBlob, error) {
-	if snap, ok := (*sb.inner.Load()).(Snapshotable); ok {
-		return snap.RestoreObjects(objects)
-	}
-	return 0, nil, ErrSnapshotNotSupported
-}
-
-// ListAllBuckets implements BucketSnapshotable by delegating to the inner backend.
-func (sb *SwappableBackend) ListAllBuckets() ([]SnapshotBucket, error) {
-	if bs, ok := (*sb.inner.Load()).(BucketSnapshotable); ok {
-		return bs.ListAllBuckets()
-	}
-	return nil, nil
-}
-
-// RestoreBuckets implements BucketSnapshotable by delegating to the inner backend.
-func (sb *SwappableBackend) RestoreBuckets(buckets []SnapshotBucket) error {
-	if bs, ok := (*sb.inner.Load()).(BucketSnapshotable); ok {
-		return bs.RestoreBuckets(buckets)
-	}
-	return nil
-}

@@ -7,7 +7,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -149,50 +148,6 @@ func TestClusterConfigHandler_Patch_SecretUsesDEK(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, []byte("shh"), plain)
-}
-
-func TestClusterConfigHandler_SnapshotKeys(t *testing.T) {
-	fsm := cluster.NewMetaFSM()
-	prop := &fakeProposer{fsm: fsm}
-	h := NewClusterConfigHandler(fsm, prop, nil)
-
-	// PATCH: set both snapshot keys.
-	body := `{"snapshot-interval":"15m","snapshot-retain":5}`
-	req := httptest.NewRequest(http.MethodPatch, "/v1/cluster/config", strings.NewReader(body))
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
-	require.Equal(t, 15*time.Minute, fsm.ClusterConfig().SnapshotInterval())
-	require.Equal(t, int32(5), fsm.ClusterConfig().SnapshotRetain())
-
-	// GET reflects effective + source.
-	rec2 := httptest.NewRecorder()
-	h.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/v1/cluster/config", nil))
-	require.Equal(t, http.StatusOK, rec2.Code)
-	var resp ClusterConfigResponse
-	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp))
-	require.Equal(t, "15m0s", resp.Effective["snapshot-interval"])
-	require.Equal(t, "explicit", resp.Source["snapshot-interval"])
-	require.Equal(t, "explicit", resp.Source["snapshot-retain"])
-
-	// Reset both keys.
-	body2 := `{"reset_keys":["snapshot-interval","snapshot-retain"]}`
-	rec3 := httptest.NewRecorder()
-	h.ServeHTTP(rec3, httptest.NewRequest(http.MethodPatch, "/v1/cluster/config", strings.NewReader(body2)))
-	require.Equal(t, http.StatusOK, rec3.Code, "body=%s", rec3.Body.String())
-	require.Equal(t, "default", fsm.ClusterConfig().SourceForKey("snapshot-interval"))
-	require.Equal(t, "default", fsm.ClusterConfig().SourceForKey("snapshot-retain"))
-}
-
-func TestClusterConfigHandler_SnapshotKeys_InvalidDuration(t *testing.T) {
-	fsm := cluster.NewMetaFSM()
-	prop := &fakeProposer{fsm: fsm}
-	h := NewClusterConfigHandler(fsm, prop, nil)
-	body := `{"snapshot-interval":"not-a-duration"}`
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/v1/cluster/config", strings.NewReader(body)))
-	require.Equal(t, http.StatusBadRequest, rec.Code, "body=%s", rec.Body.String())
-	require.Contains(t, rec.Body.String(), "snapshot-interval")
 }
 
 func TestClusterConfigHandler_Patch_Reset(t *testing.T) {

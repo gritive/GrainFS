@@ -528,25 +528,6 @@ func (s *ShardService) writeQuorumMetaVersionLocal(bucket, versionSubpath string
 	return s.writeQuorumMetaVersionLocalCore(target, data)
 }
 
-// writeQuorumMetaVersionLocalForceLocked writes the per-version blob without
-// acquiring the bucket RLock, skipping the epoch check, and bypassing the
-// write-time LWW guard. The caller MUST hold bucketSoleAuthLock(bucket).Lock().
-// This is the restore path: the snapshot restorer quiesces the bucket by holding
-// the write-lock, so a normal RLock would deadlock; and restore must be able to
-// revert a strictly-newer blob written after the snapshot was taken.
-func (s *ShardService) writeQuorumMetaVersionLocalForceLocked(bucket, versionSubpath string, data []byte) error {
-	if len(s.dataDirs) == 0 {
-		return fmt.Errorf("quorum meta version: no data dir")
-	}
-	root := filepath.Join(s.dataDirs[0], quorumMetaVersionsSubDir)
-	target := filepath.Join(root, bucket, versionSubpath)
-	rel, err := filepath.Rel(root, target)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("quorum meta version: path %q escapes root", versionSubpath)
-	}
-	return s.writeQuorumMetaVersionLocalCore(target, data)
-}
-
 // readQuorumMetaVersionsLocal returns the decoded per-version blobs for one key
 // from .quorum_meta_versions/{bucket}/{key}/{vid}. Absent dir → empty, no error.
 func (s *ShardService) readQuorumMetaVersionsLocal(bucket, key string) ([]PutObjectMetaCmd, error) {
@@ -1414,23 +1395,6 @@ func (s *ShardService) deleteQuorumMetaVersionLocal(bucket, key, versionID strin
 	defer bmu.RUnlock()
 	if err := s.rejectStaleSoleAuthEpoch(bucket, admittedEpoch); err != nil {
 		return err
-	}
-	return s.deleteQuorumMetaVersionLocalCore(target)
-}
-
-// deleteQuorumMetaVersionLocalForceLocked removes the per-version blob without
-// acquiring the bucket RLock and skipping the epoch check. The caller MUST hold
-// bucketSoleAuthLock(bucket).Lock(). This is the restore path (see
-// writeQuorumMetaVersionLocalForceLocked for the rationale).
-func (s *ShardService) deleteQuorumMetaVersionLocalForceLocked(bucket, key, versionID string) error {
-	if len(s.dataDirs) == 0 {
-		return nil
-	}
-	root := filepath.Join(s.dataDirs[0], quorumMetaVersionsSubDir)
-	target := filepath.Join(root, bucket, key, versionID)
-	rel, err := filepath.Rel(root, target)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("quorum meta version delete: path %q/%q escapes root", key, versionID)
 	}
 	return s.deleteQuorumMetaVersionLocalCore(target)
 }

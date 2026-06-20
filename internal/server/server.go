@@ -16,24 +16,15 @@ import (
 	"github.com/gritive/GrainFS/internal/server/iceberg"
 	"github.com/gritive/GrainFS/internal/server/incidentsvc"
 	"github.com/gritive/GrainFS/internal/server/receiptsvc"
-	"github.com/gritive/GrainFS/internal/server/snapshotsvc"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
 func NewServerStorage(backend storage.Backend, policyStore *CompiledPolicyStore) ServerStorage {
 	return ServerStorage{
-		Ops:          storage.NewOperations(backend, storage.WithPolicyStore(policyStore)),
-		Backend:      backend,
-		Snapshotable: storageSnapshotable(backend),
-		DBProvider:   storageDBProvider(backend),
+		Ops:        storage.NewOperations(backend, storage.WithPolicyStore(policyStore)),
+		Backend:    backend,
+		DBProvider: storageDBProvider(backend),
 	}
-}
-
-func storageSnapshotable(backend storage.Backend) storage.Snapshotable {
-	if snap, ok := backend.(storage.Snapshotable); ok {
-		return snap
-	}
-	return nil
 }
 
 func storageDBProvider(backend storage.Backend) storage.DBProvider {
@@ -78,7 +69,6 @@ func NewWithServerStorage(addr string, ss ServerStorage, policyStore *CompiledPo
 
 	s.wireAlertState()
 	s.wireBroadcastLogger()
-	s.initSnapshotManager(ss)
 
 	h := s.newHertzEngine(addr)
 	s.ensureRuntimeDefaults(ss)
@@ -110,13 +100,6 @@ func NewWithServerStorage(addr string, ss ServerStorage, policyStore *CompiledPo
 	s.incidentH = incidentsvc.NewHandler(incidentsvc.Deps{
 		IncidentStore:    s.incidentStore,
 		FeatureAvailable: func() bool { return s.routeFeatureRoutesVisible(routeFeatureIncident) },
-	})
-	s.snapshotH = snapshotsvc.NewHandler(snapshotsvc.Deps{
-		SnapMgr:          s.snapMgr,
-		FeatureAvailable: func() bool { return s.routeFeatureAvailable(routeFeatureSnapshot) },
-		MutationDisabled: s.blockIfMutationDisabled,
-		LocalhostOnly:    localhostOnly,
-		EmitEvent:        s.emitEvent,
 	})
 	s.registerRoutes(h)
 	s.hertz = h

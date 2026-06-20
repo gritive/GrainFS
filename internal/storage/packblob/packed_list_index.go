@@ -56,12 +56,6 @@ func (idx *packedListIndex) removeBucket(bucket string) {
 	}
 }
 
-func (idx *packedListIndex) clear() {
-	idx.mu.Lock()
-	defer idx.mu.Unlock()
-	idx.buckets = nil
-}
-
 func (idx *packedListIndex) page(bucket, prefix, marker string, maxKeys int) ([]string, bool) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()

@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/gritive/GrainFS/internal/cluster"
-	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // WaitForMetaRaftLeader polls until the meta-raft node sees any leader
@@ -44,31 +43,4 @@ func WaitForShardGroupCount(ctx context.Context, src cluster.ShardGroupSource, w
 		}
 	}
 	return fmt.Errorf("only %d/%d shard groups visible after %s", len(src.ShardGroups()), want, timeout)
-}
-
-// waitForSnapshotBackendReady polls until ListAllObjects succeeds or the
-// timeout elapses. The auto-snapshotter relies on this to delay its first
-// sweep until the underlying backend has finished any restore/migration
-// work that would otherwise produce empty snapshots.
-func waitForSnapshotBackendReady(ctx context.Context, snapshotable storage.Snapshotable, timeout time.Duration) error {
-	readyCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	ticker := time.NewTicker(50 * time.Millisecond)
-	defer ticker.Stop()
-
-	var lastErr error
-	for {
-		if _, err := snapshotable.ListAllObjects(); err == nil {
-			return nil
-		} else {
-			lastErr = err
-		}
-
-		select {
-		case <-readyCtx.Done():
-			return fmt.Errorf("snapshot backend not ready after %s: %w", timeout, lastErr)
-		case <-ticker.C:
-		}
-	}
 }

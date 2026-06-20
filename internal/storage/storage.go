@@ -12,8 +12,9 @@ import (
 // for shared use (lifecycle, events).
 type DBProvider interface{ DB() *badger.DB }
 
-// ErrSnapshotNotSupported is returned when the backend does not implement Snapshotable.
-var ErrSnapshotNotSupported = errors.New("snapshot not supported by this backend")
+// ErrOperationNotSupported is returned when a backend does not implement an
+// optional capability interface required by the requested operation.
+var ErrOperationNotSupported = errors.New("operation not supported by this backend")
 
 // ErrContentMD5Mismatch is returned when an object PUT's body MD5 does not match
 // the client-supplied Content-MD5 header. Maps to S3 400 BadDigest.
@@ -183,14 +184,16 @@ type Copier interface {
 	CopyObject(srcBucket, srcKey, dstBucket, dstKey string) (*Object, error)
 }
 
-// SnapshotObject is a point-in-time metadata record for a stored object.
+// SnapshotObject is a single live object-version manifest record, the unit of
+// the segment-GC known-set produced by ListAllObjectsStrict. The scrubber sweep
+// and the EC orphan-shard reclaim use it to know which segments/shards belong to
+// a live object version (and must not be reclaimed).
 //
-// Segments carries the per-object chunk refs introduced in Phase 1.6: a
-// chunked object's blobs live under <key>_segments/<blob_id>, not at the
-// legacy objectPath. Snapshots must capture Segments so snapshot restore can
-// verify the right blobs and rehydrate Object metadata. Older snapshots
-// without this field are still readable; they fall back to the legacy
-// single-file blob check during restore.
+// Segments carries the per-object chunk refs (Phase 1.6): a chunked object's
+// blobs live under <key>_segments/<blob_id>, not at the legacy objectPath, so
+// the GC known-set must include them. The placement/fidelity fields (NodeIDs,
+// ECData, ECParity, StripeBytes, PlacementGroupID, MetaSeq, UserMetadata, Parts)
+// are populated for the soleauth-on branch (per-version blob authority).
 type SnapshotObject struct {
 	Bucket         string       `json:"bucket"`
 	Key            string       `json:"key"`
@@ -204,15 +207,12 @@ type SnapshotObject struct {
 	ACL            uint8        `json:"acl,omitempty"` // ACLGrant bitmask; 0 = private (backward compat)
 	SSEAlgorithm   string       `json:"sse_algorithm,omitempty"`
 	Segments       []SegmentRef `json:"segments,omitempty"`
-	// Coalesced records merged segment blobs frozen at snapshot time. Added so
-	// snapshot freeze can pin coalesced chunks; omitempty keeps old snapshot
-	// files backward compatible.
+	// Coalesced records merged segment blobs so the GC known-set can pin
+	// coalesced chunks; omitempty keeps the JSON compact.
 	Coalesced []CoalescedRef `json:"coalesced,omitempty"`
 	Tags      []Tag          `json:"tags,omitempty"`
-	// Populated only for soleauth-on capture (per-version blob authority). Restore
-	// replays the blob via the leaf writer and cannot re-derive these from the
-	// (removed) FSM record. Zero/nil for every other capture (off/pending path is
-	// byte-identical).
+	// Populated only for the soleauth-on branch (per-version blob authority).
+	// Zero/nil for the off/pending FSM-derived branch.
 	NodeIDs          []string             `json:"node_ids,omitempty"`
 	ECData           uint8                `json:"ec_data,omitempty"`
 	ECParity         uint8                `json:"ec_parity,omitempty"`
@@ -223,51 +223,15 @@ type SnapshotObject struct {
 	Parts            []MultipartPartEntry `json:"parts,omitempty"`
 }
 
-// SnapshotObjectRef is the minimal (bucket, key, versionID) identity of a
-// snapshot-pinned object version. The EC orphan-shard scrubber uses it as the
-// snapshot half of its known-set: a full-object EC version pinned by a live
-// snapshot must never be swept even after its live metadata is hard-deleted.
+// SnapshotObjectRef is the minimal (bucket, key, versionID) identity of an
+// object version, used by the EC orphan-shard reclaim's frozen-object source
+// hook. With no object-metadata snapshot feature there are no frozen objects, so
+// the source is wired to an empty no-op; the type is retained for that hook's
+// signature.
 type SnapshotObjectRef struct {
 	Bucket    string
 	Key       string
 	VersionID string
-}
-
-// StaleBlob reports an object whose blob data was not found during restore.
-type StaleBlob struct {
-	Bucket       string `json:"bucket"`
-	Key          string `json:"key"`
-	ExpectedETag string `json:"expected_etag"`
-}
-
-// Snapshotable is an optional interface for backends that support metadata snapshots.
-// ListAllObjects enumerates every object across all buckets.
-// RestoreObjects replaces the current metadata state with the given snapshot objects.
-type Snapshotable interface {
-	ListAllObjects() ([]SnapshotObject, error)
-	RestoreObjects(objects []SnapshotObject) (restoredCount int, staleBlobs []StaleBlob, err error)
-}
-
-// SnapshotBucket is a point-in-time record of bucket-level metadata
-// (versioning state, soleauth state). Captured by BucketSnapshotable backends
-// so snapshot restores reproduce the full bucket configuration.
-type SnapshotBucket struct {
-	Name            string `json:"name"`
-	VersioningState string `json:"versioning_state,omitempty"` // "Unversioned" | "Enabled" | "Suspended"
-	SoleAuthState   string `json:"soleauth_state,omitempty"`   // "" | "off" | "pending" | "on"
-	// SoleAuthEpoch captures the monotonic soleauth epoch when > 0. On restore,
-	// it is applied as a floor via SetBucketSoleAuthorityCmd.EpochFloor to repair
-	// the fidelity gap: a pending↔off cycle accumulates bumps the transition-replay
-	// can't reproduce. Zero means the epoch was never advanced (omitted from JSON).
-	SoleAuthEpoch uint32 `json:"soleauth_epoch,omitempty"`
-}
-
-// BucketSnapshotable is an optional interface for backends that persist
-// per-bucket metadata (versioning) and want that state preserved across
-// snapshot/restore cycles.
-type BucketSnapshotable interface {
-	ListAllBuckets() ([]SnapshotBucket, error)
-	RestoreBuckets(buckets []SnapshotBucket) error
 }
 
 // Backend defines the storage operations for GrainFS.

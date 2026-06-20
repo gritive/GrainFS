@@ -27,10 +27,8 @@ type Backend struct {
 }
 
 var (
-	_ storage.Backend            = (*Backend)(nil)
-	_ storage.Snapshotable       = (*Backend)(nil)
-	_ storage.BucketSnapshotable = (*Backend)(nil)
-	_ storage.PartialIO          = (*Backend)(nil)
+	_ storage.Backend   = (*Backend)(nil)
+	_ storage.PartialIO = (*Backend)(nil)
 )
 
 // NewBackend creates a pull-through caching backend. The Resolver returns
@@ -154,40 +152,6 @@ func (b *Backend) PreferWriteAt(bucket string) bool {
 	}
 	pref, ok := b.Backend.(writeAtPreference)
 	return ok && pref.PreferWriteAt(bucket)
-}
-
-// ListAllObjects implements storage.Snapshotable by delegating to the wrapped
-// backend. Embedding storage.Backend does not promote Snapshotable, so this
-// forwarding is required for snapshots to see through the pull-through layer.
-func (b *Backend) ListAllObjects() ([]storage.SnapshotObject, error) {
-	if snap, ok := b.Backend.(storage.Snapshotable); ok {
-		return snap.ListAllObjects()
-	}
-	return nil, storage.ErrSnapshotNotSupported
-}
-
-// RestoreObjects implements storage.Snapshotable by delegating to the wrapped backend.
-func (b *Backend) RestoreObjects(objects []storage.SnapshotObject) (int, []storage.StaleBlob, error) {
-	if snap, ok := b.Backend.(storage.Snapshotable); ok {
-		return snap.RestoreObjects(objects)
-	}
-	return 0, nil, storage.ErrSnapshotNotSupported
-}
-
-// ListAllBuckets implements storage.BucketSnapshotable by delegating to the wrapped backend.
-func (b *Backend) ListAllBuckets() ([]storage.SnapshotBucket, error) {
-	if bs, ok := b.Backend.(storage.BucketSnapshotable); ok {
-		return bs.ListAllBuckets()
-	}
-	return nil, nil
-}
-
-// RestoreBuckets implements storage.BucketSnapshotable by delegating to the wrapped backend.
-func (b *Backend) RestoreBuckets(buckets []storage.SnapshotBucket) error {
-	if bs, ok := b.Backend.(storage.BucketSnapshotable); ok {
-		return bs.RestoreBuckets(buckets)
-	}
-	return nil
 }
 
 // HeadObject returns metadata from the local cache. On miss it pulls via GetObject

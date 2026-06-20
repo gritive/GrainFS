@@ -40,9 +40,6 @@ type ClusterConfigPatch struct {
 	DiskWarnFrac     *float64
 	DiskCriticalFrac *float64
 
-	SnapshotInterval *time.Duration
-	SnapshotRetain   *int32
-
 	ResetKeys   []string
 	ExpectedRev uint64 // 0 = no CAS
 
@@ -93,9 +90,6 @@ type clusterConfigSnap struct {
 
 	diskWarnFrac     *float64
 	diskCriticalFrac *float64
-
-	snapshotInterval *time.Duration
-	snapshotRetain   *int32
 }
 
 func NewClusterConfig() *ClusterConfig {
@@ -162,12 +156,6 @@ func (c *ClusterConfig) applyPatch(p ClusterConfigPatch, ts time.Time) {
 	if p.DiskCriticalFrac != nil {
 		next.diskCriticalFrac = p.DiskCriticalFrac
 	}
-	if p.SnapshotInterval != nil {
-		next.snapshotInterval = p.SnapshotInterval
-	}
-	if p.SnapshotRetain != nil {
-		next.snapshotRetain = p.SnapshotRetain
-	}
 	if p.WeightedHRWEnabled != nil {
 		next.weightedHRWEnabled = p.WeightedHRWEnabled
 	}
@@ -223,10 +211,6 @@ func (s *clusterConfigSnap) clearKey(k string) {
 		s.diskWarnFrac = nil
 	case "disk-critical-threshold":
 		s.diskCriticalFrac = nil
-	case "snapshot-interval":
-		s.snapshotInterval = nil
-	case "snapshot-retain":
-		s.snapshotRetain = nil
 	case "weighted-hrw-enabled":
 		s.weightedHRWEnabled = nil
 	case "bounded-loads-enabled":
@@ -258,8 +242,6 @@ func AllConfigKeys() []string {
 		"alert-webhook-secret",
 		"disk-warn-threshold",
 		"disk-critical-threshold",
-		"snapshot-interval",
-		"snapshot-retain",
 		"weighted-hrw-enabled",
 		"bounded-loads-enabled",
 		"bounded-loads-c",
@@ -374,20 +356,6 @@ func (c *ClusterConfig) DiskCriticalFrac() float64 {
 	return DefaultClusterDiskCriticalFrac
 }
 
-func (c *ClusterConfig) SnapshotInterval() time.Duration {
-	if v := c.snap.Load().snapshotInterval; v != nil {
-		return *v
-	}
-	return DefaultClusterSnapshotInterval
-}
-
-func (c *ClusterConfig) SnapshotRetain() int32 {
-	if v := c.snap.Load().snapshotRetain; v != nil {
-		return *v
-	}
-	return DefaultClusterSnapshotRetain
-}
-
 func (c *ClusterConfig) WeightedHRWEnabled() bool {
 	if v := c.snap.Load().weightedHRWEnabled; v != nil {
 		return *v
@@ -481,14 +449,6 @@ func (c *ClusterConfig) SourceForKey(key string) string {
 		}
 	case "disk-critical-threshold":
 		if s.diskCriticalFrac != nil {
-			return "explicit"
-		}
-	case "snapshot-interval":
-		if s.snapshotInterval != nil {
-			return "explicit"
-		}
-	case "snapshot-retain":
-		if s.snapshotRetain != nil {
 			return "explicit"
 		}
 	case "weighted-hrw-enabled":

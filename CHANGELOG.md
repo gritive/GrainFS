@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.633.0] - 2026-06-21
+
+### Removed
+- **BREAKING: the object-metadata snapshot feature is removed** (auto-snapshotter, the
+  `/admin/snapshots` create/list/restore/delete API, the snapshot `Manager`, and per-bucket
+  capture/restore). Object data durability never depended on it — objects are durable via
+  erasure-coding replication plus the scrubber sweep, and cluster/metadata via Raft — so this is a
+  pure removal of a metadata backup/restore convenience (~6.5k LOC). It eliminates the S4c-d
+  "routed per-node snapshot" cutover precondition outright (there is no longer a cluster-wide
+  snapshot of soleauth-on buckets to make work) and leaves the admin flip as the sole
+  `soleauth=on` activation path.
+  - **Operator impact:** the `/admin/snapshots` endpoints and the dashboard "Snapshots" tab are
+    gone; the `snapshot-interval` / `snapshot-retain` cluster-config keys are removed (ignored if
+    still present in a stored config). The **Raft snapshot** (log compaction, `/admin/raft/snapshot`)
+    is a different feature and is **unchanged**. KEK prune no longer has an object-snapshot
+    prune-refusal (no object snapshot can pin a KEK); the raft-store-key prune guard is unchanged.
+  - **Internals:** the scrubber's live-version known-set (`ListAllObjectsStrict` and the
+    object-manifest type) is retained and relocated to `object_manifest.go`; the EC segment-GC and
+    orphan-shard reclaim now run against that known-set with empty no-op frozen sources (they keep
+    running rather than failing closed). `SetBucketSoleAuthorityCmd.EpochFloor` is left inert
+    (no emitter) to avoid a wire-format change; a follow-up may drop the field.
+
 ## [0.0.632.0] - 2026-06-20
 
 ### Fixed
