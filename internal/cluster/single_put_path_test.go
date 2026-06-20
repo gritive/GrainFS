@@ -21,6 +21,16 @@ func newSingleNode1Plus0ChunkCapable(t *testing.T) *DistributedBackend {
 	const selfAddr = "self"
 	keeper, clusterID := testDEKKeeper(t)
 	backend.shardSvc = NewShardService(t.TempDir(), nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	// This helper bypasses SetShardService, so wire the soleauth epoch source the
+	// way production does (backend.go SetShardService) and mark it ready: a
+	// single-node test backend is the leader / caught up by definition, so a
+	// soleauth=on flip's epoch-bearing quorum-meta writes/deletes (local == wire)
+	// must pass the fence rather than fail closed (boot-window) or fail open (nil fn).
+	backend.shardSvc.SetSoleAuthEpochFn(func(bkt string) uint32 {
+		e, _ := backend.GetBucketSoleAuthEpoch(bkt)
+		return e
+	})
+	backend.shardSvc.MarkSoleAuthEpochReady()
 	backend.selfAddr = selfAddr
 	backend.allNodes = []string{selfAddr}
 	backend.SetECConfig(ECConfig{DataShards: 1, ParityShards: 0})

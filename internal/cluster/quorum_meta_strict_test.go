@@ -16,7 +16,11 @@ import (
 func newShardServiceTestWithDataDir(t *testing.T) *ShardService {
 	t.Helper()
 	keeper, clusterID := testDEKKeeper(t)
-	return NewShardService(t.TempDir(), nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(t.TempDir(), nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	// Directly-constructed test service: no boot backlog → ready (exercises the
+	// wired-fn fence logic, not the default fail-closed boot-window behavior).
+	svc.MarkSoleAuthEpochReady()
+	return svc
 }
 
 // mustEncode encodes a PutObjectMetaCmd to a quorum-meta blob. Alias of

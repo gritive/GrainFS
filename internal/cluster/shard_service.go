@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
@@ -81,18 +82,62 @@ type ShardService struct {
 	bucketSoleAuthLocks pool.SyncMap[string, *sync.RWMutex]
 	// soleAuthEpochFn returns the live per-bucket committed sole-authority epoch
 	// (0 when never flipped). The quorum-meta leaves consult it under the bucket
-	// RLock to reject a stale wire epoch. Set ONCE at startup by SetShardService
-	// (via SetSoleAuthEpochFn) before the service serves any RPC/coordinator
-	// traffic, so the plain-field read on the apply-independent leaf goroutines
-	// is safe by happens-before: the wiring write precedes every leaf read.
-	soleAuthEpochFn func(string) uint32
+	// RLock to reject a stale wire epoch. Stored in an atomic.Pointer (mirrors
+	// FSM.fenceLockFn): the shard RPC route can go LIVE (bootShardRoutes) BEFORE
+	// SetShardService wires this callback, so a boot-window leaf read can race the
+	// wiring write — the access MUST be atomic. The boot window is handled
+	// fail-closed via soleAuthEpochReady below, NOT by an (unsound) happens-before.
+	soleAuthEpochFn atomic.Pointer[func(string) uint32]
+	// soleAuthEpochReady reports whether soleAuthEpochFn can be RELIABLY consulted
+	// — i.e. the group-0 FSM has applied its boot-committed backlog so a store
+	// epoch read reflects the committed truth. Default FALSE (fail-closed): until
+	// boot proves the FSM caught up (ReadIndex+WaitApplied), the leaves reject any
+	// non-zero admitted epoch (admitting epoch-0 boot replication). A
+	// directly-constructed service (single-node/tests) is caught up by definition
+	// and marks itself ready (boot / test helpers).
+	soleAuthEpochReady atomic.Bool
 }
 
-// SetSoleAuthEpochFn wires the live committed-epoch reader the quorum-meta
-// leaves consult under the bucket RLock. Set once at startup (SetShardService)
-// before traffic; the happens-before of that single wiring write makes the
-// plain-field read on later leaf goroutines race-free.
-func (s *ShardService) SetSoleAuthEpochFn(fn func(string) uint32) { s.soleAuthEpochFn = fn }
+// SetSoleAuthEpochFn wires the live committed-epoch reader the quorum-meta leaves
+// consult under the bucket RLock. Race-safe (atomic). A nil fn stores a nil
+// pointer (NOT a non-nil pointer to a nil func) so the leaf's p==nil guard treats
+// it as unwired instead of calling a nil func.
+func (s *ShardService) SetSoleAuthEpochFn(fn func(string) uint32) {
+	if fn == nil {
+		s.soleAuthEpochFn.Store(nil)
+		return
+	}
+	s.soleAuthEpochFn.Store(&fn)
+}
+
+// MarkSoleAuthEpochReady declares the soleauth epoch source reliable (the group-0
+// FSM has applied its boot-committed backlog). Until called, the quorum-meta
+// leaves fail closed for any non-zero admitted epoch. Idempotent.
+func (s *ShardService) MarkSoleAuthEpochReady() { s.soleAuthEpochReady.Store(true) }
+
+// rejectStaleSoleAuthEpoch is the shared soleauth fence consulted by the four
+// quorum-meta leaf write/delete handlers (callers hold the per-bucket RLock).
+// It returns the retryable errStaleSoleAuthEpoch when the admitted (wire) epoch
+// must be rejected:
+//   - NOT reliable (epoch fn unwired OR not-yet-ready, i.e. the boot window): the
+//     local committed epoch cannot be verified, so admit epoch-0 traffic (legit
+//     boot-time replication; every bucket today) and fail CLOSED for any non-zero
+//     admitted epoch (only a post-flip coordinator sends one).
+//   - reliable: reject a strictly-older admitted epoch (a newer flip has fenced
+//     the originating coordinator), per soleAuthEpochStale.
+func (s *ShardService) rejectStaleSoleAuthEpoch(bucket string, admittedEpoch uint32) error {
+	p := s.soleAuthEpochFn.Load()
+	if p == nil || !s.soleAuthEpochReady.Load() {
+		if admittedEpoch > 0 {
+			return errStaleSoleAuthEpoch
+		}
+		return nil
+	}
+	if soleAuthEpochStale((*p)(bucket), admittedEpoch) {
+		return errStaleSoleAuthEpoch
+	}
+	return nil
+}
 
 // ShardServiceOption is a functional option for ShardService.
 type ShardServiceOption func(*ShardService)
