@@ -99,28 +99,14 @@ func (b *DistributedBackend) writeQuorumMeta(ctx context.Context, cmd PutObjectM
 	if k <= 0 {
 		k = 1
 	}
-	wctx, cancel := context.WithTimeout(ctx, quorumMetaWriteTimeout)
-	defer cancel()
-	latestErr := fanOutQuorumMeta(wctx, cmd.NodeIDs, k, func(fctx context.Context, node string) error {
-		if node == self {
-			return b.shardSvc.writeQuorumMetaLocal(cmd.Bucket, cmd.Key, blob, epoch)
-		}
-		addr, rerr := b.shardSvc.resolvePeerAddress(node)
-		if rerr != nil {
-			return rerr
-		}
-		return b.shardSvc.WriteQuorumMeta(fctx, addr, cmd.Bucket, cmd.Key, blob, epoch)
-	})
-	if latestErr != nil {
-		return latestErr
-	}
-	// S1: also write an immutable per-version blob to the separate
-	// .quorum_meta_versions subtree, best-effort — a failure here must NOT fail the
-	// PUT (the latest-only write already succeeded; reads ignore this subtree until
-	// S2, and S3 backfills any gaps). Same placement nodes, same K-of-N. Gated on
-	// versioning-enabled, mirroring the FSM per-version propose at :60: non-versioned
-	// buckets retain no version history (and are already quorum-meta-only / off-raft
-	// via the latest-only blob), so a per-version blob there would be pure garbage.
+	// Per-version blob FIRST, durable and FAIL-CLOSED. The immutable per-version blob
+	// in the separate .quorum_meta_versions subtree is the AUTHORITATIVE metadata for a
+	// versioned object, so a versioned write is durable only if its per-version blob
+	// reaches the K-of-N write quorum. It is written BEFORE the latest-only blob so a
+	// per-version failure returns before the latest blob is published — the caller's
+	// shard cleanup is then a clean rollback, never a published latest blob left
+	// pointing at data the caller is about to delete. Gated on versioning-enabled:
+	// non-versioned buckets retain no version history (latest-only blob / off-raft).
 	if cmd.VersionID != "" && b.bucketVersioningEnabled(ctx, cmd.Bucket) {
 		verSubpath := path.Join(cmd.Key, cmd.VersionID)
 		vctx, vcancel := context.WithTimeout(ctx, quorumMetaWriteTimeout)
@@ -135,10 +121,24 @@ func (b *DistributedBackend) writeQuorumMeta(ctx context.Context, cmd PutObjectM
 			}
 			return b.shardSvc.WriteQuorumMetaVersion(fctx, addr, cmd.Bucket, verSubpath, blob, epoch)
 		}); verr != nil {
-			b.logger.Warn().
-				Str("bucket", cmd.Bucket).Str("key", cmd.Key).Str("version", cmd.VersionID).
-				Err(verr).Msg("per-version quorum-meta write failed (best-effort)")
+			return fmt.Errorf("per-version quorum-meta write %s/%s@%s: %w", cmd.Bucket, cmd.Key, cmd.VersionID, verr)
 		}
+	}
+	// Latest-only blob (LIST-latest / legacy read fast path), same K-of-N, fail-closed.
+	wctx, cancel := context.WithTimeout(ctx, quorumMetaWriteTimeout)
+	defer cancel()
+	latestErr := fanOutQuorumMeta(wctx, cmd.NodeIDs, k, func(fctx context.Context, node string) error {
+		if node == self {
+			return b.shardSvc.writeQuorumMetaLocal(cmd.Bucket, cmd.Key, blob, epoch)
+		}
+		addr, rerr := b.shardSvc.resolvePeerAddress(node)
+		if rerr != nil {
+			return rerr
+		}
+		return b.shardSvc.WriteQuorumMeta(fctx, addr, cmd.Bucket, cmd.Key, blob, epoch)
+	})
+	if latestErr != nil {
+		return latestErr
 	}
 	return nil
 }
