@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"time"
 
@@ -48,6 +49,43 @@ func (b *DistributedBackend) deleteObjectWithMarker(ctx context.Context, bucket,
 	}
 	os.Remove(b.objectPath(bucket, key))
 	markerID := newVersionID()
+
+	// Blob-primary (raft-free): for a versioning-enabled bucket the delete marker is
+	// a durable per-version blob (IsDeleteMarker) with NO raft propose — reads,
+	// LIST, and latest-derive all treat the max-VID marker blob as "deleted". The
+	// marker reuses the current object's placement; a delete on a key that never
+	// existed has no placement to write to, so it is a no-op (the object is already
+	// absent under blob authority) — a default-placement marker for a never-existed
+	// key is a follow-up (needs coordinator placement allocation).
+	if !storage.IsInternalBucket(bucket) && b.bucketVersioningEnabled(ctx, bucket) {
+		if b.shardSvc == nil {
+			return markerID, nil
+		}
+		existing, qerr := b.readQuorumMetaCmd(bucket, key)
+		if qerr != nil {
+			if errors.Is(qerr, storage.ErrObjectNotFound) {
+				return markerID, nil // never-existed key → no placement → no-op marker
+			}
+			return "", fmt.Errorf("resolve placement for delete marker %s/%s: %w", bucket, key, qerr)
+		}
+		if werr := b.writeQuorumMeta(ctx, PutObjectMetaCmd{
+			Bucket:           bucket,
+			Key:              key,
+			VersionID:        markerID,
+			ModTime:          time.Now().Unix(),
+			IsDeleteMarker:   true,
+			ECData:           existing.ECData,
+			ECParity:         existing.ECParity,
+			NodeIDs:          existing.NodeIDs,
+			PlacementGroupID: existing.PlacementGroupID,
+		}); werr != nil {
+			return "", fmt.Errorf("write delete marker %s/%s: %w", bucket, key, werr)
+		}
+		return markerID, nil
+	}
+
+	// Legacy path (non-versioned / internal buckets): FSM-authoritative marker via
+	// raft propose + best-effort quorum-meta tombstone for scatter-gather LIST.
 	if err := b.propose(ctx, CmdDeleteObject, DeleteObjectCmd{
 		Bucket:    bucket,
 		Key:       key,
@@ -55,9 +93,6 @@ func (b *DistributedBackend) deleteObjectWithMarker(ctx context.Context, bucket,
 	}); err != nil {
 		return "", err
 	}
-	// Write a tombstone to quorum meta so scatter-gather LIST sees the delete.
-	// Read the existing placement to determine which nodes to write to.
-	// Best-effort: if the object has no quorum meta (pre-Phase-3), skip.
 	if b.shardSvc != nil {
 		if existing, qerr := b.readQuorumMetaCmd(bucket, key); qerr == nil && len(existing.NodeIDs) > 0 {
 			_ = b.writeQuorumMeta(ctx, PutObjectMetaCmd{
