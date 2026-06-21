@@ -484,6 +484,7 @@ func runChunkedPutWithParts(
 			if werr != nil {
 				return nil, werr
 			}
+			metrics.ChunkFanoutBreadth.Observe(float64(countDistinctPlacementGroups(csb.placements)))
 			winObj, _ := objectAndPlacementFromCmd(winCmd)
 			return winObj, nil
 		}
