@@ -253,16 +253,21 @@ func (b *DistributedBackend) DeleteObjectVersion(bucket, key, versionID string) 
 	// Local data cleanup: best-effort (legacy N× on-disk file; ENOENT is fine).
 	_ = os.Remove(b.objectPathV(bucket, key, versionID))
 
-	// Blob-primary hard delete (versioning-enabled, non-internal): REPLACE the
-	// version's per-version blob with a tombstone (IsHardDeleted) durably, fail-closed,
-	// with NO raft propose. The tombstone wins the LWW (quorumMetaCmdWins / MetaSeq+1)
-	// over any data-blob copy lingering on a node that missed this delete, so the
-	// version can never resurrect; the orphan walker reconciles stale data blobs and
-	// GCs the tombstone once the delete has propagated cluster-wide. The FSM obj:
-	// record (if any) is intentionally left untouched — reads are blob-authoritative,
-	// and leaving the record keeps the legacy FSM-oracle GCs inert until they are
-	// repointed to the blob authority.
-	if !storage.IsInternalBucket(bucket) && b.bucketVersioningEnabled(ctx, bucket) && b.shardSvc != nil {
+	// Blob-primary hard delete: REPLACE the version's per-version blob with a
+	// tombstone (IsHardDeleted) durably, fail-closed, with NO raft propose. The
+	// tombstone wins the LWW (quorumMetaCmdWins / MetaSeq+1) over any data-blob copy
+	// lingering on a node that missed this delete, so the version can never resurrect;
+	// the orphan walker reconciles stale data blobs and GCs the tombstone once the
+	// delete has propagated cluster-wide. The FSM obj: record (if any) is left
+	// untouched — reads are blob-authoritative.
+	//
+	// The tombstone path is gated on the version having a per-version blob (a
+	// cluster-wide read), NOT on the bucket's versioning meta-state: the delete leaf
+	// may not be the meta authority and would misread versioning, falling to the
+	// legacy purge (losing the tombstone's resurrection guard). A version with no
+	// per-version blob (carve-out appendable/coalesced/legacy-bare, non-versioned, or
+	// absent) falls through to the legacy FSM-delete path below.
+	if !storage.IsInternalBucket(bucket) && b.shardSvc != nil {
 		cmd, ok, rerr := b.readQuorumMetaVersionDecodeStrict(bucket, key, versionID)
 		if rerr != nil {
 			return fmt.Errorf("resolve per-version blob for delete %s/%s@%s: %w", bucket, key, versionID, rerr)

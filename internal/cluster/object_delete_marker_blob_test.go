@@ -58,3 +58,18 @@ func TestDeleteObjectMarker_BlobDurableNoPropose(t *testing.T) {
 	require.True(t, vids[vid], "object version listed")
 	require.True(t, vids[markerID], "delete marker listed")
 }
+
+// TestDeleteObjectMarker_HeadByVersionID405 reproduces the e2e check: HEAD of the
+// delete-marker version returns ErrMethodNotAllowed (→ 405), not 404.
+func TestDeleteObjectMarker_HeadByVersionID405(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	const bkt, key = "vbkt", "obj"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+	_ = putVersioned(t, b, ctx, bkt, key, "before")
+	markerID, err := b.DeleteObjectReturningMarker(bkt, key)
+	require.NoError(t, err)
+	_, err = b.HeadObjectVersion(ctx, bkt, key, markerID)
+	require.ErrorIs(t, err, storage.ErrMethodNotAllowed, "HEAD of delete marker version must be 405")
+}
