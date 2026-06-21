@@ -135,6 +135,13 @@ type PutObjectMetaCmd struct {
 	// that preserve the original ModTime AND VersionID. Default 0 = original
 	// write (behavior-neutral until the relocation feature writes >0).
 	MetaSeq uint64
+	// IsHardDeleted marks this per-version blob as a hard-delete TOMBSTONE under
+	// blob-primary: the version is permanently deleted (distinct from
+	// IsDeleteMarker, a soft-delete marker version). A tombstone replaces the data
+	// blob at the same {key}/{vid} path, wins the LWW tie (quorumMetaCmdWins), is
+	// excluded from every read (→404), and is reconciled/GC'd by the orphan walker.
+	// Default false = a normal data blob (old blobs decode false).
+	IsHardDeleted bool
 }
 
 // SegmentMetaEntry records the placement of one chunked-PUT segment. The

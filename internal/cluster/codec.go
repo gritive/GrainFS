@@ -280,6 +280,9 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	if c.MetaSeq != 0 {
 		clusterpb.PutObjectMetaCmdAddMetaSeq(b, c.MetaSeq)
 	}
+	if c.IsHardDeleted {
+		clusterpb.PutObjectMetaCmdAddIsHardDeleted(b, true)
+	}
 	return fbFinish(b, clusterpb.PutObjectMetaCmdEnd(b)), nil
 }
 
@@ -368,6 +371,7 @@ func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
 		Tags:             readTagsVector(t.TagsLength(), t.Tags),
 		ACL:              t.Acl(),
 		MetaSeq:          t.MetaSeq(),
+		IsHardDeleted:    t.IsHardDeleted(),
 	}, nil
 }
 

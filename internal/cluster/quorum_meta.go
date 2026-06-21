@@ -180,6 +180,26 @@ func quorumMetaBlobWins(modA int64, verA string, seqA uint64, modB int64, verB s
 	return seqA > seqB
 }
 
+// quorumMetaCmdWins reports whether candidate cand strictly beats cur in the
+// per-version LWW comparison, with the hard-delete tombstone as the top-priority
+// tiebreak: on an otherwise-equal (ModTime, VersionID, MetaSeq) a tombstone
+// (IsHardDeleted) beats a non-tombstone, so a hard-deleted version can never lose
+// the tie to the stale data blob it replaced (closes the relocation-re-write
+// equal-MetaSeq window). For two non-tombstone blobs it is identical to
+// quorumMetaBlobWins. Used on the per-version write guard and the read-side
+// per-VID dedup, where same-VID tombstone-vs-data comparisons occur.
+func quorumMetaCmdWins(cand, cur PutObjectMetaCmd) bool {
+	if quorumMetaBlobWins(cand.ModTime, cand.VersionID, cand.MetaSeq, cur.ModTime, cur.VersionID, cur.MetaSeq) {
+		return true
+	}
+	// Not a strict (ModTime,VID,MetaSeq) win. The only remaining way cand wins is
+	// the tombstone tiebreak on a FULL tie.
+	if cand.ModTime == cur.ModTime && cand.VersionID == cur.VersionID && cand.MetaSeq == cur.MetaSeq {
+		return cand.IsHardDeleted && !cur.IsHardDeleted
+	}
+	return false
+}
+
 // readQuorumMetaWinningRaw returns the raw quorum-meta blob that wins the LWW
 // comparison for (bucket, key). It is the shared read funnel for both
 // readQuorumMeta (decodes to storage.Object) and readQuorumMetaCmd (decodes to
@@ -519,7 +539,7 @@ func (s *ShardService) writeQuorumMetaVersionLocal(bucket, versionSubpath string
 	if existing, rerr := os.ReadFile(target); rerr == nil {
 		if cand, derr := s.decodeQuorumMetaCmdBlob(data); derr == nil {
 			if cur, derr2 := s.decodeQuorumMetaCmdBlob(existing); derr2 == nil {
-				if !quorumMetaBlobWins(cand.ModTime, cand.VersionID, cand.MetaSeq, cur.ModTime, cur.VersionID, cur.MetaSeq) {
+				if !quorumMetaCmdWins(cand, cur) {
 					return nil // existing wins (or ties) — keep it, skip the rename
 				}
 			}

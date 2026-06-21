@@ -140,6 +140,13 @@ table PutObjectMetaCmd {
   acl:uint8 = 0;
   // Internal LWW tiebreak for placement re-writes; default 0 = original write.
   meta_seq:uint64 = 0;
+  // Blob-primary hard-delete tombstone: when true this per-version blob marks the
+  // version as permanently deleted (distinct from is_delete_marker, which is a
+  // soft-delete marker version). A tombstone replaces the data blob at the same
+  // {key}/{vid} path, wins the LWW tie, is excluded from all reads (→404), and is
+  // reconciled/GC'd by the orphan walker. Appended last for backward-compatible
+  // reading of old blobs (absent decodes false = a normal data blob).
+  is_hard_deleted:bool = false;
 }
 
 // SegmentMetaEntry carries the per-segment placement metadata for a chunked
