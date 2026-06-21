@@ -37,6 +37,14 @@ func TestClusterCoordinator_ListObjectVersions_FansOutAcrossGroups(t *testing.T)
 	ec := ECConfig{DataShards: 1, ParityShards: 0}
 	c := NewClusterCoordinator(&fakeBackend{}, mgr, router, meta, "self").WithECConfig(ec)
 
+	// Blob-primary: the leaf backends must know vbkt is versioning-enabled so their
+	// ListObjectVersions takes the per-version blob path (not the now-removed FSM
+	// obj: scan). Persist the bucket + versioning state on both groups.
+	for _, gb := range []*GroupBackend{gbA, gbB} {
+		require.NoError(t, gb.CreateBucket(context.Background(), "vbkt"))
+		require.NoError(t, gb.SetBucketVersioning("vbkt", "Enabled"))
+	}
+
 	// Pick one key that hashes to each group, using the exact candidate set
 	// RouteObjectWrite uses (placement assertion below catches any mismatch).
 	cand, err := candidateGroupsFor(meta.ShardGroups(), ec)

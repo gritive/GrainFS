@@ -70,16 +70,15 @@ func (b *DistributedBackend) writeQuorumMeta(ctx context.Context, cmd PutObjectM
 	if storage.IsInternalBucket(cmd.Bucket) {
 		return b.propose(ctx, CmdPutObjectMeta, cmd)
 	}
-	// Versioning-enabled buckets need per-version retention: quorum-meta holds a
-	// single latest-only record per bucket/key, so without an FSM per-version key
-	// (obj:{bucket}/{key}/{versionID}) a GET ?versionId=<old> can never find an
-	// overwritten version (404). Persist the per-version metadata via raft first,
-	// then continue to the quorum-meta fan-out below for LIST/latest visibility.
-	if cmd.VersionID != "" && b.bucketVersioningEnabled(ctx, cmd.Bucket) {
-		if err := b.propose(ctx, CmdPutObjectMeta, cmd); err != nil {
-			return fmt.Errorf("versioned meta persist: %w", err)
-		}
-	}
+	// Blob-primary (raft-free): for versioning-enabled buckets the per-version blob
+	// (written below via fanOutPerVersionBlob) is the SOLE AUTHORITY for object
+	// metadata — there is no CmdPutObjectMeta propose. Reads, LIST, the orphan GCs,
+	// and DEK rewrap all derive from the per-version blobs; the latest-only blob is
+	// the LIST-latest fast path. The conditional-PUT (ExpectedETag) CAS that used to
+	// be enforced inside the propose is dropped for versioned objects: the only
+	// caller that sets ExpectedETag is object relocation, which already relies on the
+	// blob LWW (preserve-old-ModTime), not the FSM CAS. Internal buckets keep their
+	// propose above.
 	if b.shardSvc == nil || len(cmd.NodeIDs) == 0 {
 		return fmt.Errorf("quorum meta write: no shard service or empty placement")
 	}
