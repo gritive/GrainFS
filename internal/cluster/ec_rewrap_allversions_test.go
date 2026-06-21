@@ -199,3 +199,32 @@ func TestECRewrapAllVersions_NonLatestLegacyAndCrossBucket(t *testing.T) {
 	assert.Equal(t, uint32(1), shardGenOnDisk(t, backend, "b2", shardKeyB2Plain, 0), "idempotent: b2/plain")
 	assert.Equal(t, uint32(1), shardGenOnDisk(t, backend, "b2", segShardKey, 0), "idempotent: b2/seg")
 }
+
+// TestCollectECRewrapTargets_VersionedBlobNoFSM proves the DEK rewrap enumeration
+// covers a versioning-enabled object that exists ONLY as a per-version blob (no FSM
+// obj: record — the post-propose-removal steady state), and EXCLUDES a hard-delete
+// tombstone. Without this, KEK rotation would silently skip every versioned object's
+// shards once the propose is removed (unrotated DEK).
+func TestCollectECRewrapTargets_VersionedBlobNoFSM(t *testing.T) {
+	backend, _ := setupECRewrapBackend(t)
+	ctx := context.Background()
+	require.NoError(t, backend.CreateBucket(ctx, "vb"))
+	require.NoError(t, backend.SetBucketVersioning("vb", "Enabled"))
+	self := backend.selfAddr
+
+	// versioned object via per-version blob ONLY (no FSM record).
+	seedVersionBlob(t, backend, "vb", "k", "v1", PutObjectMetaCmd{ETag: "e", ECData: 1, ECParity: 0, NodeIDs: []string{self}})
+	// hard-delete tombstone → must NOT be enumerated for rewrap.
+	seedVersionBlob(t, backend, "vb", "k", "v2", PutObjectMetaCmd{ETag: "e", ECData: 1, ECParity: 0, NodeIDs: []string{self}, IsHardDeleted: true})
+
+	targets, err := backend.CollectECRewrapTargets()
+	require.NoError(t, err)
+	var vbKeys []string
+	for _, tgt := range targets {
+		if tgt.Bucket == "vb" {
+			vbKeys = append(vbKeys, tgt.ShardKey)
+		}
+	}
+	require.Contains(t, vbKeys, ecObjectShardKey("k", "v1"), "blob-only versioned object must be enumerated for rewrap")
+	require.NotContains(t, vbKeys, ecObjectShardKey("k", "v2"), "hard-delete tombstone must not be enumerated")
+}
