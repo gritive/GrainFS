@@ -95,10 +95,12 @@ func (b *DistributedBackend) tombstoneConverged(bucket, key, versionID string, n
 }
 
 // WalkOrphanQuorumMetaVersions yields each per-version quorum-meta blob on this
-// node's dataDirs[0]/.quorum_meta_versions subtree whose authoritative FSM obj:
-// record is certainly absent (across all hosted groups), whose bucket's owning
-// group is locally hosted, and which is older than the floored age gate. Fully
-// self-gated: it no-ops unless the sweep gate + all-hosted caught-up gate pass.
+// node's dataDirs[0]/.quorum_meta_versions subtree that is reclaimable under
+// blob-primary tombstone reconciliation (perVersionBlobReclaimable: a stale data
+// blob superseded by a cluster-authoritative tombstone, or a tombstone whose
+// delete has fully propagated), whose bucket's owning group is locally hosted, and
+// which is older than the floored age gate. Fully self-gated: it no-ops unless the
+// sweep gate + all-hosted caught-up gate pass.
 // Implements scrubber.OrphanQuorumMetaVersionWalkable.
 func (b *DistributedBackend) WalkOrphanQuorumMetaVersions(
 	fn func(bucket, key, versionID, path string) error,

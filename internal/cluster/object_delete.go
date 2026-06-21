@@ -63,7 +63,16 @@ func (b *DistributedBackend) deleteObjectWithMarker(ctx context.Context, bucket,
 	// blobs (non-versioned object, or a key that never existed) falls through to the
 	// legacy path below.
 	if !storage.IsInternalBucket(bucket) && b.shardSvc != nil {
-		if cmds, verr := b.readQuorumMetaVersions(bucket, key); verr == nil && len(cmds) > 0 {
+		// Decode-strict (fail-closed) read, mirroring the hard-delete path: a read
+		// ERROR must NOT fall through to the legacy FSM propose (which would write a
+		// blob-invisible marker for an actually-versioned object), so surface it. A
+		// genuine empty result (no per-version blobs anywhere reachable) is the
+		// non-versioned / never-existed case → legacy path below.
+		cmds, verr := b.readQuorumMetaVersionsDecodeStrict(bucket, key)
+		if verr != nil {
+			return "", fmt.Errorf("resolve per-version blobs for delete marker %s/%s: %w", bucket, key, verr)
+		}
+		if len(cmds) > 0 {
 			placement := cmds[0]
 			for i := range cmds {
 				if cmds[i].VersionID > placement.VersionID {
