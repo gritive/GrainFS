@@ -466,6 +466,15 @@ func decodeCreateMultipartUploadCmd(data []byte) (CreateMultipartUploadCmd, erro
 	}, nil
 }
 
+// copyByteVector returns a fresh copy of a FlatBuffers byte vector (which aliases
+// the decode buffer); nil for an absent/empty vector.
+func copyByteVector(b []byte) []byte {
+	if len(b) == 0 {
+		return nil
+	}
+	return append([]byte(nil), b...)
+}
+
 func encodeCompleteMultipartCmd(c CompleteMultipartCmd) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 	bucketOff := b.CreateString(c.Bucket)
@@ -534,6 +543,10 @@ func encodeCompleteMultipartCmd(c CompleteMultipartCmd) ([]byte, error) {
 		segmentsOff = b.EndVector(len(segOffs))
 	}
 	tagsOff := buildTagsVector(b, c.Tags, clusterpb.CompleteMultipartCmdStartTagsVector)
+	var metaBlobOff flatbuffers.UOffsetT
+	if len(c.MetaBlob) > 0 {
+		metaBlobOff = b.CreateByteVector(c.MetaBlob)
+	}
 	clusterpb.CompleteMultipartCmdStart(b)
 	clusterpb.CompleteMultipartCmdAddBucket(b, bucketOff)
 	clusterpb.CompleteMultipartCmdAddKey(b, keyOff)
@@ -557,6 +570,9 @@ func encodeCompleteMultipartCmd(c CompleteMultipartCmd) ([]byte, error) {
 	}
 	if tagsOff != 0 {
 		clusterpb.CompleteMultipartCmdAddTags(b, tagsOff)
+	}
+	if metaBlobOff != 0 {
+		clusterpb.CompleteMultipartCmdAddMetaBlob(b, metaBlobOff)
 	}
 	return fbFinish(b, clusterpb.CompleteMultipartCmdEnd(b)), nil
 }
@@ -639,6 +655,7 @@ func decodeCompleteMultipartCmd(data []byte) (CompleteMultipartCmd, error) {
 		Parts:            parts,
 		Segments:         segments,
 		Tags:             readTagsVector(t.TagsLength(), t.Tags),
+		MetaBlob:         copyByteVector(t.MetaBlobBytes()),
 	}, nil
 }
 
@@ -1181,6 +1198,11 @@ type multipartDone struct {
 	Key       string
 	VersionID string
 	ModTime   int64
+	// MetaBlob is the encoded per-version PutObjectMetaCmd for the completed object
+	// (blob-authoritative multipart, S3). Lets a retry / the loser of a concurrent
+	// complete re-write the winner's per-version blob fail-closed. Empty for the
+	// legacy FSM-authoritative (non-versioned) path.
+	MetaBlob []byte
 }
 
 func marshalMultipartDone(m multipartDone) ([]byte, error) {
@@ -1189,12 +1211,19 @@ func marshalMultipartDone(m multipartDone) ([]byte, error) {
 	bucketOff := b.CreateString(m.Bucket)
 	keyOff := b.CreateString(m.Key)
 	versionIDOff := b.CreateString(m.VersionID)
+	var metaBlobOff flatbuffers.UOffsetT
+	if len(m.MetaBlob) > 0 {
+		metaBlobOff = b.CreateByteVector(m.MetaBlob)
+	}
 	clusterpb.MultipartDoneStart(b)
 	clusterpb.MultipartDoneAddUploadId(b, uploadIDOff)
 	clusterpb.MultipartDoneAddBucket(b, bucketOff)
 	clusterpb.MultipartDoneAddKey(b, keyOff)
 	clusterpb.MultipartDoneAddVersionId(b, versionIDOff)
 	clusterpb.MultipartDoneAddModTime(b, m.ModTime)
+	if metaBlobOff != 0 {
+		clusterpb.MultipartDoneAddMetaBlob(b, metaBlobOff)
+	}
 	return fbFinish(b, clusterpb.MultipartDoneEnd(b)), nil
 }
 
@@ -1211,6 +1240,7 @@ func unmarshalMultipartDone(data []byte) (multipartDone, error) {
 		Key:       string(t.Key()),
 		VersionID: string(t.VersionId()),
 		ModTime:   t.ModTime(),
+		MetaBlob:  copyByteVector(t.MetaBlobBytes()),
 	}, nil
 }
 

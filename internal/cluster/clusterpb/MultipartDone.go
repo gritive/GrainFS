@@ -85,8 +85,42 @@ func (rcv *MultipartDone) MutateModTime(n int64) bool {
 	return rcv._tab.MutateInt64Slot(12, n)
 }
 
+func (rcv *MultipartDone) MetaBlob(j int) byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.GetByte(a + flatbuffers.UOffsetT(j*1))
+	}
+	return 0
+}
+
+func (rcv *MultipartDone) MetaBlobLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func (rcv *MultipartDone) MetaBlobBytes() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
+func (rcv *MultipartDone) MutateMetaBlob(j int, n byte) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.MutateByte(a+flatbuffers.UOffsetT(j*1), n)
+	}
+	return false
+}
+
 func MultipartDoneStart(builder *flatbuffers.Builder) {
-	builder.StartObject(5)
+	builder.StartObject(6)
 }
 func MultipartDoneAddUploadId(builder *flatbuffers.Builder, uploadId flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(uploadId), 0)
@@ -102,6 +136,12 @@ func MultipartDoneAddVersionId(builder *flatbuffers.Builder, versionId flatbuffe
 }
 func MultipartDoneAddModTime(builder *flatbuffers.Builder, modTime int64) {
 	builder.PrependInt64Slot(4, modTime, 0)
+}
+func MultipartDoneAddMetaBlob(builder *flatbuffers.Builder, metaBlob flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(5, flatbuffers.UOffsetT(metaBlob), 0)
+}
+func MultipartDoneStartMetaBlobVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(1, numElems, 1)
 }
 func MultipartDoneEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
