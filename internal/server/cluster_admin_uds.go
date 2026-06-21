@@ -13,7 +13,6 @@ import (
 //   - GET  /v1/cluster/placement                 → clusterPlacement
 //   - POST /v1/cluster/remove-peer               → removePeerHandler
 //   - GET  /v1/cluster/eventlog                  → queryEventLog
-//   - GET  /v1/cluster/verify-per-version-cutover → verifyPerVersionCutoverHandler
 //
 // /v1/cluster/peers is registered separately by admin.RegisterAdmin via
 // the admin package's Deps interface.
@@ -32,5 +31,4 @@ func (s *Server) RegisterClusterAdminUDS(h *server.Hertz) {
 	g.GET(routePathAdminUDSHealth, s.clusterHealth)
 	g.GET(routePathAdminUDSBalancerStatus, s.balancerStatusHandler)
 	g.GET(routePathAdminUDSCapabilities, s.capabilitiesStatus)
-	g.GET(routePathAdminUDSVerifyPerVersionCutover, s.verifyPerVersionCutoverHandler)
 }

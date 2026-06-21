@@ -872,12 +872,11 @@ func (b *DistributedBackend) readQuorumMetaVersion(bucket, key, versionID string
 // older live version (the read1 resurrection window). An unreachable / un-upgraded
 // / disk-erroring peer is TOLERATED (skipped) — it resurrects nothing (its blobs
 // are simply absent from the candidate set; the residual under-replication-AND-
-// unreachable window is gated out by S4c-d's verifier-clean + minReader=2 flip
-// preconditions). Self is always read strict (local read failure → fail closed).
+// unreachable window is bounded by the minReader=2 read floor). Self is always
+// read strict (local read failure → fail closed).
 //
-// Distinct from the tolerant readQuorumMetaVersions (which silently drops per-blob
-// decode failures and is correct for the off-path / non-sole-authority consumers)
-// and from the verifier's availability-strict readQuorumMetaVersionsStrict.
+// Distinct from the tolerant readQuorumMetaVersions, which silently drops per-blob
+// decode failures and is correct for the off-path / non-sole-authority consumers.
 func (b *DistributedBackend) readQuorumMetaVersionsDecodeStrict(bucket, key string) ([]PutObjectMetaCmd, error) {
 	if b.shardSvc == nil {
 		return nil, nil

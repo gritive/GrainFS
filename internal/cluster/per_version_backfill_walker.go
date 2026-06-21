@@ -134,9 +134,9 @@ func (b *DistributedBackend) forEachHostedObjVersion(
 				// (GetRootAsObjectMeta). FlatBuffers FIELD accessors (NodeIdsLength,
 				// Segments, Coalesced, …) panic OUTSIDE that recover on a record that
 				// parses as a root but carries a bad vtable/vector offset. Wrap the
-				// whole decode so such a panic becomes a decodeErr — the verifier then
-				// fail-closes to UNKNOWN and the S3 backfill fn silently skips, rather
-				// than crashing the sweep.
+				// whole decode so such a panic becomes a decodeErr — fn receives it and
+				// fail-closes (the S3 backfill fn skips the record), rather than
+				// crashing the sweep.
 				meta, err := func() (m objectMeta, e error) {
 					defer func() {
 						if r := recover(); r != nil {

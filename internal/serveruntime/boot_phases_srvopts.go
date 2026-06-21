@@ -138,7 +138,6 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 			WithDataGroups(state.dgMgr)),
 		server.WithClusterMembership(NewRaftMembership(metaRaft.Node(), metaRaft.FSM())),
 		server.WithExpandPlacement(makeExpandPlacementFunc(state.clusterCoord, metaRaft)),
-		server.WithVerifyPerVersionCutover(makeVerifyPerVersionCutoverFunc(state.distBackend)),
 		server.WithEventStore(eventstore.New(state.db)),
 		server.WithAlerts(clusterAlerts),
 		server.WithDataDir(dataDir),
