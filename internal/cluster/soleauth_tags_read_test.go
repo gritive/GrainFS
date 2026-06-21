@@ -76,7 +76,7 @@ func TestGetObjectTags_SoleAuthOn_BlobDerive(t *testing.T) {
 			Key: "k", ETag: "e", IsAppendable: true,
 			Tags: []storage.Tag{{Key: "ap", Value: "1"}},
 		}, true)
-		setSoleAuthForTest(t, b, "ba", soleAuthOn)
+		setVersioningForTest(t, b, "ba", "Enabled")
 
 		tags, err := b.GetObjectTags("ba", "k", "")
 		require.NoError(t, err)
@@ -91,7 +91,7 @@ func TestGetObjectTags_SoleAuthOn_BlobDerive(t *testing.T) {
 			Coalesced: []CoalescedShardRef{{CoalescedID: "c1", Size: 10}},
 			Tags:      []storage.Tag{{Key: "co", Value: "1"}},
 		}, true)
-		setSoleAuthForTest(t, b, "bc", soleAuthOn)
+		setVersioningForTest(t, b, "bc", "Enabled")
 
 		tags, err := b.GetObjectTags("bc", "k", "")
 		require.NoError(t, err)

@@ -293,36 +293,37 @@ func TestDeleteObjectVersion_DualDeletesPerVersionBlob(t *testing.T) {
 	require.ErrorIs(t, gerr, storage.ErrObjectNotFound)
 }
 
-// TestGetObjectVersion_MixedEraPreS1FSMOnly proves a versioning-enabled key that
-// straddles the S1 boundary still resolves a pre-S1 version that exists ONLY as a
-// BadgerDB ObjectMetaKeyV FSM record (no per-version blob, because S1's blob write
-// is versioning+post-S1 gated). The key ALSO has a post-S1 version WITH a
-// per-version blob, so the buggy predicate (per-version MISS on a key with other
-// blobs → 404) would 404 the pre-S1 version. RED: GET/HEAD of the pre-S1 version
-// returns ErrObjectNotFound; GREEN after the FSM-only fallback fix.
-func TestGetObjectVersion_MixedEraPreS1FSMOnly(t *testing.T) {
+// TestGetObjectVersion_BlobAbsentFSMOnlyIs404 proves the blob-primary contract: on
+// a versioning-enabled key, a specific version that exists ONLY as a BadgerDB
+// ObjectMetaKeyV FSM record with NO per-version blob is NOT served — the per-version
+// blob is the sole authority, so a stale FSM record must not resurrect it (404). The
+// key ALSO has a normal version WITH a per-version blob, which still resolves.
+func TestGetObjectVersion_BlobAbsentFSMOnlyIs404(t *testing.T) {
 	b := newSingleNode1Plus0ChunkCapable(t)
 	ctx := context.Background()
 	const bkt, key = "vbkt", "obj"
 	require.NoError(t, b.CreateBucket(ctx, bkt))
 	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
 
-	// Pre-S1 version: FSM ObjectMetaKeyV record ONLY, no per-version blob.
-	// PreserveLatest avoids touching the latest pointer so the post-S1 PUT wins it.
-	const preS1Vid = "019ed400-0000-7000-8000-000000000001"
+	// A plain versioned version with an FSM ObjectMetaKeyV record but NO per-version
+	// blob. PreserveLatest avoids touching the latest pointer so the normal PUT wins it.
+	const blobAbsentVid = "019ed400-0000-7000-8000-000000000001"
 	require.NoError(t, b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
-		Bucket: bkt, Key: key, VersionID: preS1Vid, ETag: "etag-preS1",
+		Bucket: bkt, Key: key, VersionID: blobAbsentVid, ETag: "etag-noblob",
 		Size: 11, ContentType: "text/plain", PreserveLatest: true,
 	}))
 
-	// Post-S1 version: normal versioned PUT → writes a per-version blob.
-	_ = putVersioned(t, b, ctx, bkt, key, "content-postS1")
+	// A normal versioned PUT → writes a per-version blob (the latest, blob-backed).
+	_ = putVersioned(t, b, ctx, bkt, key, "content-latest")
 
-	// The pre-S1 version (FSM-only, no blob) must still resolve, not 404.
-	hv, err := b.HeadObjectVersion(context.Background(), bkt, key, preS1Vid)
-	require.NoError(t, err, "pre-S1 FSM-only version must resolve (RED: 404 from per-version-miss predicate)")
-	require.Equal(t, preS1Vid, hv.VersionID)
-	require.Equal(t, "etag-preS1", hv.ETag)
+	// Blob-primary: a blob-absent plain versioned version is 404 (no FSM resurrection).
+	_, err := b.HeadObjectVersion(context.Background(), bkt, key, blobAbsentVid)
+	require.ErrorIs(t, err, storage.ErrObjectNotFound)
+
+	// The blob-backed latest still resolves.
+	latest, lerr := b.HeadObject(context.Background(), bkt, key)
+	require.NoError(t, lerr)
+	require.NotEqual(t, blobAbsentVid, latest.VersionID)
 }
 
 // TestS2a_EpicA_ReadDeleteEndToEnd is the Epic A core: versioned PUT v1+v2,

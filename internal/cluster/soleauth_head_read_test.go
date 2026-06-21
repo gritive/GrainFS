@@ -144,18 +144,16 @@ func TestHeadObjectMetaSoleAuthOffUnchanged(t *testing.T) {
 		require.Equal(t, "fsm-off", obj.ETag)
 	})
 
-	t.Run("pending: stale versioned FSM record still resolves (availability-first, NOT 404)", func(t *testing.T) {
+	t.Run("blob-absent plain-versioned FSM record is 404 (blob-primary, no FSM resurrection)", func(t *testing.T) {
 		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "pend"))
 		setVersioningForTest(t, b, "pend", "Enabled")
-		// No blob; a vid-bearing FSM record. Under pending the availability-first
-		// fallback resolves it (this is exactly the behavior soleauth=on removes).
+		// A vid-bearing FSM record with NO per-version blob. Under blob-primary the
+		// blob is the SOLE authority for a plain versioned object, so a stale FSM
+		// record must NOT resurrect it — 404. (Was the old availability-first resolve.)
 		seedFSMObject(t, b, "pend", "k", "v1", objectMeta{Key: "k", ETag: "pend-fsm"}, true)
-		setSoleAuthForTest(t, b, "pend", soleAuthPending)
 
-		obj, _, err := b.headObjectMeta(ctx, "pend", "k")
-		require.NoError(t, err)
-		require.NotNil(t, obj)
-		require.Equal(t, "pend-fsm", obj.ETag)
+		_, _, err := b.headObjectMeta(ctx, "pend", "k")
+		require.ErrorIs(t, err, storage.ErrObjectNotFound)
 	})
 }

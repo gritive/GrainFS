@@ -16,11 +16,19 @@ import (
 // Wired into the HEAD/GET latest reader (headObjectMeta) in S4c-c-read1 T1;
 // the specific-version and GetObjectTags readers follow in T2/T3.
 func (b *DistributedBackend) soleAuthReadOn(bucket string) (bool, error) {
-	state, err := b.GetBucketSoleAuthority(bucket)
-	if err != nil {
-		return false, fmt.Errorf("read soleauth state for bucket %q: %w", bucket, err)
+	// S2 blob-primary: the per-version blob tree is the AUTHORITATIVE metadata for
+	// EVERY versioning-enabled bucket's versioned objects — not only when an
+	// (already-removed) soleauth flip set state==on. Internal buckets stay on raft.
+	// The soleauth tri-state is now vestigial on the read path; the machinery is
+	// removed in S4. (Name retained until that teardown to bound this diff.)
+	if storage.IsInternalBucket(bucket) {
+		return false, nil
 	}
-	return state == soleAuthOn, nil
+	state, err := b.GetBucketVersioning(bucket)
+	if err != nil {
+		return false, fmt.Errorf("read versioning state for bucket %q: %w", bucket, err)
+	}
+	return state == "Enabled", nil
 }
 
 // fsmCarveoutObject reads the FSM BadgerDB object record the same way the

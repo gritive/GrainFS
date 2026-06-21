@@ -38,28 +38,28 @@ func seedFSMObject(t *testing.T, b *DistributedBackend, bucket, key, versionID s
 func TestSoleAuthReadOn(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("on", func(t *testing.T) {
+	t.Run("versioning-enabled bucket is blob-authoritative", func(t *testing.T) {
 		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "bon"))
-		setSoleAuthForTest(t, b, "bon", soleAuthOn)
+		setVersioningForTest(t, b, "bon", "Enabled")
 		on, err := b.soleAuthReadOn("bon")
 		require.NoError(t, err)
 		require.True(t, on)
 	})
 
-	t.Run("pending", func(t *testing.T) {
+	t.Run("suspended bucket is not blob-authoritative", func(t *testing.T) {
 		b := newTestDistributedBackend(t)
-		require.NoError(t, b.CreateBucket(ctx, "bpend"))
-		setSoleAuthForTest(t, b, "bpend", soleAuthPending)
-		on, err := b.soleAuthReadOn("bpend")
+		require.NoError(t, b.CreateBucket(ctx, "bsus"))
+		setVersioningForTest(t, b, "bsus", "Suspended")
+		on, err := b.soleAuthReadOn("bsus")
 		require.NoError(t, err)
 		require.False(t, on)
 	})
 
-	t.Run("off", func(t *testing.T) {
+	t.Run("unversioned bucket is not blob-authoritative", func(t *testing.T) {
 		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "boff"))
-		// never flipped → off
+		// never enabled → unversioned
 		on, err := b.soleAuthReadOn("boff")
 		require.NoError(t, err)
 		require.False(t, on)
@@ -68,7 +68,7 @@ func TestSoleAuthReadOn(t *testing.T) {
 	t.Run("store error propagates fail-closed", func(t *testing.T) {
 		b, db := newTestDistributedBackendWithDB(t)
 		require.NoError(t, b.CreateBucket(ctx, "berr"))
-		// Close the underlying store to force GetBucketSoleAuthority into error.
+		// Close the underlying store to force GetBucketVersioning into error.
 		require.NoError(t, db.Close())
 		on, err := b.soleAuthReadOn("berr")
 		require.Error(t, err)

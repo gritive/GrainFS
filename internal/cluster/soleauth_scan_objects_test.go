@@ -91,7 +91,7 @@ func TestScanObjectsSoleAuthOn(t *testing.T) {
 		require.NoError(t, b.CreateBucket(ctx, "b"))
 		// Legacy-bare EC record (no lat:, not appendable/coalesced) stays FSM-authoritative.
 		seedFSMObject(t, b, "b", "lk", "", objectMeta{Key: "lk", ETag: "bare", ECData: 4, ECParity: 2}, false)
-		setSoleAuthForTest(t, b, "b", soleAuthOn)
+		setVersioningForTest(t, b, "b", "Enabled")
 
 		got := collectScanObjectRecs(t, b, "b")
 		require.Contains(t, got, "lk", "EC legacy-bare carve-out is scrubbed")
