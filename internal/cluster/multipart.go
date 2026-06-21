@@ -151,6 +151,49 @@ func (b *DistributedBackend) UploadPart(ctx context.Context, bucket, key, upload
 	}, nil
 }
 
+// buildMultipartMetaBlob encodes the completed multipart object's PutObjectMetaCmd
+// — the per-version blob authority — for a versioning-enabled, non-internal bucket,
+// returning nil for non-versioned/Suspended/internal buckets (which keep the legacy
+// FSM obj:/lat: write). The opaque bytes travel through CmdCompleteMultipart into the
+// done-marker (applyCompleteMultipart stores them verbatim), so any retry or
+// concurrent-complete loser can re-write the WINNER's blob from the marker. Built on
+// the PROPOSER because CompleteMultipartCmd does not carry UserMetadata/ACL/SSE.
+func (b *DistributedBackend) buildMultipartMetaBlob(ctx context.Context, cmd PutObjectMetaCmd) ([]byte, error) {
+	if storage.IsInternalBucket(cmd.Bucket) || cmd.VersionID == "" || !b.bucketVersioningEnabled(ctx, cmd.Bucket) {
+		return nil, nil
+	}
+	blob, err := EncodeCommand(CmdPutObjectMeta, cmd)
+	if err != nil {
+		return nil, fmt.Errorf("multipart complete: encode meta_blob: %w", err)
+	}
+	return blob, nil
+}
+
+// writeCompletedMultipartBlob decodes the winning multipart object's encoded
+// PutObjectMetaCmd (the done-marker's meta_blob) and durably writes its per-version
+// quorum-meta blob, FAIL-CLOSED. The per-version blob is the sole authority for the
+// completed versioned object (reads/LIST/GC/DEK all derive from it). The meta_blob
+// bytes are stored verbatim, so the per-version blob is byte-identical to the
+// done-marker copy. Idempotent: a dup write of the same vid+bytes no-ops via the LWW
+// guard, so the winner's blob lands regardless of which complete attempt (winner or
+// concurrent loser, original or retry) observed the done-marker. Returns the decoded
+// winning object so callers can answer the S3 CompleteMultipartUpload response.
+func (b *DistributedBackend) writeCompletedMultipartBlob(ctx context.Context, metaBlob []byte) (PutObjectMetaCmd, error) {
+	env, err := DecodeCommand(metaBlob)
+	if err != nil {
+		return PutObjectMetaCmd{}, fmt.Errorf("multipart complete: decode meta_blob: %w", err)
+	}
+	cmd, err := decodePutObjectMetaCmd(env.Data)
+	if err != nil {
+		return PutObjectMetaCmd{}, fmt.Errorf("multipart complete: decode meta_blob cmd: %w", err)
+	}
+	epoch := b.resolveQuorumMetaEpoch(ctx, cmd.Bucket)
+	if err := b.fanOutPerVersionBlob(ctx, cmd, metaBlob, epoch); err != nil {
+		return PutObjectMetaCmd{}, fmt.Errorf("multipart complete: per-version blob: %w", err)
+	}
+	return cmd, nil
+}
+
 func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []storage.Part) (*storage.Object, error) {
 	lifeMu := b.multipartLifecycleLock(uploadID)
 	lifeMu.Lock()
@@ -206,6 +249,16 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 	}
 	// Idempotent retry: manifest is gone but marker exists; return committed object.
 	if doneMarker != nil {
+		// Blob-authoritative: if the marker carries the winning meta_blob, re-write
+		// the per-version blob FAIL-CLOSED before the readback. The original complete
+		// may have crashed/failed after the propose but before the blob landed — the
+		// marker is the only metadata copy until the blob is durable, so without this
+		// the object would be permanently 404. Idempotent: same vid+bytes, LWW no-op.
+		if len(doneMarker.MetaBlob) > 0 {
+			if _, werr := b.writeCompletedMultipartBlob(ctx, doneMarker.MetaBlob); werr != nil {
+				return nil, werr
+			}
+		}
 		obj, _, err := b.headObjectMetaV(ctx, bucket, key, doneMarker.VersionID)
 		if err != nil {
 			return nil, err
