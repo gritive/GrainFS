@@ -795,11 +795,6 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 		s.perVersionBackfillSweep(ctx, bf, maxBackfillPerCycle)
 	}
 
-	// Optional: update per-version cutover readiness gauges (foundation S4a).
-	if v, ok := s.backend.(PerVersionCutoverVerifiable); ok {
-		s.perVersionCutoverVerifySweep(ctx, v)
-	}
-
 	// Optional: relocate non-redundant (1+0) EC objects into a redundant group.
 	// Runs only when enabled AND the backend implements RedundancyUpgrader.
 	// Fail-soft: a sweep error is recorded on the cycle span but does not abort.

@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.634.0] - 2026-06-21
+
+### Removed
+- **BREAKING: the per-version cutover verifier is removed** (the `cluster verify-per-version-cutover`
+  CLI command + its admin route/UDS handler + the `grainfs_per_version_cutover_*` Prometheus gauges).
+  The verifier was a readiness checker for the per-bucket soleauth cutover flip; that migration
+  approach is being abandoned for a greenfield project (no existing data to migrate — versioned
+  objects will be blob-authoritative by construction rather than via a gated per-bucket flip), so the
+  verifier is dead weight. The per-version backfill walker (which writes the per-version quorum-meta
+  blobs) is unaffected, and the soleauth flag/fence machinery is removed in a later change. First in a
+  staged teardown of the dormant soleauth cutover scaffolding (~2k LOC removed here).
+
 ## [0.0.633.0] - 2026-06-21
 
 ### Removed

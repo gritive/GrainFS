@@ -70,26 +70,6 @@ type ExpandPlacementResult struct {
 // (S7-7). Injected by serveruntime, which holds the coordinator + meta-raft.
 type ExpandPlacementFunc func(ctx context.Context) (ExpandPlacementResult, error)
 
-// PerVersionCutoverReadiness is the JSON response shape for
-// GET /v1/cluster/verify-per-version-cutover.
-type PerVersionCutoverReadiness struct {
-	Complete    int      `json:"complete"`
-	Gaps        int      `json:"gaps"`
-	Stuck       int      `json:"stuck"`
-	Unknown     int      `json:"unknown"`
-	Excluded    int      `json:"excluded"`
-	Ineligible  int      `json:"ineligible"`
-	GapRefs     []string `json:"gap_refs,omitempty"`
-	StuckRefs   []string `json:"stuck_refs,omitempty"`
-	UnknownRefs []string `json:"unknown_refs,omitempty"`
-}
-
-// VerifyPerVersionCutoverFunc aggregates per-version quorum-meta coverage
-// across this node's hosted-group buckets and returns a readiness tally.
-// Injected by serveruntime (which holds *cluster.DistributedBackend).
-// An optional bucket filter ("") means "all hosted buckets".
-type VerifyPerVersionCutoverFunc func(ctx context.Context, bucket string) (PerVersionCutoverReadiness, error)
-
 type ReadIndexer interface {
 	ReadIndex(ctx context.Context) (uint64, error)
 	WaitApplied(ctx context.Context, index uint64) error
@@ -146,24 +126,23 @@ type Server struct {
 	auditInternalSecretKey string
 	auditInternalVerifier  *s3auth.CachingVerifier
 
-	cluster                   ClusterInfo
-	membership                ClusterMembership
-	joinCluster               JoinClusterFunc
-	expandPlacement           ExpandPlacementFunc
-	verifyPerVersionCutoverFn VerifyPerVersionCutoverFunc
-	balancer                  BalancerInfo
-	evStore                   *eventstore.Store
-	alerts                    *alertssvc.State
-	receiptAPI                *receipt.API
-	incidentStore             incident.StateStore
-	mutationGate              *MutationGate
-	degradedFlag              atomic.Bool
-	shardCache                *shardcache.Cache
-	jwtKeys                   *iamjwt.KeySet
-	iceberg                   *iceberg.Handler
-	receipt                   *receiptsvc.Handler
-	incidentH                 *incidentsvc.Handler
-	proxyTrust                *ProxyTrust // §5 T45: trusted-proxy Forwarded / X-Forwarded-* validator
+	cluster         ClusterInfo
+	membership      ClusterMembership
+	joinCluster     JoinClusterFunc
+	expandPlacement ExpandPlacementFunc
+	balancer        BalancerInfo
+	evStore         *eventstore.Store
+	alerts          *alertssvc.State
+	receiptAPI      *receipt.API
+	incidentStore   incident.StateStore
+	mutationGate    *MutationGate
+	degradedFlag    atomic.Bool
+	shardCache      *shardcache.Cache
+	jwtKeys         *iamjwt.KeySet
+	iceberg         *iceberg.Handler
+	receipt         *receiptsvc.Handler
+	incidentH       *incidentsvc.Handler
+	proxyTrust      *ProxyTrust // §5 T45: trusted-proxy Forwarded / X-Forwarded-* validator
 
 	readAfterWriteRetryTimeout  time.Duration
 	readAfterWriteRetryInterval time.Duration

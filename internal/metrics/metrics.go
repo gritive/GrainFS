@@ -526,46 +526,6 @@ var (
 		Help: "Total per-version backfill failures (per-object; sweep continues).",
 	})
 
-	// Foundation S4a — per-version cutover readiness gauges.
-	// Each gauge is set to the cluster-node-local sum across all hosted buckets
-	// by the background verification sweep. Alerting rule:
-	// gaps+stuck+unknown+verify_errors == 0 across all nodes indicates cutover is safe.
-
-	PerVersionCutoverComplete = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "grainfs_per_version_cutover_complete",
-		Help: "Total versioned object versions with a readable per-version quorum-meta blob (cutover-ready).",
-	})
-
-	PerVersionCutoverGaps = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "grainfs_per_version_cutover_gaps",
-		Help: "Total versioned object versions missing a per-version blob but with resolvable placement (backfill can fix).",
-	})
-
-	PerVersionCutoverStuck = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "grainfs_per_version_cutover_stuck",
-		Help: "Total versioned object versions missing a per-version blob with unresolvable placement (manual intervention needed).",
-	})
-
-	PerVersionCutoverUnknown = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "grainfs_per_version_cutover_unknown",
-		Help: "Total versioned object versions that could not be classified due to decode or read errors (fail-closed).",
-	})
-
-	PerVersionCutoverExcluded = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "grainfs_per_version_cutover_excluded",
-		Help: "Total versioned object versions intentionally excluded from cutover verification (internal buckets, appendable, coalesced).",
-	})
-
-	PerVersionCutoverIneligible = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "grainfs_per_version_cutover_ineligible",
-		Help: "Number of cutover-INELIGIBLE buckets observed (non-Enabled: Suspended or never-versioned — a deferred epic). Observability only: this does NOT block the cluster-wide coverage gate (ineligible buckets are normal). Per-bucket flip-eligibility is enforced by the CLI verify and the S4c-d flip command, both of which refuse non-Enabled buckets.",
-	})
-
-	PerVersionCutoverVerifyErrors = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "grainfs_per_version_cutover_verify_errors",
-		Help: "Number of sweep verification errors (list-buckets failure counts as 1; each failed bucket counts as 1). Non-zero blocks cutover: gaps+stuck+unknown+verify_errors == 0 across all nodes is required. Initialized to 1 at process start; reaches 0 only after a completed clean sweep.",
-	})
-
 	// Phase 16 — Self-healing metrics.
 
 	HealEventsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
@@ -672,11 +632,3 @@ var (
 		Buckets: []float64{0, 1, 2, 3, 5, 10},
 	})
 )
-
-func init() {
-	// PerVersionCutoverVerifyErrors starts at 1 ("not ready") so that a
-	// Prometheus scrape before the first sweep has ever completed does NOT read
-	// gaps+stuck+unknown+verify_errors == 0 (which would be a false-READY). The
-	// gauge reaches 0 only after a completed clean sweep.
-	PerVersionCutoverVerifyErrors.Set(1)
-}
