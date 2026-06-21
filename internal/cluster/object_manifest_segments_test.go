@@ -155,3 +155,36 @@ func TestListAllObjectsStrict_SoleAuthOn_EnumeratesPerVersionBlobs(t *testing.T)
 	require.Equal(t, "e2", v2.ETag)
 	require.True(t, v2.IsLatest, "v2 is the max-VID (latest) version")
 }
+
+// TestListAllObjectsStrict_VersioningEnabled_EnumeratesPerVersionBlobs proves the
+// C1 gate flip: the segment-GC known-set must cover a versioning-Enabled bucket's
+// per-version blobs WITHOUT requiring the (now-vestigial) soleauth=on flip. Under
+// blob-primary the per-version blob is authoritative for every versioning-Enabled
+// bucket, so listAllObjectsForGC must take its blob branch on versioning state, not
+// on GetBucketSoleAuthority==on. Without the flip these blob-only objects fall to the
+// FSM obj: scan, are absent, and the sweep would orphan-delete their live segments.
+func TestListAllObjectsStrict_VersioningEnabled_EnumeratesPerVersionBlobs(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "ve"))
+	setVersioningForTest(t, b, "ve", "Enabled")
+
+	// Blob-only object (no FSM obj: record), soleauth left OFF.
+	seedVersionBlob(t, b, "ve", "k", "v1", PutObjectMetaCmd{ETag: "e1", Size: 10})
+	seedVersionBlob(t, b, "ve", "k", "v2", PutObjectMetaCmd{ETag: "e2", Size: 20})
+
+	objs, err := b.ListAllObjectsStrict()
+	require.NoError(t, err)
+
+	var veObjs []storage.SnapshotObject
+	for _, o := range objs {
+		if o.Bucket == "ve" {
+			veObjs = append(veObjs, o)
+		}
+	}
+	require.Len(t, veObjs, 2, "both per-version blobs must be in the GC known-set on versioning state alone")
+
+	v2 := byVID(t, veObjs, "v2")
+	require.Equal(t, "e2", v2.ETag)
+	require.True(t, v2.IsLatest, "v2 is the max-VID (latest) version")
+}
