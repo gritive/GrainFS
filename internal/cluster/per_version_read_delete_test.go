@@ -276,21 +276,64 @@ func TestDeleteObjectVersion_DualDeletesPerVersionBlob(t *testing.T) {
 
 	require.NoError(t, b.DeleteObjectVersion(bkt, key, vid2))
 
-	// HeadObject re-derives latest = v1 (v2's per-version blob gone).
+	// HeadObject re-derives latest = v1 (v2's per-version blob is now a tombstone).
 	head, err := b.HeadObject(ctx, bkt, key)
 	require.NoError(t, err)
 	require.Equal(t, vid1, head.VersionID, "after hard-deleting v2, HEAD must re-derive v1")
 
-	// The v2 per-version blob is no longer enumerated.
+	// Blob-primary: the v2 per-version blob is REPLACED by a hard-delete tombstone
+	// (not physically purged). The low-level reader still surfaces it (so the orphan
+	// walker can reconcile it), but it carries IsHardDeleted.
 	cmds, err := b.readQuorumMetaVersions(bkt, key)
 	require.NoError(t, err)
-	for _, c := range cmds {
-		require.NotEqual(t, vid2, c.VersionID, "v2 per-version blob must be deleted")
+	var v2 *PutObjectMetaCmd
+	for i := range cmds {
+		if cmds[i].VersionID == vid2 {
+			v2 = &cmds[i]
+		}
 	}
+	require.NotNil(t, v2, "v2 per-version blob remains as a tombstone")
+	require.True(t, v2.IsHardDeleted, "v2 blob must be a hard-delete tombstone")
 
 	// GetObjectVersion(v2) → 404.
 	_, _, gerr := b.GetObjectVersion(context.Background(), bkt, key, vid2)
 	require.ErrorIs(t, gerr, storage.ErrObjectNotFound)
+}
+
+// TestDeleteObjectVersion_WritesTombstoneNotPurge proves the blob-primary
+// hard-delete writes a durable tombstone (IsHardDeleted) in place of the data blob
+// rather than purging it, with no raft propose, while reads exclude the version.
+func TestDeleteObjectVersion_WritesTombstoneNotPurge(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	const bkt, key = "vbkt", "obj"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+
+	vid1 := putVersioned(t, b, ctx, bkt, key, "content-v1")
+	vid2 := putVersioned(t, b, ctx, bkt, key, "content-v2")
+
+	require.NoError(t, b.DeleteObjectVersion(bkt, key, vid2))
+
+	// The v2 blob is present locally as a tombstone (not purged).
+	local, err := b.shardSvc.readQuorumMetaVersionsLocal(bkt, key)
+	require.NoError(t, err)
+	var v2 *PutObjectMetaCmd
+	for i := range local {
+		if local[i].VersionID == vid2 {
+			v2 = &local[i]
+		}
+	}
+	require.NotNil(t, v2, "v2 per-version blob must remain (as a tombstone)")
+	require.True(t, v2.IsHardDeleted, "v2 blob must be a hard-delete tombstone")
+	require.Greater(t, v2.MetaSeq, uint64(0), "tombstone MetaSeq is bumped above the data blob")
+
+	// Reads exclude the hard-deleted version; latest falls to v1.
+	_, _, gerr := b.GetObjectVersion(ctx, bkt, key, vid2)
+	require.ErrorIs(t, gerr, storage.ErrObjectNotFound)
+	head, herr := b.HeadObject(ctx, bkt, key)
+	require.NoError(t, herr)
+	require.Equal(t, vid1, head.VersionID)
 }
 
 // TestGetObjectVersion_BlobAbsentFSMOnlyIs404 proves the blob-primary contract: on

@@ -8,6 +8,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -249,8 +250,49 @@ func (b *DistributedBackend) DeleteObjectVersion(bucket, key, versionID string) 
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return err
 	}
-	// Local data cleanup: best-effort (ENOENT is fine — FSM apply is the source of truth).
+	// Local data cleanup: best-effort (legacy N× on-disk file; ENOENT is fine).
 	_ = os.Remove(b.objectPathV(bucket, key, versionID))
+
+	// Blob-primary hard delete (versioning-enabled, non-internal): REPLACE the
+	// version's per-version blob with a tombstone (IsHardDeleted) durably, fail-closed,
+	// with NO raft propose. The tombstone wins the LWW (quorumMetaCmdWins / MetaSeq+1)
+	// over any data-blob copy lingering on a node that missed this delete, so the
+	// version can never resurrect; the orphan walker reconciles stale data blobs and
+	// GCs the tombstone once the delete has propagated cluster-wide. The FSM obj:
+	// record (if any) is intentionally left untouched — reads are blob-authoritative,
+	// and leaving the record keeps the legacy FSM-oracle GCs inert until they are
+	// repointed to the blob authority.
+	if !storage.IsInternalBucket(bucket) && b.bucketVersioningEnabled(ctx, bucket) && b.shardSvc != nil {
+		cmd, ok, rerr := b.readQuorumMetaVersionDecodeStrict(bucket, key, versionID)
+		if rerr != nil {
+			return fmt.Errorf("resolve per-version blob for delete %s/%s@%s: %w", bucket, key, versionID, rerr)
+		}
+		if ok {
+			if cmd.IsHardDeleted {
+				return nil // already a tombstone → idempotent
+			}
+			tomb := cmd
+			tomb.IsHardDeleted = true
+			tomb.ModTime = time.Now().Unix()
+			tomb.MetaSeq = cmd.MetaSeq + 1
+			blob, eerr := EncodeCommand(CmdPutObjectMeta, tomb)
+			if eerr != nil {
+				return fmt.Errorf("encode hard-delete tombstone %s/%s@%s: %w", bucket, key, versionID, eerr)
+			}
+			epoch := b.resolveQuorumMetaEpoch(ctx, bucket)
+			if werr := b.fanOutPerVersionBlob(ctx, tomb, blob, epoch); werr != nil {
+				return fmt.Errorf("write hard-delete tombstone %s/%s@%s: %w", bucket, key, versionID, werr)
+			}
+			return nil
+		}
+		// blob-absent: this is a carve-out (appendable/coalesced/legacy-bare) that
+		// stays FSM-authoritative, or a truly-absent version. Fall through to the
+		// legacy FSM-delete path so a carve-out's FSM record IS removed (a tombstone
+		// would be meaningless for an object with no per-version blob).
+	}
+
+	// Legacy path (non-versioned / internal buckets, and versioning-enabled carve-outs
+	// with no per-version blob): raft propose + cluster-wide per-version blob purge.
 	if err := b.propose(ctx, CmdDeleteObjectVersion, DeleteObjectVersionCmd{
 		Bucket:    bucket,
 		Key:       key,
@@ -258,11 +300,6 @@ func (b *DistributedBackend) DeleteObjectVersion(bucket, key, versionID string) 
 	}); err != nil {
 		return err
 	}
-	// S2a dual-delete: also purge the per-version blob so derive-by-scan stops
-	// reading the hard-deleted version. Gated on blob-presence (NOT versioning):
-	// a suspended/re-enabled bucket's enabled-era blobs must still be purged. The
-	// version's placement nodes come from its own blob; absent (legacy) → skip.
-	// Fail-closed: a lingering blob on a missed node would resurface the version.
 	if b.shardSvc != nil {
 		cmd, ok, rerr := b.readQuorumMetaVersion(bucket, key, versionID)
 		if rerr != nil {

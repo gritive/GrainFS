@@ -108,20 +108,8 @@ func (b *DistributedBackend) writeQuorumMeta(ctx context.Context, cmd PutObjectM
 	// pointing at data the caller is about to delete. Gated on versioning-enabled:
 	// non-versioned buckets retain no version history (latest-only blob / off-raft).
 	if cmd.VersionID != "" && b.bucketVersioningEnabled(ctx, cmd.Bucket) {
-		verSubpath := path.Join(cmd.Key, cmd.VersionID)
-		vctx, vcancel := context.WithTimeout(ctx, quorumMetaWriteTimeout)
-		defer vcancel()
-		if verr := fanOutQuorumMeta(vctx, cmd.NodeIDs, k, func(fctx context.Context, node string) error {
-			if node == self {
-				return b.shardSvc.writeQuorumMetaVersionLocal(cmd.Bucket, verSubpath, blob, epoch)
-			}
-			addr, rerr := b.shardSvc.resolvePeerAddress(node)
-			if rerr != nil {
-				return rerr
-			}
-			return b.shardSvc.WriteQuorumMetaVersion(fctx, addr, cmd.Bucket, verSubpath, blob, epoch)
-		}); verr != nil {
-			return fmt.Errorf("per-version quorum-meta write %s/%s@%s: %w", cmd.Bucket, cmd.Key, cmd.VersionID, verr)
+		if verr := b.fanOutPerVersionBlob(ctx, cmd, blob, epoch); verr != nil {
+			return verr
 		}
 	}
 	// Latest-only blob (LIST-latest / legacy read fast path), same K-of-N, fail-closed.
@@ -139,6 +127,40 @@ func (b *DistributedBackend) writeQuorumMeta(ctx context.Context, cmd PutObjectM
 	})
 	if latestErr != nil {
 		return latestErr
+	}
+	return nil
+}
+
+// fanOutPerVersionBlob durably writes ONE per-version quorum-meta blob
+// (.quorum_meta_versions/{key}/{vid}) to the version's K-of-N placement quorum,
+// FAIL-CLOSED. It is the per-version half of writeQuorumMeta (the latest-only blob
+// and the raft propose are NOT touched here) and the sole writer of hard-delete
+// tombstones (DeleteObjectVersion). The encoded blob and the resolved soleauth
+// epoch are passed in so the hot PUT path encodes + resolves the epoch once and
+// shares them with the latest-only write.
+func (b *DistributedBackend) fanOutPerVersionBlob(ctx context.Context, cmd PutObjectMetaCmd, blob []byte, epoch uint32) error {
+	if b.shardSvc == nil || len(cmd.NodeIDs) == 0 {
+		return fmt.Errorf("per-version quorum-meta write: no shard service or empty placement")
+	}
+	self := b.currentSelfAddr()
+	k := int(cmd.ECData)
+	if k <= 0 {
+		k = 1
+	}
+	verSubpath := path.Join(cmd.Key, cmd.VersionID)
+	vctx, vcancel := context.WithTimeout(ctx, quorumMetaWriteTimeout)
+	defer vcancel()
+	if verr := fanOutQuorumMeta(vctx, cmd.NodeIDs, k, func(fctx context.Context, node string) error {
+		if node == self {
+			return b.shardSvc.writeQuorumMetaVersionLocal(cmd.Bucket, verSubpath, blob, epoch)
+		}
+		addr, rerr := b.shardSvc.resolvePeerAddress(node)
+		if rerr != nil {
+			return rerr
+		}
+		return b.shardSvc.WriteQuorumMetaVersion(fctx, addr, cmd.Bucket, verSubpath, blob, epoch)
+	}); verr != nil {
+		return fmt.Errorf("per-version quorum-meta write %s/%s@%s: %w", cmd.Bucket, cmd.Key, cmd.VersionID, verr)
 	}
 	return nil
 }
