@@ -51,11 +51,17 @@ func (b *DistributedBackend) SweepStaleMultipartDoneMarkers(ctx context.Context,
 		return 0, nil
 	}
 	now := time.Now()
-	var stale []string
 
+	// Phase 1 (in txn): collect age-eligible candidates. The per-version blob
+	// durability probe (phase 2) does FS/peer reads and must run OUTSIDE this View.
+	type candidate struct {
+		uploadID, bucket, key, versionID string
+		hasMetaBlob                      bool
+	}
+	var candidates []candidate
 	if err := b.store.View(func(txn MetadataTxn) error {
 		return b.ks().scanGroupPrefix(txn, []byte("mpudone:"), func(rawKey []byte, item MetaItem) error {
-			if len(stale) >= maxPerCycle {
+			if len(candidates) >= maxPerCycle {
 				return errStopScan
 			}
 			raw, err := b.itemValueCopy(item)
@@ -70,13 +76,33 @@ func (b *DistributedBackend) SweepStaleMultipartDoneMarkers(ctx context.Context,
 			}
 			age := now.Sub(time.Unix(marker.ModTime, 0))
 			if age > minAge {
-				uploadID := strings.TrimPrefix(string(rawKey), "mpudone:")
-				stale = append(stale, uploadID)
+				candidates = append(candidates, candidate{
+					uploadID:    strings.TrimPrefix(string(rawKey), "mpudone:"),
+					bucket:      marker.Bucket,
+					key:         marker.Key,
+					versionID:   marker.VersionID,
+					hasMetaBlob: len(marker.MetaBlob) > 0,
+				})
 			}
 			return nil
 		})
 	}); err != nil {
-		return len(stale), err
+		return 0, err
+	}
+
+	// Phase 2 (out of txn): a blob-authoritative marker (meta_blob present) is the
+	// ONLY copy of the winning object metadata until its per-version blob is durable
+	// cluster-wide. Probe it; keep the marker (skip the GC) if the blob is absent or
+	// the probe errors. Non-meta_blob (legacy/non-versioned) markers are swept on the
+	// age gate alone, exactly as before.
+	var stale []string
+	for _, c := range candidates {
+		if c.hasMetaBlob {
+			if _, ok, perr := b.readQuorumMetaVersionDecodeStrict(c.bucket, c.key, c.versionID); perr != nil || !ok {
+				continue // not yet durable (or unreadable) → keep the marker
+			}
+		}
+		stale = append(stale, c.uploadID)
 	}
 
 	if len(stale) == 0 {
