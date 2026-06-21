@@ -29,45 +29,26 @@ func writeVersionBlob(t *testing.T, b *DistributedBackend, bucket, key, versionI
 	return target
 }
 
-func TestVersionRecordExistsAllHosted(t *testing.T) {
-	tests := []struct {
-		name        string
-		put         func(b *DistributedBackend)
-		wantExists  bool
-		wantCertain bool
-	}{
-		{
-			name:        "absent everywhere → certainly orphan",
-			put:         func(b *DistributedBackend) {},
-			wantExists:  false,
-			wantCertain: true,
-		},
-		{
-			name: "live record present → keep",
-			put: func(b *DistributedBackend) {
-				putObjMeta(t, b, "bkt", "k", "v1", "etag-live")
-			},
-			wantExists:  true,
-			wantCertain: true,
-		},
-		{
-			name: "delete-marker record present → still keep (legitimate soft-delete version)",
-			put: func(b *DistributedBackend) {
-				putObjMeta(t, b, "bkt", "k", "v1", deleteMarkerETag)
-			},
-			wantExists:  true,
-			wantCertain: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			b := orphanWalkerBackend(t)
-			tt.put(b)
-			exists, certain := b.versionRecordExistsAllHosted("bkt", "k", "v1")
-			require.Equal(t, tt.wantExists, exists, "exists")
-			require.Equal(t, tt.wantCertain, certain, "certain")
-		})
-	}
+// writeTombstoneBlob writes a hard-delete tombstone (IsHardDeleted) per-version blob
+// for (bucket,key,vid) with the given placement nodes and back-dates its mtime past
+// the age floor.
+func writeTombstoneBlob(t *testing.T, b *DistributedBackend, bucket, key, versionID string, nodeIDs []string, backdate time.Duration) string {
+	t.Helper()
+	blob, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket:        bucket,
+		Key:           key,
+		VersionID:     versionID,
+		ECData:        1,
+		NodeIDs:       nodeIDs,
+		IsHardDeleted: true,
+		MetaSeq:       1,
+	})
+	require.NoError(t, err)
+	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal(bucket, filepath.Join(key, versionID), blob, 0))
+	target := filepath.Join(b.shardSvc.DataDirs()[0], quorumMetaVersionsSubDir, bucket, key, versionID)
+	past := time.Now().Add(-backdate)
+	require.NoError(t, os.Chtimes(target, past, past))
+	return target
 }
 
 func collectOrphanVersions(t *testing.T, b *DistributedBackend) []string {
@@ -80,16 +61,60 @@ func collectOrphanVersions(t *testing.T, b *DistributedBackend) []string {
 	return got
 }
 
+// TestPerVersionBlobReclaimable_DataBlob proves a data blob is reclaimable iff the
+// authoritative cross-cluster state for its version is a tombstone (this node missed
+// the hard delete) — and kept when it is still the live authority.
+func TestPerVersionBlobReclaimable_DataBlob(t *testing.T) {
+	t.Run("data blob superseded by a tombstone → reclaimable", func(t *testing.T) {
+		b := orphanWalkerBackend(t)
+		self := b.currentSelfAddr()
+		// The authoritative version state for vX is a tombstone (here served by self;
+		// in a cluster it would win the LWW from a peer that did the hard delete).
+		writeTombstoneBlob(t, b, "bkt", "k", "vX", []string{self}, oldEnough)
+		dataCmd := PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: "vX", NodeIDs: []string{self}}
+		require.True(t, b.perVersionBlobReclaimable(dataCmd))
+	})
+
+	t.Run("live data blob (no tombstone) → kept", func(t *testing.T) {
+		b := orphanWalkerBackend(t)
+		self := b.currentSelfAddr()
+		writeVersionBlob(t, b, "bkt", "k", "vLive", oldEnough) // data blob, no tombstone
+		dataCmd := PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: "vLive", NodeIDs: []string{self}}
+		require.False(t, b.perVersionBlobReclaimable(dataCmd))
+	})
+}
+
+// TestPerVersionBlobReclaimable_Tombstone proves a tombstone is GC'd only once the
+// delete has converged (all placement nodes reachable, none holds a data blob), and
+// kept (fail-closed) when a placement node is unreachable.
+func TestPerVersionBlobReclaimable_Tombstone(t *testing.T) {
+	t.Run("converged (single placement node, no data blob) → GC", func(t *testing.T) {
+		b := orphanWalkerBackend(t)
+		self := b.currentSelfAddr()
+		writeTombstoneBlob(t, b, "bkt", "k", "vT", []string{self}, oldEnough)
+		tomb := PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: "vT", NodeIDs: []string{self}, IsHardDeleted: true}
+		require.True(t, b.perVersionBlobReclaimable(tomb))
+	})
+
+	t.Run("unreachable placement node → keep (fail-closed)", func(t *testing.T) {
+		b := orphanWalkerBackend(t)
+		self := b.currentSelfAddr()
+		writeTombstoneBlob(t, b, "bkt", "k", "vT", []string{self}, oldEnough)
+		tomb := PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: "vT", NodeIDs: []string{self, "bogus-unreachable-peer"}, IsHardDeleted: true}
+		require.False(t, b.perVersionBlobReclaimable(tomb), "cannot confirm propagation to an unreachable node")
+	})
+}
+
 func TestWalkOrphanQuorumMetaVersions(t *testing.T) {
 	b := orphanWalkerBackend(t)
+	self := b.currentSelfAddr()
 
-	// blob A: dangling (no FSM record) and old → orphan candidate.
-	writeVersionBlob(t, b, "bkt", "k", "vA", oldEnough)
-	// blob B: live (FSM record present) → must NOT be yielded.
+	// blob A: converged tombstone, old → reclaim candidate (GC).
+	writeTombstoneBlob(t, b, "bkt", "k", "vA", []string{self}, oldEnough)
+	// blob B: live data blob (no tombstone) → must NOT be yielded.
 	writeVersionBlob(t, b, "bkt", "k", "vB", oldEnough)
-	putObjMeta(t, b, "bkt", "k", "vB", "etag-live")
-	// blob C: dangling but fresh (within age floor) → must NOT be yielded.
-	writeVersionBlob(t, b, "bkt", "k", "vC", 0)
+	// blob C: tombstone but fresh (within age floor) → must NOT be yielded.
+	writeTombstoneBlob(t, b, "bkt", "k", "vC", []string{self}, 0)
 
 	got := collectOrphanVersions(t, b)
 	require.Equal(t, []string{"vA"}, got)
@@ -98,47 +123,41 @@ func TestWalkOrphanQuorumMetaVersions(t *testing.T) {
 func TestWalkOrphanQuorumMetaVersions_GateClosed_NoOp(t *testing.T) {
 	b := orphanWalkerBackend(t)
 	b.SetOrphanShardSweepGate(func() bool { return false }) // gate closed → fail-closed
-	writeVersionBlob(t, b, "bkt", "k", "vA", oldEnough)
+	writeTombstoneBlob(t, b, "bkt", "k", "vA", []string{b.currentSelfAddr()}, oldEnough)
 	require.Empty(t, collectOrphanVersions(t, b))
 }
 
-func TestDeleteOrphanQuorumMetaVersion_RemovesLocalBlob(t *testing.T) {
+func TestDeleteOrphanQuorumMetaVersion_GCsConvergedTombstone(t *testing.T) {
 	b := orphanWalkerBackend(t)
-	target := writeVersionBlob(t, b, "bkt", "k", "vA", oldEnough)
+	target := writeTombstoneBlob(t, b, "bkt", "k", "vA", []string{b.currentSelfAddr()}, oldEnough)
 	require.FileExists(t, target)
 
 	require.NoError(t, b.DeleteOrphanQuorumMetaVersion("bkt", "k", "vA"))
 	_, err := os.Stat(target)
-	require.True(t, os.IsNotExist(err), "blob should be gone")
+	require.True(t, os.IsNotExist(err), "converged tombstone should be GC'd")
 }
 
-func TestDeleteOrphanQuorumMetaVersion_ReconfirmKeepsLive(t *testing.T) {
+func TestDeleteOrphanQuorumMetaVersion_KeepsLiveDataBlob(t *testing.T) {
 	b := orphanWalkerBackend(t)
-	target := writeVersionBlob(t, b, "bkt", "k", "vA", oldEnough)
-	putObjMeta(t, b, "bkt", "k", "vA", "etag-live") // version came back to life between walk and delete
+	target := writeVersionBlob(t, b, "bkt", "k", "vA", oldEnough) // live data blob, no tombstone
 
 	require.NoError(t, b.DeleteOrphanQuorumMetaVersion("bkt", "k", "vA"))
-	require.FileExists(t, target, "reconfirm must keep a now-live version's blob")
+	require.FileExists(t, target, "a live data blob with no superseding tombstone must be kept")
 }
 
-// TestPerVersionOrphanReconcile_StopsDeriveByScanResurface is the integration
-// test: a dangling blob (FSM record gone — the lingering residual of a partially
-// failed S2a hard-delete) makes the derive-by-scan source resurface a dead
-// version; reclaiming it stops the resurface while the live version is untouched.
-// The two-cycle tombstone delay is covered separately in the scrubber unit tests;
-// here a single reconcile pass exercises the real walk+delete against the backend.
-func TestPerVersionOrphanReconcile_StopsDeriveByScanResurface(t *testing.T) {
+// TestPerVersionReconcile_ReclaimsStaleDataBlob proves the reconciler removes a
+// stale DATA blob once the version's authoritative state is a tombstone, stopping
+// the derive-by-scan source from resurfacing the hard-deleted version, while a live
+// sibling version is untouched.
+func TestPerVersionReconcile_ReclaimsStaleDataBlob(t *testing.T) {
 	b := orphanWalkerBackend(t)
-	// vLive: FSM record + blob (a live retained version).
+	self := b.currentSelfAddr()
+	// vLive: a live data blob (retained version).
 	writeVersionBlob(t, b, "bkt", "k", "vLive", oldEnough)
-	putObjMeta(t, b, "bkt", "k", "vLive", "etag-live")
-	// vDead: blob only — FSM record gone after a hard-delete, copy lingered.
-	writeVersionBlob(t, b, "bkt", "k", "vDead", oldEnough)
-
-	// derive-by-scan (the LIST/HEAD?vid source) currently sees BOTH → resurface.
-	before, err := b.readQuorumMetaVersions("bkt", "k")
-	require.NoError(t, err)
-	require.Len(t, before, 2, "dangling blob resurfaces the dead version pre-reclaim")
+	// vDead: hard-deleted — its authoritative state is a tombstone. (Single-node: the
+	// tombstone IS the local blob; the reclaim of a stale DATA copy is exercised via
+	// perVersionBlobReclaimable above and the C9 two-node e2e.)
+	writeTombstoneBlob(t, b, "bkt", "k", "vDead", []string{self}, oldEnough)
 
 	var cands [][3]string
 	require.NoError(t, b.WalkOrphanQuorumMetaVersions(func(bk, k, v, _ string) error {
@@ -151,6 +170,6 @@ func TestPerVersionOrphanReconcile_StopsDeriveByScanResurface(t *testing.T) {
 
 	after, err := b.readQuorumMetaVersions("bkt", "k")
 	require.NoError(t, err)
-	require.Len(t, after, 1, "reclaim removes the dead version from derive-by-scan")
+	require.Len(t, after, 1, "the converged tombstone is GC'd; only the live version remains")
 	require.Equal(t, "vLive", after[0].VersionID)
 }

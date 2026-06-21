@@ -1,7 +1,7 @@
 package cluster
 
 import (
-	"errors"
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
@@ -11,74 +11,87 @@ import (
 	"github.com/gritive/GrainFS/internal/scrubber"
 )
 
-// This file implements the per-version orphan reconciliation sweep: it reclaims
-// dangling per-version quorum-meta blobs (.quorum_meta_versions/{bucket}/{key}/{vid})
-// whose authoritative FSM obj: record no longer exists — the residual left when
-// the S2a hard-delete's best-effort per-version dual-delete partially failed (a
-// copy lingered on a missed/offline placement node). Until reclaimed, a lingering
-// blob makes the S2b derive-by-scan LIST and the per-version HEAD/GET resurface a
-// hard-deleted version.
+// This file implements the per-version blob reconciliation sweep under blob-primary.
+// The per-version quorum-meta blob (.quorum_meta_versions/{bucket}/{key}/{vid}) is
+// the SOLE AUTHORITY for a versioned object; a hard delete REPLACES the data blob
+// with a TOMBSTONE (IsHardDeleted) rather than physically purging it. This sweep is
+// the eventual-consistency reconciler for those tombstones — the blob-primary
+// replacement for raft's delete propagation. It does two things, both deleting only
+// THIS node's local blob copy (no cluster fan-out of the deletion):
 //
-// It is the direct analog of orphan_shard_walker.go (EC shard dirs) and reuses
-// that file's safety machinery (orphanShardSweepAllowed: gate + all-hosted
-// CaughtUp; owningGroupHosted; effectiveOrphanShardAge floor; hostedGroupBackends
-// union). Two simplifications the blob form allows: (1) each blob IS a
-// PutObjectMetaCmd, so decoding it yields the authoritative (bucket,key,versionID)
-// directly — no reverse-parse of a cleaned on-disk path; (2) deletion is
-// node-local (deleteQuorumMetaVersionLocal), because the VERIFIED INVARIANT below
-// guarantees every node holding a copy is an owning-group member that runs this
-// sweep, so each node reclaims its own copy with no cluster fan-out.
+//  1. RECLAIM a stale DATA blob: a data blob (IsHardDeleted=false) whose
+//     authoritative cross-cluster state for that exact version is a tombstone — i.e.
+//     this node missed the hard delete and kept the old data blob. Reclaiming it
+//     stops the derive-by-scan LIST/HEAD from resurfacing the dead version once the
+//     tombstone-holding peers are reachable again.
+//  2. GC a TOMBSTONE: a tombstone whose delete has FULLY PROPAGATED — every
+//     placement node is reachable AND none still holds a live data blob for the
+//     version. Only then is the tombstone safe to drop; until then a node that still
+//     has the data blob could resurrect the version, so the tombstone must remain to
+//     win the LWW. This is downtime-independent (no wall-clock grace), so a node
+//     offline for any duration cannot cause a time-based resurrection.
 //
-// VERIFIED SAFETY INVARIANT: a .quorum_meta_versions blob is written ONLY to its
-// version's owning-group placement nodes (cmd.NodeIDs), and nothing relocates it
-// (the only writers are writeQuorumMeta's fan-out and its peer RPC handler; no
-// balancer/repair/reshard touches the subtree). Therefore a blob copy on this node
-// implies this node hosts the version's owning generation-group, so the obj:
-// record (under that group's ks prefix, raft-replicated by the same writeQuorumMeta
-// call) is visible to versionRecordExistsAllHosted here — unless genuinely deleted.
-// If a future change ever floats per-version blobs across groups, this invariant
-// breaks and the liveness check must become generation-aware.
+// Fail-closed throughout: any peer-read uncertainty (unreachable / decode error)
+// keeps the blob. Reuses orphan_shard_walker.go's gate machinery
+// (orphanShardSweepAllowed + owningGroupHosted + effectiveOrphanShardAge floor —
+// the age floor only avoids racing an in-flight write, NOT a propagation grace).
+// Unlike the old FSM-oracle sweep, the decision now does cross-cluster reads (the
+// tombstone lives only where the delete reached; a lagging node must fan out to
+// learn it), so this is no longer a purely node-local oracle.
 
-// versionRecordExistsAllHosted reports whether an FSM obj: record for
-// (bucket,key,versionID) exists under ANY locally-hosted group's keyspace prefix,
-// and whether that determination is CERTAIN. A delete-marker record counts as
-// existing — its per-version blob legitimately represents that version in history
-// (a hard delete removes the record entirely, so a true orphan has no record of
-// any kind). Fail-closed: any read error returns (false, false) so the caller
-// keeps the blob. Unlike hasLiveShardRecord, this is a per-version point lookup
-// across hosted groups (NOT a latest-only quorum-meta fallback), so a non-latest
-// live version whose obj: record lives under a sibling hosted group is protected.
-func (b *DistributedBackend) versionRecordExistsAllHosted(bucket, key, versionID string) (exists, certain bool) {
-	for _, gb := range b.hostedGroupBackends() {
-		if gb == nil {
-			return false, false // fail-closed
-		}
-		found, err := gb.lookupVersionRecord(bucket, key, versionID)
-		if err != nil {
-			return false, false // UNCERTAIN → keep
-		}
-		if found {
-			return true, true
-		}
+// perVersionBlobReclaimable reports whether THIS node's local per-version blob
+// (decoded into cmd) is safe to delete under blob-primary reconciliation:
+//   - a TOMBSTONE → reclaimable once tombstoneConverged (delete fully propagated);
+//   - a DATA blob → reclaimable when the authoritative cross-cluster state for the
+//     exact version is a tombstone (a peer hard-deleted it; this node missed it).
+//
+// Fail-closed: any read uncertainty returns false (keep the blob).
+func (b *DistributedBackend) perVersionBlobReclaimable(cmd PutObjectMetaCmd) bool {
+	if cmd.IsHardDeleted {
+		return b.tombstoneConverged(cmd.Bucket, cmd.Key, cmd.VersionID, cmd.NodeIDs)
 	}
-	return false, true
+	auth, ok, err := b.readQuorumMetaVersionDecodeStrict(cmd.Bucket, cmd.Key, cmd.VersionID)
+	if err != nil || !ok {
+		return false // uncertain or absent cluster-wide → keep (fail-closed)
+	}
+	return auth.IsHardDeleted // authoritative state is a tombstone → this data blob is stale
 }
 
-// lookupVersionRecord reports whether this backend's group holds an obj: record
-// for the version (delete-marker or not). ErrMetaKeyNotFound → (false, nil).
-func (b *DistributedBackend) lookupVersionRecord(bucket, key, versionID string) (found bool, err error) {
-	verr := b.store.View(func(txn MetadataTxn) error {
-		_, gerr := txn.Get(b.ks().ObjectMetaKeyV(bucket, key, versionID))
-		if gerr != nil {
-			if errors.Is(gerr, ErrMetaKeyNotFound) {
-				return nil
+// tombstoneConverged reports whether a hard-delete tombstone has fully propagated:
+// EVERY placement node (nodeIDs) is reachable AND none still holds a live (non-
+// tombstone) data blob for the version. Only then is dropping the tombstone safe —
+// no remaining data blob can resurrect the version. Fail-closed: an unreachable
+// node, a read error, or empty placement returns false (keep the tombstone). This
+// replaces a wall-clock grace, so convergence — not elapsed time — gates GC.
+func (b *DistributedBackend) tombstoneConverged(bucket, key, versionID string, nodeIDs []string) bool {
+	if b.shardSvc == nil || len(nodeIDs) == 0 {
+		return false
+	}
+	self := b.currentSelfAddr()
+	ctx, cancel := context.WithTimeout(context.Background(), quorumMetaReadTimeout)
+	defer cancel()
+	for _, node := range nodeIDs {
+		var cmds []PutObjectMetaCmd
+		var err error
+		if node == self {
+			cmds, err = b.shardSvc.readQuorumMetaVersionsLocal(bucket, key)
+		} else {
+			addr, aerr := b.shardSvc.resolvePeerAddress(node)
+			if aerr != nil {
+				return false // unreachable → cannot confirm convergence → keep
 			}
-			return gerr
+			cmds, err = b.shardSvc.ReadQuorumMetaVersions(ctx, addr, bucket, key)
 		}
-		found = true
-		return nil
-	})
-	return found, verr
+		if err != nil {
+			return false // read error → keep (fail-closed)
+		}
+		for _, c := range cmds {
+			if c.VersionID == versionID && !c.IsHardDeleted {
+				return false // a node still holds a live data blob → not converged
+			}
+		}
+	}
+	return true // all reachable, none holds a data blob → safe to GC the tombstone
 }
 
 // WalkOrphanQuorumMetaVersions yields each per-version quorum-meta blob on this
@@ -129,9 +142,8 @@ func (b *DistributedBackend) WalkOrphanQuorumMetaVersions(
 		if !b.owningGroupHosted(cmd.Bucket) {
 			return nil // owner not hosted here → can't judge → keep
 		}
-		exists, certain := b.versionRecordExistsAllHosted(cmd.Bucket, cmd.Key, cmd.VersionID)
-		if exists || !certain {
-			return nil // live OR uncertain → keep (fail-closed)
+		if !b.perVersionBlobReclaimable(cmd) {
+			return nil // live data blob, un-converged tombstone, or uncertain → keep
 		}
 		if ferr := fn(cmd.Bucket, cmd.Key, cmd.VersionID, p); ferr != nil {
 			stopErr = ferr
@@ -145,10 +157,11 @@ func (b *DistributedBackend) WalkOrphanQuorumMetaVersions(
 	return stopErr
 }
 
-// DeleteOrphanQuorumMetaVersion re-confirms the orphan decision (TOCTOU close: the
-// tombstone loop calls this a cycle after the walk) then deletes ONLY this node's
-// local blob copy. Each placement node reclaims its own lingering copy; no cluster
-// fan-out (see the VERIFIED SAFETY INVARIANT above).
+// DeleteOrphanQuorumMetaVersion re-confirms the reclaim decision (TOCTOU close: the
+// scrubber calls this a cycle after the walk) then deletes ONLY this node's local
+// blob copy (data blob or tombstone). It re-reads the local blob so the re-confirm
+// runs against the CURRENT on-disk state (a fresh PUT or a just-propagated tombstone
+// may have changed it since the walk).
 // Implements scrubber.OrphanQuorumMetaVersionWalkable.
 func (b *DistributedBackend) DeleteOrphanQuorumMetaVersion(bucket, key, versionID string) error {
 	if b.shardSvc == nil {
@@ -157,8 +170,19 @@ func (b *DistributedBackend) DeleteOrphanQuorumMetaVersion(bucket, key, versionI
 	if !b.orphanShardSweepAllowed() || !b.owningGroupHosted(bucket) {
 		return nil // gate/ownership changed since the walk → do not delete
 	}
-	if exists, certain := b.versionRecordExistsAllHosted(bucket, key, versionID); exists || !certain {
-		return nil // now live or uncertain → do not delete
+	local, err := b.shardSvc.readQuorumMetaVersionsLocal(bucket, key)
+	if err != nil {
+		return nil // cannot re-read → do not delete (fail-closed)
+	}
+	var cur *PutObjectMetaCmd
+	for i := range local {
+		if local[i].VersionID == versionID {
+			cur = &local[i]
+			break
+		}
+	}
+	if cur == nil || !b.perVersionBlobReclaimable(*cur) {
+		return nil // already gone, or no longer reclaimable → do not delete
 	}
 	epoch, _ := b.GetBucketSoleAuthEpoch(bucket)
 	return b.shardSvc.deleteQuorumMetaVersionLocal(bucket, key, versionID, epoch)
