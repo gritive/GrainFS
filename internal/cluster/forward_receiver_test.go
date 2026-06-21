@@ -257,7 +257,7 @@ func TestForwardReceiver_HandleCompleteMultipartUpload_ReturnsOK(t *testing.T) {
 
 	rcv := NewForwardReceiver(mgr)
 
-	args := buildCompleteMultipartUploadArgs("bucket", "mpu-key", up.UploadID, []storage.Part{*part})
+	args := buildCompleteMultipartUploadArgs("bucket", "mpu-key", up.UploadID, []storage.Part{*part}, versioningStateUnknown)
 	payload := encodeForwardPayload("group-1", raftpb.ForwardOpCompleteMultipartUpload, args)
 
 	reply, _ := rcv.Handle(payload)

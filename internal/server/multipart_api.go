@@ -131,6 +131,11 @@ func (s *Server) completeMultipartUpload(ctx context.Context, c *app.RequestCont
 		return
 	}
 
+	// Stamp the bucket's versioning state at the S3 edge so the forward path
+	// can drive the blob-authoritative multipart-complete write on leaf
+	// data-group nodes (which cannot read bucket versioning themselves).
+	ctx = s.ctxWithBucketVersioning(ctx, bucket)
+
 	result, err := s.completeMultipartObject(ctx, bucket, key, uploadID, parts)
 	if err != nil {
 		mapError(c, err)

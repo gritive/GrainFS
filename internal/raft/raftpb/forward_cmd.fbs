@@ -220,6 +220,11 @@ table CompleteMultipartUploadArgs {
   key:string;
   upload_id:string;
   parts:[PartRef];
+  // Versioning decision resolved at the S3 edge, carried to the forward receiver's
+  // per-group commit backend (which must not read bucket versioning itself). Drives
+  // the blob-authoritative multipart-complete path (meta_blob). Same wire tri-state
+  // as PutObjectArgs.versioning_state (0=unknown,1=disabled,2=enabled).
+  versioning_state:ubyte;
 }
 
 table AbortMultipartUploadArgs {

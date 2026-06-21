@@ -85,8 +85,20 @@ func (rcv *CompleteMultipartUploadArgs) PartsLength() int {
 	return 0
 }
 
+func (rcv *CompleteMultipartUploadArgs) VersioningState() byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
+	if o != 0 {
+		return rcv._tab.GetByte(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *CompleteMultipartUploadArgs) MutateVersioningState(n byte) bool {
+	return rcv._tab.MutateByteSlot(12, n)
+}
+
 func CompleteMultipartUploadArgsStart(builder *flatbuffers.Builder) {
-	builder.StartObject(4)
+	builder.StartObject(5)
 }
 func CompleteMultipartUploadArgsAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -102,6 +114,9 @@ func CompleteMultipartUploadArgsAddParts(builder *flatbuffers.Builder, parts fla
 }
 func CompleteMultipartUploadArgsStartPartsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
+}
+func CompleteMultipartUploadArgsAddVersioningState(builder *flatbuffers.Builder, versioningState byte) {
+	builder.PrependByteSlot(4, versioningState, 0)
 }
 func CompleteMultipartUploadArgsEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

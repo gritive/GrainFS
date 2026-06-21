@@ -452,7 +452,7 @@ func uploadPartArgsBuilderSize(bucket, key, uploadID string, bodyLen int) int {
 	return bodyLen + len(bucket) + len(key) + len(uploadID) + tableOverhead
 }
 
-func buildCompleteMultipartUploadArgs(bucket, key, uploadID string, parts []storage.Part) []byte {
+func buildCompleteMultipartUploadArgs(bucket, key, uploadID string, parts []storage.Part, versioningState byte) []byte {
 	b := flatbuffers.NewBuilder(128)
 	bk := b.CreateString(bucket)
 	k := b.CreateString(key)
@@ -476,6 +476,7 @@ func buildCompleteMultipartUploadArgs(bucket, key, uploadID string, parts []stor
 	raftpb.CompleteMultipartUploadArgsAddKey(b, k)
 	raftpb.CompleteMultipartUploadArgsAddUploadId(b, u)
 	raftpb.CompleteMultipartUploadArgsAddParts(b, partsVec)
+	raftpb.CompleteMultipartUploadArgsAddVersioningState(b, versioningState)
 	b.Finish(raftpb.CompleteMultipartUploadArgsEnd(b))
 	return b.FinishedBytes()
 }
