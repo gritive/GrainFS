@@ -119,7 +119,14 @@ func (b *DistributedBackend) liveVersionedShardDirs() (map[string]bool, error) {
 	if b.shardSvc == nil {
 		return nil, fmt.Errorf("no shard service")
 	}
-	out := make(map[string]bool)
+	// Phase 1 (inside the read txn): collect candidate FSM obj: records. The
+	// per-bucket versioning lookup (soleAuthReadOn) opens its OWN read txn, so it
+	// must run OUTSIDE this View — collect here, classify below.
+	type fsmRec struct {
+		bucket, key, versionID string
+		meta                   objectMeta
+	}
+	var recs []fsmRec
 	verr := b.store.View(func(txn MetadataTxn) error {
 		return b.ks().scanGroupPrefix(txn, []byte("obj:"), func(rawKey []byte, item MetaItem) error {
 			s := string(rawKey[len("obj:"):]) // <bucket>/<key>/<versionID>
@@ -148,16 +155,39 @@ func (b *DistributedBackend) liveVersionedShardDirs() (map[string]bool, error) {
 			if meta.ETag == deleteMarkerETag {
 				return nil // tombstone — no shards
 			}
-			dir, derr := b.shardSvc.getShardDir(bucket, meta.Key+"/"+versionID, 0)
-			if derr != nil {
-				return nil // escaping key cannot match a real on-disk dir
-			}
-			out[filepath.Clean(dir)] = true
+			recs = append(recs, fsmRec{bucket: bucket, key: meta.Key, versionID: versionID, meta: meta})
 			return nil
 		})
 	})
 	if verr != nil {
 		return nil, verr
+	}
+	// Phase 2 (outside the txn): forward-map each record EXCEPT a plain (non-carve-out)
+	// versioned record under a versioning-enabled bucket — those are blob-authoritative
+	// under blob-primary (protected via hasLiveShardRecord's per-version blob lookup),
+	// and a lingering one (e.g. left by a hard delete) must NOT keep its now-tombstoned
+	// shards alive. Carve-outs (appendable/coalesced) and non-versioned records stay
+	// FSM-authoritative and need the bijective forward-map for cleanable keys.
+	out := make(map[string]bool)
+	verCache := make(map[string]bool)
+	for _, r := range recs {
+		ver, ok := verCache[r.bucket]
+		if !ok {
+			v, err := b.soleAuthReadOn(r.bucket)
+			if err != nil {
+				return nil, err // fail-closed
+			}
+			ver = v
+			verCache[r.bucket] = v
+		}
+		if ver && !isFsmCarveoutClass(r.meta, false) {
+			continue // plain versioned → blob-authoritative, not forward-mapped here
+		}
+		dir, derr := b.shardSvc.getShardDir(r.bucket, r.key+"/"+r.versionID, 0)
+		if derr != nil {
+			continue // escaping key cannot match a real on-disk dir
+		}
+		out[filepath.Clean(dir)] = true
 	}
 	return out, nil
 }
@@ -374,6 +404,24 @@ func parseFullObjectRel(rel string) (bucket, key, versionID string, ok bool) {
 // hold shards without a LOCAL quorum-meta record, so the peer fan-out in
 // readQuorumMeta is mandatory — a local-only read would false-orphan it).
 func (b *DistributedBackend) hasLiveShardRecord(bucket, key, versionID string) (live, certain bool) {
+	// Blob-primary: for a versioning-enabled bucket the per-version blob is the
+	// shard-liveness authority for plain versioned objects (live iff a blob exists
+	// that is neither a hard-delete tombstone nor a delete marker); carve-outs
+	// (appendable/coalesced) stay FSM-authoritative. A stale plain-versioned FSM
+	// record is NON-authoritative here, so a hard-deleted version's shards become
+	// orphan-eligible even while its FSM record lingers.
+	if on, serr := b.soleAuthReadOn(bucket); serr != nil {
+		return false, false // uncertain → keep
+	} else if on {
+		cmd, ok, err := b.readQuorumMetaVersionDecodeStrict(bucket, key, versionID)
+		if err != nil {
+			return false, false // uncertain → keep
+		}
+		if ok {
+			return !cmd.IsHardDeleted && !cmd.IsDeleteMarker, true
+		}
+		return b.fsmCarveoutShardLive(bucket, key, versionID)
+	}
 	var fsmLive, fsmFound bool
 	verr := b.store.View(func(txn MetadataTxn) error {
 		item, gerr := txn.Get(b.ks().ObjectMetaKeyV(bucket, key, versionID))
@@ -417,6 +465,45 @@ func (b *DistributedBackend) hasLiveShardRecord(bucket, key, versionID string) (
 	default:
 		return false, false // quorum-meta read error → UNCERTAIN → keep
 	}
+}
+
+// fsmCarveoutShardLive judges shard liveness from the FSM obj: record for a
+// versioning-enabled bucket when no per-version blob exists: only a carve-out
+// (appendable/coalesced) record is authoritative and keeps its shards alive. A
+// plain versioned FSM record is non-authoritative under blob-primary (the blob is
+// the authority and already reported no live version), so it is orphan-eligible.
+// Fail-closed: a read error returns (false, false) so the caller keeps the shards.
+func (b *DistributedBackend) fsmCarveoutShardLive(bucket, key, versionID string) (live, certain bool) {
+	var found, carveLive bool
+	verr := b.store.View(func(txn MetadataTxn) error {
+		item, gerr := txn.Get(b.ks().ObjectMetaKeyV(bucket, key, versionID))
+		if gerr != nil {
+			if errors.Is(gerr, ErrMetaKeyNotFound) {
+				return nil
+			}
+			return gerr
+		}
+		raw, cerr := b.itemValueCopy(item)
+		if cerr != nil {
+			return cerr
+		}
+		meta, merr := unmarshalObjectMeta(raw)
+		if merr != nil {
+			return merr
+		}
+		// versionID != "" → bareLegacy=false; carve-out = appendable || coalesced.
+		if isFsmCarveoutClass(meta, false) && meta.ETag != deleteMarkerETag {
+			found, carveLive = true, true
+		}
+		return nil
+	})
+	if verr != nil {
+		return false, false // UNCERTAIN → keep
+	}
+	if found {
+		return carveLive, true
+	}
+	return false, true // no carve-out record → orphan-eligible (blob already said not-live)
 }
 
 // DeleteOrphanDir removes one full-object EC shard dir across every dataDir

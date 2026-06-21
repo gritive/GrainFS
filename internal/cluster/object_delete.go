@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"time"
 
@@ -48,6 +49,63 @@ func (b *DistributedBackend) deleteObjectWithMarker(ctx context.Context, bucket,
 	}
 	os.Remove(b.objectPath(bucket, key))
 	markerID := newVersionID()
+
+	// Blob-primary (raft-free): if the object exists as a versioned object — i.e. it
+	// has per-version blobs — the delete marker is a durable per-version blob
+	// (IsDeleteMarker) with NO raft propose, reusing the object's placement. Reads,
+	// LIST, and latest-derive all treat the max-VID marker blob as "deleted".
+	//
+	// The decision is made from the object's ACTUAL storage (a cluster-wide
+	// per-version read), NOT the bucket's versioning meta-state: the delete leaf may
+	// not be the meta authority (a data-group node) and would misread versioning as
+	// Unversioned, falling to the legacy FSM path — leaving the marker invisible to
+	// the blob-primary readers (a 404 instead of 405). A key with no per-version
+	// blobs (non-versioned object, or a key that never existed) falls through to the
+	// legacy path below.
+	if !storage.IsInternalBucket(bucket) && b.shardSvc != nil {
+		// Decode-strict (fail-closed) read, mirroring the hard-delete path: a read
+		// ERROR must NOT fall through to the legacy FSM propose (which would write a
+		// blob-invisible marker for an actually-versioned object), so surface it. A
+		// genuine empty result (no per-version blobs anywhere reachable) is the
+		// non-versioned / never-existed case → legacy path below.
+		cmds, verr := b.readQuorumMetaVersionsDecodeStrict(bucket, key)
+		if verr != nil {
+			return "", fmt.Errorf("resolve per-version blobs for delete marker %s/%s: %w", bucket, key, verr)
+		}
+		if len(cmds) > 0 {
+			placement := cmds[0]
+			for i := range cmds {
+				if cmds[i].VersionID > placement.VersionID {
+					placement = cmds[i]
+				}
+			}
+			if len(placement.NodeIDs) > 0 {
+				marker := PutObjectMetaCmd{
+					Bucket:           bucket,
+					Key:              key,
+					VersionID:        markerID,
+					ModTime:          time.Now().Unix(),
+					IsDeleteMarker:   true,
+					ECData:           placement.ECData,
+					ECParity:         placement.ECParity,
+					NodeIDs:          placement.NodeIDs,
+					PlacementGroupID: placement.PlacementGroupID,
+				}
+				blob, eerr := EncodeCommand(CmdPutObjectMeta, marker)
+				if eerr != nil {
+					return "", fmt.Errorf("encode delete marker %s/%s: %w", bucket, key, eerr)
+				}
+				epoch := b.resolveQuorumMetaEpoch(ctx, bucket)
+				if werr := b.fanOutPerVersionBlob(ctx, marker, blob, epoch); werr != nil {
+					return "", fmt.Errorf("write delete marker %s/%s: %w", bucket, key, werr)
+				}
+				return markerID, nil
+			}
+		}
+	}
+
+	// Legacy path (non-versioned / internal buckets, and never-existed keys): FSM
+	// marker via raft propose + best-effort quorum-meta tombstone for LIST.
 	if err := b.propose(ctx, CmdDeleteObject, DeleteObjectCmd{
 		Bucket:    bucket,
 		Key:       key,
@@ -55,9 +113,6 @@ func (b *DistributedBackend) deleteObjectWithMarker(ctx context.Context, bucket,
 	}); err != nil {
 		return "", err
 	}
-	// Write a tombstone to quorum meta so scatter-gather LIST sees the delete.
-	// Read the existing placement to determine which nodes to write to.
-	// Best-effort: if the object has no quorum meta (pre-Phase-3), skip.
 	if b.shardSvc != nil {
 		if existing, qerr := b.readQuorumMetaCmd(bucket, key); qerr == nil && len(existing.NodeIDs) > 0 {
 			_ = b.writeQuorumMeta(ctx, PutObjectMetaCmd{

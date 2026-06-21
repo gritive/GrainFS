@@ -310,8 +310,20 @@ func (rcv *PutObjectMetaCmd) MutateMetaSeq(n uint64) bool {
 	return rcv._tab.MutateUint64Slot(46, n)
 }
 
+func (rcv *PutObjectMetaCmd) IsHardDeleted() bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(48))
+	if o != 0 {
+		return rcv._tab.GetBool(o + rcv._tab.Pos)
+	}
+	return false
+}
+
+func (rcv *PutObjectMetaCmd) MutateIsHardDeleted(n bool) bool {
+	return rcv._tab.MutateBoolSlot(48, n)
+}
+
 func PutObjectMetaCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(22)
+	builder.StartObject(23)
 }
 func PutObjectMetaCmdAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -393,6 +405,9 @@ func PutObjectMetaCmdAddAcl(builder *flatbuffers.Builder, acl byte) {
 }
 func PutObjectMetaCmdAddMetaSeq(builder *flatbuffers.Builder, metaSeq uint64) {
 	builder.PrependUint64Slot(21, metaSeq, 0)
+}
+func PutObjectMetaCmdAddIsHardDeleted(builder *flatbuffers.Builder, isHardDeleted bool) {
+	builder.PrependBoolSlot(22, isHardDeleted, false)
 }
 func PutObjectMetaCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

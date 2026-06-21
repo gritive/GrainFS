@@ -1324,11 +1324,16 @@ func (c *ClusterCoordinator) ListObjectVersions(
 // bucketSoleAuthOn reports whether the bucket's soleauth state is "on",
 // FAIL-CLOSED on a read error (mirrors DistributedBackend.soleAuthReadOn).
 func (c *ClusterCoordinator) bucketSoleAuthOn(bucket string) (bool, error) {
-	state, err := c.GetBucketSoleAuthority(bucket)
-	if err != nil {
-		return false, fmt.Errorf("read soleauth state for bucket %q: %w", bucket, err)
+	// S2 blob-primary: blob-authoritative for every versioning-enabled bucket
+	// (mirrors DistributedBackend.soleAuthReadOn). Internal buckets stay on raft.
+	if storage.IsInternalBucket(bucket) {
+		return false, nil
 	}
-	return state == soleAuthOn, nil
+	state, err := c.GetBucketVersioning(bucket)
+	if err != nil {
+		return false, fmt.Errorf("read versioning state for bucket %q: %w", bucket, err)
+	}
+	return state == "Enabled", nil
 }
 
 // dedupVersionsKeepFirst removes (Key,VersionID) duplicates, keeping the first

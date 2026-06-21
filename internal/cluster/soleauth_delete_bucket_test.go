@@ -88,15 +88,17 @@ func TestDeleteBucketEmptinessSoleAuthOn(t *testing.T) {
 func TestDeleteBucketEmptinessOffUnchanged(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("off: a stale FSM obj: record blocks deletion (obj: scan)", func(t *testing.T) {
+	t.Run("a stale plain-versioned FSM record does NOT block deletion (blob-primary)", func(t *testing.T) {
 		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "voff"))
 		setVersioningForTest(t, b, "voff", "Enabled")
+		// A stale plain-versioned FSM record with no per-version blob is
+		// non-authoritative under blob-primary, so the bucket is authoritatively
+		// empty and deletes (was: the obj: scan saw the ghost and blocked).
 		seedFSMObject(t, b, "voff", "ghost", vidB1, objectMeta{Key: "ghost", ETag: "stale"}, true)
-		// soleauth never flipped → off
 
-		err := b.DeleteBucket(ctx, "voff")
-		require.ErrorIs(t, err, storage.ErrBucketNotEmpty)
+		require.NoError(t, b.DeleteBucket(ctx, "voff"))
+		require.ErrorIs(t, b.HeadBucket(ctx, "voff"), storage.ErrBucketNotFound)
 	})
 
 	t.Run("off: empty bucket deletes", func(t *testing.T) {

@@ -790,11 +790,6 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 		s.orphanVersionSweep(vw)
 	}
 
-	// Optional: write missing per-version quorum-meta blobs (foundation S3 backfill).
-	if bf, ok := s.backend.(PerVersionBackfillable); ok {
-		s.perVersionBackfillSweep(ctx, bf, maxBackfillPerCycle)
-	}
-
 	// Optional: relocate non-redundant (1+0) EC objects into a redundant group.
 	// Runs only when enabled AND the backend implements RedundancyUpgrader.
 	// Fail-soft: a sweep error is recorded on the cycle span but does not abort.

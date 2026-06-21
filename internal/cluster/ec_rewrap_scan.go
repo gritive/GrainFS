@@ -1,5 +1,10 @@
 package cluster
 
+import (
+	"context"
+	"fmt"
+)
+
 // ECRewrapTarget identifies a single EC-distributed shard that a DEK rewrap
 // lane must migrate. ShardKey is the canonical shard-service key; NodeIDs is
 // positional: shard i lives on NodeIDs[i].
@@ -21,7 +26,7 @@ type ECRewrapTarget struct {
 // (and dropped on failure) inside buildECShardTargets, so they arrive clean.
 func (b *DistributedBackend) CollectECRewrapTargets() ([]ECRewrapTarget, error) {
 	var out []ECRewrapTarget
-	err := b.fsm.IterECShardScanTargetsAllVersions(func(t ECShardScanTarget) error {
+	appendTarget := func(t ECShardScanTarget) error {
 		switch t.Kind {
 		case ECShardObjectVersion:
 			if !validateECRefPlacement(t.ECData, t.ECParity, t.NodeIDs) {
@@ -40,6 +45,50 @@ func (b *DistributedBackend) CollectECRewrapTargets() ([]ECRewrapTarget, error) 
 			})
 		}
 		return nil
-	})
-	return out, err
+	}
+
+	// FSM scan: carve-outs (appendable/coalesced), non-versioned objects, and —
+	// until the propose is removed — plain versioned records. Post-removal the
+	// versioned records are gone; the per-version blob enum below covers them.
+	if err := b.fsm.IterECShardScanTargetsAllVersions(appendTarget); err != nil {
+		return nil, err
+	}
+
+	// Per-version blob enum (versioning-enabled buckets): the per-version blob is the
+	// authority for versioned objects once their FSM obj: records are removed, so DEK
+	// rewrap MUST enumerate from blobs or it would silently skip every versioned
+	// object's shards — leaving them encrypted under a retired KEK generation. It is
+	// cluster-wide and FAIL-CLOSED (scanQuorumMetaVersionsClusterAll): a missed peer
+	// aborts the sweep rather than under-enumerating (a node that holds a shard but
+	// not the K-of-N blob still gets its shard covered via the peer's blob). Reuses
+	// buildECShardTargets on the decoded blob, yielding identical object-version +
+	// segment shard targets; the lane rewraps only the shards local to each node.
+	buckets, err := b.ListBuckets(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	for _, bucket := range buckets {
+		on, serr := b.soleAuthReadOn(bucket)
+		if serr != nil {
+			return nil, serr
+		}
+		if !on {
+			continue
+		}
+		cmds, cerr := b.scanQuorumMetaVersionsClusterAll(bucket, "")
+		if cerr != nil {
+			return nil, fmt.Errorf("ec rewrap blob enum %s: %w", bucket, cerr)
+		}
+		for _, cmd := range cmds {
+			if cmd.IsHardDeleted || cmd.IsDeleteMarker {
+				continue // tombstone / delete marker — no live shards to rewrap
+			}
+			meta := buildPutObjectMeta(cmd)
+			ref := ObjectMetaRef{Bucket: bucket, Key: cmd.Key, VersionID: cmd.VersionID}
+			if err := b.fsm.buildECShardTargets(ref, meta, appendTarget); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return out, nil
 }

@@ -47,13 +47,17 @@ func (b *DistributedBackend) listAllObjectsForGC() ([]storage.SnapshotObject, er
 	}
 	var result []storage.SnapshotObject
 	for _, bucket := range buckets {
-		saState, saErr := b.GetBucketSoleAuthority(bucket)
+		// Blob-primary: the per-version tree is the GC known-set authority for EVERY
+		// versioning-Enabled bucket, not only the (now-vestigial) soleauth=on flip —
+		// because writeQuorumMeta writes per-version blobs for every Enabled bucket and
+		// T5 removes the FSM obj: writer. Gating on soleAuthReadOn (== versioning
+		// Enabled) keeps the FSM obj: scan only for non-versioned/Suspended buckets,
+		// whose objects still live in the FSM. Internal buckets fail soleAuthReadOn.
+		on, saErr := b.soleAuthReadOn(bucket)
 		if saErr != nil {
 			return nil, fmt.Errorf("list objects soleauth %s: %w", bucket, saErr)
 		}
-		if saState == soleAuthOn {
-			// INVARIANT (v9 scope): only Enabled buckets are ever soleauth=on, so the
-			// per-version tree is this bucket's sole authority. S4c-d enforces Enabled-only.
+		if on {
 			objs, oerr := b.listSoleAuthBucketObjectsForGC(bucket)
 			if oerr != nil {
 				return nil, oerr
@@ -139,6 +143,11 @@ func (b *DistributedBackend) listSoleAuthBucketObjectsForGC(bucket string) ([]st
 	if err != nil {
 		return nil, fmt.Errorf("list soleauth bucket %s: %w", bucket, err)
 	}
+	// Hard-delete tombstones are not live objects: exclude them from the segment-GC
+	// known-set so their now-dead segments become orphan-eligible (a live sibling
+	// version that shares a coalesced segment still protects it — the known-set
+	// unions all remaining live versions).
+	cmds = dropHardDeletedVersions(cmds)
 
 	// First pass: find the max VersionID per key (markers included).
 	maxVID := make(map[string]string, len(cmds))

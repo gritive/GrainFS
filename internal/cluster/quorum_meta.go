@@ -70,16 +70,15 @@ func (b *DistributedBackend) writeQuorumMeta(ctx context.Context, cmd PutObjectM
 	if storage.IsInternalBucket(cmd.Bucket) {
 		return b.propose(ctx, CmdPutObjectMeta, cmd)
 	}
-	// Versioning-enabled buckets need per-version retention: quorum-meta holds a
-	// single latest-only record per bucket/key, so without an FSM per-version key
-	// (obj:{bucket}/{key}/{versionID}) a GET ?versionId=<old> can never find an
-	// overwritten version (404). Persist the per-version metadata via raft first,
-	// then continue to the quorum-meta fan-out below for LIST/latest visibility.
-	if cmd.VersionID != "" && b.bucketVersioningEnabled(ctx, cmd.Bucket) {
-		if err := b.propose(ctx, CmdPutObjectMeta, cmd); err != nil {
-			return fmt.Errorf("versioned meta persist: %w", err)
-		}
-	}
+	// Blob-primary (raft-free): for versioning-enabled buckets the per-version blob
+	// (written below via fanOutPerVersionBlob) is the SOLE AUTHORITY for object
+	// metadata — there is no CmdPutObjectMeta propose. Reads, LIST, the orphan GCs,
+	// and DEK rewrap all derive from the per-version blobs; the latest-only blob is
+	// the LIST-latest fast path. The conditional-PUT (ExpectedETag) CAS that used to
+	// be enforced inside the propose is dropped for versioned objects: the only
+	// caller that sets ExpectedETag is object relocation, which already relies on the
+	// blob LWW (preserve-old-ModTime), not the FSM CAS. Internal buckets keep their
+	// propose above.
 	if b.shardSvc == nil || len(cmd.NodeIDs) == 0 {
 		return fmt.Errorf("quorum meta write: no shard service or empty placement")
 	}
@@ -99,6 +98,20 @@ func (b *DistributedBackend) writeQuorumMeta(ctx context.Context, cmd PutObjectM
 	if k <= 0 {
 		k = 1
 	}
+	// Per-version blob FIRST, durable and FAIL-CLOSED. The immutable per-version blob
+	// in the separate .quorum_meta_versions subtree is the AUTHORITATIVE metadata for a
+	// versioned object, so a versioned write is durable only if its per-version blob
+	// reaches the K-of-N write quorum. It is written BEFORE the latest-only blob so a
+	// per-version failure returns before the latest blob is published — the caller's
+	// shard cleanup is then a clean rollback, never a published latest blob left
+	// pointing at data the caller is about to delete. Gated on versioning-enabled:
+	// non-versioned buckets retain no version history (latest-only blob / off-raft).
+	if cmd.VersionID != "" && b.bucketVersioningEnabled(ctx, cmd.Bucket) {
+		if verr := b.fanOutPerVersionBlob(ctx, cmd, blob, epoch); verr != nil {
+			return verr
+		}
+	}
+	// Latest-only blob (LIST-latest / legacy read fast path), same K-of-N, fail-closed.
 	wctx, cancel := context.WithTimeout(ctx, quorumMetaWriteTimeout)
 	defer cancel()
 	latestErr := fanOutQuorumMeta(wctx, cmd.NodeIDs, k, func(fctx context.Context, node string) error {
@@ -114,31 +127,39 @@ func (b *DistributedBackend) writeQuorumMeta(ctx context.Context, cmd PutObjectM
 	if latestErr != nil {
 		return latestErr
 	}
-	// S1: also write an immutable per-version blob to the separate
-	// .quorum_meta_versions subtree, best-effort — a failure here must NOT fail the
-	// PUT (the latest-only write already succeeded; reads ignore this subtree until
-	// S2, and S3 backfills any gaps). Same placement nodes, same K-of-N. Gated on
-	// versioning-enabled, mirroring the FSM per-version propose at :60: non-versioned
-	// buckets retain no version history (and are already quorum-meta-only / off-raft
-	// via the latest-only blob), so a per-version blob there would be pure garbage.
-	if cmd.VersionID != "" && b.bucketVersioningEnabled(ctx, cmd.Bucket) {
-		verSubpath := path.Join(cmd.Key, cmd.VersionID)
-		vctx, vcancel := context.WithTimeout(ctx, quorumMetaWriteTimeout)
-		defer vcancel()
-		if verr := fanOutQuorumMeta(vctx, cmd.NodeIDs, k, func(fctx context.Context, node string) error {
-			if node == self {
-				return b.shardSvc.writeQuorumMetaVersionLocal(cmd.Bucket, verSubpath, blob, epoch)
-			}
-			addr, rerr := b.shardSvc.resolvePeerAddress(node)
-			if rerr != nil {
-				return rerr
-			}
-			return b.shardSvc.WriteQuorumMetaVersion(fctx, addr, cmd.Bucket, verSubpath, blob, epoch)
-		}); verr != nil {
-			b.logger.Warn().
-				Str("bucket", cmd.Bucket).Str("key", cmd.Key).Str("version", cmd.VersionID).
-				Err(verr).Msg("per-version quorum-meta write failed (best-effort)")
+	return nil
+}
+
+// fanOutPerVersionBlob durably writes ONE per-version quorum-meta blob
+// (.quorum_meta_versions/{key}/{vid}) to the version's K-of-N placement quorum,
+// FAIL-CLOSED. It is the per-version half of writeQuorumMeta (the latest-only blob
+// and the raft propose are NOT touched here) and the sole writer of hard-delete
+// tombstones (DeleteObjectVersion). The encoded blob and the resolved soleauth
+// epoch are passed in so the hot PUT path encodes + resolves the epoch once and
+// shares them with the latest-only write.
+func (b *DistributedBackend) fanOutPerVersionBlob(ctx context.Context, cmd PutObjectMetaCmd, blob []byte, epoch uint32) error {
+	if b.shardSvc == nil || len(cmd.NodeIDs) == 0 {
+		return fmt.Errorf("per-version quorum-meta write: no shard service or empty placement")
+	}
+	self := b.currentSelfAddr()
+	k := int(cmd.ECData)
+	if k <= 0 {
+		k = 1
+	}
+	verSubpath := path.Join(cmd.Key, cmd.VersionID)
+	vctx, vcancel := context.WithTimeout(ctx, quorumMetaWriteTimeout)
+	defer vcancel()
+	if verr := fanOutQuorumMeta(vctx, cmd.NodeIDs, k, func(fctx context.Context, node string) error {
+		if node == self {
+			return b.shardSvc.writeQuorumMetaVersionLocal(cmd.Bucket, verSubpath, blob, epoch)
 		}
+		addr, rerr := b.shardSvc.resolvePeerAddress(node)
+		if rerr != nil {
+			return rerr
+		}
+		return b.shardSvc.WriteQuorumMetaVersion(fctx, addr, cmd.Bucket, verSubpath, blob, epoch)
+	}); verr != nil {
+		return fmt.Errorf("per-version quorum-meta write %s/%s@%s: %w", cmd.Bucket, cmd.Key, cmd.VersionID, verr)
 	}
 	return nil
 }
@@ -178,6 +199,26 @@ func quorumMetaBlobWins(modA int64, verA string, seqA uint64, modB int64, verB s
 		return verA > verB
 	}
 	return seqA > seqB
+}
+
+// quorumMetaCmdWins reports whether candidate cand strictly beats cur in the
+// per-version LWW comparison, with the hard-delete tombstone as the top-priority
+// tiebreak: on an otherwise-equal (ModTime, VersionID, MetaSeq) a tombstone
+// (IsHardDeleted) beats a non-tombstone, so a hard-deleted version can never lose
+// the tie to the stale data blob it replaced (closes the relocation-re-write
+// equal-MetaSeq window). For two non-tombstone blobs it is identical to
+// quorumMetaBlobWins. Used on the per-version write guard and the read-side
+// per-VID dedup, where same-VID tombstone-vs-data comparisons occur.
+func quorumMetaCmdWins(cand, cur PutObjectMetaCmd) bool {
+	if quorumMetaBlobWins(cand.ModTime, cand.VersionID, cand.MetaSeq, cur.ModTime, cur.VersionID, cur.MetaSeq) {
+		return true
+	}
+	// Not a strict (ModTime,VID,MetaSeq) win. The only remaining way cand wins is
+	// the tombstone tiebreak on a FULL tie.
+	if cand.ModTime == cur.ModTime && cand.VersionID == cur.VersionID && cand.MetaSeq == cur.MetaSeq {
+		return cand.IsHardDeleted && !cur.IsHardDeleted
+	}
+	return false
 }
 
 // readQuorumMetaWinningRaw returns the raw quorum-meta blob that wins the LWW
@@ -519,7 +560,7 @@ func (s *ShardService) writeQuorumMetaVersionLocal(bucket, versionSubpath string
 	if existing, rerr := os.ReadFile(target); rerr == nil {
 		if cand, derr := s.decodeQuorumMetaCmdBlob(data); derr == nil {
 			if cur, derr2 := s.decodeQuorumMetaCmdBlob(existing); derr2 == nil {
-				if !quorumMetaBlobWins(cand.ModTime, cand.VersionID, cand.MetaSeq, cur.ModTime, cur.VersionID, cur.MetaSeq) {
+				if !quorumMetaCmdWins(cand, cur) {
 					return nil // existing wins (or ties) — keep it, skip the rename
 				}
 			}
@@ -772,6 +813,16 @@ func (b *DistributedBackend) listObjectsPerVersion(ctx context.Context, bucket, 
 	}
 	out := make([]PutObjectMetaCmd, 0, len(byKey))
 	for _, c := range byKey {
+		if c.IsHardDeleted {
+			// The per-key-max version was hard-deleted; the per-key-max scan
+			// collapsed the predecessor away, so re-derive the new latest from the
+			// full per-version set for this key (cluster-wide, tombstones/markers
+			// excluded). Omit the key entirely if nothing live remains.
+			if live, ok := b.latestLiveForKey(bucket, c.Key); ok {
+				out = append(out, live)
+			}
+			continue
+		}
 		if c.IsDeleteMarker {
 			continue // global-max is a marker → key deleted, omit from LIST
 		}
@@ -954,10 +1005,16 @@ func (b *DistributedBackend) readQuorumMetaVersionDecodeStrict(bucket, key, vers
 
 // deriveLatestVersion returns the max-VersionID blob and whether the object's
 // latest state is live (false = no versions OR latest is a delete marker).
+// Hard-delete tombstones (IsHardDeleted) are skipped as if the version were not
+// present, so a hard-delete of the current latest version correctly falls through
+// to the live predecessor instead of reporting the whole key as gone.
 func deriveLatestVersion(cmds []PutObjectMetaCmd) (PutObjectMetaCmd, bool) {
 	var latest PutObjectMetaCmd
 	found := false
 	for _, c := range cmds {
+		if c.IsHardDeleted {
+			continue // hard-delete tombstone: version is gone, never the latest
+		}
 		if !found || c.VersionID > latest.VersionID {
 			latest = c
 			found = true
@@ -967,6 +1024,37 @@ func deriveLatestVersion(cmds []PutObjectMetaCmd) (PutObjectMetaCmd, bool) {
 		return PutObjectMetaCmd{}, false
 	}
 	return latest, true
+}
+
+// dropHardDeletedVersions returns cmds with hard-delete tombstones removed. Apply
+// at the read / list / scan CONSUMERS so a hard-deleted version is fully excluded
+// (never resurrected). It is correct to drop after the per-VID dedup because a
+// tombstone is written with MetaSeq = existing+1, so it always wins the same-VID
+// dedup over the data blob it replaced (and the per-version write guard keeps only
+// the tombstone on disk). The low-level scanners deliberately KEEP tombstones so
+// the orphan walker can still reconcile/GC them.
+func dropHardDeletedVersions(cmds []PutObjectMetaCmd) []PutObjectMetaCmd {
+	out := make([]PutObjectMetaCmd, 0, len(cmds))
+	for _, c := range cmds {
+		if c.IsHardDeleted {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// latestLiveForKey resolves the live latest version for a single key from the full
+// cluster-wide per-version set (tombstones and delete markers excluded via
+// deriveLatestVersion). Used by listObjectsPerVersion when a key's per-key-max scan
+// collapsed to a hard-delete tombstone: the predecessor was collapsed away, so the
+// new latest must be re-derived from all versions of that key.
+func (b *DistributedBackend) latestLiveForKey(bucket, key string) (PutObjectMetaCmd, bool) {
+	cmds, err := b.readQuorumMetaVersions(bucket, key)
+	if err != nil {
+		return PutObjectMetaCmd{}, false
+	}
+	return deriveLatestVersion(cmds)
 }
 
 // isQuorumMetaTempName reports whether a directory entry is an in-flight

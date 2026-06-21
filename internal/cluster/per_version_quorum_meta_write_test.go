@@ -197,9 +197,14 @@ func TestWriteQuorumMetaVersionLocal_ConcurrentWritesLWWMax(t *testing.T) {
 		fmt.Sprintf("on-disk blob must be LWW winner (MetaSeq=%d), got MetaSeq=%d", N-1, cmd.MetaSeq))
 }
 
-// TestWriteQuorumMeta_PerVersionFailureDoesNotFailPut proves the per-version
-// write is best-effort: if its subtree can't be created, PutObject still succeeds.
-func TestWriteQuorumMeta_PerVersionFailureDoesNotFailPut(t *testing.T) {
+// TestWriteQuorumMeta_PerVersionFailureFailsPutClosed proves the per-version blob
+// is the AUTHORITATIVE metadata for a versioned object: if it cannot be durably
+// written, the PUT FAILS CLOSED (was: best-effort, the PUT succeeded with a
+// missing blob — a deferred 404 / lost object). The per-version blob is written
+// BEFORE the latest-only blob, so on failure the latest blob is never published:
+// the PUT's shard cleanup is then a clean rollback, never a published latest blob
+// left pointing at data the caller is about to delete.
+func TestWriteQuorumMeta_PerVersionFailureFailsPutClosed(t *testing.T) {
 	ctx := context.Background()
 	b := newTestDistributedBackend(t)
 	require.NoError(t, b.CreateBucket(ctx, "bucket"))
@@ -213,5 +218,10 @@ func TestWriteQuorumMeta_PerVersionFailureDoesNotFailPut(t *testing.T) {
 	require.NoError(t, os.WriteFile(blocker, []byte("x"), 0o644))
 
 	_, err := b.PutObject(ctx, "bucket", "obj", bytes.NewReader([]byte("data")), "application/octet-stream")
-	require.NoError(t, err, "per-version write failure must not fail the PUT (best-effort)")
+	require.Error(t, err, "versioned PUT must fail closed when the per-version blob cannot be durably written")
+
+	// The per-version write runs first, so the latest-only blob is never published.
+	_, statErr := os.Stat(filepath.Join(root, quorumMetaSubDir, "bucket", "obj"))
+	require.True(t, os.IsNotExist(statErr),
+		"latest-only blob must NOT be published when the per-version write fails")
 }

@@ -116,18 +116,16 @@ func TestHeadObjectMetaVSoleAuthOffUnchanged(t *testing.T) {
 		require.Equal(t, "v1", obj.VersionID)
 	})
 
-	t.Run("off: FSM-fallback hit resolves (no blob, vid-bearing FSM record)", func(t *testing.T) {
+	t.Run("blob-absent plain-versioned FSM record is 404 (blob-primary, no FSM resurrection)", func(t *testing.T) {
 		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "foff"))
 		setVersioningForTest(t, b, "foff", "Enabled")
-		// No blob; a vid-bearing FSM record. Under off the existing path reads the
-		// ObjectMetaKeyV FSM record directly.
+		// A vid-bearing FSM record with NO per-version blob. Under blob-primary the
+		// per-version blob is the sole authority, so a specific-version read of a
+		// blob-absent plain versioned record is 404 (was the old FSM ObjectMetaKeyV read).
 		seedFSMObject(t, b, "foff", "k", "v1", objectMeta{Key: "k", ETag: "fsm-off"}, true)
 
-		obj, _, err := b.headObjectMetaV(ctx, "foff", "k", "v1")
-		require.NoError(t, err)
-		require.NotNil(t, obj)
-		require.Equal(t, "fsm-off", obj.ETag)
-		require.Equal(t, "v1", obj.VersionID)
+		_, _, err := b.headObjectMetaV(ctx, "foff", "k", "v1")
+		require.ErrorIs(t, err, storage.ErrObjectNotFound)
 	})
 }

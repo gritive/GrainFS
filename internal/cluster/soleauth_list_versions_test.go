@@ -218,15 +218,15 @@ func TestListObjectVersionsSoleAuthOn(t *testing.T) {
 func TestListObjectVersionsSoleAuthOffUnchanged(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("off: versioned multi-key FSM listing", func(t *testing.T) {
+	t.Run("versioned multi-key blob listing (blob-primary)", func(t *testing.T) {
 		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "voff"))
 		setVersioningForTest(t, b, "voff", "Enabled")
-		// FSM records with lat: pointers — the off-path reads these directly.
-		seedFSMObject(t, b, "voff", "k1", vidA1, objectMeta{Key: "k1", ETag: "k1-v1"}, false)
-		seedFSMObject(t, b, "voff", "k1", vidA2, objectMeta{Key: "k1", ETag: "k1-v2"}, true)
-		seedFSMObject(t, b, "voff", "k2", vidB1, objectMeta{Key: "k2", ETag: "k2-v1"}, true)
-		// soleauth never flipped → off
+		// Blob-primary: ListObjectVersions derives from the per-version blob tree;
+		// IsLatest is the max-VersionID per key.
+		seedVersionBlob(t, b, "voff", "k1", vidA1, PutObjectMetaCmd{ETag: "k1-v1"})
+		seedVersionBlob(t, b, "voff", "k1", vidA2, PutObjectMetaCmd{ETag: "k1-v2"})
+		seedVersionBlob(t, b, "voff", "k2", vidB1, PutObjectMetaCmd{ETag: "k2-v1"})
 
 		vs, err := b.ListObjectVersions(ctx, "voff", "", 0)
 		require.NoError(t, err)

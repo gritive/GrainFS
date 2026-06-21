@@ -216,6 +216,9 @@ func (b *DistributedBackend) scanObjectsSoleAuth(bucket string) ([]scrubber.Obje
 	if err != nil {
 		return nil, fmt.Errorf("scan objects (soleauth): %w", err)
 	}
+	// Hard-delete tombstones have no live shards to scrub: drop them before the
+	// per-key collapse so a hard-deleted latest falls to its live predecessor.
+	cmds = dropHardDeletedVersions(cmds)
 	// Collapse to latest (max-VID) per key; MetaSeq tiebreak on equal VID.
 	latest := map[string]PutObjectMetaCmd{}
 	for _, c := range cmds {

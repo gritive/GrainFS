@@ -103,17 +103,18 @@ func TestRead1DecodeStrictResurrection(t *testing.T) {
 
 // TestRead1DecodeStrictOffUnchanged confirms the off/pending path keeps the
 // tolerant reader: a corrupt blob is dropped (availability-first), NOT an error.
-func TestRead1DecodeStrictOffUnchanged(t *testing.T) {
+func TestRead1DecodeStrictCorruptBlobFailsClosed(t *testing.T) {
 	ctx := context.Background()
 	b := newTestDistributedBackend(t)
 	require.NoError(t, b.CreateBucket(ctx, "b"))
 	setVersioningForTest(t, b, "b", "Enabled")
 	seedVersionBlob(t, b, "b", "k", vidA1, PutObjectMetaCmd{ETag: "older-live"})
 	seedCorruptVersionBlob(t, b, "b", "k", vidA2)
-	// soleauth off (default)
 
-	// off-path derive is tolerant: the corrupt blob is dropped, older live resolves.
-	obj, err := b.HeadObject(ctx, "b", "k")
-	require.NoError(t, err, "off path stays availability-first (tolerant), byte-identical to today")
-	require.Equal(t, "older-live", obj.ETag)
+	// Blob-primary: the versioned read is decode-strict. An undecodable sibling blob
+	// could BE the authoritative latest, so the read fails closed rather than
+	// tolerantly dropping it and resurrecting an older live version. (Was the old
+	// off-path tolerant derive.)
+	_, err := b.HeadObject(ctx, "b", "k")
+	require.Error(t, err, "decode-strict: a corrupt per-version blob fails the read closed")
 }
