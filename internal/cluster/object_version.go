@@ -63,6 +63,11 @@ func (b *DistributedBackend) headObjectMetaV(ctx context.Context, bucket, key, v
 			return nil, PlacementMeta{}, verr // fail closed
 		}
 		if ok {
+			if cmd.IsHardDeleted {
+				// Hard-delete tombstone: the version is permanently gone → 404
+				// (NoSuchVersion), distinct from a delete-marker version (405).
+				return nil, PlacementMeta{}, storage.ErrObjectNotFound
+			}
 			if cmd.IsDeleteMarker {
 				return nil, PlacementMeta{}, storage.ErrMethodNotAllowed
 			}
@@ -95,6 +100,9 @@ func (b *DistributedBackend) headObjectMetaV(ctx context.Context, bucket, key, v
 			for _, cmd := range cmds {
 				if cmd.VersionID != versionID {
 					continue
+				}
+				if cmd.IsHardDeleted {
+					return nil, PlacementMeta{}, storage.ErrObjectNotFound
 				}
 				if cmd.IsDeleteMarker {
 					return nil, PlacementMeta{}, storage.ErrMethodNotAllowed
@@ -456,6 +464,9 @@ func (b *DistributedBackend) listObjectVersionsSoleAuth(bucket, prefix string, m
 	if err != nil {
 		return nil, err
 	}
+	// Hard-delete tombstones are not versions: drop them before deriving IsLatest /
+	// emitting (a delete MARKER is kept — it IS a version in S3 ListObjectVersions).
+	cmds = dropHardDeletedVersions(cmds)
 	// Per-key max VID (UUIDv7 string max) so the max-VID blob is flagged IsLatest.
 	maxVID := map[string]string{}
 	for _, c := range cmds {

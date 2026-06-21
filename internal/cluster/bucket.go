@@ -641,6 +641,9 @@ func (b *DistributedBackend) GetObjectTags(bucket, key, versionID string) ([]sto
 			// the blob tree falls to carve-out (mirrors T2 headObjectMetaV).
 			for _, c := range cmds {
 				if c.VersionID == versionID {
+					if c.IsHardDeleted {
+						return nil, storage.ErrObjectNotFound
+					}
 					if c.IsDeleteMarker {
 						return nil, storage.ErrMethodNotAllowed
 					}

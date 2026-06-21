@@ -143,6 +143,11 @@ func (b *DistributedBackend) listSoleAuthBucketObjectsForGC(bucket string) ([]st
 	if err != nil {
 		return nil, fmt.Errorf("list soleauth bucket %s: %w", bucket, err)
 	}
+	// Hard-delete tombstones are not live objects: exclude them from the segment-GC
+	// known-set so their now-dead segments become orphan-eligible (a live sibling
+	// version that shares a coalesced segment still protects it — the known-set
+	// unions all remaining live versions).
+	cmds = dropHardDeletedVersions(cmds)
 
 	// First pass: find the max VersionID per key (markers included).
 	maxVID := make(map[string]string, len(cmds))

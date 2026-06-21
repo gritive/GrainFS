@@ -792,6 +792,16 @@ func (b *DistributedBackend) listObjectsPerVersion(ctx context.Context, bucket, 
 	}
 	out := make([]PutObjectMetaCmd, 0, len(byKey))
 	for _, c := range byKey {
+		if c.IsHardDeleted {
+			// The per-key-max version was hard-deleted; the per-key-max scan
+			// collapsed the predecessor away, so re-derive the new latest from the
+			// full per-version set for this key (cluster-wide, tombstones/markers
+			// excluded). Omit the key entirely if nothing live remains.
+			if live, ok := b.latestLiveForKey(bucket, c.Key); ok {
+				out = append(out, live)
+			}
+			continue
+		}
 		if c.IsDeleteMarker {
 			continue // global-max is a marker → key deleted, omit from LIST
 		}
@@ -974,10 +984,16 @@ func (b *DistributedBackend) readQuorumMetaVersionDecodeStrict(bucket, key, vers
 
 // deriveLatestVersion returns the max-VersionID blob and whether the object's
 // latest state is live (false = no versions OR latest is a delete marker).
+// Hard-delete tombstones (IsHardDeleted) are skipped as if the version were not
+// present, so a hard-delete of the current latest version correctly falls through
+// to the live predecessor instead of reporting the whole key as gone.
 func deriveLatestVersion(cmds []PutObjectMetaCmd) (PutObjectMetaCmd, bool) {
 	var latest PutObjectMetaCmd
 	found := false
 	for _, c := range cmds {
+		if c.IsHardDeleted {
+			continue // hard-delete tombstone: version is gone, never the latest
+		}
 		if !found || c.VersionID > latest.VersionID {
 			latest = c
 			found = true
@@ -987,6 +1003,37 @@ func deriveLatestVersion(cmds []PutObjectMetaCmd) (PutObjectMetaCmd, bool) {
 		return PutObjectMetaCmd{}, false
 	}
 	return latest, true
+}
+
+// dropHardDeletedVersions returns cmds with hard-delete tombstones removed. Apply
+// at the read / list / scan CONSUMERS so a hard-deleted version is fully excluded
+// (never resurrected). It is correct to drop after the per-VID dedup because a
+// tombstone is written with MetaSeq = existing+1, so it always wins the same-VID
+// dedup over the data blob it replaced (and the per-version write guard keeps only
+// the tombstone on disk). The low-level scanners deliberately KEEP tombstones so
+// the orphan walker can still reconcile/GC them.
+func dropHardDeletedVersions(cmds []PutObjectMetaCmd) []PutObjectMetaCmd {
+	out := make([]PutObjectMetaCmd, 0, len(cmds))
+	for _, c := range cmds {
+		if c.IsHardDeleted {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// latestLiveForKey resolves the live latest version for a single key from the full
+// cluster-wide per-version set (tombstones and delete markers excluded via
+// deriveLatestVersion). Used by listObjectsPerVersion when a key's per-key-max scan
+// collapsed to a hard-delete tombstone: the predecessor was collapsed away, so the
+// new latest must be re-derived from all versions of that key.
+func (b *DistributedBackend) latestLiveForKey(bucket, key string) (PutObjectMetaCmd, bool) {
+	cmds, err := b.readQuorumMetaVersions(bucket, key)
+	if err != nil {
+		return PutObjectMetaCmd{}, false
+	}
+	return deriveLatestVersion(cmds)
 }
 
 // isQuorumMetaTempName reports whether a directory entry is an in-flight
