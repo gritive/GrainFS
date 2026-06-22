@@ -120,4 +120,9 @@ func TestSetObjectACL_ConcurrentRMW_NoLostUpdate(t *testing.T) {
 	require.NoError(t, err)
 	// Each serialized RMW bumps MetaSeq by 1 from the prior winner; n writers => MetaSeq == n.
 	require.Equal(t, uint64(n), cmd.MetaSeq, "every ACL RMW must serialize and advance MetaSeq; a lost update would leave a gap")
+	// Coherence: MetaSeq==n proves serialization; this proves the surviving blob
+	// holds a coherent ACL value actually written by some RMW (one of the two the
+	// writers alternate), not a torn/partial value from an interleaved write.
+	require.Contains(t, []uint8{uint8(s3auth.ACLPrivate), uint8(s3auth.ACLPublicRead)}, cmd.ACL,
+		"final on-disk ACL must be a coherent value written by an RMW, not torn")
 }

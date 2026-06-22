@@ -17,6 +17,30 @@
   The guarantee is bounded to a single delete→recreate incarnation; a higher-order double-cascade ABA is out
   of scope.
 
+## [0.0.646.0] - 2026-06-22
+
+### Fixed
+- **Guarded the `BucketWithPolicyProp` admin wiring against a typed-nil proposer.** `boot_phases_admin.go`
+  boxed the concrete `*iam.MetaProposer` straight into the `admin.Deps.BucketWithPolicyProp` interface; a
+  nil proposer would have become a non-nil typed-nil interface and defeated the `!= nil` guard at
+  `handlers_bucket.go:43`. A new `bucketWithPolicyProposer` helper collapses a nil concrete pointer to an
+  untyped-nil interface, mirroring the existing `bucketUpstreamDeleteProposer` guard. Defensive only —
+  unreachable on the serve path today (boot fails hard when `IAMStore` is absent).
+
+### Changed
+- **docs(runbook):** documented the mpudone marker 24h retention bound. A `CompleteMultipartUpload` retry
+  arriving more than 24h after the original success returns `ErrUploadNotFound` because the scrubber's
+  mpudone GC sweep (`EnableMultipartDoneSweep(256, 24*time.Hour)`) has expired the idempotency marker. 24h
+  conservatively outlives realistic client retries and Raft replay, so legitimate retries are always
+  covered; no operator action required.
+- **test(cluster):** strengthened the S4c-0 PR1 characterization tests. The concurrent ACL RMW test now also
+  asserts the surviving quorum-meta blob holds a coherent ACL value (catching a torn write), and a new
+  `TestWriteQuorumMetaLocal_OverwritesOnTie` locks in the latest-only writer's overwrite-on-`(ModTime,
+  VersionID, MetaSeq)`-tie intent that previously lived only in a code comment.
+- **docs:** pruned resolved bucket-delete follow-ups from `TODOS.md` (the typed-nil guard, the RMW test
+  strengthening, the mpudone retention doc, and the v8 §MPU spec amendment that was applied to the
+  git-untracked design doc out of band).
+
 ## [0.0.645.0] - 2026-06-22
 
 ### Changed
