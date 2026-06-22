@@ -4,21 +4,43 @@
 
 ### Bucket-delete config cascade follow-ups (PR: fix-bucket-delete-config-cascade)
 
-- **[P3] Mixed `--lifecycle-interval` clusters.** The lifecycle-delete cascade is gated per-node on
-  `LifecycleInterval > 0` (matches the lifecycle-store-wiring condition; default `1h`). A deliberately
-  mixed cluster (some nodes `0`, some `>0`) could route an admin delete to a `0` node and skip the
-  lifecycle-delete. Uniform deployments unaffected; mixed-interval is operator misconfiguration.
-- **[P3] Best-effort crash residual.** If the data-Raft bucket delete commits but the process dies
-  before the config cascade, the config leaks and is reconciled only on an operator retry (the
-  `ErrBucketNotFound` path re-runs the idempotent cascade). Same residual class as the NFS-export
-  cascade; acceptable.
+- **[P3][won't-fix] Mixed `--lifecycle-interval` clusters are unsupported.** The lifecycle-delete
+  cascade is gated per-node on `LifecycleInterval > 0`, which is **load-bearing**, not cosmetic: the
+  lifecycle store itself is only wired when `interval > 0` (`boot_phases_srvopts.go`), and
+  `applyBucketLifecycleDelete` errors if the store is nil (`meta_fsm_lifecycle.go`). So a deliberately
+  mixed cluster (some nodes `0`, some `>0`) is operator misconfiguration, not a latent bug. Uniform
+  deployments unaffected.
+
+### Bucket config off group-0 (control-plane read linearization)
+
+- **[DONE] Follower-stale bucket-versioning read at the mutating S3 edge.** A multipart-complete / PUT /
+  Copy on a group-0 follower read its lagging local replica and silently wrote the object
+  non-versioned (a just-joined follower observed Unversioned for ~90s after another node enabled
+  versioning). Fixed: the mutating edge resolves versioning via a linearizing read
+  (`GetBucketVersioningLinearized` = ReadIndex+WaitApplied, reusing the object-read primitive),
+  **degrading to a local read during a group-0 leaderless window** so writes aren't coupled to
+  control-plane leadership; reads/scrub keep the plain local read. Versioning stays on group-0 raft
+  (consensus preserved — a mutable RMW cell needs total order + atomic CAS, which a quorum LWW blob
+  can't provide; see `docs/superpowers/specs/2026-06-23-bucket-config-off-group0-quorum-design.md`).
+- **[P3][follow-up] Linearize `GetBucketPolicy` the same way** — identical plain-`store.View` shape on
+  group-0; a stale policy read at a mutating edge could mis-authorize. Small, reuses the same pattern.
+- **[P3][follow-up] AppendObject versioned-bucket feature-gate** reads versioning via the PLAIN read
+  (`object_append.go`), so a stale follower read can let an append proceed on a versioning-enabled
+  bucket (a 501-gate bypass, not data mis-versioning). Pre-existing; route through the linearized read
+  if it matters.
+- **[P3][epic, separate] group-0 control-plane demotion** — consolidate bucket existence/assignment
+  onto the true meta-raft (`bucketAssignments`) so group-0 becomes a plain data group. Larger; touches
+  bucket-lifecycle atomicity + the #838 delete cascade. Not needed for the read-linearization fix.
 
 ### Tests / docs / spec polish
 
-- **[P3][test] No multi-node integration test for the forwarded-propose apply-wait + MPU phantom-winner
-  guard.** Covered by single-node tests + reasoning + the full suite, but a true 2/3-node
-  follower-forwards-during-phantom-commit test isn't feasible in the current solo-leader unit harness.
-  Add one if a multi-node raft test harness is introduced.
+- **[P3][test] Deterministic multi-node reproduction of the forwarded-propose apply-wait + MPU
+  phantom-winner guard.** The follower-stale-versioning blocker is now fixed (above), so a follower
+  CAN do a versioned write (`tests/e2e/cluster_versioned_write_follower_test.go`, a happy-path
+  integration spec). A *deterministic* reproduction of the phantom-winner race still needs a group-0 /
+  data-group apply-delay seam (a long-enough delay collides with the 30s propose deadline — the trap
+  that blocked the earlier attempt). The guard logic is unit-covered (`readDoneMarkerFn` seam);
+  add the deterministic e2e if an apply-timing seam is introduced.
 
 ## Superseded / historical (do not resurrect the analysis)
 

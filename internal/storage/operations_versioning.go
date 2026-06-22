@@ -21,6 +21,23 @@ func (o *Operations) GetBucketVersioning(bucket string) (string, error) {
 	return plan.bucketVersioner.GetBucketVersioning(bucket)
 }
 
+// GetBucketVersioningLinearized is the linearizable, fail-closed read for the
+// MUTATING S3 edge (a follower must not read a stale local replica and
+// mis-version the write). Delegates to the backend's linearized read when it
+// supports one (cluster), else the plain local read.
+func (o *Operations) GetBucketVersioningLinearized(ctx context.Context, bucket string) (string, error) {
+	plan := o.planForCall()
+	if plan.bucketVersioner == nil {
+		return "", UnsupportedOperationError{Op: "GetBucketVersioningLinearized", Reason: UnsupportedReasonNoAdapter}
+	}
+	if lin, ok := plan.bucketVersioner.(interface {
+		GetBucketVersioningLinearized(context.Context, string) (string, error)
+	}); ok {
+		return lin.GetBucketVersioningLinearized(ctx, bucket)
+	}
+	return plan.bucketVersioner.GetBucketVersioning(bucket)
+}
+
 func (o *Operations) GetObjectVersion(ctx context.Context, bucket, key, versionID string) (io.ReadCloser, *Object, error) {
 	plan := o.planForCall()
 	if plan.versionedGetter == nil {

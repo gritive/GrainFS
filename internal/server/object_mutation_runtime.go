@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"io"
 	"time"
 
@@ -25,7 +26,9 @@ func (s *Server) putObjectWithUserMetadataAndMD5(
 		result *storage.PutObjectResult
 		err    error
 	)
-	ctx = s.ctxWithBucketVersioning(ctx, bucket)
+	if ctx, err = s.ctxWithBucketVersioningStrict(ctx, bucket); err != nil {
+		return nil, err
+	}
 	backendStart := time.Now()
 	result, err = s.ops.PutObjectWithRequestResult(ctx, storage.PutObjectRequest{
 		Bucket:         bucket,
@@ -57,7 +60,10 @@ func (s *Server) putObjectWithUserMetadataAndMD5(
 }
 
 func (s *Server) putFormObject(ctx context.Context, bucket, key string, body io.Reader, contentType string) (*storage.PutObjectResult, error) {
-	ctx = s.ctxWithBucketVersioning(ctx, bucket)
+	ctx, err := s.ctxWithBucketVersioningStrict(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
 	result, err := s.ops.PutObjectWithResult(ctx, bucket, key, body, contentType)
 	if err != nil {
 		return nil, err
@@ -71,14 +77,42 @@ func (s *Server) putFormObject(ctx context.Context, bucket, key string, body io.
 // (enabled OR disabled) onto the context. The per-group commit backend then
 // never reads versioning itself — that read would cross the control/data-plane
 // boundary (the commit backend holds no bucketver state). The decision threads
-// down via context and onward over the forward wire. A read error (e.g. a
-// backend that doesn't track versioning) leaves the context unstamped, so the
-// commit path falls back to a local read.
+// down via context and onward over the forward wire.
+//
+// TOLERANT variant (READ paths: GET/HEAD/LIST + Copy source): uses the PLAIN
+// local read — never the linearizing barrier. Reads must stay available and
+// instant even when group-0 (the control plane) has no leader; a slightly-stale
+// versioning view only affects read-mode selection, never data integrity. A
+// resolve error leaves the context unstamped so the read falls back to a local
+// read. MUTATING paths use ctxWithBucketVersioningStrict instead.
 func (s *Server) ctxWithBucketVersioning(ctx context.Context, bucket string) context.Context {
 	if state, vErr := s.ops.GetBucketVersioning(bucket); vErr == nil {
 		return cluster.ContextWithBucketVersioning(ctx, state == "Enabled")
 	}
 	return ctx
+}
+
+// ctxWithBucketVersioningStrict is the LINEARIZING variant for MUTATING paths
+// (PUT / CompleteMultipart / Copy-dst): a follower must not read a stale local
+// replica and mis-version the write. It uses GetBucketVersioningLinearized
+// (ReadIndex+WaitApplied), which DEGRADES to a local read during a group-0
+// leaderless window (so writes aren't coupled to control-plane leadership) and
+// only returns an error on a genuine resolve fault — which the caller surfaces
+// rather than silently writing non-versioned.
+func (s *Server) ctxWithBucketVersioningStrict(ctx context.Context, bucket string) (context.Context, error) {
+	state, err := s.ops.GetBucketVersioningLinearized(ctx, bucket)
+	if err != nil {
+		// A backend that doesn't track versioning is not a fault — leave the ctx
+		// unstamped (downstream treats it as unversioned), exactly as the tolerant
+		// path does. A genuine resolve fault (e.g. local store error) surfaces so
+		// the write doesn't silently go non-versioned.
+		var unsupported storage.UnsupportedOperationError
+		if errors.As(err, &unsupported) {
+			return ctx, nil
+		}
+		return ctx, err
+	}
+	return cluster.ContextWithBucketVersioning(ctx, state == "Enabled"), nil
 }
 
 // ctxWithVersionHistory stamps "this bucket can hold version history" =

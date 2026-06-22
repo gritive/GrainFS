@@ -96,8 +96,13 @@ func (s *Server) handleCopyObject(ctx context.Context, c *app.RequestContext, ds
 	}
 	// Stamp the DESTINATION bucket's versioning decision so a versioned-bucket
 	// copy persists per-version FSM metadata (the destination write reaches the
-	// same cluster PUT commit path as a normal PUT).
-	ctx = s.ctxWithBucketVersioning(ctx, dstBucket)
+	// same cluster PUT commit path as a normal PUT). Fail-closed: a resolve error
+	// must not silently write the copy as non-versioned.
+	ctx, verr := s.ctxWithBucketVersioningStrict(ctx, dstBucket)
+	if verr != nil {
+		mapError(c, verr)
+		return
+	}
 	result, err := s.copyObjectWithMutation(ctx, req)
 	if err != nil {
 		mapError(c, err)
