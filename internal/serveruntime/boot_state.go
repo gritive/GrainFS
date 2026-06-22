@@ -267,6 +267,7 @@ type bootState struct {
 	receiptWiring     *HealReceiptWiring
 	incidentRecorder  *incident.Recorder
 	lifecycleSvc      *lifecycle.Service
+	lifecycleStore    *lifecycle.Store
 	migrationSvc      *migration.Service
 	mutationGate      *server.MutationGate
 	auditSearchWarmup func(context.Context) error

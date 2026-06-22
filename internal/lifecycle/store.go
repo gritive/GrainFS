@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -10,6 +11,12 @@ import (
 )
 
 var lifecyclePrefix = []byte("lifecycle:")
+
+// UnconditionalDeleteGen, when passed as the observed generation to DeleteIfGen,
+// deletes the record regardless of its stored generation. Used by explicit
+// operator deletes (S3 DeleteBucketLifecycle) and by replay of legacy
+// delete payloads that predate per-record generations.
+const UnconditionalDeleteGen = ^uint64(0)
 
 // Store persists lifecycle configurations in BadgerDB.
 // Key format: "lifecycle:{bucket}"
@@ -24,6 +31,89 @@ func NewStore(db *badger.DB) *Store {
 
 func (s *Store) key(bucket string) []byte {
 	return []byte("lifecycle:" + bucket)
+}
+
+func (s *Store) genKey(bucket string) []byte {
+	return []byte("lifecyclegen:" + bucket)
+}
+
+// GetGen returns the current generation for bucket's lifecycle config, or 0 if
+// the record (or its generation) is absent.
+func (s *Store) GetGen(bucket string) (uint64, error) {
+	var gen uint64
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(s.genKey(bucket))
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			if len(val) == 8 {
+				gen = binary.BigEndian.Uint64(val)
+			}
+			return nil
+		})
+	})
+	if errors.Is(err, badger.ErrKeyNotFound) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return gen, nil
+}
+
+// PutRawBumpGen stores raw S3 wire XML for bucket and bumps its generation
+// (current + 1) atomically in one transaction. Replaces PutRaw on the FSM apply
+// path so every put advances the CAS generation deterministically.
+func (s *Store) PutRawBumpGen(bucket string, raw []byte) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		var cur uint64
+		if item, err := txn.Get(s.genKey(bucket)); err == nil {
+			_ = item.Value(func(val []byte) error {
+				if len(val) == 8 {
+					cur = binary.BigEndian.Uint64(val)
+				}
+				return nil
+			})
+		} else if !errors.Is(err, badger.ErrKeyNotFound) {
+			return err
+		}
+		var genBuf [8]byte
+		binary.BigEndian.PutUint64(genBuf[:], cur+1)
+		if err := txn.Set(s.key(bucket), append([]byte(nil), raw...)); err != nil {
+			return err
+		}
+		return txn.Set(s.genKey(bucket), genBuf[:])
+	})
+}
+
+// DeleteIfGen removes bucket's lifecycle config (and its generation) iff the
+// stored generation equals observedGen, or unconditionally when observedGen is
+// UnconditionalDeleteGen. A mismatch is a no-op (returns nil): a newer put won
+// the race, so the record now belongs to a different bucket incarnation.
+func (s *Store) DeleteIfGen(bucket string, observedGen uint64) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		if observedGen != UnconditionalDeleteGen {
+			var cur uint64
+			if item, err := txn.Get(s.genKey(bucket)); err == nil {
+				_ = item.Value(func(val []byte) error {
+					if len(val) == 8 {
+						cur = binary.BigEndian.Uint64(val)
+					}
+					return nil
+				})
+			} else if !errors.Is(err, badger.ErrKeyNotFound) {
+				return err
+			}
+			if cur != observedGen {
+				return nil // CAS mismatch: keep the record
+			}
+		}
+		if err := txn.Delete(s.key(bucket)); err != nil {
+			return err
+		}
+		return txn.Delete(s.genKey(bucket))
+	})
 }
 
 // Get returns the lifecycle configuration for bucket, or nil if not set.

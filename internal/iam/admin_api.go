@@ -389,6 +389,7 @@ type BucketUpstreamItem struct {
 	CreatedAt   time.Time            `json:"created_at"`
 	CreatedBy   string               `json:"created_by,omitempty"`
 	Status      BucketUpstreamStatus `json:"status"`
+	Generation  uint64               `json:"generation"`
 }
 
 func (a *AdminAPI) PutBucketUpstream(ctx context.Context, req BucketUpstreamPutRequest) error {
@@ -467,7 +468,7 @@ func (a *AdminAPI) GetBucketUpstream(_ context.Context, bucket string) (BucketUp
 	if status == "" {
 		status = BucketUpstreamStatusActive
 	}
-	return BucketUpstreamItem{Bucket: u.Bucket, UpstreamURL: u.Endpoint, AccessKey: u.AccessKey, CreatedAt: u.CreatedAt, CreatedBy: u.CreatedBy, Status: status}, nil
+	return BucketUpstreamItem{Bucket: u.Bucket, UpstreamURL: u.Endpoint, AccessKey: u.AccessKey, CreatedAt: u.CreatedAt, CreatedBy: u.CreatedBy, Status: status, Generation: u.Generation}, nil
 }
 
 func (a *AdminAPI) HandleBucketUpstreamGet(w http.ResponseWriter, r *http.Request, bucket string) {
@@ -488,7 +489,7 @@ func (a *AdminAPI) ListBucketUpstreams(_ context.Context) ([]BucketUpstreamItem,
 		if status == "" {
 			status = BucketUpstreamStatusActive
 		}
-		out = append(out, BucketUpstreamItem{Bucket: u.Bucket, UpstreamURL: u.Endpoint, AccessKey: u.AccessKey, CreatedAt: u.CreatedAt, CreatedBy: u.CreatedBy, Status: status})
+		out = append(out, BucketUpstreamItem{Bucket: u.Bucket, UpstreamURL: u.Endpoint, AccessKey: u.AccessKey, CreatedAt: u.CreatedAt, CreatedBy: u.CreatedBy, Status: status, Generation: u.Generation})
 	}
 	return out, nil
 }
@@ -503,7 +504,7 @@ func (a *AdminAPI) DeleteBucketUpstream(ctx context.Context, bucket string) erro
 	if _, ok := a.store.LookupBucketUpstream(bucket); !ok {
 		return &adminapi.Error{Code: "not_found", Message: "not found"}
 	}
-	if err := a.proposer.ProposeBucketUpstreamDelete(ctx, bucket); err != nil {
+	if err := a.proposer.ProposeBucketUpstreamDelete(ctx, bucket, UnconditionalDeleteGen); err != nil {
 		return &adminapi.Error{Code: "internal", Message: "propose: " + err.Error()}
 	}
 	return nil

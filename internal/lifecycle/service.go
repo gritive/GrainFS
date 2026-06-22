@@ -17,7 +17,7 @@ import (
 // internal/cluster provides the adapter.
 type Proposer interface {
 	ProposeLifecyclePut(ctx context.Context, bucket string, raw []byte) error
-	ProposeLifecycleDelete(ctx context.Context, bucket string) error
+	ProposeLifecycleDelete(ctx context.Context, bucket string, observedGen uint64) error
 }
 
 // LeadershipSignal is the seam between Service and the Raft node. It does not
@@ -187,9 +187,12 @@ func (s *Service) Apply(ctx context.Context, bucket string, raw []byte) error {
 	return s.proposer.ProposeLifecyclePut(ctx, bucket, raw)
 }
 
-// Delete proposes removal of the bucket's lifecycle configuration.
+// Delete proposes removal of the bucket's lifecycle configuration. The explicit
+// S3 DeleteBucketLifecycle path is unconditional (operator intent), so it passes
+// UnconditionalDeleteGen; the bucket-delete cascade uses the proposer directly
+// with a captured generation (see internal/server/admin).
 func (s *Service) Delete(ctx context.Context, bucket string) error {
-	return s.proposer.ProposeLifecycleDelete(ctx, bucket)
+	return s.proposer.ProposeLifecycleDelete(ctx, bucket, UnconditionalDeleteGen)
 }
 
 // Run watches leadership changes until ctx is done, starting/stopping the

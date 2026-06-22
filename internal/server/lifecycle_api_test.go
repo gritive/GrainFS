@@ -28,7 +28,7 @@ type directProposer struct{ store *lifecycle.Store }
 func (p *directProposer) ProposeLifecyclePut(_ context.Context, bucket string, raw []byte) error {
 	return p.store.PutRaw(bucket, raw)
 }
-func (p *directProposer) ProposeLifecycleDelete(_ context.Context, bucket string) error {
+func (p *directProposer) ProposeLifecycleDelete(_ context.Context, bucket string, observedGen uint64) error {
 	return p.store.Delete(bucket)
 }
 

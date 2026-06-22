@@ -139,8 +139,20 @@ func (rcv *BucketUpstreamPutPayload) MutateSecretKeyDekGen(n uint32) bool {
 	return rcv._tab.MutateUint32Slot(18, n)
 }
 
+func (rcv *BucketUpstreamPutPayload) Generation() uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
+	if o != 0 {
+		return rcv._tab.GetUint64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *BucketUpstreamPutPayload) MutateGeneration(n uint64) bool {
+	return rcv._tab.MutateUint64Slot(20, n)
+}
+
 func BucketUpstreamPutPayloadStart(builder *flatbuffers.Builder) {
-	builder.StartObject(8)
+	builder.StartObject(9)
 }
 func BucketUpstreamPutPayloadAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -168,6 +180,9 @@ func BucketUpstreamPutPayloadAddStatus(builder *flatbuffers.Builder, status flat
 }
 func BucketUpstreamPutPayloadAddSecretKeyDekGen(builder *flatbuffers.Builder, secretKeyDekGen uint32) {
 	builder.PrependUint32Slot(7, secretKeyDekGen, 0)
+}
+func BucketUpstreamPutPayloadAddGeneration(builder *flatbuffers.Builder, generation uint64) {
+	builder.PrependUint64Slot(8, generation, 0)
 }
 func BucketUpstreamPutPayloadEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

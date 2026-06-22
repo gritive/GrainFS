@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.647.0] - 2026-06-23
+
+### Fixed
+- **Closed the delete→recreate race in the bucket-delete config cascade (generation-CAS-on-delete).** When a
+  bucket is deleted, the cascade clears its lifecycle config and IAM bucket-upstream record (both meta-Raft,
+  keyed by bucket name) after the data-Raft bucket delete. A client that recreated the same-name bucket and
+  wrote fresh config in the window between the data-Raft delete and the cascade propose could have that
+  fresh config wiped. Each config PUT now stamps a monotonic per-record generation; `AdminDeleteBucket`
+  captures the observed generation BEFORE the data-Raft delete; the cascade-delete carries it and the FSM
+  apply deletes only when the stored generation still matches (CAS). A concurrent recreate bumps the
+  generation past the captured value, so the stale cascade-delete becomes a no-op and the recreated bucket's
+  config survives. Both records are fenced. Generation is computed deterministically at FSM-apply time and
+  round-trips through the IAM snapshot, so it survives restart and snapshot-install without resetting.
+  Explicit operator deletes (S3 `DeleteBucketLifecycle`, admin `DeleteBucketUpstream`) remain unconditional.
+  The guarantee is bounded to a single delete→recreate incarnation; a higher-order double-cascade ABA is out
+  of scope.
+
 ## [0.0.646.0] - 2026-06-22
 
 ### Fixed

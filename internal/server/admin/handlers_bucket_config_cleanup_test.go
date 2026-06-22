@@ -15,23 +15,34 @@ import (
 // fakeLifecycleDeleteProp records ProposeLifecycleDelete calls and returns errOnDelete.
 type fakeLifecycleDeleteProp struct {
 	called      []string
+	gotGen      []uint64 // observedGen per call
 	errOnDelete error
 }
 
-func (f *fakeLifecycleDeleteProp) ProposeLifecycleDelete(_ context.Context, bucket string) error {
+func (f *fakeLifecycleDeleteProp) ProposeLifecycleDelete(_ context.Context, bucket string, observedGen uint64) error {
 	f.called = append(f.called, bucket)
+	f.gotGen = append(f.gotGen, observedGen)
 	return f.errOnDelete
 }
 
 // fakeUpstreamDeleteProp records ProposeBucketUpstreamDelete calls and returns errOnDelete.
 type fakeUpstreamDeleteProp struct {
 	called      []string
+	gotGen      []uint64 // observedGen per call
 	errOnDelete error
 }
 
-func (f *fakeUpstreamDeleteProp) ProposeBucketUpstreamDelete(_ context.Context, bucket string) error {
+func (f *fakeUpstreamDeleteProp) ProposeBucketUpstreamDelete(_ context.Context, bucket string, observedGen uint64) error {
 	f.called = append(f.called, bucket)
+	f.gotGen = append(f.gotGen, observedGen)
 	return f.errOnDelete
+}
+
+// fakeLifecycleGenReader returns a fixed generation for the capture-before-delete read.
+type fakeLifecycleGenReader struct{ gen uint64 }
+
+func (f fakeLifecycleGenReader) GetLifecycleGen(_ context.Context, _ string) (uint64, error) {
+	return f.gen, nil
 }
 
 // On a successful delete, both config proposers are invoked with the bucket name.
@@ -135,4 +146,26 @@ func TestAdminDeleteBucket_NilConfigProposers_NoPanic(t *testing.T) {
 	err := admin.AdminDeleteBucket(context.Background(), d, "b", false)
 	require.NoError(t, err)
 	assert.False(t, fake.buckets["b"])
+}
+
+// The cascade forwards the lifecycle generation captured by the admin handler.
+func TestAdminDeleteBucket_ForwardsCapturedLifecycleGen(t *testing.T) {
+	fake := newFakeBucketOps()
+	fake.buckets["b"] = true
+	lc := &fakeLifecycleDeleteProp{}
+	d := &admin.Deps{Buckets: fake, LifecycleDeleteProp: lc, LifecycleGenReader: fakeLifecycleGenReader{gen: 5}}
+
+	require.NoError(t, admin.AdminDeleteBucket(context.Background(), d, "b", false))
+	assert.Equal(t, []uint64{5}, lc.gotGen, "cascade must forward the captured lifecycle generation")
+}
+
+// With no gen reader wired, the captured generation is 0 (fail-safe).
+func TestAdminDeleteBucket_NilGenReader_ForwardsZero(t *testing.T) {
+	fake := newFakeBucketOps()
+	fake.buckets["b"] = true
+	lc := &fakeLifecycleDeleteProp{}
+	d := &admin.Deps{Buckets: fake, LifecycleDeleteProp: lc} // no LifecycleGenReader
+
+	require.NoError(t, admin.AdminDeleteBucket(context.Background(), d, "b", false))
+	assert.Equal(t, []uint64{0}, lc.gotGen)
 }

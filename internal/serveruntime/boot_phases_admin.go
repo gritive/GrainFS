@@ -15,6 +15,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/dashboard"
 	"github.com/gritive/GrainFS/internal/iam/pdp"
+	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/nodeconfig"
 	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/s3auth"
@@ -128,6 +129,7 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		IAMGroup:                 iamGroupAdminService(state),
 		BucketWithPolicyProp:     bucketWithPolicyProposer(state),
 		LifecycleDeleteProp:      lifecycleDeleteProposer(state),
+		LifecycleGenReader:       lifecycleGenReader(state),
 		BucketUpstreamDeleteProp: bucketUpstreamDeleteProposer(state),
 		ConfigProposer:           state.metaRaft,
 		ConfigStore:              state.cfgStore,
@@ -326,6 +328,22 @@ func lifecycleDeleteProposer(state *bootState) admin.LifecycleDeleteProposer {
 		return nil
 	}
 	return &cluster.LifecycleProposer{Propose: state.metaRaft.Propose}
+}
+
+type lifecycleGenReaderAdapter struct{ store *lifecycle.Store }
+
+func (a lifecycleGenReaderAdapter) GetLifecycleGen(_ context.Context, bucket string) (uint64, error) {
+	return a.store.GetGen(bucket)
+}
+
+// lifecycleGenReader returns a reader for the bucket-delete cascade's
+// capture-before-delete, or nil when lifecycle is not wired (cascade observes
+// generation 0). Gated identically to lifecycleDeleteProposer.
+func lifecycleGenReader(state *bootState) admin.LifecycleGenReader {
+	if !lifecycleCascadeEnabled(state.metaRaft != nil, state.cfg.LifecycleInterval) || state.lifecycleStore == nil {
+		return nil
+	}
+	return lifecycleGenReaderAdapter{store: state.lifecycleStore}
 }
 
 // bucketUpstreamDeleteProposer returns the IAM bucket-upstream-delete proposer

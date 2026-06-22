@@ -265,6 +265,7 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 		// Phase 6.5 S3: the lifecycle store shares the FSM-state DB; serveruntime
 		// owns the raw handle (the backend no longer exposes it).
 		lstore := lifecycle.NewStore(state.sharedFSMDB)
+		state.lifecycleStore = lstore
 		prop := &cluster.LifecycleProposer{Propose: state.metaRaft.Propose}
 		// Use Node() (interface) — not RaftNode() (v1 concrete) — so the
 		// v2 adapter resolves under M5 PR 28 serveruntime=v2 default.

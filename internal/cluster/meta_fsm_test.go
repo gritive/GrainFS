@@ -726,7 +726,7 @@ func TestApplyBucketLifecycleDelete_RemovesStore(t *testing.T) {
 	f.SetLifecycle(store)
 	require.NoError(t, store.PutRaw("b1", []byte(`<LifecycleConfiguration><Rule><ID>r1</ID></Rule></LifecycleConfiguration>`)))
 
-	payload := lifecycle.EncodeDeletePayload("b1")
+	payload := lifecycle.EncodeDeletePayload("b1", lifecycle.UnconditionalDeleteGen)
 	data, err := encodeMetaCmd(clusterpb.MetaCmdTypeBucketLifecycleDelete, payload)
 	require.NoError(t, err)
 	require.NoError(t, f.applyCmd(data))
