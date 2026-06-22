@@ -19,7 +19,6 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/gossip"
-	"github.com/gritive/GrainFS/internal/pool"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/transport"
@@ -141,14 +140,14 @@ type DistributedBackend struct {
 	ecConfig                         ECConfig  // Phase 18: erasure coding config (k+m shard parameters)
 	ecConfigSnapshot                 atomic.Pointer[ECConfig]
 	runtimeSnapshot                  atomic.Pointer[backendRuntimeSnapshot]
-	shardLocks                       pool.SyncMap[string, *sync.RWMutex] // scrubbable.go: per-(bucket,key) RWMutex for ReadShard/WriteShard
-	objectMetaRMWLocks               pool.SyncMap[string, *sync.RWMutex] // per-(bucket,key) serialization for tag/ACL/relocation quorum-meta RMW
-	multipartLocks                   sync.Map                            // map[uploadID]*sync.RWMutex; serializes part writes against complete/abort cleanup
-	appendLocks                      [appendLockStripeCount]sync.Mutex   // striped owner-side admission locks for same-object AppendObject
-	incidentRecorder                 IncidentRecorder                    // nil disables zero-ops incident recording
-	testBeforeChunkedMultipartCommit func() error                        // test-only hook for chunked multipart commit preflight
-	testBeforeAppendSegmentWrite     func()                              // test-only hook after append pre-check before segment write
-	testOnListObjectVersionsCtx      func(ctx context.Context)           // test-only hook: called with the ctx passed to ListObjectVersions
+	shardLocks                       keyedRWMutex                      // scrubbable.go: per-(bucket,key) RWMutex for ReadShard/WriteShard (refcounted, bounded)
+	objectMetaRMWLocks               keyedRWMutex                      // per-(bucket,key) serialization for tag/ACL/relocation quorum-meta RMW (refcounted, bounded)
+	multipartLocks                   sync.Map                          // map[uploadID]*sync.RWMutex; serializes part writes against complete/abort cleanup
+	appendLocks                      [appendLockStripeCount]sync.Mutex // striped owner-side admission locks for same-object AppendObject
+	incidentRecorder                 IncidentRecorder                  // nil disables zero-ops incident recording
+	testBeforeChunkedMultipartCommit func() error                      // test-only hook for chunked multipart commit preflight
+	testBeforeAppendSegmentWrite     func()                            // test-only hook after append pre-check before segment write
+	testOnListObjectVersionsCtx      func(ctx context.Context)         // test-only hook: called with the ctx passed to ListObjectVersions
 
 	// shardCache caches reconstructed/fetched EC shards. Sits in front of
 	// getObjectEC's per-shard fan-out: a full hit (every needed shard
@@ -1366,10 +1365,11 @@ func (b *DistributedBackend) multipartLifecycleLock(uploadID string) *sync.RWMut
 
 // objectMetaRMWLock serializes read-modify-write of an object's quorum-meta
 // blob (tag/ACL mutation, relocation re-write) on the owning coordinator so a
-// second RMW reads the first's result instead of clobbering it.
-func (b *DistributedBackend) objectMetaRMWLock(bucket, key string) *sync.RWMutex {
-	v, _ := b.objectMetaRMWLocks.LoadOrStore(bucket+"\x00"+key, &sync.RWMutex{})
-	return v
+// second RMW reads the first's result instead of clobbering it. It takes the
+// per-(bucket,key) write lock and returns an unlock closure; the underlying
+// lock is reclaimed once the last holder releases (bounded memory).
+func (b *DistributedBackend) objectMetaRMWLock(bucket, key string) func() {
+	return b.objectMetaRMWLocks.lockWrite(bucket + "\x00" + key)
 }
 
 // Node returns the RaftNode interface for leadership and raft control.

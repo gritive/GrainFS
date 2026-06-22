@@ -40,14 +40,21 @@ func (b *DistributedBackend) readDoneMarker(uploadID string) (*multipartDone, er
 // At most maxPerCycle upload IDs are collected per call. Returns the count
 // included in the batch (0 when no stale markers exist).
 //
-// Leader-gating: b.propose forwards to the raft leader automatically, so no
-// explicit IsLeader check is required — every node may call this. Only the
-// leader commits the batch; followers' proposals are forwarded and, on success,
-// replicated back, so the deletion is consistent across the cluster.
+// Leader-gating: this runs leader-only. Correctness never required it — b.propose
+// forwards every node's deletes to the raft leader, who dedups via idempotent
+// CmdDeleteMultipartDone — but the mpudone: keyspace is fully replicated meta-Raft
+// state, so the leader already holds every marker. Letting followers also scan the
+// whole keyspace and run the per-version blob-durability probes (phase 2, FS/peer
+// reads) every cycle is pure N-way redundant work whose proposals just forward back
+// to the leader. Gating on b.node.IsLeader() keeps the leader's authoritative scan
+// and drops the waste. Single-node mode (b.node == nil) always runs.
 //
 // Implements scrubber.MultipartDoneSweeper.
 func (b *DistributedBackend) SweepStaleMultipartDoneMarkers(ctx context.Context, maxPerCycle int, minAge time.Duration) (int, error) {
 	if maxPerCycle <= 0 {
+		return 0, nil
+	}
+	if b.node != nil && !b.node.IsLeader() {
 		return 0, nil
 	}
 	now := time.Now()
