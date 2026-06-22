@@ -50,7 +50,3 @@ func AdminListStorageBuckets(ctx context.Context, d *Deps) (ListStorageBucketsRe
 func AdminCreateStorageBucket(ctx context.Context, d *Deps, req CreateBucketAdminReq) (BucketInfo, error) {
 	return AdminCreateBucket(ctx, d, req)
 }
-
-func AdminStorageProtocols(_ context.Context, d *Deps) (StorageProtocolStatusResp, error) {
-	return d.Protocols, nil
-}

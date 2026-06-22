@@ -50,7 +50,7 @@ func selfRegisterMember(ctx context.Context, mr memberSelfRegistrar, nodeID stri
 // Ordering: MUST run AFTER bootWALAndForwardersPart1 (which installs the meta-raft
 // forwarder so a follower's Propose reaches the leader) AND after invite-join
 // Phase-2 membership promotion (also inside bootWALAndForwardersPart1). Wired last
-// in run.go's post-join sequence, after bootNodeServices.
+// in run.go's post-join sequence.
 //
 // NON-FATAL: a propose failure (leader churn, transient forwarder failure, leader
 // outage) must NOT boot-loop the node. Self-registration is best-effort and

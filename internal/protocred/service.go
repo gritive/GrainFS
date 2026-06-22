@@ -215,11 +215,8 @@ func (s *Service) Revoke(id string) error {
 	return nil
 }
 
-func connectionHint(item Credential, secret string) map[string]string {
-	name := resourceName(item.Resource)
+func connectionHint(item Credential, _ string) map[string]string {
 	switch item.Protocol {
-	case ProtocolNFS:
-		return map[string]string{"mount_path": name + "/" + item.ID + ":" + secret}
 	case ProtocolS3:
 		return map[string]string{"access_key_id": item.ID}
 	case ProtocolIceberg:

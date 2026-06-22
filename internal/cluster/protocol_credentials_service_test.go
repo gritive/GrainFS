@@ -24,7 +24,7 @@ func TestProtocolCredentialServiceProposesMutationsAndReadsStore(t *testing.T) {
 	svc.now = func() time.Time { return time.Unix(200, 0).UTC() }
 
 	created, err := svc.Create(protocred.CreateRequest{
-		SAID: "node-a", Protocol: protocred.ProtocolNFS, Resource: "volume/devdisk", Mode: protocred.ModeRW,
+		SAID: "node-a", Protocol: protocred.ProtocolS3, Resource: "bucket/devdisk", Mode: protocred.ModeRW,
 	})
 	require.NoError(t, err)
 	require.NotEmpty(t, created.ID)
@@ -32,9 +32,9 @@ func TestProtocolCredentialServiceProposesMutationsAndReadsStore(t *testing.T) {
 	item, err := svc.Get(created.ID)
 	require.NoError(t, err)
 	require.Equal(t, "node-a", item.SAID)
-	require.Equal(t, "volume/devdisk", item.Resource)
+	require.Equal(t, "bucket/devdisk", item.Resource)
 
-	listed := svc.List(protocred.ListFilter{SAID: "node-a", Protocol: protocred.ProtocolNFS})
+	listed := svc.List(protocred.ListFilter{SAID: "node-a", Protocol: protocred.ProtocolS3})
 	require.Len(t, listed, 1)
 	require.Equal(t, created.ID, listed[0].ID)
 
@@ -62,7 +62,7 @@ func TestProtocolCredentialServicePropagatesProposeError(t *testing.T) {
 	})
 
 	_, err := svc.Create(protocred.CreateRequest{
-		SAID: "node-a", Protocol: protocred.ProtocolNFS, Resource: "volume/devdisk", Mode: protocred.ModeRW,
+		SAID: "node-a", Protocol: protocred.ProtocolS3, Resource: "bucket/devdisk", Mode: protocred.ModeRW,
 	})
 	require.ErrorIs(t, err, wantErr)
 	require.Empty(t, svc.List(protocred.ListFilter{}))

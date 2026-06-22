@@ -12,7 +12,6 @@ import (
 	hzserver "github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/rs/zerolog/log"
 
-	"github.com/gritive/GrainFS/internal/adminapi"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/dashboard"
 	"github.com/gritive/GrainFS/internal/iam/pdp"
@@ -138,7 +137,6 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		ProtocolCredAuthz:        protocolCredentialAuthorizer(state),
 		AdminAuthz:               adminAuthorizer(state, "admin"),
 		ActorAuth:                newOIDCActorAuthenticator(state.cfgStore),
-		Protocols:                storageProtocolStatusFromConfig(cfg),
 		PDPTokens:                ensurePDPTokenSource(state),
 	}
 	if state.auditSearcher != nil {
@@ -357,13 +355,4 @@ func bucketUpstreamDeleteProposer(state *bootState) admin.BucketUpstreamDeletePr
 		return nil
 	}
 	return state.iamProposer
-}
-
-func storageProtocolStatusFromConfig(cfg Config) adminapi.StorageProtocolStatusResp {
-	return adminapi.StorageProtocolStatusResp{
-		NFS4: adminapi.ProtocolEndpointStatus{
-			Enabled: cfg.NFS4Port > 0,
-			Port:    cfg.NFS4Port,
-		},
-	}
 }

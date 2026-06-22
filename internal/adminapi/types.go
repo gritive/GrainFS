@@ -188,17 +188,6 @@ type ListStorageBucketsResp struct {
 	Buckets []StorageBucketSummary `json:"buckets"`
 }
 
-type ProtocolEndpointStatus struct {
-	Enabled bool   `json:"enabled"`
-	Bind    string `json:"bind,omitempty"`
-	Port    int    `json:"port,omitempty"`
-	Warning string `json:"warning,omitempty"`
-}
-
-type StorageProtocolStatusResp struct {
-	NFS4 ProtocolEndpointStatus `json:"nfs4"`
-}
-
 type CredentialCreateReq struct {
 	SAID      string `json:"sa_id"`
 	Protocol  string `json:"protocol"`

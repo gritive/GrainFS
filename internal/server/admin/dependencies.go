@@ -210,4 +210,3 @@ type VlogCategoryBytes = adminapi.VlogCategoryBytes
 type VlogSmokeReport = adminapi.VlogSmokeReport
 type ListStorageBucketsResp = adminapi.ListStorageBucketsResp
 type StorageBucketSummary = adminapi.StorageBucketSummary
-type StorageProtocolStatusResp = adminapi.StorageProtocolStatusResp

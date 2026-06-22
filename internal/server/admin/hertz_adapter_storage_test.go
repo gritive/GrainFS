@@ -15,7 +15,6 @@ import (
 	"github.com/cloudwego/hertz/pkg/network/standard"
 	"github.com/stretchr/testify/require"
 
-	"github.com/gritive/GrainFS/internal/adminapi"
 	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/iam/principal"
 	"github.com/gritive/GrainFS/internal/server/admin"
@@ -25,15 +24,10 @@ func TestRegisterUIStorageRoutesExposeSafeSurface(t *testing.T) {
 	h, base, start := newUIRouteTestServer(t)
 	d := newServerDeps(t, t.TempDir())
 	d.Buckets = newFakeBucketOps()
-	d.Protocols = adminapi.StorageProtocolStatusResp{}
 	admin.RegisterUI(h, d)
 	start()
 
-	resp := doRouteTestRequest(t, http.MethodGet, base+"/ui/api/storage/protocols", nil)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-	resp.Body.Close()
-
-	resp = doRouteTestRequest(t, http.MethodGet, base+"/ui/api/storage/buckets", nil)
+	resp := doRouteTestRequest(t, http.MethodGet, base+"/ui/api/storage/buckets", nil)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	resp.Body.Close()
 

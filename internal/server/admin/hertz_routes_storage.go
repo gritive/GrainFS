@@ -1,7 +1,6 @@
 package admin
 
 func registerStorageUI(g router, d *Deps) {
-	g.GET(routePathStorageProtocols, wrapZero(d, AdminStorageProtocols))
 	if routeFeatureRoutesVisible(d, routeFeatureBuckets) {
 		g.GET(routePathStorageBuckets, wrapZero(d, AdminListStorageBuckets))
 		g.POST(routePathStorageBuckets, wrapBody[CreateBucketAdminReq, BucketInfo](d, AdminCreateStorageBucket))

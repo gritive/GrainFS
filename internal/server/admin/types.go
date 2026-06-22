@@ -40,7 +40,6 @@ type Deps struct {
 	IcebergConfig            IcebergConfigService         // optional; nil disables iceberg config endpoint
 	AuditQuery               AuditQueryService            // optional; nil disables audit admin endpoints
 	Status                   StatusService                // optional; nil disables GET /v1/status
-	Protocols                StorageProtocolStatusResp
 	Token                    *dashboard.TokenStore
 	PublicURL                string // e.g. "https://node1:9000"; empty means use localhost fallback
 	NodeID                   string

@@ -12,7 +12,6 @@ type Protocol string
 const (
 	ProtocolS3      Protocol = "s3"
 	ProtocolIceberg Protocol = "iceberg"
-	ProtocolNFS     Protocol = "nfs"
 )
 
 type Mode string
@@ -93,7 +92,7 @@ func ValidateCreateRequest(req CreateRequest) error {
 
 func validProtocol(p Protocol) bool {
 	switch p {
-	case ProtocolS3, ProtocolIceberg, ProtocolNFS:
+	case ProtocolS3, ProtocolIceberg:
 		return true
 	default:
 		return false
@@ -111,14 +110,6 @@ func validResource(resource string) bool {
 		}
 	}
 	return false
-}
-
-func resourceName(resource string) string {
-	_, name, ok := strings.Cut(resource, "/")
-	if !ok {
-		return resource
-	}
-	return name
 }
 
 func cloneTime(t *time.Time) *time.Time {

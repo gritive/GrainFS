@@ -46,10 +46,7 @@ type ServeOptions struct {
 	ShardCacheSize     int64 // --shard-cache-size
 
 	// --- Protocols ---
-	NFS4Port           int           // --nfs4-port
-	NFSWriteBufferDir  string        // --nfs-write-buffer-dir
-	NFSWriteBufferIdle time.Duration // --nfs-write-buffer-idle
-	EnableIceberg      bool          // --enable-iceberg
+	EnableIceberg bool // --enable-iceberg
 
 	// --- Intervals ---
 	ScrubInterval             time.Duration // --scrub-interval

@@ -83,9 +83,6 @@ func optionsToConfig(
 	cfg.KEKProtector = opts.KEKProtector
 	cfg.KEKRecoverySecretFile = opts.KEKRecoverySecretFile
 
-	cfg.NFS4Port = opts.NFS4Port
-	cfg.NFSWriteBufferDir = opts.NFSWriteBufferDir
-	cfg.NFSWriteBufferIdle = opts.NFSWriteBufferIdle
 	cfg.EnableIceberg = opts.EnableIceberg
 
 	cfg.FDWatchEnabled = opts.FDWatchEnabled

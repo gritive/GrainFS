@@ -36,7 +36,6 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 		MeasureReadAmp:     true,
 		ShardCacheSize:     int64(1 << 27),
 
-		NFS4Port:      12049,
 		EnableIceberg: true,
 
 		ScrubInterval:          7 * time.Second,
@@ -157,7 +156,6 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 	require.Equal(t, opts.AuditCommitInterval, cfg.AuditCommitInterval)
 
 	// Node services.
-	require.Equal(t, opts.NFS4Port, cfg.NFS4Port)
 	require.True(t, cfg.EnableIceberg)
 
 	// Resource guards.

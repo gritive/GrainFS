@@ -7,8 +7,7 @@ const (
 	routePathClusterPeers          = "/cluster/peers"
 	routePathResourceVlogBreakdown = "/resource/vlog/breakdown"
 
-	routePathStorageProtocols = "/storage/protocols"
-	routePathStorageBuckets   = "/storage/buckets"
+	routePathStorageBuckets = "/storage/buckets"
 
 	routePathScrub           = "/scrub"
 	routePathScrubJobs       = "/scrub/jobs"

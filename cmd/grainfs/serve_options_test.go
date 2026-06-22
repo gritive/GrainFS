@@ -30,9 +30,6 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 		"--cluster-append-forward-buffer-total-bytes", "16777216",
 		"--cluster-append-forward-buffer-max-per-request", "1048576",
 		"--append-size-cap-bytes", "67108864",
-		"--nfs4-port", "12049",
-		"--nfs-write-buffer-dir", "/tmp/nfs-writebuf",
-		"--nfs-write-buffer-idle", "15s",
 		"--pack-threshold", "31",
 		"--shard-pack-threshold", "41",
 		"--scrub-interval", "7s",
@@ -111,9 +108,6 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 	require.Equal(t, int64(134217728), opts.ShardCacheSize)
 
 	// Protocols.
-	require.Equal(t, 12049, opts.NFS4Port)
-	require.Equal(t, "/tmp/nfs-writebuf", opts.NFSWriteBufferDir)
-	require.Equal(t, "15s", opts.NFSWriteBufferIdle.String())
 	require.True(t, opts.EnableIceberg)
 
 	// Intervals.
@@ -168,15 +162,4 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 	require.Equal(t, "9001", opts.FlagsSnapshot["port"])
 	require.Equal(t, "/tmp/sentinel-data", opts.FlagsSnapshot["data"])
 	require.Equal(t, "<redacted>", opts.FlagsSnapshot["heal-receipt-psk"], "secret redaction")
-}
-
-func TestServeDefaultPortsDisabled(t *testing.T) {
-	cmd := &cobra.Command{Use: "serve"}
-	registerAllServeFlags(cmd)
-	require.NoError(t, cmd.ParseFlags([]string{}))
-
-	opts, err := serveOptionsFromCmd(cmd)
-	require.NoError(t, err)
-
-	require.Equal(t, 0, opts.NFS4Port, "NFS4 must be disabled by default")
 }
