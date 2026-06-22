@@ -194,7 +194,7 @@ func init() {
 	iamPolicyDetachCmd.Flags().String("sa", "", "ServiceAccount ID to detach from")
 
 	iamPolicySimulateCmd.Flags().String("sa", "", "ServiceAccount ID")
-	iamPolicySimulateCmd.Flags().String("principal-kind", "", "principal kind (sa, mount_sa, oidc, protocol_credential)")
+	iamPolicySimulateCmd.Flags().String("principal-kind", "", "principal kind (sa, oidc, protocol_credential)")
 	iamPolicySimulateCmd.Flags().String("principal-id", "", "principal ID")
 	iamPolicySimulateCmd.Flags().String("issuer", "", "OIDC issuer URL")
 	iamPolicySimulateCmd.Flags().String("subject", "", "OIDC subject")

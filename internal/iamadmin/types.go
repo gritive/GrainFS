@@ -209,50 +209,6 @@ type GroupPolicyDetachOptions struct {
 	PolicyName string
 }
 
-// --- MountSA ---
-
-type MountSACreateOptions struct {
-	BaseOptions
-	Name      string
-	UID       uint32
-	CreatedBy string
-}
-
-type MountSAListOptions struct {
-	BaseOptions
-}
-
-type MountSAGetOptions struct {
-	BaseOptions
-	Name string
-}
-
-type MountSADeleteOptions struct {
-	BaseOptions
-	Name string
-}
-
-type MountSAPolicyAttachOptions struct {
-	BaseOptions
-	MountSA    string
-	PolicyName string
-}
-
-type MountSAPolicyDetachOptions struct {
-	BaseOptions
-	MountSA    string
-	PolicyName string
-}
-
-// MountSAItem is the wire shape for a single MountSA entry returned by the
-// admin server. CreatedAt is milliseconds since epoch (set by the proposer).
-type MountSAItem struct {
-	Name      string `json:"name"`
-	UID       uint32 `json:"uid"`
-	CreatedAt int64  `json:"created_at"`
-	CreatedBy string `json:"created_by,omitempty"`
-}
-
 // --- PDP bearer token ---
 
 type PDPSetTokenOptions struct {
