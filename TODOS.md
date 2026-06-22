@@ -24,10 +24,20 @@
   can't provide; see `docs/superpowers/specs/2026-06-23-bucket-config-off-group0-quorum-design.md`).
 - **[P3][follow-up] Linearize `GetBucketPolicy` the same way** — identical plain-`store.View` shape on
   group-0; a stale policy read at a mutating edge could mis-authorize. Small, reuses the same pattern.
-- **[P3][follow-up] AppendObject versioned-bucket feature-gate** reads versioning via the PLAIN read
-  (`object_append.go`), so a stale follower read can let an append proceed on a versioning-enabled
-  bucket (a 501-gate bypass, not data mis-versioning). Pre-existing; route through the linearized read
-  if it matters.
+- **[DONE] AppendObject versioned-bucket feature-gate** read the PLAIN versioning state
+  (`object_append.go`), so a stale group-0 follower could read Unversioned for an Enabled bucket and
+  let an append bypass the 501 gate. Fixed: the gate now resolves versioning via the linearized read
+  (`GetBucketVersioningLinearized`, #839), matching the PUT/Copy/CompleteMultipart mutating-edge
+  contract. Discriminating unit test (`TestAppendObjectGateUsesLinearizedRead`, call-count).
+- **[P3][follow-up] AppendObject 501-gate fails OPEN on a genuine versioning-read fault.** The gate is
+  `vErr == nil && state == "Enabled"`, so any non-`UnsupportedOperationError` resolve fault is treated
+  as not-Enabled and the append proceeds — diverging from `ctxWithBucketVersioningStrict`, which
+  fail-closes on a genuine fault. Pre-existing (predicate byte-identical to pre-#839). Practical risk
+  is near-nil: it requires an Enabled bucket AND the linearized read's barrier to fail AND the
+  degraded local read to itself error (a real BadgerDB fault), a state where the node can't read its
+  own metadata anyway. Fail-closing would also reduce append availability on the common non-versioned
+  bucket when versioning-read transiently faults. Decide strict-parity vs availability if it ever
+  matters; not worth a behavior change now.
 - **[P3][epic, separate] group-0 control-plane demotion** — consolidate bucket existence/assignment
   onto the true meta-raft (`bucketAssignments`) so group-0 becomes a plain data group. Larger; touches
   bucket-lifecycle atomicity + the #838 delete cascade. Not needed for the read-linearization fix.
