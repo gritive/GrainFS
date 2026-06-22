@@ -3,6 +3,8 @@ package policy
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -82,6 +84,104 @@ func TestAllowNegativeCachesNoPolicy(t *testing.T) {
 func TestAllowNilLoaderPreservesLegacyDefaultAllow(t *testing.T) {
 	cs := NewCompiledPolicyStore() // no loader
 	require.True(t, cs.Allow(context.Background(), inp("AKIA", s3auth.PutObject, "b", "k")))
+}
+
+func TestAllowOnReadFaultAllowsUncached(t *testing.T) {
+	cs := NewCompiledPolicyStore()
+	var calls int
+	cs.SetLoader(func(string) ([]byte, bool, error) { calls++; return nil, false, errors.New("badger down") })
+	// Indeterminate read → legacy allow, and NOT cached (so it retries).
+	require.True(t, cs.Allow(context.Background(), inp("AKIA", s3auth.PutObject, "b", "k")))
+	require.True(t, cs.Allow(context.Background(), inp("AKIA", s3auth.PutObject, "b", "k")))
+	require.Equal(t, 2, calls, "fault is not cached; re-read each request")
+}
+
+func TestAllowFailsClosedOnMalformedPolicy(t *testing.T) {
+	cs := NewCompiledPolicyStore()
+	var calls int
+	cs.SetLoader(func(string) ([]byte, bool, error) { calls++; return []byte("{not json"), true, nil })
+	require.False(t, cs.Allow(context.Background(), inp("AKIA", s3auth.PutObject, "b", "k"))) // unparseable committed policy → deny
+	require.False(t, cs.Allow(context.Background(), inp("AKIA", s3auth.PutObject, "b", "k")))
+	require.Equal(t, 1, calls, "malformed policy cached as deny, not re-read")
+}
+
+func TestSetClearsNegativeCache(t *testing.T) {
+	cs := NewCompiledPolicyStore()
+	cs.SetLoader(func(string) ([]byte, bool, error) { return nil, false, nil })
+	require.True(t, cs.Allow(context.Background(), inp("AKIA", s3auth.PutObject, "b", "k"))) // negative-cached
+	require.NoError(t, cs.Set("b", denyPutPolicy(t, "b")))                                   // write-path Set on same node
+	require.False(t, cs.Allow(context.Background(), inp("AKIA", s3auth.PutObject, "b", "k"))) // Deny now enforced, no Invalidate needed
+}
+
+func TestInvalidateTightensCachedAllowToDeny(t *testing.T) {
+	cs := NewCompiledPolicyStore()
+	deny := false
+	cs.SetLoader(func(string) ([]byte, bool, error) {
+		if deny {
+			return denyPutPolicy(t, "b"), true, nil
+		}
+		return nil, false, nil
+	})
+	require.True(t, cs.Allow(context.Background(), inp("AKIA", s3auth.PutObject, "b", "k"))) // no policy → allow + negative-cache
+	deny = true
+	cs.Invalidate("b")                                                                       // policy tightened on another node (apply-hook)
+	require.False(t, cs.Allow(context.Background(), inp("AKIA", s3auth.PutObject, "b", "k"))) // re-pull → Deny enforced
+}
+
+func TestInvalidateLoosensCachedDenyToAllow(t *testing.T) {
+	cs := NewCompiledPolicyStore()
+	deny := true
+	cs.SetLoader(func(string) ([]byte, bool, error) {
+		if deny {
+			return denyPutPolicy(t, "b"), true, nil
+		}
+		return nil, false, nil
+	})
+	require.False(t, cs.Allow(context.Background(), inp("AKIA", s3auth.PutObject, "b", "k")))
+	deny = false
+	cs.Invalidate("b") // policy deleted on another node
+	require.True(t, cs.Allow(context.Background(), inp("AKIA", s3auth.PutObject, "b", "k")))
+}
+
+func TestInvalidateAllFlushesEverything(t *testing.T) {
+	cs := NewCompiledPolicyStore()
+	live := true
+	cs.SetLoader(func(string) ([]byte, bool, error) {
+		if live {
+			return denyPutPolicy(t, "b"), true, nil
+		}
+		return nil, false, nil
+	})
+	require.False(t, cs.Allow(context.Background(), inp("AKIA", s3auth.PutObject, "b", "k")))
+	live = false
+	cs.Invalidate("") // snapshot install flush-all
+	require.True(t, cs.Allow(context.Background(), inp("AKIA", s3auth.PutObject, "b", "k")))
+}
+
+// TestInvalidateDuringInflightPullDropsStaleResult: an Invalidate that races an
+// in-flight pull must win — the stale pulled view must not get cached.
+func TestInvalidateDuringInflightPullDropsStaleResult(t *testing.T) {
+	cs := NewCompiledPolicyStore()
+	denyBytes := denyPutPolicy(t, "b") // precompute off the loader goroutine
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	var once sync.Once
+	deny := false
+	cs.SetLoader(func(string) ([]byte, bool, error) {
+		once.Do(func() { close(entered); <-release }) // only the first pull blocks
+		if deny {
+			return denyBytes, true, nil
+		}
+		return nil, false, nil // first pull returns the STALE (pre-tighten) view
+	})
+	done := make(chan bool)
+	go func() { done <- cs.Allow(context.Background(), inp("AKIA", s3auth.PutObject, "b", "k")) }()
+	<-entered
+	deny = true
+	cs.Invalidate("b") // tighten while the pull holds the old view
+	close(release)
+	<-done                                                                                   // the in-flight pull may return allow for ITS request...
+	require.False(t, cs.Allow(context.Background(), inp("AKIA", s3auth.PutObject, "b", "k"))) // ...but the stale result must not have been cached
 }
 
 func TestCompiledPolicyStore_NoPolicyAllowsAll(t *testing.T) {

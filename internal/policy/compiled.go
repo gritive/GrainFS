@@ -257,6 +257,36 @@ func (cs *CompiledPolicyStore) Set(bucket string, policyJSON []byte) error {
 	return nil
 }
 
+// Invalidate drops the cached policy decision for bucket so the next Allow
+// re-pulls from the committed replica. An empty bucket flushes the whole cache
+// (snapshot install). It always bumps gen first so an in-flight pull that began
+// before this call refuses to cache its now-stale result.
+func (cs *CompiledPolicyStore) Invalidate(bucket string) {
+	cs.writeMu.Lock()
+	defer cs.writeMu.Unlock()
+	cs.gen.Add(1)
+	old := cs.state.Load()
+	if bucket == "" {
+		cs.state.Store(&policyState{
+			byBucket: make(map[string]*compiledPolicy),
+			raw:      make(map[string][]byte),
+			negative: make(map[string]struct{}),
+		})
+		return
+	}
+	_, a := old.byBucket[bucket]
+	_, b := old.raw[bucket]
+	_, c := old.negative[bucket]
+	if !a && !b && !c {
+		return // gen already bumped above — guards in-flight pulls even with nothing cached
+	}
+	next := cloneState(old)
+	delete(next.byBucket, bucket)
+	delete(next.raw, bucket)
+	delete(next.negative, bucket)
+	cs.state.Store(next)
+}
+
 // GetRaw returns the raw JSON policy for a bucket, or nil.
 func (cs *CompiledPolicyStore) GetRaw(bucket string) []byte {
 	raw := cs.state.Load().raw[bucket]
