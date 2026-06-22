@@ -47,6 +47,43 @@ func inp(accessKey string, action s3auth.S3Action, bucket, key string) s3auth.Pe
 	}
 }
 
+// denyPutPolicy builds a Deny-PutObject-for-* bucket policy as raw JSON, reusing
+// the existing test helpers so the pull-on-miss loader can hand it back.
+func denyPutPolicy(t *testing.T, bucket string) []byte {
+	t.Helper()
+	return makePolicy(t, denyStmt("*", "s3:PutObject", "arn:aws:s3:::"+bucket+"/*"))
+}
+
+func TestAllowPullsOnMissAndEnforcesDeny(t *testing.T) {
+	cs := NewCompiledPolicyStore()
+	var calls int
+	cs.SetLoader(func(bucket string) ([]byte, bool, error) {
+		calls++
+		if bucket == "b" {
+			return denyPutPolicy(t, "b"), true, nil
+		}
+		return nil, false, nil
+	})
+
+	require.False(t, cs.Allow(context.Background(), inp("AKIA", s3auth.PutObject, "b", "k"))) // committed Deny enforced on cold cache
+	require.False(t, cs.Allow(context.Background(), inp("AKIA", s3auth.PutObject, "b", "k"))) // served from cache
+	require.Equal(t, 1, calls, "policy bucket resolved once then cached")
+}
+
+func TestAllowNegativeCachesNoPolicy(t *testing.T) {
+	cs := NewCompiledPolicyStore()
+	var calls int
+	cs.SetLoader(func(string) ([]byte, bool, error) { calls++; return nil, false, nil })
+	require.True(t, cs.Allow(context.Background(), inp("AKIA", s3auth.PutObject, "free", "k")))
+	require.True(t, cs.Allow(context.Background(), inp("AKIA", s3auth.PutObject, "free", "k")))
+	require.Equal(t, 1, calls, "no-policy bucket resolved once then negative-cached")
+}
+
+func TestAllowNilLoaderPreservesLegacyDefaultAllow(t *testing.T) {
+	cs := NewCompiledPolicyStore() // no loader
+	require.True(t, cs.Allow(context.Background(), inp("AKIA", s3auth.PutObject, "b", "k")))
+}
+
 func TestCompiledPolicyStore_NoPolicyAllowsAll(t *testing.T) {
 	cs := NewCompiledPolicyStore()
 	ctx := context.Background()
