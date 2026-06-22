@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/stretchr/testify/require"
 )
@@ -140,6 +141,28 @@ func TestWriteQuorumMetaLocal_SkipsWhenExistingWins(t *testing.T) {
 	got, err := os.ReadFile(filepath.Join(b.shardSvc.dataDirs[0], quorumMetaSubDir, "bkt", "k"))
 	require.NoError(t, err)
 	require.Equal(t, newer, got)
+}
+
+// TestWriteQuorumMetaLocal_OverwritesOnTie verifies the latest-only writer
+// OVERWRITES on a full (ModTime, VersionID, MetaSeq) tie. The guard uses strict
+// "existing beats candidate" (quorum_meta.go:445-452), so a read-modify-write
+// mutation (here an ACL change) carrying equal ModTime/MetaSeq is NEVER
+// suppressed — only a strictly-newer on-disk blob causes a skip. This intent
+// previously lived only in a code comment.
+func TestWriteQuorumMetaLocal_OverwritesOnTie(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	first := mustEncodeMetaCmd(t, PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: "v1", ModTime: 100, MetaSeq: 1})
+	// Same (ModTime, VID, MetaSeq) — a TIE — but a different ACL, so the encoded
+	// bytes differ. The RMW mutation must land (overwrite), not be suppressed.
+	second := mustEncodeMetaCmd(t, PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: "v1", ModTime: 100, MetaSeq: 1, ACL: uint8(s3auth.ACLPublicRead)})
+	require.NotEqual(t, first, second, "tie blobs must differ in bytes to prove an overwrite happened")
+
+	require.NoError(t, b.shardSvc.writeQuorumMetaLocal("bkt", "k", first))
+	require.NoError(t, b.shardSvc.writeQuorumMetaLocal("bkt", "k", second))
+
+	got, err := os.ReadFile(filepath.Join(b.shardSvc.dataDirs[0], quorumMetaSubDir, "bkt", "k"))
+	require.NoError(t, err)
+	require.Equal(t, second, got, "latest-only writer must overwrite on a (ModTime,VID,MetaSeq) tie so an RMW mutation is not suppressed")
 }
 
 // TestWriteQuorumMetaVersionLocal_ConcurrentWritesLWWMax verifies that when N

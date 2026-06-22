@@ -126,7 +126,7 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		IcebergConfig:            newIcebergConfigAdapter(state.cfg.IAMStore),
 		IAMPolicy:                iamPolicyAdminService(state),
 		IAMGroup:                 iamGroupAdminService(state),
-		BucketWithPolicyProp:     state.iamProposer,
+		BucketWithPolicyProp:     bucketWithPolicyProposer(state),
 		LifecycleDeleteProp:      lifecycleDeleteProposer(state),
 		BucketUpstreamDeleteProp: bucketUpstreamDeleteProposer(state),
 		ConfigProposer:           state.metaRaft,
@@ -337,6 +337,20 @@ func lifecycleDeleteProposer(state *bootState) admin.LifecycleDeleteProposer {
 // IAMStore is absent, so it is unreachable on the serve path today — this guard
 // is defensive, not load-bearing.)
 func bucketUpstreamDeleteProposer(state *bootState) admin.BucketUpstreamDeleteProposer {
+	if state.iamProposer == nil {
+		return nil
+	}
+	return state.iamProposer
+}
+
+// bucketWithPolicyProposer returns the IAM create-bucket-with-policy proposer
+// for the admin bucket-create attach path, or nil when IAM is not wired.
+// Returning the concrete *iam.MetaProposer directly when it is nil would box a
+// typed-nil into the interface (non-nil interface, defeating the != nil guard
+// at handlers_bucket.go:43), so guard explicitly. Unreachable today
+// (boot_phases_backend.go fails boot when IAMStore is absent), so this is
+// defensive + for consistency with bucketUpstreamDeleteProposer.
+func bucketWithPolicyProposer(state *bootState) admin.BucketWithPolicyProposer {
 	if state.iamProposer == nil {
 		return nil
 	}
