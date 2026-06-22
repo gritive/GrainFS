@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync/atomic"
@@ -113,7 +114,32 @@ func NewOperations(backend Backend, opts ...OperationsOption) *Operations {
 	for _, opt := range opts {
 		opt(o)
 	}
+	if o.policyStore != nil {
+		o.policyStore.SetLoader(o.loadCommittedBucketPolicy)
+	}
 	return o
+}
+
+// loadCommittedBucketPolicy reads a bucket's policy from the committed local
+// replica for CompiledPolicyStore pull-on-miss. It bypasses the policy cache
+// (reads the PolicyBackend directly) and normalizes outcomes so internal/policy
+// stays free of any storage dependency:
+//   - no policy backend, or ErrBucketNotFound → found=false, err=nil (allow, negative-cache)
+//   - any other error (router/recovery/fault) → found=false, err set     (allow, uncached)
+//   - bytes                                    → found=true             (compile)
+func (o *Operations) loadCommittedBucketPolicy(bucket string) ([]byte, bool, error) {
+	plan := o.planForCall()
+	if plan.policyBackend == nil {
+		return nil, false, nil
+	}
+	data, err := plan.policyBackend.GetBucketPolicy(bucket)
+	if err != nil {
+		if errors.Is(err, ErrBucketNotFound) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return data, true, nil
 }
 
 func (o *Operations) Backend() Backend {

@@ -1,12 +1,53 @@
 package storage
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/policy"
+	"github.com/gritive/GrainFS/internal/s3auth"
 )
+
+// mapPolicyBackend serves a settable policy map and returns ErrBucketNotFound for
+// absent buckets, so loadCommittedBucketPolicy's not-found normalization is
+// exercised (the existing policyBackendFake returns nil error on a miss).
+type mapPolicyBackend struct {
+	Backend
+	policies map[string][]byte
+}
+
+func (m *mapPolicyBackend) GetBucketPolicy(bucket string) ([]byte, error) {
+	if p, ok := m.policies[bucket]; ok {
+		return p, nil
+	}
+	return nil, ErrBucketNotFound
+}
+func (m *mapPolicyBackend) SetBucketPolicy(bucket string, p []byte) error {
+	m.policies[bucket] = p
+	return nil
+}
+func (m *mapPolicyBackend) DeleteBucketPolicy(bucket string) error {
+	delete(m.policies, bucket)
+	return nil
+}
+
+func TestOperationsAllowPullsCommittedPolicyOnColdCache(t *testing.T) {
+	be := &mapPolicyBackend{policies: map[string][]byte{
+		"b": []byte(`{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Principal":{"AWS":["*"]},"Action":["s3:PutObject"],"Resource":["arn:aws:s3:::b/*"]}]}`),
+	}}
+	store := policy.NewCompiledPolicyStore()
+	_ = NewOperations(be, WithPolicyStore(store)) // installs the pull-on-miss loader
+
+	in := s3auth.PermCheckInput{Action: s3auth.PutObject,
+		Principal: s3auth.Principal{AccessKey: "AKIA"},
+		Resource:  s3auth.ResourceRef{Bucket: "b", Key: "k"}}
+	require.False(t, store.Allow(context.Background(), in)) // cold store + committed Deny ⇒ deny
+
+	in.Resource.Bucket = "free"
+	require.True(t, store.Allow(context.Background(), in)) // no committed policy ⇒ allow (negative-cache)
+}
 
 func TestOperationsBucketPolicyPersistsAndUpdatesCache(t *testing.T) {
 	backend := &policyBackendFake{}
