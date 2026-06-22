@@ -16,7 +16,6 @@ import (
 	"github.com/gritive/GrainFS/internal/iam/mountsastore"
 	"github.com/gritive/GrainFS/internal/nfs4server"
 	"github.com/gritive/GrainFS/internal/nfsexport"
-	"github.com/gritive/GrainFS/internal/p9server"
 	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -27,18 +26,11 @@ import (
 // start.
 type NodeServices struct {
 	nfs4Srv *nfs4server.Server
-	p9Srv   *p9server.Server
 	nfs4Err error
-	p9Err   error
 }
 
 // Close shuts down any started services. Safe to call on the zero value.
 func (n *NodeServices) Close() {
-	if n.p9Srv != nil {
-		if err := n.p9Srv.Close(); err != nil {
-			log.Warn().Err(err).Msg("9p server close error")
-		}
-	}
 	if n.nfs4Srv != nil {
 		if err := n.nfs4Srv.Close(); err != nil {
 			log.Warn().Err(err).Msg("nfs4 server close error")
@@ -56,12 +48,8 @@ func (n *NodeServices) NFS4() *nfs4server.Server { return n.nfs4Srv }
 func (n *NodeServices) ProtocolStatus(cfg Config) adminapi.StorageProtocolStatusResp {
 	resp := storageProtocolStatusFromConfig(cfg)
 	resp.NFS4.Enabled = n.nfs4Srv != nil
-	resp.P9.Enabled = n.p9Srv != nil
 	if cfg.NFS4Port > 0 && n.nfs4Srv == nil && n.nfs4Err != nil {
 		resp.NFS4.Warning = "start failed: " + n.nfs4Err.Error()
-	}
-	if cfg.P9Port > 0 && n.p9Srv == nil && n.p9Err != nil {
-		resp.P9.Warning = "start failed: " + n.p9Err.Error()
 	}
 	return resp
 }
@@ -70,12 +58,9 @@ func (n *NodeServices) SetNFSExports(src *nfsexport.ExportService) {
 	if n.nfs4Srv != nil {
 		n.nfs4Srv.SetExportSource(src)
 	}
-	if n.p9Srv != nil && src != nil {
-		n.p9Srv.SetExportStore(src)
-	}
 }
 
-// NodeServicesIAMConfig carries optional IAM gate dependencies for NFS/9P
+// NodeServicesIAMConfig carries optional IAM gate dependencies for NFS
 // servers (NFS§B T8 + T12). Nil fields disable the corresponding gate
 // (backward compat).
 //
@@ -83,8 +68,8 @@ func (n *NodeServices) SetNFSExports(src *nfsexport.ExportService) {
 // access is now controlled at attach/mount authorization time rather than by
 // global anonymous config.
 //
-// AuditHook is called synchronously after every grainfs:NFSMount /
-// grainfs:9PAttach allow/deny decision (T15 NFS§C). nil = no audit emit.
+// AuditHook is called synchronously after every grainfs:NFSMount
+// allow/deny decision (T15 NFS§C). nil = no audit emit.
 type NodeServicesIAMConfig struct {
 	MountSAStore        *mountsastore.Store
 	Authorizer          *s3auth.Authorizer
@@ -93,10 +78,10 @@ type NodeServicesIAMConfig struct {
 	ProtocolCredentials *protocred.AttachValidator
 }
 
-// StartNodeServices spawns NFSv4 and 9P servers if their respective ports
-// are > 0. Returns the handle for shutdown. iam is optional; nil = no IAM gate.
+// StartNodeServices spawns the NFSv4 server if its port is > 0. Returns
+// the handle for shutdown. iam is optional; nil = no IAM gate.
 func StartNodeServices(ctx context.Context, backend storage.Backend,
-	nfs4Port int, p9Bind string, p9Port int,
+	nfs4Port int,
 	nfsWriteBufDir string, nfsWriteBufIdle time.Duration, dataDir string,
 	iam ...*NodeServicesIAMConfig,
 ) *NodeServices {
@@ -156,41 +141,6 @@ func StartNodeServices(ctx context.Context, backend storage.Backend,
 						return
 					}
 					log.Error().Err(err).Msg("nfs4 server error")
-				}
-			}()
-		}
-	}
-
-	if p9Port > 0 {
-		if p9Bind == "" {
-			p9Bind = "127.0.0.1"
-		}
-		addr := net.JoinHostPort(p9Bind, fmt.Sprintf("%d", p9Port))
-		ln, err := net.Listen("tcp", addr)
-		if err != nil {
-			svc.p9Err = fmt.Errorf("9p listen %s: %w", addr, err)
-			log.Error().Err(svc.p9Err).Msg("9p server start failed")
-		} else {
-			var p9Opts []p9server.ServerOption
-			if iamCfg != nil && iamCfg.MountSAStore != nil {
-				p9Opts = append(p9Opts, p9server.WithMountSAStore(iamCfg.MountSAStore))
-			}
-			if iamCfg != nil && iamCfg.Authorizer != nil {
-				p9Opts = append(p9Opts, p9server.WithAuthorizer(iamCfg.Authorizer))
-			}
-			if iamCfg != nil && iamCfg.CfgStore != nil {
-				p9Opts = append(p9Opts, p9server.WithConfigReader(iamCfg.CfgStore))
-			}
-			if iamCfg != nil && iamCfg.AuditHook != nil {
-				p9Opts = append(p9Opts, p9server.WithAuditHook(iamCfg.AuditHook))
-			}
-			if iamCfg != nil && iamCfg.ProtocolCredentials != nil {
-				p9Opts = append(p9Opts, p9server.WithProtocolCredentialValidator(iamCfg.ProtocolCredentials))
-			}
-			svc.p9Srv = p9server.NewServer(backend, p9Opts...)
-			go func() {
-				if err := svc.p9Srv.Serve(ctx, ln); err != nil && ctx.Err() == nil {
-					log.Error().Err(err).Msg("9p server error")
 				}
 			}()
 		}
