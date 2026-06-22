@@ -148,7 +148,7 @@ func TestCompatEnumConverters_RoundTrip(t *testing.T) {
 	require.Equal(t, compat.Severity(""), severityFromFB(clusterpb.CompatSeverityUnknown))
 
 	ops := []compat.Operation{
-		compat.OperationMigrationCutover, compat.OperationNfsExportCreate,
+		compat.OperationMigrationCutover,
 		compat.OperationCreateMultipartUpload, compat.OperationListMultipartUploads,
 		compat.OperationListParts,
 	}
@@ -175,7 +175,7 @@ func TestCompatEnumDriftGuard(t *testing.T) {
 	}
 
 	ops := []compat.Operation{
-		compat.OperationMigrationCutover, compat.OperationNfsExportCreate,
+		compat.OperationMigrationCutover,
 		compat.OperationCreateMultipartUpload, compat.OperationListMultipartUploads,
 		compat.OperationListParts,
 	}

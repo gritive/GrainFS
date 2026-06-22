@@ -1009,7 +1009,6 @@ enum CompatSeverity : byte {
 enum CompatOperation : byte {
   Unknown = 0,
   MigrationCutover = 1,
-  NfsExportCreate = 2,
   CreateMultipartUpload = 3,
   ListMultipartUploads = 4,
   ListParts = 5,

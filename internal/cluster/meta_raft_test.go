@@ -780,7 +780,7 @@ func TestMetaRaftProposeWithGateFollowerRequiresGatedForwarder(t *testing.T) {
 	gate.ReportEvidence(compat.Evidence{
 		NodeID: compat.NodeID("node-1"),
 		Capabilities: map[string]bool{
-			compat.CapabilityNfsExportCreateV1: true,
+			compat.CapabilityMigrationCutoverV1: true,
 		},
 		LastSeen: time.Now(),
 		Ready:    true,
@@ -792,10 +792,10 @@ func TestMetaRaftProposeWithGateFollowerRequiresGatedForwarder(t *testing.T) {
 	}
 	node := &fakeProposerNode{isLeader: false}
 	plan := compat.GatePlan{
-		Capability: compat.CapabilityNfsExportCreateV1,
+		Capability: compat.CapabilityMigrationCutoverV1,
 		Scope:      compat.ScopeMetaRaft,
 		Severity:   compat.SeverityHard,
-		Operation:  compat.OperationNfsExportCreate,
+		Operation:  compat.OperationMigrationCutover,
 		ConfigID:   raftConfigurationID(cfg),
 	}
 
@@ -812,7 +812,7 @@ func TestMetaRaftProposeWithGateFollowerUsesGatedForwarder(t *testing.T) {
 	gate.ReportEvidence(compat.Evidence{
 		NodeID: compat.NodeID("node-1"),
 		Capabilities: map[string]bool{
-			compat.CapabilityNfsExportCreateV1: true,
+			compat.CapabilityMigrationCutoverV1: true,
 		},
 		LastSeen: time.Now(),
 		Ready:    true,
@@ -826,10 +826,10 @@ func TestMetaRaftProposeWithGateFollowerUsesGatedForwarder(t *testing.T) {
 	}
 	node := &fakeProposerNode{isLeader: false}
 	plan := compat.GatePlan{
-		Capability: compat.CapabilityNfsExportCreateV1,
+		Capability: compat.CapabilityMigrationCutoverV1,
 		Scope:      compat.ScopeMetaRaft,
 		Severity:   compat.SeverityHard,
-		Operation:  compat.OperationNfsExportCreate,
+		Operation:  compat.OperationMigrationCutover,
 		ConfigID:   raftConfigurationID(cfg),
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)

@@ -260,7 +260,7 @@ func TestGossipReceiverReportsCapabilityEvidenceToGate(t *testing.T) {
 	gate.ReportEvidence(compat.Evidence{
 		NodeID: compat.NodeID("node-a"),
 		Capabilities: map[string]bool{
-			compat.CapabilityNfsExportCreateV1: true,
+			compat.CapabilityMigrationCutoverV1: true,
 		},
 		LastSeen: now,
 		Ready:    true,
@@ -269,11 +269,11 @@ func TestGossipReceiverReportsCapabilityEvidenceToGate(t *testing.T) {
 	recv := gossip.NewGossipReceiver(tr, store).WithCapabilityGate(gate)
 	recv.RegisterNativeGossipRoutes()
 
-	msg := gateStatsGossipMsg(gossip.NodeStats{NodeID: "node-b", DiskUsedPct: 55.0}, compat.CapabilityNfsExportCreateV1)
+	msg := gateStatsGossipMsg(gossip.NodeStats{NodeID: "node-b", DiskUsedPct: 55.0}, compat.CapabilityMigrationCutoverV1)
 	tr.deliver(t, "node-b:9000", transport.RouteGossipAdmin, msg)
 
 	require.Eventually(t, func() bool {
-		_, err := gate.RequireMetaRaftCapability(compat.CapabilityNfsExportCreateV1, compat.OperationNfsExportCreate, time.Now())
+		_, err := gate.RequireMetaRaftCapability(compat.CapabilityMigrationCutoverV1, compat.OperationMigrationCutover, time.Now())
 		return err == nil
 	}, 500*time.Millisecond, 10*time.Millisecond)
 }
@@ -290,7 +290,7 @@ func TestGossipReceiverReportsCapabilityEvidenceUnderRaftMemberID(t *testing.T) 
 	gate.ReportEvidence(compat.Evidence{
 		NodeID: compat.NodeID("10.0.0.1:7001"),
 		Capabilities: map[string]bool{
-			compat.CapabilityNfsExportCreateV1: true,
+			compat.CapabilityMigrationCutoverV1: true,
 		},
 		LastSeen: now,
 		Ready:    true,
@@ -303,11 +303,11 @@ func TestGossipReceiverReportsCapabilityEvidenceUnderRaftMemberID(t *testing.T) 
 		}}))
 	recv.RegisterNativeGossipRoutes()
 
-	msg := gateStatsGossipMsg(gossip.NodeStats{NodeID: "node-b", DiskUsedPct: 55.0}, compat.CapabilityNfsExportCreateV1)
+	msg := gateStatsGossipMsg(gossip.NodeStats{NodeID: "node-b", DiskUsedPct: 55.0}, compat.CapabilityMigrationCutoverV1)
 	tr.deliver(t, "10.0.0.2:54321", transport.RouteGossipAdmin, msg)
 
 	require.Eventually(t, func() bool {
-		_, err := gate.RequireMetaRaftCapability(compat.CapabilityNfsExportCreateV1, compat.OperationNfsExportCreate, time.Now())
+		_, err := gate.RequireMetaRaftCapability(compat.CapabilityMigrationCutoverV1, compat.OperationMigrationCutover, time.Now())
 		return err == nil
 	}, 500*time.Millisecond, 10*time.Millisecond)
 }
@@ -324,7 +324,7 @@ func TestGossipReceiverPrefersAddressBookOverDirectNodeIDMatch(t *testing.T) {
 	gate.ReportEvidence(compat.Evidence{
 		NodeID: compat.NodeID("node-a:7001"),
 		Capabilities: map[string]bool{
-			compat.CapabilityNfsExportCreateV1: true,
+			compat.CapabilityMigrationCutoverV1: true,
 		},
 		LastSeen: now,
 		Ready:    true,
@@ -337,11 +337,11 @@ func TestGossipReceiverPrefersAddressBookOverDirectNodeIDMatch(t *testing.T) {
 		}}))
 	recv.RegisterNativeGossipRoutes()
 
-	msg := gateStatsGossipMsg(gossip.NodeStats{NodeID: "node-b", DiskUsedPct: 55.0}, compat.CapabilityNfsExportCreateV1)
+	msg := gateStatsGossipMsg(gossip.NodeStats{NodeID: "node-b", DiskUsedPct: 55.0}, compat.CapabilityMigrationCutoverV1)
 	tr.deliver(t, "node-b:54321", transport.RouteGossipAdmin, msg)
 
 	require.Eventually(t, func() bool {
-		_, err := gate.RequireMetaRaftCapability(compat.CapabilityNfsExportCreateV1, compat.OperationNfsExportCreate, time.Now())
+		_, err := gate.RequireMetaRaftCapability(compat.CapabilityMigrationCutoverV1, compat.OperationMigrationCutover, time.Now())
 		return err == nil
 	}, 500*time.Millisecond, 10*time.Millisecond)
 }

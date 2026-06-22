@@ -168,7 +168,7 @@ func TestGossipSenderIncludesCapabilityEvidence(t *testing.T) {
 
 	sender := NewGossipSender("node-a", []string{"node-b:9000"}, tr, store, 30*time.Second).
 		WithCapabilityEvidenceSource(staticCapabilityEvidence{caps: map[string]bool{
-			compat.CapabilityNfsExportCreateV1: true,
+			compat.CapabilityMigrationCutoverV1: true,
 		}})
 	sender.BroadcastOnce(context.Background())
 
@@ -177,7 +177,7 @@ func TestGossipSenderIncludesCapabilityEvidence(t *testing.T) {
 
 	pb := clusterpb.GetRootAsNodeStatsMsg(msgs[0].payload, 0)
 	require.Equal(t, 1, pb.CapabilitiesLength())
-	assert.Equal(t, compat.CapabilityNfsExportCreateV1, string(pb.Capabilities(0)))
+	assert.Equal(t, compat.CapabilityMigrationCutoverV1, string(pb.Capabilities(0)))
 }
 
 func TestGossipSenderUsesLatestPeerProvider(t *testing.T) {
