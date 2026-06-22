@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.645.0] - 2026-06-22
+
+### Changed
+- **docs:** pruned completed items from `TODOS.md` — removed the finished mount-protocol removal epic
+  (slices A/B/C, PRs #827–#833) and the Run 2 quick-wins section (PR #835). Remaining backlog is the
+  pending bucket-delete-cascade follow-ups, test/doc/spec polish, and the historical do-not-resurrect
+  notes. No code change.
+
 ## [0.0.644.0] - 2026-06-22
 
 ### Changed
