@@ -15,7 +15,7 @@ import (
 )
 
 // Transport is the generic admin HTTP transport shared by every admin client
-// package (volumeadmin, clusteradmin, ...). It handles endpoint dispatch
+// package (admincli, clusteradmin, ...). It handles endpoint dispatch
 // (UDS vs HTTP), JSON marshaling, and converting transport-level + non-2xx
 // responses into *Error envelopes.
 //

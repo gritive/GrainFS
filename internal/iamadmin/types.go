@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// BaseOptions matches the shape used by volumeadmin/clusteradmin/nfsadmin
+// BaseOptions matches the shape used by admincli/clusteradmin/nfsadmin
 // so cmd helpers can populate it uniformly. RawBytes is unused for IAM but
 // kept for shape parity.
 type BaseOptions struct {

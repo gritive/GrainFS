@@ -1,4 +1,4 @@
-package volumeadmin
+package admincli
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 	"github.com/gritive/GrainFS/internal/adminapi"
 )
 
-// Client speaks to the volumeadmin endpoints on the admin HTTP server.
+// Client speaks to the admincli endpoints on the admin HTTP server.
 // Transport plumbing lives in adminapi; this type only wires endpoint methods.
 type Client struct {
 	*adminapi.Transport

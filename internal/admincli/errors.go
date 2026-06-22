@@ -1,4 +1,4 @@
-package volumeadmin
+package admincli
 
 import (
 	"github.com/gritive/GrainFS/internal/adminapi"
@@ -6,7 +6,7 @@ import (
 
 // Error is the typed error returned on non-2xx admin responses.
 // Aliased to adminapi.Error so transport-level handling is shared with
-// clusteradmin while volumeadmin keeps endpoint-specific Detail views.
+// clusteradmin while admincli keeps endpoint-specific Detail views.
 type Error = adminapi.Error
 
 // IsCode reports whether err is a *Error with the given code.

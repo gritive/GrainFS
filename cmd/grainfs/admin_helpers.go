@@ -9,12 +9,12 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/gritive/GrainFS/internal/volumeadmin"
+	"github.com/gritive/GrainFS/internal/admincli"
 )
 
 // DefaultAdminTimeout caps a single admin CLI request when the user does not
 // pass --timeout. Replaces the former hardcoded http.Client.Timeout: 30s in
-// volumeadmin.NewClient (which silently capped BaseOptions.Timeout > 30s).
+// admincli.NewClient (which silently capped BaseOptions.Timeout > 30s).
 const DefaultAdminTimeout = 30 * time.Second
 
 // registerAdminTimeoutFlag adds --timeout to cmd's PersistentFlags so every
@@ -39,9 +39,9 @@ func adminTimeoutFromCmd(cmd *cobra.Command) time.Duration {
 }
 
 // applyAdminTimeout wraps ctx with the resolved admin timeout. Used by admin
-// runners (dashboard, bucket scrub) that don't go through volumeadmin's
+// runners (dashboard, bucket scrub) that don't go through admincli's
 // withTimeout helper. d <= 0 returns ctx unchanged (no cap), matching
-// volumeadmin.withTimeout's contract.
+// admincli.withTimeout's contract.
 func applyAdminTimeout(ctx context.Context, cmd *cobra.Command) (context.Context, context.CancelFunc) {
 	d := adminTimeoutFromCmd(cmd)
 	if d <= 0 {
@@ -61,9 +61,9 @@ func registerAdminEndpointFlag(cmd *cobra.Command) {
 // adminClientFromCmd reads --endpoint and returns a configured admin client.
 // Used by admin CLI commands (volume, dashboard, bucket scrub) that share the
 // same connection mechanics.
-func adminClientFromCmd(cmd *cobra.Command) (*volumeadmin.Client, error) {
+func adminClientFromCmd(cmd *cobra.Command) (*admincli.Client, error) {
 	endpoint, _ := cmd.Flags().GetString("endpoint")
-	return volumeadmin.NewClient(endpoint)
+	return admincli.NewClient(endpoint)
 }
 
 // jsonOut reports whether the caller wants JSON output. Single source of
@@ -75,7 +75,7 @@ func jsonOut(cmd *cobra.Command) bool {
 
 // printJSON pretty-prints v as JSON to cmd's stdout.
 func printJSON(cmd *cobra.Command, v any) error {
-	return volumeadmin.PrintJSON(cmd.OutOrStdout(), v)
+	return admincli.PrintJSON(cmd.OutOrStdout(), v)
 }
 
 // adminEndpointFromCmd resolves --endpoint and validates it. Used by all admin

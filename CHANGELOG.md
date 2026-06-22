@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.642.0] - 2026-06-22
+
+### Changed
+- **`internal/volumeadmin` renamed to `internal/admincli` (stale name from the volume-removal epic).**
+  Despite the name, the package was never volume-specific: it is the shared admin HTTP client used by every
+  `grainfs` admin CLI command (iam/cluster/credential/scrub) plus the live S3 EC bucket-scrub session client.
+  The volume-removal epic (#781–#785) repurposed it without renaming. This is a behavior-neutral rename of the
+  package + its callers (`cmd/grainfs`) and a refresh of the doc comments in sibling admin packages that
+  referenced it by name.
+
+### Removed
+- **Dead `adminapi.VolumeInfo` type removed** (a volume-removal-epic leftover referenced only by its own test).
+- **Duplicate `adminapi.ScrubVolumeResp` collapsed into the canonical `adminapi.ScrubResp`.** The scrub-trigger
+  server handler + route already returned `ScrubResp`; the admin client aliased a separate, byte-identical
+  `ScrubVolumeResp`. The client alias now points at the one `ScrubResp`, removing the duplicate wire type. No
+  behavior change (identical JSON shape).
+
 ## [0.0.641.0] - 2026-06-22
 
 ### Added

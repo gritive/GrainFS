@@ -180,12 +180,6 @@ type DashboardTokenResp struct {
 	PublicURLSet bool   `json:"public_url_set"`
 }
 
-// ScrubVolumeResp identifies the resulting session.
-type ScrubVolumeResp struct {
-	SessionID string `json:"session_id"`
-	Created   bool   `json:"created"`
-}
-
 // ScrubJobInfo is the JSON form of one scrub session.
 type ScrubJobInfo struct {
 	SessionID    string   `json:"session_id"`
@@ -209,17 +203,6 @@ type ScrubJobInfo struct {
 // ListScrubJobsResp aggregates active sessions.
 type ListScrubJobsResp struct {
 	Jobs []ScrubJobInfo `json:"jobs"`
-}
-
-// VolumeInfo is the JSON representation of a volume in admin responses.
-type VolumeInfo struct {
-	Name            string   `json:"name"`
-	Size            int64    `json:"size"`
-	BlockSize       int      `json:"block_size"`
-	AllocatedBlocks int64    `json:"allocated_blocks"`
-	AllocatedBytes  int64    `json:"allocated_bytes"`
-	Health          string   `json:"health"`
-	HealthReasons   []string `json:"health_reasons"`
 }
 
 // --- Cluster wire types ---
