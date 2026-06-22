@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.636.0] - 2026-06-22
+
+### Removed
+- **9P protocol support removed (BREAKING).** GrainFS no longer ships a 9P2000.L server. The
+  `--9p-bind` and `--9p-port` serve flags are gone (passing them now fails with "unknown flag"), the
+  admin storage-protocols response no longer carries a `p9` field, and the `Protocol9P` credential
+  type, the `9PAttachOnly` built-in IAM policy, the `grainfs:9PAttach` action, and the
+  `protocol-credential/9p/*` policy resources are all removed. The `internal/p9server` package and all
+  9P e2e/colima tests and `bench-9p*` / `test-9p-colima` Makefile targets are deleted. NFS, S3, and
+  Iceberg are unaffected: the `internal/protocred` credential layer (S3/Iceberg/NFS) and
+  `internal/iam/mountsastore` survive. This is the first slice of the mount-protocol removal epic;
+  NFS removal and the shared mount-SA infrastructure teardown follow in later PRs.
+
 ## [0.0.635.0] - 2026-06-22
 
 ### Fixed
