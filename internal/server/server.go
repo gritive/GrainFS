@@ -221,6 +221,10 @@ func (s *Server) TLSActive() bool {
 // helpers like SweepOrphanMultiparts without reaching into Server internals.
 func (s *Server) Operations() *storage.Operations { return s.ops }
 
+// PolicyStore returns the compiled bucket-policy store so boot wiring can hook
+// its cache invalidator into the cluster apply path.
+func (s *Server) PolicyStore() *CompiledPolicyStore { return s.policyStore }
+
 // Shutdown gracefully shuts down the server, draining in-flight requests.
 func (s *Server) Shutdown(ctx context.Context) error {
 	err := s.hertz.Shutdown(ctx)
