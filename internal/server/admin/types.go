@@ -27,6 +27,7 @@ type Deps struct {
 	IAMGroup                 IAMGroupService              // optional; nil disables IAM group admin endpoints
 	BucketWithPolicyProp     BucketWithPolicyProposer     // optional; nil → create-only path (no attach)
 	LifecycleDeleteProp      LifecycleDeleteProposer      // optional; nil → no lifecycle cascade on bucket delete
+	LifecycleGenReader       LifecycleGenReader           // optional; nil → observed lifecycle gen 0 (cascade no-ops or deletes-if-absent)
 	BucketUpstreamDeleteProp BucketUpstreamDeleteProposer // optional; nil → no IAM upstream cascade on bucket delete
 	ConfigProposer           ConfigProposer               // optional; nil disables config write endpoints
 	ConfigStore              ConfigStoreReader            // optional; nil disables config read endpoints

@@ -16,16 +16,20 @@ import (
 // CALLER CONTRACT: invoke only once the bucket itself is known to be gone
 // (delete succeeded, or the bucket was already absent). Never call it on a
 // failed delete of a surviving bucket (e.g. ErrBucketNotEmpty) — that would
-// strip a live bucket's config.
-func cascadeBucketConfigAfterDelete(ctx context.Context, d *Deps, name string) error {
+// strip a live bucket's config. observedLifecycleGen/observedUpstreamGen are the
+// CAS tokens the caller MUST capture BEFORE the data-Raft delete; the FSM apply
+// only deletes when the stored generation still equals the observed one, so a
+// racing recreate (which bumps the generation past the captured value) makes
+// this cascade a no-op and keeps the recreated bucket's fresh config.
+func cascadeBucketConfigAfterDelete(ctx context.Context, d *Deps, name string, observedLifecycleGen, observedUpstreamGen uint64) error {
 	var errs []error
 	if d.LifecycleDeleteProp != nil {
-		if err := d.LifecycleDeleteProp.ProposeLifecycleDelete(ctx, name); err != nil {
+		if err := d.LifecycleDeleteProp.ProposeLifecycleDelete(ctx, name, observedLifecycleGen); err != nil {
 			errs = append(errs, fmt.Errorf("delete lifecycle config: %w", err))
 		}
 	}
 	if d.BucketUpstreamDeleteProp != nil {
-		if err := d.BucketUpstreamDeleteProp.ProposeBucketUpstreamDelete(ctx, name); err != nil {
+		if err := d.BucketUpstreamDeleteProp.ProposeBucketUpstreamDelete(ctx, name, observedUpstreamGen); err != nil {
 			errs = append(errs, fmt.Errorf("delete IAM bucket-upstream: %w", err))
 		}
 	}

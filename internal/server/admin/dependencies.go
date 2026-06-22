@@ -102,16 +102,27 @@ type BucketWithPolicyProposer interface {
 // LifecycleDeleteProposer proposes a meta-Raft delete of a bucket's lifecycle
 // configuration. The bucket-delete cascade uses it so a recreated same-name
 // bucket does not inherit stale lifecycle config. Implemented by
-// cluster.LifecycleProposer.
+// cluster.LifecycleProposer. observedGen is the CAS token captured BEFORE the
+// data-Raft delete: the FSM apply only deletes when the stored generation still
+// equals it (a racing recreate bumps the generation past it → no-op).
 type LifecycleDeleteProposer interface {
-	ProposeLifecycleDelete(ctx context.Context, bucket string) error
+	ProposeLifecycleDelete(ctx context.Context, bucket string, observedGen uint64) error
 }
 
 // BucketUpstreamDeleteProposer proposes a meta-Raft delete of a bucket's IAM
 // upstream (read-through federation) record, for the same bucket-delete
-// cascade. Implemented by iam.MetaProposer.
+// cascade. Implemented by iam.MetaProposer. observedGen carries the same
+// capture-before-delete CAS token as LifecycleDeleteProposer.
 type BucketUpstreamDeleteProposer interface {
-	ProposeBucketUpstreamDelete(ctx context.Context, bucket string) error
+	ProposeBucketUpstreamDelete(ctx context.Context, bucket string, observedGen uint64) error
+}
+
+// LifecycleGenReader reads the current CAS generation of a bucket's lifecycle
+// config so the bucket-delete cascade can capture it BEFORE the data-Raft
+// delete. A local, possibly-stale read is safe: generation is monotonic and a
+// CAS mismatch is fail-safe (the cascade-delete becomes a no-op).
+type LifecycleGenReader interface {
+	GetLifecycleGen(ctx context.Context, bucket string) (uint64, error)
 }
 
 // IAMGroupService is the slim interface group admin handlers need.
