@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // TestNonVersionedListObjectVersions_EnumeratesBlobs proves the S3 ?versions API
@@ -45,6 +47,36 @@ func TestNonVersionedListObjectVersions_EnumeratesBlobs(t *testing.T) {
 		require.NotEmpty(t, g.Versions, "lifecycle group %q must carry its version", g.Key)
 	}
 	require.True(t, seen["a.txt"] && seen["b.txt"], "lifecycle scan must see both non-versioned objects, got %v", seen)
+}
+
+// TestNonVersionedListObjectVersions_MultipartNoDuplicate proves a non-versioned
+// MULTIPART object appears EXACTLY ONCE in ?versions. A non-versioned multipart
+// complete writes BOTH the FSM obj:/lat: records AND the latest-only blob (same
+// VersionID), so without the leaf (Key,VID) dedup it would double-list (the
+// single-group ?versions path and the lifecycle worker bypass the coordinator dedup).
+func TestNonVersionedListObjectVersions_MultipartNoDuplicate(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	const bkt, key = "plainbkt", "mp.bin"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	// No SetBucketVersioning → non-versioned.
+
+	up, err := b.CreateMultipartUpload(ctx, bkt, key, "application/octet-stream")
+	require.NoError(t, err)
+	part, err := b.UploadPart(ctx, bkt, key, up.UploadID, 1, bytes.NewReader([]byte("multipart-payload")), "")
+	require.NoError(t, err)
+	_, err = b.CompleteMultipartUpload(ctx, bkt, key, up.UploadID, []storage.Part{*part})
+	require.NoError(t, err)
+
+	vers, err := b.ListObjectVersions(ctx, bkt, "", 0)
+	require.NoError(t, err)
+	count := 0
+	for _, v := range vers {
+		if v.Key == key {
+			count++
+		}
+	}
+	require.Equal(t, 1, count, "non-versioned multipart object must appear exactly once in ?versions (got %d)", count)
 }
 
 // TestNonVersionedListObjectVersions_DeletedAbsent proves a deleted (tombstoned)

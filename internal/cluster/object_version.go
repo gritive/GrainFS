@@ -497,6 +497,16 @@ func (b *DistributedBackend) ListObjectVersions(ctx context.Context, bucket, pre
 	if err != nil {
 		return nil, err
 	}
+	// Dedup blob-vs-FSM by (Key,VID): a non-versioned MULTIPART complete writes BOTH
+	// the FSM obj:/lat: records AND the latest-only blob with the SAME VersionID
+	// (applyCompleteMultipart legacy branch + the proposer's blob mirror), so the
+	// blob enum above and the FSM scan both emit it. Keep-first prefers the blob
+	// entry (appended first). Simple-PUT objects (blob-only) and appendable/coalesced
+	// carve-outs (FSM-only, blob deleted) are disjoint, so this only collapses the
+	// multipart overlap. Done at the leaf because the single-group path and the
+	// lifecycle worker (ScanObjectsGrouped) consume the leaf directly, bypassing the
+	// coordinator's dedup.
+	versions = dedupVersionsKeepFirst(versions)
 	// Sort DESC by VersionID (UUIDv7 is lex-ASC-by-time, so reverse = newest-first).
 	sort.Slice(versions, func(i, j int) bool {
 		if versions[i].Key != versions[j].Key {

@@ -860,14 +860,21 @@ func (b *DistributedBackend) scanQuorumMetaVersionsClusterAll(bucket, prefix str
 }
 
 // scanQuorumMetaClusterAll is the latest-only-tree twin of
-// scanQuorumMetaVersionsClusterAll: a cluster-wide, FAIL-CLOSED enumeration of the
-// latest-only blob per key (.quorum_meta/{bucket}/{key}) across self + every peer.
-// One entry per key (LWW winner kept). Used by the DEK-rewrap enumerator so a
-// non-versioned object's segment shards on a PARITY node that missed the K-of-N
-// latest-only write are still covered (via a peer's blob that lists the full
-// placement). FAIL-CLOSED: a peer that cannot be reached/enumerated aborts — a
-// partial set would leave shards un-rewrapped (undecryptable after a future KEK
-// prune). Self uses the strict (decode-fail-closed) local scan.
+// scanQuorumMetaVersionsClusterAll: a cluster-wide enumeration of the latest-only
+// blob per key (.quorum_meta/{bucket}/{key}) across self + every peer, one entry
+// per key (LWW winner kept). Used by the DEK-rewrap enumerator so a non-versioned
+// object's segment shards on a PARITY node that missed the K-of-N latest-only write
+// are still covered (via a peer's blob that lists the full placement).
+//
+// Fail-closed at the TRANSPORT level: an unreachable/erroring peer aborts the scan
+// (a partial set would leave shards un-rewrapped → undecryptable after a future KEK
+// prune). Self uses the strict (decode-fail-closed) local scan. CAVEAT: the peer
+// path reuses the non-strict ScanQuorumMeta RPC, which silently DROPS an undecodable
+// blob (it does not abort) — strictly weaker than the per-version twin's strict
+// ScanQuorumMetaVersionsAll. Bounded: a key is dropped only if its blob is corrupt
+// on EVERY replica (a single good replica masks it via the LWW union), and such an
+// object is already unreadable. FOLLOW-UP before DEK-gen prune is enabled (S7): add
+// a strict latest-only peer RPC mirroring handleScanQuorumMetaVersionsAll.
 func (b *DistributedBackend) scanQuorumMetaClusterAll(bucket string) ([]PutObjectMetaCmd, error) {
 	if b.shardSvc == nil {
 		return nil, nil
@@ -2022,9 +2029,14 @@ func (b *DistributedBackend) scatterGatherList(ctx context.Context, bucket, pref
 func filterAndSortEntries(entries []PutObjectMetaCmd) []PutObjectMetaCmd {
 	out := entries[:0]
 	for _, e := range entries {
-		if !e.IsDeleteMarker {
-			out = append(out, e)
+		// Drop both tombstone kinds: IsDeleteMarker (non-versioned/Suspended soft
+		// delete) and IsHardDeleted (defense-in-depth — the latest-only tree carries
+		// no hard-delete tombstone today, but a future writer must never surface one
+		// as a live LIST entry).
+		if e.IsDeleteMarker || e.IsHardDeleted {
+			continue
 		}
+		out = append(out, e)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	return out
