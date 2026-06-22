@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
@@ -147,4 +148,24 @@ func TestStorageProtocolStatusFromConfig(t *testing.T) {
 	require.True(t, resp.P9.Enabled)
 	require.Equal(t, "127.0.0.1", resp.P9.Bind)
 	require.Equal(t, 564, resp.P9.Port)
+}
+
+func TestLifecycleCascadeEnabled(t *testing.T) {
+	for _, c := range []struct {
+		name            string
+		metaRaftPresent bool
+		interval        time.Duration
+		want            bool
+	}{
+		{"enabled: meta-raft + interval", true, time.Hour, true},
+		{"disabled: interval zero (store unwired)", true, 0, false},
+		{"disabled: no meta-raft", false, time.Hour, false},
+		{"disabled: neither", false, 0, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := lifecycleCascadeEnabled(c.metaRaftPresent, c.interval); got != c.want {
+				t.Fatalf("lifecycleCascadeEnabled(%v, %v) = %v, want %v", c.metaRaftPresent, c.interval, got, c.want)
+			}
+		})
+	}
 }
