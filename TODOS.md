@@ -2,68 +2,6 @@
 
 ## Follow-ups
 
-### [EPIC] Remove mount protocols (NFS + 9P) + NBD dead sweep — keep S3 + Iceberg only
-
-Decision (2026-06-22): retire every non-S3 access protocol, mirroring the volume/NBD removal epic
-(#781–#785). GrainFS continues toward a pure S3 + Iceberg system; NFS and 9P are the last
-self-implemented protocol servers and a meaningful complexity/attack-surface sink. `internal/protocred`
-survives (S3/Iceberg use it, stripped of mount-protocol enum values); `internal/iam/mountsastore` and
-the `MountSA*` meta-Raft commands die once **both** NFS and 9P are gone. NBD is already deleted; only
-dead references remain. Three dependency-ordered, independently-shippable slices (one PR each):
-
-- **Slice A — 9P removal — MERGED (PR #827, v0.0.636.0, master).** Deleted `internal/p9server`, 9P serve
-  flags + config/`adminapi.P9` status, `protocred.Protocol9P`, `9PAttachOnly`/`grainfs:9PAttach`/`"9p"`
-  policy, 9P tests + Makefile/bench. ~6.2k LOC.
-- **Slice B — NFS removal — DONE (this PR, branch `remove-nfs`, v0.0.637.0).** Deleted
-  `internal/nfs4server`/`nfsadmin`/`nfsexport`, the NFS-export FSM + `NfsExport*` FlatBuffers (make fbs),
-  the node-services subsystem (NFS was its last consumer; lifecycle/shutdown boot fns rescued to
-  `boot_phases_lifecycle.go`; lifecycle FSM handlers rescued to `meta_fsm_lifecycle.go`), the `grainfs
-  nfs` CLI + admin NFS-export API + bucket-delete NFS cascade (#826 config cascade preserved), the
-  `/admin` storage-protocols endpoint, `protocred.ProtocolNFS`, serve flags `--nfs4-port`/`--nfs-write-
-  buffer-*`, NFS tests/colima/Makefile/bench, NFS docs. ~20.5k LOC removed. **Deferred to Slice C** (kept
-  dormant): the `NfsExportCreate` compat capability/operation (used as a generic example capability by
-  gossip/meta_raft/iceberg tests — removing it needs test migration). Mount-SA layer + S3/Iceberg untouched.
-- **Slice C — DONE (branch `remove-mount-sa-slice-c`, v0.0.638.0, 6 task commits + release, PR pending).**
-  Removed `internal/iam/mountsastore`, the `MountSA*` meta-Raft commands + snapshot fields + `handlers_mountsa`
-  + `PrincipalTypeMount` (collapsed `PrincipalType` to single S3 value) + `cross_namespace` mountActions +
-  `NFSMountOnly`/`grainfs:NFSMount` + the policyattach MountSA layer; the dormant `NfsExportCreate` compat
-  capability/operation (migrated the generic gate tests onto the surviving `CapabilityMigrationCutoverV1`,
-  same ScopeMetaRaft+SeverityHard — chosen over MultipartListing for semantic match); the NBD dead refs
-  (`DomainNBD` AAD constant [no-renumber], `"nbd"`/`"nbd/volume"`/`"volume"`/`"nfs"`/`"nfs/bucket"` protocol-cred
-  policy strings, the IAM-admin `mount-sa` resource grammar, `FDCategoryNFSSession` + its `resourceguard`
-  consumer, a dead Web-UI NFS section, comments, operator-doc route refs). `make fbs` regen twice (no-renumber).
-  Plan gate (codex + completeness-critic, 10 findings incl. 1 ordering BLOCKER) + 6 task reviews + opus
-  whole-branch gate (✅ ready-to-merge). The MOUNT-PROTOCOL REMOVAL EPIC IS COMPLETE (A+B+C all shipped/pending).
-
-### [follow-up] Slice C deferred cleanups — ALL DONE (2026-06-22)
-
-All four post-#829 cleanups shipped + merged as separate squash PRs:
-- **DONE PR #830 (v0.0.639.0):** protocred `validResource` dropped the dead `volume/` prefix.
-- **DONE PR #831 (v0.0.640.0):** collapsed the single-value `policy.PrincipalType` enum (type + param + field removed).
-- **DONE PR #832 (v0.0.641.0):** added `TestIAMBucketUpstreamRoutes*` authz regression tests (restored the
-  upstream bearer-deny / UDS-fallback coverage lost when #829 T2 deleted the combined MountSA+upstream tests).
-- **DONE PR #833 (v0.0.642.0):** renamed `internal/volumeadmin` → `internal/admincli` (behavior-neutral; it is
-  the LIVE shared admin-CLI client, not volume-specific) + removed dead `adminapi.VolumeInfo` + collapsed the
-  duplicate `adminapi.ScrubVolumeResp` into the canonical `adminapi.ScrubResp` (the rename surfaced the dup).
-
-Slice B surface to remove (map precisely before cutting):
-- `internal/nfs4server` — the self-implemented NFSv4 server (XDR/RPC), the `:2049` listener.
-- `internal/nfsexport` — the export registry store (meta-Raft, per-record `Generation`, fsid allocator).
-- Meta-Raft NFS-export commands + apply handlers (`MetaCmdTypeNfsExport*`, `applyNfsExportUpsert`/delete
-  in `internal/cluster/meta_fsm_exports.go`; `SetExportStore`/`SetExportFsidMajor`).
-- Admin surface: `admin.Deps.NfsExports`, `admin.NfsExportServiceAdapter`, NFS export admin handlers
-  (`internal/server/admin/handlers_nfs*.go`), and the **NFS cascade inside `AdminDeleteBucket`**
-  (`MarkBucketDeleteCleanup`, `cascadeNfsExportAfterBucketDelete`/`…AfterMissingBucket`,
-  `clearNfsExportBucketDeleteCleanupAfterError`, `handlers_bucket_nfs_cleanup.go`). Removing this also
-  simplifies the bucket-delete path the config cascade now lives in.
-- Boot wiring (`state.nfsExportSvc`, the NFS server start), CLI commands, `tests/nfs4_colima/`, the
-  `make test-nfs4-colima` target, any Web UI NFS tab, and the NFSv4 references in `CLAUDE.md`/README.
-- Removing NFS also moots the cross-Raft delete→recreate race for the NFS-export cascade (one fewer
-  meta-Raft cascade) — see the bucket-delete follow-up below.
-- Lesson from volume/NBD removal: split producer (mechanical) vs consumer (delicate read/cascade-plane)
-  PRs; run a code-gate for Go-tooling blind spots (dead build-tag flags, dead Web UI tabs); confirm no
-  legacy data/exports must be preserved before cutting the read/cascade fallbacks.
-
 ### Bucket-delete config cascade follow-ups (PR: fix-bucket-delete-config-cascade)
 
 - **[P2][deferred] delete→recreate concurrency race in the bucket-delete config cascade.** The cascade
@@ -72,7 +10,7 @@ Slice B surface to remove (map precisely before cutting):
   NAME, synchronously after the data-Raft bucket delete. A different client that recreates the same-name
   bucket AND writes fresh config inside the sub-millisecond window between the data-Raft delete and the
   cascade propose would have that fresh config wiped. Window is tiny (the recreate needs 2 raft
-  round-trips to beat the cascade's single propose), and the same race already exists in the (being
+  round-trips to beat the cascade's single propose), and the same race already existed in the (now
   removed) NFS-export cascade. Strictly better than the prior status quo (unconditional config leak).
   Deferred by decision (2026-06-22) — ship the cascade now, fence later. **Recommended fix when taken:**
   per-record generation + CAS-on-delete (size S, no cross-Raft coupling): each config put stamps
@@ -92,19 +30,6 @@ Slice B surface to remove (map precisely before cutting):
   before the config cascade, the config leaks and is reconciled only on an operator retry (the
   `ErrBucketNotFound` path re-runs the idempotent cascade). Same residual class as the NFS-export
   cascade; acceptable.
-
-### Quick wins (Run 2 candidate)
-
-- **[P3] mpudone GC thundering-herd → leader-only proposing.** `SweepStaleMultipartDoneMarkers`
-  (multipart_done_sweep.go) runs on every node; in an N-node cluster each node scans its local `mpudone:`
-  and proposes the same stale batch each scrub cycle (N redundant raft entries/cycle). Apply is
-  idempotent so it's correct, but a leader-only gate (or dedup) would cut the redundant proposes. Low
-  priority given 24h-aged, ≤256-batch, O(minutes) cycle.
-- **[P3] Unbounded per-object lock-map growth.** `objectMetaRMWLocks` (per-`(bucket,key)`),
-  `quorumMetaTargetLocks` (per blob-target-path), and `shardLocks` grow one entry per unique object seen
-  and are never evicted. Mirrors the existing accepted `shardLocks` pattern; a long-running node with
-  millions of objects accumulates lock entries. Consider a bounded/striped lock pool or LRU eviction if
-  it ever shows up in heap profiles.
 
 ### Tests / docs / spec polish
 
