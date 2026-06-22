@@ -9,12 +9,11 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/iam/bucketpolicy"
 	"github.com/gritive/GrainFS/internal/iam/group"
-	"github.com/gritive/GrainFS/internal/iam/mountsastore"
 	"github.com/gritive/GrainFS/internal/iam/policyattach"
 	"github.com/gritive/GrainFS/internal/iam/policystore"
 )
 
-// encodeMetaIAMPolicyStoresSnapshot serializes all §2 + §A IAM policy stores into
+// encodeMetaIAMPolicyStoresSnapshot serializes all §2 IAM policy stores into
 // a MetaIAMPolicyStoresSnapshot FlatBuffers buffer used as the IPST trailer payload.
 //
 // Sorted-key serialization throughout (names/ids sorted alphabetically before encoding;
@@ -24,7 +23,6 @@ func encodeMetaIAMPolicyStoresSnapshot(
 	groups []group.GroupEntry,
 	attach policyattach.AttachSnapshot,
 	bucketPols []bucketpolicy.BucketPolicyEntry,
-	mountSAs []mountsastore.MountSA,
 ) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 
@@ -170,57 +168,6 @@ func encodeMetaIAMPolicyStoresSnapshot(
 	}
 	bpVec := b.EndVector(len(bpOffs))
 
-	// ── MountSA entries ───────────────────────────────────────────────────────
-	sort.Slice(mountSAs, func(i, j int) bool { return mountSAs[i].Name < mountSAs[j].Name })
-	msaOffs := make([]flatbuffers.UOffsetT, len(mountSAs))
-	for i := len(mountSAs) - 1; i >= 0; i-- {
-		sa := mountSAs[i]
-		nameOff := b.CreateString(sa.Name)
-		createdByOff := b.CreateString(sa.CreatedBy)
-		clusterpb.MetaMountSAEntryStart(b)
-		clusterpb.MetaMountSAEntryAddName(b, nameOff)
-		clusterpb.MetaMountSAEntryAddNumericUid(b, sa.NumericUID)
-		clusterpb.MetaMountSAEntryAddCreatedAt(b, sa.CreatedAt)
-		clusterpb.MetaMountSAEntryAddCreatedBy(b, createdByOff)
-		msaOffs[i] = clusterpb.MetaMountSAEntryEnd(b)
-	}
-	clusterpb.MetaIAMPolicyStoresSnapshotStartMountSasVector(b, len(msaOffs))
-	for i := len(msaOffs) - 1; i >= 0; i-- {
-		b.PrependUOffsetT(msaOffs[i])
-	}
-	msaVec := b.EndVector(len(msaOffs))
-
-	// ── MountSA attachments ───────────────────────────────────────────────────
-	msaAtt := attach.MountSAAttachments
-	sort.Slice(msaAtt, func(i, j int) bool { return msaAtt[i].MountSA < msaAtt[j].MountSA })
-	msaAttOffs := make([]flatbuffers.UOffsetT, len(msaAtt))
-	for i := len(msaAtt) - 1; i >= 0; i-- {
-		e := msaAtt[i]
-		msaNameOff := b.CreateString(e.MountSA)
-
-		ps := append([]string(nil), e.Policies...)
-		sort.Strings(ps)
-		pOffs := make([]flatbuffers.UOffsetT, len(ps))
-		for j, p := range ps {
-			pOffs[j] = b.CreateString(p)
-		}
-		clusterpb.MetaIAMPolicyAttachMountSAEntryStartPoliciesVector(b, len(pOffs))
-		for j := len(pOffs) - 1; j >= 0; j-- {
-			b.PrependUOffsetT(pOffs[j])
-		}
-		pVec := b.EndVector(len(pOffs))
-
-		clusterpb.MetaIAMPolicyAttachMountSAEntryStart(b)
-		clusterpb.MetaIAMPolicyAttachMountSAEntryAddMountSa(b, msaNameOff)
-		clusterpb.MetaIAMPolicyAttachMountSAEntryAddPolicies(b, pVec)
-		msaAttOffs[i] = clusterpb.MetaIAMPolicyAttachMountSAEntryEnd(b)
-	}
-	clusterpb.MetaIAMPolicyStoresSnapshotStartMountSaAttachmentsVector(b, len(msaAttOffs))
-	for i := len(msaAttOffs) - 1; i >= 0; i-- {
-		b.PrependUOffsetT(msaAttOffs[i])
-	}
-	msaAttVec := b.EndVector(len(msaAttOffs))
-
 	// ── Assemble root ─────────────────────────────────────────────────────────
 	clusterpb.MetaIAMPolicyStoresSnapshotStart(b)
 	clusterpb.MetaIAMPolicyStoresSnapshotAddPolicies(b, polVec)
@@ -228,8 +175,6 @@ func encodeMetaIAMPolicyStoresSnapshot(
 	clusterpb.MetaIAMPolicyStoresSnapshotAddSaAttachments(b, saVec)
 	clusterpb.MetaIAMPolicyStoresSnapshotAddGroupAttachments(b, gaVec)
 	clusterpb.MetaIAMPolicyStoresSnapshotAddBucketPolicies(b, bpVec)
-	clusterpb.MetaIAMPolicyStoresSnapshotAddMountSas(b, msaVec)
-	clusterpb.MetaIAMPolicyStoresSnapshotAddMountSaAttachments(b, msaAttVec)
 	return fbFinish(b, clusterpb.MetaIAMPolicyStoresSnapshotEnd(b)), nil
 }
 
@@ -240,14 +185,13 @@ func decodeMetaIAMPolicyStoresSnapshot(data []byte) (
 	groups []group.GroupEntry,
 	attach policyattach.AttachSnapshot,
 	bucketPols []bucketpolicy.BucketPolicyEntry,
-	mountSAs []mountsastore.MountSA,
 	err error,
 ) {
 	snap, err := fbSafe(data, func(d []byte) *clusterpb.MetaIAMPolicyStoresSnapshot {
 		return clusterpb.GetRootAsMetaIAMPolicyStoresSnapshot(d, 0)
 	})
 	if err != nil {
-		return nil, nil, policyattach.AttachSnapshot{}, nil, nil,
+		return nil, nil, policyattach.AttachSnapshot{}, nil,
 			fmt.Errorf("iam_policy_stores_codec: MetaIAMPolicyStoresSnapshot: %w", err)
 	}
 
@@ -256,7 +200,7 @@ func decodeMetaIAMPolicyStoresSnapshot(data []byte) (
 	var pFB clusterpb.MetaIAMPolicyEntry
 	for i := 0; i < snap.PoliciesLength(); i++ {
 		if !snap.Policies(&pFB, i) {
-			return nil, nil, policyattach.AttachSnapshot{}, nil, nil,
+			return nil, nil, policyattach.AttachSnapshot{}, nil,
 				fmt.Errorf("iam_policy_stores_codec: policy %d decode failed", i)
 		}
 		policies[i] = policystore.PolicyEntry{
@@ -271,7 +215,7 @@ func decodeMetaIAMPolicyStoresSnapshot(data []byte) (
 	var gFB clusterpb.MetaIAMGroupEntry
 	for i := 0; i < snap.GroupsLength(); i++ {
 		if !snap.Groups(&gFB, i) {
-			return nil, nil, policyattach.AttachSnapshot{}, nil, nil,
+			return nil, nil, policyattach.AttachSnapshot{}, nil,
 				fmt.Errorf("iam_policy_stores_codec: group %d decode failed", i)
 		}
 		aps := make([]string, gFB.AttachedPoliciesLength())
@@ -294,7 +238,7 @@ func decodeMetaIAMPolicyStoresSnapshot(data []byte) (
 	var saFB clusterpb.MetaIAMPolicyAttachSAEntry
 	for i := 0; i < snap.SaAttachmentsLength(); i++ {
 		if !snap.SaAttachments(&saFB, i) {
-			return nil, nil, policyattach.AttachSnapshot{}, nil, nil,
+			return nil, nil, policyattach.AttachSnapshot{}, nil,
 				fmt.Errorf("iam_policy_stores_codec: sa_attachment %d decode failed", i)
 		}
 		ps := make([]string, saFB.PoliciesLength())
@@ -309,7 +253,7 @@ func decodeMetaIAMPolicyStoresSnapshot(data []byte) (
 	var gaFB clusterpb.MetaIAMPolicyAttachGroupEntry
 	for i := 0; i < snap.GroupAttachmentsLength(); i++ {
 		if !snap.GroupAttachments(&gaFB, i) {
-			return nil, nil, policyattach.AttachSnapshot{}, nil, nil,
+			return nil, nil, policyattach.AttachSnapshot{}, nil,
 				fmt.Errorf("iam_policy_stores_codec: group_attachment %d decode failed", i)
 		}
 		ps := make([]string, gaFB.PoliciesLength())
@@ -324,7 +268,7 @@ func decodeMetaIAMPolicyStoresSnapshot(data []byte) (
 	var bpFB clusterpb.MetaIAMBucketPolicyEntry
 	for i := 0; i < snap.BucketPoliciesLength(); i++ {
 		if !snap.BucketPolicies(&bpFB, i) {
-			return nil, nil, policyattach.AttachSnapshot{}, nil, nil,
+			return nil, nil, policyattach.AttachSnapshot{}, nil,
 				fmt.Errorf("iam_policy_stores_codec: bucket_policy %d decode failed", i)
 		}
 		bucketPols[i] = bucketpolicy.BucketPolicyEntry{
@@ -333,37 +277,7 @@ func decodeMetaIAMPolicyStoresSnapshot(data []byte) (
 		}
 	}
 
-	// MountSA entries (§A, optional — pre-§A snapshots have 0 entries here)
-	mountSAs = make([]mountsastore.MountSA, snap.MountSasLength())
-	var msaFB clusterpb.MetaMountSAEntry
-	for i := 0; i < snap.MountSasLength(); i++ {
-		if !snap.MountSas(&msaFB, i) {
-			return nil, nil, policyattach.AttachSnapshot{}, nil, nil,
-				fmt.Errorf("iam_policy_stores_codec: mount_sa %d decode failed", i)
-		}
-		mountSAs[i] = mountsastore.MountSA{
-			Name:       string(msaFB.Name()),
-			NumericUID: msaFB.NumericUid(),
-			CreatedAt:  msaFB.CreatedAt(),
-			CreatedBy:  string(msaFB.CreatedBy()),
-		}
-	}
+	attach = policyattach.AttachSnapshot{SAAttachments: saEntries, GroupAttachments: gaEntries}
 
-	// MountSA attachments (§A, optional)
-	msaAttEntries := make([]policyattach.MountSAAttachEntry, snap.MountSaAttachmentsLength())
-	var msaAttFB clusterpb.MetaIAMPolicyAttachMountSAEntry
-	for i := 0; i < snap.MountSaAttachmentsLength(); i++ {
-		if !snap.MountSaAttachments(&msaAttFB, i) {
-			return nil, nil, policyattach.AttachSnapshot{}, nil, nil,
-				fmt.Errorf("iam_policy_stores_codec: mount_sa_attachment %d decode failed", i)
-		}
-		ps := make([]string, msaAttFB.PoliciesLength())
-		for j := range ps {
-			ps[j] = string(msaAttFB.Policies(j))
-		}
-		msaAttEntries[i] = policyattach.MountSAAttachEntry{MountSA: string(msaAttFB.MountSa()), Policies: ps}
-	}
-	attach = policyattach.AttachSnapshot{SAAttachments: saEntries, GroupAttachments: gaEntries, MountSAAttachments: msaAttEntries}
-
-	return policies, groups, attach, bucketPols, mountSAs, nil
+	return policies, groups, attach, bucketPols, nil
 }

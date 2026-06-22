@@ -5,7 +5,6 @@ import (
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/iam/bucketpolicy"
 	"github.com/gritive/GrainFS/internal/iam/group"
-	"github.com/gritive/GrainFS/internal/iam/mountsastore"
 	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/iam/policyattach"
 	"github.com/gritive/GrainFS/internal/iam/policystore"
@@ -82,15 +81,6 @@ func (f *MetaFSM) SetBucketPolicyStore(s *bucketpolicy.InMemoryStore) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.bucketPolicyStore = s
-}
-
-// SetMountSAStore wires the NFS/9P mount service account store into the
-// MetaFSM. Must be called before the raft log starts replaying. nil means
-// MountSA* commands return an error.
-func (f *MetaFSM) SetMountSAStore(s *mountsastore.Store) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.mountSAStore = s
 }
 
 // SetProtocolCredentialStore wires the protocol credential store into MetaFSM

@@ -68,10 +68,6 @@ const (
 	MetaCmdTypeCreateBucketWithPolicyAttach MetaCmdType = 62
 	MetaCmdTypeJWTSigningKeyRotate          MetaCmdType = 63
 	MetaCmdTypeJWTSigningKeyPrune           MetaCmdType = 64
-	MetaCmdTypeMountSACreate                MetaCmdType = 65
-	MetaCmdTypeMountSADelete                MetaCmdType = 66
-	MetaCmdTypeMountSAAttachPolicy          MetaCmdType = 67
-	MetaCmdTypeMountSADetachPolicy          MetaCmdType = 68
 	MetaCmdTypeKEKRotate                    MetaCmdType = 69
 	MetaCmdTypeKEKRetire                    MetaCmdType = 70
 	MetaCmdTypeKEKPrune                     MetaCmdType = 71
@@ -158,10 +154,6 @@ var EnumNamesMetaCmdType = map[MetaCmdType]string{
 	MetaCmdTypeCreateBucketWithPolicyAttach: "CreateBucketWithPolicyAttach",
 	MetaCmdTypeJWTSigningKeyRotate:          "JWTSigningKeyRotate",
 	MetaCmdTypeJWTSigningKeyPrune:           "JWTSigningKeyPrune",
-	MetaCmdTypeMountSACreate:                "MountSACreate",
-	MetaCmdTypeMountSADelete:                "MountSADelete",
-	MetaCmdTypeMountSAAttachPolicy:          "MountSAAttachPolicy",
-	MetaCmdTypeMountSADetachPolicy:          "MountSADetachPolicy",
 	MetaCmdTypeKEKRotate:                    "KEKRotate",
 	MetaCmdTypeKEKRetire:                    "KEKRetire",
 	MetaCmdTypeKEKPrune:                     "KEKPrune",
@@ -248,10 +240,6 @@ var EnumValuesMetaCmdType = map[string]MetaCmdType{
 	"CreateBucketWithPolicyAttach": MetaCmdTypeCreateBucketWithPolicyAttach,
 	"JWTSigningKeyRotate":          MetaCmdTypeJWTSigningKeyRotate,
 	"JWTSigningKeyPrune":           MetaCmdTypeJWTSigningKeyPrune,
-	"MountSACreate":                MetaCmdTypeMountSACreate,
-	"MountSADelete":                MetaCmdTypeMountSADelete,
-	"MountSAAttachPolicy":          MetaCmdTypeMountSAAttachPolicy,
-	"MountSADetachPolicy":          MetaCmdTypeMountSADetachPolicy,
 	"KEKRotate":                    MetaCmdTypeKEKRotate,
 	"KEKRetire":                    MetaCmdTypeKEKRetire,
 	"KEKPrune":                     MetaCmdTypeKEKPrune,

@@ -20,7 +20,6 @@ import (
 	"github.com/gritive/GrainFS/internal/iam/bucketpolicy"
 	"github.com/gritive/GrainFS/internal/iam/group"
 	iamjwt "github.com/gritive/GrainFS/internal/iam/jwt"
-	"github.com/gritive/GrainFS/internal/iam/mountsastore"
 	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/iam/policyattach"
 	"github.com/gritive/GrainFS/internal/iam/policystore"
@@ -93,10 +92,6 @@ const (
 	MetaCmdTypeCreateBucketWithPolicyAttach = clusterpb.MetaCmdTypeCreateBucketWithPolicyAttach
 	MetaCmdTypeJWTSigningKeyRotate          = clusterpb.MetaCmdTypeJWTSigningKeyRotate
 	MetaCmdTypeJWTSigningKeyPrune           = clusterpb.MetaCmdTypeJWTSigningKeyPrune
-	MetaCmdTypeMountSACreate                = clusterpb.MetaCmdTypeMountSACreate
-	MetaCmdTypeMountSADelete                = clusterpb.MetaCmdTypeMountSADelete
-	MetaCmdTypeMountSAAttachPolicy          = clusterpb.MetaCmdTypeMountSAAttachPolicy
-	MetaCmdTypeMountSADetachPolicy          = clusterpb.MetaCmdTypeMountSADetachPolicy
 	// KEK envelope rotation (Phase B): rotate the cluster KEK in lockstep with
 	// the FSM-deterministic install of the rewrapped DEK set.
 	MetaCmdTypeKEKRotate = clusterpb.MetaCmdTypeKEKRotate
@@ -344,17 +339,13 @@ type MetaFSM struct {
 	// Group* commands are safe no-ops when nil.
 	groupStore *group.InMemoryStore
 
-	// policyAttachStore is the SA/group/MountSA→policy attachment store. nil until
+	// policyAttachStore is the SA/group→policy attachment store. nil until
 	// SetPolicyAttachStore is called; PolicyAttach* commands are safe no-ops when nil.
 	policyAttachStore *policyattach.InMemoryStore
 
 	// bucketPolicyStore is the per-bucket policy document store. nil until
 	// SetBucketPolicyStore is called; BucketPolicy* commands are safe no-ops when nil.
 	bucketPolicyStore *bucketpolicy.InMemoryStore
-
-	// mountSAStore is the NFS/9P mount service account store backed by Badger.
-	// nil until SetMountSAStore is called; MountSA* commands return an error when nil.
-	mountSAStore *mountsastore.Store
 
 	// protocolCredentialStore is the durable protocol credential snapshot store.
 	// Phase 1A snapshots/restores it; Phase 1B wires command apply semantics.
@@ -894,14 +885,6 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		return f.applyBucketPolicyPut(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeBucketPolicyDelete:
 		return f.applyBucketPolicyDelete(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeMountSACreate:
-		return f.applyMountSACreate(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeMountSADelete:
-		return f.applyMountSADelete(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeMountSAAttachPolicy:
-		return f.applyMountSAAttachPolicy(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeMountSADetachPolicy:
-		return f.applyMountSADetachPolicy(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeCreateBucketWithPolicyAttach:
 		return f.applyCreateBucketWithPolicyAttach(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeKEKRotate:

@@ -14,7 +14,6 @@ import (
 	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/iam"
-	"github.com/gritive/GrainFS/internal/iam/mountsastore"
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/nodeconfig"
 	"github.com/gritive/GrainFS/internal/protocred"
@@ -131,16 +130,6 @@ func bootMetaRaftWiring(state *bootState) error {
 		return fmt.Errorf("wire IAM policy stores: %w", err)
 	}
 	state.iamPolicyStores = iamStores
-
-	// NFS§A T5: wire the MountSA Badger-backed store into the meta-FSM apply path.
-	// MetaCmds 65-68 (MountSACreate/Delete/AttachPolicy/DetachPolicy) require
-	// the store to be wired before Start fires the apply loop.
-	mountSAStore, err := mountsastore.NewStore(state.db)
-	if err != nil {
-		return fmt.Errorf("open mountsa store: %w", err)
-	}
-	metaRaft.FSM().SetMountSAStore(mountSAStore)
-	state.mountSAStore = mountSAStore
 
 	protocolCredentialStore := protocred.NewStore()
 	metaRaft.FSM().SetProtocolCredentialStore(protocolCredentialStore)
