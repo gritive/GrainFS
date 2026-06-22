@@ -22,7 +22,7 @@
 - **group 추가는 Phase 7에서 해제됨(v0.0.543.0)**: running cluster에 placement group 증설 가능(`grainfs cluster expand-placement`, generation-probe로 기존 객체 remap 없음). group **감소**는 여전히 미지원. 노드-in-group은 EC heal로 변동.
 - **유지**: Erasure Coding, At-rest Encryption(XAES-256-GCM), zero-CA, putpipeline streaming 산개(꼬리만 quorum-write로 교체).
 - **별개 베팅(성능 비요구, data plane 안정 후): 라이브러리 분리(raft/HRW/bounded/gossip) · 비-S3 프로토콜 재연결 · data-plane HTTP transport.**
-- **dead code 삭제** 아키텍처 변경으로 생기는 dead code는 과감히 삭제, 단, 향후 다시 연결할 nfs, 9p, nbd 등 프로토콜은 예외
+- **dead code 삭제** 아키텍처 변경으로 생기는 dead code는 과감히 삭제, 단, 향후 다시 연결할 nfs, nbd 등 프로토콜은 예외
 - **테스트도 1급 변경 대상** (코드만큼 churn 큼):
   - eager-delete라 삭제 경로의 테스트는 **코드와 함께 삭제**(Phase 3=data_raft, Phase 4=meta_index서 동시). 단일 경로라 dual-path 2배 부담 없음.
   - 신규 경로(placement/quorum/LIST)는 net-new 테스트. 정확성은 S3 e2e green 게이트, 성능은 Phase 5 cross-binary 벤치가 판정.
@@ -53,7 +53,7 @@
 - **검증**: quorum-write 꼬리가 raft-commit 꼬리 대비 비상식적으로 크지 않음. 크면 STOP·재평가.
 
 ### Phase 1 — Strip-down (disable, 삭제 아님) ✅ DONE
-- 비-S3 프로토콜(NFS/NBD/Iceberg/9p)을 seam 뒤로 **비활성화**(재연결 경계 보존, 삭제 아님), request actor 모델 → API 단일 라인.
+- 비-S3 프로토콜(NFS/NBD/Iceberg)을 seam 뒤로 **비활성화**(재연결 경계 보존, 삭제 아님), request actor 모델 → API 단일 라인. (9P는 이후 영구 제거됨.)
 - **목표**: S3-only 최소 코어·단일 경로로 data-plane 수술 전 surface 축소. greenfield = 하위호환 제거지 *프로토콜은 skip*(재연결 대비)이지 삭제 아님.
 - **검증**: S3 PUT/GET/LIST/DELETE green, 단일 경로. 토글로 프로토콜 복구 가능.
 - **결과**: NFS4/NBD port=0 기본, `--enable-iceberg` 플래그 추가, executioncluster+execution 패키지 삭제, 비-S3 e2e/colima 테스트 skip 처리.
@@ -227,4 +227,4 @@ Phase 5는 구현 단계가 아니라 **terminal 결정 게이트**다 (S4-0와 
   - **bounded**: 단일 primitive 아님 — pool/resourceguard는 이미 독립 패키지, putpipeline은 EC 도메인 로직(분리 대상 아님). 추가 작업 없음 확인.
 
 ### Phase 10 — 비-S3 프로토콜 재연결
-- 비활성 프로토콜(NFS/NBD/Iceberg/9p)을 신규 코어의 보존된 seam에 재활성화. Iceberg는 강일관 catalog commit → control-plane raft 의존(설계상 자연 정합).
+- 비활성 프로토콜(NFS/NBD/Iceberg)을 신규 코어의 보존된 seam에 재활성화. Iceberg는 강일관 catalog commit → control-plane raft 의존(설계상 자연 정합).

@@ -6,7 +6,7 @@ node or as a Raft-backed cluster.
 It exposes object, file, and block interfaces over one storage layer:
 
 - **Object storage:** S3-compatible HTTP API
-- **File storage:** NFSv4 and 9P2000.L *(disabled by default in Phase 1 — pass `--nfs4-port 2049` to enable)*
+- **File storage:** NFSv4 *(disabled by default in Phase 1 — pass `--nfs4-port 2049` to enable)*
 - **Table/catalog integration:** Iceberg REST Catalog for DuckDB-oriented lake workflows *(disabled by default in Phase 1 — pass `--enable-iceberg` to enable)*
 
 ## Quick Start (2-5 minutes)
@@ -36,7 +36,7 @@ upload: ./file.txt to s3://default/file.txt
 That's it. You have a working local S3 server. To verify the same data through
 NFS on Linux, start the server with `--nfs4-port 2049` and continue with
 [`docs/users/nfs-mount-quickstart.md`](docs/users/nfs-mount-quickstart.md).
-That guide also covers 9P mounts, authenticated Mount SAs, and read-only exports.
+That guide also covers authenticated Mount SAs and read-only exports.
 
 > ℹ️ **Phase 1:** NFSv4 and Iceberg REST Catalog are disabled by default while the data-plane architecture is being rearchitected. Add `--nfs4-port 2049` or `--enable-iceberg` to re-enable them. S3 is unaffected.
 
@@ -124,7 +124,7 @@ See [`docs/operators/deploy-production-cluster.md`](docs/operators/deploy-produc
 | Area | Summary | Details |
 | --- | --- | --- |
 | S3 API | Bucket/object basics, AppendObject (S3 Express), multipart upload/listing, SigV4, presigned URL, form upload | [S3 compatibility](docs/reference/s3-compatibility.md) |
-| File protocols | NFSv4 explicit bucket exports, 9P2000.L *(pass `--nfs4-port 2049` to enable)* | [NFSv4 compatibility](docs/reference/nfs-compatibility.md), [9P compatibility](docs/reference/9p-compatibility.md) |
+| File protocols | NFSv4 explicit bucket exports *(pass `--nfs4-port 2049` to enable)* | [NFSv4 compatibility](docs/reference/nfs-compatibility.md) |
 | Iceberg | DuckDB-compatible REST Catalog *(pass `--enable-iceberg` to enable)* | [Iceberg compatibility](docs/reference/iceberg-compatibility.md) |
 | Cluster durability | Custom Raft, zero-config EC profile, shard integrity envelope | [Runbook](docs/operators/runbook.md) |
 | Operations | Object browser, metrics, balancer status, incidents, recovery drills | [Documentation](#documentation) |
@@ -160,13 +160,13 @@ the desired erasure-coding profile from cluster size and placement group voters.
 Temporary target loss does not silently lower durability; writes fail until the
 required targets are writable.
 
-**Same data, multiple protocols.** S3, NFSv4, 9P, and Iceberg use the same
+**Same data, multiple protocols.** S3, NFSv4, and Iceberg use the same
 storage backend contracts. Use the compatibility docs for protocol-specific
-limits. *(Phase 1: NFSv4, 9P, and Iceberg are disabled by default; S3 is the active interface.)*
+limits. *(Phase 1: NFSv4 and Iceberg are disabled by default; S3 is the active interface.)*
 
-**Protocol network boundary.** S3 uses IAM. NFSv4 and 9P do not use S3
-IAM; expose those listeners only on loopback, private networks, or
-firewall-restricted addresses. *(Phase 1: these listeners are off by default — set their port flags to enable.)*
+**Protocol network boundary.** S3 uses IAM. NFSv4 does not use S3
+IAM; expose the NFSv4 listener only on loopback, private networks, or
+firewall-restricted addresses. *(Phase 1: this listener is off by default — set `--nfs4-port` to enable.)*
 
 ## Common Workflows
 
@@ -195,7 +195,7 @@ Requirements:
 - Go 1.26+
 - `golangci-lint` (run by `make lint`, which `make build` depends on)
 - `warp` for S3-compatible comparison benchmarks
-- Linux client tooling for NFS, 9P, and FUSE-over-S3 integration tests
+- Linux client tooling for NFS and FUSE-over-S3 integration tests
 
 Common commands:
 

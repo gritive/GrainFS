@@ -35,7 +35,6 @@ Common serve options:
 | `--node-id` | Explicit node identity. |
 | `--raft-addr` | Raft listen address. |
 | `--nfs4-port` | NFSv4 port; use `0` to disable. |
-| `--9p-bind`, `--9p-port` | 9P2000.L bind address and port. |
 
 At-rest encryption is always enabled and bootstraps from the KEK/DEK metadata
 under the data directory; there is no separate static encryption-key flag.
@@ -130,9 +129,8 @@ one-time `secret` as the SigV4 secret key. Read-only credentials allow read
 operations only. S3 `CopyObject` is limited to same-bucket copies for protocol
 credentials.
 
-NFS and 9P attach paths enforce protocol credentials when credential
-storage is wired. NFS uses `connection_hint.mount_path` (`bucket/credential-id:secret`),
-and 9P uses `connection_hint.aname` (`credential-id:secret@bucket`). Read-only
+NFS attach paths enforce protocol credentials when credential storage is wired.
+NFS uses `connection_hint.mount_path` (`bucket/credential-id:secret`). Read-only
 credentials mount successfully but reject mutation operations.
 
 List inventory can be narrowed to the same resource scope:
@@ -225,34 +223,6 @@ grainfs nfs debug mydata --json
 
 See `../reference/nfs-compatibility.md`, `../operators/nfs-debug.md`, and
 `../operators/nfs-export-lifecycle.md`.
-
-## 9P
-
-Enable the 9P server with `--9p-port` and `--9p-bind`. The server is
-authenticated through Mount SAs or protocol credentials when IAM credential
-storage is wired. Keep the default loopback bind unless the network is trusted.
-
-```bash
-grainfs serve \
-  --data ./data \
-  --port 9000 \
-  --9p-bind 127.0.0.1 \
-  --9p-port 5640
-```
-
-From a Linux client:
-
-```bash
-sudo modprobe 9p 9pnet 9pnet_virtio
-sudo mkdir -p /mnt/grainfs-9p
-grainfs credential create --sa <sa_id> --protocol 9p --resource bucket/mybucket --mode ro
-# Save the returned connection_hint.aname, for example: pc_...:pcsec_...@mybucket
-sudo mount -t 9p \
-  -o trans=tcp,port=5640,version=9p2000.L,msize=262144,aname='<connection_hint.aname>' \
-  127.0.0.1 /mnt/grainfs-9p
-```
-
-See `../reference/9p-compatibility.md` for the supported 9P surface.
 
 ## Encryption Key Rotation
 

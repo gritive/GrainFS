@@ -430,7 +430,7 @@ turning off the top-level `iam.pdp.enabled` disables every PDP plane at once
 }
 ```
 
-- **Scope: S3 + Iceberg only.** NFS, 9P, and NBD are served by separate
+- **Scope: S3 + Iceberg only.** NFS and NBD are served by separate
   authorizer instances and are **not** covered by data-plane PDP enforcement
   yet — that is a documented follow-up.
 - **Protocol/context on the wire.** A data-plane PDP request carries
@@ -467,7 +467,7 @@ data-plane request volume, cache hit/miss/grace, and latency from the
 control-plane series.
 
 Not yet supported: mTLS client certs to the PDP, a per-CIDR SSRF allowlist,
-data-plane enforcement for NFS / 9P / NBD, and a per-scope `failure_policy`.
+data-plane enforcement for NFS / NBD, and a per-scope `failure_policy`.
 
 ## Current Boundary
 
@@ -477,5 +477,5 @@ External PDP adapter (remote `https` with a DEK-sealed bearer token + dial-time 
 egress filtering, or a local `http` loopback sidecar; disabled by default) chains
 after GrainFS IAM for admin and protocol-credential operations, and — when
 `iam.pdp.data_plane.enabled` is also set — for S3/Iceberg object/bucket
-operations. mTLS, a per-CIDR SSRF allowlist, NFS/9P/NBD data-plane enforcement,
+operations. mTLS, a per-CIDR SSRF allowlist, NFS/NBD data-plane enforcement,
 and a per-scope `failure_policy` remain future slices.

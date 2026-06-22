@@ -15,7 +15,7 @@ workflows.
 | Use DuckDB with the Iceberg REST Catalog | [Iceberg DuckDB guide](users/iceberg-duckdb.md) | How-to |
 | Query S3 audit data as an Iceberg table | [Audit Iceberg guide](users/audit-iceberg.md) | How-to / explanation |
 | Check S3 compatibility before choosing a client feature | [S3 compatibility](reference/s3-compatibility.md) | Reference |
-| Check file protocol behavior | [NFSv4 compatibility](reference/nfs-compatibility.md), [9P compatibility](reference/9p-compatibility.md) | Reference |
+| Check file protocol behavior | [NFSv4 compatibility](reference/nfs-compatibility.md) | Reference |
 | Check Iceberg client support | [Iceberg compatibility](reference/iceberg-compatibility.md) | Reference |
 
 ## Operators
@@ -40,7 +40,6 @@ rules.
 | --- | --- |
 | S3 API and client compatibility | [S3 compatibility](reference/s3-compatibility.md) |
 | NFSv4 compatibility and attribute audit | [NFSv4 compatibility](reference/nfs-compatibility.md), [NFSv4 attribute audit](reference/nfsv4-attribute-audit.md) |
-| 9P compatibility | [9P compatibility](reference/9p-compatibility.md) |
 | Iceberg REST Catalog compatibility | [Iceberg compatibility](reference/iceberg-compatibility.md) |
 | Benchmark methodology | [Benchmarks](reference/benchmarks.md) |
 | Rolling upgrade compatibility | [Rolling upgrade compatibility](reference/rolling-upgrade-compatibility.md) |
