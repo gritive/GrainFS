@@ -859,6 +859,64 @@ func (b *DistributedBackend) scanQuorumMetaVersionsClusterAll(bucket, prefix str
 	return out, nil
 }
 
+// scanQuorumMetaClusterAll is the latest-only-tree twin of
+// scanQuorumMetaVersionsClusterAll: a cluster-wide, FAIL-CLOSED enumeration of the
+// latest-only blob per key (.quorum_meta/{bucket}/{key}) across self + every peer.
+// One entry per key (LWW winner kept). Used by the DEK-rewrap enumerator so a
+// non-versioned object's segment shards on a PARITY node that missed the K-of-N
+// latest-only write are still covered (via a peer's blob that lists the full
+// placement). FAIL-CLOSED: a peer that cannot be reached/enumerated aborts — a
+// partial set would leave shards un-rewrapped (undecryptable after a future KEK
+// prune). Self uses the strict (decode-fail-closed) local scan.
+func (b *DistributedBackend) scanQuorumMetaClusterAll(bucket string) ([]PutObjectMetaCmd, error) {
+	if b.shardSvc == nil {
+		return nil, nil
+	}
+	byKey := map[string]PutObjectMetaCmd{}
+	put := func(c PutObjectMetaCmd) {
+		if ex, ok := byKey[c.Key]; !ok || quorumMetaCmdWins(c, ex) {
+			byKey[c.Key] = c
+		}
+	}
+	local, lerr := b.shardSvc.scanQuorumMetaBucketStrict(bucket)
+	if lerr != nil {
+		return nil, lerr
+	}
+	for _, c := range local {
+		put(c)
+	}
+	if b.shardGroup != nil {
+		self := b.currentSelfAddr()
+		seen := map[string]bool{self: true}
+		ctx, cancel := context.WithTimeout(context.Background(), quorumMetaReadTimeout)
+		defer cancel()
+		for _, g := range b.shardGroup.ShardGroups() {
+			for _, p := range g.PeerIDs {
+				if seen[p] {
+					continue
+				}
+				seen[p] = true
+				addr, aerr := b.shardSvc.resolvePeerAddress(p)
+				if aerr != nil {
+					return nil, aerr // fail-closed
+				}
+				remote, rerr := b.shardSvc.ScanQuorumMeta(ctx, addr, bucket, "")
+				if rerr != nil {
+					return nil, rerr // fail-closed: a partial set leaves shards un-rewrapped
+				}
+				for _, c := range remote {
+					put(c)
+				}
+			}
+		}
+	}
+	out := make([]PutObjectMetaCmd, 0, len(byKey))
+	for _, c := range byKey {
+		out = append(out, c)
+	}
+	return out, nil
+}
+
 // readQuorumMetaVersion returns the single per-version blob for (bucket, key,
 // versionID), found via the all-groups fan-out (NOT local-only) so a reachable
 // replica is located even when the local node isn't a placement node. Returns

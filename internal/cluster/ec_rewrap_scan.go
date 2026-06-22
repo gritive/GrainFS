@@ -3,6 +3,8 @@ package cluster
 import (
 	"context"
 	"fmt"
+
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // ECRewrapTarget identifies a single EC-distributed shard that a DEK rewrap
@@ -49,11 +51,8 @@ func (b *DistributedBackend) CollectECRewrapTargets() ([]ECRewrapTarget, error) 
 
 	// FSM scan: carve-outs (appendable/coalesced) + internal-bucket records. (Plain
 	// versioned and non-versioned objects no longer write FSM obj: records — they are
-	// blob-only. Versioned objects are covered by the per-version blob enum below.
-	// FOLLOW-UP: non-versioned/Suspended latest-only blobs are NOT yet enumerated here
-	// — their segment shards are skipped on KEK rotation. Not data-loss today because
-	// DEK-gen prune is blanket-refused (S7-0); a hard precondition before S7 prune is a
-	// cluster-wide fail-closed latest-only blob enum mirroring the per-version one.)
+	// blob-only; the per-version blob enum below covers versioned, the latest-only
+	// blob enum covers non-versioned/Suspended.)
 	if err := b.fsm.IterECShardScanTargetsAllVersions(appendTarget); err != nil {
 		return nil, err
 	}
@@ -76,10 +75,20 @@ func (b *DistributedBackend) CollectECRewrapTargets() ([]ECRewrapTarget, error) 
 		if serr != nil {
 			return nil, serr
 		}
-		if !on {
-			continue
+		// versioning-Enabled → per-version blob tree; non-versioned/Suspended
+		// (non-internal) → latest-only blob tree. Both cluster-wide + fail-closed so a
+		// parity node that missed the K-of-N blob still gets its shard covered via a
+		// peer's blob. Internal buckets are FSM-only (handled by the scan above).
+		var cmds []PutObjectMetaCmd
+		var cerr error
+		switch {
+		case on:
+			cmds, cerr = b.scanQuorumMetaVersionsClusterAll(bucket, "")
+		case !storage.IsInternalBucket(bucket):
+			cmds, cerr = b.scanQuorumMetaClusterAll(bucket)
+		default:
+			continue // internal bucket — FSM-authoritative, covered above
 		}
-		cmds, cerr := b.scanQuorumMetaVersionsClusterAll(bucket, "")
 		if cerr != nil {
 			return nil, fmt.Errorf("ec rewrap blob enum %s: %w", bucket, cerr)
 		}
