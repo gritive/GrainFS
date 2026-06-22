@@ -43,7 +43,7 @@ func NewResolver(store Store, ttl time.Duration) *Resolver {
 }
 
 // cacheKey produces a stable cache key for a (sa, bucket) pair.
-func cacheKey(_ PrincipalType, sa, bucket string) string {
+func cacheKey(sa, bucket string) string {
 	return "s|" + sa + "|" + bucket
 }
 
@@ -54,11 +54,10 @@ func principalCacheKey(p principal.Principal, bucket string) string {
 }
 
 // Effective returns the union of principal-attached and bucket policies for
-// the given (saID, bucket, principalType), using the cache when the entry
-// is still fresh. principalType is accepted for API compatibility but only
-// PrincipalTypeS3 (default) is meaningful: SAPolicies + SAGroups expansion.
-func (r *Resolver) Effective(ctx context.Context, saID, bucket string, ptype PrincipalType) (EvalInput, error) {
-	k := cacheKey(ptype, saID, bucket)
+// the given (saID, bucket) pair, using the cache when the entry is still fresh.
+// Resolution is SAPolicies + SAGroups → GroupPolicies expansion.
+func (r *Resolver) Effective(ctx context.Context, saID, bucket string) (EvalInput, error) {
+	k := cacheKey(saID, bucket)
 	r.mu.Lock()
 	if e, ok := r.cache[k]; ok && time.Now().Before(e.expires) {
 		r.mu.Unlock()
@@ -122,7 +121,7 @@ func (r *Resolver) Effective(ctx context.Context, saID, bucket string, ptype Pri
 func (r *Resolver) EffectivePrincipal(ctx context.Context, p principal.Principal, bucket string) (EvalInput, error) {
 	switch p.Kind {
 	case principal.KindServiceAccount, principal.KindProtocolCredential:
-		return r.Effective(ctx, p.ID, bucket, PrincipalTypeS3)
+		return r.Effective(ctx, p.ID, bucket)
 	case principal.KindOIDC:
 		return r.effectiveOIDC(ctx, p, bucket)
 	default:

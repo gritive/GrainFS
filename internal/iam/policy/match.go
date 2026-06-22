@@ -5,26 +5,11 @@ import (
 	"strings"
 )
 
-// PrincipalType selects which attach pool the Resolver consults when
-// materializing principal-attached policies. Default zero-value is
-// PrincipalTypeS3 so existing S3 callers don't need to set the field.
-type PrincipalType uint8
-
-const (
-	// PrincipalTypeS3 selects the S3 service-account pool (SAPolicies +
-	// SAGroups → GroupPolicies). Zero value, default for any caller that
-	// does not set the field.
-	PrincipalTypeS3 PrincipalType = 0
-)
-
 type RequestContext struct {
 	Action   string // "s3:GetObject"
 	Resource string // "arn:aws:s3:::analytics/logs/foo"
 	SourceIP string
 	Prefix   string // set only on list-like requests; empty otherwise
-	// PrincipalType selects which attach pool the Resolver reads for the
-	// principal. Defaults to PrincipalTypeS3.
-	PrincipalType PrincipalType
 }
 
 func matchAction(pattern, req string) bool {

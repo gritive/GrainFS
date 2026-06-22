@@ -79,7 +79,7 @@ func (a *Authorizer) Authorize(ctx context.Context, saID, bucket string, ctxReq 
 			return policy.EvalResult{Decision: policy.DecisionAllow, Reason: ReasonDefaultBucketImplicitAnon, ConditionContext: cc}
 		}
 	}
-	in, err := a.resolver.Effective(ctx, saID, bucket, ctxReq.PrincipalType)
+	in, err := a.resolver.Effective(ctx, saID, bucket)
 	if err != nil {
 		return policy.EvalResult{Decision: policy.DecisionDeny, Reason: "resolver: " + err.Error(), ConditionContext: cc}
 	}

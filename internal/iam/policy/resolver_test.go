@@ -52,17 +52,17 @@ func TestResolver_CachesUntilTTL(t *testing.T) {
 		docs:     map[string]string{"readonly": `{"Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}`},
 	}
 	r := NewResolver(s, 100*time.Millisecond)
-	if _, err := r.Effective(context.Background(), "sa-1", "bucket-x", PrincipalTypeS3); err != nil {
+	if _, err := r.Effective(context.Background(), "sa-1", "bucket-x"); err != nil {
 		t.Fatalf("Effective#1: %v", err)
 	}
-	if _, err := r.Effective(context.Background(), "sa-1", "bucket-x", PrincipalTypeS3); err != nil {
+	if _, err := r.Effective(context.Background(), "sa-1", "bucket-x"); err != nil {
 		t.Fatalf("Effective#2: %v", err)
 	}
 	if s.resolveCount > 1 {
 		t.Fatalf("cache miss on second call: resolveCount=%d", s.resolveCount)
 	}
 	time.Sleep(150 * time.Millisecond)
-	if _, err := r.Effective(context.Background(), "sa-1", "bucket-x", PrincipalTypeS3); err != nil {
+	if _, err := r.Effective(context.Background(), "sa-1", "bucket-x"); err != nil {
 		t.Fatalf("Effective#3: %v", err)
 	}
 	if s.resolveCount != 2 {
@@ -93,12 +93,12 @@ func TestResolver_InvalidateClearsImmediately(t *testing.T) {
 		docs:     map[string]string{"readonly": `{"Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}`},
 	}
 	r := NewResolver(s, 1*time.Hour)
-	if _, err := r.Effective(context.Background(), "sa-1", "bucket-x", PrincipalTypeS3); err != nil {
+	if _, err := r.Effective(context.Background(), "sa-1", "bucket-x"); err != nil {
 		t.Fatal(err)
 	}
 	before := s.resolveCount
 	r.Invalidate([]string{"sa-1"}, nil)
-	if _, err := r.Effective(context.Background(), "sa-1", "bucket-x", PrincipalTypeS3); err != nil {
+	if _, err := r.Effective(context.Background(), "sa-1", "bucket-x"); err != nil {
 		t.Fatal(err)
 	}
 	if s.resolveCount != before+1 {

@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.640.0] - 2026-06-22
+
+### Changed
+- **`policy.PrincipalType` removed (single-value enum collapse).** After the mount-SA removal (#829) the
+  `PrincipalType` enum had only one value (`PrincipalTypeS3`). The type, the `RequestContext.PrincipalType`
+  field, and the `ptype` parameter on `Resolver.Effective`/`cacheKey` are removed; `Effective(ctx, saID,
+  bucket)` now always resolves via the S3 service-account path (SAPolicies + SAGroups expansion). Pure
+  internal cleanup — no behavior change to S3/OIDC/protocol-credential authorization.
+
 ## [0.0.639.0] - 2026-06-22
 
 ### Removed
