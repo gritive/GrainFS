@@ -369,6 +369,19 @@ var (
 		Help: "Current consecutive RunValueLogGC failures per category; resets on ErrNoRewrite.",
 	}, []string{"node_id", "category"})
 
+	// Transport metrics.
+
+	// TransportClientDialsTotal counts cold (pool-miss) dials made by the
+	// node-to-node Hertz client. With keep-alive pooling a single conn serves
+	// many RPCs to a peer, so this stays flat under steady load; a sustained rise
+	// (relative to RPC volume) means the pool is not reusing connections —
+	// connection churn that the explicit MaxConnsPerHost/MaxIdleConnDuration/
+	// KeepAlive pool contract is meant to avoid.
+	TransportClientDialsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_transport_client_dials_total",
+		Help: "Total cold (pool-miss) connection dials made by the cluster HTTP client.",
+	})
+
 	// Balancer metrics.
 
 	BalancerGossipTotal = promauto.NewCounter(prometheus.CounterOpts{
