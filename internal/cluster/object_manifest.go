@@ -47,12 +47,16 @@ func (b *DistributedBackend) listAllObjectsForGC() ([]storage.SnapshotObject, er
 	}
 	var result []storage.SnapshotObject
 	for _, bucket := range buckets {
-		// Blob-primary: the per-version tree is the GC known-set authority for EVERY
-		// versioning-Enabled bucket, not only the (now-vestigial) soleauth=on flip —
-		// because writeQuorumMeta writes per-version blobs for every Enabled bucket and
-		// T5 removes the FSM obj: writer. Gating on soleAuthReadOn (== versioning
-		// Enabled) keeps the FSM obj: scan only for non-versioned/Suspended buckets,
-		// whose objects still live in the FSM. Internal buckets fail soleAuthReadOn.
+		// Blob-primary GC known-set authority by bucket class:
+		//   - versioning-Enabled user bucket → the per-version blob tree
+		//     (listSoleAuthBucketObjectsForGC). soleAuthReadOn == versioning Enabled.
+		//   - non-versioned/Suspended user bucket → the latest-only blob tree
+		//     (listNonVersionedBucketObjectsForGC) for regular objects, UNION the FSM
+		//     obj: scan below for appendable/coalesced carve-outs (FSM-authoritative,
+		//     no blob) + any legacy records. A non-versioned regular PUT writes ONLY
+		//     the latest-only blob (writeQuorumMeta, no FSM obj: propose), so without
+		//     the blob scan the sweep would orphan its live segments.
+		//   - internal bucket → the FSM obj: tree only (it still proposes CmdPutObjectMeta).
 		on, saErr := b.soleAuthReadOn(bucket)
 		if saErr != nil {
 			return nil, fmt.Errorf("list objects soleauth %s: %w", bucket, saErr)
@@ -65,6 +69,19 @@ func (b *DistributedBackend) listAllObjectsForGC() ([]storage.SnapshotObject, er
 			result = append(result, objs...)
 			continue
 		}
+		if !storage.IsInternalBucket(bucket) && b.shardSvc != nil {
+			// Non-versioned/Suspended user bucket: regular objects on the latest-only
+			// blob tree. Falls through to the FSM scan for carve-outs/legacy (additive
+			// — a regular non-versioned object has no FSM obj: record, so no dup).
+			// shardSvc==nil (FSM-only test backends) → blobs are impossible, FSM only.
+			objs, oerr := b.listNonVersionedBucketObjectsForGC(bucket)
+			if oerr != nil {
+				return nil, oerr
+			}
+			result = append(result, objs...)
+		}
+		// FSM obj: scan — internal buckets, plus non-versioned appendable/coalesced
+		// carve-outs (FSM-authoritative) and any legacy FSM records.
 		if err := b.store.View(func(txn MetadataTxn) error {
 			latest := make(map[string]string)
 			rawLatPrefix := []byte("lat:" + bucket + "/")
@@ -160,56 +177,85 @@ func (b *DistributedBackend) listSoleAuthBucketObjectsForGC(bucket string) ([]st
 	// Second pass: map each PutObjectMetaCmd to a SnapshotObject.
 	out := make([]storage.SnapshotObject, 0, len(cmds))
 	for _, cmd := range cmds {
-		// Copy UserMetadata (do not alias).
-		var userMeta map[string]string
-		if len(cmd.UserMetadata) > 0 {
-			userMeta = make(map[string]string, len(cmd.UserMetadata))
-			for k, v := range cmd.UserMetadata {
-				userMeta[k] = v
-			}
+		out = append(out, snapshotObjectFromQuorumCmd(bucket, cmd, maxVID[cmd.Key] == cmd.VersionID))
+	}
+	return out, nil
+}
+
+// snapshotObjectFromQuorumCmd maps a decoded quorum-meta PutObjectMetaCmd to a
+// storage.SnapshotObject for the segment-GC known-set, copying (not aliasing)
+// every slice/map because the cmd's backing bytes are reused by the scanner. The
+// caller supplies isLatest (per-version: max-VID-per-key; non-versioned: always
+// true). Shared by the versioning-Enabled (per-version) and non-versioned
+// (latest-only) GC known-set builders.
+func snapshotObjectFromQuorumCmd(bucket string, cmd PutObjectMetaCmd, isLatest bool) storage.SnapshotObject {
+	var userMeta map[string]string
+	if len(cmd.UserMetadata) > 0 {
+		userMeta = make(map[string]string, len(cmd.UserMetadata))
+		for k, v := range cmd.UserMetadata {
+			userMeta[k] = v
 		}
-		// Copy Parts slice (do not alias).
-		var parts []storage.MultipartPartEntry
-		if len(cmd.Parts) > 0 {
-			parts = append([]storage.MultipartPartEntry(nil), cmd.Parts...)
-		}
-		// Copy Tags slice (do not alias).
-		var tags []storage.Tag
-		if len(cmd.Tags) > 0 {
-			tags = append([]storage.Tag(nil), cmd.Tags...)
-		}
-		// Copy NodeIDs slice (do not alias).
-		var nodeIDs []string
-		if len(cmd.NodeIDs) > 0 {
-			nodeIDs = append([]string(nil), cmd.NodeIDs...)
-		}
-		etag := cmd.ETag
-		if cmd.IsDeleteMarker {
-			etag = deleteMarkerETag
-		}
-		out = append(out, storage.SnapshotObject{
-			Bucket:           bucket,
-			Key:              cmd.Key,
-			ETag:             etag,
-			Size:             cmd.Size,
-			ContentType:      cmd.ContentType,
-			Modified:         cmd.ModTime,
-			VersionID:        cmd.VersionID,
-			IsDeleteMarker:   cmd.IsDeleteMarker,
-			IsLatest:         maxVID[cmd.Key] == cmd.VersionID,
-			ACL:              cmd.ACL,
-			SSEAlgorithm:     cmd.SSEAlgorithm,
-			NodeIDs:          nodeIDs,
-			ECData:           cmd.ECData,
-			ECParity:         cmd.ECParity,
-			StripeBytes:      cmd.StripeBytes,
-			PlacementGroupID: cmd.PlacementGroupID,
-			MetaSeq:          cmd.MetaSeq,
-			UserMetadata:     userMeta,
-			Parts:            parts,
-			Tags:             tags,
-			Segments:         segmentMetaEntriesToRefs(cmd.Segments),
-		})
+	}
+	var parts []storage.MultipartPartEntry
+	if len(cmd.Parts) > 0 {
+		parts = append([]storage.MultipartPartEntry(nil), cmd.Parts...)
+	}
+	var tags []storage.Tag
+	if len(cmd.Tags) > 0 {
+		tags = append([]storage.Tag(nil), cmd.Tags...)
+	}
+	var nodeIDs []string
+	if len(cmd.NodeIDs) > 0 {
+		nodeIDs = append([]string(nil), cmd.NodeIDs...)
+	}
+	etag := cmd.ETag
+	if cmd.IsDeleteMarker {
+		etag = deleteMarkerETag
+	}
+	return storage.SnapshotObject{
+		Bucket:           bucket,
+		Key:              cmd.Key,
+		ETag:             etag,
+		Size:             cmd.Size,
+		ContentType:      cmd.ContentType,
+		Modified:         cmd.ModTime,
+		VersionID:        cmd.VersionID,
+		IsDeleteMarker:   cmd.IsDeleteMarker,
+		IsLatest:         isLatest,
+		ACL:              cmd.ACL,
+		SSEAlgorithm:     cmd.SSEAlgorithm,
+		NodeIDs:          nodeIDs,
+		ECData:           cmd.ECData,
+		ECParity:         cmd.ECParity,
+		StripeBytes:      cmd.StripeBytes,
+		PlacementGroupID: cmd.PlacementGroupID,
+		MetaSeq:          cmd.MetaSeq,
+		UserMetadata:     userMeta,
+		Parts:            parts,
+		Tags:             tags,
+		Segments:         segmentMetaEntriesToRefs(cmd.Segments),
+	}
+}
+
+// listNonVersionedBucketObjectsForGC enumerates the latest-only quorum-meta blobs
+// of a NON-VERSIONED (or Suspended) user bucket via a FAIL-CLOSED strict scan,
+// mapping each to a storage.SnapshotObject (always IsLatest — non-versioned has a
+// single latest per key). Hard-delete tombstones are excluded (dead segments).
+// Symmetric counterpart of listSoleAuthBucketObjectsForGC for the latest-only tree:
+// without it the segment GC would orphan-delete a live non-versioned object's
+// segments (a non-versioned PUT writes ONLY the latest-only blob — no FSM record).
+func (b *DistributedBackend) listNonVersionedBucketObjectsForGC(bucket string) ([]storage.SnapshotObject, error) {
+	if b.shardSvc == nil {
+		return nil, fmt.Errorf("list non-versioned bucket %s: no shard service", bucket)
+	}
+	cmds, err := b.shardSvc.scanQuorumMetaBucketStrict(bucket)
+	if err != nil {
+		return nil, fmt.Errorf("list non-versioned bucket %s: %w", bucket, err)
+	}
+	cmds = dropHardDeletedVersions(cmds)
+	out := make([]storage.SnapshotObject, 0, len(cmds))
+	for _, cmd := range cmds {
+		out = append(out, snapshotObjectFromQuorumCmd(bucket, cmd, true))
 	}
 	return out, nil
 }

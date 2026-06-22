@@ -859,6 +859,71 @@ func (b *DistributedBackend) scanQuorumMetaVersionsClusterAll(bucket, prefix str
 	return out, nil
 }
 
+// scanQuorumMetaClusterAll is the latest-only-tree twin of
+// scanQuorumMetaVersionsClusterAll: a cluster-wide enumeration of the latest-only
+// blob per key (.quorum_meta/{bucket}/{key}) across self + every peer, one entry
+// per key (LWW winner kept). Used by the DEK-rewrap enumerator so a non-versioned
+// object's segment shards on a PARITY node that missed the K-of-N latest-only write
+// are still covered (via a peer's blob that lists the full placement).
+//
+// Fail-closed at the TRANSPORT level: an unreachable/erroring peer aborts the scan
+// (a partial set would leave shards un-rewrapped → undecryptable after a future KEK
+// prune). Self uses the strict (decode-fail-closed) local scan. CAVEAT: the peer
+// path reuses the non-strict ScanQuorumMeta RPC, which silently DROPS an undecodable
+// blob (it does not abort) — strictly weaker than the per-version twin's strict
+// ScanQuorumMetaVersionsAll. Bounded: a key is dropped only if its blob is corrupt
+// on EVERY replica (a single good replica masks it via the LWW union), and such an
+// object is already unreadable. FOLLOW-UP before DEK-gen prune is enabled (S7): add
+// a strict latest-only peer RPC mirroring handleScanQuorumMetaVersionsAll.
+func (b *DistributedBackend) scanQuorumMetaClusterAll(bucket string) ([]PutObjectMetaCmd, error) {
+	if b.shardSvc == nil {
+		return nil, nil
+	}
+	byKey := map[string]PutObjectMetaCmd{}
+	put := func(c PutObjectMetaCmd) {
+		if ex, ok := byKey[c.Key]; !ok || quorumMetaCmdWins(c, ex) {
+			byKey[c.Key] = c
+		}
+	}
+	local, lerr := b.shardSvc.scanQuorumMetaBucketStrict(bucket)
+	if lerr != nil {
+		return nil, lerr
+	}
+	for _, c := range local {
+		put(c)
+	}
+	if b.shardGroup != nil {
+		self := b.currentSelfAddr()
+		seen := map[string]bool{self: true}
+		ctx, cancel := context.WithTimeout(context.Background(), quorumMetaReadTimeout)
+		defer cancel()
+		for _, g := range b.shardGroup.ShardGroups() {
+			for _, p := range g.PeerIDs {
+				if seen[p] {
+					continue
+				}
+				seen[p] = true
+				addr, aerr := b.shardSvc.resolvePeerAddress(p)
+				if aerr != nil {
+					return nil, aerr // fail-closed
+				}
+				remote, rerr := b.shardSvc.ScanQuorumMeta(ctx, addr, bucket, "")
+				if rerr != nil {
+					return nil, rerr // fail-closed: a partial set leaves shards un-rewrapped
+				}
+				for _, c := range remote {
+					put(c)
+				}
+			}
+		}
+	}
+	out := make([]PutObjectMetaCmd, 0, len(byKey))
+	for _, c := range byKey {
+		out = append(out, c)
+	}
+	return out, nil
+}
+
 // readQuorumMetaVersion returns the single per-version blob for (bucket, key,
 // versionID), found via the all-groups fan-out (NOT local-only) so a reachable
 // replica is located even when the local node isn't a placement node. Returns
@@ -1156,6 +1221,46 @@ func (s *ShardService) ScanQuorumMetaBucket(bucket, prefix string) ([]PutObjectM
 		cmd, qerr := s.readQuorumMetaRawCmd(bucket, key)
 		if qerr != nil {
 			return nil
+		}
+		results = append(results, cmd)
+		return nil
+	})
+	return results, err
+}
+
+// scanQuorumMetaBucketStrict is the FAIL-CLOSED twin of ScanQuorumMetaBucket: a
+// latest-only blob that cannot be read/decoded returns an error (rather than being
+// silently skipped) so the segment-GC known-set is never silently incomplete — a
+// dropped object would orphan-delete its live segments. Used by the non-versioned
+// GC known-set builder (listNonVersionedBucketObjectsForGC). No prefix filter (the
+// GC walks the whole bucket).
+func (s *ShardService) scanQuorumMetaBucketStrict(bucket string) ([]PutObjectMetaCmd, error) {
+	if len(s.dataDirs) == 0 {
+		return nil, nil
+	}
+	root := filepath.Join(s.dataDirs[0], quorumMetaSubDir)
+	bucketRoot := filepath.Join(root, bucket)
+	if _, err := os.Stat(bucketRoot); os.IsNotExist(err) {
+		return nil, nil
+	}
+	var results []PutObjectMetaCmd
+	err := filepath.WalkDir(bucketRoot, func(path string, d fs.DirEntry, werr error) error {
+		if werr != nil {
+			return werr // fail-closed: a walk error must not silently shrink the known-set
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if isQuorumMetaTempName(d.Name()) {
+			return nil // in-flight atomic-publish temp, not a stored key
+		}
+		key, rerr := filepath.Rel(bucketRoot, path)
+		if rerr != nil {
+			return rerr
+		}
+		cmd, qerr := s.readQuorumMetaRawCmd(bucket, key)
+		if qerr != nil {
+			return fmt.Errorf("gc known-set: read latest blob %s/%s: %w", bucket, key, qerr)
 		}
 		results = append(results, cmd)
 		return nil
@@ -1924,9 +2029,14 @@ func (b *DistributedBackend) scatterGatherList(ctx context.Context, bucket, pref
 func filterAndSortEntries(entries []PutObjectMetaCmd) []PutObjectMetaCmd {
 	out := entries[:0]
 	for _, e := range entries {
-		if !e.IsDeleteMarker {
-			out = append(out, e)
+		// Drop both tombstone kinds: IsDeleteMarker (non-versioned/Suspended soft
+		// delete) and IsHardDeleted (defense-in-depth — the latest-only tree carries
+		// no hard-delete tombstone today, but a future writer must never surface one
+		// as a live LIST entry).
+		if e.IsDeleteMarker || e.IsHardDeleted {
+			continue
 		}
+		out = append(out, e)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	return out

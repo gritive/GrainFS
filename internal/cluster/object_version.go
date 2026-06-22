@@ -338,6 +338,33 @@ func (b *DistributedBackend) ListObjectVersions(ctx context.Context, bucket, pre
 		return b.listObjectVersionsSoleAuth(bucket, prefix, maxKeys)
 	}
 	var versions []*storage.ObjectVersion
+	// Non-versioned/Suspended regular objects are blob-only (latest-only blob, no
+	// FSM obj: record), so enumerate them from the latest-only blobs and present
+	// each as a single latest version — otherwise the S3 ?versions API and the
+	// lifecycle worker (ScanObjectsGrouped) would miss every blob-only object.
+	// scatterGatherList returns the cluster-wide, tombstone-filtered live view (so
+	// a deleted object is absent); each leaf returns the SAME view, deduped at the
+	// coordinator (dedupVersionsKeepFirst). Disjoint from the FSM carve-out scan
+	// below: an appendable/coalesced object has its latest-only blob deleted (it is
+	// FSM-authoritative), so no key appears in both.
+	if !storage.IsInternalBucket(bucket) && b.shardSvc != nil {
+		cmds, lerr := b.scatterGatherList(ctx, bucket, prefix)
+		if lerr != nil {
+			return nil, lerr
+		}
+		for _, cmd := range cmds {
+			versions = append(versions, &storage.ObjectVersion{
+				Key:            cmd.Key,
+				VersionID:      cmd.VersionID,
+				IsLatest:       true,
+				IsDeleteMarker: false,
+				LastModified:   cmd.ModTime,
+				ETag:           cmd.ETag,
+				Size:           cmd.Size,
+				Tags:           append([]storage.Tag(nil), cmd.Tags...),
+			})
+		}
+	}
 	latestMap := map[string]string{} // key → latestVID
 	err := b.store.View(func(txn MetadataTxn) error {
 		// Pre-scan latest pointers for the prefix so each version can tag IsLatest.
@@ -470,6 +497,16 @@ func (b *DistributedBackend) ListObjectVersions(ctx context.Context, bucket, pre
 	if err != nil {
 		return nil, err
 	}
+	// Dedup blob-vs-FSM by (Key,VID): a non-versioned MULTIPART complete writes BOTH
+	// the FSM obj:/lat: records AND the latest-only blob with the SAME VersionID
+	// (applyCompleteMultipart legacy branch + the proposer's blob mirror), so the
+	// blob enum above and the FSM scan both emit it. Keep-first prefers the blob
+	// entry (appended first). Simple-PUT objects (blob-only) and appendable/coalesced
+	// carve-outs (FSM-only, blob deleted) are disjoint, so this only collapses the
+	// multipart overlap. Done at the leaf because the single-group path and the
+	// lifecycle worker (ScanObjectsGrouped) consume the leaf directly, bypassing the
+	// coordinator's dedup.
+	versions = dedupVersionsKeepFirst(versions)
 	// Sort DESC by VersionID (UUIDv7 is lex-ASC-by-time, so reverse = newest-first).
 	sort.Slice(versions, func(i, j int) bool {
 		if versions[i].Key != versions[j].Key {

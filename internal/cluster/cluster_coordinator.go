@@ -1254,10 +1254,19 @@ func (c *ClusterCoordinator) ListObjectVersions(
 		}
 		return merged, nil
 	}
-	merged, err := c.fanOutListObjectVersions(ctx, state, groups, bucket, prefix, maxKeys)
+	// maxKeys=0 (untruncated) so per-leaf truncation can't underfill the merged
+	// result before the cluster-wide dedup/reconcile below.
+	merged, err := c.fanOutListObjectVersions(ctx, state, groups, bucket, prefix, 0)
 	if err != nil {
 		return nil, err
 	}
+	// Non-versioned/Suspended: each leaf returns the SAME cluster-wide latest-only
+	// blob view (→ N× duplicated across groups), plus its own LOCAL FSM carve-outs
+	// (appendable/coalesced — distinct per owning group, never duplicated). Dedup by
+	// (Key,VID) keep-the-first collapses the blob N× without disturbing the carve-outs
+	// (distinct tuples). reconcileVersionIsLatest then fixes IsLatest across the
+	// deduped set (a blob object is its own single latest).
+	merged = dedupVersionsKeepFirst(merged)
 	reconcileVersionIsLatest(merged)
 	sortObjectVersions(merged)
 	if maxKeys > 0 && len(merged) > maxKeys {

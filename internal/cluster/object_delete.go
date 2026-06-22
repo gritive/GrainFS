@@ -103,29 +103,38 @@ func (b *DistributedBackend) deleteObjectWithMarker(ctx context.Context, bucket,
 		}
 	}
 
-	// Legacy path (non-versioned / internal buckets, and never-existed keys): FSM
-	// marker via raft propose + best-effort quorum-meta tombstone for LIST.
-	if err := b.propose(ctx, CmdDeleteObject, DeleteObjectCmd{
-		Bucket:    bucket,
-		Key:       key,
-		VersionID: markerID,
-	}); err != nil {
-		return "", err
-	}
+	// Non-versioned / never-existed key: blob-authoritative delete, RAFT-FREE. A
+	// non-versioned PUT writes ONLY the latest-only blob (writeQuorumMeta, no FSM
+	// obj: propose), so there is no FSM record to delete — the old CmdDeleteObject
+	// propose was vestigial. Instead, overwrite the latest-only key with an
+	// IsDeleteMarker tombstone, FAIL-CLOSED, reusing the existing object's
+	// placement. The write is LWW-guarded (fresh ModTime) so it converges against a
+	// concurrent PUT; read/LIST fold the marker → 404/absent; the overwritten data
+	// blob's segments become orphan-eligible for the segment GC. A never-existed (or
+	// already-deleted) key has no live blob → no-op success (S3 delete-of-absent).
 	if b.shardSvc != nil {
-		if existing, qerr := b.readQuorumMetaCmd(bucket, key); qerr == nil && len(existing.NodeIDs) > 0 {
-			_ = b.writeQuorumMeta(ctx, PutObjectMetaCmd{
-				Bucket:         bucket,
-				Key:            key,
-				VersionID:      markerID,
-				ModTime:        time.Now().Unix(),
-				IsDeleteMarker: true,
-				ECData:         existing.ECData,
-				NodeIDs:        existing.NodeIDs,
-			})
-		} else if !errors.Is(qerr, storage.ErrObjectNotFound) && qerr != nil {
-			_ = b.shardSvc.deleteQuorumMetaLocal(bucket, key) // fallback: remove stale file
+		existing, qerr := b.readQuorumMetaCmd(bucket, key)
+		switch {
+		case qerr == nil && len(existing.NodeIDs) > 0:
+			if werr := b.writeQuorumMeta(ctx, PutObjectMetaCmd{
+				Bucket:           bucket,
+				Key:              key,
+				VersionID:        markerID,
+				ModTime:          time.Now().Unix(),
+				IsDeleteMarker:   true,
+				ECData:           existing.ECData,
+				ECParity:         existing.ECParity,
+				NodeIDs:          existing.NodeIDs,
+				PlacementGroupID: existing.PlacementGroupID,
+			}); werr != nil {
+				return "", fmt.Errorf("write non-versioned delete tombstone %s/%s: %w", bucket, key, werr)
+			}
+		case qerr != nil && !errors.Is(qerr, storage.ErrObjectNotFound):
+			// Fail closed on a read error — do NOT report a successful delete when we
+			// could not establish the object's state.
+			return "", fmt.Errorf("resolve non-versioned object for delete %s/%s: %w", bucket, key, qerr)
 		}
+		// ErrObjectNotFound (never-existed / already-deleted) → no-op success.
 	}
 	return markerID, nil
 }
