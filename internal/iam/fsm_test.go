@@ -350,7 +350,7 @@ func TestApplyBucketUpstreamDelete_Idempotent(t *testing.T) {
 	enc := newTestEncryptor(t)
 	ap := NewApplier(s, enc)
 
-	if err := ap.ApplyBucketUpstreamDelete(buildBucketUpstreamDeletePayload("ghost")); err != nil {
+	if err := ap.ApplyBucketUpstreamDelete(buildBucketUpstreamDeletePayload("ghost", UnconditionalDeleteGen)); err != nil {
 		t.Fatalf("ApplyBucketUpstreamDelete on empty store: %v", err)
 	}
 
@@ -361,7 +361,7 @@ func TestApplyBucketUpstreamDelete_Idempotent(t *testing.T) {
 		t.Fatalf("seed Apply: %v", err)
 	}
 	for i := 0; i < 2; i++ {
-		if err := ap.ApplyBucketUpstreamDelete(buildBucketUpstreamDeletePayload("buc1")); err != nil {
+		if err := ap.ApplyBucketUpstreamDelete(buildBucketUpstreamDeletePayload("buc1", UnconditionalDeleteGen)); err != nil {
 			t.Fatalf("ApplyBucketUpstreamDelete iter %d: %v", i, err)
 		}
 	}

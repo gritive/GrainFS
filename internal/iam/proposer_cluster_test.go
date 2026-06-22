@@ -102,7 +102,7 @@ func TestMetaProposer_ProposeBucketUpstreamDelete(t *testing.T) {
 			return nil
 		},
 	}
-	if err := mp.ProposeBucketUpstreamDelete(context.Background(), "shared"); err != nil {
+	if err := mp.ProposeBucketUpstreamDelete(context.Background(), "shared", 7); err != nil {
 		t.Fatalf("ProposeBucketUpstreamDelete: %v", err)
 	}
 	if seenType != clusterpb.MetaCmdTypeIAMBucketUpstreamDelete {
@@ -111,5 +111,8 @@ func TestMetaProposer_ProposeBucketUpstreamDelete(t *testing.T) {
 	pb := iampb.GetRootAsBucketUpstreamDeletePayload(seenPayload, 0)
 	if string(pb.Bucket()) != "shared" {
 		t.Errorf("payload bucket: got %q want shared", pb.Bucket())
+	}
+	if pb.Generation() != 7 {
+		t.Errorf("payload generation: got %d want 7", pb.Generation())
 	}
 }

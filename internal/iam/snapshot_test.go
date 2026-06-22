@@ -339,3 +339,39 @@ func TestSnapshot_DEKGenSurvivesBucketUpstreamRoundTrip(t *testing.T) {
 	require.Equal(t, uint32(11), u.SecretKeyDEKGen)
 	require.Equal(t, "upstream-secret", u.SecretKey)
 }
+
+// The CAS generation must survive a snapshot write/read round-trip. Two puts
+// drive Generation to 2 via the live apply path; after WriteSnapshot →
+// ReadSnapshot the restored store must report Generation 2, not reset to 1.
+// This FAILS if ReadSnapshot routes through ApplyBucketUpstreamPut (live,
+// recompute) instead of ApplyBucketUpstreamPutFromSnapshot (verbatim).
+func TestSnapshot_GenerationSurvivesBucketUpstreamRoundTrip(t *testing.T) {
+	enc := newTestEncryptor(t)
+
+	src := NewStore()
+	ap := NewApplier(src, enc)
+	wrapped, _, err := WrapSecret(enc, "bucket-upstream:my-bucket", "AK1", "upstream-secret")
+	require.NoError(t, err)
+	put := buildBucketUpstreamPutPayload(BucketUpstream{
+		Bucket:       "my-bucket",
+		Endpoint:     "http://example",
+		AccessKey:    "AK1",
+		SecretKeyEnc: wrapped,
+		Status:       BucketUpstreamStatusActive,
+	})
+	require.NoError(t, ap.ApplyBucketUpstreamPut(put)) // gen 1
+	require.NoError(t, ap.ApplyBucketUpstreamPut(put)) // gen 2
+	pre, ok := src.LookupBucketUpstream("my-bucket")
+	require.True(t, ok)
+	require.Equal(t, uint64(2), pre.Generation, "second live put → gen 2")
+
+	var buf bytes.Buffer
+	require.NoError(t, WriteSnapshot(&buf, src))
+
+	dst := NewStore()
+	require.NoError(t, ReadSnapshot(&buf, dst, enc))
+
+	u, ok := dst.LookupBucketUpstream("my-bucket")
+	require.True(t, ok)
+	require.Equal(t, uint64(2), u.Generation, "generation survives snapshot round-trip (not reset to 1)")
+}

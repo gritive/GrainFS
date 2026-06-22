@@ -97,7 +97,7 @@ func (f *fakeProposer) ProposeBucketUpstreamPut(_ context.Context, u BucketUpstr
 	return f.bucketUpstreamPutErr
 }
 
-func (f *fakeProposer) ProposeBucketUpstreamDelete(_ context.Context, bucket string) error {
+func (f *fakeProposer) ProposeBucketUpstreamDelete(_ context.Context, bucket string, _ uint64) error {
 	f.bucketUpstreamDeletes = append(f.bucketUpstreamDeletes, bucket)
 	f.dispatched = append(f.dispatched, "BucketUpstreamDelete")
 	return f.bucketUpstreamDeleteErr

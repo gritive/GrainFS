@@ -46,8 +46,8 @@ func (m *MetaProposer) ProposeBucketUpstreamPut(ctx context.Context, u BucketUps
 	return m.Propose(ctx, clusterpb.MetaCmdTypeIAMBucketUpstreamPut, buildBucketUpstreamPutPayload(u))
 }
 
-func (m *MetaProposer) ProposeBucketUpstreamDelete(ctx context.Context, bucket string) error {
-	return m.Propose(ctx, clusterpb.MetaCmdTypeIAMBucketUpstreamDelete, buildBucketUpstreamDeletePayload(bucket))
+func (m *MetaProposer) ProposeBucketUpstreamDelete(ctx context.Context, bucket string, observedGen uint64) error {
+	return m.Propose(ctx, clusterpb.MetaCmdTypeIAMBucketUpstreamDelete, buildBucketUpstreamDeletePayload(bucket, observedGen))
 }
 
 func (m *MetaProposer) ProposeBucketUpstreamCutover(ctx context.Context, bucket string) error {

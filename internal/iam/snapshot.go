@@ -160,7 +160,7 @@ func ReadSnapshot(r io.Reader, dst *Store, enc storage.DataEncryptor) error {
 		if err != nil {
 			return err
 		}
-		if err := ap.ApplyBucketUpstreamPut(blob); err != nil {
+		if err := ap.ApplyBucketUpstreamPutFromSnapshot(blob); err != nil {
 			return err
 		}
 	}
@@ -257,15 +257,17 @@ func buildBucketUpstreamPutPayload(u BucketUpstream) []byte {
 	iampb.BucketUpstreamPutPayloadAddCreatedBy(b, cbOff)
 	iampb.BucketUpstreamPutPayloadAddStatus(b, statusOff)
 	iampb.BucketUpstreamPutPayloadAddSecretKeyDekGen(b, u.SecretKeyDEKGen)
+	iampb.BucketUpstreamPutPayloadAddGeneration(b, u.Generation)
 	b.Finish(iampb.BucketUpstreamPutPayloadEnd(b))
 	return b.FinishedBytes()
 }
 
-func buildBucketUpstreamDeletePayload(bucket string) []byte {
+func buildBucketUpstreamDeletePayload(bucket string, generation uint64) []byte {
 	b := flatbuffers.NewBuilder(32)
 	bucketOff := b.CreateString(bucket)
 	iampb.BucketUpstreamDeletePayloadStart(b)
 	iampb.BucketUpstreamDeletePayloadAddBucket(b, bucketOff)
+	iampb.BucketUpstreamDeletePayloadAddGeneration(b, generation)
 	b.Finish(iampb.BucketUpstreamDeletePayloadEnd(b))
 	return b.FinishedBytes()
 }

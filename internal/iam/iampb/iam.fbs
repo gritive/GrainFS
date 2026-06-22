@@ -95,10 +95,12 @@ table BucketUpstreamPutPayload {
   created_by:         string;
   status:             string; // "" = legacy active
   secret_key_dek_gen: uint32 = 0; // DEK generation sealing secret_key_enc. Any uint32 is valid (gen 0 = genesis-bootstrap active gen). Pre-R2 ciphertext is unreachable: format guard refuses pre-format-5 dirs at boot.
+  generation:         uint64 = 0; // CAS generation; FSM apply sets current+1
 }
 
 table BucketUpstreamDeletePayload {
-  bucket: string;
+  bucket:     string;
+  generation: uint64 = 0; // observed CAS generation; UnconditionalDeleteGen for explicit deletes
 }
 
 root_type SACreatePayload;
