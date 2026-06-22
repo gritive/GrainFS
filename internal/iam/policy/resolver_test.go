@@ -9,13 +9,12 @@ import (
 )
 
 type fakeStore struct {
-	saToPols      map[string][]string
-	saToGroups    map[string][]string
-	groupToPols   map[string][]string
-	mountSAToPols map[string][]string
-	bucketPols    map[string]string
-	docs          map[string]string
-	resolveCount  int
+	saToPols     map[string][]string
+	saToGroups   map[string][]string
+	groupToPols  map[string][]string
+	bucketPols   map[string]string
+	docs         map[string]string
+	resolveCount int
 }
 
 func (f *fakeStore) SAPolicies(_ context.Context, saID string) ([]string, error) {
@@ -29,11 +28,6 @@ func (f *fakeStore) SAGroups(_ context.Context, saID string) ([]string, error) {
 
 func (f *fakeStore) GroupPolicies(_ context.Context, group string) ([]string, error) {
 	return f.groupToPols[group], nil
-}
-
-func (f *fakeStore) MountSAPolicies(_ context.Context, mountSA string) ([]string, error) {
-	f.resolveCount++
-	return f.mountSAToPols[mountSA], nil
 }
 
 func (f *fakeStore) PolicyDoc(_ context.Context, name string) (*Document, error) {

@@ -115,22 +115,12 @@ func DeletePolicy(ctx context.Context, d *Deps, name string) error {
 }
 
 // AttachPolicyToSA attaches a policy to a ServiceAccount via Raft.
-// It rejects policies that contain mount-SA-only actions (grainfs:NFSMount)
-// to enforce cross-namespace isolation.
 func AttachPolicyToSA(ctx context.Context, d *Deps, policyName, saID string) error {
 	if d.IAMPolicy == nil {
 		return NewInternal("iam policy admin disabled")
 	}
 	if policyName == "" || saID == "" {
 		return NewInvalid("policy and sa_id are required")
-	}
-	// Cross-namespace pre-check: reject Mount SA actions on S3 SA policies.
-	// Policy may not exist yet (attach before put is not normally valid) — skip
-	// when the doc is unavailable rather than blocking on a not-found condition.
-	if raw, err := d.IAMPolicy.PolicyDoc(ctx, policyName); err == nil && raw != nil {
-		if nsErr := policy.ValidateForS3SAAttach(string(raw)); nsErr != nil {
-			return NewForbidden(fmt.Sprintf("cross-namespace attach rejected: %v", nsErr))
-		}
 	}
 	payload, err := cluster.EncodePolicyAttachToSAPutPayload(saID, policyName)
 	if err != nil {
@@ -172,7 +162,7 @@ func SimulatePolicy(ctx context.Context, d *Deps, req PolicySimulateRequest) (Po
 			return PolicySimulateResult{}, NewInvalid("principal_kind and principal_id are required")
 		}
 		switch req.PrincipalKind {
-		case "sa", "mount_sa", "oidc", "protocol_credential":
+		case "sa", "oidc", "protocol_credential":
 		default:
 			return PolicySimulateResult{}, NewInvalid("unsupported principal_kind")
 		}
