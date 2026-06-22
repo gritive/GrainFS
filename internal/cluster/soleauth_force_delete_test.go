@@ -34,7 +34,6 @@ func TestForceDeleteBucketSoleAuthOn(t *testing.T) {
 		// Stale non-carve-out vid-bearing FSM record with NO blob — non-authoritative
 		// under `on`: must NOT be enumerated/resurrected, and must NOT block the delete.
 		seedFSMObject(t, b, "b", "ghost", vidB1, objectMeta{Key: "ghost", ETag: "stale"}, true)
-		setSoleAuthForTest(t, b, "b", soleAuthOn)
 
 		require.NoError(t, b.ForceDeleteBucket(ctx, "b"))
 		require.ErrorIs(t, b.HeadBucket(ctx, "b"), storage.ErrBucketNotFound)

@@ -130,7 +130,7 @@ func TestForwardReceiver_HandlePutObject_PreservesSSE(t *testing.T) {
 
 	rcv := NewForwardReceiver(mgr)
 
-	args := buildPutObjectArgsWithSSE("bucket", "sse-key", "text/plain", []byte("hello"), "AES256", nil, "", 0, versioningStateUnknown, 0)
+	args := buildPutObjectArgsWithSSE("bucket", "sse-key", "text/plain", []byte("hello"), "AES256", nil, "", 0, versioningStateUnknown)
 	payload := encodeForwardPayload("group-1", raftpb.ForwardOpPutObject, args)
 	reply, _ := rcv.Handle(payload)
 
@@ -154,7 +154,7 @@ func TestForwardReceiver_HandlePutObject_PreservesUserMetadata(t *testing.T) {
 	rcv := NewForwardReceiver(mgr)
 
 	um := map[string]string{"x-amz-meta-team": "storage", "x-amz-meta-env": "prod"}
-	args := buildPutObjectArgsWithSSE("bucket", "meta-key", "text/plain", []byte("hello"), "", um, "", 0, versioningStateUnknown, 0)
+	args := buildPutObjectArgsWithSSE("bucket", "meta-key", "text/plain", []byte("hello"), "", um, "", 0, versioningStateUnknown)
 	payload := encodeForwardPayload("group-1", raftpb.ForwardOpPutObject, args)
 	reply, _ := rcv.Handle(payload)
 
@@ -174,7 +174,7 @@ func TestForwardReceiver_HandlePutObject_PersistsACL(t *testing.T) {
 	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
 	rcv := NewForwardReceiver(mgr)
 	acl := uint8(s3auth.ACLPublicRead)
-	args := buildPutObjectArgsWithSSE("bucket", "acl-key", "text/plain", []byte("hi"), "", nil, "", acl, versioningStateUnknown, 0)
+	args := buildPutObjectArgsWithSSE("bucket", "acl-key", "text/plain", []byte("hi"), "", nil, "", acl, versioningStateUnknown)
 	payload := encodeForwardPayload("group-1", raftpb.ForwardOpPutObject, args)
 	reply, _ := rcv.Handle(payload)
 	require.NotNil(t, reply)
@@ -195,7 +195,7 @@ func TestForwardReceiver_HandlePutObject_RejectsBadContentMD5(t *testing.T) {
 	rcv := NewForwardReceiver(mgr)
 
 	// body "hello" but a deliberately wrong Content-MD5
-	args := buildPutObjectArgsWithSSE("bucket", "bad-md5", "text/plain", []byte("hello"), "", nil, "deadbeefdeadbeefdeadbeefdeadbeef", 0, versioningStateUnknown, 0)
+	args := buildPutObjectArgsWithSSE("bucket", "bad-md5", "text/plain", []byte("hello"), "", nil, "deadbeefdeadbeefdeadbeefdeadbeef", 0, versioningStateUnknown)
 	payload := encodeForwardPayload("group-1", raftpb.ForwardOpPutObject, args)
 	reply, _ := rcv.Handle(payload)
 
@@ -210,7 +210,7 @@ func TestForwardReceiver_HandlePutObject_GoodContentMD5OK(t *testing.T) {
 	rcv := NewForwardReceiver(mgr)
 
 	// md5("hello") = 5d41402abc4b2a76b9719d911017c592
-	args := buildPutObjectArgsWithSSE("bucket", "good-md5", "text/plain", []byte("hello"), "", nil, "5d41402abc4b2a76b9719d911017c592", 0, versioningStateUnknown, 0)
+	args := buildPutObjectArgsWithSSE("bucket", "good-md5", "text/plain", []byte("hello"), "", nil, "5d41402abc4b2a76b9719d911017c592", 0, versioningStateUnknown)
 	payload := encodeForwardPayload("group-1", raftpb.ForwardOpPutObject, args)
 	reply, _ := rcv.Handle(payload)
 

@@ -187,8 +187,7 @@ func (b *DistributedBackend) writeCompletedMultipartBlob(ctx context.Context, me
 	if err != nil {
 		return PutObjectMetaCmd{}, fmt.Errorf("multipart complete: decode meta_blob cmd: %w", err)
 	}
-	epoch := b.resolveQuorumMetaEpoch(ctx, cmd.Bucket)
-	if err := b.fanOutPerVersionBlob(ctx, cmd, metaBlob, epoch); err != nil {
+	if err := b.fanOutPerVersionBlob(ctx, cmd, metaBlob); err != nil {
 		return PutObjectMetaCmd{}, fmt.Errorf("multipart complete: per-version blob: %w", err)
 	}
 	return cmd, nil

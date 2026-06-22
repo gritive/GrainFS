@@ -11,7 +11,7 @@ import (
 // seedCorruptVersionBlob writes an undecodable per-version blob at (bucket,key,vid).
 func seedCorruptVersionBlob(t *testing.T, b *DistributedBackend, bucket, key, vid string) {
 	t.Helper()
-	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal(bucket, filepath.Join(key, vid), []byte("not-a-decodable-blob"), 0))
+	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal(bucket, filepath.Join(key, vid), []byte("not-a-decodable-blob")))
 }
 
 // TestReadQuorumMetaVersionsDecodeStrict covers the new read1 reader: decode-strict
@@ -57,7 +57,6 @@ func TestRead1DecodeStrictResurrection(t *testing.T) {
 		setVersioningForTest(t, b, "b", "Enabled")
 		seedVersionBlob(t, b, "b", "k", vidA1, PutObjectMetaCmd{ETag: "older-live"})
 		seedCorruptVersionBlob(t, b, "b", "k", vidA2) // max-VID, corrupt (would-be marker)
-		setSoleAuthForTest(t, b, "b", soleAuthOn)
 
 		_, err := b.HeadObject(ctx, "b", "k")
 		require.Error(t, err, "corrupt latest must NOT resurrect the older live version")
@@ -69,7 +68,6 @@ func TestRead1DecodeStrictResurrection(t *testing.T) {
 		setVersioningForTest(t, b, "b", "Enabled")
 		seedVersionBlob(t, b, "b", "k", vidA1, PutObjectMetaCmd{ETag: "clean-target"})
 		seedCorruptVersionBlob(t, b, "b", "k", vidB1) // sibling, corrupt
-		setSoleAuthForTest(t, b, "b", soleAuthOn)
 
 		_, err := b.HeadObjectVersion(ctx, "b", "k", vidA1)
 		require.Error(t, err, "an undecodable sibling version makes the key's version set untrustworthy → fail closed")
@@ -81,7 +79,6 @@ func TestRead1DecodeStrictResurrection(t *testing.T) {
 		setVersioningForTest(t, b, "b", "Enabled")
 		seedVersionBlob(t, b, "b", "k", vidA1, PutObjectMetaCmd{ETag: "v1"})
 		seedCorruptVersionBlob(t, b, "b", "k", vidA2)
-		setSoleAuthForTest(t, b, "b", soleAuthOn)
 
 		_, err := b.GetObjectTags("b", "k", "")
 		require.Error(t, err)
@@ -93,7 +90,6 @@ func TestRead1DecodeStrictResurrection(t *testing.T) {
 		setVersioningForTest(t, b, "b", "Enabled")
 		seedVersionBlob(t, b, "b", "k", vidA1, PutObjectMetaCmd{ETag: "v1"})
 		seedVersionBlob(t, b, "b", "k", vidA2, PutObjectMetaCmd{ETag: "v2-latest"})
-		setSoleAuthForTest(t, b, "b", soleAuthOn)
 
 		obj, err := b.HeadObject(ctx, "b", "k")
 		require.NoError(t, err)

@@ -22,7 +22,6 @@ func TestHeadObjectMetaVSoleAuthOn(t *testing.T) {
 		require.NoError(t, b.CreateBucket(ctx, "bon"))
 		setVersioningForTest(t, b, "bon", "Enabled")
 		seedVersionBlob(t, b, "bon", "k", "v1", PutObjectMetaCmd{ETag: "etag-blob", Size: 42})
-		setSoleAuthForTest(t, b, "bon", soleAuthOn)
 
 		obj, _, err := b.headObjectMetaV(ctx, "bon", "k", "v1")
 		require.NoError(t, err)
@@ -38,7 +37,6 @@ func TestHeadObjectMetaVSoleAuthOn(t *testing.T) {
 		setVersioningForTest(t, b, "bstale", "Enabled")
 		// No per-version blob for v1. A stale vid-bearing, non-carve-out FSM record lingers.
 		seedFSMObject(t, b, "bstale", "k", "v1", objectMeta{Key: "k", ETag: "stale"}, true)
-		setSoleAuthForTest(t, b, "bstale", soleAuthOn)
 
 		obj, _, err := b.headObjectMetaV(ctx, "bstale", "k", "v1")
 		require.ErrorIs(t, err, storage.ErrObjectNotFound)
@@ -50,7 +48,6 @@ func TestHeadObjectMetaVSoleAuthOn(t *testing.T) {
 		require.NoError(t, b.CreateBucket(ctx, "bdm"))
 		setVersioningForTest(t, b, "bdm", "Enabled")
 		seedVersionBlob(t, b, "bdm", "k", "v1", PutObjectMetaCmd{ETag: deleteMarkerETag, IsDeleteMarker: true})
-		setSoleAuthForTest(t, b, "bdm", soleAuthOn)
 
 		obj, _, err := b.headObjectMetaV(ctx, "bdm", "k", "v1")
 		require.ErrorIs(t, err, storage.ErrMethodNotAllowed)
@@ -62,7 +59,6 @@ func TestHeadObjectMetaVSoleAuthOn(t *testing.T) {
 		require.NoError(t, b.CreateBucket(ctx, "bapp"))
 		setVersioningForTest(t, b, "bapp", "Enabled")
 		seedFSMObject(t, b, "bapp", "k", "v1", objectMeta{Key: "k", ETag: "app", IsAppendable: true}, true)
-		setSoleAuthForTest(t, b, "bapp", soleAuthOn)
 
 		obj, _, err := b.headObjectMetaV(ctx, "bapp", "k", "v1")
 		require.NoError(t, err)
@@ -77,7 +73,6 @@ func TestHeadObjectMetaVSoleAuthOn(t *testing.T) {
 		setVersioningForTest(t, b, "bco", "Enabled")
 		m := objectMeta{Key: "k", ETag: "co", Coalesced: []CoalescedShardRef{{CoalescedID: "c1", Size: 10}}}
 		seedFSMObject(t, b, "bco", "k", "v1", m, true)
-		setSoleAuthForTest(t, b, "bco", soleAuthOn)
 
 		obj, _, err := b.headObjectMetaV(ctx, "bco", "k", "v1")
 		require.NoError(t, err)

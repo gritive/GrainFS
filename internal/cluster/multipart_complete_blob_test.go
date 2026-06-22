@@ -102,7 +102,7 @@ func TestCompleteMultipart_RetryRewritesBlobFromMarker(t *testing.T) {
 
 	// Simulate the crash window: the object is committed (done-marker + segments)
 	// but the per-version blob never landed.
-	require.NoError(t, b.shardSvc.deleteQuorumMetaVersionLocal(bkt, key, vid, 0))
+	require.NoError(t, b.shardSvc.deleteQuorumMetaVersionLocal(bkt, key, vid))
 	_, err = b.HeadObject(ctx, bkt, key)
 	require.ErrorIs(t, err, storage.ErrObjectNotFound, "blob gone → object reads 404 before the retry")
 

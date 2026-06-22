@@ -54,7 +54,7 @@ func writeQMeta(t *testing.T, svc *ShardService, cmd PutObjectMetaCmd) {
 	t.Helper()
 	blob, err := EncodeCommand(CmdPutObjectMeta, cmd)
 	require.NoError(t, err)
-	require.NoError(t, svc.writeQuorumMetaLocal(cmd.Bucket, cmd.Key, blob, 0))
+	require.NoError(t, svc.writeQuorumMetaLocal(cmd.Bucket, cmd.Key, blob))
 }
 
 // TestQuorumMetaMerge_CrossGenerationLWW proves the S7-6 fence: a routed

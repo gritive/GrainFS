@@ -64,10 +64,9 @@ const (
 	// sweep (Task 5b) after confirming each upload is old enough to GC.
 	// Using a raft command (rather than a TTL) keeps all replicas consistent.
 	CmdDeleteMultipartDone CommandType = 43
-	// CmdSetBucketSoleAuthority persists the per-bucket sole-authority tri-state
-	// flag (off → pending → on). Inert foundation for the S4c cutover; no
-	// production code reads it yet. S4c-a1.
-	CmdSetBucketSoleAuthority CommandType = 44
+	// NOTE: CommandType 44 was CmdSetBucketSoleAuthority (per-bucket sole-authority
+	// tri-state flag) — removed in the soleauth teardown (blob-primary epic).
+	// The slot is retired; do NOT reuse 44 for a new command.
 )
 
 // Command is a serializable FSM command for Raft log entries.
@@ -313,29 +312,6 @@ type SetBucketVersioningCmd struct {
 	Bucket string
 	State  string // "Enabled" | "Suspended"
 }
-
-// SetBucketSoleAuthorityCmd persists the per-bucket sole-authority tri-state.
-// State is one of soleAuthOff ("off"), soleAuthPending ("pending"), soleAuthOn ("on").
-// One-way guard (off→pending→on; pending→off abort; on is terminal) is enforced in apply.
-//
-// EpochFloor is an additive monotonic floor for the stored soleauth epoch. When
-// non-zero, applySetBucketSoleAuthority raises the epoch to max(computed, EpochFloor).
-// It was only ever set by the (now-removed) object-metadata snapshot restore path,
-// so it is currently INERT — no caller emits a non-zero EpochFloor. The field is
-// retained as dead-but-harmless rather than churn the wire format (FlatBuffers
-// field removal has rolling-upgrade implications); a tiny follow-up may drop it.
-type SetBucketSoleAuthorityCmd struct {
-	Bucket     string
-	State      string
-	EpochFloor uint32 // monotonic floor for the stored soleauth epoch (inert: no current emitter)
-}
-
-// soleAuth* are the valid tri-state values for the sole-authority flag.
-const (
-	soleAuthOff     = "off"
-	soleAuthPending = "pending"
-	soleAuthOn      = "on"
-)
 
 // SetObjectACLCmd updates the ACL bitmask for an existing object.
 type SetObjectACLCmd struct {

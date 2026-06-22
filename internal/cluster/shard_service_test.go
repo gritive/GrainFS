@@ -232,7 +232,7 @@ func TestShardService_NativeWriteHandler_RejectsTruncatedSealedShard(t *testing.
 func TestBuildShardEnvelope_SizesBuilderForSmallShardPayload(t *testing.T) {
 	payload := bytes.Repeat([]byte("x"), 64<<10)
 
-	envb := buildShardEnvelope("WriteShard", "bkt", "obj/v1", 1, payload, 0)
+	envb := buildShardEnvelope("WriteShard", "bkt", "obj/v1", 1, payload)
 	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
 
 	require.LessOrEqual(t, cap(envb.Bytes), 80<<10)

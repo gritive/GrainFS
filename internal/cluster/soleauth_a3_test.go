@@ -103,7 +103,7 @@ func TestScanQuorumMetaVersionsAll_RPCRoundTrip(t *testing.T) {
 	} {
 		blob, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: bkt, Key: key, VersionID: vid, ETag: "e-" + vid})
 		require.NoError(t, err)
-		require.NoError(t, svcPeer.writeQuorumMetaVersionLocal(bkt, filepath.Join(key, vid), blob, 0))
+		require.NoError(t, svcPeer.writeQuorumMetaVersionLocal(bkt, filepath.Join(key, vid), blob))
 	}
 
 	peerAddr := trPeer.LocalAddr()

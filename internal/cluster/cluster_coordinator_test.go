@@ -41,19 +41,6 @@ type fakeBackend struct {
 	policy        []byte
 	mpuResult     []*storage.MultipartUpload
 	mpuErr        error
-	// soleAuthStates maps bucket name → soleauth state ("off"/"pending"/"on").
-	// Absent key returns soleAuthOff. Used by the snapshot guard tests.
-	soleAuthStates map[string]string
-}
-
-func (f *fakeBackend) GetBucketSoleAuthority(bucket string) (string, error) {
-	f.record(fmt.Sprintf("GetBucketSoleAuthority:%s", bucket))
-	if f.soleAuthStates != nil {
-		if s, ok := f.soleAuthStates[bucket]; ok {
-			return s, nil
-		}
-	}
-	return soleAuthOff, nil
 }
 
 func (f *fakeBackend) SetBucketVersioning(bucket, state string) error {

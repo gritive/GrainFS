@@ -208,11 +208,11 @@ func TestBuildHeadObjectVersionArgs_Roundtrip(t *testing.T) {
 // explicitly (even empty string) per the SSE preservation work in #504, so the
 // no-SSE wrapper is unused outside tests.
 func buildPutObjectArgs(bucket, key, contentType string, body []byte) []byte {
-	return buildPutObjectArgsWithSSE(bucket, key, contentType, body, "", nil, "", 0, versioningStateUnknown, 0)
+	return buildPutObjectArgsWithSSE(bucket, key, contentType, body, "", nil, "", 0, versioningStateUnknown)
 }
 
 func TestBuildPutObjectArgs_RoundtripContentMD5(t *testing.T) {
-	args := buildPutObjectArgsWithSSE("b", "k", "text/plain", []byte("hello"), "", nil, "5d41402abc4b2a76b9719d911017c592", 0, versioningStateUnknown, 0)
+	args := buildPutObjectArgsWithSSE("b", "k", "text/plain", []byte("hello"), "", nil, "5d41402abc4b2a76b9719d911017c592", 0, versioningStateUnknown)
 	pa := raftpb.GetRootAsPutObjectArgs(args, 0)
 	require.Equal(t, "5d41402abc4b2a76b9719d911017c592", string(pa.ContentMd5Hex()))
 }
@@ -223,7 +223,7 @@ func TestBuildPutObjectArgs_RoundtripContentMD5(t *testing.T) {
 // reads versioning itself. An old peer omits the field → unknown (0).
 func TestBuildPutObjectArgs_RoundtripVersioningState(t *testing.T) {
 	for _, st := range []byte{versioningStateUnknown, versioningStateDisabled, versioningStateEnabled} {
-		args := buildPutObjectArgsWithSSE("b", "k", "text/plain", []byte("x"), "", nil, "", 0, st, 0)
+		args := buildPutObjectArgsWithSSE("b", "k", "text/plain", []byte("x"), "", nil, "", 0, st)
 		require.Equal(t, st, raftpb.GetRootAsPutObjectArgs(args, 0).VersioningState())
 	}
 }

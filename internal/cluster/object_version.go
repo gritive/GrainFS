@@ -284,8 +284,7 @@ func (b *DistributedBackend) DeleteObjectVersion(bucket, key, versionID string) 
 			if eerr != nil {
 				return fmt.Errorf("encode hard-delete tombstone %s/%s@%s: %w", bucket, key, versionID, eerr)
 			}
-			epoch := b.resolveQuorumMetaEpoch(ctx, bucket)
-			if werr := b.fanOutPerVersionBlob(ctx, tomb, blob, epoch); werr != nil {
+			if werr := b.fanOutPerVersionBlob(ctx, tomb, blob); werr != nil {
 				return fmt.Errorf("write hard-delete tombstone %s/%s@%s: %w", bucket, key, versionID, werr)
 			}
 			return nil

@@ -7,20 +7,16 @@ import (
 )
 
 // soleAuthReadOn reports whether the bucket's per-version quorum-meta blob tree
-// is the SOLE AUTHORITY for reads (soleauth state == "on"). It FAILS CLOSED: on
-// any error reading the soleauth state it returns (false, err) so callers must
-// surface the error rather than silently treating the bucket as "off".
+// is the SOLE AUTHORITY for reads: true for every versioning-enabled non-internal
+// bucket. It FAILS CLOSED — on any error reading the versioning state it returns
+// (false, err) so callers surface the error rather than silently treating the
+// bucket as not-blob-authoritative.
 //
-// Returns (true, nil) iff the state is soleAuthOn; (false, nil) for off/pending.
-//
-// Wired into the HEAD/GET latest reader (headObjectMeta) in S4c-c-read1 T1;
-// the specific-version and GetObjectTags readers follow in T2/T3.
+// NOTE: the legacy soleauth tri-state flag + epoch fence it once consulted were
+// removed in the soleauth teardown; this now reads bucket versioning directly. The
+// "soleAuth" name is a vestige kept to bound that diff — a follow-up renames it
+// (e.g. blobAuthReadOn). Returns false for internal buckets (they stay on raft).
 func (b *DistributedBackend) soleAuthReadOn(bucket string) (bool, error) {
-	// S2 blob-primary: the per-version blob tree is the AUTHORITATIVE metadata for
-	// EVERY versioning-enabled bucket's versioned objects — not only when an
-	// (already-removed) soleauth flip set state==on. Internal buckets stay on raft.
-	// The soleauth tri-state is now vestigial on the read path; the machinery is
-	// removed in S4. (Name retained until that teardown to bound this diff.)
 	if storage.IsInternalBucket(bucket) {
 		return false, nil
 	}

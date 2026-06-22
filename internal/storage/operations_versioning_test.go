@@ -36,10 +36,6 @@ func TestOperationsVersioningDelegatesToAdapters(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "dm1", marker)
 
-	epoch, err := ops.GetBucketSoleAuthEpoch("b")
-	require.NoError(t, err)
-	require.Equal(t, uint32(0), epoch)
-
 	require.Equal(t, []string{
 		"setversioning:b:Enabled",
 		"getversioning:b",
@@ -48,7 +44,6 @@ func TestOperationsVersioningDelegatesToAdapters(t *testing.T) {
 		"listversions:b:k:1000",
 		"deleteversion:b/k:v1",
 		"deletemarker:b/k",
-		"getsoleauthepoch:b",
 	}, backend.calls)
 }
 
@@ -68,9 +63,6 @@ func TestOperationsVersioningUnsupportedWithoutAdapters(t *testing.T) {
 
 	_, err := ops.GetBucketVersioning("b")
 	requireUnsupportedOp(t, err, "GetBucketVersioning", UnsupportedReasonNoAdapter)
-
-	_, err = ops.GetBucketSoleAuthEpoch("b")
-	requireUnsupportedOp(t, err, "GetBucketSoleAuthEpoch", UnsupportedReasonNoAdapter)
 
 	err = ops.SetBucketVersioning("b", "Enabled")
 	requireUnsupportedOp(t, err, "SetBucketVersioning", UnsupportedReasonNoAdapter)
@@ -110,11 +102,6 @@ func (b *versioningBackend) SetBucketVersioning(bucket, state string) error {
 func (b *versioningBackend) GetBucketVersioning(bucket string) (string, error) {
 	b.calls = append(b.calls, "getversioning:"+bucket)
 	return "Enabled", nil
-}
-
-func (b *versioningBackend) GetBucketSoleAuthEpoch(bucket string) (uint32, error) {
-	b.calls = append(b.calls, "getsoleauthepoch:"+bucket)
-	return 0, nil
 }
 
 func (b *versioningBackend) GetObjectVersion(ctx context.Context, bucket, key, versionID string) (io.ReadCloser, *Object, error) {

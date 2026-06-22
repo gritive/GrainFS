@@ -94,14 +94,6 @@ func (g *RecoveryWriteGate) GetBucketVersioning(bucket string) (string, error) {
 	return v.GetBucketVersioning(bucket)
 }
 
-func (g *RecoveryWriteGate) GetBucketSoleAuthEpoch(bucket string) (uint32, error) {
-	v, ok := g.Backend.(BucketVersioner)
-	if !ok {
-		return 0, ErrOperationNotSupported
-	}
-	return v.GetBucketSoleAuthEpoch(bucket)
-}
-
 func (g *RecoveryWriteGate) SetBucketVersioning(string, string) error { return g.err }
 
 func (g *RecoveryWriteGate) GetObjectVersion(ctx context.Context, bucket, key, versionID string) (io.ReadCloser, *Object, error) {
