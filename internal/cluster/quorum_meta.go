@@ -461,11 +461,10 @@ func (s *ShardService) writeQuorumMetaLocal(bucket, key string, data []byte) err
 	return nil
 }
 
-// writeQuorumMetaVersionLocalCore is the lock-free, epoch-free, guard-free FS
-// core for per-version blob writes: mkdir + atomic temp+fsync+rename. It assumes
-// the caller has already validated the target path and holds whatever lock is
-// appropriate (bucket RLock for the normal guarded path; bucket WLock for the
-// force-locked restore path).
+// writeQuorumMetaVersionLocalCore is the lock-free, guard-free FS core for
+// per-version blob writes: mkdir + atomic temp+fsync+rename. It assumes the
+// caller has already validated the target path and holds the per-target lock
+// (the LWW-guard critical section in writeQuorumMetaVersionLocal).
 func (s *ShardService) writeQuorumMetaVersionLocalCore(target string, data []byte) error {
 	dir := filepath.Dir(target)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
