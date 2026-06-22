@@ -119,7 +119,6 @@ var _ = ginkgo.Describe("Heal receipt API", ginkgo.Ordered, func() {
 				"--join-listen-addr", joinAddr(i),
 				"--heal-receipt-window=1",
 				"--heal-receipt-gossip-interval=1s",
-				"--nfs4-port", "0",
 				"--scrub-interval", "0",
 				"--lifecycle-interval", "0",
 			)

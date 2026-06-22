@@ -53,9 +53,7 @@ DROP SCHEMA grainfs_iceberg.ns_e2e;
 }
 
 func runIcebergDuckDBClusterAnyNodeTableAPI(t testing.TB) {
-	cluster := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{
-		disableNFS4: true,
-	})
+	cluster := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{})
 	client := ecS3Client(cluster.httpURLs[cluster.leaderIdx], cluster.accessKey, cluster.secretKey)
 	createBucketWithAdminPolicyAttachViaUDSAny(t, cluster.dataDirs, cluster.saID, "grainfs-tables", client)
 	requireIcebergClusterS3Ready(t, cluster, "grainfs-tables")
@@ -219,7 +217,6 @@ func startIcebergE2EServerWithExtraArgs(t testing.TB, dataDir string, raftPort i
 		"--data", dataDir,
 		"--port", fmt.Sprintf("%d", port),
 		"--raft-addr", fmt.Sprintf("127.0.0.1:%d", raftPort),
-		"--nfs4-port", "0",
 		"--lifecycle-interval", "0",
 	}
 	args = append(args, extraArgs...)
@@ -305,7 +302,6 @@ func runAuditIcebergClusterFollowerShipDuckDB(t testing.TB) {
 	const commitInterval = 8 * time.Second
 	start := time.Now()
 	cluster := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{
-		disableNFS4: true,
 		ExtraArgs: []string{
 			"--audit-iceberg=true",
 			"--audit-commit-interval", commitInterval.String(),
@@ -350,7 +346,6 @@ func runAuditIcebergClusterFollowerShipDuckDB(t testing.TB) {
 func runAuditIcebergClusterLeaderFlap(t testing.TB) {
 	const commitInterval = 8 * time.Second
 	cluster := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{
-		disableNFS4: true,
 		ExtraArgs: []string{
 			"--audit-iceberg=true",
 			"--audit-commit-interval", commitInterval.String(),

@@ -69,8 +69,8 @@ type S3Event struct {
 	// path simple; a future migration can promote it to a real map type.)
 	ConditionContext map[string]string
 
-	// Source identifies the protocol that produced this event (T15 NFS§C).
-	// Valid values: "s3" | "nfs4" | "iceberg". Empty for legacy rows
+	// Source identifies the protocol that produced this event.
+	// Valid values: "s3" | "iceberg". Empty for legacy rows
 	// written before this field existed.
 	Source string
 }

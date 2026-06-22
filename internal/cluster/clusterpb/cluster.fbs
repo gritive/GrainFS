@@ -525,12 +525,8 @@ enum MetaCmdType : uint8 {
   MigrationJobStart       = 37, // Migration job: start
   MigrationJobDone        = 38, // Migration job: done
   MigrationJobFailed      = 39, // Migration job: failed
-  NfsExportUpsert         = 40, // NFSv4 multi-export: registry upsert (Phase 1)
-  NfsExportDelete         = 41, // NFSv4 multi-export: registry delete (Phase 1)
-  NfsExportBucketDeleteCascade = 42, // NFSv4 multi-export: bucket delete cascade marker
   CapabilityActivate      = 43, // Rolling-upgrade capability: active persisted feature marker
   MigrationCutover        = 44, // Migration job: mark bucket upstream cutover semantics active
-  NfsExportCreate         = 45, // NFSv4 multi-export: create only, reject existing export
   ConfigPut               = 46, // cluster-wide config: set key=value
   ConfigDelete            = 47, // cluster-wide config: unset key (revert to default)
   DEKRotate               = 48, // DEK key rotation: generate new active generation
@@ -918,31 +914,6 @@ table MetaRegisterMemberCmd {
   node_key_kek_gen:uint32;
 }
 
-// NFSv4 multi-export registry. Per design doc D2/D3/D5.
-// fsid_major = cluster namespace; fsid_minor = monotonic export id;
-// generation increments on every Upsert so Phase 3 FHs from a prior
-// epoch are auto-stale after remove/re-add.
-table NfsExportConfig {
-  read_only:bool = false;
-  fsid_major:uint64 = 0;
-  fsid_minor:uint64 = 0;
-  generation:uint64 = 0;
-}
-
-table NfsExportUpsertCmd {
-  bucket:string;
-  config:NfsExportConfig;
-}
-
-table NfsExportDeleteCmd {
-  bucket:string;
-}
-
-table NfsExportBucketDeleteCascadeCmd {
-  bucket:string;
-  force:bool = false;
-}
-
 // MetaConfigSnapshot is the GCFG trailer payload: a snapshot of all
 // explicitly-set cluster-wide config key→value pairs (config.Store).
 // Wire position: appended after the IAM trailer (if any) as described by
@@ -993,7 +964,6 @@ table MetaStateSnapshot {
   iceberg_tables:[IcebergTableEntry];
   object_index:[MetaObjectIndexEntry];
   cluster_config:[ubyte];                     // serialized ClusterConfig FBS buffer; empty/missing = no explicit config (legacy)
-  nfs_exports:[NfsExportUpsertCmd];           // NFS export registry rows for snapshot install after log compaction
   iceberg_schema_version:int = 0;             // 0 = legacy (no warehouse field); 2 = warehouse-aware (D#14 T38)
   last_rotation_request_entries:[LastRotationRequestEntry]; // Phase B Task 2: slot 11
   kek_status_entries:[KEKStatusEntry];                      // Phase B Task 2: slot 12

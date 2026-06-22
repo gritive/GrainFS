@@ -223,8 +223,8 @@ func testFSMProtocolCredential(id string) protocred.Credential {
 	return protocred.Credential{
 		ID:         id,
 		SAID:       "sa_fsm",
-		Protocol:   protocred.ProtocolNFS,
-		Resource:   "volume/fsm",
+		Protocol:   protocred.ProtocolS3,
+		Resource:   "bucket/fsm",
 		Mode:       protocred.ModeRW,
 		SecretHash: sha256.Sum256([]byte("secret")),
 		SecretHint: "secret-hint",

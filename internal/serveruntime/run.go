@@ -298,9 +298,6 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := bootDegradedAndServices(ctx, state); err != nil {
 		return err
 	}
-	if err := bootNodeServices(ctx, state); err != nil {
-		return err
-	}
 
 	// Zero-CA §6 D-rev3 step 2: announce this node's own per-node SPKI into the
 	// peer registry. Placed LAST in the post-join sequence — after

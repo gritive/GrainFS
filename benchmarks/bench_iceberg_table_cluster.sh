@@ -142,7 +142,6 @@ start_node() {
     --raft-addr "$(raft_addr "$i")" \
     --join-listen-addr "$(join_addr "$i")" \
     $(bench_encryption_args) \
-    --nfs4-port 0 \
     --nbd-port 0 \
     --scrub-interval 0 \
     --lifecycle-interval 0 \

@@ -136,15 +136,6 @@ func TestBootHTTPServerAndAdminUsesDurableProtocolCredentialsWhenMetaRaftIsWired
 	require.Same(t, store, state.protocolCredentialStore)
 }
 
-func TestStorageProtocolStatusFromConfig(t *testing.T) {
-	resp := storageProtocolStatusFromConfig(Config{
-		NFS4Port: 2049,
-	})
-
-	require.True(t, resp.NFS4.Enabled)
-	require.Equal(t, 2049, resp.NFS4.Port)
-}
-
 func TestLifecycleCascadeEnabled(t *testing.T) {
 	for _, c := range []struct {
 		name            string

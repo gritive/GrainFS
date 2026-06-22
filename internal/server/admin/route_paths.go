@@ -7,11 +7,7 @@ const (
 	routePathClusterPeers          = "/cluster/peers"
 	routePathResourceVlogBreakdown = "/resource/vlog/breakdown"
 
-	routePathStorageProtocols  = "/storage/protocols"
-	routePathStorageBuckets    = "/storage/buckets"
-	routePathStorageNfsExports = "/storage/nfs/exports"
-	routePathStorageNfsExport  = "/storage/nfs/exports/:name"
-	routePathStorageNfsDebug   = "/storage/nfs/exports/:name/debug"
+	routePathStorageBuckets = "/storage/buckets"
 
 	routePathScrub           = "/scrub"
 	routePathScrubJobs       = "/scrub/jobs"
@@ -27,10 +23,6 @@ const (
 	routePathBucket           = "/buckets/:name"
 	routePathBucketPolicy     = "/buckets/:name/policy"
 	routePathBucketVersioning = "/buckets/:name/versioning"
-
-	routePathNfsExports = "/nfs/exports"
-	routePathNfsDebug   = "/nfs/exports/:name/debug"
-	routePathNfsExport  = "/nfs/exports/:name"
 
 	routePathConfig      = "/config"
 	routePathConfigByKey = "/config/:key"

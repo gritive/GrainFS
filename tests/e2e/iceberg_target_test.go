@@ -271,7 +271,6 @@ func newSingleNodeIcebergTargetWithAudit(t testing.TB, commitInterval time.Durat
 func newSharedClusterIcebergTargetWithAudit(t testing.TB, commitInterval time.Duration) *icebergTarget {
 	t.Helper()
 	cluster := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{
-		disableNFS4: true,
 		ExtraArgs: []string{
 			"--audit-iceberg=true",
 			"--audit-commit-interval", commitInterval.String(),

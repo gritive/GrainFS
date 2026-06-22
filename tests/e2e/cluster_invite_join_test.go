@@ -92,7 +92,6 @@ func startInviteLeader(t testing.TB, clusterKey string) *inviteJoinNode {
 		"--raft-addr", fmt.Sprintf("127.0.0.1:%d", n.raftPort),
 		"--join-listen-addr", fmt.Sprintf("127.0.0.1:%d", n.joinPort),
 		"--node-id", n.nodeID,
-		"--nfs4-port", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	}
@@ -134,7 +133,6 @@ func (n *inviteJoinNode) joinerArgs() []string {
 		"--port", fmt.Sprintf("%d", n.httpPort),
 		"--raft-addr", fmt.Sprintf("127.0.0.1:%d", n.raftPort),
 		"--node-id", n.nodeID,
-		"--nfs4-port", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	}, n.indexFlags()...)
@@ -165,7 +163,6 @@ func startInviteLeaderIndexed(t testing.TB, clusterKey string, indexGroups, expe
 		"--raft-addr", fmt.Sprintf("127.0.0.1:%d", n.raftPort),
 		"--join-listen-addr", fmt.Sprintf("127.0.0.1:%d", n.joinPort),
 		"--node-id", n.nodeID,
-		"--nfs4-port", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	}, n.indexFlags()...)

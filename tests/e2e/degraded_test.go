@@ -68,7 +68,6 @@ var _ = ginkgo.Describe("Degraded mode writes", func() {
 					"--node-id", raftAddr(i),
 					"--raft-addr", raftAddr(i),
 					"--join-listen-addr", joinAddr(i),
-					"--nfs4-port", "0",
 					"--scrub-interval", "0",
 					"--lifecycle-interval", "0",
 					"--degraded-check-interval", "1s",

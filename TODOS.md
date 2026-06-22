@@ -11,15 +11,33 @@ survives (S3/Iceberg use it, stripped of mount-protocol enum values); `internal/
 the `MountSA*` meta-Raft commands die once **both** NFS and 9P are gone. NBD is already deleted; only
 dead references remain. Three dependency-ordered, independently-shippable slices (one PR each):
 
-- **Slice A — 9P removal — DONE (this PR, branch `remove-9p`).** Deleted `internal/p9server`, the
-  `--9p-bind`/`--9p-port` serve flags + config/`adminapi.P9` status plumbing, `protocred.Protocol9P`,
-  the `9PAttachOnly` builtin policy + `grainfs:9PAttach` action + `"9p"` policy allowlist entries, all
-  9P e2e/colima tests, and the 9P Makefile/bench targets. `.fbs` untouched (MountSA cmds shared with
-  NFS). ~6.2k LOC removed. NFS/NBD/S3/Iceberg untouched.
-- **Slice B — NFS removal (NEXT).** The big one (~16k LOC, needs `make fbs`). Surface map below.
+- **Slice A — 9P removal — MERGED (PR #827, v0.0.636.0, master).** Deleted `internal/p9server`, 9P serve
+  flags + config/`adminapi.P9` status, `protocred.Protocol9P`, `9PAttachOnly`/`grainfs:9PAttach`/`"9p"`
+  policy, 9P tests + Makefile/bench. ~6.2k LOC.
+- **Slice B — NFS removal — DONE (this PR, branch `remove-nfs`, v0.0.637.0).** Deleted
+  `internal/nfs4server`/`nfsadmin`/`nfsexport`, the NFS-export FSM + `NfsExport*` FlatBuffers (make fbs),
+  the node-services subsystem (NFS was its last consumer; lifecycle/shutdown boot fns rescued to
+  `boot_phases_lifecycle.go`; lifecycle FSM handlers rescued to `meta_fsm_lifecycle.go`), the `grainfs
+  nfs` CLI + admin NFS-export API + bucket-delete NFS cascade (#826 config cascade preserved), the
+  `/admin` storage-protocols endpoint, `protocred.ProtocolNFS`, serve flags `--nfs4-port`/`--nfs-write-
+  buffer-*`, NFS tests/colima/Makefile/bench, NFS docs. ~20.5k LOC removed. **Deferred to Slice C** (kept
+  dormant): the `NfsExportCreate` compat capability/operation (used as a generic example capability by
+  gossip/meta_raft/iceberg tests — removing it needs test migration). Mount-SA layer + S3/Iceberg untouched.
 - **Slice C — shared mount-infra teardown + NBD dead sweep.** `internal/iam/mountsastore`, the
-  `MountSA*` meta-Raft commands + snapshot fields + admin handlers, and the NBD dead refs (`DomainNBD`
-  AAD constant, `"nbd"`/`"nbd/volume"`/`"volume"` policy entries, NFS/NBD comments). Only after B.
+  `MountSA*` meta-Raft commands + snapshot fields + `handlers_mountsa` + `PrincipalTypeMount` + `cross_namespace`
+  mountActions + `NFSMountOnly`/`grainfs:NFSMount`; the dormant `NfsExportCreate` compat capability/operation
+  (`compat.CapabilityNfsExportCreateV1`/`OperationNfsExportCreate`, `CompatOperation.NfsExportCreate`,
+  `meta_forward` mappings) + migrate the generic capability tests onto a surviving capability
+  (e.g. `CapabilityMultipartListingV1`); the NBD dead refs (`DomainNBD` AAD constant, `"nbd"`/`"nbd/volume"`/`"volume"`
+  + `"nfs"`/`"nfs/bucket"` policy entries, NFS/NBD comments). Only after B (both NFS+9P now gone — unblocked).
+
+### [cleanup] Rename `internal/volumeadmin` → admin-CLI client (stale name from the volume removal epic)
+
+`internal/volumeadmin` is NOT dead — despite the name it is the shared admin HTTP client used by every
+`grainfs` admin CLI command (iam/cluster/credential/scrub) plus the live S3 EC bucket-scrub session
+client (`grainfs scrub`). The volume removal epic (#781–#785) repurposed it without renaming. Behavior-
+neutral rename to e.g. `internal/admincli` (and `adminapi.ScrubVolumeResp`→`ScrubResp`, `ScrubVolumeReq`
+etc.). Separate PR — unrelated to the mount-protocol removal. Decided 2026-06-22 (user).
 
 Slice B surface to remove (map precisely before cutting):
 - `internal/nfs4server` — the self-implemented NFSv4 server (XDR/RPC), the `:2049` listener.

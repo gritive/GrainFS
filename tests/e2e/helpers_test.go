@@ -542,7 +542,6 @@ func startIsolatedE2EServer(t testing.TB) (string, *s3.Client) {
 	cmd := exec.Command(getBinary(), "serve",
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", port),
-		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	)

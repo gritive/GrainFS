@@ -27,7 +27,6 @@ var _ = ginkgo.Describe("Jepsen raft cluster", func() {
 		cmd := exec.Command(binary, "serve",
 			"--data", dir,
 			"--port", fmt.Sprintf("%d", port),
-			"--nfs4-port", fmt.Sprintf("%d", freePort()),
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
 		)

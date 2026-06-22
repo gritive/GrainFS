@@ -57,7 +57,6 @@ func runTLSHotSwapCase(t testing.TB) {
 	cmd := exec.Command(getBinary(), "serve",
 		"--data", dataDir,
 		"--port", fmt.Sprintf("%d", port),
-		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	)

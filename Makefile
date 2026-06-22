@@ -7,7 +7,7 @@ GO_SRC := $(shell find cmd internal -name '*.go' -not -name '*_test.go')
 FBS_SRC := $(shell find internal -name '*.fbs')
 FBS_STAMPS := $(FBS_SRC:.fbs=.fbs.stamp)
 
-.PHONY: test test-unit test-colima test-race test-e2e test-e2e-iceberg test-e2e-colima test-directio-linux test-jepsen test-smoke test-network-fault clean run lint lint-keyspace lint-storage-fixture bench bench-cluster bench-s3-compat-compare bench-iceberg-table bench-iceberg-table-cluster build-pgo test-nbd-interop update-deps fbs test-nfs4-colima test-pynfs-colima test-nbd-colima bench-nbd bench-nbd-cluster bench-nfs bench-nfs-multi bench-nfs-cluster test-fuse-s3-colima test-s3-client-smoke-colima bench-fuse-s3-colima test-raft-v2-chaos test-compat test-cluster-mount-colima
+.PHONY: test test-unit test-colima test-race test-e2e test-e2e-iceberg test-e2e-colima test-directio-linux test-jepsen test-smoke test-network-fault clean run lint lint-keyspace lint-storage-fixture bench bench-cluster bench-s3-compat-compare bench-iceberg-table bench-iceberg-table-cluster build-pgo test-nbd-interop update-deps fbs test-nbd-colima bench-nbd bench-nbd-cluster test-fuse-s3-colima test-s3-client-smoke-colima bench-fuse-s3-colima test-raft-v2-chaos test-compat test-cluster-mount-colima
 
 PGO_PROFILE ?= /tmp/grainfs-bench-cpu.out
 E2E_TEST_TIMEOUT ?= 3600s
@@ -48,11 +48,10 @@ test: test-unit test-colima
 test-unit:
 	go test $(UNIT_PKGS) -count=1 -cover
 
-test-colima: test-directio-linux test-nbd-colima test-fuse-s3-colima test-s3-client-smoke-colima test-nfs4-colima test-cluster-mount-colima
+test-colima: test-directio-linux test-nbd-colima test-fuse-s3-colima test-s3-client-smoke-colima test-cluster-mount-colima
 
 test-cluster-mount-colima: build
 	go test -v -tags colima -count=1 -timeout 300s -run TestNBD_ClusterMount ./tests/nbd_colima/
-	go test -v -tags colima -count=1 -timeout 300s -run TestNFS4_ClusterMount ./tests/nfs4_colima/
 
 test-race:
 	go test $(UNIT_PKGS) -count=1 -race -cover
@@ -62,14 +61,6 @@ test-e2e: bin/$(BINARY)
 
 test-e2e-iceberg: bin/$(BINARY)
 	GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) go test ./tests/e2e/ -run TestIceberg -v -count=1 -timeout 5m
-
-test-nfs4-colima: build
-	go test -v -tags colima -timeout 120s ./tests/nfs4_colima/ -run TestNFS4
-
-test-pynfs-colima:
-	@echo "Running pynfs conformance in Colima VM (advisory)"
-	tests/conformance/run_pynfs.sh --colima --suite basic
-	@echo "Summary: tests/conformance/results/summary.json"
 
 test-nbd-colima: build
 	go test -v -tags colima -timeout 120s ./tests/nbd_colima/
@@ -89,15 +80,6 @@ bench-nbd: build
 
 bench-nbd-cluster: build
 	./benchmarks/bench_nbd_cluster_profile.sh
-
-bench-nfs: build
-	./benchmarks/bench_nfs_profile.sh
-
-bench-nfs-multi: build
-	./benchmarks/bench_nfs_multi_profile.sh
-
-bench-nfs-cluster: build
-	./benchmarks/bench_nfs_cluster_profile.sh
 
 test-fuse-s3-colima: build
 	go test -v -tags colima -timeout 180s ./tests/fuse_s3_colima/ -run TestFUSE_S3

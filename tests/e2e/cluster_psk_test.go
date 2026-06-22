@@ -36,7 +36,6 @@ var _ = ginkgo.Describe("Cluster PSK", func() {
 				"--port", fmt.Sprintf("%d", port),
 				"--raft-addr", fmt.Sprintf("127.0.0.1:%d", raft),
 				"--node-id", "n-no-key",
-				"--nfs4-port", "0",
 			)
 			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 			out, err := cmd.CombinedOutput()

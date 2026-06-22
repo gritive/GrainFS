@@ -3,11 +3,10 @@
 `GrainFS` is a single-binary distributed storage server. It runs as one local
 node or as a Raft-backed cluster.
 
-It exposes object, file, and block interfaces over one storage layer:
+It exposes object storage and table catalog interfaces over one storage layer:
 
 - **Object storage:** S3-compatible HTTP API
-- **File storage:** NFSv4 *(disabled by default in Phase 1 — pass `--nfs4-port 2049` to enable)*
-- **Table/catalog integration:** Iceberg REST Catalog for DuckDB-oriented lake workflows *(disabled by default in Phase 1 — pass `--enable-iceberg` to enable)*
+- **Table/catalog integration:** Iceberg REST Catalog for DuckDB-oriented lake workflows *(disabled by default — pass `--enable-iceberg` to enable)*
 
 ## Quick Start (2-5 minutes)
 
@@ -33,12 +32,9 @@ upload: ./file.txt to s3://default/file.txt
 ... file.txt
 ```
 
-That's it. You have a working local S3 server. To verify the same data through
-NFS on Linux, start the server with `--nfs4-port 2049` and continue with
-[`docs/users/nfs-mount-quickstart.md`](docs/users/nfs-mount-quickstart.md).
-That guide also covers authenticated Mount SAs and read-only exports.
+That's it. You have a working local S3 server.
 
-> ℹ️ **Phase 1:** NFSv4 and Iceberg REST Catalog are disabled by default while the data-plane architecture is being rearchitected. Add `--nfs4-port 2049` or `--enable-iceberg` to re-enable them. S3 is unaffected.
+> ℹ️ **Iceberg:** Iceberg REST Catalog is disabled by default. Add `--enable-iceberg` to enable it. S3 is always on.
 
 > ⚠ **Anonymous default bucket**: any client on this port can read/write `s3://default` until you install an explicit bucket policy for `default`. Create service accounts through the admin socket under the data directory (`<data-dir>/admin.sock`); the Auth + Iceberg block below shows the Quick Start command. See [`docs/operators/deploy-production-cluster.md`](docs/operators/deploy-production-cluster.md).
 
@@ -124,7 +120,6 @@ See [`docs/operators/deploy-production-cluster.md`](docs/operators/deploy-produc
 | Area | Summary | Details |
 | --- | --- | --- |
 | S3 API | Bucket/object basics, AppendObject (S3 Express), multipart upload/listing, SigV4, presigned URL, form upload | [S3 compatibility](docs/reference/s3-compatibility.md) |
-| File protocols | NFSv4 explicit bucket exports *(pass `--nfs4-port 2049` to enable)* | [NFSv4 compatibility](docs/reference/nfs-compatibility.md) |
 | Iceberg | DuckDB-compatible REST Catalog *(pass `--enable-iceberg` to enable)* | [Iceberg compatibility](docs/reference/iceberg-compatibility.md) |
 | Cluster durability | Custom Raft, zero-config EC profile, shard integrity envelope | [Runbook](docs/operators/runbook.md) |
 | Operations | Object browser, metrics, balancer status, incidents, recovery drills | [Documentation](#documentation) |
@@ -160,13 +155,9 @@ the desired erasure-coding profile from cluster size and placement group voters.
 Temporary target loss does not silently lower durability; writes fail until the
 required targets are writable.
 
-**Same data, multiple protocols.** S3, NFSv4, and Iceberg use the same
-storage backend contracts. Use the compatibility docs for protocol-specific
-limits. *(Phase 1: NFSv4 and Iceberg are disabled by default; S3 is the active interface.)*
-
-**Protocol network boundary.** S3 uses IAM. NFSv4 does not use S3
-IAM; expose the NFSv4 listener only on loopback, private networks, or
-firewall-restricted addresses. *(Phase 1: this listener is off by default — set `--nfs4-port` to enable.)*
+**Same data, multiple interfaces.** S3 and Iceberg use the same storage backend
+contracts. Use the compatibility docs for protocol-specific limits. *(Iceberg is
+disabled by default — pass `--enable-iceberg` to enable.)*
 
 ## Common Workflows
 
@@ -181,7 +172,6 @@ firewall-restricted addresses. *(Phase 1: this listener is off by default — se
 | Inspect object placement | `grainfs cluster --endpoint <data>/admin.sock placement [bucket] [key]` |
 | Grow placement groups on a running cluster | `grainfs cluster expand-placement --endpoint <data>/admin.sock` |
 | Configure cluster policy | `grainfs cluster config --endpoint <data>/admin.sock ...` |
-| Export a bucket over NFSv4 | `grainfs nfs export add <bucket> --endpoint <data>/admin.sock` |
 | Rotate / inspect the cluster encryption key (KEK) | `grainfs encrypt kek status\|rotate\|retire\|prune --endpoint <data>/admin.sock` |
 | Check balancer status | `curl http://localhost:9000/api/cluster/balancer/status` |
 | Check incidents | `curl http://localhost:9000/api/incidents` |
@@ -195,7 +185,7 @@ Requirements:
 - Go 1.26+
 - `golangci-lint` (run by `make lint`, which `make build` depends on)
 - `warp` for S3-compatible comparison benchmarks
-- Linux client tooling for NFS and FUSE-over-S3 integration tests
+- Linux client tooling for FUSE-over-S3 integration tests
 
 Common commands:
 
@@ -215,10 +205,6 @@ make bench-cluster
 make bench-s3-compat-compare
 make bench-iceberg-table
 make bench-iceberg-table-cluster
-make bench-nfs
-make bench-nbd
-make bench-nfs-cluster
-make bench-nbd-cluster
 ```
 
 Use [docs/reference/benchmarks.md](docs/reference/benchmarks.md) for benchmark

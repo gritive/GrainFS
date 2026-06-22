@@ -124,10 +124,7 @@ type Config struct {
 	AuditCommitInterval time.Duration
 
 	// Node services
-	NFS4Port           int
-	NFSWriteBufferDir  string
-	NFSWriteBufferIdle time.Duration
-	EnableIceberg      bool
+	EnableIceberg bool
 
 	// Resource guards (pre-resolved from cobra; Run body reads only these)
 	FDWatchEnabled        bool

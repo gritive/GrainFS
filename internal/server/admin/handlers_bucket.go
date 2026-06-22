@@ -114,15 +114,6 @@ func AdminDeleteBucket(ctx context.Context, d *Deps, name string, force bool) er
 	if reservedname.IsReservedBucketName(name) {
 		return NewInvalid(fmt.Sprintf("bucket name %q is reserved and cannot be deleted via public API", name))
 	}
-	var hadNfsExport bool
-	if d.NfsExports != nil {
-		_, hadNfsExport = d.NfsExports.Get(name)
-	}
-	if d.NfsExports != nil && hadNfsExport {
-		if err := d.NfsExports.MarkBucketDeleteCleanup(name); err != nil {
-			return NewInternal("mark NFS export bucket-delete cleanup: " + err.Error())
-		}
-	}
 	var err error
 	if force {
 		err = d.Buckets.ForceDeleteBucket(ctx, name)
@@ -130,22 +121,13 @@ func AdminDeleteBucket(ctx context.Context, d *Deps, name string, force bool) er
 		err = d.Buckets.DeleteBucket(ctx, name)
 	}
 	if err == nil {
-		if nfsErr := cascadeNfsExportAfterBucketDelete(ctx, d, name, force, hadNfsExport); nfsErr != nil {
-			return nfsErr
-		}
 		return cascadeBucketConfigAfterDelete(ctx, d, name)
 	}
 	if errors.Is(err, storage.ErrBucketNotFound) {
-		if cascadeErr := cascadeNfsExportAfterMissingBucket(ctx, d, name, force, hadNfsExport); cascadeErr != nil {
-			return cascadeErr
-		}
 		if cfgErr := cascadeBucketConfigAfterDelete(ctx, d, name); cfgErr != nil {
 			return cfgErr
 		}
 		return NewNotFound("bucket not found")
-	}
-	if err := clearNfsExportBucketDeleteCleanupAfterError(d, name, hadNfsExport, err); err != nil {
-		return err
 	}
 	if errors.Is(err, storage.ErrBucketNotEmpty) {
 		if force {

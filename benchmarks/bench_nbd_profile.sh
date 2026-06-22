@@ -81,7 +81,6 @@ SERVE_ARGS=(
   --data   "$DATA_DIR"
   --port   "$HTTP_PORT"
   --nbd-port "$NBD_PORT"
-  --nfs4-port 0
   $(bench_encryption_args)
 )
 if [[ "${GRAINFS_PPROF:-0}" = "1" ]]; then

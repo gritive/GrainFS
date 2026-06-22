@@ -124,79 +124,13 @@ type VlogSmokeReport struct {
 	Stale []string `json:"stale"`
 }
 
-type NfsExportInfo struct {
-	Bucket     string `json:"bucket"`
-	ReadOnly   bool   `json:"read_only"`
-	FsidMajor  uint64 `json:"fsid_major"`
-	FsidMinor  uint64 `json:"fsid_minor"`
-	Generation uint64 `json:"generation"`
-}
-
-type NfsExportUpsertReq struct {
-	Bucket   string `json:"bucket,omitempty"`
-	ReadOnly bool   `json:"read_only"`
-}
-
-type ListNfsExportsResp struct {
-	Exports []NfsExportInfo `json:"exports"`
-}
-
-type ExportDebugLookup struct {
-	Client string `json:"client,omitempty"`
-	Bucket string `json:"bucket"`
-	Result string `json:"result"`
-	AtUnix int64  `json:"at_unix"`
-}
-
-type ExportDebugPropagation struct {
-	AppliedNodes  []string `json:"applied_nodes"`
-	TotalNodes    int      `json:"total_nodes"`
-	LastApplyUnix int64    `json:"last_apply_unix,omitempty"`
-}
-
-type ExportDebugBackend struct {
-	Exists      bool  `json:"exists"`
-	ObjectCount int64 `json:"object_count"`
-}
-
-type ExportDebugResp struct {
-	Bucket             string                 `json:"bucket"`
-	Registered         bool                   `json:"registered"`
-	ReadOnly           bool                   `json:"read_only,omitempty"`
-	FsidMajor          uint64                 `json:"fsid_major,omitempty"`
-	FsidMinor          uint64                 `json:"fsid_minor,omitempty"`
-	Generation         uint64                 `json:"generation,omitempty"`
-	RecentLookups      []ExportDebugLookup    `json:"recent_lookups,omitempty"`
-	Propagation        ExportDebugPropagation `json:"propagation"`
-	BackendBucket      ExportDebugBackend     `json:"backend_bucket"`
-	ActiveMountClients []string               `json:"active_mount_clients,omitempty"`
-}
-
-type StorageBucketNFSExport struct {
-	Registered bool   `json:"registered"`
-	ReadOnly   bool   `json:"read_only"`
-	Generation uint64 `json:"generation,omitempty"`
-}
-
 type StorageBucketSummary struct {
-	Name        string                  `json:"name"`
-	HasUpstream bool                    `json:"has_upstream"`
-	NFSExport   *StorageBucketNFSExport `json:"nfs_export,omitempty"`
+	Name        string `json:"name"`
+	HasUpstream bool   `json:"has_upstream"`
 }
 
 type ListStorageBucketsResp struct {
 	Buckets []StorageBucketSummary `json:"buckets"`
-}
-
-type ProtocolEndpointStatus struct {
-	Enabled bool   `json:"enabled"`
-	Bind    string `json:"bind,omitempty"`
-	Port    int    `json:"port,omitempty"`
-	Warning string `json:"warning,omitempty"`
-}
-
-type StorageProtocolStatusResp struct {
-	NFS4 ProtocolEndpointStatus `json:"nfs4"`
 }
 
 type CredentialCreateReq struct {

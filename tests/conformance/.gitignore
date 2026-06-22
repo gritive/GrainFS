@@ -1,6 +1,0 @@
-# pynfs upstream clone, fetched by run_pynfs.sh.
-.pynfs/
-
-# Local conformance output.
-results/
-*.log

@@ -58,7 +58,7 @@ Complete ALL items before proceeding with deployment. If ANY item fails, do NOT 
 ### Infrastructure Readiness
 
 - [ ] **Server resources**: Minimum 4 CPU, 8GB RAM, 100GB disk
-- [ ] **Network connectivity**: Port 9000 is reachable by S3 clients. Keep NFSv4 2049 and NBD 10809 listeners on loopback, private networks, or firewall-restricted addresses when enabled.
+- [ ] **Network connectivity**: Port 9000 is reachable by S3 clients.
 - [ ] **Disk mounting**: Data directory mounted on reliable storage (SSD recommended)
 - [ ] **Backup repository**: Restic repo initialized and accessible
 - [ ] **Monitoring**: Prometheus scraping configured and receiving data
@@ -205,60 +205,6 @@ After a node restart, committed objects are durable on disk (small / no-redundan
 The periodic placement monitor proactively detects and repairs segment (`<key>/segments/<blobID>`) and coalesced (`<key>/coalesced/<id>`) EC shards for **latest-version** objects between boots, complementing read-time reconstruction. Non-latest-version segment/coalesced shards are not proactively scanned by the placement monitor; they remain covered by read-time EC reconstruction. Corrupt segment or coalesced shards trigger quarantine of the parent object (object-level, using the scanned version). The metric `grainfs_placement_monitor_invalid_ec_ref_total{kind="segment|coalesced"}` is incremented when a ref has malformed placement (`len(NodeIDs) != ECData+ECParity`); a non-zero rate indicates corrupt object metadata and warrants investigation.
 
 The placement monitor quarantines an object **only** on confirmed shard corruption (CRC mismatch, structural decode failure, truncation, or AEAD auth failure). Every other non-ENOENT local shard read error — `EIO`, `EMFILE` ("too many open files"), `EBUSY`, permission denied, or unknown — is treated as **transient**: it is logged at Debug level, counted by `grainfs_placement_monitor_transient_read_error_total{kind="object_version|segment|coalesced|unknown"}`, and skipped (the next scan retries it), **not** quarantined. This prevents a transient or failing-disk node-day from mass-quarantining otherwise healthy objects. A sustained transient rate is a signal about the **node's** disk/FD health (failing disk, fd exhaustion), not about the objects — investigate the node (`dmesg`, SMART, open-fd count, `--max-open-files`), not the named objects.
-
-## NFS Multi-Bucket Export
-
-Use explicit exports for every bucket mounted through NFSv4:
-
-```bash
-export GRAINFS_ADMIN_SOCKET=<data>/admin.sock
-grainfs nfs export list
-grainfs nfs export add <bucket>
-grainfs nfs debug <bucket>
-```
-
-Triage:
-
-- `No such file or directory` at the pseudo-root: check `grainfs nfs debug <bucket>` and register the bucket if `registered=false`.
-- Stale handles after export changes: unmount/remount affected clients and check the export generation in `grainfs nfs debug`.
-- Backend exists but NFS is missing: create the export; S3 bucket creation alone does not expose the bucket over NFS.
-
-Metrics:
-
-- `grainfs_nfs_exports_total{state}`
-- `grainfs_nfs_export_propagation_seconds`
-- `grainfs_nfs_lookup_unknown_export_total`
-- `grainfs_nfs_revoked_stateids_total{reason}`
-
-## NFS Write Buffer
-
-NFS WRITE ops are coalesced into a local file under `<data>/nfs-writebuf/`. The buffer flushes to backend `PutObject` on:
-
-- NFS COMMIT op
-- `SETATTR` truncate (discard semantics — buffered writes are dropped)
-- Idle timeout (`--nfs-write-buffer-idle`, default 30s)
-- Server shutdown drain
-
-### Disk sizing
-
-Plan for `max(concurrent NFS objects) × max(object size)` of disk under `<data>/nfs-writebuf/`. The idle timeout bounds dwell time. For most workloads the live set is small (open files only); long-lived idle keys are flushed on the next idle tick.
-
-### Cluster mode limitation
-
-Buffering is per-node. Two NFS clients mounted to **different** GrainFS nodes that write the **same** key may see last-write-wins on flush (no cross-node coordination yet). For strict consistency in a multi-node cluster: pin all NFS clients to a single GrainFS node, or wait for cluster-scoped buffer support.
-
-### Recovery
-
-On startup the buffer dir is scanned and leftover files are flushed to backend. If a flush fails (backend unreachable), files are renamed to `<sha1>.failed.<reason>.<timestamp>` so subsequent writes for the same key cannot collide. Inspect `*.failed.*` files manually and either:
-
-- Replay them via `dd if=<failed-file> | aws s3 cp - s3://<bucket>/<key>` (read the `.meta` sidecar for `bucket`/`key`), or
-- Delete them after confirming the data is recoverable from elsewhere.
-
-### Disable buffering
-
-Set `--nfs-write-buffer-idle=0` to disable. NFS WRITE then falls back to the per-write RMW path (older behaviour, ~10× slower on sequential workloads, no buffer correctness concerns).
-
-Grafana example: `docs/observability/nfs-multi-export.json`.
 
 For `fd_exhaustion_risk`, inspect the decision text first. It includes current FD usage, projected threshold ETA when available, and best-effort categories such as `socket`, `badger`, or `nfs_session`.
 
@@ -649,20 +595,6 @@ grainfs cluster --endpoint $ENDPOINT peers
 
 ---
 
-## NFSv4 Conformance Testing
-
-`GrainFS` tracks NFSv4 RFC 8881 attribute behavior in `docs/reference/nfsv4-attribute-audit.md`. Update the audit in the same PR as any NFS attribute behavior change.
-
-The external pynfs suite is advisory and non-blocking:
-
-```bash
-make test-pynfs-colima
-```
-
-The runner clones the pinned upstream pynfs commit, starts a local `GrainFS` server, creates a test bucket/export, and writes results to `tests/conformance/results/summary.json` plus a timestamped log. Failures should be copied into `TODOS.md` follow-ups; they do not block ordinary PRs unless a PR explicitly changes NFS protocol behavior.
-
----
-
 ## Monitoring Setup
 
 ### Prometheus Alerts
@@ -986,8 +918,6 @@ spec:
         ports:
         - containerPort: 9000
           name: s3
-        - containerPort: 2049
-          name: nfsv4
         volumeMounts:
         - name: data
           mountPath: /grainfs/data
@@ -1069,7 +999,7 @@ cluster identity; nodes that keep the old key fail authentication against nodes
 that use the new key.
 
 **v0.0.39 and newer support online rolling rotation.** The PSK can be replaced
-without S3, NFS, or NBD downtime. The CLI sends rotation commands through the
+without S3 downtime. The CLI sends rotation commands through the
 meta-Raft leader's localhost-only Unix socket (`$DATA/rotate.sock`, mode 0600).
 
 ### Online rotation (recommended)
@@ -1158,94 +1088,9 @@ leader with:
 
 ### Offline fallback (all nodes older than v0.0.39)
 
-1. Stop every node. This causes S3, NFS, and NBD downtime.
+1. Stop every node. This causes S3 downtime.
 2. Write the new key to every node's `keys.d/current.key`, then restart each node.
 3. Confirm peer reconnection with `grainfs cluster --endpoint <data-dir>/admin.sock status`.
-
----
-
-## NFS Mount Operations
-
-### Creating a Mount SA
-
-A Mount SA scopes NFS access to a named principal with an attached IAM policy.
-Use the `NFSMountOnly` builtin for NFSv4 clients.
-
-```bash
-# Create the Mount SA with a numeric UID hint (advisory, for AUTH_SYS mapping).
-grainfs iam mount-sa create alice-mount --uid 1000 --endpoint <data>/admin.sock
-
-# Attach a builtin policy.
-grainfs iam mount-sa policy attach alice-mount NFSMountOnly --endpoint <data>/admin.sock
-
-# Register the target bucket as an NFS export if not already present.
-grainfs nfs export add my-bucket --endpoint <data>/admin.sock
-
-# List existing Mount SAs.
-grainfs iam mount-sa list --endpoint <data>/admin.sock
-```
-
-Mount path for NFSv4: `:<bucket>/<mount-sa>` (e.g. `localhost:/my-bucket/alice-mount`).
-
-### Cross-namespace policy rejection
-
-Attaching a regular IAM policy (action namespace `s3:*`) to a Mount SA returns
-HTTP 412 Precondition Failed. Mount SAs accept only policies whose actions
-are in the `grainfs:` namespace (`NFSMountOnly`, or a custom policy that uses
-only `grainfs:NFSRead` / `grainfs:NFSWrite`).
-
-Remediation: create or use a policy in the `grainfs:` action namespace, then retry
-`grainfs iam mount-sa policy attach`.
-
-### Read-only export
-
-```bash
-# Register as read-only from the start.
-grainfs nfs export add my-bucket --ro --endpoint <data>/admin.sock
-
-# Flip an existing export to read-only (with optional quiesce).
-grainfs nfs export update my-bucket --ro --quiesce-wait 30s --endpoint <data>/admin.sock
-```
-
-Clients on a read-only export receive `NFS4ERR_ROFS` on writes.
-
-### Auditing NFS access
-
-The `audit.s3` Iceberg table records every NFS operation with `source = 'nfs4'`
-and the client `source_ip`:
-
-```bash
-grainfs audit query "
-  SELECT sa_id, source, source_ip, operation, bucket, ts
-  FROM grainfs_iceberg.audit.s3
-  WHERE source = 'nfs4'
-  ORDER BY ts DESC
-  LIMIT 20
-" --endpoint <data>/admin.sock
-```
-
-### TLS posture gate for authenticated clusters
-
-For network-exposed deployments, run NFS behind a private network boundary
-or TLS-terminating proxy. Recommended hardening:
-
-- A TLS certificate is on disk (`<data>/tls/cert.pem`), or
-- `trusted-proxy.cidr` is set (TLS is terminated by a front-end proxy).
-
-Boot error prefix: `NFS boot: auth required + no TLS cert + no trusted proxy`.
-
-Remediation options:
-
-```bash
-# Option A: place the TLS cert (and restart).
-cp server.crt <data>/tls/cert.pem
-cp server.key <data>/tls/key.pem
-
-# Option B: configure a trusted proxy CIDR (hot-applied, no restart needed).
-grainfs config set trusted-proxy.cidr 10.0.0.0/8 --endpoint <data>/admin.sock
-```
-
-See also: `docs/operators/deploy-production-cluster.md` for TLS posture details.
 
 ---
 

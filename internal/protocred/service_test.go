@@ -3,7 +3,6 @@ package protocred
 import (
 	"bytes"
 	"encoding/base64"
-	"strings"
 	"testing"
 	"time"
 
@@ -39,29 +38,23 @@ func TestServiceCreateGetListAndHints(t *testing.T) {
 	svc := NewService(NewStore(), WithNow(func() time.Time { return now }))
 
 	secret, err := svc.Create(CreateRequest{
-		SAID: "node-a", Protocol: ProtocolNFS, Resource: "volume/devdisk", Mode: ModeRW,
+		SAID: "node-a", Protocol: ProtocolS3, Resource: "bucket/devdisk", Mode: ModeRW,
 	})
 	require.NoError(t, err)
 	require.NotEmpty(t, secret.ID)
 	require.NotEmpty(t, secret.Secret)
-	require.True(t, strings.HasPrefix(secret.ConnectionHint["mount_path"], "devdisk/"))
-
-	nfsSecret, err := svc.Create(CreateRequest{
-		SAID: "node-a", Protocol: ProtocolNFS, Resource: "bucket/default", Mode: ModeRO,
-	})
-	require.NoError(t, err)
-	require.Equal(t, "default/"+nfsSecret.ID+":"+nfsSecret.Secret, nfsSecret.ConnectionHint["mount_path"])
+	require.Equal(t, secret.ID, secret.ConnectionHint["access_key_id"])
 
 	item, err := svc.Get(secret.ID)
 	require.NoError(t, err)
 	require.NotEmpty(t, item.SecretHint)
 	require.NotContains(t, item.SecretHint, secret.Secret)
 	require.Equal(t, "node-a", item.SAID)
-	require.Equal(t, ProtocolNFS, item.Protocol)
-	require.Equal(t, "volume/devdisk", item.Resource)
+	require.Equal(t, ProtocolS3, item.Protocol)
+	require.Equal(t, "bucket/devdisk", item.Resource)
 	require.Equal(t, ModeRW, item.Mode)
 
-	items := svc.List(ListFilter{SAID: "node-a", Protocol: ProtocolNFS, Resource: "volume/devdisk"})
+	items := svc.List(ListFilter{SAID: "node-a", Protocol: ProtocolS3, Resource: "bucket/devdisk"})
 	require.Len(t, items, 1)
 	require.Equal(t, secret.ID, items[0].ID)
 }
@@ -69,14 +62,14 @@ func TestServiceCreateGetListAndHints(t *testing.T) {
 func TestServiceListFiltersByResource(t *testing.T) {
 	store := NewStore()
 	svc := NewService(store)
-	_, err := svc.Create(CreateRequest{SAID: "sa-a", Protocol: ProtocolNFS, Resource: "volume/one", Mode: ModeRW})
+	_, err := svc.Create(CreateRequest{SAID: "sa-a", Protocol: ProtocolS3, Resource: "bucket/one", Mode: ModeRW})
 	require.NoError(t, err)
-	_, err = svc.Create(CreateRequest{SAID: "sa-a", Protocol: ProtocolNFS, Resource: "volume/two", Mode: ModeRW})
+	_, err = svc.Create(CreateRequest{SAID: "sa-a", Protocol: ProtocolS3, Resource: "bucket/two", Mode: ModeRW})
 	require.NoError(t, err)
 
-	got := svc.List(ListFilter{Protocol: ProtocolNFS, Resource: "volume/two"})
+	got := svc.List(ListFilter{Protocol: ProtocolS3, Resource: "bucket/two"})
 	require.Len(t, got, 1)
-	require.Equal(t, "volume/two", got[0].Resource)
+	require.Equal(t, "bucket/two", got[0].Resource)
 }
 
 func TestServiceEnvelopeStoresRecoverableSecretWithoutLeakingPlaintext(t *testing.T) {
@@ -129,13 +122,13 @@ func TestMaterializeCreateMatchesServiceCreateShape(t *testing.T) {
 	now := time.Unix(123, 0).UTC()
 	expires := now.Add(time.Hour)
 	item, secret, err := MaterializeCreate(CreateRequest{
-		SAID: "node-a", Protocol: ProtocolNFS, Resource: "volume/devdisk", Mode: ModeRW, ExpiresAt: &expires, CreatedBy: "admin",
+		SAID: "node-a", Protocol: ProtocolS3, Resource: "bucket/devdisk", Mode: ModeRW, ExpiresAt: &expires, CreatedBy: "admin",
 	}, now)
 	require.NoError(t, err)
 	require.NotEmpty(t, item.ID)
 	require.Equal(t, item.ID, secret.ID)
 	require.NotEmpty(t, secret.Secret)
-	require.True(t, strings.HasPrefix(secret.ConnectionHint["mount_path"], "devdisk/"))
+	require.Equal(t, secret.ID, secret.ConnectionHint["access_key_id"])
 	require.Equal(t, now, item.CreatedAt)
 	require.Equal(t, "admin", item.CreatedBy)
 	require.NotNil(t, item.ExpiresAt)
@@ -145,7 +138,7 @@ func TestMaterializeCreateMatchesServiceCreateShape(t *testing.T) {
 
 func TestServiceRotateAndRevoke(t *testing.T) {
 	svc := NewService(NewStore())
-	first, err := svc.Create(CreateRequest{SAID: "node-a", Protocol: ProtocolNFS, Resource: "volume/devdisk", Mode: ModeRO})
+	first, err := svc.Create(CreateRequest{SAID: "node-a", Protocol: ProtocolS3, Resource: "bucket/devdisk", Mode: ModeRO})
 	require.NoError(t, err)
 	second, err := svc.Rotate(first.ID)
 	require.NoError(t, err)
@@ -182,24 +175,24 @@ func TestServiceAuthenticate(t *testing.T) {
 	now := time.Unix(180, 0).UTC()
 	svc := NewService(NewStore(), WithNow(func() time.Time { return now }))
 	secret, err := svc.Create(CreateRequest{
-		SAID: "node-a", Protocol: ProtocolNFS, Resource: "volume/devdisk", Mode: ModeRW,
+		SAID: "node-a", Protocol: ProtocolS3, Resource: "bucket/devdisk", Mode: ModeRW,
 	})
 	require.NoError(t, err)
 
 	item, err := svc.Authenticate(AuthenticateRequest{
-		Protocol: ProtocolNFS,
-		Resource: "volume/devdisk",
+		Protocol: ProtocolS3,
+		Resource: "bucket/devdisk",
 		Mode:     ModeRW,
 		Secret:   secret.Secret,
 	})
 	require.NoError(t, err)
 	require.Equal(t, secret.ID, item.ID)
 
-	_, err = svc.Authenticate(AuthenticateRequest{Protocol: ProtocolNFS, Resource: "volume/devdisk", Mode: ModeRW, Secret: "wrong"})
+	_, err = svc.Authenticate(AuthenticateRequest{Protocol: ProtocolS3, Resource: "bucket/devdisk", Mode: ModeRW, Secret: "wrong"})
 	require.ErrorIs(t, err, ErrNotFound)
-	_, err = svc.Authenticate(AuthenticateRequest{Protocol: ProtocolNFS, Resource: "volume/other", Mode: ModeRW, Secret: secret.Secret})
+	_, err = svc.Authenticate(AuthenticateRequest{Protocol: ProtocolS3, Resource: "bucket/other", Mode: ModeRW, Secret: secret.Secret})
 	require.ErrorIs(t, err, ErrInvalid)
-	_, err = svc.Authenticate(AuthenticateRequest{Protocol: ProtocolNFS, Resource: "volume/devdisk", Mode: ModeRO, Secret: secret.Secret})
+	_, err = svc.Authenticate(AuthenticateRequest{Protocol: ProtocolS3, Resource: "bucket/devdisk", Mode: ModeRO, Secret: secret.Secret})
 	require.ErrorIs(t, err, ErrInvalid)
 }
 
@@ -208,25 +201,25 @@ func TestServiceAuthenticateRejectsExpiredAndRevoked(t *testing.T) {
 	svc := NewService(NewStore(), WithNow(func() time.Time { return now }))
 	past := now.Add(-time.Second)
 	expired, err := svc.Create(CreateRequest{
-		SAID: "node-a", Protocol: ProtocolNFS, Resource: "volume/expired", Mode: ModeRW, ExpiresAt: &past,
+		SAID: "node-a", Protocol: ProtocolS3, Resource: "bucket/expired", Mode: ModeRW, ExpiresAt: &past,
 	})
 	require.NoError(t, err)
 	active, err := svc.Create(CreateRequest{
-		SAID: "node-a", Protocol: ProtocolNFS, Resource: "volume/revoked", Mode: ModeRW,
+		SAID: "node-a", Protocol: ProtocolS3, Resource: "bucket/revoked", Mode: ModeRW,
 	})
 	require.NoError(t, err)
 	require.NoError(t, svc.Revoke(active.ID))
 
-	_, err = svc.Authenticate(AuthenticateRequest{Protocol: ProtocolNFS, Resource: "volume/expired", Mode: ModeRW, Secret: expired.Secret})
+	_, err = svc.Authenticate(AuthenticateRequest{Protocol: ProtocolS3, Resource: "bucket/expired", Mode: ModeRW, Secret: expired.Secret})
 	require.ErrorIs(t, err, ErrExpired)
-	_, err = svc.Authenticate(AuthenticateRequest{Protocol: ProtocolNFS, Resource: "volume/revoked", Mode: ModeRW, Secret: active.Secret})
+	_, err = svc.Authenticate(AuthenticateRequest{Protocol: ProtocolS3, Resource: "bucket/revoked", Mode: ModeRW, Secret: active.Secret})
 	require.ErrorIs(t, err, ErrRevoked)
 }
 
 func TestMaterializeRotateDoesNotMutateInput(t *testing.T) {
 	now := time.Unix(124, 0).UTC()
 	item, _, err := MaterializeCreate(CreateRequest{
-		SAID: "node-a", Protocol: ProtocolNFS, Resource: "volume/devdisk", Mode: ModeRO,
+		SAID: "node-a", Protocol: ProtocolS3, Resource: "bucket/devdisk", Mode: ModeRO,
 	}, now)
 	require.NoError(t, err)
 	originalHash := item.SecretHash
@@ -243,14 +236,14 @@ func TestServiceValidationAndExpiry(t *testing.T) {
 	now := time.Unix(200, 0).UTC()
 	svc := NewService(NewStore(), WithNow(func() time.Time { return now }))
 
-	_, err := svc.Create(CreateRequest{SAID: "", Protocol: ProtocolNFS, Resource: "volume/devdisk", Mode: ModeRW})
+	_, err := svc.Create(CreateRequest{SAID: "", Protocol: ProtocolS3, Resource: "bucket/devdisk", Mode: ModeRW})
 	require.Error(t, err)
-	_, err = svc.Create(CreateRequest{SAID: "node-a", Protocol: "ftp", Resource: "volume/devdisk", Mode: ModeRW})
+	_, err = svc.Create(CreateRequest{SAID: "node-a", Protocol: "ftp", Resource: "bucket/devdisk", Mode: ModeRW})
 	require.Error(t, err)
-	_, err = svc.Create(CreateRequest{SAID: "node-a", Protocol: ProtocolNFS, Resource: "bad", Mode: ModeRW})
+	_, err = svc.Create(CreateRequest{SAID: "node-a", Protocol: ProtocolS3, Resource: "bad", Mode: ModeRW})
 	require.Error(t, err)
 	past := now.Add(-time.Second)
-	secret, err := svc.Create(CreateRequest{SAID: "node-a", Protocol: ProtocolNFS, Resource: "volume/devdisk", Mode: ModeRW, ExpiresAt: &past})
+	secret, err := svc.Create(CreateRequest{SAID: "node-a", Protocol: ProtocolS3, Resource: "bucket/devdisk", Mode: ModeRW, ExpiresAt: &past})
 	require.NoError(t, err)
 	item, err := svc.Get(secret.ID)
 	require.NoError(t, err)
