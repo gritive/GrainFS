@@ -402,6 +402,35 @@ func runChunkedPutWithParts(
 	// commitCompleteMultipartObjectWriteResult in object_put.go for the rationale.
 	var commitErr error
 	if completeUploadID != "" {
+		// Blob-authoritative multipart (versioning-enabled): build the completed
+		// object's encoded PutObjectMetaCmd HERE (the proposer) — CompleteMultipartCmd
+		// does not carry UserMetadata/ACL/SSE — and pass the opaque bytes through the
+		// command so applyCompleteMultipart stores them verbatim in the done-marker.
+		// The per-version blob (written after the propose, from the marker) is then the
+		// sole authority. nil for non-versioned/Suspended (legacy FSM obj:/lat:).
+		metaCmd := PutObjectMetaCmd{
+			Bucket:           bucket,
+			Key:              key,
+			Size:             obj.Size,
+			ETag:             obj.ETag,
+			VersionID:        versionID,
+			ContentType:      contentType,
+			ModTime:          commitModTime,
+			UserMetadata:     userMetadata,
+			SSEAlgorithm:     sseAlgorithm,
+			ACL:              csb.acl,
+			Parts:            partsMeta,
+			NodeIDs:          csb.placements[0].NodeIDs,
+			ECData:           uint8(csb.placements[0].Config.DataShards),
+			ECParity:         uint8(csb.placements[0].Config.ParityShards),
+			PlacementGroupID: csb.placements[0].PlacementGroupID,
+			Segments:         segments,
+			Tags:             tags,
+		}
+		metaBlob, mberr := csb.buildMultipartMetaBlob(ctx, metaCmd)
+		if mberr != nil {
+			return nil, mberr
+		}
 		// Authoritative commit: atomic {write object meta to FSM, delete the
 		// manifest} via data_raft (applyCompleteMultipart). That atomicity
 		// prevents a manifest leak / upload-ID reuse, so it stays the durable
@@ -423,6 +452,7 @@ func runChunkedPutWithParts(
 			PlacementGroupID: csb.placements[0].PlacementGroupID,
 			Segments:         segments,
 			Tags:             tags,
+			MetaBlob:         metaBlob,
 		})
 		if commitErr != nil && !shardCleanupSafeOnProposeError(commitErr) {
 			// Phantom-commit window (timeout / cancellation): the raft entry may
@@ -430,7 +460,36 @@ func runChunkedPutWithParts(
 			// object's segment shards. See preserveSegmentsOnProposeError above.
 			preserveSegmentsOnProposeError = true
 		}
+		if commitErr == nil && len(metaBlob) > 0 {
+			// Blob-authoritative path. The object is durably committed via raft (the
+			// done-marker carries the winner's meta_blob), so suppress the cleanup
+			// defer BEFORE the blob write: a blob-write failure must NOT delete the
+			// segments — they are the winner's data and the client's retry re-writes
+			// the blob from the marker. (A concurrent loser's segments are orphans the
+			// segment scrubber reclaims; either way they must survive this call.)
+			committed = true
+			marker, merr := csb.readDoneMarker(completeUploadID)
+			if merr != nil {
+				// Fail closed: the marker is the authority on who won; without it we
+				// cannot safely choose whose blob to publish. Retry re-reads it.
+				return nil, fmt.Errorf("multipart complete: done-marker readback: %w", merr)
+			}
+			// Write the WINNER's per-version blob FAIL-CLOSED. winner+loser both run
+			// this (idempotent same vid+bytes); the loser uses the marker's meta_blob.
+			winnerBlob := metaBlob
+			if marker != nil && len(marker.MetaBlob) > 0 {
+				winnerBlob = marker.MetaBlob
+			}
+			winCmd, werr := csb.writeCompletedMultipartBlob(ctx, winnerBlob)
+			if werr != nil {
+				return nil, werr
+			}
+			metrics.ChunkFanoutBreadth.Observe(float64(countDistinctPlacementGroups(csb.placements)))
+			winObj, _ := objectAndPlacementFromCmd(winCmd)
+			return winObj, nil
+		}
 		if commitErr == nil {
+			// Legacy non-versioned/Suspended path (no meta_blob).
 			// Phantom-winner guard: after a successful propose, check who actually
 			// won this uploadID. If another concurrent completion committed first
 			// (its marker holds a different versionID), our FSM apply was a no-op
@@ -529,6 +588,25 @@ func (c *clusterSegmentBackend) writeQuorumMeta(ctx context.Context, cmd PutObje
 		return c.writeQuorumMetaFn(ctx, cmd)
 	}
 	return c.b.writeQuorumMeta(ctx, cmd)
+}
+
+// buildMultipartMetaBlob delegates to the DistributedBackend. A nil backend
+// (test seam wiring without a real DistributedBackend) means the legacy
+// non-versioned path → no meta_blob.
+func (c *clusterSegmentBackend) buildMultipartMetaBlob(ctx context.Context, cmd PutObjectMetaCmd) ([]byte, error) {
+	if c.b == nil {
+		return nil, nil
+	}
+	return c.b.buildMultipartMetaBlob(ctx, cmd)
+}
+
+// writeCompletedMultipartBlob delegates to the DistributedBackend. Only reached on
+// the blob-authoritative path (meta_blob present), which a nil backend never takes.
+func (c *clusterSegmentBackend) writeCompletedMultipartBlob(ctx context.Context, metaBlob []byte) (PutObjectMetaCmd, error) {
+	if c.b == nil {
+		return PutObjectMetaCmd{}, fmt.Errorf("multipart complete: no backend for per-version blob write")
+	}
+	return c.b.writeCompletedMultipartBlob(ctx, metaBlob)
 }
 
 // readDoneMarker reads the mpudone marker for uploadID. Returns (nil, nil) when

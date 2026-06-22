@@ -148,13 +148,12 @@ func (b *DistributedBackend) fsmCarveoutObject(bucket, key, versionID string) (*
 // carve-out: it is blob-authoritative under sole authority and a stale one
 // must never resurrect.
 func isFsmCarveoutClass(meta objectMeta, bareLegacy bool) bool {
-	// Multipart-completed objects (Parts != nil) are the 4th carve-out: the
-	// CmdCompleteMultipart propose is retained for manifest-teardown atomicity, so
-	// their FSM obj: record is authoritative and must stay readable under
-	// blob-primary even when the best-effort per-version blob mirror is absent.
-	// Moving multipart commit off raft (per-version blob as the sole authority) is a
-	// follow-up; until then their FSM record is the read/GC/LIST fallback.
-	return meta.IsAppendable || len(meta.Coalesced) > 0 || len(meta.Parts) > 0 || bareLegacy
+	// Multipart is NO LONGER a carve-out: a versioning-enabled multipart complete is
+	// now blob-authoritative (its per-version blob is written FAIL-CLOSED and is the
+	// sole authority for read/GC/LIST/DEK, identical to a regular versioned PUT). The
+	// CmdCompleteMultipart propose is retained only for manifest-teardown atomicity +
+	// the phantom-winner done-marker; it no longer writes an FSM obj:/lat: record.
+	return meta.IsAppendable || len(meta.Coalesced) > 0 || bareLegacy
 }
 
 // objectAndPlacementFromObjectMeta builds a storage.Object and PlacementMeta

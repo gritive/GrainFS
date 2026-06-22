@@ -812,6 +812,7 @@ func (r *ForwardReceiver) handleAppendObjectStream(dg *DataGroup, args []byte, b
 func (r *ForwardReceiver) handleCompleteMultipartUpload(dg *DataGroup, args []byte) []byte {
 	ctx := contextForForwardedGroup(context.Background(), dg)
 	ca := raftpb.GetRootAsCompleteMultipartUploadArgs(args, 0)
+	ctx = contextWithVersioningState(ctx, ca.VersioningState())
 	bucket := string(ca.Bucket())
 	key := string(ca.Key())
 	n := ca.PartsLength()

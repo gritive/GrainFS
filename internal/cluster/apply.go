@@ -507,23 +507,14 @@ func (f *FSM) applyCompleteMultipart(txn MetadataTxn, data []byte) error {
 	if err != nil {
 		return err
 	}
-	objMeta, err := marshalObjectMeta(objectMeta{
-		Key:              c.Key,
-		Size:             c.Size,
-		ContentType:      c.ContentType,
-		ETag:             c.ETag,
-		LastModified:     c.ModTime,
-		ECData:           c.ECData,
-		ECParity:         c.ECParity,
-		NodeIDs:          c.NodeIDs,
-		PlacementGroupID: c.PlacementGroupID,
-		Parts:            c.Parts,
-		Segments:         segmentMetaEntriesToRefs(c.Segments),
-		Tags:             c.Tags,
-	})
-	if err != nil {
-		return fmt.Errorf("marshal object meta: %w", err)
-	}
+	// Blob-authoritative multipart (versioning-enabled): the proposer built the
+	// completed object's encoded PutObjectMetaCmd and passed it as meta_blob. In
+	// this mode the per-version quorum-meta blob (written by the proposer after this
+	// commit, from the done-marker) is the SOLE AUTHORITY — apply writes NO FSM
+	// obj:/lat: record, only the done-marker carrying meta_blob. Non-versioned /
+	// Suspended completes carry no meta_blob and keep the legacy FSM obj:/lat: write
+	// (non-versioned blob authority is a separate task).
+	blobAuthoritative := len(c.MetaBlob) > 0
 	mpuKey := f.keys.MultipartKey(c.UploadID)
 	item, err := txn.Get(mpuKey)
 	if err == ErrMetaKeyNotFound {
@@ -564,25 +555,49 @@ func (f *FSM) applyCompleteMultipart(txn MetadataTxn, data []byte) error {
 		return fmt.Errorf("complete multipart upload mismatch: upload %s is for %s/%s, got %s/%s", c.UploadID, mpu.Bucket, mpu.Key, c.Bucket, c.Key)
 	}
 
-	// Dual-write legacy + versioned, same pattern as applyPutObjectMeta.
-	if err := f.setValue(txn, f.keys.ObjectMetaKey(c.Bucket, c.Key), objMeta); err != nil {
-		return err
-	}
-	if c.VersionID != "" {
-		if err := f.setValue(txn, f.keys.ObjectMetaKeyV(c.Bucket, c.Key, c.VersionID), objMeta); err != nil {
+	// Legacy FSM write (non-versioned/Suspended only). Blob-authoritative completes
+	// skip this entirely — their per-version blob is the sole authority.
+	if !blobAuthoritative {
+		objMeta, merr := marshalObjectMeta(objectMeta{
+			Key:              c.Key,
+			Size:             c.Size,
+			ContentType:      c.ContentType,
+			ETag:             c.ETag,
+			LastModified:     c.ModTime,
+			ECData:           c.ECData,
+			ECParity:         c.ECParity,
+			NodeIDs:          c.NodeIDs,
+			PlacementGroupID: c.PlacementGroupID,
+			Parts:            c.Parts,
+			Segments:         segmentMetaEntriesToRefs(c.Segments),
+			Tags:             c.Tags,
+		})
+		if merr != nil {
+			return fmt.Errorf("marshal object meta: %w", merr)
+		}
+		// Dual-write legacy + versioned, same pattern as applyPutObjectMeta.
+		if err := f.setValue(txn, f.keys.ObjectMetaKey(c.Bucket, c.Key), objMeta); err != nil {
 			return err
 		}
-		if err := txn.Set(f.keys.LatestKey(c.Bucket, c.Key), []byte(c.VersionID)); err != nil {
-			return err
+		if c.VersionID != "" {
+			if err := f.setValue(txn, f.keys.ObjectMetaKeyV(c.Bucket, c.Key, c.VersionID), objMeta); err != nil {
+				return err
+			}
+			if err := txn.Set(f.keys.LatestKey(c.Bucket, c.Key), []byte(c.VersionID)); err != nil {
+				return err
+			}
 		}
 	}
 	// Write a done marker so that a retried apply of the same command is idempotent.
+	// For blob-authoritative completes the marker carries meta_blob so any retry /
+	// concurrent loser re-writes the winner's per-version blob from it.
 	doneMarker := multipartDone{
 		UploadID:  c.UploadID,
 		Bucket:    c.Bucket,
 		Key:       c.Key,
 		VersionID: c.VersionID,
 		ModTime:   c.ModTime,
+		MetaBlob:  c.MetaBlob,
 	}
 	doneBytes, err := marshalMultipartDone(doneMarker)
 	if err != nil {

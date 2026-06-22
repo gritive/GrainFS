@@ -362,6 +362,32 @@ func (b *DistributedBackend) commitCompleteMultipartObjectWriteResult(
 	if plan.PreserveModTime {
 		modTime = plan.ModTime
 	}
+	// Blob-authoritative multipart (versioning-enabled): build the completed object's
+	// encoded PutObjectMetaCmd here (the proposer) and pass it as meta_blob; the
+	// per-version blob (written after the propose, from the done-marker) is then the
+	// sole authority. nil for non-versioned/Suspended (legacy FSM obj:/lat:).
+	metaCmd := PutObjectMetaCmd{
+		Bucket:           plan.Bucket,
+		Key:              plan.Key,
+		Size:             result.Size,
+		ContentType:      plan.ContentType,
+		ETag:             result.ETag,
+		ModTime:          modTime,
+		VersionID:        plan.VersionID,
+		PlacementGroupID: plan.PlacementGroupID,
+		ECData:           result.ECData,
+		ECParity:         result.ECParity,
+		NodeIDs:          result.Placement,
+		UserMetadata:     cloneStringMap(plan.UserMetadata),
+		SSEAlgorithm:     plan.SSEAlgorithm,
+		ACL:              plan.ACL,
+		Parts:            result.Parts,
+		Tags:             result.Tags,
+	}
+	metaBlob, mberr := b.buildMultipartMetaBlob(ctx, metaCmd)
+	if mberr != nil {
+		return nil, mberr
+	}
 	// Authoritative commit: atomic {write object meta to FSM, delete manifest}.
 	if merr := b.propose(ctx, CmdCompleteMultipart, CompleteMultipartCmd{
 		Bucket:           plan.Bucket,
@@ -378,6 +404,7 @@ func (b *DistributedBackend) commitCompleteMultipartObjectWriteResult(
 		NodeIDs:          result.Placement,
 		Parts:            result.Parts,
 		Tags:             result.Tags,
+		MetaBlob:         metaBlob,
 	}); merr != nil {
 		ObservePutTraceStage(ctx, PutTraceStageDataRaftProposeMeta, stageStart, PutTraceStageFields{Error: merr.Error()})
 		if shardCleanupSafeOnProposeError(merr) {
@@ -385,6 +412,31 @@ func (b *DistributedBackend) commitCompleteMultipartObjectWriteResult(
 		}
 		return nil, merr
 	}
+
+	// Blob-authoritative: write the WINNER's per-version blob from the done-marker's
+	// meta_blob, FAIL-CLOSED. winner+loser both run this (idempotent same vid+bytes);
+	// the loser uses the marker's meta_blob. The object is durably committed via raft,
+	// so a blob-write failure returns an error and the client's retry re-writes it.
+	if len(metaBlob) > 0 {
+		marker, merr := b.readDoneMarker(uploadID)
+		if merr != nil {
+			return nil, fmt.Errorf("multipart complete: done-marker readback: %w", merr)
+		}
+		winnerBlob := metaBlob
+		if marker != nil && len(marker.MetaBlob) > 0 {
+			winnerBlob = marker.MetaBlob
+		}
+		winCmd, werr := b.writeCompletedMultipartBlob(ctx, winnerBlob)
+		if werr != nil {
+			return nil, werr
+		}
+		ObservePutTraceStage(ctx, PutTraceStageDataRaftProposeMeta, stageStart, PutTraceStageFields{})
+		observePutStage(metricPath, "propose_meta", stageStart)
+		winObj, _ := objectAndPlacementFromCmd(winCmd)
+		return winObj, nil
+	}
+
+	// Non-versioned/Suspended legacy path (no meta_blob).
 	// Phantom-winner guard: after a successful propose, check who actually won
 	// this uploadID. If another concurrent completion committed first (its
 	// marker holds a different versionID), our FSM apply was a no-op — do NOT
@@ -413,24 +465,7 @@ func (b *DistributedBackend) commitCompleteMultipartObjectWriteResult(
 
 	// LIST-visibility mirror into quorum-meta (best-effort; the object is already
 	// durably committed above). Must NOT delete shards or fail the op on error.
-	if merr := b.writeQuorumMeta(ctx, PutObjectMetaCmd{
-		Bucket:           plan.Bucket,
-		Key:              plan.Key,
-		Size:             result.Size,
-		ContentType:      plan.ContentType,
-		ETag:             result.ETag,
-		ModTime:          modTime,
-		VersionID:        plan.VersionID,
-		PlacementGroupID: plan.PlacementGroupID,
-		ECData:           result.ECData,
-		ECParity:         result.ECParity,
-		NodeIDs:          result.Placement,
-		UserMetadata:     cloneStringMap(plan.UserMetadata),
-		SSEAlgorithm:     plan.SSEAlgorithm,
-		ACL:              plan.ACL,
-		Parts:            result.Parts,
-		Tags:             result.Tags,
-	}); merr != nil {
+	if merr := b.writeQuorumMeta(ctx, metaCmd); merr != nil {
 		log.Warn().Err(merr).Str("bucket", plan.Bucket).Str("key", plan.Key).Str("upload_id", uploadID).
 			Msg("multipart complete: quorum-meta mirror failed (object committed via raft; LIST visibility deferred until repair)")
 	}

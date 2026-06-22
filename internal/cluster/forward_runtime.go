@@ -344,7 +344,7 @@ func (r forwardRuntime) completeMultipartUpload(ctx context.Context, target Rout
 	if r.sender == nil {
 		return nil, ErrCoordinatorNoRouter
 	}
-	args := buildCompleteMultipartUploadArgs(bucket, key, uploadID, parts)
+	args := buildCompleteMultipartUploadArgs(bucket, key, uploadID, parts, versioningStateFromContext(ctx))
 	reply, err := r.sender.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpCompleteMultipartUpload, args)
 	if err != nil {
 		return nil, err

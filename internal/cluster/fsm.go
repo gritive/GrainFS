@@ -248,6 +248,13 @@ type CompleteMultipartCmd struct {
 	Parts            []storage.MultipartPartEntry
 	Segments         []SegmentMetaEntry
 	Tags             []storage.Tag
+	// MetaBlob is the encoded per-version PutObjectMetaCmd for the completed object,
+	// built on the proposer (carries UserMetadata/ACL/SSEAlgorithm which the flat
+	// fields above omit). Set only for versioning-enabled buckets; its presence
+	// switches applyCompleteMultipart to the blob-authoritative path (no obj:/lat:
+	// write) and is persisted into the done-marker for retry-safety. Empty →
+	// legacy FSM-authoritative multipart (non-versioned/Suspended).
+	MetaBlob []byte
 }
 
 type AbortMultipartCmd struct {
