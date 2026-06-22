@@ -648,27 +648,34 @@ func (b *DistributedBackend) GetBucketVersioning(bucket string) (string, error) 
 	return state, err
 }
 
-// GetBucketVersioningLinearized is the LINEARIZABLE, FAIL-CLOSED read for the
-// MUTATING S3 edge. Bucket versioning lives in the group-0 raft FSM and a
-// follower's local replica can lag (a just-joined follower observed Unversioned
-// for ~90s after another node enabled versioning) — so a write resolving
-// versioning from the local replica could silently mis-version the object. We
-// confirm the leader's commit index (ReadIndex — forwarded to the group-0 leader
-// when this node is a follower) and wait for the local FSM to apply up to it
-// before the local read (same primitive object reads use, exec_policy.go
-// ResolveRead). On a ReadIndex/apply failure we return the error (fail-closed):
-// the mutating edge surfaces it as a retryable error rather than writing
-// non-versioned. Non-raft backends (nil node) fall back to the local read.
+// GetBucketVersioningLinearized is the LINEARIZABLE read for the MUTATING S3
+// edge. Bucket versioning lives in the group-0 raft FSM and a follower's local
+// replica can lag (a just-joined follower observed Unversioned for ~90s after
+// another node enabled versioning) — so a write resolving versioning from the
+// local replica could mis-version the object. We confirm the leader's commit
+// index (ReadIndex — forwarded to the group-0 leader when this node is a
+// follower) and wait for the local FSM to apply up to it before the local read
+// (same primitive object reads use, exec_policy.go ResolveRead).
+//
+// DEGRADE-TO-LOCAL (not fail-closed): if the ReadIndex barrier can't complete
+// (a group-0 leaderless window), we fall back to the local read rather than
+// erroring. Erroring here would couple EVERY object write — even to unversioned
+// buckets — to group-0 (control-plane) leadership, defeating the multiraft
+// property that data writes don't depend on any single group's leader. The
+// fallback is the original behavior, and the bug it addresses (a ~90s apply lag)
+// occurs while group-0 DOES have a leader, where the barrier succeeds. Non-raft
+// backends (nil node) read locally.
 func (b *DistributedBackend) GetBucketVersioningLinearized(ctx context.Context, bucket string) (string, error) {
 	if b.node != nil {
 		readCtx, cancel := context.WithTimeout(ctx, localExecFollowerReadDeadline)
-		defer cancel()
 		idx, err := b.ReadIndex(readCtx)
-		if err != nil {
-			return "", err
+		if err == nil {
+			err = b.WaitApplied(readCtx, idx)
 		}
-		if err := b.WaitApplied(readCtx, idx); err != nil {
-			return "", err
+		cancel()
+		if err != nil {
+			b.logger.Debug().Err(err).Str("bucket", bucket).
+				Msg("bucket-versioning linearizing read barrier unavailable; degrading to local read")
 		}
 	}
 	return b.GetBucketVersioning(bucket)
