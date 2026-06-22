@@ -138,22 +138,8 @@ It also covers IAM policy and group mutation routes:
 - `DELETE /v1/iam/group/:name/policy/:policy` evaluates
   `grainfs:IAMGroupPolicyDetach` on `iam/group/:name/policy/:policy`.
 
-It also covers mount-SA and bucket-upstream admin routes:
+It also covers bucket-upstream admin routes:
 
-- `GET /v1/iam/mount-sa` evaluates `grainfs:IAMMountSAList` on
-  `iam/mount-sa/*`.
-- `GET /v1/iam/mount-sa/:name` evaluates `grainfs:IAMMountSARead` on
-  `iam/mount-sa/:name`.
-- `POST /v1/iam/mount-sa` evaluates `grainfs:IAMMountSAWrite` on
-  `iam/mount-sa/:name`, with `:name` read from the JSON body.
-- `DELETE /v1/iam/mount-sa/:name` evaluates `grainfs:IAMMountSADelete` on
-  `iam/mount-sa/:name`.
-- `PUT /v1/iam/mount-sa/:name/policy/:policy` evaluates
-  `grainfs:IAMMountSAPolicyAttach` on
-  `iam/mount-sa/:name/policy/:policy`.
-- `DELETE /v1/iam/mount-sa/:name/policy/:policy` evaluates
-  `grainfs:IAMMountSAPolicyDetach` on
-  `iam/mount-sa/:name/policy/:policy`.
 - `GET /v1/upstreams` evaluates `grainfs:IAMBucketUpstreamList` on
   `iam/upstream/*`.
 - `GET /v1/buckets/:bucket/upstream` evaluates
@@ -219,7 +205,6 @@ Example policy for a mapped OIDC group:
         "grainfs:IAMGroupMemberDelete",
         "grainfs:IAMGroupPolicyAttach",
         "grainfs:IAMGroupPolicyDetach",
-        "grainfs:IAMMountSA*",
         "grainfs:IAMBucketUpstream*",
         "grainfs:AdminConfig*",
         "grainfs:AdminDashboardToken*"
@@ -230,8 +215,6 @@ Example policy for a mapped OIDC group:
         "iam/policy/*/attach/sa/*",
         "iam/group/*",
         "iam/group/*/policy/*",
-        "iam/mount-sa/*",
-        "iam/mount-sa/*/policy/*",
         "iam/upstream/*",
         "iam/upstream/*/cutover",
         "admin/config/*",
@@ -467,15 +450,15 @@ data-plane request volume, cache hit/miss/grace, and latency from the
 control-plane series.
 
 Not yet supported: mTLS client certs to the PDP, a per-CIDR SSRF allowlist,
-data-plane enforcement for NFS / NBD, and a per-scope `failure_policy`.
+and a per-scope `failure_policy`.
 
 ## Current Boundary
 
 HTTP bearer-token actors are wired for protocol credential, bucket policy, IAM,
-mount-SA, bucket-upstream, config, and dashboard-token admin routes. An optional
+bucket-upstream, config, and dashboard-token admin routes. An optional
 External PDP adapter (remote `https` with a DEK-sealed bearer token + dial-time SSRF
 egress filtering, or a local `http` loopback sidecar; disabled by default) chains
 after GrainFS IAM for admin and protocol-credential operations, and — when
 `iam.pdp.data_plane.enabled` is also set — for S3/Iceberg object/bucket
-operations. mTLS, a per-CIDR SSRF allowlist, NFS/NBD data-plane enforcement,
-and a per-scope `failure_policy` remain future slices.
+operations. mTLS, a per-CIDR SSRF allowlist, and a per-scope `failure_policy`
+remain future slices.

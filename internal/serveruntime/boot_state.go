@@ -19,7 +19,6 @@ import (
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/gossip"
 	"github.com/gritive/GrainFS/internal/iam"
-	"github.com/gritive/GrainFS/internal/iam/mountsastore"
 	"github.com/gritive/GrainFS/internal/incident"
 	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/migration"
@@ -118,7 +117,6 @@ type bootState struct {
 	iamAdminAPI      *iam.AdminAPI
 	iamProposer      *iam.MetaProposer
 	iamPolicyStores  *IAMStores
-	mountSAStore     *mountsastore.Store
 	cfgStore         *config.Store
 	// pdpTokenSource is the single PDP TokenSource / admin.PDPTokenManager
 	// instance, created once via ensurePDPTokenSource (adminAuthorizer is

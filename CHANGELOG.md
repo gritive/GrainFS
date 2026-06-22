@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.0.638.0] - 2026-06-22
+
+### Removed
+- **Shared mount-SA authentication layer + dormant compat capability removed; mount-protocol removal
+  epic complete (BREAKING).** With NFS (v0.0.637.0) and 9P (v0.0.636.0) gone, the mount service-account
+  (MountSA) infrastructure they shared is dead and is now deleted: the `internal/iam/mountsastore`
+  package, the `MountSACreate`/`MountSADelete`/`MountSAAttachPolicy`/`MountSADetachPolicy` meta-Raft
+  commands and their apply handlers, the MountSA snapshot fields and FlatBuffers tables
+  (`MetaMountSAEntry`, `MetaIAMPolicyAttachMountSAEntry`, the four `MountSA*Payload` tables), the
+  `policy.PrincipalType` mount value (the enum collapses to S3-only), `principal.KindMountSA`, the
+  `cross_namespace` mount-vs-S3 attach guard, the `NFSMountOnly` built-in policy and the
+  `grainfs:NFSMount` action, and the mount-SA admin API + HTTP routes + `grainfs iam mount-sa` CLI
+  tree. The dormant `NfsExportCreate` compat capability/operation (kept in v0.0.637.0 only because
+  gate/gossip/roundtrip tests used it as a generic example) is removed; those tests migrate to the
+  surviving `CapabilityMigrationCutoverV1` (same meta-Raft scope/severity). Leftover NBD/volume/NFS
+  dead references are swept: the `DomainNBD` AAD domain constant, the `nbd`/`nfs`/`volume`/`nbd/volume`/
+  `nfs/bucket` protocol-credential policy-resource strings, the IAM-admin `mount-sa` resource grammar,
+  the `FDCategoryNFSSession` FD-observability category and its `resourceguard` consumer, a dead Web-UI
+  NFS storage section, and stale comments/operator-doc references. FlatBuffers enum values are left as
+  numbered gaps (no renumber); the at-rest encryption domain values are unchanged. This is the final
+  slice of the mount-protocol removal epic (9P → v0.0.636.0, NFS → v0.0.637.0): GrainFS is now a pure
+  S3 + Iceberg system. S3, Iceberg, and the `internal/protocred` credential layer are unaffected.
+
 ## [0.0.637.0] - 2026-06-22
 
 ### Removed

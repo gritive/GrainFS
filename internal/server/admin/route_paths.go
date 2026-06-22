@@ -43,12 +43,6 @@ const (
 	routePathIAMGroupMember       = "/iam/group/:name/member/:said"
 	routePathIAMGroupPolicyAttach = "/iam/group/:name/policy/:policy"
 
-	// MountSA routes: policy sub-path listed before bare :name to ensure
-	// more-specific routes are registered first (avoids Hertz param capture).
-	routePathIAMMountSA             = "/iam/mount-sa"
-	routePathIAMMountSAByName       = "/iam/mount-sa/:name"
-	routePathIAMMountSAPolicyAttach = "/iam/mount-sa/:name/policy/:policy"
-
 	// PDP bearer-token: set (POST, token in body) / clear (DELETE) / show (GET).
 	routePathIAMPDPToken  = "/iam/pdp/token"
 	routePathIAMPDPStatus = "/iam/pdp/status"

@@ -22,7 +22,6 @@ type Operation string
 
 const (
 	OperationMigrationCutover      Operation = "migration_cutover"
-	OperationNfsExportCreate       Operation = "nfs_export_create"
 	OperationCreateMultipartUpload Operation = "create_multipart_upload"
 	OperationListMultipartUploads  Operation = "list_multipart_uploads"
 	OperationListParts             Operation = "list_parts"
@@ -36,7 +35,6 @@ const (
 
 const (
 	CapabilityMigrationCutoverV1 = "migration_cutover_v1"
-	CapabilityNfsExportCreateV1  = "nfs_export_create_v1"
 	CapabilityMultipartListingV1 = "multipart_listing_v1"
 	CapabilityKEKEnvelopeV1      = "kek_envelope_v1"
 	CapabilityDEKReplicatedV1    = "dek_replicated_v1"
@@ -65,14 +63,6 @@ var DefaultRegistry = mustRegistryWithOps(
 			IntroducedVersion: "0.0.193.0",
 			Description:       "Allows bucket-upstream cutover status and migration cutover persisted semantics.",
 			Semantics:         "Nodes must apply and replay bucket-upstream status semantics and reject unsupported payloads.",
-		},
-		{
-			Name:              CapabilityNfsExportCreateV1,
-			Scope:             ScopeMetaRaft,
-			Severity:          SeverityHard,
-			IntroducedVersion: "0.0.194.0",
-			Description:       "Allows create-only NFS export registry commands.",
-			Semantics:         "Nodes must apply NfsExportCreate as an atomic create-only registry operation instead of ignoring the command.",
 		},
 		{
 			Name:              CapabilityMultipartListingV1,

@@ -106,26 +106,6 @@ func iamGroupPolicyResource(c *app.RequestContext) string {
 	return "iam/group/*/policy/*"
 }
 
-func iamMountSAResource(c *app.RequestContext) string {
-	if name := c.Param("name"); name != "" {
-		return "iam/mount-sa/" + name
-	}
-	var req CreateMountSAReq
-	if body := c.Request.Body(); len(body) > 0 && json.Unmarshal(body, &req) == nil && req.Name != "" {
-		return "iam/mount-sa/" + req.Name
-	}
-	return "iam/mount-sa/*"
-}
-
-func iamMountSAPolicyResource(c *app.RequestContext) string {
-	name := c.Param("name")
-	policyName := c.Param("policy")
-	if name != "" && policyName != "" {
-		return "iam/mount-sa/" + name + "/policy/" + policyName
-	}
-	return "iam/mount-sa/*/policy/*"
-}
-
 func iamBucketUpstreamResource(c *app.RequestContext) string {
 	if bucket := c.Param("bucket"); bucket != "" {
 		return "iam/upstream/" + bucket

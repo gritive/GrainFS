@@ -87,9 +87,6 @@ func (fakeEmptyPolicyStore) SAGroups(_ context.Context, _ string) ([]string, err
 func (fakeEmptyPolicyStore) GroupPolicies(_ context.Context, _ string) ([]string, error) {
 	return nil, nil
 }
-func (fakeEmptyPolicyStore) MountSAPolicies(_ context.Context, _ string) ([]string, error) {
-	return nil, nil
-}
 func (fakeEmptyPolicyStore) PolicyDoc(_ context.Context, _ string) (*policy.Document, error) {
 	return nil, nil
 }

@@ -417,7 +417,7 @@ func TestMetaForwardReceiverRefreshesGateBeforeGatedProposal(t *testing.T) {
 	gate.ReportEvidence(compat.Evidence{
 		NodeID: compat.NodeID("node-a"),
 		Capabilities: map[string]bool{
-			compat.CapabilityNfsExportCreateV1: true,
+			compat.CapabilityMigrationCutoverV1: true,
 		},
 		LastSeen: time.Now(),
 		Ready:    true,
@@ -427,10 +427,10 @@ func TestMetaForwardReceiverRefreshesGateBeforeGatedProposal(t *testing.T) {
 	command, err := encodeMetaCmd(MetaCmdTypeNoOp, nil)
 	require.NoError(t, err)
 	plan := compat.GatePlan{
-		Capability: compat.CapabilityNfsExportCreateV1,
+		Capability: compat.CapabilityMigrationCutoverV1,
 		Scope:      compat.ScopeMetaRaft,
 		Severity:   compat.SeverityHard,
-		Operation:  compat.OperationNfsExportCreate,
+		Operation:  compat.OperationMigrationCutover,
 		ConfigID:   raftConfigurationID(cfg),
 	}
 

@@ -25,7 +25,6 @@ type Deps struct {
 	IAM                      IAMService                   // optional; nil disables IAM admin endpoints
 	IAMPolicy                IAMPolicyService             // optional; nil disables IAM policy admin endpoints
 	IAMGroup                 IAMGroupService              // optional; nil disables IAM group admin endpoints
-	IAMMountSA               IAMMountSAService            // optional; nil disables IAM mount-SA admin endpoints
 	BucketWithPolicyProp     BucketWithPolicyProposer     // optional; nil → create-only path (no attach)
 	LifecycleDeleteProp      LifecycleDeleteProposer      // optional; nil → no lifecycle cascade on bucket delete
 	BucketUpstreamDeleteProp BucketUpstreamDeleteProposer // optional; nil → no IAM upstream cascade on bucket delete

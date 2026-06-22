@@ -332,8 +332,6 @@ func operationToFB(o compat.Operation) clusterpb.CompatOperation {
 	switch o {
 	case compat.OperationMigrationCutover:
 		return clusterpb.CompatOperationMigrationCutover
-	case compat.OperationNfsExportCreate:
-		return clusterpb.CompatOperationNfsExportCreate
 	case compat.OperationCreateMultipartUpload:
 		return clusterpb.CompatOperationCreateMultipartUpload
 	case compat.OperationListMultipartUploads:
@@ -350,8 +348,6 @@ func operationFromFB(o clusterpb.CompatOperation) compat.Operation {
 	switch o {
 	case clusterpb.CompatOperationMigrationCutover:
 		return compat.OperationMigrationCutover
-	case clusterpb.CompatOperationNfsExportCreate:
-		return compat.OperationNfsExportCreate
 	case clusterpb.CompatOperationCreateMultipartUpload:
 		return compat.OperationCreateMultipartUpload
 	case clusterpb.CompatOperationListMultipartUploads:

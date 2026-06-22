@@ -15,7 +15,6 @@ import (
 	"github.com/gritive/GrainFS/internal/iam/bucketpolicy"
 	"github.com/gritive/GrainFS/internal/iam/group"
 	iamjwt "github.com/gritive/GrainFS/internal/iam/jwt"
-	"github.com/gritive/GrainFS/internal/iam/mountsastore"
 	"github.com/gritive/GrainFS/internal/iam/policyattach"
 	"github.com/gritive/GrainFS/internal/iam/policystore"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
@@ -803,24 +802,23 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		}
 	}
 
-	// IPST: decode IAM policy stores snapshot (§2 + §A stores).
+	// IPST: decode IAM policy stores snapshot (§2 stores).
 	type ipstDecoded struct {
 		polSnap    []policystore.PolicyEntry
 		grpSnap    []group.GroupEntry
 		attachSnap policyattach.AttachSnapshot
 		bpSnap     []bucketpolicy.BucketPolicyEntry
-		mountSAs   []mountsastore.MountSA
 	}
 	var newIPST *ipstDecoded
 	if len(trailers.ipstData) > 0 {
-		if f.policyStore == nil && f.groupStore == nil && f.policyAttachStore == nil && f.bucketPolicyStore == nil && f.mountSAStore == nil {
+		if f.policyStore == nil && f.groupStore == nil && f.policyAttachStore == nil && f.bucketPolicyStore == nil {
 			log.Warn().Int("ipst_len", len(trailers.ipstData)).Msg("meta_fsm: Restore: snapshot contains IPST section but no policy stores wired; skipping")
 		} else {
-			polSnap, grpSnap, attachSnap, bpSnap, mountSAs, err := decodeMetaIAMPolicyStoresSnapshot(trailers.ipstData)
+			polSnap, grpSnap, attachSnap, bpSnap, err := decodeMetaIAMPolicyStoresSnapshot(trailers.ipstData)
 			if err != nil {
 				return fmt.Errorf("meta_fsm: Restore: decode IAM policy stores: %w", err)
 			}
-			newIPST = &ipstDecoded{polSnap, grpSnap, attachSnap, bpSnap, mountSAs}
+			newIPST = &ipstDecoded{polSnap, grpSnap, attachSnap, bpSnap}
 		}
 	}
 
@@ -989,15 +987,6 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		} else {
 			f.bucketPolicyStore.ReplaceAll(newIPST.bpSnap)
 		}
-		if f.mountSAStore == nil {
-			if len(newIPST.mountSAs) > 0 {
-				log.Warn().Int("entries", len(newIPST.mountSAs)).Msg("meta_fsm: Restore: IPST has MountSA entries but mountSAStore not wired; entries dropped")
-			}
-		} else {
-			if err := f.mountSAStore.ReplaceAll(newIPST.mountSAs); err != nil {
-				return fmt.Errorf("meta_fsm: Restore: MountSA store ReplaceAll: %w", err)
-			}
-		}
 		// Invalidate the resolver cache so stale pre-restore entries don't
 		// survive the snapshot install. Empty saIDs+buckets nukes the full cache.
 		if f.policyResolver != nil {
@@ -1027,10 +1016,9 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 	//
 	// This commit + callback are deliberately the LAST side effects of Restore:
 	// the accept-set rebuild must fire ONLY after Restore is guaranteed to return
-	// nil. The last error-returning step is f.mountSAStore.ReplaceAll above (the
-	// IPST commit); a late failure there must NOT have rebuilt the transport
-	// accept-set for a Restore that ultimately fails. The JKEY commit just above
-	// is documented atomic/no-error, so nothing after this point can err.
+	// nil. All preceding store commits (IPST, JKEY) are documented atomic/no-error,
+	// so a late failure must NOT have rebuilt the transport accept-set for a
+	// Restore that ultimately fails. Nothing after this point can err.
 	f.peers.commitDenylist(newDeny)
 	f.peers.commitPeerIndexes(newPeersByNodeID, newPeersBySPKI)
 	f.firePeersChanged()

@@ -8,11 +8,6 @@ import (
 // PrincipalType selects which attach pool the Resolver consults when
 // materializing principal-attached policies. Default zero-value is
 // PrincipalTypeS3 so existing S3 callers don't need to set the field.
-//
-// FU#5 (F-§B-resolver-mountsa): mount-SA names live in a separate attach
-// pool (policyattach.MountSAPolicies) than S3 SAs. Without this enum the
-// resolver always reads SAPolicies and a mount-SA principal returns an
-// empty policy set even when NFSMountOnly is attached.
 type PrincipalType uint8
 
 const (
@@ -20,11 +15,6 @@ const (
 	// SAGroups → GroupPolicies). Zero value, default for any caller that
 	// does not set the field.
 	PrincipalTypeS3 PrincipalType = 0
-	// PrincipalTypeMount selects the NFS mount service-account pool
-	// (MountSAPolicies only — mount-SA does not expand through groups,
-	// matching the cross-namespace attach-time reject semantics from
-	// NFS§A T4).
-	PrincipalTypeMount PrincipalType = 1
 )
 
 type RequestContext struct {
@@ -33,8 +23,7 @@ type RequestContext struct {
 	SourceIP string
 	Prefix   string // set only on list-like requests; empty otherwise
 	// PrincipalType selects which attach pool the Resolver reads for the
-	// principal. Defaults to PrincipalTypeS3 — NFS/9P callers set this to
-	// PrincipalTypeMount when invoking Authorize with a mount-SA name.
+	// principal. Defaults to PrincipalTypeS3.
 	PrincipalType PrincipalType
 }
 

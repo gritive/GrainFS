@@ -6,7 +6,6 @@ const (
 	FDCategorySocket              Category = "socket"
 	FDCategoryBadger              Category = "badger"
 	FDCategoryReceiptOrEventStore Category = "receipt_or_event_store"
-	FDCategoryNFSSession          Category = "nfs_session"
 	FDCategoryRegularFile         Category = "regular_file"
 	FDCategoryUnknown             Category = "unknown"
 )

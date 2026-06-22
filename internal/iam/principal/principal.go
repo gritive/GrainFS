@@ -4,7 +4,6 @@ type Kind string
 
 const (
 	KindServiceAccount     Kind = "sa"
-	KindMountSA            Kind = "mount_sa"
 	KindOIDC               Kind = "oidc"
 	KindProtocolCredential Kind = "protocol_credential"
 )
@@ -21,10 +20,6 @@ type Principal struct {
 
 func ServiceAccount(id string) Principal {
 	return Principal{Kind: KindServiceAccount, ID: id, Source: "iam"}
-}
-
-func MountSA(id string) Principal {
-	return Principal{Kind: KindMountSA, ID: id, Source: "mount-sa"}
 }
 
 func ProtocolCredential(ownerSAID, credentialID string) Principal {

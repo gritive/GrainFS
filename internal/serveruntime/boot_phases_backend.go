@@ -39,7 +39,7 @@ import (
 func bootBackendWrap(ctx context.Context, state *bootState) error {
 	cfg := state.cfg
 
-	// Use ClusterCoordinator as the primary backend for S3, NFSv4, NBD. In
+	// Use ClusterCoordinator as the primary backend for S3 and Iceberg. In
 	// single-node mode, opt-in packed blobs can sit on this routed path and
 	// avoid per-object shard-file commits for small objects.
 	var routed storage.Backend = state.clusterCoord
