@@ -20,6 +20,8 @@ import (
 	"github.com/cloudwego/hertz/pkg/network/standard"
 	"github.com/cloudwego/hertz/pkg/protocol"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
+
+	"github.com/gritive/GrainFS/internal/metrics"
 )
 
 // httpALPN is the ALPN protocol for the HTTP cluster transport. It was kept
@@ -36,6 +38,33 @@ const httpPingPath = "/_grainfs/ping"
 // response-body read so a stalled mid-body server cannot pin a client goroutine +
 // pooled conn forever. Generous for 16MiB+ shard bodies over LAN. See idleReadConn.
 const defaultClientBodyTimeout = 5 * time.Minute
+
+// Client-side connection-pool contract (httpClient). These make the keep-alive
+// pool an EXPLICIT, intentional contract instead of relying on opaque Hertz
+// HostClient defaults — the pool + the httpRetryIf ErrBadPoolConn retry already
+// depend on keep-alive being on, so the dependency is now declared at the build
+// site.
+const (
+	// clientMaxConnsPerHost is the EXPLICIT cap on concurrent conns to a single
+	// peer. Sized for the control-RPC fan-out: every raft group can have a control
+	// RPC (heartbeat/AppendEntries/propose-forward) plus reads in flight to one
+	// peer at once, and 512 sits comfortably above realistic groups×concurrency.
+	// NOTE: this is an INTENTIONAL bound, not a default-match — Hertz v0.10.3+
+	// defaults MaxConnsPerHost to 0 (unlimited; see hertz pkg/common/errors), so
+	// the prior implicit pool was unbounded. We choose a bound (observable via
+	// GetOptions()) so a pathological fan-out cannot open unbounded sockets to one
+	// peer; 512 is high enough that normal control traffic never queues. Pool
+	// exhaustion returns ErrNoFreeConns immediately (no WithMaxConnWaitTimeout, see
+	// httpClient) — a transient error raft retries next tick.
+	clientMaxConnsPerHost = 512
+
+	// clientMaxIdleConnDuration is how long an idle pooled conn is kept before it
+	// is reaped. Held at Hertz's implicit default (10s): long enough that
+	// steady-cadence raft heartbeats keep conns warm (no per-tick re-dial), short
+	// enough that a dead peer's conns drain promptly. A reaped conn surfaces as
+	// ErrBadPoolConn, which httpRetryIf retries once on a fresh conn.
+	clientMaxIdleConnDuration = 10 * time.Second
+)
 
 // HTTPTransport is the sole node-to-node cluster transport (Phase 8): a Hertz
 // HTTP server and Hertz HTTP client over zero-CA SPKI-pinned mTLS + live
@@ -94,6 +123,12 @@ type HTTPTransport struct {
 	// client goroutine + pooled conn forever. Set before the first call (the
 	// client builds lazily); 0 disables the bound. See idleReadConn.
 	clientBodyTimeout time.Duration
+
+	// dialCounter, when non-nil, is incremented on every cold (pool-miss) dial of
+	// the client — the test seam for asserting keep-alive connection reuse. Set
+	// before the first RPC (the client builds lazily). Production leaves it nil
+	// (the Prometheus TransportClientDialsTotal counter is the prod observability).
+	dialCounter *atomic.Int64
 }
 
 // NewHTTPTransport derives the cluster identity from psk and builds a transport
@@ -305,9 +340,20 @@ func (t *HTTPTransport) LocalAddr() string {
 // net/http's DialTLSContext — so a post-Listen rotation/flip reaches new client
 // conns. (newTLSConn is unexported, so we wrap rather than reimplement.)
 type httpFreshDialer struct {
-	inner network.Dialer
-	build func() *tls.Config
-	idle  time.Duration // per-Read idle bound armed on the dialed conn (0 = none)
+	inner  network.Dialer
+	build  func() *tls.Config
+	idle   time.Duration // per-Read idle bound armed on the dialed conn (0 = none)
+	onDial func()        // observability hook fired per cold (pool-miss) dial; nil-safe
+}
+
+// countDial fires the cold-dial observability hook (nil-safe). DialConnection is
+// the keep-alive pool's MISS path: the Hertz host client only calls it when no
+// pooled conn is available, so one call == one new wire connection. A pool HIT
+// reuses an existing conn without dialing, so it never reaches here.
+func (d *httpFreshDialer) countDial() {
+	if d.onDial != nil {
+		d.onDial()
+	}
 }
 
 func (d *httpFreshDialer) DialConnection(n, address string, timeout time.Duration, _ *tls.Config) (network.Conn, error) {
@@ -315,6 +361,7 @@ func (d *httpFreshDialer) DialConnection(n, address string, timeout time.Duratio
 	if err != nil {
 		return nil, err
 	}
+	d.countDial()
 	return wrapIdleReadConn(conn, d.idle), nil
 }
 
@@ -421,10 +468,28 @@ func (t *HTTPTransport) httpClient() (*hzclient.Client, error) {
 	if t.client != nil {
 		return t.client, nil
 	}
+	dialer := &httpFreshDialer{
+		inner:  standard.NewDialer(),
+		build:  t.buildClientTLS,
+		idle:   t.clientBodyTimeout,
+		onDial: t.countClientDial,
+	}
 	c, err := hzclient.NewClient(
-		hzclient.WithDialer(&httpFreshDialer{inner: standard.NewDialer(), build: t.buildClientTLS, idle: t.clientBodyTimeout}),
+		hzclient.WithDialer(dialer),
 		hzclient.WithResponseBodyStream(true),
 		hzclient.WithRetryConfig(retry.WithMaxAttemptTimes(2)), // 1 retry; delay 0 (no DelayPolicy)
+		// Explicit client-side keep-alive pool contract (see the clientMaxConns*
+		// consts for sizing/rationale). Making the pool sizing intentional and
+		// observable (GetOptions) is the point — the ErrBadPoolConn retry already
+		// depends on keep-alive. WithKeepAlive(true) is the Hertz default, stated
+		// explicitly here so the dependency is declared. We deliberately do NOT set
+		// WithMaxConnWaitTimeout: with a 512-conn cap, control-RPC pool exhaustion
+		// is not expected, and any queue-wait would eat into the 80ms
+		// groupRaftRPCTimeout / raft election budget. Exhaustion stays an immediate
+		// ErrNoFreeConns (transient; raft retries next tick).
+		hzclient.WithMaxConnsPerHost(clientMaxConnsPerHost),
+		hzclient.WithMaxIdleConnDuration(clientMaxIdleConnDuration),
+		hzclient.WithKeepAlive(true),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("http client: %w", err)
@@ -432,6 +497,17 @@ func (t *HTTPTransport) httpClient() (*hzclient.Client, error) {
 	c.SetRetryIfFunc(httpRetryIf)
 	t.client = c
 	return c, nil
+}
+
+// countClientDial records one cold (pool-miss) client dial: it bumps the
+// process-wide Prometheus counter and, when a test has injected one, the local
+// dial counter. Called from httpFreshDialer.DialConnection — the keep-alive
+// pool's miss path (a pool hit reuses a conn and never dials).
+func (t *HTTPTransport) countClientDial() {
+	metrics.TransportClientDialsTotal.Inc()
+	if t.dialCounter != nil {
+		t.dialCounter.Add(1)
+	}
 }
 
 // httpRetryIf decides whether to retry a failed request. It retries idempotent

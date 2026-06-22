@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.0.651.0] - 2026-06-23
+
+### Fixed
+- **Client-side HTTP connection pool is now an explicit, observable contract.** The sole
+  node-to-node Hertz client (`internal/transport/http_transport.go` `httpClient()`) was built with no
+  pool options, relying entirely on opaque Hertz `HostClient` defaults even though the keep-alive pool
+  and the `httpRetryIf` `ErrBadPoolConn` retry already depend on pooling being on. The client now sets
+  explicit `WithMaxConnsPerHost(512)`, `WithMaxIdleConnDuration(10s)`, and `WithKeepAlive(true)` so the
+  pool sizing is intentional and inspectable via `GetOptions()`. `WithMaxConnWaitTimeout` is
+  deliberately omitted: with a 512-conn cap control-RPC pool exhaustion is not expected, and any
+  queue-wait would eat into the 80ms `groupRaftRPCTimeout` / raft election budget — exhaustion stays an
+  immediate `ErrNoFreeConns` (transient; raft retries next tick). NOTE: Hertz v0.10.3+ defaults
+  `MaxConnsPerHost` to 0 (unlimited), so the prior implicit pool was unbounded; the 512 cap is an
+  intentional bound (high enough that normal control traffic never queues) against pathological
+  per-peer fan-out.
+
+### Added
+- **Pool dial observability.** A new Prometheus counter `grainfs_transport_client_dials_total`
+  (`internal/metrics`) increments on each cold (pool-miss) dial at the single dial seam
+  (`httpFreshDialer.DialConnection`), so connection churn is visible: under steady load with keep-alive
+  reuse it stays flat; a sustained rise relative to RPC volume means the pool is not reusing
+  connections. Client-side only — the server accept path is untouched. Heartbeat batching (Option C)
+  is deferred behind a Linux load benchmark.
+
 ## [0.0.650.0] - 2026-06-23
 
 ### Fixed
