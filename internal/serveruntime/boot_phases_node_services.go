@@ -118,34 +118,34 @@ func warmupAuditSearch(ctx context.Context, warmup func(context.Context) error, 
 	}
 }
 
-// bootNodeServicesPostureGate enforces the TLS posture check before NFS/9P
+// bootNodeServicesPostureGate enforces the TLS posture check before NFS
 // listeners start. Parallel to bootTLSPostureGate (§5 T44) which gates the S3
 // HTTP server; this extends the same §5/FU#3 posture contract to mount
 // protocols.
 //
-// When anon is disabled the NFS/9P connection traverses the same network path
+// When anon is disabled the NFS connection traverses the same network path
 // as S3, so the same posture requirements apply: either a TLS cert on disk or
 // a trusted-proxy CIDR set. Returns nil when cfgStore is nil (boot ordering
 // guarantees it is non-nil when called from bootNodeServices).
 func bootNodeServicesPostureGate(state *bootState) error {
 	nc := nodeconfig.New(state.cfg.DataDir)
 	if err := enforceTLSPosture(state.cfgStore, nc); err != nil {
-		return fmt.Errorf("NFS/9P boot: %w", err)
+		return fmt.Errorf("NFS boot: %w", err)
 	}
 	return nil
 }
 
-// bootNodeServices starts the universal node services (NFS/NFSv4/9P) and
+// bootNodeServices starts the universal node services (NFS/NFSv4) and
 // registers the NFS4 cache invalidator on distBackend so cross-protocol cache
 // coherency works in cluster mode.
 //
-// Inputs:  state.backend, state.cfg.NFS4Port/P9Port,
+// Inputs:  state.backend, state.cfg.NFS4Port,
 //
 //	state.distBackend.
 //
 // Cleanup: nodeSvc.Close registered via state.AddCleanup.
 func bootNodeServices(ctx context.Context, state *bootState) error {
-	// NFS§B T13: TLS posture gate — refuse to start NFS/9P when auth is
+	// NFS§B T13: TLS posture gate — refuse to start NFS when auth is
 	// required but neither a TLS cert nor a trusted-proxy CIDR is present.
 	// Extends §5/FU#3 gate to mount protocols. cfgStore is guaranteed non-nil
 	// at this point (bootSrvOptsAndReceipt fail-fasts on nil).
@@ -156,7 +156,7 @@ func bootNodeServices(ctx context.Context, state *bootState) error {
 	cfg := state.cfg
 	// Post-Phase-18 local-path merge: universal node services (NFS/NFSv4)
 	// are now wired in cluster mode too, not just local.
-	// NFS§B T8: wire mount-SA IAM gate into NFS/9P servers when IAM is available.
+	// NFS§B T8: wire mount-SA IAM gate into NFS servers when IAM is available.
 	var iamCfg *NodeServicesIAMConfig
 	if state.mountSAStore != nil && state.iamPolicyStores != nil && state.cfgStore != nil {
 		iamCfg = &NodeServicesIAMConfig{
@@ -179,7 +179,7 @@ func bootNodeServices(ctx context.Context, state *bootState) error {
 		}
 		iamCfg.ProtocolCredentials = protocolCredentialValidator
 	}
-	nodeSvc := StartNodeServices(ctx, state.backend, cfg.NFS4Port, cfg.P9Bind, cfg.P9Port, cfg.NFSWriteBufferDir, cfg.NFSWriteBufferIdle, cfg.DataDir, iamCfg)
+	nodeSvc := StartNodeServices(ctx, state.backend, cfg.NFS4Port, cfg.NFSWriteBufferDir, cfg.NFSWriteBufferIdle, cfg.DataDir, iamCfg)
 	nodeSvc.SetNFSExports(state.nfsExportSvc)
 	if state.adminDeps != nil {
 		state.adminDeps.NFSDiag = nodeSvc.NFS4()

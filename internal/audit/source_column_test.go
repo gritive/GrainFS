@@ -29,7 +29,6 @@ func TestS3Event_HasSourceField(t *testing.T) {
 	if e.Source != "nfs4" {
 		t.Fatalf("Source field not set correctly, got %q", e.Source)
 	}
-	e.Source = "9p"
 	e.Source = "iceberg"
 	e.Source = "s3"
 	e.Source = ""
@@ -67,19 +66,6 @@ func TestWireRoundtrip_Source(t *testing.T) {
 			Status:     200,
 			AuthStatus: "allow",
 			Source:     "nfs4",
-		},
-		{
-			Ts:         1716000000000101,
-			EventID:    "evt-9p",
-			NodeID:     "node-1",
-			RequestID:  "req-9p-1",
-			SAID:       "",
-			SourceIP:   "10.0.0.3",
-			Method:     "Walk",
-			Bucket:     "mybucket",
-			Status:     403,
-			AuthStatus: "deny",
-			Source:     "9p",
 		},
 		{
 			Ts:         1716000000000102,

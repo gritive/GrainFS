@@ -53,7 +53,7 @@ func RenderList(w io.Writer, items []Credential) {
 
 func formatConnectionHint(h map[string]string) string {
 	parts := make([]string, 0, len(h))
-	keys := []string{"export_name", "mount_path", "aname", "access_key_id", "client_id"}
+	keys := []string{"export_name", "mount_path", "access_key_id", "client_id"}
 	seen := map[string]bool{}
 	for _, k := range keys {
 		if v, ok := h[k]; ok {

@@ -2,13 +2,26 @@
 
 ## Follow-ups
 
-### [EPIC] Remove the NFS feature (NFSv4 server + nfsexport subsystem)
+### [EPIC] Remove mount protocols (NFS + 9P) + NBD dead sweep — keep S3 + Iceberg only
 
-Decision (2026-06-22): retire NFS entirely, mirroring the volume/NBD removal epic (#781–#785).
-GrainFS continues toward a pure S3 + Iceberg system; NFS is the last self-implemented protocol
-server and a meaningful complexity/attack-surface sink. Its own subsystem (own spec → plan → multi-PR).
+Decision (2026-06-22): retire every non-S3 access protocol, mirroring the volume/NBD removal epic
+(#781–#785). GrainFS continues toward a pure S3 + Iceberg system; NFS and 9P are the last
+self-implemented protocol servers and a meaningful complexity/attack-surface sink. `internal/protocred`
+survives (S3/Iceberg use it, stripped of mount-protocol enum values); `internal/iam/mountsastore` and
+the `MountSA*` meta-Raft commands die once **both** NFS and 9P are gone. NBD is already deleted; only
+dead references remain. Three dependency-ordered, independently-shippable slices (one PR each):
 
-Surface to remove (map precisely before cutting):
+- **Slice A — 9P removal — DONE (this PR, branch `remove-9p`).** Deleted `internal/p9server`, the
+  `--9p-bind`/`--9p-port` serve flags + config/`adminapi.P9` status plumbing, `protocred.Protocol9P`,
+  the `9PAttachOnly` builtin policy + `grainfs:9PAttach` action + `"9p"` policy allowlist entries, all
+  9P e2e/colima tests, and the 9P Makefile/bench targets. `.fbs` untouched (MountSA cmds shared with
+  NFS). ~6.2k LOC removed. NFS/NBD/S3/Iceberg untouched.
+- **Slice B — NFS removal (NEXT).** The big one (~16k LOC, needs `make fbs`). Surface map below.
+- **Slice C — shared mount-infra teardown + NBD dead sweep.** `internal/iam/mountsastore`, the
+  `MountSA*` meta-Raft commands + snapshot fields + admin handlers, and the NBD dead refs (`DomainNBD`
+  AAD constant, `"nbd"`/`"nbd/volume"`/`"volume"` policy entries, NFS/NBD comments). Only after B.
+
+Slice B surface to remove (map precisely before cutting):
 - `internal/nfs4server` — the self-implemented NFSv4 server (XDR/RPC), the `:2049` listener.
 - `internal/nfsexport` — the export registry store (meta-Raft, per-record `Generation`, fsid allocator).
 - Meta-Raft NFS-export commands + apply handlers (`MetaCmdTypeNfsExport*`, `applyNfsExportUpsert`/delete

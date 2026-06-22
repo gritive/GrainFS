@@ -9,17 +9,18 @@ import (
 )
 
 func TestNodeServicesProtocolStatusReportsFailedListenerAsDisabled(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	// Bind on all interfaces so the NFS4 listener (which also binds 0.0.0.0)
+	// fails with EADDRINUSE.
+	ln, err := net.Listen("tcp", ":0")
 	require.NoError(t, err)
 	defer ln.Close()
 	port := ln.Addr().(*net.TCPAddr).Port
 
-	svc := StartNodeServices(context.Background(), nil, 0, "127.0.0.1", port, "", 0, "")
+	svc := StartNodeServices(context.Background(), nil, port, "", 0, "")
 	t.Cleanup(svc.Close)
 
-	status := svc.ProtocolStatus(Config{P9Bind: "127.0.0.1", P9Port: port})
-	require.False(t, status.P9.Enabled)
-	require.Equal(t, "127.0.0.1", status.P9.Bind)
-	require.Equal(t, port, status.P9.Port)
-	require.Contains(t, status.P9.Warning, "start failed")
+	status := svc.ProtocolStatus(Config{NFS4Port: port})
+	require.False(t, status.NFS4.Enabled)
+	require.Equal(t, port, status.NFS4.Port)
+	require.Contains(t, status.NFS4.Warning, "start failed")
 }

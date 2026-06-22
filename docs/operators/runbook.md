@@ -58,7 +58,7 @@ Complete ALL items before proceeding with deployment. If ANY item fails, do NOT 
 ### Infrastructure Readiness
 
 - [ ] **Server resources**: Minimum 4 CPU, 8GB RAM, 100GB disk
-- [ ] **Network connectivity**: Port 9000 is reachable by S3 clients. Keep NFSv4 2049, NBD 10809, and 9P listeners on loopback, private networks, or firewall-restricted addresses when enabled.
+- [ ] **Network connectivity**: Port 9000 is reachable by S3 clients. Keep NFSv4 2049 and NBD 10809 listeners on loopback, private networks, or firewall-restricted addresses when enabled.
 - [ ] **Disk mounting**: Data directory mounted on reliable storage (SSD recommended)
 - [ ] **Backup repository**: Restic repo initialized and accessible
 - [ ] **Monitoring**: Prometheus scraping configured and receiving data
@@ -1164,12 +1164,12 @@ leader with:
 
 ---
 
-## NFS / 9P Mount Operations
+## NFS Mount Operations
 
 ### Creating a Mount SA
 
-A Mount SA scopes NFS/9P access to a named principal with an attached IAM policy.
-Use the `NFSMountOnly` builtin for NFSv4 clients and `9PAttachOnly` for 9P clients.
+A Mount SA scopes NFS access to a named principal with an attached IAM policy.
+Use the `NFSMountOnly` builtin for NFSv4 clients.
 
 ```bash
 # Create the Mount SA with a numeric UID hint (advisory, for AUTH_SYS mapping).
@@ -1186,14 +1186,13 @@ grainfs iam mount-sa list --endpoint <data>/admin.sock
 ```
 
 Mount path for NFSv4: `:<bucket>/<mount-sa>` (e.g. `localhost:/my-bucket/alice-mount`).
-Mount path for 9P: `aname=<mount-sa>@<bucket>` (e.g. `aname=alice-mount@my-bucket`).
 
 ### Cross-namespace policy rejection
 
 Attaching a regular IAM policy (action namespace `s3:*`) to a Mount SA returns
 HTTP 412 Precondition Failed. Mount SAs accept only policies whose actions
-are in the `grainfs:` namespace (`NFSMountOnly`, `9PAttachOnly`, or a custom
-policy that uses only `grainfs:NFSRead` / `grainfs:NFSWrite` / `grainfs:9PAttach`).
+are in the `grainfs:` namespace (`NFSMountOnly`, or a custom policy that uses
+only `grainfs:NFSRead` / `grainfs:NFSWrite`).
 
 Remediation: create or use a policy in the `grainfs:` action namespace, then retry
 `grainfs iam mount-sa policy attach`.
@@ -1208,18 +1207,18 @@ grainfs nfs export add my-bucket --ro --endpoint <data>/admin.sock
 grainfs nfs export update my-bucket --ro --quiesce-wait 30s --endpoint <data>/admin.sock
 ```
 
-Clients on a read-only export receive `NFS4ERR_ROFS` / 9P `EROFS` on writes.
+Clients on a read-only export receive `NFS4ERR_ROFS` on writes.
 
-### Auditing NFS/9P access
+### Auditing NFS access
 
-The `audit.s3` Iceberg table records every NFS and 9P operation with
-`source = 'nfs4'` or `source = '9p'` and the client `source_ip`:
+The `audit.s3` Iceberg table records every NFS operation with `source = 'nfs4'`
+and the client `source_ip`:
 
 ```bash
 grainfs audit query "
   SELECT sa_id, source, source_ip, operation, bucket, ts
   FROM grainfs_iceberg.audit.s3
-  WHERE source IN ('nfs4', '9p')
+  WHERE source = 'nfs4'
   ORDER BY ts DESC
   LIMIT 20
 " --endpoint <data>/admin.sock
@@ -1227,13 +1226,13 @@ grainfs audit query "
 
 ### TLS posture gate for authenticated clusters
 
-For network-exposed deployments, run NFS/9P behind a private network boundary
+For network-exposed deployments, run NFS behind a private network boundary
 or TLS-terminating proxy. Recommended hardening:
 
 - A TLS certificate is on disk (`<data>/tls/cert.pem`), or
 - `trusted-proxy.cidr` is set (TLS is terminated by a front-end proxy).
 
-Boot error prefix: `NFS/9P boot: auth required + no TLS cert + no trusted proxy`.
+Boot error prefix: `NFS boot: auth required + no TLS cert + no trusted proxy`.
 
 Remediation options:
 

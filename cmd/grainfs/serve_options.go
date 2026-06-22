@@ -60,8 +60,6 @@ func serveOptionsFromCmd(cmd *cobra.Command) (serveruntime.ServeOptions, error) 
 	opts.NFS4Port, _ = cmd.Flags().GetInt("nfs4-port")
 	opts.NFSWriteBufferDir, _ = cmd.Flags().GetString("nfs-write-buffer-dir")
 	opts.NFSWriteBufferIdle, _ = cmd.Flags().GetDuration("nfs-write-buffer-idle")
-	opts.P9Bind, _ = cmd.Flags().GetString("9p-bind")
-	opts.P9Port, _ = cmd.Flags().GetInt("9p-port")
 	opts.EnableIceberg, _ = cmd.Flags().GetBool("enable-iceberg")
 
 	// Intervals.

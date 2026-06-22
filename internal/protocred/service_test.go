@@ -52,12 +52,6 @@ func TestServiceCreateGetListAndHints(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "default/"+nfsSecret.ID+":"+nfsSecret.Secret, nfsSecret.ConnectionHint["mount_path"])
 
-	p9Secret, err := svc.Create(CreateRequest{
-		SAID: "node-a", Protocol: Protocol9P, Resource: "bucket/default", Mode: ModeRO,
-	})
-	require.NoError(t, err)
-	require.Equal(t, p9Secret.ID+":"+p9Secret.Secret+"@default", p9Secret.ConnectionHint["aname"])
-
 	item, err := svc.Get(secret.ID)
 	require.NoError(t, err)
 	require.NotEmpty(t, item.SecretHint)

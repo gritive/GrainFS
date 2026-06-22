@@ -7,7 +7,7 @@ GO_SRC := $(shell find cmd internal -name '*.go' -not -name '*_test.go')
 FBS_SRC := $(shell find internal -name '*.fbs')
 FBS_STAMPS := $(FBS_SRC:.fbs=.fbs.stamp)
 
-.PHONY: test test-unit test-colima test-race test-e2e test-e2e-iceberg test-e2e-colima test-directio-linux test-jepsen test-smoke test-network-fault clean run lint lint-keyspace lint-storage-fixture bench bench-cluster bench-s3-compat-compare bench-iceberg-table bench-iceberg-table-cluster build-pgo test-nbd-interop update-deps fbs test-nfs4-colima test-pynfs-colima test-nbd-colima bench-nbd bench-nbd-cluster bench-nfs bench-nfs-multi bench-nfs-cluster bench-9p bench-9p-cluster test-fuse-s3-colima test-s3-client-smoke-colima bench-fuse-s3-colima test-raft-v2-chaos test-compat test-9p-colima test-cluster-mount-colima
+.PHONY: test test-unit test-colima test-race test-e2e test-e2e-iceberg test-e2e-colima test-directio-linux test-jepsen test-smoke test-network-fault clean run lint lint-keyspace lint-storage-fixture bench bench-cluster bench-s3-compat-compare bench-iceberg-table bench-iceberg-table-cluster build-pgo test-nbd-interop update-deps fbs test-nfs4-colima test-pynfs-colima test-nbd-colima bench-nbd bench-nbd-cluster bench-nfs bench-nfs-multi bench-nfs-cluster test-fuse-s3-colima test-s3-client-smoke-colima bench-fuse-s3-colima test-raft-v2-chaos test-compat test-cluster-mount-colima
 
 PGO_PROFILE ?= /tmp/grainfs-bench-cpu.out
 E2E_TEST_TIMEOUT ?= 3600s
@@ -51,7 +51,6 @@ test-unit:
 test-colima: test-directio-linux test-nbd-colima test-fuse-s3-colima test-s3-client-smoke-colima test-nfs4-colima test-cluster-mount-colima
 
 test-cluster-mount-colima: build
-	go test -v -tags colima -count=1 -timeout 300s -run Test9P_ClusterMount ./tests/9p_colima/
 	go test -v -tags colima -count=1 -timeout 300s -run TestNBD_ClusterMount ./tests/nbd_colima/
 	go test -v -tags colima -count=1 -timeout 300s -run TestNFS4_ClusterMount ./tests/nfs4_colima/
 
@@ -99,19 +98,6 @@ bench-nfs-multi: build
 
 bench-nfs-cluster: build
 	./benchmarks/bench_nfs_cluster_profile.sh
-
-bench-9p: build
-	./benchmarks/bench_9p_profile.sh
-
-bench-9p-cluster: build
-	./benchmarks/bench_9p_cluster_profile.sh
-
-# FUSE-over-S3 e2e: macOS host runs grainfs serve, Colima Linux VM mounts via
-# rclone mount and exercises common filesystem operations. Verifies that
-# GrainFS's S3 API works with standard FUSE-over-S3 client tooling.
-# Prereqs in the VM: rclone, fuse3 (e.g., colima ssh -- sudo apt install -y rclone fuse3)
-test-9p-colima: build
-	go test -v -count=1 -timeout 120s -tags=colima ./tests/9p_colima/
 
 test-fuse-s3-colima: build
 	go test -v -tags colima -timeout 180s ./tests/fuse_s3_colima/ -run TestFUSE_S3

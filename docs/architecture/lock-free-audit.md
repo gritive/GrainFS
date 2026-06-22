@@ -70,8 +70,7 @@ copy-on-write publish step.
   immutable snapshot or update an atomic pointer. Readers stay lock-free.
   Examples: IAM store, receipt routing cache, VFS stat/dir caches, node stats.
 - **Protocol ordering:** The lock is part of a wire protocol or stream contract.
-  Examples: raft stream send serialization, NFSv4 session slot replay cache,
-  9P per-object read-modify-write locks.
+  Examples: raft stream send serialization, NFSv4 session slot replay cache.
 - **FSM/state-machine consistency:** A single writer or low-frequency control
   path updates multiple maps that must be observed atomically by readers.
   Examples: meta FSM, ring store, migration queues, scrub director state.
@@ -135,8 +134,6 @@ rg -n "sync\.(Mutex|RWMutex)" internal cmd --glob '*.go' --glob '!*_test.go'
   `quic.go` — were removed with the mux subsystem in v0.0.551.0.)
 - `internal/nfs4server/state.go`, `lookup_hint.go`, `lookup_ring.go`,
   `server.go` - protect NFS filehandle/session/replay/server connection state.
-- `internal/p9server/locks.go`, `server.go` - per-object RMW locks and server
-  connection tracking.
 
 ### FSM And Control-Plane Consistency
 

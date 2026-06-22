@@ -18,8 +18,6 @@ Usage:
   grainfs serve [flags]
 
 Flags:
-      --9p-bind string                                      9P2000.L bind address; set 0.0.0.0 only on trusted networks (default "127.0.0.1")
-      --9p-port int                                         9P2000.L server port (0 = disabled); unauthenticated, use firewall
       --admin-group string                                  OS group name for admin socket chown (default: caller's primary group)
       --admin-socket string                                 admin Unix socket path (default <data>/admin.sock)
       --append-size-cap-bytes int                           Per-object total size cap for AppendObject in bytes (default 5 TiB, S3 PutObject parity). (default 5497558138880)

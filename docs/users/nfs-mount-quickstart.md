@@ -1,6 +1,6 @@
-# NFS / 9P Quick Start
+# NFS Quick Start
 
-GrainFS exposes the same data via S3, NFSv4, and 9P. Mount once, read/write either way.
+GrainFS exposes the same data via S3 and NFSv4. Mount once, read/write either way.
 
 ## Anonymous mount on the default bucket
 
@@ -20,22 +20,16 @@ grainfs nfs export add default --endpoint ./tmp/admin.sock
 sudo mount -t nfs4 -o nolock,nfsvers=4.0 localhost:/default /mnt/data
 ```
 
-**9P mount (Linux):**
-
-```bash
-sudo mount -t 9p -o trans=tcp,port=5640,aname=default localhost /mnt/data
-```
-
 That's it. Read/write under `/mnt/data` lands in the `default` bucket and is visible via the S3 endpoint at the same time:
 
 ```bash
-ls /mnt/data                                                      # via NFS/9P
+ls /mnt/data                                                      # via NFS
 aws --no-sign-request --endpoint-url http://localhost:9000 s3 ls s3://default/  # via S3
 ```
 
 > Anonymous mount access is decided by the bucket/export authorization path.
 > The bucket must be registered as an export; S3 bucket creation alone does not
-> expose the bucket over NFS or 9P.
+> expose the bucket over NFS.
 
 ## Authenticated mount with a Mount SA
 
@@ -43,10 +37,10 @@ S3 auth is active after you bootstrap the first admin SA
 (`grainfs iam sa create`). Mounts require a Mount SA with an attached policy.
 
 `grainfs credential` is the new shared admin surface for protocol credentials
-across S3, Iceberg, NFS, 9P, and NBD. NFS and 9P accept either the Mount SA
-path below or a protocol credential connection hint. Mount SA remains useful
-when you want a stable operator-named principal with explicit uid metadata;
-protocol credentials are the rotation-friendly path.
+across S3, Iceberg, and NFS. NFS accepts either the Mount SA path below or a
+protocol credential connection hint. Mount SA remains useful when you want a
+stable operator-named principal with explicit uid metadata; protocol credentials
+are the rotation-friendly path.
 
 ### 1. Create a Mount SA
 
@@ -54,22 +48,18 @@ protocol credentials are the rotation-friendly path.
 grainfs iam mount-sa create alice-mount --uid 1000 --endpoint ./tmp/admin.sock
 ```
 
-The `--uid` value is the numeric UID that the NFS/9P principal reports. It has
+The `--uid` value is the numeric UID that the NFS principal reports. It has
 no effect on S3 policy evaluation; it is advisory metadata for the client host.
 
 ### 2. Attach a builtin policy
 
-For NFSv4 access attach `NFSMountOnly`; for 9P attach `9PAttachOnly`:
+For NFSv4 access attach `NFSMountOnly`:
 
 ```bash
-# NFSv4
 grainfs iam mount-sa policy attach alice-mount NFSMountOnly --endpoint ./tmp/admin.sock
-
-# 9P
-grainfs iam mount-sa policy attach alice-mount 9PAttachOnly --endpoint ./tmp/admin.sock
 ```
 
-Both builtin policies grant the mount SA read/write access to any exported
+This builtin policy grants the mount SA read/write access to any exported
 bucket it is authorized on. To restrict to a specific bucket, write a custom
 policy and attach it instead.
 
@@ -87,17 +77,6 @@ grainfs nfs export add my-bucket --endpoint ./tmp/admin.sock
 sudo mount -t nfs4 -o nolock,nfsvers=4.0 localhost:/my-bucket/alice-mount /mnt/data
 ```
 
-**9P** — the `aname` parameter encodes `<mount-sa>@<bucket>`:
-
-```bash
-sudo mount -t 9p -o trans=tcp,port=5640,aname=alice-mount@my-bucket localhost /mnt/data
-```
-
-> The `aname=<mount-sa>@<bucket>` convention is required by the hugelgupf/p9
-> library: `aname` is consumed as the first Walk component rather than a
-> separate Tattach field. The format `uname=<mount-sa>, aname=<bucket>` shown
-> in some plan drafts does not match the implementation.
-
 ## Protocol credential mount
 
 Create protocol credentials against the target bucket and use the returned
@@ -107,15 +86,10 @@ connection hints directly:
 # NFSv4
 grainfs credential create --sa <sa_id> --protocol nfs --resource bucket/my-bucket --mode rw --endpoint ./tmp/admin.sock
 sudo mount -t nfs4 -o nolock,nfsvers=4.0 localhost:/<connection_hint.mount_path> /mnt/data
-
-# 9P
-grainfs credential create --sa <sa_id> --protocol 9p --resource bucket/my-bucket --mode ro --endpoint ./tmp/admin.sock
-sudo mount -t 9p -o trans=tcp,port=5640,aname='<connection_hint.aname>' localhost /mnt/data
 ```
 
-The NFS mount path is `bucket/credential-id:secret`. The 9P `aname` is
-`credential-id:secret@bucket`. Read-only credentials mount successfully and
-return `NFS4ERR_ROFS` / 9P `EROFS` for mutations.
+The NFS mount path is `bucket/credential-id:secret`. Read-only credentials mount
+successfully and return `NFS4ERR_ROFS` for mutations.
 
 ## Read-only export
 
@@ -132,19 +106,19 @@ To flip an existing export to read-only with a quiesce window:
 grainfs nfs export update my-bucket --ro --quiesce-wait 30s --endpoint ./tmp/admin.sock
 ```
 
-Clients that already have the export mounted will receive `NFS4ERR_ROFS` / 9P
-`EROFS` on any write attempt after the update propagates.
+Clients that already have the export mounted will receive `NFS4ERR_ROFS` on any
+write attempt after the update propagates.
 
-## Audit NFS/9P access
+## Audit NFS access
 
-The `audit.s3` Iceberg table records all NFS and 9P accesses with the
-`source` column set to `nfs4` or `9p`:
+The `audit.s3` Iceberg table records all NFS accesses with the `source` column
+set to `nfs4`:
 
 ```bash
 grainfs audit query "
   SELECT sa_id, source, source_ip, operation, bucket, ts
   FROM grainfs_iceberg.audit.s3
-  WHERE source IN ('nfs4', '9p')
+  WHERE source = 'nfs4'
   ORDER BY ts DESC
   LIMIT 20
 " --endpoint ./tmp/admin.sock
@@ -152,14 +126,11 @@ grainfs audit query "
 
 ## Known limits
 
-- `AUTH_SYS` uid is trusted on NFSv4. Restrict NFS/9P port access to LAN or
+- `AUTH_SYS` uid is trusted on NFSv4. Restrict NFS port access to LAN or
   trusted hosts via firewall or IP ACL; any host that can reach the port can
   present any uid.
 - macOS NFS client buffers writes aggressively in the page cache. Use Linux
   clients for write-after-read verification in tests.
-- Mount SA pool miss (authenticated path with an `@` in `aname` but the SA
-  does not exist) returns `NFS4ERR_NOENT` or 9P `ENOENT`. There is no
-  anonymous fallback once a Mount SA name is supplied.
-- 9P uses `aname=<mount-sa>@<bucket>` for Mount SAs and
-  `aname=<credential-id>:<secret>@<bucket>` for protocol credentials due to
-  hugelgupf/p9 lib convention. The `uname` field is ignored by GrainFS.
+- Mount SA pool miss (authenticated path with a Mount SA name that does not
+  exist) returns `NFS4ERR_NOENT`. There is no anonymous fallback once a Mount
+  SA name is supplied.

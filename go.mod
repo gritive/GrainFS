@@ -16,7 +16,6 @@ require (
 	github.com/google/flatbuffers v25.12.19+incompatible
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
-	github.com/hugelgupf/p9 v0.4.1
 	github.com/klauspost/compress v1.18.6
 	github.com/klauspost/reedsolomon v1.14.1
 	github.com/onsi/ginkgo/v2 v2.19.0
@@ -92,7 +91,6 @@ require (
 	github.com/tidwall/match v1.2.0 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
-	github.com/u-root/uio v0.0.0-20240224005618-d2acac8f3701 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.44.0 // indirect
 	go.opentelemetry.io/otel/metric v1.44.0 // indirect

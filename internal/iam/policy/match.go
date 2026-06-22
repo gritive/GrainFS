@@ -12,7 +12,7 @@ import (
 // FU#5 (F-§B-resolver-mountsa): mount-SA names live in a separate attach
 // pool (policyattach.MountSAPolicies) than S3 SAs. Without this enum the
 // resolver always reads SAPolicies and a mount-SA principal returns an
-// empty policy set even when 9PAttachOnly / NFSMountOnly is attached.
+// empty policy set even when NFSMountOnly is attached.
 type PrincipalType uint8
 
 const (
@@ -20,7 +20,7 @@ const (
 	// SAGroups → GroupPolicies). Zero value, default for any caller that
 	// does not set the field.
 	PrincipalTypeS3 PrincipalType = 0
-	// PrincipalTypeMount selects the NFS/9P mount service-account pool
+	// PrincipalTypeMount selects the NFS mount service-account pool
 	// (MountSAPolicies only — mount-SA does not expand through groups,
 	// matching the cross-namespace attach-time reject semantics from
 	// NFS§A T4).

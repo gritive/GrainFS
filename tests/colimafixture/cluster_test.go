@@ -20,10 +20,9 @@ func TestColimaClusterFixtureBoots(t *testing.T) {
 	c := StartCluster(t, Options{
 		NumNodes:  3,
 		EnableNFS: true,
-		EnableP9:  true,
 	})
 	bootDur := time.Since(start)
-	t.Logf("cluster booted in %v (3 nodes, all protocols)", bootDur)
+	t.Logf("cluster booted in %v (3 nodes, NFS enabled)", bootDur)
 
 	if len(c.HTTPPorts) != 3 {
 		t.Fatalf("expected 3 HTTP ports, got %d", len(c.HTTPPorts))

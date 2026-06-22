@@ -43,7 +43,6 @@ type mrCluster struct {
 	raftPorts     []int
 	joinPorts     []int
 	nfs4Ports     []int
-	p9Ports       []int
 	httpURLs      []string
 	stopped       bool
 	clusterKey    string
@@ -58,7 +57,6 @@ type mrCluster struct {
 
 type mrClusterOptions struct {
 	disableNFS4   bool
-	enableP9      bool     // wire --9p-port on every node (per-node ports allocated)
 	FastBootstrap bool     // replace time.Sleep(8s) with shard-group polling
 	MaxNodes      int      // pre-allocate ports for up to MaxNodes (for addNode); 0 = numNodes
 	ExtraArgs     []string // extra flags appended to each node's serve command
@@ -107,7 +105,6 @@ func newMRCluster(t testing.TB, maxNodes int, opts mrClusterOptions) (*mrCluster
 	c.raftPorts = make([]int, maxNodes)
 	c.joinPorts = make([]int, maxNodes)
 	c.nfs4Ports = make([]int, maxNodes)
-	c.p9Ports = make([]int, maxNodes)
 	c.httpURLs = make([]string, maxNodes)
 	c.dataDirs = make([]string, maxNodes)
 	c.procs = make([]*exec.Cmd, maxNodes)
@@ -119,11 +116,8 @@ func newMRCluster(t testing.TB, maxNodes int, opts mrClusterOptions) (*mrCluster
 		if !opts.disableNFS4 {
 			c.nfs4Ports[i] = ports[2*maxNodes+i]
 		}
-		// Slot ports[3*maxNodes+i] left reserved (formerly NBD) to keep p9/join
-		// port indices stable.
-		if opts.enableP9 {
-			c.p9Ports[i] = ports[4*maxNodes+i]
-		}
+		// Slot ports[3*maxNodes+i] and ports[4*maxNodes+i] left reserved (formerly
+		// NBD and 9P) to keep join port indices stable.
 		c.joinPorts[i] = ports[5*maxNodes+i]
 		c.httpURLs[i] = fmt.Sprintf("http://127.0.0.1:%d", c.httpPorts[i])
 
@@ -347,10 +341,6 @@ func (c *mrCluster) startNode(i int, extraEnv []string) *exec.Cmd {
 		"--nfs4-port", fmt.Sprintf("%d", c.nfs4Ports[i]),
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
-	}
-	if c.p9Ports[i] > 0 {
-		args = append(args, "--9p-bind", "127.0.0.1",
-			"--9p-port", fmt.Sprintf("%d", c.p9Ports[i]))
 	}
 	args = append(args, c.extraArgs...)
 	cmd := exec.Command(binary, args...)

@@ -197,7 +197,6 @@ type ProtocolEndpointStatus struct {
 
 type StorageProtocolStatusResp struct {
 	NFS4 ProtocolEndpointStatus `json:"nfs4"`
-	P9   ProtocolEndpointStatus `json:"p9"`
 }
 
 type CredentialCreateReq struct {

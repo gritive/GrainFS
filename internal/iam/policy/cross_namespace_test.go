@@ -25,11 +25,6 @@ func TestValidateMountSAPolicyAttach_AllowsNFSAction(t *testing.T) {
 	require.NoError(t, ValidateForMountSAAttach(policyJSON))
 }
 
-func TestValidateMountSAPolicyAttach_Allows9PAction(t *testing.T) {
-	policyJSON := `{"Statement":[{"Effect":"Allow","Action":"grainfs:9PAttach","Resource":"arn:aws:s3:::bucket-x"}]}`
-	require.NoError(t, ValidateForMountSAAttach(policyJSON))
-}
-
 func TestValidateMountSAPolicyAttach_RejectsWildcard(t *testing.T) {
 	// "*" is ambiguous for MountSA — it could grant S3 access through a MountSA principal
 	policyJSON := `{"Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}`
@@ -66,13 +61,6 @@ func TestValidateS3SAPolicyAttach_RejectsNFSAction(t *testing.T) {
 	require.Contains(t, err.Error(), "grainfs:NFSMount")
 }
 
-func TestValidateS3SAPolicyAttach_Rejects9PAction(t *testing.T) {
-	policyJSON := `{"Statement":[{"Effect":"Allow","Action":"grainfs:9PAttach","Resource":"*"}]}`
-	err := ValidateForS3SAAttach(policyJSON)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "grainfs:9PAttach")
-}
-
 func TestValidateS3SAPolicyAttach_AllowsS3Action(t *testing.T) {
 	policyJSON := `{"Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::bucket-x/*"}]}`
 	require.NoError(t, ValidateForS3SAAttach(policyJSON))
@@ -105,12 +93,6 @@ func TestParse_AcceptsGrainfsAction(t *testing.T) {
 	doc := []byte(`{"Statement":[{"Effect":"Allow","Action":"grainfs:NFSMount","Resource":"arn:aws:s3:::bucket-x"}]}`)
 	_, err := Parse(doc)
 	require.NoError(t, err, "Parse should accept grainfs: namespace actions")
-}
-
-func TestParse_Accepts9PAttachAction(t *testing.T) {
-	doc := []byte(`{"Statement":[{"Effect":"Allow","Action":"grainfs:9PAttach","Resource":"arn:aws:s3:::bucket-x"}]}`)
-	_, err := Parse(doc)
-	require.NoError(t, err, "Parse should accept grainfs:9PAttach action")
 }
 
 func TestParse_AcceptsProtocolCredentialActions(t *testing.T) {

@@ -25,9 +25,7 @@ func TestRegisterUIStorageRoutesExposeSafeSurface(t *testing.T) {
 	h, base, start := newUIRouteTestServer(t)
 	d := newServerDeps(t, t.TempDir())
 	d.Buckets = newFakeBucketOps()
-	d.Protocols = adminapi.StorageProtocolStatusResp{
-		P9: adminapi.ProtocolEndpointStatus{Enabled: true, Bind: "127.0.0.1", Port: 564},
-	}
+	d.Protocols = adminapi.StorageProtocolStatusResp{}
 	admin.RegisterUI(h, d)
 	start()
 

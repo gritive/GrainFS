@@ -70,7 +70,7 @@ type S3Event struct {
 	ConditionContext map[string]string
 
 	// Source identifies the protocol that produced this event (T15 NFS§C).
-	// Valid values: "s3" | "nfs4" | "9p" | "iceberg". Empty for legacy rows
+	// Valid values: "s3" | "nfs4" | "iceberg". Empty for legacy rows
 	// written before this field existed.
 	Source string
 }

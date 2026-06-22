@@ -43,7 +43,6 @@ type Cluster struct {
 	RaftPorts []int    // QUIC raft ports
 	JoinPorts []int    // Zero-CA QUIC join-listener ports
 	NFSPorts  []int    // NFSv4 ports (bind :%d)
-	P9Ports   []int    // 9P2000.L ports (bind 0.0.0.0 via --9p-bind)
 	DataDirs  []string // per-node data directories (temp)
 
 	LeaderIdx int    // 0 — seed is always the initial leader at boot
@@ -63,10 +62,6 @@ type Options struct {
 
 	// EnableNFS enables NFSv4 listeners (binds 0.0.0.0 by default).
 	EnableNFS bool
-
-	// EnableP9 enables 9P listeners with --9p-bind 0.0.0.0 so the colima VM
-	// can reach them. Off by default — only set true if the test mounts 9P.
-	EnableP9 bool
 
 	// Binary overrides the grainfs binary path (default: ../../bin/grainfs).
 	Binary string
@@ -100,7 +95,6 @@ func StartCluster(t testing.TB, opts Options) *Cluster {
 		RaftPorts: make([]int, numNodes),
 		JoinPorts: make([]int, numNodes),
 		NFSPorts:  make([]int, numNodes),
-		P9Ports:   make([]int, numNodes),
 		DataDirs:  make([]string, numNodes),
 		procs:     make([]*exec.Cmd, numNodes),
 		logs:      make([]*os.File, numNodes),
@@ -109,9 +103,9 @@ func StartCluster(t testing.TB, opts Options) *Cluster {
 		t.Cleanup(c.Stop)
 	}
 
-	// Allocate up to 5 ports/node (http, raft, nfs4, 9p). Even when a
-	// protocol is disabled we still reserve the slot so port indices are
-	// stable; serve will simply not listen on a `0` port.
+	// Allocate 6 slots/node (http, raft, nfs4, reserved, reserved, join).
+	// Even when a protocol is disabled we still reserve the slot so port
+	// indices are stable; serve will simply not listen on a `0` port.
 	ports := uniqueFreePorts(t, numNodes*6)
 	for i := 0; i < numNodes; i++ {
 		c.HTTPPorts[i] = ports[i]
@@ -119,9 +113,6 @@ func StartCluster(t testing.TB, opts Options) *Cluster {
 		c.JoinPorts[i] = ports[5*numNodes+i]
 		if opts.EnableNFS {
 			c.NFSPorts[i] = ports[2*numNodes+i]
-		}
-		if opts.EnableP9 {
-			c.P9Ports[i] = ports[4*numNodes+i]
 		}
 		dir, err := os.MkdirTemp("", fmt.Sprintf("grainfs-colima-cluster-%d-*", i))
 		if err != nil {
@@ -263,12 +254,6 @@ func (c *Cluster) spawn(t testing.TB, binary string, i int, extraEnv []string) (
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	}
-	if c.P9Ports[i] > 0 {
-		args = append(args,
-			"--9p-bind", "0.0.0.0",
-			"--9p-port", fmt.Sprintf("%d", c.P9Ports[i]),
-		)
-	}
 	cmd := exec.Command(binary, args...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -284,7 +269,7 @@ func (c *Cluster) spawn(t testing.TB, binary string, i int, extraEnv []string) (
 }
 
 // uniqueFreePorts picks n ports where both TCP and UDP are free. The fixture
-// uses TCP for HTTP/NFS/NBD/9P and UDP for QUIC raft, so checking TCP alone can
+// uses TCP for HTTP/NFS and UDP for QUIC raft, so checking TCP alone can
 // choose a port that later fails the raft listener with EADDRINUSE.
 func uniqueFreePorts(t testing.TB, n int) []int {
 	t.Helper()
