@@ -54,8 +54,7 @@ func TestSetObjectTags_ConcurrentRMW_NoLostUpdate(t *testing.T) {
 
 func TestRelocation_HoldsMetaRMWLock(t *testing.T) {
 	b := newTestDistributedBackend(t)
-	lock := b.objectMetaRMWLock("bucket", "obj")
-	lock.Lock() // simulate an in-progress tag RMW holding the lock
+	unlock := b.objectMetaRMWLock("bucket", "obj") // simulate an in-progress tag RMW holding the lock
 	started := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
@@ -73,7 +72,7 @@ func TestRelocation_HoldsMetaRMWLock(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 		// good: blocked on the lock
 	}
-	lock.Unlock()
+	unlock()
 	// now it proceeds (and returns an error for the missing redundant group — fine);
 	// guard against a hang so a regression deadlock fails CI instead of blocking forever.
 	select {

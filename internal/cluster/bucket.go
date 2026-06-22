@@ -449,9 +449,8 @@ func (b *DistributedBackend) SetObjectACLPropose(bucket, key string, acl uint8) 
 	// blob directly (read-modify-write) instead of proposing to data_raft.
 	if b.shardSvc != nil && !storage.IsInternalBucket(bucket) {
 		handled, err := func() (bool, error) {
-			lock := b.objectMetaRMWLock(bucket, key)
-			lock.Lock()
-			defer lock.Unlock() // releases at closure return, BEFORE any fall-through
+			unlock := b.objectMetaRMWLock(bucket, key)
+			defer unlock() // releases at closure return, BEFORE any fall-through
 			cmd, err := b.readQuorumMetaCmd(bucket, key)
 			if err == nil {
 				cmd.ACL = acl
@@ -506,9 +505,8 @@ func (b *DistributedBackend) SetObjectTagsPropose(bucket, key, versionID string,
 			// RMWs for the same object converge on one owner node. A residual
 			// cross-coordinator window exists only during ownership transitions;
 			// that is a pre-existing distributed limitation and is NOT regressed here.
-			lock := b.objectMetaRMWLock(bucket, key)
-			lock.Lock()
-			defer lock.Unlock() // releases at closure return, BEFORE any fall-through
+			unlock := b.objectMetaRMWLock(bucket, key)
+			defer unlock() // releases at closure return, BEFORE any fall-through
 			cmd, err := b.readQuorumMetaCmd(bucket, key)
 			if err == nil {
 				cmd.Tags = append([]storage.Tag(nil), tags...)

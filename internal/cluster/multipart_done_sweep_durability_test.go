@@ -51,6 +51,47 @@ func TestSweepDoneMarkers_KeepsMarkerUntilBlobDurable(t *testing.T) {
 	require.Equal(t, 1, n, "once the per-version blob is durable the marker is sweep-eligible")
 }
 
+// forcedNonLeader wraps a RaftNode and forces IsLeader() to report false, so a
+// test can exercise the follower path of a leader-gated method without standing
+// up a multi-node cluster. All other RaftNode methods delegate to the embedded node.
+type forcedNonLeader struct{ RaftNode }
+
+func (forcedNonLeader) IsLeader() bool { return false }
+
+// TestSweepDoneMarkers_LeaderGated proves the sweep is leader-only: a non-leader
+// node returns early without scanning or deleting (every node holds the fully
+// replicated mpudone: keyspace, so only the leader need scan — followers' work
+// is pure redundancy). Single-node / leader sweeps normally.
+func TestSweepDoneMarkers_LeaderGated(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	const bkt, key = "gatebkt", "mp.bin"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+
+	up, err := b.CreateMultipartUpload(ctx, bkt, key, "application/octet-stream")
+	require.NoError(t, err)
+	part, err := b.UploadPart(ctx, bkt, key, up.UploadID, 1, bytes.NewReader([]byte("payload")), "")
+	require.NoError(t, err)
+	_, err = b.CompleteMultipartUpload(ctx, bkt, key, up.UploadID, []storage.Part{*part})
+	require.NoError(t, err)
+
+	// Non-leader: the gate returns early — no scan, no delete.
+	orig := b.node
+	b.node = forcedNonLeader{orig}
+	n, err := b.SweepStaleMultipartDoneMarkers(ctx, 100, -time.Second)
+	require.NoError(t, err)
+	require.Equal(t, 0, n, "a non-leader must not sweep")
+	marker, err := b.readDoneMarker(up.UploadID)
+	require.NoError(t, err)
+	require.NotNil(t, marker, "non-leader sweep must leave the marker intact")
+
+	// Leader (single-node node restored): the stale marker is swept.
+	b.node = orig
+	n, err = b.SweepStaleMultipartDoneMarkers(ctx, 100, -time.Second)
+	require.NoError(t, err)
+	require.Equal(t, 1, n, "the leader sweeps the stale marker")
+}
+
 // TestSweepDoneMarkers_NonVersionedSweptByAge proves the legacy path is unchanged:
 // a non-versioned done-marker (no meta_blob) is swept purely on the age gate, with
 // no per-version blob probe.

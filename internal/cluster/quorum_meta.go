@@ -438,9 +438,8 @@ func (s *ShardService) writeQuorumMetaLocal(bucket, key string, data []byte) err
 	// Temp create/write/fsync/close above are outside the lock (unique temp name;
 	// no contention there). The existing defer os.Remove(tmpName) still fires on
 	// the guard-skip path because it was registered before the lock is taken.
-	mu := s.quorumMetaTargetLock(target)
-	mu.Lock()
-	defer mu.Unlock()
+	unlock := s.quorumMetaTargetLock(target)
+	defer unlock()
 	// Write-time LWW guard: a blind-writer (e.g. leaderless backfill) must not
 	// clobber a newer on-disk blob. Absent file → no-op (the common case).
 	// Use strict "existing beats candidate" (not "candidate does not beat existing")
@@ -511,9 +510,8 @@ func (s *ShardService) writeQuorumMetaVersionLocal(bucket, versionSubpath string
 	}
 	// Per-target lock: serializes the (guard-read + rename) critical section.
 	// Mirrors writeQuorumMetaLocal — see that function for the full rationale.
-	mu := s.quorumMetaTargetLock(target)
-	mu.Lock()
-	defer mu.Unlock()
+	unlock := s.quorumMetaTargetLock(target)
+	defer unlock()
 	// Write-time LWW guard: a blind-writer (e.g. leaderless backfill) must not
 	// clobber a newer on-disk blob. Absent file → no-op (the common case).
 	// decodeQuorumMetaCmdBlob is a method on *ShardService (the receiver `s` here).

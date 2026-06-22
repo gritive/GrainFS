@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.644.0] - 2026-06-22
+
+### Changed
+- **mpudone GC sweep is now leader-only.** `SweepStaleMultipartDoneMarkers` (the scrubber's periodic GC of
+  stale multipart-done idempotency markers) returns early on non-leaders. Correctness never required every
+  node to run it — each node's deletes forward to the raft leader, who dedups — but the `mpudone:` keyspace
+  is fully replicated meta-Raft state, so the leader already holds every marker. Letting followers also scan
+  the whole keyspace and run the per-version blob-durability probes (FS/peer reads) each cycle was pure
+  N-way redundant work. Single-node mode is unaffected.
+- **Per-key lock maps are now memory-bounded.** The `shardLocks` (ReadShard/WriteShard), `objectMetaRMWLocks`
+  (tag/ACL/relocation quorum-meta RMW), and `quorumMetaTargetLocks` (leaf-writer LWW-guard + rename) maps
+  previously stored one `sync.RWMutex` per `(bucket,key)` / target ever seen and never evicted — an unbounded
+  leak on a long-running process. They now use a shared refcounted `keyedRWMutex` that reclaims a key's lock
+  once the last holder releases, bounding memory to currently-held keys while preserving exact per-key
+  serialization (no striping / false contention) and mutual exclusion. No behavior change.
+
 ## [0.0.643.0] - 2026-06-22
 
 ### Changed

@@ -73,7 +73,7 @@ type ShardService struct {
 	// and then race on the rename — allowing a lower-priority blob to land last
 	// and clobber the true LWW winner. The temp-create/write/fsync/close steps
 	// remain outside the lock (each writer uses a unique temp name; no contention).
-	quorumMetaTargetLocks pool.SyncMap[string, *sync.Mutex]
+	quorumMetaTargetLocks keyedRWMutex // per-target write lock (refcounted, bounded)
 }
 
 // ShardServiceOption is a functional option for ShardService.
@@ -158,13 +158,13 @@ func (s *ShardService) DataDirs() []string {
 	return s.dataDirs
 }
 
-// quorumMetaTargetLock returns the per-target Mutex that serializes the
-// (LWW guard-read + os.Rename) critical section in the leaf writers. Mirrors
-// DistributedBackend.objectMetaRMWLock: LoadOrStore is atomic so concurrent
-// callers always converge on a single Mutex per target path.
-func (s *ShardService) quorumMetaTargetLock(target string) *sync.Mutex {
-	v, _ := s.quorumMetaTargetLocks.LoadOrStore(target, &sync.Mutex{})
-	return v
+// quorumMetaTargetLock takes the per-target write lock that serializes the
+// (LWW guard-read + os.Rename) critical section in the leaf writers and returns
+// an unlock closure. Mirrors DistributedBackend.objectMetaRMWLock: concurrent
+// callers converge on a single lock per target path, and the lock is reclaimed
+// once the last holder releases (bounded memory).
+func (s *ShardService) quorumMetaTargetLock(target string) func() {
+	return s.quorumMetaTargetLocks.lockWrite(target)
 }
 
 // getShardDir resolves the on-disk directory for an object's shard and rejects

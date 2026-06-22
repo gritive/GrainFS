@@ -17,7 +17,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gritive/GrainFS/internal/scrubber"
@@ -29,17 +28,11 @@ import (
 // this backend instance only. Lock state lives on the backend so multiple
 // backends in the same process (tests, future multi-tenant) do not alias.
 func (b *DistributedBackend) acquireShardWriteLock(bucket, key string) func() {
-	lockKey := bucket + "\x00" + key
-	mu, _ := b.shardLocks.LoadOrStore(lockKey, &sync.RWMutex{})
-	mu.Lock()
-	return func() { mu.Unlock() }
+	return b.shardLocks.lockWrite(bucket + "\x00" + key)
 }
 
 func (b *DistributedBackend) acquireShardReadLock(bucket, key string) func() {
-	lockKey := bucket + "\x00" + key
-	mu, _ := b.shardLocks.LoadOrStore(lockKey, &sync.RWMutex{})
-	mu.RLock()
-	return func() { mu.RUnlock() }
+	return b.shardLocks.lockRead(bucket + "\x00" + key)
 }
 
 // ScanObjects streams one scrubber.ObjectRecord per live EC object in the
