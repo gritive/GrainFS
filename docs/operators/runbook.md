@@ -737,6 +737,28 @@ Walk/delete errors > 0 indicates filesystem permission or I/O issues.
 
 ---
 
+### Issue: CompleteMultipartUpload retry returns `ErrUploadNotFound` after ~24h
+
+**Symptoms:** a client (or a Raft replay) re-issues `CompleteMultipartUpload`
+for an upload that already completed successfully, and instead of the idempotent
+success it gets `ErrUploadNotFound`.
+
+**Diagnosis:** completion idempotency is provided by a durable `mpudone:` marker.
+The scrubber's mpudone GC sweep expires those markers after **24h**
+(`EnableMultipartDoneSweep(256, 24*time.Hour)`; the marker keyspace would be
+unbounded without it). A duplicate complete arriving **more than 24h** after the
+original success is therefore no longer idempotency-protected and returns
+`ErrUploadNotFound`.
+
+**Fix / expectation:** this is by design — 24h conservatively outlives realistic
+client retries and Raft replay windows, so legitimate retries are always covered.
+A complete arriving >24h later indicates a stuck client or an unusually long
+replay, not data loss: the object that the first complete produced is unaffected.
+No operator action is required; do not lengthen the retention to mask a
+misbehaving client.
+
+---
+
 ### Issue: hard-deleted version reappears in LIST / HEAD ?versionId (versioned buckets)
 
 **Symptoms:** on a versioning-enabled bucket, a version you removed with
