@@ -108,8 +108,8 @@ func TestAllowFailsClosedOnMalformedPolicy(t *testing.T) {
 func TestSetClearsNegativeCache(t *testing.T) {
 	cs := NewCompiledPolicyStore()
 	cs.SetLoader(func(string) ([]byte, bool, error) { return nil, false, nil })
-	require.True(t, cs.Allow(context.Background(), inp("AKIA", s3auth.PutObject, "b", "k"))) // negative-cached
-	require.NoError(t, cs.Set("b", denyPutPolicy(t, "b")))                                   // write-path Set on same node
+	require.True(t, cs.Allow(context.Background(), inp("AKIA", s3auth.PutObject, "b", "k")))  // negative-cached
+	require.NoError(t, cs.Set("b", denyPutPolicy(t, "b")))                                    // write-path Set on same node
 	require.False(t, cs.Allow(context.Background(), inp("AKIA", s3auth.PutObject, "b", "k"))) // Deny now enforced, no Invalidate needed
 }
 
@@ -124,7 +124,7 @@ func TestInvalidateTightensCachedAllowToDeny(t *testing.T) {
 	})
 	require.True(t, cs.Allow(context.Background(), inp("AKIA", s3auth.PutObject, "b", "k"))) // no policy → allow + negative-cache
 	deny = true
-	cs.Invalidate("b")                                                                       // policy tightened on another node (apply-hook)
+	cs.Invalidate("b")                                                                        // policy tightened on another node (apply-hook)
 	require.False(t, cs.Allow(context.Background(), inp("AKIA", s3auth.PutObject, "b", "k"))) // re-pull → Deny enforced
 }
 
@@ -180,7 +180,7 @@ func TestInvalidateDuringInflightPullDropsStaleResult(t *testing.T) {
 	deny = true
 	cs.Invalidate("b") // tighten while the pull holds the old view
 	close(release)
-	<-done                                                                                   // the in-flight pull may return allow for ITS request...
+	<-done                                                                                    // the in-flight pull may return allow for ITS request...
 	require.False(t, cs.Allow(context.Background(), inp("AKIA", s3auth.PutObject, "b", "k"))) // ...but the stale result must not have been cached
 }
 
