@@ -4,20 +4,6 @@
 
 ### Bucket-delete config cascade follow-ups (PR: fix-bucket-delete-config-cascade)
 
-- **[P2][deferred] delete→recreate concurrency race in the bucket-delete config cascade.** The cascade
-  (`cascadeBucketConfigAfterDelete`, internal/server/admin/handlers_bucket_config_cleanup.go) deletes the
-  lifecycle config (`lifecycle:{bucket}`, meta-Raft) and IAM bucket-upstream (meta-Raft) keyed by bucket
-  NAME, synchronously after the data-Raft bucket delete. A different client that recreates the same-name
-  bucket AND writes fresh config inside the sub-millisecond window between the data-Raft delete and the
-  cascade propose would have that fresh config wiped. Window is tiny (the recreate needs 2 raft
-  round-trips to beat the cascade's single propose), and the same race already existed in the (now
-  removed) NFS-export cascade. Strictly better than the prior status quo (unconditional config leak).
-  Deferred by decision (2026-06-22) — ship the cascade now, fence later. **Recommended fix when taken:**
-  per-record generation + CAS-on-delete (size S, no cross-Raft coupling): each config put stamps
-  `gen=prev+1`; the admin handler captures the observed gen before deleting; the cascade-delete carries
-  it; apply deletes iff `stored.gen == observed`. A true bucket-incarnation token is L/EPIC (no reusable
-  bucket identity exists — the data-Raft bucket record is literally `{}`; data-Raft and meta-Raft cannot
-  read each other), so generation-CAS dominates it.
 - **[P3] Mixed `--lifecycle-interval` clusters.** The lifecycle-delete cascade is gated per-node on
   `LifecycleInterval > 0` (matches the lifecycle-store-wiring condition; default `1h`). A deliberately
   mixed cluster (some nodes `0`, some `>0`) could route an admin delete to a `0` node and skip the
