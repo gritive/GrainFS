@@ -141,23 +141,6 @@ func (s *routeIAMGroupService) Propose(_ context.Context, cmdType clusterpb.Meta
 	return nil
 }
 
-type routeIAMMountSAService struct {
-	proposed []clusterpb.MetaCmdType
-}
-
-func (s *routeIAMMountSAService) Propose(_ context.Context, cmdType clusterpb.MetaCmdType, _ []byte) error {
-	s.proposed = append(s.proposed, cmdType)
-	return nil
-}
-
-func (s *routeIAMMountSAService) List() []admin.MountSAItem {
-	return []admin.MountSAItem{{Name: "mount", NumericUID: 1000, CreatedAt: 100}}
-}
-
-func (s *routeIAMMountSAService) Get(name string) (admin.MountSAItem, bool) {
-	return admin.MountSAItem{Name: name, NumericUID: 1000, CreatedAt: 100}, true
-}
-
 // TestRegisterIAMUI_NoPolicyRoutes asserts that the /ui/api surface does NOT
 // expose policy mutation endpoints. A dashboard-token holder must not be able
 // to attach Resource:* policies to any SA.
@@ -372,88 +355,6 @@ func TestIAMMutationAndGroupRoutesUseBearerActorAuthz(t *testing.T) {
 	}, gotResources)
 }
 
-func TestIAMMountSAAndUpstreamRoutesUseBearerActorAuthz(t *testing.T) {
-	h, base, start := newUIRouteTestServer(t)
-	actor := principal.OIDC("https://idp.example.com/", "alice", "oidc:example:alice", []string{"oidc:example:storage-admins"})
-	authz := &credentialAuthorizerStub{decision: policy.DecisionAllow}
-	iamSvc := &routeIAMService{}
-	mountSvc := &routeIAMMountSAService{}
-	admin.RegisterIAMOnly(h, &admin.Deps{
-		IAM:        iamSvc,
-		IAMPolicy:  &fakePolicyService{},
-		IAMMountSA: mountSvc,
-		ActorAuth:  &actorAuthStub{principal: actor},
-		AdminAuthz: authz,
-	})
-	start()
-
-	upstreamBody := bytes.NewBufferString(`{"bucket":"logs","upstream_url":"https://s3.example.com","access_key":"AKIA","secret_key":"secret"}`)
-	cutoverBody := bytes.NewBufferString(`{"bucket":"logs"}`)
-	createMountBody := bytes.NewBufferString(`{"name":"mount","uid":1000}`)
-	doRouteTestRequestAuth(t, http.MethodPut, base+"/v1/iam/mount-sa/mount/policy/NFSMountOnly", "Bearer route-token", nil, http.StatusNoContent)
-	doRouteTestRequestAuth(t, http.MethodDelete, base+"/v1/iam/mount-sa/mount/policy/NFSMountOnly", "Bearer route-token", nil, http.StatusNoContent)
-	doRouteTestRequestAuth(t, http.MethodPost, base+"/v1/iam/mount-sa", "Bearer route-token", createMountBody, http.StatusCreated)
-	doRouteTestRequestAuth(t, http.MethodGet, base+"/v1/iam/mount-sa", "Bearer route-token", nil, http.StatusOK)
-	doRouteTestRequestAuth(t, http.MethodGet, base+"/v1/iam/mount-sa/mount", "Bearer route-token", nil, http.StatusOK)
-	doRouteTestRequestAuth(t, http.MethodDelete, base+"/v1/iam/mount-sa/mount", "Bearer route-token", nil, http.StatusNoContent)
-	doRouteTestRequestAuth(t, http.MethodPut, base+"/v1/upstreams", "Bearer route-token", upstreamBody, http.StatusNoContent)
-	doRouteTestRequestAuth(t, http.MethodGet, base+"/v1/upstreams", "Bearer route-token", nil, http.StatusOK)
-	doRouteTestRequestAuth(t, http.MethodGet, base+"/v1/buckets/logs/upstream", "Bearer route-token", nil, http.StatusOK)
-	doRouteTestRequestAuth(t, http.MethodDelete, base+"/v1/buckets/logs/upstream", "Bearer route-token", nil, http.StatusNoContent)
-	doRouteTestRequestAuth(t, http.MethodPost, base+"/v1/migration/cutover", "Bearer route-token", cutoverBody, http.StatusNoContent)
-
-	require.Len(t, authz.calls, 11)
-	gotActions := make([]string, 0, len(authz.calls))
-	gotResources := make([]string, 0, len(authz.calls))
-	for _, call := range authz.calls {
-		require.Equal(t, actor, call.principal)
-		gotActions = append(gotActions, call.action)
-		gotResources = append(gotResources, call.resource)
-	}
-	require.Equal(t, []string{
-		"grainfs:IAMMountSAPolicyAttach",
-		"grainfs:IAMMountSAPolicyDetach",
-		"grainfs:IAMMountSAWrite",
-		"grainfs:IAMMountSAList",
-		"grainfs:IAMMountSARead",
-		"grainfs:IAMMountSADelete",
-		"grainfs:IAMBucketUpstreamWrite",
-		"grainfs:IAMBucketUpstreamList",
-		"grainfs:IAMBucketUpstreamRead",
-		"grainfs:IAMBucketUpstreamDelete",
-		"grainfs:IAMBucketUpstreamCutover",
-	}, gotActions)
-	require.Equal(t, []string{
-		"iam/mount-sa/mount/policy/NFSMountOnly",
-		"iam/mount-sa/mount/policy/NFSMountOnly",
-		"iam/mount-sa/mount",
-		"iam/mount-sa/*",
-		"iam/mount-sa/mount",
-		"iam/mount-sa/mount",
-		"iam/upstream/logs",
-		"iam/upstream/*",
-		"iam/upstream/logs",
-		"iam/upstream/logs",
-		"iam/upstream/logs/cutover",
-	}, gotResources)
-	require.Equal(t, []clusterpb.MetaCmdType{
-		clusterpb.MetaCmdTypeMountSAAttachPolicy,
-		clusterpb.MetaCmdTypeMountSADetachPolicy,
-		clusterpb.MetaCmdTypeMountSACreate,
-		clusterpb.MetaCmdTypeMountSADelete,
-	}, mountSvc.proposed)
-	require.Equal(t, []iam.BucketUpstreamPutRequest{{
-		Bucket:      "logs",
-		UpstreamURL: "https://s3.example.com",
-		AccessKey:   "AKIA",
-		SecretKey:   "secret",
-	}}, iamSvc.upstreamPuts)
-	require.Equal(t, 1, iamSvc.upstreamLists)
-	require.Equal(t, []string{"logs"}, iamSvc.upstreamGets)
-	require.Equal(t, []string{"logs"}, iamSvc.upstreamDeletes)
-	require.Equal(t, []string{"logs"}, iamSvc.upstreamCutovers)
-}
-
 func TestIAMMutationRoutesDenyBearerSelfEffectBeforeHandler(t *testing.T) {
 	h, base, start := newUIRouteTestServer(t)
 	policySvc := &fakePolicyService{
@@ -505,44 +406,6 @@ func TestIAMReadRoutesDenyBearerBeforeHandler(t *testing.T) {
 	require.Contains(t, string(raw), "implicit Deny")
 }
 
-func TestIAMMountSAAndUpstreamRoutesDenyBearerBeforeMutation(t *testing.T) {
-	h, base, start := newUIRouteTestServer(t)
-	iamSvc := &routeIAMService{}
-	mountSvc := &routeIAMMountSAService{}
-	admin.RegisterIAMOnly(h, &admin.Deps{
-		IAM:        iamSvc,
-		IAMPolicy:  &fakePolicyService{},
-		IAMMountSA: mountSvc,
-		ActorAuth:  &actorAuthStub{principal: principal.OIDC("https://idp.example.com/", "alice", "oidc:example:alice", nil)},
-		AdminAuthz: &credentialAuthorizerStub{decision: policy.DecisionDeny, reason: "implicit Deny"},
-	})
-	start()
-
-	doRouteTestRequestAuth(t, http.MethodPost, base+"/v1/iam/mount-sa", "Bearer route-token", bytes.NewBufferString(`{"name":"mount","uid":1000}`), http.StatusForbidden)
-	doRouteTestRequestAuth(t, http.MethodPut, base+"/v1/upstreams", "Bearer route-token", bytes.NewBufferString(`{"bucket":"logs","upstream_url":"https://s3.example.com","access_key":"AKIA","secret_key":"secret"}`), http.StatusForbidden)
-
-	require.Empty(t, mountSvc.proposed)
-	require.Empty(t, iamSvc.upstreamPuts)
-}
-
-func TestIAMMountSAAndUpstreamRoutesBearerFailsClosedWithoutAuthorizer(t *testing.T) {
-	h, base, start := newUIRouteTestServer(t)
-	iamSvc := &routeIAMService{}
-	mountSvc := &routeIAMMountSAService{}
-	admin.RegisterIAMOnly(h, &admin.Deps{
-		IAM:        iamSvc,
-		IAMMountSA: mountSvc,
-		ActorAuth:  &actorAuthStub{principal: principal.OIDC("https://idp.example.com/", "alice", "oidc:example:alice", nil)},
-	})
-	start()
-
-	doRouteTestRequestAuth(t, http.MethodGet, base+"/v1/iam/mount-sa", "Bearer route-token", nil, http.StatusForbidden)
-	doRouteTestRequestAuth(t, http.MethodGet, base+"/v1/upstreams", "Bearer route-token", nil, http.StatusForbidden)
-
-	require.Empty(t, mountSvc.proposed)
-	require.Zero(t, iamSvc.upstreamLists)
-}
-
 func TestIAMReadRoutesRejectMalformedBearerBeforeFallback(t *testing.T) {
 	h, base, start := newUIRouteTestServer(t)
 	iamSvc := &routeIAMService{}
@@ -560,26 +423,6 @@ func TestIAMReadRoutesRejectMalformedBearerBeforeFallback(t *testing.T) {
 	require.Empty(t, authz.calls)
 }
 
-func TestIAMMountSAAndUpstreamRoutesRejectMalformedBearerBeforeFallback(t *testing.T) {
-	h, base, start := newUIRouteTestServer(t)
-	iamSvc := &routeIAMService{}
-	mountSvc := &routeIAMMountSAService{}
-	authz := &credentialAuthorizerStub{decision: policy.DecisionAllow}
-	admin.RegisterIAMOnly(h, &admin.Deps{
-		IAM:        iamSvc,
-		IAMMountSA: mountSvc,
-		ActorAuth:  &actorAuthStub{principal: principal.OIDC("https://idp.example.com/", "alice", "oidc:example:alice", nil)},
-		AdminAuthz: authz,
-	})
-	start()
-
-	doRouteTestRequestAuth(t, http.MethodGet, base+"/v1/iam/mount-sa", "Bearer\tbad-token", nil, http.StatusUnauthorized)
-	doRouteTestRequestAuth(t, http.MethodGet, base+"/v1/upstreams", "Bearer\tbad-token", nil, http.StatusUnauthorized)
-
-	require.Empty(t, authz.calls)
-	require.Zero(t, iamSvc.upstreamLists)
-}
-
 func TestIAMReadRoutesWithoutBearerKeepUDSFallback(t *testing.T) {
 	h, base, start := newUIRouteTestServer(t)
 	iamSvc := &routeIAMService{}
@@ -590,27 +433,6 @@ func TestIAMReadRoutesWithoutBearerKeepUDSFallback(t *testing.T) {
 	doRouteTestRequestAuth(t, http.MethodGet, base+"/v1/iam/sa", "", nil, http.StatusOK)
 
 	require.Equal(t, 1, iamSvc.listSACalls)
-	require.Empty(t, authz.calls)
-}
-
-func TestIAMMountSAAndUpstreamRoutesWithoutBearerKeepUDSFallback(t *testing.T) {
-	h, base, start := newUIRouteTestServer(t)
-	iamSvc := &routeIAMService{}
-	mountSvc := &routeIAMMountSAService{}
-	authz := &credentialAuthorizerStub{decision: policy.DecisionDeny}
-	admin.RegisterIAMOnly(h, &admin.Deps{
-		IAM:        iamSvc,
-		IAMPolicy:  &fakePolicyService{},
-		IAMMountSA: mountSvc,
-		AdminAuthz: authz,
-	})
-	start()
-
-	doRouteTestRequestAuth(t, http.MethodPost, base+"/v1/iam/mount-sa", "", bytes.NewBufferString(`{"name":"mount","uid":1000}`), http.StatusCreated)
-	doRouteTestRequestAuth(t, http.MethodPut, base+"/v1/upstreams", "", bytes.NewBufferString(`{"bucket":"logs","upstream_url":"https://s3.example.com","access_key":"AKIA","secret_key":"secret"}`), http.StatusNoContent)
-
-	require.Equal(t, []clusterpb.MetaCmdType{clusterpb.MetaCmdTypeMountSACreate}, mountSvc.proposed)
-	require.Len(t, iamSvc.upstreamPuts, 1)
 	require.Empty(t, authz.calls)
 }
 

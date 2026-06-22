@@ -7,7 +7,6 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/iam/builtin"
-	"github.com/gritive/GrainFS/internal/iam/mountsastore"
 	"github.com/gritive/GrainFS/internal/iam/policy"
 )
 
@@ -138,40 +137,6 @@ func AttachPolicyToSA(ctx context.Context, d *Deps, policyName, saID string) err
 		return err
 	}
 	return d.IAMPolicy.Propose(ctx, clusterpb.MetaCmdTypePolicyAttachToSAPut, payload)
-}
-
-// AttachPolicyToMountSA attaches a policy to a MountSA (NFS/9P principal) via Raft.
-// It rejects policies that contain S3/Iceberg actions or wildcards to enforce
-// cross-namespace isolation.
-func AttachPolicyToMountSA(ctx context.Context, d *Deps, policyName, mountSA string) error {
-	if d.IAMMountSA == nil {
-		return NewInternal("iam mount-sa admin disabled")
-	}
-	if policyName == "" || mountSA == "" {
-		return NewInvalid("policy and mount_sa are required")
-	}
-	// Cross-namespace pre-check: reject non-mount actions on MountSA policies.
-	if d.IAMPolicy != nil {
-		if raw, err := d.IAMPolicy.PolicyDoc(ctx, policyName); err == nil && raw != nil {
-			if nsErr := policy.ValidateForMountSAAttach(string(raw)); nsErr != nil {
-				return NewForbidden(fmt.Sprintf("cross-namespace attach rejected: %v", nsErr))
-			}
-		}
-	}
-	payload := mountsastore.EncodeAttachPolicyPayload(mountSA, policyName)
-	return d.IAMMountSA.Propose(ctx, clusterpb.MetaCmdTypeMountSAAttachPolicy, payload)
-}
-
-// DetachPolicyFromMountSA detaches a policy from a MountSA via Raft.
-func DetachPolicyFromMountSA(ctx context.Context, d *Deps, policyName, mountSA string) error {
-	if d.IAMMountSA == nil {
-		return NewInternal("iam mount-sa admin disabled")
-	}
-	if policyName == "" || mountSA == "" {
-		return NewInvalid("policy and mount_sa are required")
-	}
-	payload := mountsastore.EncodeDetachPolicyPayload(mountSA, policyName)
-	return d.IAMMountSA.Propose(ctx, clusterpb.MetaCmdTypeMountSADetachPolicy, payload)
 }
 
 // DetachPolicyFromSA detaches a policy from a ServiceAccount via Raft.

@@ -77,30 +77,6 @@ func registerIAM(g router, d *Deps) {
 		resource: iamGroupPolicyResource,
 		guard:    denyGroupIfSelfEffective,
 	})
-	mountSAListAuthz := adminRouteAuthzMiddleware(d, adminRouteAuthzSpec{
-		action:   "grainfs:IAMMountSAList",
-		resource: iamMountSAResource,
-	})
-	mountSAReadAuthz := adminRouteAuthzMiddleware(d, adminRouteAuthzSpec{
-		action:   "grainfs:IAMMountSARead",
-		resource: iamMountSAResource,
-	})
-	mountSAWriteAuthz := adminRouteAuthzMiddleware(d, adminRouteAuthzSpec{
-		action:   "grainfs:IAMMountSAWrite",
-		resource: iamMountSAResource,
-	})
-	mountSADeleteAuthz := adminRouteAuthzMiddleware(d, adminRouteAuthzSpec{
-		action:   "grainfs:IAMMountSADelete",
-		resource: iamMountSAResource,
-	})
-	mountSAPolicyAttachAuthz := adminRouteAuthzMiddleware(d, adminRouteAuthzSpec{
-		action:   "grainfs:IAMMountSAPolicyAttach",
-		resource: iamMountSAPolicyResource,
-	})
-	mountSAPolicyDetachAuthz := adminRouteAuthzMiddleware(d, adminRouteAuthzSpec{
-		action:   "grainfs:IAMMountSAPolicyDetach",
-		resource: iamMountSAPolicyResource,
-	})
 	upstreamListAuthz := adminRouteAuthzMiddleware(d, adminRouteAuthzSpec{
 		action:   "grainfs:IAMBucketUpstreamList",
 		resource: iamBucketUpstreamResource,
@@ -146,14 +122,6 @@ func registerIAM(g router, d *Deps) {
 	g.DELETE(routePathIAMGroupPolicyAttach, actor, groupPolicyDetachAuthz, iamGroupPolicyDetachHandler(d))
 	g.PUT(routePathIAMGroupByName, actor, groupWriteAuthz, iamGroupPutHandler(d))
 	g.DELETE(routePathIAMGroupByName, actor, groupDeleteAuthz, iamGroupDeleteHandler(d))
-	// MountSA (create/delete/policy-attach/detach + list/get)
-	// Policy sub-path (:name/policy/:policy) must be registered before bare :name.
-	g.PUT(routePathIAMMountSAPolicyAttach, actor, mountSAPolicyAttachAuthz, iamMountSAPolicyAttachHandler(d))
-	g.DELETE(routePathIAMMountSAPolicyAttach, actor, mountSAPolicyDetachAuthz, iamMountSAPolicyDetachHandler(d))
-	g.POST(routePathIAMMountSA, actor, mountSAWriteAuthz, iamMountSAPostHandler(d))
-	g.GET(routePathIAMMountSA, actor, mountSAListAuthz, iamMountSAListHandler(d))
-	g.GET(routePathIAMMountSAByName, actor, mountSAReadAuthz, iamMountSAGetHandler(d))
-	g.DELETE(routePathIAMMountSAByName, actor, mountSADeleteAuthz, iamMountSADeleteHandler(d))
 	// Bucket upstream (PUT upsert -> 204). Routes under /upstreams (not
 	// /buckets/upstream) to avoid Hertz static-beats-param collision with
 	// GET /buckets/:name used by AdminGetBucket.
