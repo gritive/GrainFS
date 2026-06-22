@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.635.0] - 2026-06-22
+
+### Fixed
+- **Bucket delete now cascades to per-bucket meta-Raft config.** Deleting a bucket (admin UDS) also
+  deletes its lifecycle configuration (`lifecycle:{bucket}`) and IAM bucket-upstream record. These live
+  on the meta-Raft, outside the data-Raft bucket keyspace that `applyDeleteBucket` clears, so they
+  previously leaked into a recreated same-name bucket. The cascade runs only once the bucket is
+  confirmed gone (delete succeeded, or already absent) and never strips a surviving bucket's config
+  (a non-empty bucket that fails to delete keeps its config). The lifecycle-delete proposer is gated on
+  the same condition that wires the lifecycle store (`--lifecycle-interval > 0`, default `1h`), so a
+  lifecycle-disabled node does not fail bucket deletes. A narrow delete-then-recreate concurrency race
+  (sub-millisecond window) is tracked as a follow-up.
+
 ## [0.0.634.0] - 2026-06-21
 
 ### Removed

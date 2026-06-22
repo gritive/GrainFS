@@ -130,11 +130,17 @@ func AdminDeleteBucket(ctx context.Context, d *Deps, name string, force bool) er
 		err = d.Buckets.DeleteBucket(ctx, name)
 	}
 	if err == nil {
-		return cascadeNfsExportAfterBucketDelete(ctx, d, name, force, hadNfsExport)
+		if nfsErr := cascadeNfsExportAfterBucketDelete(ctx, d, name, force, hadNfsExport); nfsErr != nil {
+			return nfsErr
+		}
+		return cascadeBucketConfigAfterDelete(ctx, d, name)
 	}
 	if errors.Is(err, storage.ErrBucketNotFound) {
-		if err := cascadeNfsExportAfterMissingBucket(ctx, d, name, force, hadNfsExport); err != nil {
-			return err
+		if cascadeErr := cascadeNfsExportAfterMissingBucket(ctx, d, name, force, hadNfsExport); cascadeErr != nil {
+			return cascadeErr
+		}
+		if cfgErr := cascadeBucketConfigAfterDelete(ctx, d, name); cfgErr != nil {
+			return cfgErr
 		}
 		return NewNotFound("bucket not found")
 	}

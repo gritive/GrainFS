@@ -122,6 +122,21 @@ type BucketWithPolicyProposer interface {
 	ProposeCreateBucketWithPolicyAttach(ctx context.Context, bucket, sa, policy string) error
 }
 
+// LifecycleDeleteProposer proposes a meta-Raft delete of a bucket's lifecycle
+// configuration. The bucket-delete cascade uses it so a recreated same-name
+// bucket does not inherit stale lifecycle config. Implemented by
+// cluster.LifecycleProposer.
+type LifecycleDeleteProposer interface {
+	ProposeLifecycleDelete(ctx context.Context, bucket string) error
+}
+
+// BucketUpstreamDeleteProposer proposes a meta-Raft delete of a bucket's IAM
+// upstream (read-through federation) record, for the same bucket-delete
+// cascade. Implemented by iam.MetaProposer.
+type BucketUpstreamDeleteProposer interface {
+	ProposeBucketUpstreamDelete(ctx context.Context, bucket string) error
+}
+
 // IAMGroupService is the slim interface group admin handlers need.
 // Kept separate from IAMPolicyService because group operations use distinct
 // Raft MetaCmdTypes (52-55, 58-59) and distinct FSM stores. nil disables

@@ -123,22 +123,24 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 			WarnRatio:     cfg.VlogWarnRatio,
 			CriticalRatio: cfg.VlogCriticalRatio,
 		}),
-		IAM:                  state.iamAdminAPI,
-		IcebergConfig:        newIcebergConfigAdapter(state.cfg.IAMStore),
-		IAMPolicy:            iamPolicyAdminService(state),
-		IAMGroup:             iamGroupAdminService(state),
-		IAMMountSA:           iamMountSAAdminService(state),
-		BucketWithPolicyProp: state.iamProposer,
-		ConfigProposer:       state.metaRaft,
-		ConfigStore:          state.cfgStore,
-		Buckets:              storage.NewOperations(state.backend),
-		NfsExports:           &admin.NfsExportServiceAdapter{Svc: state.nfsExportSvc},
-		ProtocolCredentials:  state.protocolCredentials,
-		ProtocolCredAuthz:    protocolCredentialAuthorizer(state),
-		AdminAuthz:           adminAuthorizer(state, "admin"),
-		ActorAuth:            newOIDCActorAuthenticator(state.cfgStore),
-		Protocols:            storageProtocolStatusFromConfig(cfg),
-		PDPTokens:            ensurePDPTokenSource(state),
+		IAM:                      state.iamAdminAPI,
+		IcebergConfig:            newIcebergConfigAdapter(state.cfg.IAMStore),
+		IAMPolicy:                iamPolicyAdminService(state),
+		IAMGroup:                 iamGroupAdminService(state),
+		IAMMountSA:               iamMountSAAdminService(state),
+		BucketWithPolicyProp:     state.iamProposer,
+		LifecycleDeleteProp:      lifecycleDeleteProposer(state),
+		BucketUpstreamDeleteProp: bucketUpstreamDeleteProposer(state),
+		ConfigProposer:           state.metaRaft,
+		ConfigStore:              state.cfgStore,
+		Buckets:                  storage.NewOperations(state.backend),
+		NfsExports:               &admin.NfsExportServiceAdapter{Svc: state.nfsExportSvc},
+		ProtocolCredentials:      state.protocolCredentials,
+		ProtocolCredAuthz:        protocolCredentialAuthorizer(state),
+		AdminAuthz:               adminAuthorizer(state, "admin"),
+		ActorAuth:                newOIDCActorAuthenticator(state.cfgStore),
+		Protocols:                storageProtocolStatusFromConfig(cfg),
+		PDPTokens:                ensurePDPTokenSource(state),
 	}
 	if state.auditSearcher != nil {
 		state.adminDeps.AuditQuery = state.auditSearcher
@@ -320,6 +322,42 @@ func ensureProtocolCredentialStore(state *bootState) *protocred.Store {
 		state.metaRaft.FSM().SetProtocolCredentialStore(state.protocolCredentialStore)
 	}
 	return state.protocolCredentialStore
+}
+
+// lifecycleCascadeEnabled reports whether the bucket-delete cascade may propose
+// a lifecycle-delete. It must match the condition under which the lifecycle
+// store is wired into the MetaFSM (boot_phases_srvopts.go:261-274,
+// cfg.LifecycleInterval > 0): when the store is unwired, applyBucketLifecycleDelete
+// returns an error (meta_fsm_exports.go:53) that MetaRaft.Propose surfaces, which
+// would break every bucket delete. When unwired no lifecycle config can exist
+// (PutBucketLifecycle shares the same nil-store guard), so skipping is correct.
+func lifecycleCascadeEnabled(metaRaftPresent bool, lifecycleInterval time.Duration) bool {
+	return metaRaftPresent && lifecycleInterval > 0
+}
+
+// lifecycleDeleteProposer returns a meta-Raft lifecycle-delete proposer for the
+// bucket-delete cascade, or nil (untyped) when lifecycle is not wired — so the
+// cascade no-ops rather than proposing a delete that would fail apply.
+func lifecycleDeleteProposer(state *bootState) admin.LifecycleDeleteProposer {
+	if !lifecycleCascadeEnabled(state.metaRaft != nil, state.cfg.LifecycleInterval) {
+		return nil
+	}
+	return &cluster.LifecycleProposer{Propose: state.metaRaft.Propose}
+}
+
+// bucketUpstreamDeleteProposer returns the IAM bucket-upstream-delete proposer
+// for the bucket-delete cascade, or nil when IAM is not wired. Returning the
+// concrete *iam.MetaProposer directly when it is nil would box a typed-nil into
+// the interface (non-nil interface, defeating the `!= nil` guard), so guard
+// explicitly. (The pre-existing `BucketWithPolicyProp: state.iamProposer` line
+// has this same latent typed-nil, but boot_phases_backend.go fails boot when
+// IAMStore is absent, so it is unreachable on the serve path today — this guard
+// is defensive, not load-bearing.)
+func bucketUpstreamDeleteProposer(state *bootState) admin.BucketUpstreamDeleteProposer {
+	if state.iamProposer == nil {
+		return nil
+	}
+	return state.iamProposer
 }
 
 func storageProtocolStatusFromConfig(cfg Config) adminapi.StorageProtocolStatusResp {
