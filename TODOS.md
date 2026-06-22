@@ -23,13 +23,33 @@ dead references remain. Three dependency-ordered, independently-shippable slices
   buffer-*`, NFS tests/colima/Makefile/bench, NFS docs. ~20.5k LOC removed. **Deferred to Slice C** (kept
   dormant): the `NfsExportCreate` compat capability/operation (used as a generic example capability by
   gossip/meta_raft/iceberg tests — removing it needs test migration). Mount-SA layer + S3/Iceberg untouched.
-- **Slice C — shared mount-infra teardown + NBD dead sweep.** `internal/iam/mountsastore`, the
-  `MountSA*` meta-Raft commands + snapshot fields + `handlers_mountsa` + `PrincipalTypeMount` + `cross_namespace`
-  mountActions + `NFSMountOnly`/`grainfs:NFSMount`; the dormant `NfsExportCreate` compat capability/operation
-  (`compat.CapabilityNfsExportCreateV1`/`OperationNfsExportCreate`, `CompatOperation.NfsExportCreate`,
-  `meta_forward` mappings) + migrate the generic capability tests onto a surviving capability
-  (e.g. `CapabilityMultipartListingV1`); the NBD dead refs (`DomainNBD` AAD constant, `"nbd"`/`"nbd/volume"`/`"volume"`
-  + `"nfs"`/`"nfs/bucket"` policy entries, NFS/NBD comments). Only after B (both NFS+9P now gone — unblocked).
+- **Slice C — DONE (branch `remove-mount-sa-slice-c`, v0.0.638.0, 6 task commits + release, PR pending).**
+  Removed `internal/iam/mountsastore`, the `MountSA*` meta-Raft commands + snapshot fields + `handlers_mountsa`
+  + `PrincipalTypeMount` (collapsed `PrincipalType` to single S3 value) + `cross_namespace` mountActions +
+  `NFSMountOnly`/`grainfs:NFSMount` + the policyattach MountSA layer; the dormant `NfsExportCreate` compat
+  capability/operation (migrated the generic gate tests onto the surviving `CapabilityMigrationCutoverV1`,
+  same ScopeMetaRaft+SeverityHard — chosen over MultipartListing for semantic match); the NBD dead refs
+  (`DomainNBD` AAD constant [no-renumber], `"nbd"`/`"nbd/volume"`/`"volume"`/`"nfs"`/`"nfs/bucket"` protocol-cred
+  policy strings, the IAM-admin `mount-sa` resource grammar, `FDCategoryNFSSession` + its `resourceguard`
+  consumer, a dead Web-UI NFS section, comments, operator-doc route refs). `make fbs` regen twice (no-renumber).
+  Plan gate (codex + completeness-critic, 10 findings incl. 1 ordering BLOCKER) + 6 task reviews + opus
+  whole-branch gate (✅ ready-to-merge). The MOUNT-PROTOCOL REMOVAL EPIC IS COMPLETE (A+B+C all shipped/pending).
+
+### [follow-up] Slice C deferred cleanups (low priority, out of slice scope)
+
+- **[P3] Dead `adminapi.VolumeInfo` type** — leftover from the volume-removal epic (#781–#785), referenced
+  only by `internal/adminapi/storage_types_test.go`. Not part of the mount-protocol removal; remove in a
+  future adminapi cleanup (good companion to the `volumeadmin` rename below).
+- **[P3] `internal/protocred/types.go` `validResource` accepts a `volume/` resource prefix** — pre-existing
+  latent grammar inconsistency (predates the volume epic, ~PR #579): the protocred validator is more
+  permissive than the policy ARN grammar (`validProtocolCredentialResource`, which now only allows
+  s3/iceberg). Benign (`validProtocol` only permits s3/iceberg), but worth aligning in a protocred cleanup.
+- **[P3] Optional: drop the now-single-valued `policy.PrincipalType` enum entirely** — Slice C collapsed it
+  to `PrincipalTypeS3` only; `cacheKey`'s `ptype` param is now vestigial. Removing the type + param ripples
+  through `RequestContext`/`Effective` callers for zero behavior change — defer unless a future change needs it.
+- **[P3] Optional: dedicated upstream-route authz test** — Slice C T2 deleted MountSA route tests that also
+  asserted upstream-route bearer-deny/fail-closed; the middleware mechanism stays covered by surviving IAM
+  read/mutation/group tests, but the upstream-route-specific wiring assertion was lost (low value to restore).
 
 ### [cleanup] Rename `internal/volumeadmin` → admin-CLI client (stale name from the volume removal epic)
 

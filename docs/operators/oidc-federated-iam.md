@@ -450,15 +450,15 @@ data-plane request volume, cache hit/miss/grace, and latency from the
 control-plane series.
 
 Not yet supported: mTLS client certs to the PDP, a per-CIDR SSRF allowlist,
-data-plane enforcement for NFS / NBD, and a per-scope `failure_policy`.
+and a per-scope `failure_policy`.
 
 ## Current Boundary
 
 HTTP bearer-token actors are wired for protocol credential, bucket policy, IAM,
-mount-SA, bucket-upstream, config, and dashboard-token admin routes. An optional
+bucket-upstream, config, and dashboard-token admin routes. An optional
 External PDP adapter (remote `https` with a DEK-sealed bearer token + dial-time SSRF
 egress filtering, or a local `http` loopback sidecar; disabled by default) chains
 after GrainFS IAM for admin and protocol-credential operations, and — when
 `iam.pdp.data_plane.enabled` is also set — for S3/Iceberg object/bucket
-operations. mTLS, a per-CIDR SSRF allowlist, NFS/NBD data-plane enforcement,
-and a per-scope `failure_policy` remain future slices.
+operations. mTLS, a per-CIDR SSRF allowlist, and a per-scope `failure_policy`
+remain future slices.
