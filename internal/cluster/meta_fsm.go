@@ -28,7 +28,6 @@ import (
 	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/migration"
-	"github.com/gritive/GrainFS/internal/nfsexport"
 	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -71,10 +70,6 @@ const (
 	MetaCmdTypeIAMBucketUpstreamDelete      = clusterpb.MetaCmdTypeIAMBucketUpstreamDelete
 	MetaCmdTypeBucketLifecyclePut           = clusterpb.MetaCmdTypeBucketLifecyclePut
 	MetaCmdTypeBucketLifecycleDelete        = clusterpb.MetaCmdTypeBucketLifecycleDelete
-	MetaCmdTypeNfsExportUpsert              = clusterpb.MetaCmdTypeNfsExportUpsert
-	MetaCmdTypeNfsExportDelete              = clusterpb.MetaCmdTypeNfsExportDelete
-	MetaCmdTypeNfsExportBucketDeleteCascade = clusterpb.MetaCmdTypeNfsExportBucketDeleteCascade
-	MetaCmdTypeNfsExportCreate              = clusterpb.MetaCmdTypeNfsExportCreate
 	MetaCmdTypeCapabilityActivate           = clusterpb.MetaCmdTypeCapabilityActivate
 	MetaCmdTypeMigrationCutover             = clusterpb.MetaCmdTypeMigrationCutover
 	MetaCmdTypeConfigPut                    = clusterpb.MetaCmdTypeConfigPut
@@ -274,8 +269,6 @@ type MetaFSM struct {
 	onShardGroupAdded    func(ShardGroupEntry)                       // fired after PutShardGroup applies; protected by mu (v0.0.7.0)
 	onIcebergResult      func(string, error)                         // requestID, typed catalog result; must not block
 	onScrubTrigger       func(scrubber.ScrubTriggerEntry)            // PR4: cluster-wide scrub trigger applied; must not block
-	onNfsExportChange    func()                                      // fired after NFS export registry apply; must not block
-
 	// 클러스터 키 회전 — 결정론적 FSM은 여기, side-effect (디스크 I/O,
 	// transport identity swap)는 onRotationApplied 콜백으로 분리 (D16).
 	rotation          *RotationFSM
@@ -326,11 +319,6 @@ type MetaFSM struct {
 	// lifecycleStore is wired via SetLifecycle. nil = lifecycle commands return
 	// an error (not configured).
 	lifecycleStore *lifecycle.Store
-
-	// exportStore is wired via SetExportStore. nil = NFS export commands return
-	// an error (not configured).
-	exportStore     *nfsexport.Store
-	exportFsidMajor uint64
 
 	// migrationStore is wired via SetMigration. nil = migration commands return
 	// an error (not configured).
@@ -866,14 +854,6 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		return f.applyBucketLifecyclePut(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeBucketLifecycleDelete:
 		return f.applyBucketLifecycleDelete(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeNfsExportUpsert:
-		return f.applyNfsExportUpsert(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeNfsExportCreate:
-		return f.applyNfsExportCreate(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeNfsExportDelete:
-		return f.applyNfsExportDelete(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeNfsExportBucketDeleteCascade:
-		return f.applyNfsExportBucketDeleteCascade(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeClusterConfigPatch:
 		return f.applyClusterConfigPatch(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeMigrationJobStart:

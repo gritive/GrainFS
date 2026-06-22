@@ -19,7 +19,6 @@ import (
 	"github.com/gritive/GrainFS/internal/iam/policyattach"
 	"github.com/gritive/GrainFS/internal/iam/policystore"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
-	"github.com/gritive/GrainFS/internal/nfsexport"
 	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -88,7 +87,6 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 			icebergTables = append(icebergTables, e)
 		}
 	}
-	exportStore := f.exportStore
 	// Snapshot dekRefCounts while holding the read lock.
 	dekRefCountsCopy := make(map[uint32]uint64, len(f.dekRefCounts))
 	for g, c := range f.dekRefCounts {
@@ -149,11 +147,6 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 		dekVersionsCopy, dekActiveCopy = f.dekKeeper.VersionsAndActive()
 	}
 	f.mu.RUnlock()
-
-	nfsExports := map[string]nfsexport.Config(nil)
-	if exportStore != nil {
-		nfsExports = exportStore.Snapshot().Entries()
-	}
 
 	b := clusterBuilderPool.Get()
 
@@ -288,7 +281,6 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	// Object index removed in Phase 4; encode empty vector for wire compatibility.
 	clusterpb.MetaStateSnapshotStartObjectIndexVector(b, 0)
 	objectIndexVec := b.EndVector(0)
-	nfsExportVec := buildNfsExportEntriesVector(b, nfsExports)
 
 	// ClusterConfig: serialize the wrapper's current snap into a stand-alone
 	// FBS buffer and embed it as a [ubyte] vector. Always emit — the inner
@@ -393,7 +385,6 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	clusterpb.MetaStateSnapshotAddIcebergTables(b, icebergTableVec)
 	clusterpb.MetaStateSnapshotAddObjectIndex(b, objectIndexVec)
 	clusterpb.MetaStateSnapshotAddClusterConfig(b, clusterConfigVec)
-	clusterpb.MetaStateSnapshotAddNfsExports(b, nfsExportVec)
 	clusterpb.MetaStateSnapshotAddIcebergSchemaVersion(b, 2)
 	clusterpb.MetaStateSnapshotAddLastRotationRequestEntries(b, lrrVec)
 	clusterpb.MetaStateSnapshotAddKekStatusEntries(b, kekStatusVec)
@@ -609,27 +600,6 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 			newIcebergTables[wh] = make(map[string]IcebergTableEntry)
 		}
 		newIcebergTables[wh][icebergTableKey(ident)] = entry
-	}
-
-	// Object index removed in Phase 4; discard any entries for backward compatibility.
-	hasNfsExports := snap.NfsExportsPresent()
-	newNfsExports := make(map[string]nfsexport.Config, snap.NfsExportsLength())
-	var exportFB clusterpb.NfsExportUpsertCmd
-	for i := 0; i < snap.NfsExportsLength(); i++ {
-		if !snap.NfsExports(&exportFB, i) {
-			return fmt.Errorf("meta_fsm: Restore: NFS export %d decode failed", i)
-		}
-		bucket := string(exportFB.Bucket())
-		cfgFB := exportFB.Config(nil)
-		if bucket == "" || cfgFB == nil {
-			return fmt.Errorf("meta_fsm: Restore: NFS export %d missing bucket/config", i)
-		}
-		newNfsExports[bucket] = nfsexport.Config{
-			ReadOnly:   cfgFB.ReadOnly(),
-			FsidMajor:  cfgFB.FsidMajor(),
-			FsidMinor:  cfgFB.FsidMinor(),
-			Generation: cfgFB.Generation(),
-		}
 	}
 
 	// ClusterConfig: decode the embedded FBS blob and atomically swap into
@@ -970,24 +940,6 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 
 	if newClusterCfgSnap != nil {
 		f.clusterCfg.ReplaceSnap(newClusterCfgSnap)
-	}
-	restoredNfsExports := false
-	// NOTE: nfsexport.Store.ReplaceAll touches BadgerDB and may return an error
-	// after the core FSM fields are already committed. Making this fully atomic
-	// requires refactoring nfsexport.Store behind an interface for staged-commit.
-	// Deferred to a follow-up — see TODOS for the design discussion. In practice
-	// a BadgerDB error here would indicate disk failure during snapshot restore,
-	// which warrants operator intervention regardless of atomicity.
-	if f.exportStore != nil && hasNfsExports {
-		if err := f.exportStore.ReplaceAll(newNfsExports); err != nil {
-			return fmt.Errorf("meta_fsm: Restore: NFS exports: %w", err)
-		}
-		restoredNfsExports = true
-	} else if f.exportStore == nil && len(newNfsExports) > 0 {
-		return fmt.Errorf("meta_fsm: Restore: snapshot contains NFS exports but export store is not wired")
-	}
-	if restoredNfsExports {
-		f.publishNfsExportChange()
 	}
 	if cb != nil {
 		for bucket, groupID := range newBucketAssignments {

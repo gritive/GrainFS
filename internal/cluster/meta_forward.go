@@ -665,14 +665,8 @@ func isIcebergMetaCommand(data []byte) bool {
 	}
 }
 
-func metaCommandGateRequirement(data []byte) (string, compat.Operation, bool) {
-	cmd := clusterpb.GetRootAsMetaCmd(data, 0)
-	switch cmd.Type() {
-	case MetaCmdTypeNfsExportCreate:
-		return compat.CapabilityNfsExportCreateV1, compat.OperationNfsExportCreate, true
-	default:
-		return "", "", false
-	}
+func metaCommandGateRequirement(_ []byte) (string, compat.Operation, bool) {
+	return "", "", false
 }
 
 func metaForwardErrorType(err error) string {

@@ -47,12 +47,8 @@ const (
 	MetaCmdTypeMigrationJobStart            MetaCmdType = 37
 	MetaCmdTypeMigrationJobDone             MetaCmdType = 38
 	MetaCmdTypeMigrationJobFailed           MetaCmdType = 39
-	MetaCmdTypeNfsExportUpsert              MetaCmdType = 40
-	MetaCmdTypeNfsExportDelete              MetaCmdType = 41
-	MetaCmdTypeNfsExportBucketDeleteCascade MetaCmdType = 42
 	MetaCmdTypeCapabilityActivate           MetaCmdType = 43
 	MetaCmdTypeMigrationCutover             MetaCmdType = 44
-	MetaCmdTypeNfsExportCreate              MetaCmdType = 45
 	MetaCmdTypeConfigPut                    MetaCmdType = 46
 	MetaCmdTypeConfigDelete                 MetaCmdType = 47
 	MetaCmdTypeDEKRotate                    MetaCmdType = 48
@@ -141,12 +137,8 @@ var EnumNamesMetaCmdType = map[MetaCmdType]string{
 	MetaCmdTypeMigrationJobStart:            "MigrationJobStart",
 	MetaCmdTypeMigrationJobDone:             "MigrationJobDone",
 	MetaCmdTypeMigrationJobFailed:           "MigrationJobFailed",
-	MetaCmdTypeNfsExportUpsert:              "NfsExportUpsert",
-	MetaCmdTypeNfsExportDelete:              "NfsExportDelete",
-	MetaCmdTypeNfsExportBucketDeleteCascade: "NfsExportBucketDeleteCascade",
 	MetaCmdTypeCapabilityActivate:           "CapabilityActivate",
 	MetaCmdTypeMigrationCutover:             "MigrationCutover",
-	MetaCmdTypeNfsExportCreate:              "NfsExportCreate",
 	MetaCmdTypeConfigPut:                    "ConfigPut",
 	MetaCmdTypeConfigDelete:                 "ConfigDelete",
 	MetaCmdTypeDEKRotate:                    "DEKRotate",
@@ -235,12 +227,8 @@ var EnumValuesMetaCmdType = map[string]MetaCmdType{
 	"MigrationJobStart":            MetaCmdTypeMigrationJobStart,
 	"MigrationJobDone":             MetaCmdTypeMigrationJobDone,
 	"MigrationJobFailed":           MetaCmdTypeMigrationJobFailed,
-	"NfsExportUpsert":              MetaCmdTypeNfsExportUpsert,
-	"NfsExportDelete":              MetaCmdTypeNfsExportDelete,
-	"NfsExportBucketDeleteCascade": MetaCmdTypeNfsExportBucketDeleteCascade,
 	"CapabilityActivate":           MetaCmdTypeCapabilityActivate,
 	"MigrationCutover":             MetaCmdTypeMigrationCutover,
-	"NfsExportCreate":              MetaCmdTypeNfsExportCreate,
 	"ConfigPut":                    MetaCmdTypeConfigPut,
 	"ConfigDelete":                 MetaCmdTypeConfigDelete,
 	"DEKRotate":                    MetaCmdTypeDEKRotate,

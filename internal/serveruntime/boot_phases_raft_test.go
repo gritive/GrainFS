@@ -56,7 +56,6 @@ func TestBootRaftPhases_OrderingInvariant(t *testing.T) {
 	require.NoError(t, bootMetaRaftWiring(state))
 	require.NotNil(t, state.metaRaft, "metaRaft after Wiring")
 	require.NotNil(t, state.metaTransport, "metaTransport after Wiring")
-	require.NotNil(t, state.nfsExportSvc, "NFS export service after Wiring")
 	assert.Nil(t, state.dgMgr, "DataGroup not yet constructed before its phase")
 	assert.Nil(t, state.clusterRouter, "Router not yet constructed before its phase")
 	assert.Nil(t, state.rotationWorker, "Rotation not yet constructed before its phase")

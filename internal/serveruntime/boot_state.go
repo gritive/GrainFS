@@ -23,7 +23,6 @@ import (
 	"github.com/gritive/GrainFS/internal/incident"
 	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/migration"
-	"github.com/gritive/GrainFS/internal/nfsexport"
 	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/scrubber"
@@ -126,7 +125,6 @@ type bootState struct {
 	// called twice + the Deps literal references it). Its live encryptor is
 	// refreshed by wireIAMEncryptor on fresh boot and snapshot-restore swaps.
 	pdpTokenSource   *pdpTokenSource
-	nfsExportSvc     *nfsexport.ExportService
 	dekKeeper        *encrypt.DEKKeeper
 	rewrapController *encrypt.RewrapController // created in wireDEKKeeper (early); lanes registered post-backend in wireRewrapLanes
 	// clusterID is the 16-byte cluster identity loaded in wireDEKKeeper and (on
