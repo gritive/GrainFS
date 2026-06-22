@@ -49,7 +49,7 @@ type HTTPTransport struct {
 	cancel    context.CancelFunc
 	localAddr string
 
-	// Live-swappable identity (mirrors TCPTransport S5a): the composer owns
+	// Live-swappable identity (mirrors HTTPTransport S5a): the composer owns
 	// accept-set/present-cert mutations and atomically stores a fresh
 	// IdentitySnapshot into identity; the server (via GetConfigForClient) and the
 	// client dialer rebuild their tls.Config per handshake/dial from
@@ -97,7 +97,7 @@ type HTTPTransport struct {
 }
 
 // NewHTTPTransport derives the cluster identity from psk and builds a transport
-// pinned to it. Mirrors NewTCPTransport's empty-PSK contract.
+// pinned to it. Mirrors NewHTTPTransport's empty-PSK contract.
 func NewHTTPTransport(psk string) (*HTTPTransport, error) {
 	if psk == "" {
 		return nil, ErrEmptyClusterKey
@@ -117,7 +117,7 @@ func NewHTTPTransport(psk string) (*HTTPTransport, error) {
 	}
 	// Seed the live identity (base PSK accepted, present = PSK cert), then hand
 	// ownership to the composer whose swap closure atomically restores it — exactly
-	// as NewTCPTransport does — so rotation/flip mutations recompute the snapshot.
+	// as NewHTTPTransport does — so rotation/flip mutations recompute the snapshot.
 	t.identity.Store(snap)
 	t.composer = newIdentityComposer(spki, func(s *IdentitySnapshot) { t.identity.Store(s) })
 	t.composer.setPresent(cert, spki)

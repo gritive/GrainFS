@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.650.0] - 2026-06-23
+
+### Fixed
+- **Bucket-policy authz cache now enforces a committed Deny on a node that never served the policy
+  write.** In cluster mode a follower (or a single-node node after a restart) whose in-memory
+  `CompiledPolicyStore` was never populated for a bucket default-ALLOWed S3 requests, so a committed
+  **Deny** bucket-policy was silently unenforced (a real Layer-2 authz gap, masked only by the Layer-1
+  IAM grant). `CompiledPolicyStore.Allow` now pulls the policy on a cache miss from the local committed
+  Raft replica — a loader injected by `storage.NewOperations` over `PolicyBackend.GetBucketPolicy` —
+  compiles it, and caches the result positive or negative, so a committed Deny is honored on the first
+  request no matter which node served the write. The cluster apply path invalidates the cached entry on
+  a committed `SetBucketPolicy`/`DeleteBucketPolicy` (so deletes and tightening propagate to every node)
+  via `DistributedBackend.SetOnBucketPolicyApply`, and flushes the whole policy cache on a snapshot
+  install. A global generation stamp drops an in-flight pull's result if a concurrent mutation raced it,
+  so a stale view can never overwrite a newer one. Structural/fault reads fail **open** (legacy
+  default-allow, uncached, self-healing — no spurious-deny regression); an unparseable committed policy
+  fails **closed** (deny, cached). The `internal/policy` package stays free of any `internal/storage`
+  dependency (the loader is injected as a plain func).
+
 ## [0.0.649.0] - 2026-06-23
 
 ### Fixed

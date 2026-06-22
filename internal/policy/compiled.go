@@ -125,7 +125,13 @@ type compiledPolicy struct {
 type policyState struct {
 	byBucket map[string]*compiledPolicy
 	raw      map[string][]byte
+	negative map[string]struct{} // buckets resolved to "no enforceable policy" (allow)
 }
+
+// LoaderFunc loads a bucket's committed policy from the local replica for
+// pull-on-miss. found=true → compile policyJSON. found=false,err=nil → no policy
+// (allow, negative-cache). err!=nil → indeterminate read (allow, do not cache).
+type LoaderFunc func(bucket string) (policyJSON []byte, found bool, err error)
 
 // CompiledPolicyStore is a policy store that pre-compiles policies at Set() time
 // for O(1) action lookup and deny-first evaluation.
@@ -146,6 +152,13 @@ type policyState struct {
 type CompiledPolicyStore struct {
 	writeMu sync.Mutex
 	state   atomic.Pointer[policyState]
+	loader  atomic.Pointer[LoaderFunc]
+	// gen is a global mutation stamp: ANY Set/Delete/Invalidate (on any bucket)
+	// bumps it. A pull captures gen before its loader read and refuses to publish
+	// if gen advanced meanwhile, so a concurrent mutation always wins over an
+	// in-flight pull's now-possibly-stale view. Coarse (cross-bucket) but policy
+	// writes are rare, so the occasional redundant re-pull is acceptable.
+	gen atomic.Uint64
 }
 
 // NewCompiledPolicyStore creates an empty store.
@@ -154,15 +167,40 @@ func NewCompiledPolicyStore() *CompiledPolicyStore {
 	cs.state.Store(&policyState{
 		byBucket: make(map[string]*compiledPolicy),
 		raw:      make(map[string][]byte),
+		negative: make(map[string]struct{}),
 	})
 	return cs
 }
 
-// Set compiles and stores a policy for a bucket.
-func (cs *CompiledPolicyStore) Set(bucket string, policyJSON []byte) error {
+// SetLoader installs the pull-on-miss loader. Wire once at construction time.
+func (cs *CompiledPolicyStore) SetLoader(fn LoaderFunc) { cs.loader.Store(&fn) }
+
+// cloneState deep-copies the three maps for copy-on-write publication.
+func cloneState(old *policyState) *policyState {
+	next := &policyState{
+		byBucket: make(map[string]*compiledPolicy, len(old.byBucket)+1),
+		raw:      make(map[string][]byte, len(old.raw)+1),
+		negative: make(map[string]struct{}, len(old.negative)+1),
+	}
+	for k, v := range old.byBucket {
+		next.byBucket[k] = v
+	}
+	for k, v := range old.raw {
+		next.raw[k] = v
+	}
+	for k := range old.negative {
+		next.negative[k] = struct{}{}
+	}
+	return next
+}
+
+// compilePolicy parses and compiles a policy document into the action-indexed,
+// deny-first representation. Extracted so both Set (write path) and pull-on-miss
+// share one compile path.
+func compilePolicy(policyJSON []byte) (*compiledPolicy, error) {
 	bp, err := ParsePolicy(policyJSON)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	cp := &compiledPolicy{}
@@ -203,24 +241,55 @@ func (cs *CompiledPolicyStore) Set(bucket string, policyJSON []byte) error {
 			}
 		}
 	}
+	return cp, nil
+}
+
+// Set compiles and stores a policy for a bucket.
+func (cs *CompiledPolicyStore) Set(bucket string, policyJSON []byte) error {
+	cp, err := compilePolicy(policyJSON)
+	if err != nil {
+		return err
+	}
 
 	cs.writeMu.Lock()
 	defer cs.writeMu.Unlock()
-	old := cs.state.Load()
-	next := &policyState{
-		byBucket: make(map[string]*compiledPolicy, len(old.byBucket)+1),
-		raw:      make(map[string][]byte, len(old.raw)+1),
-	}
-	for k, v := range old.byBucket {
-		next.byBucket[k] = v
-	}
-	for k, v := range old.raw {
-		next.raw[k] = v
-	}
+	cs.gen.Add(1) // publishing newer truth — invalidate any in-flight pull
+	next := cloneState(cs.state.Load())
 	next.byBucket[bucket] = cp
 	next.raw[bucket] = append([]byte(nil), policyJSON...)
+	delete(next.negative, bucket)
 	cs.state.Store(next)
 	return nil
+}
+
+// Invalidate drops the cached policy decision for bucket so the next Allow
+// re-pulls from the committed replica. An empty bucket flushes the whole cache
+// (snapshot install). It always bumps gen first so an in-flight pull that began
+// before this call refuses to cache its now-stale result.
+func (cs *CompiledPolicyStore) Invalidate(bucket string) {
+	cs.writeMu.Lock()
+	defer cs.writeMu.Unlock()
+	cs.gen.Add(1)
+	old := cs.state.Load()
+	if bucket == "" {
+		cs.state.Store(&policyState{
+			byBucket: make(map[string]*compiledPolicy),
+			raw:      make(map[string][]byte),
+			negative: make(map[string]struct{}),
+		})
+		return
+	}
+	_, a := old.byBucket[bucket]
+	_, b := old.raw[bucket]
+	_, c := old.negative[bucket]
+	if !a && !b && !c {
+		return // gen already bumped above — guards in-flight pulls even with nothing cached
+	}
+	next := cloneState(old)
+	delete(next.byBucket, bucket)
+	delete(next.raw, bucket)
+	delete(next.negative, bucket)
+	cs.state.Store(next)
 }
 
 // GetRaw returns the raw JSON policy for a bucket, or nil.
@@ -236,28 +305,18 @@ func (cs *CompiledPolicyStore) GetRaw(bucket string) []byte {
 func (cs *CompiledPolicyStore) Delete(bucket string) {
 	cs.writeMu.Lock()
 	defer cs.writeMu.Unlock()
+	cs.gen.Add(1) // removing a policy — invalidate any in-flight pull so it can't re-cache it
 	old := cs.state.Load()
 	_, hadCompiled := old.byBucket[bucket]
 	_, hadRaw := old.raw[bucket]
-	if !hadCompiled && !hadRaw {
-		return // no-op: avoid an unnecessary clone
+	_, hadNeg := old.negative[bucket]
+	if !hadCompiled && !hadRaw && !hadNeg {
+		return // no-op: avoid an unnecessary clone (gen already bumped above)
 	}
-	next := &policyState{
-		byBucket: make(map[string]*compiledPolicy, len(old.byBucket)),
-		raw:      make(map[string][]byte, len(old.raw)),
-	}
-	for k, v := range old.byBucket {
-		if k == bucket {
-			continue
-		}
-		next.byBucket[k] = v
-	}
-	for k, v := range old.raw {
-		if k == bucket {
-			continue
-		}
-		next.raw[k] = v
-	}
+	next := cloneState(old)
+	delete(next.byBucket, bucket)
+	delete(next.raw, bucket)
+	delete(next.negative, bucket)
 	cs.state.Store(next)
 }
 
@@ -272,25 +331,91 @@ func (cs *CompiledPolicyStore) Allow(_ context.Context, in s3auth.PermCheckInput
 	if int(in.Action) >= maxS3Action {
 		return false
 	}
-
-	cp := cs.state.Load().byBucket[in.Resource.Bucket]
-	if cp == nil {
-		return true // no policy = no restriction
+	st := cs.state.Load()
+	bucket := in.Resource.Bucket
+	if cp := st.byBucket[bucket]; cp != nil {
+		return evaluate(cp, in)
 	}
+	if _, neg := st.negative[bucket]; neg {
+		return true // resolved: no enforceable policy
+	}
+	return cs.pullAndAllow(in)
+}
 
+// evaluate applies deny-first / allow / default-deny against a compiled policy.
+func evaluate(cp *compiledPolicy, in s3auth.PermCheckInput) bool {
 	// Deny-first: any explicit deny wins
 	for _, rule := range cp.deny[in.Action] {
 		if rule.matches(in) {
 			return false
 		}
 	}
-
 	// Then check allow rules
 	for _, rule := range cp.allow[in.Action] {
 		if rule.matches(in) {
 			return true
 		}
 	}
-
 	return false // default deny when policy exists
+}
+
+// pullAndAllow resolves an unresolved bucket from the committed replica via the
+// loader, caches the result (guarded by gen so a concurrent Set/Delete/Invalidate
+// wins), and evaluates. See LoaderFunc for the outcome mapping.
+func (cs *CompiledPolicyStore) pullAndAllow(in s3auth.PermCheckInput) bool {
+	lp := cs.loader.Load()
+	if lp == nil {
+		return true // legacy: no loader wired
+	}
+	bucket := in.Resource.Bucket
+	gen := cs.gen.Load() // capture BEFORE the read; Set/Delete/Invalidate bump it
+	data, found, err := (*lp)(bucket)
+	if err != nil {
+		return true // indeterminate read → allow, NOT cached (retries, self-heals)
+	}
+	if !found {
+		cs.cacheNegative(bucket, gen)
+		return true
+	}
+	cp, perr := compilePolicy(data)
+	if perr != nil {
+		// Malformed committed policy → fail closed (empty compiledPolicy is
+		// default-deny) and cache to avoid re-reading every request.
+		cs.cacheCompiled(bucket, data, &compiledPolicy{}, gen)
+		return false
+	}
+	cs.cacheCompiled(bucket, data, cp, gen)
+	return evaluate(cp, in)
+}
+
+// cacheNegative records "no policy" for bucket, unless a concurrent mutation
+// (gen bump) raced this pull — in which case the pulled view is stale and dropped.
+func (cs *CompiledPolicyStore) cacheNegative(bucket string, gen uint64) {
+	cs.writeMu.Lock()
+	defer cs.writeMu.Unlock()
+	if cs.gen.Load() != gen {
+		return
+	}
+	old := cs.state.Load()
+	if _, ok := old.negative[bucket]; ok {
+		return
+	}
+	next := cloneState(old)
+	next.negative[bucket] = struct{}{}
+	cs.state.Store(next)
+}
+
+// cacheCompiled records a compiled policy for bucket, unless a concurrent
+// mutation raced this pull (gen mismatch → drop the stale result).
+func (cs *CompiledPolicyStore) cacheCompiled(bucket string, raw []byte, cp *compiledPolicy, gen uint64) {
+	cs.writeMu.Lock()
+	defer cs.writeMu.Unlock()
+	if cs.gen.Load() != gen {
+		return
+	}
+	next := cloneState(cs.state.Load())
+	next.byBucket[bucket] = cp
+	next.raw[bucket] = append([]byte(nil), raw...)
+	delete(next.negative, bucket)
+	cs.state.Store(next)
 }

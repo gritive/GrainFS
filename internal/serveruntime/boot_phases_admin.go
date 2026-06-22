@@ -85,6 +85,14 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 	srv := server.New(cfg.Addr, state.backend, state.srvOpts...)
 	state.srv = srv
 
+	// Wire the bucket-policy cache invalidator into the cluster apply path so a
+	// committed policy change/delete on any node drops this node's compiled cache
+	// entry, forcing the next authz Allow to re-pull the committed policy. The
+	// loader (pull-on-miss) is already wired mode-agnostically in storage.NewOperations.
+	if state.distBackend != nil {
+		state.distBackend.SetOnBucketPolicyApply(srv.PolicyStore().Invalidate)
+	}
+
 	// --- Admin / dashboard wiring (Volume CLI Phase B) ---
 	tokenStore, err := dashboard.Open(filepath.Join(cfg.DataDir, "dashboard.token"))
 	if err != nil {

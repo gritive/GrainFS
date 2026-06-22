@@ -658,7 +658,7 @@ func bootInviteJoinPhase2(ctx context.Context, state *bootState) error {
 
 	// reply.PeerSPKIs (the cluster per-node accept-set) is intentionally NOT
 	// installed here: the joiner's normal cluster transport derives its accept-set
-	// from the shared transport PSK (NewTCPTransport(transportPSK) →
+	// from the shared transport PSK (NewHTTPTransport(transportPSK) →
 	// DeriveClusterIdentity), which Phase-1 already delivered. The leader dials
 	// the freshly-joined node using that SAME PSK-derived cluster identity, so
 	// AppendEntries catch-up (and thus the gen-0 DEK Apply the WaitDEKReady gate

@@ -16,9 +16,9 @@ import (
 )
 
 // PeerProbeDialer abstracts a transport stream call: caller hands the leader a
-// concrete impl bound to a *transport.TCPTransport, the leader uses it to
+// concrete impl bound to a *transport.HTTPTransport, the leader uses it to
 // reach voter transport addresses. Keeping this an interface rather than the raw
-// *TCPTransport keeps the cluster package independent of transport connection
+// *HTTPTransport keeps the cluster package independent of transport connection
 // pooling and the boot-time dialer plumbing.
 //
 // Both dialer variants delegate to the cluster transport.Call. Production uses the
@@ -29,7 +29,7 @@ type PeerProbeDialer interface {
 }
 
 // ClusterPeerProbeDialer is the production PeerProbeDialer backed by the cluster
-// transport (callerTransport; *transport.TCPTransport at runtime). Built once at boot.
+// transport (callerTransport; *transport.HTTPTransport at runtime). Built once at boot.
 type ClusterPeerProbeDialer struct{ T callerTransport }
 
 // CallKEKDiskSpace dispatches a KEK disk-space probe over the native
