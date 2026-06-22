@@ -28,30 +28,34 @@
   `*policy.CompiledPolicyStore`. `GetBucketPolicy` (`loadBucketPolicy`) is only the GET ?policy /
   admin **display** read. Linearizing it changes no authorization and only adds group-0 coupling to a
   display read. Superseded by the real gap below.
-- **[P2][security, deferred — design chosen, not yet built] Follower's bucket-policy authz cache is
-  never populated from committed Raft state.** In cluster mode the authoritative per-bucket S3
-  bucket-policy gate is the server-layer `*policy.CompiledPolicyStore` (`CompiledPolicyStore.Allow`
-  default-ALLOWs on a miss; `compiled.go:271`). It is `Set` only from `operations_policy.go:13` (the
-  request-processing node's write path) and `:38` (lazy-load on a GET ?policy display). It is NOT
-  populated by the data-Raft FSM apply: `notifyOnApply` (`backend.go:816`) handles only
-  `CmdPutObjectMeta`/`CmdDeleteObject`/`CmdCompleteMultipart`; `CmdSetBucketPolicy` falls to `default`.
-  And `FSM.Restore` (`apply.go:1059`) bulk-loads the snapshot into Badger without firing apply hooks.
-  → A follower that never served the PutBucketPolicy AND never served a GET ?policy for a bucket
-  has an empty compiled entry → every PUT/DELETE/multipart hits `Allow` → `true` (default allow),
-  so a committed **Deny** bucket-policy is silently unenforced on that follower. PERMANENT gap (not a
-  bounded apply-lag window), partially masked by Layer-1 IAM grants (an SA with no IAM allow is still
-  denied at L1; the gap is the bucket-policy Deny layer). Severity below #839 (authz gap, reversible,
-  not silent data loss), but a real correctness/security defect. The IAM meta-FSM bucket-policy path
-  (`MetaCmdTypeBucketPolicyPut`, `bucketpolicy.InMemoryStore`, `applyBucketPolicyPut/Delete`) is dead
-  in production (no proposer) — wire-or-remove it to kill the dual-store ambiguity.
-  **Chosen design (deferred 2026-06-23): hybrid = apply-hook + pull-on-miss.** (1) Add
-  `CmdSetBucketPolicy`/`CmdDeleteBucketPolicy` cases to `notifyOnApply` → a policy callback →
-  `CompiledPolicyStore.Set/Delete` (propagates changes, esp. deletes/tightening, on every node). (2)
-  On a `CompiledPolicyStore` miss, load from the local committed replica (the backend's
-  `GetBucketPolicy` Badger read + lazy-compile, with a negative-cache for "no policy") instead of
-  default-allow — inherently complete across boot / runtime-snapshot-install / apply-lag, self-healing,
-  no group-0 coupling, one local read per bucket per node. Needs a deterministic follower
-  false-allow e2e (RED) + careful authz-path review (security-critical).
+- **[DONE] Follower's bucket-policy authz cache is never populated from committed Raft state.**
+  In cluster mode a follower (or a single-node node after restart) whose in-memory
+  `*policy.CompiledPolicyStore` was never populated for a bucket default-ALLOWed (`Allow` returned
+  `true` on a `cp == nil` miss), so a committed **Deny** bucket-policy was silently unenforced.
+  Fixed (hybrid, per the chosen design): (1) **pull-on-miss** — `Allow` now loads the policy from
+  the local committed replica via an injected loader (`storage.NewOperations` wires
+  `loadCommittedBucketPolicy` → `PolicyBackend.GetBucketPolicy`), compiles, and caches it positive
+  **or** negative; a successfully-read committed Deny is always honored on the first request. (2)
+  **apply-hook invalidate** — `notifyOnApply` fires `CompiledPolicyStore.Invalidate(bucket)` on
+  committed `CmdSetBucketPolicy`/`CmdDeleteBucketPolicy` (wired via `DistributedBackend.SetOnBucketPolicyApply`
+  in boot) so deletes/tightening on any node drop the cached entry → next `Allow` re-pulls. (3)
+  snapshot install flushes the whole policy cache (`restore` → `Invalidate("")`). A global generation
+  stamp drops an in-flight pull's result if a concurrent mutation raced it. Fault/structural-read
+  errors fail **open** (legacy default-allow, uncached, self-healing — no spurious-deny regression);
+  an unparseable committed policy fails **closed** (deny, cached). `internal/policy` stays free of
+  `internal/storage` (loader injected as a plain func). Tests: policy unit (pull/negative/fault/
+  malformed/tighten/loosen/flush/concurrency, race-clean), storage cold-cache, cluster apply-hook,
+  in-process server cold-cache proof.
+- **[P3][follow-up, security-consistency] Admin GET ?policy on a malformed stored policy leaves the
+  negative cache stale.** `operations_policy.go:38` lazily `Set`s on the display read and ignores
+  compile errors; if a bucket was negative-cached and an admin GETs a malformed committed policy, the
+  `Set` fails and the negative entry survives → authz `Allow` returns allow, whereas the authz
+  pull-on-miss path correctly fail-closes a malformed policy to deny. Only affects already-malformed
+  stored policies (PutBucketPolicy rejects new ones); not a bypass of any valid Deny. Make the
+  GET-path `Set`-failure clear the negative entry (or call `Invalidate`) for parity.
+- **[P3][cleanup] Dead IAM meta-FSM bucket-policy path** (`MetaCmdTypeBucketPolicyPut`,
+  `bucketpolicy.InMemoryStore`, `applyBucketPolicyPut/Delete`) is dead in production (no proposer).
+  Wire-or-remove it to kill the dual-store ambiguity. (Deferred from the authz-cache fix above.)
 - **[DONE] AppendObject versioned-bucket feature-gate** read the PLAIN versioning state
   (`object_append.go`), so a stale group-0 follower could read Unversioned for an Enabled bucket and
   let an append bypass the 501 gate. Fixed: the gate now resolves versioning via the linearized read
