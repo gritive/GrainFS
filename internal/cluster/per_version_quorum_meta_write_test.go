@@ -20,7 +20,7 @@ func TestWriteQuorumMetaVersionLocal_WritesToSeparateSubtree(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	data := []byte("blob-bytes")
 
-	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal("bkt", filepath.Join("a/b/c.txt", "vid-1"), data, 0))
+	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal("bkt", filepath.Join("a/b/c.txt", "vid-1"), data))
 
 	root := b.shardSvc.dataDirs[0]
 	verPath := filepath.Join(root, quorumMetaVersionsSubDir, "bkt", "a/b/c.txt", "vid-1")
@@ -53,7 +53,7 @@ func TestWriteQuorumMetaVersion_RPC(t *testing.T) {
 	trB.RegisterBufferedRoute(transport.RouteShardRPC, svcB.NativeRPCHandler())
 
 	data := []byte("ver-blob")
-	require.NoError(t, svcA.WriteQuorumMetaVersion(ctx, trB.LocalAddr(), "bkt", filepath.Join("k", "vid-1"), data, 0))
+	require.NoError(t, svcA.WriteQuorumMetaVersion(ctx, trB.LocalAddr(), "bkt", filepath.Join("k", "vid-1"), data))
 
 	got, err := os.ReadFile(filepath.Join(dirB, "shards", quorumMetaVersionsSubDir, "bkt", "k", "vid-1"))
 	require.NoError(t, err, "remote node must have written the per-version blob")
@@ -105,9 +105,9 @@ func TestWriteQuorumMetaVersionLocal_SkipsWhenExistingWins(t *testing.T) {
 	newer := mustEncodeMetaCmd(t, PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: "vid-1", ModTime: 200, MetaSeq: 2})
 	older := mustEncodeMetaCmd(t, PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: "vid-1", ModTime: 100, MetaSeq: 1})
 
-	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal("bkt", sub, newer, 0))
+	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal("bkt", sub, newer))
 	// An older blind-writer (e.g. backfill) must NOT overwrite the newer on-disk blob.
-	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal("bkt", sub, older, 0))
+	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal("bkt", sub, older))
 
 	got, err := os.ReadFile(filepath.Join(b.shardSvc.dataDirs[0], quorumMetaVersionsSubDir, "bkt", "k", "vid-1"))
 	require.NoError(t, err)
@@ -121,8 +121,8 @@ func TestWriteQuorumMetaVersionLocal_OverwritesWhenCandidateWins(t *testing.T) {
 	sub := filepath.Join("k", "vid-1")
 	older := mustEncodeMetaCmd(t, PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: "vid-1", ModTime: 100, MetaSeq: 1})
 	newer := mustEncodeMetaCmd(t, PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: "vid-1", ModTime: 100, MetaSeq: 2}) // same ModTime/VID, higher MetaSeq
-	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal("bkt", sub, older, 0))
-	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal("bkt", sub, newer, 0))
+	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal("bkt", sub, older))
+	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal("bkt", sub, newer))
 	got, err := os.ReadFile(filepath.Join(b.shardSvc.dataDirs[0], quorumMetaVersionsSubDir, "bkt", "k", "vid-1"))
 	require.NoError(t, err)
 	require.Equal(t, newer, got, "higher-MetaSeq candidate must overwrite (relocation/RMW path)")
@@ -135,8 +135,8 @@ func TestWriteQuorumMetaLocal_SkipsWhenExistingWins(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	newer := mustEncodeMetaCmd(t, PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: "v2", ModTime: 200})
 	older := mustEncodeMetaCmd(t, PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: "v1", ModTime: 100})
-	require.NoError(t, b.shardSvc.writeQuorumMetaLocal("bkt", "k", newer, 0))
-	require.NoError(t, b.shardSvc.writeQuorumMetaLocal("bkt", "k", older, 0))
+	require.NoError(t, b.shardSvc.writeQuorumMetaLocal("bkt", "k", newer))
+	require.NoError(t, b.shardSvc.writeQuorumMetaLocal("bkt", "k", older))
 	got, err := os.ReadFile(filepath.Join(b.shardSvc.dataDirs[0], quorumMetaSubDir, "bkt", "k"))
 	require.NoError(t, err)
 	require.Equal(t, newer, got)
@@ -176,7 +176,7 @@ func TestWriteQuorumMetaVersionLocal_ConcurrentWritesLWWMax(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			errs[i] = b.shardSvc.writeQuorumMetaVersionLocal(bucket, sub, blobs[i], 0)
+			errs[i] = b.shardSvc.writeQuorumMetaVersionLocal(bucket, sub, blobs[i])
 		}()
 	}
 	close(start)

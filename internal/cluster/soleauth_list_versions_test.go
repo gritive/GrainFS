@@ -44,7 +44,6 @@ func TestListObjectVersionsSoleAuthOn(t *testing.T) {
 		// k2: v1 live, v2 DELETE MARKER (max → latest, still IsLatest)
 		seedVersionBlob(t, b, "bon", "k2", vidB1, PutObjectMetaCmd{ETag: "k2-v1", Size: 5, ModTime: 300})
 		seedVersionBlob(t, b, "bon", "k2", vidB2, PutObjectMetaCmd{ETag: deleteMarkerETag, IsDeleteMarker: true, ModTime: 400})
-		setSoleAuthForTest(t, b, "bon", soleAuthOn)
 
 		vs, err := b.ListObjectVersions(ctx, "bon", "", 0)
 		require.NoError(t, err)
@@ -70,7 +69,6 @@ func TestListObjectVersionsSoleAuthOn(t *testing.T) {
 		seedVersionBlob(t, b, "bstale", "live", vidA1, PutObjectMetaCmd{ETag: "live"})
 		// A stale, non-carve-out vid-bearing FSM record with NO backing blob.
 		seedFSMObject(t, b, "bstale", "ghost", vidB1, objectMeta{Key: "ghost", ETag: "stale"}, true)
-		setSoleAuthForTest(t, b, "bstale", soleAuthOn)
 
 		vs, err := b.ListObjectVersions(ctx, "bstale", "", 0)
 		require.NoError(t, err)
@@ -86,7 +84,6 @@ func TestListObjectVersionsSoleAuthOn(t *testing.T) {
 		require.NoError(t, b.CreateBucket(ctx, "bapp"))
 		setVersioningForTest(t, b, "bapp", "Enabled")
 		seedFSMObject(t, b, "bapp", "ak", vidA1, objectMeta{Key: "ak", ETag: "app", IsAppendable: true}, true)
-		setSoleAuthForTest(t, b, "bapp", soleAuthOn)
 
 		vs, err := b.ListObjectVersions(ctx, "bapp", "", 0)
 		require.NoError(t, err)
@@ -109,7 +106,6 @@ func TestListObjectVersionsSoleAuthOn(t *testing.T) {
 		seedFSMObject(t, b, "bmir", "ak", vidA1, objectMeta{Key: "ak", ETag: "app", IsAppendable: true}, true)
 		// slashless mirror obj:bmir/ak (appendable), WITHOUT touching lat:
 		seedFSMObject(t, b, "bmir", "ak", "", objectMeta{Key: "ak", ETag: "app", IsAppendable: true}, false)
-		setSoleAuthForTest(t, b, "bmir", soleAuthOn)
 
 		vs, err := b.ListObjectVersions(ctx, "bmir", "", 0)
 		require.NoError(t, err)
@@ -136,7 +132,6 @@ func TestListObjectVersionsSoleAuthOn(t *testing.T) {
 		setVersioningForTest(t, b, "bco", "Enabled")
 		m := objectMeta{Key: "ck", ETag: "co", Coalesced: []CoalescedShardRef{{CoalescedID: "c1", Size: 10}}}
 		seedFSMObject(t, b, "bco", "ck", vidA1, m, true)
-		setSoleAuthForTest(t, b, "bco", soleAuthOn)
 
 		vs, err := b.ListObjectVersions(ctx, "bco", "", 0)
 		require.NoError(t, err)
@@ -149,7 +144,6 @@ func TestListObjectVersionsSoleAuthOn(t *testing.T) {
 		require.NoError(t, b.CreateBucket(ctx, "bbare"))
 		// bare obj: record, NO lat: pointer, NOT appendable/coalesced.
 		seedFSMObject(t, b, "bbare", "lk", "", objectMeta{Key: "lk", ETag: "bare"}, false)
-		setSoleAuthForTest(t, b, "bbare", soleAuthOn)
 
 		vs, err := b.ListObjectVersions(ctx, "bbare", "", 0)
 		require.NoError(t, err)
@@ -168,7 +162,6 @@ func TestListObjectVersionsSoleAuthOn(t *testing.T) {
 		// Same (key, vid) exists as both a blob AND an appendable FSM carve-out.
 		seedVersionBlob(t, b, "bcol", "k", vidA1, PutObjectMetaCmd{ETag: "blob-wins", Size: 99})
 		seedFSMObject(t, b, "bcol", "k", vidA1, objectMeta{Key: "k", ETag: "carveout-loses", IsAppendable: true}, true)
-		setSoleAuthForTest(t, b, "bcol", soleAuthOn)
 
 		vs, err := b.ListObjectVersions(ctx, "bcol", "", 0)
 		require.NoError(t, err)
@@ -194,7 +187,6 @@ func TestListObjectVersionsSoleAuthOn(t *testing.T) {
 		seedVersionBlob(t, b, "btrunc", "k1", vidA1, PutObjectMetaCmd{ETag: "1"})
 		seedVersionBlob(t, b, "btrunc", "k2", vidB1, PutObjectMetaCmd{ETag: "2"})
 		seedVersionBlob(t, b, "btrunc", "k3", vidB2, PutObjectMetaCmd{ETag: "3"})
-		setSoleAuthForTest(t, b, "btrunc", soleAuthOn)
 
 		vs, err := b.ListObjectVersions(ctx, "btrunc", "", 2)
 		require.NoError(t, err)

@@ -20,7 +20,6 @@ func TestDeleteBucketEmptinessSoleAuthOn(t *testing.T) {
 		require.NoError(t, b.CreateBucket(ctx, "bon"))
 		setVersioningForTest(t, b, "bon", "Enabled")
 		seedVersionBlob(t, b, "bon", "k1", vidA1, PutObjectMetaCmd{ETag: "v1"})
-		setSoleAuthForTest(t, b, "bon", soleAuthOn)
 
 		err := b.DeleteBucket(ctx, "bon")
 		require.ErrorIs(t, err, storage.ErrBucketNotEmpty)
@@ -31,7 +30,6 @@ func TestDeleteBucketEmptinessSoleAuthOn(t *testing.T) {
 		require.NoError(t, b.CreateBucket(ctx, "bmark"))
 		setVersioningForTest(t, b, "bmark", "Enabled")
 		seedVersionBlob(t, b, "bmark", "k", vidA1, PutObjectMetaCmd{ETag: deleteMarkerETag, IsDeleteMarker: true})
-		setSoleAuthForTest(t, b, "bmark", soleAuthOn)
 
 		err := b.DeleteBucket(ctx, "bmark")
 		require.ErrorIs(t, err, storage.ErrBucketNotEmpty)
@@ -42,7 +40,6 @@ func TestDeleteBucketEmptinessSoleAuthOn(t *testing.T) {
 		require.NoError(t, b.CreateBucket(ctx, "bapp"))
 		setVersioningForTest(t, b, "bapp", "Enabled")
 		seedFSMObject(t, b, "bapp", "ak", vidA1, objectMeta{Key: "ak", ETag: "app", IsAppendable: true}, true)
-		setSoleAuthForTest(t, b, "bapp", soleAuthOn)
 
 		err := b.DeleteBucket(ctx, "bapp")
 		require.ErrorIs(t, err, storage.ErrBucketNotEmpty)
@@ -56,7 +53,6 @@ func TestDeleteBucketEmptinessSoleAuthOn(t *testing.T) {
 		require.NoError(t, b.CreateBucket(ctx, "bstale"))
 		setVersioningForTest(t, b, "bstale", "Enabled")
 		seedFSMObject(t, b, "bstale", "ghost", vidB1, objectMeta{Key: "ghost", ETag: "stale"}, true)
-		setSoleAuthForTest(t, b, "bstale", soleAuthOn)
 
 		require.NoError(t, b.DeleteBucket(ctx, "bstale"))
 		require.ErrorIs(t, b.HeadBucket(ctx, "bstale"), storage.ErrBucketNotFound)
@@ -66,7 +62,6 @@ func TestDeleteBucketEmptinessSoleAuthOn(t *testing.T) {
 		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "bempty"))
 		setVersioningForTest(t, b, "bempty", "Enabled")
-		setSoleAuthForTest(t, b, "bempty", soleAuthOn)
 
 		require.NoError(t, b.DeleteBucket(ctx, "bempty"))
 		require.ErrorIs(t, b.HeadBucket(ctx, "bempty"), storage.ErrBucketNotFound)

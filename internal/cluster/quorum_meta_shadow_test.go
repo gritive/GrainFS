@@ -68,7 +68,7 @@ func TestWriteShadowMetaLocal_RejectsTraversal(t *testing.T) {
 func TestHandleShadowMeta_RoutesThroughRPCAndWrites(t *testing.T) {
 	s := newShadowTestShardService(t, &fakeShadowTransport{})
 
-	envb := buildShardEnvelope("WriteShadowMeta", "bucket", "k1", 0, []byte("blob"), 0)
+	envb := buildShardEnvelope("WriteShadowMeta", "bucket", "k1", 0, []byte("blob"))
 	payload := envb.FinishedBytes()
 	resp := s.handleRPC(payload)
 

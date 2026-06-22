@@ -38,7 +38,7 @@ func BenchmarkForwardBodyEncode(b *testing.B) {
 					b.Fatal(err)
 				}
 				_ = buildPutObjectArgsWithSSE("bk", "k", "application/octet-stream",
-					body, "", nil, "", 0, versioningStateUnknown, 0)
+					body, "", nil, "", 0, versioningStateUnknown)
 			}
 		})
 
@@ -47,7 +47,7 @@ func BenchmarkForwardBodyEncode(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				// Body-less args; the body would be streamed by the transport.
 				_ = buildPutObjectArgsWithSSE("bk", "k", "application/octet-stream",
-					nil, "", nil, "", 0, versioningStateUnknown, 0)
+					nil, "", nil, "", 0, versioningStateUnknown)
 			}
 		})
 	}

@@ -35,7 +35,7 @@ func TestSweepDoneMarkers_KeepsMarkerUntilBlobDurable(t *testing.T) {
 	const minAge = -time.Second
 
 	// Blob missing → the marker MUST be kept (the only metadata copy left).
-	require.NoError(t, b.shardSvc.deleteQuorumMetaVersionLocal(bkt, key, vid, 0))
+	require.NoError(t, b.shardSvc.deleteQuorumMetaVersionLocal(bkt, key, vid))
 	n, err := b.SweepStaleMultipartDoneMarkers(ctx, 100, minAge)
 	require.NoError(t, err)
 	require.Equal(t, 0, n, "a meta_blob marker whose per-version blob is absent must not be swept")

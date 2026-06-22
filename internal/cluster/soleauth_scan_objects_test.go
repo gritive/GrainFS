@@ -38,7 +38,6 @@ func TestScanObjectsSoleAuthOn(t *testing.T) {
 		seedVersionBlob(t, b, "b", "k1", vidA2, PutObjectMetaCmd{ETag: "k1v2", ECData: 1, ECParity: 0})
 		// k2: single version; 4+2 profile.
 		seedVersionBlob(t, b, "b", "k2", vidB1, PutObjectMetaCmd{ETag: "k2v1", ECData: 4, ECParity: 2})
-		setSoleAuthForTest(t, b, "b", soleAuthOn)
 
 		got := collectScanObjectRecs(t, b, "b")
 		require.Len(t, got, 2, "one record per key (latest only)")
@@ -55,7 +54,6 @@ func TestScanObjectsSoleAuthOn(t *testing.T) {
 		setVersioningForTest(t, b, "b", "Enabled")
 		seedVersionBlob(t, b, "b", "k", vidA1, PutObjectMetaCmd{ETag: "v1", ECData: 1, ECParity: 0})
 		seedVersionBlob(t, b, "b", "k", vidA2, PutObjectMetaCmd{ETag: deleteMarkerETag, IsDeleteMarker: true})
-		setSoleAuthForTest(t, b, "b", soleAuthOn)
 
 		got := collectScanObjectRecs(t, b, "b")
 		require.NotContains(t, got, "k", "a delete-marker latest has no shards to scrub")
@@ -68,7 +66,6 @@ func TestScanObjectsSoleAuthOn(t *testing.T) {
 		seedVersionBlob(t, b, "b", "live", vidA1, PutObjectMetaCmd{ETag: "live", ECData: 1, ECParity: 0})
 		// Stale FSM record with a lat: pointer but NO blob and NOT a carve-out class.
 		seedFSMObject(t, b, "b", "ghost", vidB1, objectMeta{Key: "ghost", ETag: "stale", ECData: 1, ECParity: 0}, true)
-		setSoleAuthForTest(t, b, "b", soleAuthOn)
 
 		got := collectScanObjectRecs(t, b, "b")
 		require.Contains(t, got, "live")
@@ -80,7 +77,6 @@ func TestScanObjectsSoleAuthOn(t *testing.T) {
 		require.NoError(t, b.CreateBucket(ctx, "b"))
 		setVersioningForTest(t, b, "b", "Enabled")
 		seedVersionBlob(t, b, "b", "k", vidA1, PutObjectMetaCmd{ETag: "v1", ECData: 0, ECParity: 0})
-		setSoleAuthForTest(t, b, "b", soleAuthOn)
 
 		got := collectScanObjectRecs(t, b, "b")
 		require.NotContains(t, got, "k", "a non-EC object has no EC shards to scrub")
@@ -104,8 +100,7 @@ func TestScanObjectsSoleAuthOn(t *testing.T) {
 		require.NoError(t, b.CreateBucket(ctx, "b"))
 		setVersioningForTest(t, b, "b", "Enabled")
 		// Write an undecodable blob into the per-version tree.
-		require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal("b", filepath.Join("k", vidA1), []byte("not-a-valid-blob"), 0))
-		setSoleAuthForTest(t, b, "b", soleAuthOn)
+		require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal("b", filepath.Join("k", vidA1), []byte("not-a-valid-blob")))
 
 		ch, err := b.ScanObjects("b")
 		require.Error(t, err, "strict scan surfaces a corrupt blob synchronously")

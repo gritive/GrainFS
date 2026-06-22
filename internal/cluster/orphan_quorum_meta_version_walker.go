@@ -186,8 +186,7 @@ func (b *DistributedBackend) DeleteOrphanQuorumMetaVersion(bucket, key, versionI
 	if cur == nil || !b.perVersionBlobReclaimable(*cur) {
 		return nil // already gone, or no longer reclaimable → do not delete
 	}
-	epoch, _ := b.GetBucketSoleAuthEpoch(bucket)
-	return b.shardSvc.deleteQuorumMetaVersionLocal(bucket, key, versionID, epoch)
+	return b.shardSvc.deleteQuorumMetaVersionLocal(bucket, key, versionID)
 }
 
 // Compile-time assertion: DistributedBackend satisfies the scrubber interface.

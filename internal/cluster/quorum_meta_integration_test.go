@@ -161,11 +161,11 @@ func TestScatterGatherList_LWWAndTombstone(t *testing.T) {
 	}
 
 	// Node A: alpha.bin (ModTime=10, fresh) + beta.bin (tombstone, ModTime=5).
-	require.NoError(t, svcA.writeQuorumMetaLocal("bkt", "alpha.bin", encodeBlob(baseCmd("alpha.bin", 10, false)), 0))
-	require.NoError(t, svcA.writeQuorumMetaLocal("bkt", "beta.bin", encodeBlob(baseCmd("beta.bin", 5, true)), 0))
+	require.NoError(t, svcA.writeQuorumMetaLocal("bkt", "alpha.bin", encodeBlob(baseCmd("alpha.bin", 10, false))))
+	require.NoError(t, svcA.writeQuorumMetaLocal("bkt", "beta.bin", encodeBlob(baseCmd("beta.bin", 5, true))))
 	// Node B: alpha.bin (ModTime=5, stale) + gamma.bin (ModTime=10, normal).
-	require.NoError(t, svcB.writeQuorumMetaLocal("bkt", "alpha.bin", encodeBlob(baseCmd("alpha.bin", 5, false)), 0))
-	require.NoError(t, svcB.writeQuorumMetaLocal("bkt", "gamma.bin", encodeBlob(baseCmd("gamma.bin", 10, false)), 0))
+	require.NoError(t, svcB.writeQuorumMetaLocal("bkt", "alpha.bin", encodeBlob(baseCmd("alpha.bin", 5, false))))
+	require.NoError(t, svcB.writeQuorumMetaLocal("bkt", "gamma.bin", encodeBlob(baseCmd("gamma.bin", 10, false))))
 
 	backendA := &DistributedBackend{
 		selfAddr: trA.LocalAddr(),
@@ -234,8 +234,8 @@ func TestScatterGatherList_SpansAllShardGroups(t *testing.T) {
 	}
 	// alpha.bin lives on node A (generation-0 group), gamma.bin on node B
 	// (a second/"newer-generation" group). Each node only has its own object.
-	require.NoError(t, svcA.writeQuorumMetaLocal("bkt", "alpha.bin", encodeBlob(cmd("alpha.bin")), 0))
-	require.NoError(t, svcB.writeQuorumMetaLocal("bkt", "gamma.bin", encodeBlob(cmd("gamma.bin")), 0))
+	require.NoError(t, svcA.writeQuorumMetaLocal("bkt", "alpha.bin", encodeBlob(cmd("alpha.bin"))))
+	require.NoError(t, svcB.writeQuorumMetaLocal("bkt", "gamma.bin", encodeBlob(cmd("gamma.bin"))))
 
 	// Two SEPARATE groups, one peer each — the generation-agnostic fan-out must
 	// iterate both groups, not just the bucket-routed one.
@@ -288,11 +288,11 @@ func TestScanObjectMetaEntries_CarriesPlacementFields(t *testing.T) {
 		Bucket: "vols", Key: "vol1/blk", ETag: "e", ModTime: 10,
 		ECData: 4, ECParity: 2, PlacementGroupID: "g1",
 		NodeIDs: []string{"n1", "n2", "n3", "n4", "n5", "n6"},
-	}), 0))
+	})))
 	require.NoError(t, svc.writeQuorumMetaLocal("vols", "vol2/blk", encodeBlob(PutObjectMetaCmd{
 		Bucket: "vols", Key: "vol2/blk", ETag: "e", ModTime: 5, IsDeleteMarker: true,
 		ECData: 4, ECParity: 2, PlacementGroupID: "g1", NodeIDs: []string{"n1"},
-	}), 0))
+	})))
 
 	backend := &DistributedBackend{
 		selfAddr: tr.LocalAddr(),
@@ -501,7 +501,7 @@ func TestReadQuorumMeta_PeerFallback_ParityNodeMiss(t *testing.T) {
 		require.NoError(t, err)
 		return b
 	}()
-	require.NoError(t, svcData.writeQuorumMetaLocal("bkt", "obj", blob, 0))
+	require.NoError(t, svcData.writeQuorumMetaLocal("bkt", "obj", blob))
 
 	// The parity node has no local file for this object.
 	_, err := os.Stat(filepath.Join(dirParity, "shards", quorumMetaSubDir, "bkt", "obj"))

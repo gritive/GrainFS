@@ -21,7 +21,7 @@ func seedVersionBlob(t *testing.T, b *DistributedBackend, bucket, key, vid strin
 	cmd.VersionID = vid
 	blob, err := EncodeCommand(CmdPutObjectMeta, cmd)
 	require.NoError(t, err)
-	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal(bucket, filepath.Join(key, vid), blob, 0))
+	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal(bucket, filepath.Join(key, vid), blob))
 }
 
 // setVersioningForTest sets a bucket's versioning state via Raft proposal.
@@ -29,24 +29,6 @@ func seedVersionBlob(t *testing.T, b *DistributedBackend, bucket, key, vid strin
 func setVersioningForTest(t *testing.T, b *DistributedBackend, bucket, state string) {
 	t.Helper()
 	require.NoError(t, b.SetBucketVersioning(bucket, state))
-}
-
-// setSoleAuthForTest advances the bucket's soleauth to the target state by
-// walking valid transitions (mirrors seedSoleAuth in soleauth_test.go but
-// operates on a DistributedBackend rather than an FSM directly).
-func setSoleAuthForTest(t *testing.T, b *DistributedBackend, bucket, target string) {
-	t.Helper()
-	switch target {
-	case soleAuthOff:
-		// default — no proposal needed
-	case soleAuthPending:
-		require.NoError(t, b.SetBucketSoleAuthority(bucket, soleAuthPending))
-	case soleAuthOn:
-		require.NoError(t, b.SetBucketSoleAuthority(bucket, soleAuthPending))
-		require.NoError(t, b.SetBucketSoleAuthority(bucket, soleAuthOn))
-	default:
-		t.Fatalf("setSoleAuthForTest: unknown target %q", target)
-	}
 }
 
 // byVID finds the single object-manifest entry with VersionID == vid in the

@@ -98,10 +98,6 @@ func newTestDistributedBackendWithDB(t clusterTestTB) (*DistributedBackend, *bad
 	keeper, clusterID := testDEKKeeper(t)
 	svc := NewShardService(backend.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 	backend.SetShardService(svc, []string{backend.selfAddr})
-	// Single-node test backend = leader / caught up → mark the soleauth epoch source
-	// ready so an epoch-bearing (soleauth=on) quorum-meta write/delete is not fenced
-	// by the boot-window fail-closed guard.
-	svc.MarkSoleAuthEpochReady()
 
 	stopApply := make(chan struct{})
 	go backend.RunApplyLoop(stopApply)

@@ -17,9 +17,6 @@ func newShardServiceTestWithDataDir(t *testing.T) *ShardService {
 	t.Helper()
 	keeper, clusterID := testDEKKeeper(t)
 	svc := NewShardService(t.TempDir(), nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
-	// Directly-constructed test service: no boot backlog → ready (exercises the
-	// wired-fn fence logic, not the default fail-closed boot-window behavior).
-	svc.MarkSoleAuthEpochReady()
 	return svc
 }
 
@@ -44,7 +41,7 @@ func writeRawVersionBlobForTest(t *testing.T, s *ShardService, bucket, key, vid 
 // enumerator errors on an undecodable blob, while the tolerant one skips it.
 func TestScanQuorumMetaVersionsBucketAllStrict_FailsClosed(t *testing.T) {
 	s := newShardServiceTestWithDataDir(t)
-	require.NoError(t, s.writeQuorumMetaVersionLocal("b", path.Join("k", "v1"), mustEncode(t, PutObjectMetaCmd{Bucket: "b", Key: "k", VersionID: "v1"}), 0))
+	require.NoError(t, s.writeQuorumMetaVersionLocal("b", path.Join("k", "v1"), mustEncode(t, PutObjectMetaCmd{Bucket: "b", Key: "k", VersionID: "v1"})))
 	writeRawVersionBlobForTest(t, s, "b", "k", "v2", []byte("\x00garbage"))
 
 	tolerant, terr := s.ScanQuorumMetaVersionsBucketAll("b", "")

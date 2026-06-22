@@ -103,20 +103,8 @@ func (rcv *ShardRequest) MutateData(j int, n byte) bool {
 	return false
 }
 
-func (rcv *ShardRequest) AdmittedSoleauthEpoch() uint32 {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
-	if o != 0 {
-		return rcv._tab.GetUint32(o + rcv._tab.Pos)
-	}
-	return 0
-}
-
-func (rcv *ShardRequest) MutateAdmittedSoleauthEpoch(n uint32) bool {
-	return rcv._tab.MutateUint32Slot(12, n)
-}
-
 func ShardRequestStart(builder *flatbuffers.Builder) {
-	builder.StartObject(5)
+	builder.StartObject(4)
 }
 func ShardRequestAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -132,9 +120,6 @@ func ShardRequestAddData(builder *flatbuffers.Builder, data flatbuffers.UOffsetT
 }
 func ShardRequestStartDataVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(1, numElems, 1)
-}
-func ShardRequestAddAdmittedSoleauthEpoch(builder *flatbuffers.Builder, admittedSoleauthEpoch uint32) {
-	builder.PrependUint32Slot(4, admittedSoleauthEpoch, 0)
 }
 func ShardRequestEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

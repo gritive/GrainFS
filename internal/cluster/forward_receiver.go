@@ -342,7 +342,6 @@ func (r *ForwardReceiver) handlePutObject(dg *DataGroup, args []byte) []byte {
 		ForwardMode: PutTraceForwardFrame,
 	})
 	ctx = contextWithVersioningState(ctx, pa.VersioningState())
-	ctx = contextWithSoleAuthEpochWire(ctx, pa.SoleauthEpoch())
 	ObservePutTraceStage(ctx, PutTraceStageForwardReceiverDispatch, time.Now(), PutTraceStageFields{})
 	stageStart := time.Now()
 	obj, err := dg.Backend().PutObjectWithRequest(ctx, storage.PutObjectRequest{
@@ -378,7 +377,6 @@ func (r *ForwardReceiver) handlePutObjectStream(dg *DataGroup, args []byte, body
 		ForwardMode: PutTraceForwardStream,
 	})
 	ctx = contextWithVersioningState(ctx, pa.VersioningState())
-	ctx = contextWithSoleAuthEpochWire(ctx, pa.SoleauthEpoch())
 	ObservePutTraceStage(ctx, PutTraceStageForwardReceiverDispatch, time.Now(), PutTraceStageFields{})
 	stageStart := time.Now()
 	obj, err := dg.Backend().PutObjectWithRequest(ctx, storage.PutObjectRequest{

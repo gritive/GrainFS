@@ -22,7 +22,7 @@ func writeVersionBlob(t *testing.T, b *DistributedBackend, bucket, key, versionI
 		NodeIDs:   []string{b.currentSelfAddr()},
 	})
 	require.NoError(t, err)
-	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal(bucket, filepath.Join(key, versionID), blob, 0))
+	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal(bucket, filepath.Join(key, versionID), blob))
 	target := filepath.Join(b.shardSvc.DataDirs()[0], quorumMetaVersionsSubDir, bucket, key, versionID)
 	past := time.Now().Add(-backdate)
 	require.NoError(t, os.Chtimes(target, past, past))
@@ -44,7 +44,7 @@ func writeTombstoneBlob(t *testing.T, b *DistributedBackend, bucket, key, versio
 		MetaSeq:       1,
 	})
 	require.NoError(t, err)
-	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal(bucket, filepath.Join(key, versionID), blob, 0))
+	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal(bucket, filepath.Join(key, versionID), blob))
 	target := filepath.Join(b.shardSvc.DataDirs()[0], quorumMetaVersionsSubDir, bucket, key, versionID)
 	past := time.Now().Add(-backdate)
 	require.NoError(t, os.Chtimes(target, past, past))

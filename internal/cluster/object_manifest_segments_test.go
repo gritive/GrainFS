@@ -134,8 +134,6 @@ func TestListAllObjectsStrict_SoleAuthOn_EnumeratesPerVersionBlobs(t *testing.T)
 	seedVersionBlob(t, b, "sa", "k", "v1", PutObjectMetaCmd{ETag: "e1", Size: 10})
 	seedVersionBlob(t, b, "sa", "k", "v2", PutObjectMetaCmd{ETag: "e2", Size: 20})
 
-	setSoleAuthForTest(t, b, "sa", soleAuthOn)
-
 	objs, err := b.ListAllObjectsStrict()
 	require.NoError(t, err)
 

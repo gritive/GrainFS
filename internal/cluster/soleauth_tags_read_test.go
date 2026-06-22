@@ -29,7 +29,6 @@ func TestGetObjectTags_SoleAuthOn_BlobDerive(t *testing.T) {
 			MetaSeq: 1,
 		})
 		setVersioningForTest(t, b, "vb", "Enabled")
-		setSoleAuthForTest(t, b, "vb", soleAuthOn)
 
 		tags, err := b.GetObjectTags("vb", "k", "")
 		require.NoError(t, err)
@@ -47,7 +46,6 @@ func TestGetObjectTags_SoleAuthOn_BlobDerive(t *testing.T) {
 			MetaSeq: 1,
 		})
 		setVersioningForTest(t, b, "vb", "Enabled")
-		setSoleAuthForTest(t, b, "vb", soleAuthOn)
 
 		tags, err := b.GetObjectTags("vb", "k", "v1")
 		require.NoError(t, err)
@@ -62,7 +60,6 @@ func TestGetObjectTags_SoleAuthOn_BlobDerive(t *testing.T) {
 			Key: "k", ETag: "e", Tags: []storage.Tag{{Key: "stale", Value: "yes"}},
 		}, true)
 		setVersioningForTest(t, b, "vb", "Enabled")
-		setSoleAuthForTest(t, b, "vb", soleAuthOn)
 
 		tags, err := b.GetObjectTags("vb", "k", "")
 		require.ErrorIs(t, err, storage.ErrObjectNotFound, "blob-absent versioned object is 404, never stale FSM tags")
@@ -106,7 +103,6 @@ func TestGetObjectTags_SoleAuthOn_BlobDerive(t *testing.T) {
 			Key: "k", ETag: "e",
 			Tags: []storage.Tag{{Key: "lg", Value: "1"}},
 		}, false)
-		setSoleAuthForTest(t, b, "bl", soleAuthOn)
 
 		tags, err := b.GetObjectTags("bl", "k", "")
 		require.NoError(t, err)
@@ -132,7 +128,6 @@ func TestGetObjectTags_SoleAuthOn_BlobDerive(t *testing.T) {
 			Tags: []storage.Tag{{Key: "stale", Value: "x"}},
 		}, true)
 		setVersioningForTest(t, b, "bdm0", "Enabled")
-		setSoleAuthForTest(t, b, "bdm0", soleAuthOn)
 
 		tags, err := b.GetObjectTags("bdm0", "k", "")
 		require.ErrorIs(t, err, storage.ErrObjectNotFound, "latest delete-marker → 404, no carve-out fallthrough")
@@ -148,7 +143,6 @@ func TestGetObjectTags_SoleAuthOn_BlobDerive(t *testing.T) {
 			ETag: deleteMarkerETag, IsDeleteMarker: true,
 		})
 		setVersioningForTest(t, b, "bdm1", "Enabled")
-		setSoleAuthForTest(t, b, "bdm1", soleAuthOn)
 
 		tags, err := b.GetObjectTags("bdm1", "k", "v1")
 		require.ErrorIs(t, err, storage.ErrMethodNotAllowed)

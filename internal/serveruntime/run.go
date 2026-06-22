@@ -205,38 +205,6 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("failed to initialize distributed storage: %w", err)
 	}
 
-	// Close the soleauth-fence boot-window (single-group): the shard RPC route is
-	// already live (bootShardRoutes), but the quorum-meta leaf fence cannot yet
-	// reliably read the committed soleauth epoch until the group-0 FSM has applied
-	// its boot-committed backlog — so the ShardService stays NOT-ready (default)
-	// and the leaves fail closed for any non-zero admitted epoch. Mark it ready
-	// once the FSM is provably caught up via ReadIndex+WaitApplied (CommittedIndex
-	// resets to the snapshot floor on restart, so it is not a reliable backlog
-	// measure). If the node never catches up (or shuts down), MarkSoleAuthEpochReady
-	// never fires and the fence stays fail-closed — safe. Multi-group epoch-source
-	// routing + per-group readiness is a tracked S4c-d precondition. Dormant today.
-	if state.shardSvc != nil && state.distBackend != nil {
-		go func() {
-			// Retry until caught up or shutdown: ReadIndex can return a transient
-			// leader-loss error during boot/re-election; giving up on the first one
-			// would leave the fence fail-closed for every non-zero soleauth write
-			// until restart (a liveness regression). Stay fail-closed only while the
-			// node genuinely cannot establish a read point.
-			for {
-				if idx, err := state.distBackend.ReadIndex(ctx); err == nil {
-					if werr := state.distBackend.WaitApplied(ctx, idx); werr == nil {
-						state.shardSvc.MarkSoleAuthEpochReady()
-						return
-					}
-				}
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(250 * time.Millisecond):
-				}
-			}
-		}()
-	}
 	if err := bootBackendWrap(ctx, state); err != nil {
 		return err
 	}

@@ -95,8 +95,7 @@ func (b *DistributedBackend) deleteObjectWithMarker(ctx context.Context, bucket,
 				if eerr != nil {
 					return "", fmt.Errorf("encode delete marker %s/%s: %w", bucket, key, eerr)
 				}
-				epoch := b.resolveQuorumMetaEpoch(ctx, bucket)
-				if werr := b.fanOutPerVersionBlob(ctx, marker, blob, epoch); werr != nil {
+				if werr := b.fanOutPerVersionBlob(ctx, marker, blob); werr != nil {
 					return "", fmt.Errorf("write delete marker %s/%s: %w", bucket, key, werr)
 				}
 				return markerID, nil
@@ -125,8 +124,7 @@ func (b *DistributedBackend) deleteObjectWithMarker(ctx context.Context, bucket,
 				NodeIDs:        existing.NodeIDs,
 			})
 		} else if !errors.Is(qerr, storage.ErrObjectNotFound) && qerr != nil {
-			epoch, _ := b.GetBucketSoleAuthEpoch(bucket)
-			_ = b.shardSvc.deleteQuorumMetaLocal(bucket, key, epoch) // fallback: remove stale file
+			_ = b.shardSvc.deleteQuorumMetaLocal(bucket, key) // fallback: remove stale file
 		}
 	}
 	return markerID, nil

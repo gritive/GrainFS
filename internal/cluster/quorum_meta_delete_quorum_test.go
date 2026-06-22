@@ -56,8 +56,8 @@ func TestDeleteQuorumMetaQuorum_RemovesPeerReplica(t *testing.T) {
 		require.NoError(t, err)
 		return b
 	}()
-	require.NoError(t, svcSelf.writeQuorumMetaLocal("bkt", "obj", blob, 0))
-	require.NoError(t, svcPeer.writeQuorumMetaLocal("bkt", "obj", blob, 0))
+	require.NoError(t, svcSelf.writeQuorumMetaLocal("bkt", "obj", blob))
+	require.NoError(t, svcPeer.writeQuorumMetaLocal("bkt", "obj", blob))
 
 	selfPath := filepath.Join(dirSelf, "shards", quorumMetaSubDir, "bkt", "obj")
 	peerPath := filepath.Join(dirPeer, "shards", quorumMetaSubDir, "bkt", "obj")
@@ -87,7 +87,7 @@ func TestDeleteQuorumMetaQuorum_EmptyNodesFallsBackLocal(t *testing.T) {
 	dir := t.TempDir()
 	svc := NewShardService(dir, tr,
 		WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
-	require.NoError(t, svc.writeQuorumMetaLocal("bkt", "obj", []byte("x"), 0))
+	require.NoError(t, svc.writeQuorumMetaLocal("bkt", "obj", []byte("x")))
 	p := filepath.Join(dir, "shards", quorumMetaSubDir, "bkt", "obj")
 	require.FileExists(t, p)
 
