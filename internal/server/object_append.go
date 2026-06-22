@@ -48,10 +48,15 @@ func (s *Server) appendObject(ctx context.Context, c *app.RequestContext, bucket
 	}
 
 	// AppendObject is not defined on versioning-enabled buckets — S3 Express
-	// rejects with 501. GetBucketVersioning may return ErrUnsupportedOperation
-	// on backends that don't track versioning (LocalBackend); that's treated
-	// as Unversioned.
-	if state, vErr := s.ops.GetBucketVersioning(bucket); vErr == nil && state == "Enabled" {
+	// rejects with 501. This is a MUTATING edge (the append writes data), so it
+	// resolves versioning via the LINEARIZED read (#839): a just-joined group-0
+	// follower whose local replica lags (~90s) must not read "Unversioned" for an
+	// Enabled bucket and let the append bypass the 501 gate — the same mutating-edge
+	// contract PUT/Copy/CompleteMultipart already follow. GetBucketVersioningLinearized
+	// degrades to a local read during a group-0 leaderless window (no control-plane
+	// coupling) and returns ErrUnsupportedOperation on backends that don't track
+	// versioning (LocalBackend); that's treated as Unversioned.
+	if state, vErr := s.ops.GetBucketVersioningLinearized(ctx, bucket); vErr == nil && state == "Enabled" {
 		writeXMLError(c, consts.StatusNotImplemented, "NotImplemented", "AppendObject is not supported on versioning-enabled buckets")
 		return true
 	}
