@@ -79,30 +79,33 @@ func (s *Server) putFormObject(ctx context.Context, bucket, key string, body io.
 // boundary (the commit backend holds no bucketver state). The decision threads
 // down via context and onward over the forward wire.
 //
-// TOLERANT variant (read paths): a resolve error leaves the context unstamped,
-// so the read path falls back to a local read. MUTATING paths MUST use
-// ctxWithBucketVersioningStrict instead — defaulting a write to non-versioned on
-// a resolve error would silently mis-version the object.
+// TOLERANT variant (READ paths: GET/HEAD/LIST + Copy source): uses the PLAIN
+// local read — never the linearizing barrier. Reads must stay available and
+// instant even when group-0 (the control plane) has no leader; a slightly-stale
+// versioning view only affects read-mode selection, never data integrity. A
+// resolve error leaves the context unstamped so the read falls back to a local
+// read. MUTATING paths use ctxWithBucketVersioningStrict instead.
 func (s *Server) ctxWithBucketVersioning(ctx context.Context, bucket string) context.Context {
-	c, _ := s.ctxWithBucketVersioningStrict(ctx, bucket)
-	return c
+	if state, vErr := s.ops.GetBucketVersioning(bucket); vErr == nil {
+		return cluster.ContextWithBucketVersioning(ctx, state == "Enabled")
+	}
+	return ctx
 }
 
-// ctxWithBucketVersioningStrict is the FAIL-CLOSED variant for MUTATING paths
-// (PUT / CompleteMultipart / Copy-dst). A versioning-resolve error (e.g. a
-// group-0 leaderless window where the linearizing ReadIndex can't complete) is
-// returned to the caller so the write fails and the client retries — it must NOT
-// silently default to non-versioned, which would write the object unversioned
-// when the bucket is actually versioned (worse than a stale read).
+// ctxWithBucketVersioningStrict is the LINEARIZING variant for MUTATING paths
+// (PUT / CompleteMultipart / Copy-dst): a follower must not read a stale local
+// replica and mis-version the write. It uses GetBucketVersioningLinearized
+// (ReadIndex+WaitApplied), which DEGRADES to a local read during a group-0
+// leaderless window (so writes aren't coupled to control-plane leadership) and
+// only returns an error on a genuine resolve fault — which the caller surfaces
+// rather than silently writing non-versioned.
 func (s *Server) ctxWithBucketVersioningStrict(ctx context.Context, bucket string) (context.Context, error) {
-	// MUTATING edge: linearizable, fail-closed read (a follower must not read a
-	// stale local replica and silently mis-version the write).
 	state, err := s.ops.GetBucketVersioningLinearized(ctx, bucket)
 	if err != nil {
 		// A backend that doesn't track versioning is not a fault — leave the ctx
 		// unstamped (downstream treats it as unversioned), exactly as the tolerant
-		// path does. Only a genuine resolve failure (e.g. group-0 leaderless
-		// window) fails closed so the write doesn't silently go non-versioned.
+		// path does. A genuine resolve fault (e.g. local store error) surfaces so
+		// the write doesn't silently go non-versioned.
 		var unsupported storage.UnsupportedOperationError
 		if errors.As(err, &unsupported) {
 			return ctx, nil

@@ -851,9 +851,10 @@ func (c *ClusterCoordinator) GetBucketVersioning(bucket string) (string, error) 
 	return v.GetBucketVersioning(bucket)
 }
 
-// GetBucketVersioningLinearized is the linearizable, fail-closed read used by the
-// MUTATING S3 edge (see DistributedBackend.GetBucketVersioningLinearized). Falls
-// back to the local read for a base backend that doesn't support linearization.
+// GetBucketVersioningLinearized is the linearizing read used by the MUTATING S3
+// edge (see DistributedBackend.GetBucketVersioningLinearized — it degrades to a
+// local read during a group-0 leaderless window, not fail-closed). Falls back to
+// the plain read for a base backend that doesn't support linearization.
 func (c *ClusterCoordinator) GetBucketVersioningLinearized(ctx context.Context, bucket string) (string, error) {
 	type linearizableVersioner interface {
 		GetBucketVersioningLinearized(ctx context.Context, bucket string) (string, error)
