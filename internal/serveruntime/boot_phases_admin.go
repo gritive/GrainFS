@@ -134,7 +134,6 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		ConfigProposer:           state.metaRaft,
 		ConfigStore:              state.cfgStore,
 		Buckets:                  storage.NewOperations(state.backend),
-		NfsExports:               &admin.NfsExportServiceAdapter{Svc: state.nfsExportSvc},
 		ProtocolCredentials:      state.protocolCredentials,
 		ProtocolCredAuthz:        protocolCredentialAuthorizer(state),
 		AdminAuthz:               adminAuthorizer(state, "admin"),

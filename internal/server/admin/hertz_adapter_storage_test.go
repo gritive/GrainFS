@@ -54,44 +54,6 @@ func TestRegisterUIStorageRoutesDoNotExposeDestructiveBucketDelete(t *testing.T)
 	require.Contains(t, []int{http.StatusNotFound, http.StatusMethodNotAllowed}, resp.StatusCode)
 }
 
-func TestRegisterUIStorageRoutesDoNotExposeNfsDebug(t *testing.T) {
-	h, base, start := newUIRouteTestServer(t)
-	d := newServerDeps(t, t.TempDir())
-	d.Buckets = newFakeBucketOps()
-	d.NfsExports = &fakeStorageNfsExports{
-		exports: map[string]admin.NfsExportInfo{
-			"logs": {Bucket: "logs", Generation: 1},
-		},
-	}
-	admin.RegisterUI(h, d)
-	start()
-
-	resp := doRouteTestRequest(t, http.MethodGet, base+"/ui/api/storage/nfs/exports/logs/debug", nil)
-	defer resp.Body.Close()
-	require.Contains(t, []int{http.StatusNotFound, http.StatusMethodNotAllowed}, resp.StatusCode)
-}
-
-func TestRegisterUIStorageRoutesDoNotExposeNfsMutations(t *testing.T) {
-	h, base, start := newUIRouteTestServer(t)
-	d := newServerDeps(t, t.TempDir())
-	d.Buckets = newFakeBucketOps()
-	d.NfsExports = &fakeStorageNfsExports{
-		exports: map[string]admin.NfsExportInfo{
-			"logs": {Bucket: "logs", Generation: 1},
-		},
-	}
-	admin.RegisterUI(h, d)
-	start()
-
-	resp := doRouteTestRequest(t, http.MethodPost, base+"/ui/api/storage/nfs/exports", bytes.NewBufferString(`{"bucket":"logs"}`))
-	resp.Body.Close()
-	require.Contains(t, []int{http.StatusNotFound, http.StatusMethodNotAllowed}, resp.StatusCode)
-
-	resp = doRouteTestRequest(t, http.MethodPatch, base+"/ui/api/storage/nfs/exports/logs", bytes.NewBufferString(`{"read_only":true}`))
-	resp.Body.Close()
-	require.Contains(t, []int{http.StatusNotFound, http.StatusMethodNotAllowed}, resp.StatusCode)
-}
-
 func TestBucketPolicyRoute_InvalidStoredPolicyDoesNotPanic(t *testing.T) {
 	cli := startBucketRouteTestServer(t, []byte{0xae, '{', '}'})
 

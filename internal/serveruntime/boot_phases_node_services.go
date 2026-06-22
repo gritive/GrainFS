@@ -182,7 +182,6 @@ func bootNodeServices(ctx context.Context, state *bootState) error {
 	nodeSvc := StartNodeServices(ctx, state.backend, cfg.NFS4Port, cfg.NFSWriteBufferDir, cfg.NFSWriteBufferIdle, cfg.DataDir, iamCfg)
 	nodeSvc.SetNFSExports(state.nfsExportSvc)
 	if state.adminDeps != nil {
-		state.adminDeps.NFSDiag = nodeSvc.NFS4()
 		state.adminDeps.Protocols = nodeSvc.ProtocolStatus(cfg)
 	}
 	state.AddCleanup(func() { nodeSvc.Close() })

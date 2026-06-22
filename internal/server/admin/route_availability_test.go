@@ -8,7 +8,6 @@ func TestRouteAvailabilityManifestDocumentsHiddenOptionalAdminFeatures(t *testin
 		name    string
 	}{
 		{feature: routeFeatureBuckets, name: "buckets"},
-		{feature: routeFeatureNfsExports, name: "nfs_exports"},
 		{feature: routeFeatureIAM, name: "iam"},
 	}
 
@@ -29,9 +28,6 @@ func TestRouteFeatureRoutesVisibleRequiresDependencyForHiddenAdminFeatures(t *te
 	d := &Deps{}
 	if routeFeatureRoutesVisible(d, routeFeatureBuckets) {
 		t.Fatal("bucket routes should be hidden without bucket ops")
-	}
-	if routeFeatureRoutesVisible(d, routeFeatureNfsExports) {
-		t.Fatal("NFS export routes should be hidden without export service")
 	}
 	if routeFeatureRoutesVisible(d, routeFeatureIAM) {
 		t.Fatal("IAM routes should be hidden without IAM service")

@@ -41,15 +41,6 @@ func AdminListStorageBuckets(ctx context.Context, d *Deps) (ListStorageBucketsRe
 			Name:        name,
 			HasUpstream: hasUpstream[name],
 		}
-		if d.NfsExports != nil {
-			if info, ok := d.NfsExports.Get(name); ok {
-				item.NFSExport = &StorageBucketNFSExport{
-					Registered: true,
-					ReadOnly:   info.ReadOnly,
-					Generation: info.Generation,
-				}
-			}
-		}
 		out = append(out, item)
 	}
 

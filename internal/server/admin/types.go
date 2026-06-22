@@ -33,7 +33,6 @@ type Deps struct {
 	ConfigStore              ConfigStoreReader            // optional; nil disables config read endpoints
 	PDPTokens                PDPTokenManager              // optional; nil disables IAM PDP token endpoints
 	Buckets                  BucketOps                    // optional; nil disables bucket CRUD admin endpoints
-	NfsExports               NfsExportService             // optional; nil disables NFS export admin endpoints
 	ProtocolCredentials      ProtocolCredentialService    // optional; nil disables protocol credential endpoints
 	ProtocolCredAuthz        CredentialAuthorizer         // required when ProtocolCredentials is configured; nil fails closed
 	AdminAuthz               CredentialAuthorizer         // optional; bearer actor authz for selected admin routes
@@ -42,7 +41,6 @@ type Deps struct {
 	AuditQuery               AuditQueryService            // optional; nil disables audit admin endpoints
 	Status                   StatusService                // optional; nil disables GET /v1/status
 	Protocols                StorageProtocolStatusResp
-	NFSDiag                  NFSDiag // optional; nil disables live NFS lookup/client diagnostics
 	Token                    *dashboard.TokenStore
 	PublicURL                string // e.g. "https://node1:9000"; empty means use localhost fallback
 	NodeID                   string
