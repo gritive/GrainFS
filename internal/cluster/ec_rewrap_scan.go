@@ -47,9 +47,13 @@ func (b *DistributedBackend) CollectECRewrapTargets() ([]ECRewrapTarget, error) 
 		return nil
 	}
 
-	// FSM scan: carve-outs (appendable/coalesced), non-versioned objects, and —
-	// until the propose is removed — plain versioned records. Post-removal the
-	// versioned records are gone; the per-version blob enum below covers them.
+	// FSM scan: carve-outs (appendable/coalesced) + internal-bucket records. (Plain
+	// versioned and non-versioned objects no longer write FSM obj: records — they are
+	// blob-only. Versioned objects are covered by the per-version blob enum below.
+	// FOLLOW-UP: non-versioned/Suspended latest-only blobs are NOT yet enumerated here
+	// — their segment shards are skipped on KEK rotation. Not data-loss today because
+	// DEK-gen prune is blanket-refused (S7-0); a hard precondition before S7 prune is a
+	// cluster-wide fail-closed latest-only blob enum mirroring the per-version one.)
 	if err := b.fsm.IterECShardScanTargetsAllVersions(appendTarget); err != nil {
 		return nil, err
 	}
