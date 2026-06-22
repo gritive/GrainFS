@@ -1,12 +1,20 @@
-// Regression e2e for the follower-stale bucket-versioning read: enabling
-// versioning on the leader and then writing on a FOLLOWER must produce a
-// versioned object (a VersionId). Before the fix, a just-joined follower read
-// its lagging local group-0 replica and silently wrote the object non-versioned
-// (no VersionId). The mutating S3 edge now linearizes the versioning read
-// (ReadIndex + WaitApplied), so the follower observes Enabled deterministically.
+// Integration coverage for a versioned write on a FOLLOWER: enable versioning on
+// the leader, then PUT on a follower, and the object must be versioned (a
+// VersionId). This is the multipart-off-raft control-plane path that the mutating
+// S3 edge now linearizes (GetBucketVersioningLinearized: ReadIndex + WaitApplied)
+// so a follower observes leader-enabled versioning rather than its lagging local
+// group-0 replica.
 //
-// This is the deterministic, seam-free coverage that the blocked phantom-winner
-// e2e (TODOS Item 3) needed — a follower can now do a versioned write.
+// Scope note: this is a happy-path integration test, NOT a deterministic
+// regression of the stale window. The follower-stale read is a TRANSIENT apply
+// lag (observed up to ~90s, but a follower often catches up within the test's
+// retry window), so this spec passes with or without the barrier when there is
+// no lag. Deterministically reproducing the window would need a group-0
+// SetBucketVersioning apply-delay seam, and a delay long enough to outlast the
+// PUT retry window collides with the 30s propose deadline (the same trap that
+// blocked the phantom-winner e2e). The barrier's correctness rests on reusing the
+// gate-validated ReadIndex+WaitApplied primitive object reads already use
+// (exec_policy.go ResolveRead); this spec guards the end-to-end wiring.
 package e2e
 
 import (
