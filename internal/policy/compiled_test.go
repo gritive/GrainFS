@@ -168,11 +168,12 @@ func TestInvalidateDuringInflightPullDropsStaleResult(t *testing.T) {
 	var once sync.Once
 	deny := false
 	cs.SetLoader(func(string) ([]byte, bool, error) {
-		once.Do(func() { close(entered); <-release }) // only the first pull blocks
-		if deny {
+		localDeny := deny                             // capture the view at loader ENTRY, before blocking
+		once.Do(func() { close(entered); <-release }) // only the first pull blocks, holding the captured view
+		if localDeny {
 			return denyBytes, true, nil
 		}
-		return nil, false, nil // first pull returns the STALE (pre-tighten) view
+		return nil, false, nil // the first (blocked) pull carries the STALE "no policy" view
 	})
 	done := make(chan bool)
 	go func() { done <- cs.Allow(context.Background(), inp("AKIA", s3auth.PutObject, "b", "k")) }()

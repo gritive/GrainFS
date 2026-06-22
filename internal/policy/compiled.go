@@ -153,7 +153,12 @@ type CompiledPolicyStore struct {
 	writeMu sync.Mutex
 	state   atomic.Pointer[policyState]
 	loader  atomic.Pointer[LoaderFunc]
-	gen     atomic.Uint64 // bumped by Set/Delete/Invalidate; guards in-flight pull caching
+	// gen is a global mutation stamp: ANY Set/Delete/Invalidate (on any bucket)
+	// bumps it. A pull captures gen before its loader read and refuses to publish
+	// if gen advanced meanwhile, so a concurrent mutation always wins over an
+	// in-flight pull's now-possibly-stale view. Coarse (cross-bucket) but policy
+	// writes are rare, so the occasional redundant re-pull is acceptable.
+	gen atomic.Uint64
 }
 
 // NewCompiledPolicyStore creates an empty store.
