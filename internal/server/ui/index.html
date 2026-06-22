@@ -118,9 +118,6 @@ tbody tr:last-child td{border-bottom:none}
 <!-- Storage Tab -->
 <div class="content hidden" id="tab-storage">
   <div class="stats">
-    <div class="stat-card"><div class="label">NFSv4</div><div class="value" id="storage-nfs4">-</div></div>
-    <div class="stat-card"><div class="label">NBD</div><div class="value" id="storage-nbd">-</div></div>
-    <div class="stat-card"><div class="label">9P</div><div class="value" id="storage-p9">-</div></div>
     <div class="stat-card"><div class="label">Buckets</div><div class="value" id="storage-bucket-count">-</div></div>
   </div>
   <div class="toolbar">
@@ -133,14 +130,8 @@ tbody tr:last-child td{border-bottom:none}
   <div id="storage-msg" style="font-size:0.8rem;color:var(--text-muted);margin-bottom:0.75rem"></div>
   <div class="table-wrap" style="margin-bottom:1rem">
     <table>
-      <thead><tr><th>Bucket</th><th>Upstream</th><th>NFS Export</th><th>Mode</th></tr></thead>
+      <thead><tr><th>Bucket</th><th>Upstream</th></tr></thead>
       <tbody id="storage-bucket-list"></tbody>
-    </table>
-  </div>
-  <div class="table-wrap">
-    <table>
-      <thead><tr><th>NFS Export</th><th>Mode</th><th>FSID</th><th>Generation</th></tr></thead>
-      <tbody id="storage-nfs-list"></tbody>
     </table>
   </div>
 </div>
@@ -689,15 +680,8 @@ tbody tr:last-child td{border-bottom:none}
   document.getElementById('modal-bucket-ok').addEventListener('click', createBucket);
 
   // Storage
-  function protocolLabel(p) {
-    if (!p || !p.enabled) return 'off';
-    if (p.bind) return p.bind + ':' + p.port;
-    return String(p.port);
-  }
-
-  function fetchStorageJSON(path, optional) {
+  function fetchStorageJSON(path) {
     return fetchAuth(baseURL + path).then(function(r) {
-      if (optional && (r.status === 404 || r.status === 405)) return null;
       return r.json().then(function(payload) {
         if (!r.ok) throw new Error((payload && (payload.error || payload.code)) || ('HTTP ' + r.status));
         return payload;
@@ -711,47 +695,22 @@ tbody tr:last-child td{border-bottom:none}
     msg.textContent = 'Loading storage state...';
 
     Promise.all([
-      fetchStorageJSON('/ui/api/storage/protocols'),
-      fetchStorageJSON('/ui/api/storage/buckets'),
-      fetchStorageJSON('/ui/api/storage/nfs/exports', true)
+      fetchStorageJSON('/ui/api/storage/buckets')
     ]).then(function(results) {
-      var protocols = results[0] || {};
-      var bucketPayload = results[1] || {};
-      var nfsPayload = results[2] || {};
+      var bucketPayload = results[0] || {};
       var buckets = bucketPayload.buckets || [];
-      var exports = nfsPayload.exports || [];
 
-      document.getElementById('storage-nfs4').textContent = protocolLabel(protocols.nfs4);
-      document.getElementById('storage-nbd').textContent = protocolLabel(protocols.nbd);
-      document.getElementById('storage-p9').textContent = protocolLabel(protocols.p9);
       document.getElementById('storage-bucket-count').textContent = String(buckets.length);
 
       var bucketBody = document.getElementById('storage-bucket-list');
       clearChildren(bucketBody);
       if (buckets.length === 0) {
-        bucketBody.appendChild(mkEl('tr', null, [mkEl('td', { colspan: '4', className: 'empty-state', textContent: 'No buckets.' })]));
+        bucketBody.appendChild(mkEl('tr', null, [mkEl('td', { colspan: '2', className: 'empty-state', textContent: 'No buckets.' })]));
       }
       buckets.forEach(function(b) {
-        var nfs = b.nfs_export;
         bucketBody.appendChild(mkEl('tr', null, [
           mkTd(b.name || ''),
-          mkTd(b.has_upstream ? 'configured' : 'none'),
-          mkTd(nfs && nfs.registered ? 'registered' : 'none'),
-          mkTd(nfs && nfs.registered ? (nfs.read_only ? 'read-only' : 'read-write') : '')
-        ]));
-      });
-
-      var nfsBody = document.getElementById('storage-nfs-list');
-      clearChildren(nfsBody);
-      if (exports.length === 0) {
-        nfsBody.appendChild(mkEl('tr', null, [mkEl('td', { colspan: '4', className: 'empty-state', textContent: 'No NFS exports.' })]));
-      }
-      exports.forEach(function(e) {
-        nfsBody.appendChild(mkEl('tr', null, [
-          mkTd(e.bucket || ''),
-          mkTd(e.read_only ? 'read-only' : 'read-write'),
-          mkTd((e.fsid_major || 0) + '.' + (e.fsid_minor || 0), 'size-cell'),
-          mkTd(String(e.generation || 0), 'size-cell')
+          mkTd(b.has_upstream ? 'configured' : 'none')
         ]));
       });
 

@@ -19,7 +19,6 @@ const (
 	DomainDEKFSMWrap         AADDomain = 0x0006
 	DomainKEKRotate          AADDomain = 0x0007
 	DomainKEKCatchup         AADDomain = 0x0008
-	DomainNBD                AADDomain = 0x0009
 	DomainIAMAdmin           AADDomain = 0x000A
 	DomainCapabilityAssertV1 AADDomain = 0x000B
 	// DomainCASChunk binds content-addressed canonical chunk ciphertext.

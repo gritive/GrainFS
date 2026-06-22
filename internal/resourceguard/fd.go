@@ -80,7 +80,6 @@ func fdMetricCategories() []resourcewatch.Category {
 		resourcewatch.FDCategorySocket,
 		resourcewatch.FDCategoryBadger,
 		resourcewatch.FDCategoryReceiptOrEventStore,
-		resourcewatch.FDCategoryNFSSession,
 		resourcewatch.FDCategoryRegularFile,
 		resourcewatch.FDCategoryUnknown,
 	}

@@ -193,7 +193,7 @@ func nextActionForFailure(cause Cause, code string) string {
 	if cause == CauseGoroutineRunaway {
 		switch code {
 		case "goroutine_critical":
-			return "Critical goroutine count: capture pprof goroutine dump immediately and isolate the leaking subsystem (likely candidates: NFSv4 sessions, NBD connections, raft transport, scrub/replication workers)."
+			return "Critical goroutine count: capture pprof goroutine dump immediately and isolate the leaking subsystem (likely candidates: raft transport, scrub/replication workers)."
 		default:
 			return "Inspect goroutine pprof dump for unexpected blocked or leaking goroutines on this node."
 		}
