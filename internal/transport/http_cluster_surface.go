@@ -7,7 +7,7 @@ package transport
 var _ ClusterTransport = (*HTTPTransport)(nil)
 
 // RecycleConns closes the Hertz client's idle connections so peers re-handshake
-// under the current presented identity (the HTTP analogue of TCPTransport's conn
+// under the current presented identity (the HTTP connection
 // recycling after a rotation/flip; the server side re-reads identity per handshake
 // via GetConfigForClient).
 func (t *HTTPTransport) RecycleConns() {
