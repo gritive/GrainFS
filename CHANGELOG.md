@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.639.0] - 2026-06-22
+
+### Removed
+- **Dead `volume/` protocol-credential resource prefix removed.** `protocred.validResource` no longer
+  accepts a `volume/` resource prefix — it was a leftover from the removed NBD/volume subsystem and could
+  never pair with a valid protocol (`validProtocol` permits only `s3`/`iceberg`). Only `bucket/` and
+  `catalog/` remain, aligning the protocred validator with the policy ARN grammar. No behavior change for
+  S3/Iceberg credentials.
+
 ## [0.0.638.0] - 2026-06-22
 
 ### Removed
