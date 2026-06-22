@@ -127,8 +127,6 @@ type Config struct {
 	NFS4Port           int
 	NFSWriteBufferDir  string
 	NFSWriteBufferIdle time.Duration
-	P9Bind             string
-	P9Port             int
 	EnableIceberg      bool
 
 	// Resource guards (pre-resolved from cobra; Run body reads only these)

@@ -49,8 +49,6 @@ type ServeOptions struct {
 	NFS4Port           int           // --nfs4-port
 	NFSWriteBufferDir  string        // --nfs-write-buffer-dir
 	NFSWriteBufferIdle time.Duration // --nfs-write-buffer-idle
-	P9Bind             string        // --9p-bind
-	P9Port             int           // --9p-port
 	EnableIceberg      bool          // --enable-iceberg
 
 	// --- Intervals ---
