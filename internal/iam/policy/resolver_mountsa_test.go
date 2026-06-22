@@ -14,9 +14,9 @@ import (
 // through to implicit Deny.
 func TestResolver_Effective_MountSAPolicies(t *testing.T) {
 	s := &fakeStore{
-		mountSAToPols: map[string][]string{"alice": {"9PAttachOnly"}},
+		mountSAToPols: map[string][]string{"alice": {"NFSMountOnly"}},
 		docs: map[string]string{
-			"9PAttachOnly": `{"Statement":[{"Effect":"Allow","Action":"grainfs:9PAttach","Resource":"*"}]}`,
+			"NFSMountOnly": `{"Statement":[{"Effect":"Allow","Action":"grainfs:NFSMount","Resource":"*"}]}`,
 		},
 	}
 	r := NewResolver(s, time.Minute)
@@ -27,8 +27,8 @@ func TestResolver_Effective_MountSAPolicies(t *testing.T) {
 	if len(in.PrincipalPolicies) != 1 {
 		t.Fatalf("PrincipalPolicies len: got %d want 1", len(in.PrincipalPolicies))
 	}
-	if len(in.PrincipalPolicyNames) != 1 || in.PrincipalPolicyNames[0] != "9PAttachOnly" {
-		t.Fatalf("PrincipalPolicyNames: got %#v want [9PAttachOnly]", in.PrincipalPolicyNames)
+	if len(in.PrincipalPolicyNames) != 1 || in.PrincipalPolicyNames[0] != "NFSMountOnly" {
+		t.Fatalf("PrincipalPolicyNames: got %#v want [NFSMountOnly]", in.PrincipalPolicyNames)
 	}
 }
 
@@ -39,10 +39,10 @@ func TestResolver_Effective_MountSAPolicies(t *testing.T) {
 func TestResolver_Effective_S3SAPolicies_Unchanged(t *testing.T) {
 	s := &fakeStore{
 		saToPols:      map[string][]string{"bob": {"S3ReadOnly"}},
-		mountSAToPols: map[string][]string{"bob": {"9PAttachOnly"}}, // must be ignored on S3 path
+		mountSAToPols: map[string][]string{"bob": {"NFSMountOnly"}}, // must be ignored on S3 path
 		docs: map[string]string{
 			"S3ReadOnly":   `{"Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}`,
-			"9PAttachOnly": `{"Statement":[{"Effect":"Allow","Action":"grainfs:9PAttach","Resource":"*"}]}`,
+			"NFSMountOnly": `{"Statement":[{"Effect":"Allow","Action":"grainfs:NFSMount","Resource":"*"}]}`,
 		},
 	}
 	r := NewResolver(s, time.Minute)
@@ -62,10 +62,10 @@ func TestResolver_Effective_S3SAPolicies_Unchanged(t *testing.T) {
 func TestResolver_Effective_PrincipalTypeCacheSeparation(t *testing.T) {
 	s := &fakeStore{
 		saToPols:      map[string][]string{"alice": {"S3ReadOnly"}},
-		mountSAToPols: map[string][]string{"alice": {"9PAttachOnly"}},
+		mountSAToPols: map[string][]string{"alice": {"NFSMountOnly"}},
 		docs: map[string]string{
 			"S3ReadOnly":   `{"Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}`,
-			"9PAttachOnly": `{"Statement":[{"Effect":"Allow","Action":"grainfs:9PAttach","Resource":"*"}]}`,
+			"NFSMountOnly": `{"Statement":[{"Effect":"Allow","Action":"grainfs:NFSMount","Resource":"*"}]}`,
 		},
 	}
 	r := NewResolver(s, time.Minute)
@@ -80,8 +80,8 @@ func TestResolver_Effective_PrincipalTypeCacheSeparation(t *testing.T) {
 	if len(s3In.PrincipalPolicyNames) != 1 || s3In.PrincipalPolicyNames[0] != "S3ReadOnly" {
 		t.Fatalf("s3 path: got %#v want [S3ReadOnly]", s3In.PrincipalPolicyNames)
 	}
-	if len(mntIn.PrincipalPolicyNames) != 1 || mntIn.PrincipalPolicyNames[0] != "9PAttachOnly" {
-		t.Fatalf("mount path: got %#v want [9PAttachOnly]", mntIn.PrincipalPolicyNames)
+	if len(mntIn.PrincipalPolicyNames) != 1 || mntIn.PrincipalPolicyNames[0] != "NFSMountOnly" {
+		t.Fatalf("mount path: got %#v want [NFSMountOnly]", mntIn.PrincipalPolicyNames)
 	}
 }
 
@@ -91,11 +91,11 @@ func TestResolver_Effective_PrincipalTypeCacheSeparation(t *testing.T) {
 // groups remain S3-only.
 func TestResolver_Effective_MountSA_SkipsGroups(t *testing.T) {
 	s := &fakeStore{
-		mountSAToPols: map[string][]string{"alice": {"9PAttachOnly"}},
+		mountSAToPols: map[string][]string{"alice": {"NFSMountOnly"}},
 		saToGroups:    map[string][]string{"alice": {"admins"}}, // must NOT be consulted
 		groupToPols:   map[string][]string{"admins": {"S3FullAdmin"}},
 		docs: map[string]string{
-			"9PAttachOnly": `{"Statement":[{"Effect":"Allow","Action":"grainfs:9PAttach","Resource":"*"}]}`,
+			"NFSMountOnly": `{"Statement":[{"Effect":"Allow","Action":"grainfs:NFSMount","Resource":"*"}]}`,
 			"S3FullAdmin":  `{"Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}`,
 		},
 	}
@@ -104,7 +104,7 @@ func TestResolver_Effective_MountSA_SkipsGroups(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Effective: %v", err)
 	}
-	if len(in.PrincipalPolicyNames) != 1 || in.PrincipalPolicyNames[0] != "9PAttachOnly" {
-		t.Fatalf("mount-SA must not pull group policies: got %#v want [9PAttachOnly]", in.PrincipalPolicyNames)
+	if len(in.PrincipalPolicyNames) != 1 || in.PrincipalPolicyNames[0] != "NFSMountOnly" {
+		t.Fatalf("mount-SA must not pull group policies: got %#v want [NFSMountOnly]", in.PrincipalPolicyNames)
 	}
 }

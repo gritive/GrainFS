@@ -7,10 +7,9 @@ import (
 )
 
 // mountActions lists the actions that belong exclusively to the Mount SA
-// (NFS/9P) principal namespace.
+// (NFS) principal namespace.
 var mountActions = map[string]bool{
 	"grainfs:NFSMount": true,
-	"grainfs:9PAttach": true,
 }
 
 // extractRawActions decodes only the action fields from a policy JSON document.
@@ -60,8 +59,7 @@ func isS3OrIcebergAction(a string) bool {
 }
 
 // ValidateForMountSAAttach returns an error when the policy JSON contains any
-// action that is outside the Mount SA namespace (grainfs:NFSMount /
-// grainfs:9PAttach). In particular:
+// action that is outside the Mount SA namespace (grainfs:NFSMount). In particular:
 //   - "*" is rejected: it is ambiguous and would implicitly grant S3 access
 //     through a MountSA principal, breaking namespace isolation.
 //   - s3:* / iceberg:* actions are rejected.
@@ -73,24 +71,24 @@ func ValidateForMountSAAttach(policyJSON string) error {
 	for _, a := range actions {
 		if a == "*" {
 			return fmt.Errorf("policy contains wildcard action %q; "+
-				"Mount SA policies must use grainfs:NFSMount or grainfs:9PAttach only", a)
+				"Mount SA policies must use grainfs:NFSMount only", a)
 		}
 		if isS3OrIcebergAction(a) {
 			return fmt.Errorf("policy contains S3/Iceberg action %q; "+
-				"Mount SA policies must use grainfs:NFSMount or grainfs:9PAttach only", a)
+				"Mount SA policies must use grainfs:NFSMount only", a)
 		}
 		// grainfs:* wildcard is also disallowed — future grainfs actions may not
 		// be mount-SA actions.
 		if strings.HasPrefix(a, "grainfs:") && !isMountAction(a) {
 			return fmt.Errorf("policy contains unknown grainfs action %q; "+
-				"only grainfs:NFSMount and grainfs:9PAttach are valid for Mount SA policies", a)
+				"only grainfs:NFSMount is valid for Mount SA policies", a)
 		}
 	}
 	return nil
 }
 
 // ValidateForS3SAAttach returns an error when the policy JSON contains any
-// Mount SA-only action (grainfs:NFSMount / grainfs:9PAttach). Wildcard "*"
+// Mount SA-only action (grainfs:NFSMount). Wildcard "*"
 // is allowed because for S3 SAs it is scoped to S3/Iceberg operations by
 // the evaluator (MountSA principals are authenticated separately and never
 // carry an S3 SA principal tag).
@@ -102,7 +100,7 @@ func ValidateForS3SAAttach(policyJSON string) error {
 	for _, a := range actions {
 		if isMountAction(a) {
 			return fmt.Errorf("policy contains mount action %q; "+
-				"S3/Iceberg SA policies must not include grainfs:NFSMount or grainfs:9PAttach", a)
+				"S3/Iceberg SA policies must not include grainfs:NFSMount", a)
 		}
 	}
 	return nil

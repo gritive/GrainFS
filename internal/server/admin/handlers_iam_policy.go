@@ -116,8 +116,8 @@ func DeletePolicy(ctx context.Context, d *Deps, name string) error {
 }
 
 // AttachPolicyToSA attaches a policy to a ServiceAccount via Raft.
-// It rejects policies that contain mount-SA-only actions (grainfs:NFSMount /
-// grainfs:9PAttach) to enforce cross-namespace isolation.
+// It rejects policies that contain mount-SA-only actions (grainfs:NFSMount)
+// to enforce cross-namespace isolation.
 func AttachPolicyToSA(ctx context.Context, d *Deps, policyName, saID string) error {
 	if d.IAMPolicy == nil {
 		return NewInternal("iam policy admin disabled")

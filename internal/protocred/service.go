@@ -220,8 +220,6 @@ func connectionHint(item Credential, secret string) map[string]string {
 	switch item.Protocol {
 	case ProtocolNFS:
 		return map[string]string{"mount_path": name + "/" + item.ID + ":" + secret}
-	case Protocol9P:
-		return map[string]string{"aname": item.ID + ":" + secret + "@" + name}
 	case ProtocolS3:
 		return map[string]string{"access_key_id": item.ID}
 	case ProtocolIceberg:

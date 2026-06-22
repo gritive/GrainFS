@@ -151,13 +151,13 @@ func TestIsBuiltinName(t *testing.T) {
 	}
 }
 
-// TestBuiltins_MountSASeeded verifies NFSMountOnly and 9PAttachOnly are seeded,
-// parseable, and satisfy ValidateForMountSAAttach.
+// TestBuiltins_MountSASeeded verifies NFSMountOnly is seeded,
+// parseable, and satisfies ValidateForMountSAAttach.
 func TestBuiltins_MountSASeeded(t *testing.T) {
 	ps := policystore.NewInMemoryStore()
 	require.NoError(t, SeedAll(context.Background(), ps))
 
-	for _, name := range []string{"NFSMountOnly", "9PAttachOnly"} {
+	for _, name := range []string{"NFSMountOnly"} {
 		raw, err := ps.GetRaw(context.Background(), name)
 		require.NoError(t, err, "GetRaw(%q)", name)
 		require.NotEmpty(t, raw, "builtin %q doc should not be empty", name)
@@ -174,7 +174,7 @@ func TestBuiltins_MountSA_CrossNamespaceGuard(t *testing.T) {
 	require.NoError(t, SeedAll(context.Background(), ps))
 
 	// MountSA policies must pass ValidateForMountSAAttach.
-	for _, name := range []string{"NFSMountOnly", "9PAttachOnly"} {
+	for _, name := range []string{"NFSMountOnly"} {
 		raw, err := ps.GetRaw(context.Background(), name)
 		require.NoError(t, err)
 		require.NoError(t, policy.ValidateForMountSAAttach(string(raw)),
