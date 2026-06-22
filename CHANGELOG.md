@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.637.0] - 2026-06-22
+
+### Removed
+- **NFSv4 protocol support removed (BREAKING).** GrainFS no longer ships an NFSv4 server. The
+  `--nfs4-port`, `--nfs-write-buffer-dir`, and `--nfs-write-buffer-idle` serve flags are gone (passing
+  them now fails with "unknown flag"), the `grainfs nfs` command tree and the admin NFS-export API are
+  removed, the `/admin` storage-protocols endpoint is removed (it reported only mount-protocol status,
+  all now gone), and the `internal/nfs4server`, `internal/nfsadmin`, `internal/nfsexport` packages plus
+  the `NfsExport*` meta-Raft commands (and their FlatBuffers) are deleted. The `protocred` `Protocol`
+  enum drops `ProtocolNFS` (S3 + Iceberg remain). The bucket-delete NFS-export cascade is removed; the
+  per-bucket config cascade (lifecycle + IAM upstream, v0.0.635.0) is preserved unchanged. NFS export
+  tests, `tests/nfs4_colima`, and the `test-nfs4-colima`/`test-pynfs-colima`/`bench-nfs*` Makefile
+  targets are deleted. S3 and Iceberg are unaffected. This is the second slice of the mount-protocol
+  removal epic (9P was removed in v0.0.636.0); the shared mount-SA authentication layer
+  (`internal/iam/mountsastore`, the `MountSA*` meta-Raft commands) survives for a final teardown slice.
+
 ## [0.0.636.0] - 2026-06-22
 
 ### Removed
