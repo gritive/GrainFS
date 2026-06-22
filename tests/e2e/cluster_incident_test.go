@@ -65,7 +65,6 @@ var _ = ginkgo.Describe("Cluster incidents", func() {
 			ClusterKey:    clusterKey,
 			LogPrefix:     "grainfs-incident",
 			ScrubInterval: "2s",
-			DisableNFS:    true,
 		})
 		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 		ginkgo.DeferCleanup(cancel)
@@ -144,7 +143,6 @@ var _ = ginkgo.Describe("Cluster incidents", func() {
 			ClusterKey:    clusterKey,
 			LogPrefix:     "grainfs-quarantine-incident",
 			ScrubInterval: "2s",
-			DisableNFS:    true,
 		})
 		ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
 		ginkgo.DeferCleanup(cancel)

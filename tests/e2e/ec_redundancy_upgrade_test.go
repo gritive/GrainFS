@@ -47,7 +47,6 @@ func runECRedundancyUpgradeSurvivesOwnerKill(t testing.TB) {
 	c := startMRCluster(t, 1, mrClusterOptions{
 		FastBootstrap: true,
 		MaxNodes:      4,
-		disableNFS4:   true,
 		ExtraArgs: []string{
 			"--scrub-interval", "2s",
 			"--ec-redundancy-upgrade",

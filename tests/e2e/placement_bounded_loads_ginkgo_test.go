@@ -54,7 +54,6 @@ var _ = ginkgo.Describe("Placement BoundedLoads E2E", ginkgo.Ordered, func() {
 			Mode:       ClusterModeDynamicJoin,
 			ClusterKey: "E2E-BL-PLACEMENT-KEY",
 			LogPrefix:  "grainfs-bl-placement",
-			DisableNFS: true,
 		})
 		tgt = newClusterS3TargetFromCluster(ginkgo.GinkgoTB(), c)
 	})

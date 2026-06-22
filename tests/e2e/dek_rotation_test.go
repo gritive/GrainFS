@@ -42,10 +42,9 @@ var _ = ginkgo.Describe("data-DEK rotation (encryption.rotate-dek)", func() {
 	ginkgo.It("advances the active DEK generation cluster-wide and keeps pre/post-rotation objects readable", func() {
 		t := ginkgo.GinkgoTB()
 		c := startE2ECluster(t, e2eClusterOptions{
-			Nodes:      3,
-			Mode:       ClusterModeDynamicJoin,
-			DisableNFS: true,
-			LogPrefix:  "dek-rotate-cluster",
+			Nodes:     3,
+			Mode:      ClusterModeDynamicJoin,
+			LogPrefix: "dek-rotate-cluster",
 		})
 		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 		ginkgo.DeferCleanup(cancel)

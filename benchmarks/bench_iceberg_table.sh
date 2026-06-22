@@ -68,7 +68,6 @@ SERVE_ARGS=(
   "$BINARY" serve
   --data "$DATA_DIR"
   --port "$BASE_PORT"
-  --nfs4-port 0
   --nbd-port 0
   $(bench_encryption_args)
   --lifecycle-interval 0

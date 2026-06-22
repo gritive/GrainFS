@@ -110,7 +110,6 @@ func startGrainfsNode(t *testing.T, binary, dataDir string, httpPort, raftPort i
 		"--port", fmt.Sprintf("%d", httpPort),
 		"--node-id", "n1",
 		"--raft-addr", fmt.Sprintf("127.0.0.1:%d", raftPort),
-		"--nfs4-port", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	}

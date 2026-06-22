@@ -52,7 +52,6 @@ GRAINFS_VOLUME_TRACE=1 "$BINARY" serve \
   --data   "$DATA_DIR" \
   --port   "$HTTP_PORT" \
   --nbd-port "$NBD_PORT" \
-  --nfs4-port 0 \
   $(bench_encryption_args) \
   2>&1 | tee "$LOG_FILE" &
 SERVER_PID=$!

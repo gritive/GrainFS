@@ -547,7 +547,6 @@ func startIAMTestServer(t testing.TB) iamTestServer {
 	cmd := exec.Command(getBinary(), "serve",
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", port),
-		"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	)
@@ -588,7 +587,6 @@ type iamTestServerHandle struct {
 	BootstrapAK   string
 	BootstrapSK   string
 	s3Port        int
-	nfsPort       int
 	cmd           *exec.Cmd
 	cli           *s3.Client
 	// firstStart tracks whether we've spawned the binary at least once.
@@ -612,7 +610,6 @@ func startIAMTestServerWithRestart(t testing.TB) *iamTestServerHandle {
 		DataDir:   dir,
 		AdminSock: filepath.Join(dir, "admin.sock"),
 		s3Port:    freePort(),
-		nfsPort:   freePort(),
 	}
 	h.S3URL = fmt.Sprintf("http://127.0.0.1:%d", h.s3Port)
 	t.Cleanup(func() {
@@ -635,7 +632,6 @@ func (h *iamTestServerHandle) Start(t testing.TB) {
 	args := []string{"serve",
 		"--data", h.DataDir,
 		"--port", fmt.Sprintf("%d", h.s3Port),
-		"--nfs4-port", fmt.Sprintf("%d", h.nfsPort),
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	}

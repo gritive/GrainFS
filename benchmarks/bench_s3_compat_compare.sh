@@ -328,7 +328,6 @@ start_grainfs_single() {
     --data "$data_arg" \
     --port "$port" \
     $(bench_encryption_args) \
-    --nfs4-port 0 \
     --nbd-port 0 \
     --scrub-interval 0 \
     --lifecycle-interval 0 \
@@ -428,7 +427,6 @@ start_grainfs_cluster() {
       --raft-addr "127.0.0.1:${raft_ports[$zero_idx]}" \
       --join-listen-addr "127.0.0.1:${join_ports[$zero_idx]}" \
       $(bench_encryption_args) \
-      --nfs4-port 0 \
       --nbd-port 0 \
       --scrub-interval 0 \
       --lifecycle-interval 0 \

@@ -114,8 +114,6 @@ func runClusterJoinAllServicesAvailable(t testing.TB) {
 		// catalog over a joined cluster, so it must enable the flag it tests.
 		ExtraArgs: []string{"--enable-iceberg"},
 	})
-	waitForPortsParallel(t, c.nfs4Ports, 30*time.Second)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	ginkgo.DeferCleanup(cancel)
 	client := newIcebergSigV4Client(t, c.accessKey, c.secretKey, "us-east-1")
@@ -155,7 +153,6 @@ func runClusterJoinDynamicJoinServicesNodeCount(t testing.TB, nodes int) {
 	})
 
 	waitForPortsParallel(t, c.httpPorts, 30*time.Second)
-	waitForPortsParallel(t, c.nfs4Ports, 30*time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	ginkgo.DeferCleanup(cancel)

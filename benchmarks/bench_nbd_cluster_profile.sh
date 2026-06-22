@@ -86,7 +86,6 @@ start_node() {
     --node-id "bench-nbd-node-$i" \
     --raft-addr "$(raft_addr "$i")" \
     $(bench_encryption_args) \
-    --nfs4-port 0 \
     --nbd-port "$(nbd_port "$i")" \
     --pprof-port "$(pprof_port "$i")" \
     --scrub-interval 0 \

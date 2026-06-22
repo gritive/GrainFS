@@ -245,7 +245,6 @@ func startSingleKEKNode(t testing.TB) (string, string) {
 		"--port", fmt.Sprintf("%d", httpPort),
 		"--raft-addr", fmt.Sprintf("127.0.0.1:%d", raftPort),
 		"--node-id", "kek-single",
-		"--nfs4-port", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	}
@@ -423,10 +422,9 @@ var _ = ginkgo.Describe("KEK rotation lifecycle", func() {
 		ginkgo.It("propagates rotation to all followers", func() {
 			t := ginkgo.GinkgoTB()
 			c := startE2ECluster(t, e2eClusterOptions{
-				Nodes:      3,
-				Mode:       ClusterModeDynamicJoin,
-				DisableNFS: true,
-				LogPrefix:  "kek-rotate-cluster",
+				Nodes:     3,
+				Mode:      ClusterModeDynamicJoin,
+				LogPrefix: "kek-rotate-cluster",
 			})
 			leaderDir := c.dataDirs[c.leaderIdx]
 			leaderNode := c.nodeID(c.leaderIdx)
@@ -453,10 +451,9 @@ var _ = ginkgo.Describe("KEK rotation lifecycle", func() {
 		ginkgo.It("prunes a retired version with all voters lease_count=0", func() {
 			t := ginkgo.GinkgoTB()
 			c := startE2ECluster(t, e2eClusterOptions{
-				Nodes:      3,
-				Mode:       ClusterModeDynamicJoin,
-				DisableNFS: true,
-				LogPrefix:  "kek-prune-cluster",
+				Nodes:     3,
+				Mode:      ClusterModeDynamicJoin,
+				LogPrefix: "kek-prune-cluster",
 			})
 			leaderDir := c.dataDirs[c.leaderIdx]
 			leaderNode := kekClusterName(t, leaderDir)
@@ -513,10 +510,9 @@ var _ = ginkgo.Describe("KEK rotation lifecycle", func() {
 		ginkgo.It("survives a leader restart mid-lifecycle without double-applying", func() {
 			t := ginkgo.GinkgoTB()
 			c := startE2ECluster(t, e2eClusterOptions{
-				Nodes:      3,
-				Mode:       ClusterModeDynamicJoin,
-				DisableNFS: true,
-				LogPrefix:  "kek-restart-cluster",
+				Nodes:     3,
+				Mode:      ClusterModeDynamicJoin,
+				LogPrefix: "kek-restart-cluster",
 			})
 			leaderIdx := c.leaderIdx
 			leaderDir := c.dataDirs[leaderIdx]
@@ -564,10 +560,9 @@ var _ = ginkgo.Describe("KEK rotation lifecycle", func() {
 		ginkgo.It("reads on a follower an encrypted object written via the leader", func() {
 			t := ginkgo.GinkgoTB()
 			c := startE2ECluster(t, e2eClusterOptions{
-				Nodes:      3,
-				Mode:       ClusterModeDynamicJoin,
-				DisableNFS: true,
-				LogPrefix:  "kek-crossread-cluster",
+				Nodes:     3,
+				Mode:      ClusterModeDynamicJoin,
+				LogPrefix: "kek-crossread-cluster",
 			})
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			ginkgo.DeferCleanup(cancel)
@@ -610,10 +605,9 @@ var _ = ginkgo.Describe("KEK rotation lifecycle", func() {
 		ginkgo.It("serves an object written before a KEK rotation after the rotation", func() {
 			t := ginkgo.GinkgoTB()
 			c := startE2ECluster(t, e2eClusterOptions{
-				Nodes:      3,
-				Mode:       ClusterModeDynamicJoin,
-				DisableNFS: true,
-				LogPrefix:  "kek-objsurvive-cluster",
+				Nodes:     3,
+				Mode:      ClusterModeDynamicJoin,
+				LogPrefix: "kek-objsurvive-cluster",
 			})
 			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 			ginkgo.DeferCleanup(cancel)
@@ -656,10 +650,9 @@ var _ = ginkgo.Describe("KEK rotation lifecycle", func() {
 		ginkgo.It("serves an object on a follower after rotation without quarantining it", func() {
 			t := ginkgo.GinkgoTB()
 			c := startE2ECluster(t, e2eClusterOptions{
-				Nodes:      3,
-				Mode:       ClusterModeDynamicJoin,
-				DisableNFS: true,
-				LogPrefix:  "kek-follower-rotate-cluster",
+				Nodes:     3,
+				Mode:      ClusterModeDynamicJoin,
+				LogPrefix: "kek-follower-rotate-cluster",
 			})
 			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 			ginkgo.DeferCleanup(cancel)

@@ -172,16 +172,9 @@ type ExportDebugResp struct {
 	ActiveMountClients []string               `json:"active_mount_clients,omitempty"`
 }
 
-type StorageBucketNFSExport struct {
-	Registered bool   `json:"registered"`
-	ReadOnly   bool   `json:"read_only"`
-	Generation uint64 `json:"generation,omitempty"`
-}
-
 type StorageBucketSummary struct {
-	Name        string                  `json:"name"`
-	HasUpstream bool                    `json:"has_upstream"`
-	NFSExport   *StorageBucketNFSExport `json:"nfs_export,omitempty"`
+	Name        string `json:"name"`
+	HasUpstream bool   `json:"has_upstream"`
 }
 
 type ListStorageBucketsResp struct {

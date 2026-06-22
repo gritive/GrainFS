@@ -254,7 +254,7 @@ serve_node() {
     $bin serve --data $DATA_DIR --port $HTTP_PORT --node-id p5-node-$idx \
     --raft-addr $ipi:$RAFT_PORT --join-listen-addr $ipi:$JOIN_PORT \
     --raft-heartbeat-interval ${RAFT_HEARTBEAT:-1s} --raft-election-timeout ${RAFT_ELECTION:-3s} \
-    --nfs4-port 0 --nbd-port 0 --scrub-interval 0 --lifecycle-interval 0 --log-level ${LOG_LEVEL:-warn} \
+    --nbd-port 0 --scrub-interval 0 --lifecycle-interval 0 --log-level ${LOG_LEVEL:-warn} \
     && echo node-$idx-launched"
 }
 

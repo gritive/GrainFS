@@ -33,7 +33,6 @@ var _ = ginkgo.Describe("Migration injector", func() {
 			srcCmd := exec.Command(binary, "serve",
 				"--data", srcDir,
 				"--port", fmt.Sprintf("%d", srcPort),
-				"--nfs4-port", fmt.Sprintf("%d", freePort()),
 				"--scrub-interval", "0",
 				"--lifecycle-interval", "0",
 			)
@@ -71,7 +70,6 @@ var _ = ginkgo.Describe("Migration injector", func() {
 			dstCmd := exec.Command(binary, "serve",
 				"--data", dstDir,
 				"--port", fmt.Sprintf("%d", dstPort),
-				"--nfs4-port", fmt.Sprintf("%d", freePort()),
 				"--scrub-interval", "0",
 				"--lifecycle-interval", "0",
 			)

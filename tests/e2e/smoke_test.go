@@ -47,7 +47,6 @@ func runSmokeDeploymentCases() {
 		cmd := exec.Command(binary, "serve",
 			"--data", dir,
 			"--port", fmt.Sprintf("%d", port),
-			"--nfs4-port", fmt.Sprintf("%d", freePort()),
 		)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
