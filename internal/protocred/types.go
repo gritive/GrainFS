@@ -104,7 +104,7 @@ func validMode(m Mode) bool {
 }
 
 func validResource(resource string) bool {
-	for _, prefix := range []string{"bucket/", "volume/", "catalog/"} {
+	for _, prefix := range []string{"bucket/", "catalog/"} {
 		if strings.HasPrefix(resource, prefix) && len(resource) > len(prefix) {
 			return true
 		}
