@@ -622,6 +622,13 @@ func (b *DistributedBackend) GetObjectTags(bucket, key, versionID string) ([]sto
 
 // GetBucketVersioning satisfies server.BucketVersioner. Returns "Unversioned"
 // when no state has been set so the S3 semantic matches ECBackend's default.
+//
+// This is the LOCAL (best-effort) read: it may be stale on a lagging follower.
+// READ paths (GET/LIST/scrub) use it — a slightly-stale versioning view only
+// affects read-mode selection, never data integrity, and must stay available in
+// a degraded (leaderless) cluster. MUTATING paths must use
+// GetBucketVersioningLinearized instead: a stale read there silently mis-versions
+// the written object.
 func (b *DistributedBackend) GetBucketVersioning(bucket string) (string, error) {
 	var state string
 	err := b.store.View(func(txn MetadataTxn) error {
@@ -639,6 +646,32 @@ func (b *DistributedBackend) GetBucketVersioning(bucket string) (string, error) 
 		})
 	})
 	return state, err
+}
+
+// GetBucketVersioningLinearized is the LINEARIZABLE, FAIL-CLOSED read for the
+// MUTATING S3 edge. Bucket versioning lives in the group-0 raft FSM and a
+// follower's local replica can lag (a just-joined follower observed Unversioned
+// for ~90s after another node enabled versioning) — so a write resolving
+// versioning from the local replica could silently mis-version the object. We
+// confirm the leader's commit index (ReadIndex — forwarded to the group-0 leader
+// when this node is a follower) and wait for the local FSM to apply up to it
+// before the local read (same primitive object reads use, exec_policy.go
+// ResolveRead). On a ReadIndex/apply failure we return the error (fail-closed):
+// the mutating edge surfaces it as a retryable error rather than writing
+// non-versioned. Non-raft backends (nil node) fall back to the local read.
+func (b *DistributedBackend) GetBucketVersioningLinearized(ctx context.Context, bucket string) (string, error) {
+	if b.node != nil {
+		readCtx, cancel := context.WithTimeout(ctx, localExecFollowerReadDeadline)
+		defer cancel()
+		idx, err := b.ReadIndex(readCtx)
+		if err != nil {
+			return "", err
+		}
+		if err := b.WaitApplied(readCtx, idx); err != nil {
+			return "", err
+		}
+	}
+	return b.GetBucketVersioning(bucket)
 }
 
 func (b *DistributedBackend) ListBuckets(ctx context.Context) ([]string, error) {

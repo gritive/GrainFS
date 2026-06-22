@@ -851,6 +851,19 @@ func (c *ClusterCoordinator) GetBucketVersioning(bucket string) (string, error) 
 	return v.GetBucketVersioning(bucket)
 }
 
+// GetBucketVersioningLinearized is the linearizable, fail-closed read used by the
+// MUTATING S3 edge (see DistributedBackend.GetBucketVersioningLinearized). Falls
+// back to the local read for a base backend that doesn't support linearization.
+func (c *ClusterCoordinator) GetBucketVersioningLinearized(ctx context.Context, bucket string) (string, error) {
+	type linearizableVersioner interface {
+		GetBucketVersioningLinearized(ctx context.Context, bucket string) (string, error)
+	}
+	if v, ok := c.base.(linearizableVersioner); ok {
+		return v.GetBucketVersioningLinearized(ctx, bucket)
+	}
+	return c.GetBucketVersioning(bucket)
+}
+
 func (c *ClusterCoordinator) SetBucketPolicy(bucket string, policyJSON []byte) error {
 	type proposer interface {
 		SetBucketPolicyPropose(bucket string, policyJSON []byte) error
