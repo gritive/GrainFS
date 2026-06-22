@@ -22,8 +22,36 @@
   control-plane leadership; reads/scrub keep the plain local read. Versioning stays on group-0 raft
   (consensus preserved — a mutable RMW cell needs total order + atomic CAS, which a quorum LWW blob
   can't provide; see `docs/superpowers/specs/2026-06-23-bucket-config-off-group0-quorum-design.md`).
-- **[P3][follow-up] Linearize `GetBucketPolicy` the same way** — identical plain-`store.View` shape on
-  group-0; a stale policy read at a mutating edge could mis-authorize. Small, reuses the same pattern.
+- **[premise-WRONG, do not implement] "Linearize `GetBucketPolicy` the same way".** Investigated and
+  refuted: the S3 mutating-edge authz decision does NOT call `GetBucketPolicy`. It goes
+  `mustAuthorize` → `authz_decision.go` `s.authz.Decide` → `RequestAuthorizer.Decide` → the in-memory
+  `*policy.CompiledPolicyStore`. `GetBucketPolicy` (`loadBucketPolicy`) is only the GET ?policy /
+  admin **display** read. Linearizing it changes no authorization and only adds group-0 coupling to a
+  display read. Superseded by the real gap below.
+- **[P2][security, deferred — design chosen, not yet built] Follower's bucket-policy authz cache is
+  never populated from committed Raft state.** In cluster mode the authoritative per-bucket S3
+  bucket-policy gate is the server-layer `*policy.CompiledPolicyStore` (`CompiledPolicyStore.Allow`
+  default-ALLOWs on a miss; `compiled.go:271`). It is `Set` only from `operations_policy.go:13` (the
+  request-processing node's write path) and `:38` (lazy-load on a GET ?policy display). It is NOT
+  populated by the data-Raft FSM apply: `notifyOnApply` (`backend.go:816`) handles only
+  `CmdPutObjectMeta`/`CmdDeleteObject`/`CmdCompleteMultipart`; `CmdSetBucketPolicy` falls to `default`.
+  And `FSM.Restore` (`apply.go:1059`) bulk-loads the snapshot into Badger without firing apply hooks.
+  → A follower that never served the PutBucketPolicy AND never served a GET ?policy for a bucket
+  has an empty compiled entry → every PUT/DELETE/multipart hits `Allow` → `true` (default allow),
+  so a committed **Deny** bucket-policy is silently unenforced on that follower. PERMANENT gap (not a
+  bounded apply-lag window), partially masked by Layer-1 IAM grants (an SA with no IAM allow is still
+  denied at L1; the gap is the bucket-policy Deny layer). Severity below #839 (authz gap, reversible,
+  not silent data loss), but a real correctness/security defect. The IAM meta-FSM bucket-policy path
+  (`MetaCmdTypeBucketPolicyPut`, `bucketpolicy.InMemoryStore`, `applyBucketPolicyPut/Delete`) is dead
+  in production (no proposer) — wire-or-remove it to kill the dual-store ambiguity.
+  **Chosen design (deferred 2026-06-23): hybrid = apply-hook + pull-on-miss.** (1) Add
+  `CmdSetBucketPolicy`/`CmdDeleteBucketPolicy` cases to `notifyOnApply` → a policy callback →
+  `CompiledPolicyStore.Set/Delete` (propagates changes, esp. deletes/tightening, on every node). (2)
+  On a `CompiledPolicyStore` miss, load from the local committed replica (the backend's
+  `GetBucketPolicy` Badger read + lazy-compile, with a negative-cache for "no policy") instead of
+  default-allow — inherently complete across boot / runtime-snapshot-install / apply-lag, self-healing,
+  no group-0 coupling, one local read per bucket per node. Needs a deterministic follower
+  false-allow e2e (RED) + careful authz-path review (security-critical).
 - **[DONE] AppendObject versioned-bucket feature-gate** read the PLAIN versioning state
   (`object_append.go`), so a stale group-0 follower could read Unversioned for an Enabled bucket and
   let an append bypass the 501 gate. Fixed: the gate now resolves versioning via the linearized read
