@@ -1163,6 +1163,46 @@ func (s *ShardService) ScanQuorumMetaBucket(bucket, prefix string) ([]PutObjectM
 	return results, err
 }
 
+// scanQuorumMetaBucketStrict is the FAIL-CLOSED twin of ScanQuorumMetaBucket: a
+// latest-only blob that cannot be read/decoded returns an error (rather than being
+// silently skipped) so the segment-GC known-set is never silently incomplete — a
+// dropped object would orphan-delete its live segments. Used by the non-versioned
+// GC known-set builder (listNonVersionedBucketObjectsForGC). No prefix filter (the
+// GC walks the whole bucket).
+func (s *ShardService) scanQuorumMetaBucketStrict(bucket string) ([]PutObjectMetaCmd, error) {
+	if len(s.dataDirs) == 0 {
+		return nil, nil
+	}
+	root := filepath.Join(s.dataDirs[0], quorumMetaSubDir)
+	bucketRoot := filepath.Join(root, bucket)
+	if _, err := os.Stat(bucketRoot); os.IsNotExist(err) {
+		return nil, nil
+	}
+	var results []PutObjectMetaCmd
+	err := filepath.WalkDir(bucketRoot, func(path string, d fs.DirEntry, werr error) error {
+		if werr != nil {
+			return werr // fail-closed: a walk error must not silently shrink the known-set
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if isQuorumMetaTempName(d.Name()) {
+			return nil // in-flight atomic-publish temp, not a stored key
+		}
+		key, rerr := filepath.Rel(bucketRoot, path)
+		if rerr != nil {
+			return rerr
+		}
+		cmd, qerr := s.readQuorumMetaRawCmd(bucket, key)
+		if qerr != nil {
+			return fmt.Errorf("gc known-set: read latest blob %s/%s: %w", bucket, key, qerr)
+		}
+		results = append(results, cmd)
+		return nil
+	})
+	return results, err
+}
+
 // ScanQuorumMetaVersionsBucket walks .quorum_meta_versions/{bucket}/, decodes
 // EVERY version blob, groups by the decoded cmd.Key (authoritative — keys contain
 // '/', so a dir can be both a key-leaf and an intermediate dir, e.g. a/b and

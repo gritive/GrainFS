@@ -220,8 +220,10 @@ func twoBucketBackends(t *testing.T) (b1, b2 *DistributedBackend) {
 	b2 = newTestDistributedBackend(t)
 	require.NoError(t, b1.CreateBucket(ctx, "b1bkt"))
 	require.NoError(t, b2.CreateBucket(ctx, "b2bkt"))
-	putObjMeta(t, b1, "b1bkt", "k", "v1", "e1")
-	putObjMeta(t, b2, "b2bkt", "k", "v2", "e2")
+	// Non-versioned objects are authoritative on the latest-only blob (no FSM obj:
+	// record under blob-primary), so the GC known-set scans those blobs.
+	seedLatestBlob(t, b1, "b1bkt", "k", PutObjectMetaCmd{VersionID: "v1", ETag: "e1", NodeIDs: []string{"n1"}, ECData: 1})
+	seedLatestBlob(t, b2, "b2bkt", "k", PutObjectMetaCmd{VersionID: "v2", ETag: "e2", NodeIDs: []string{"n1"}, ECData: 1})
 	return b1, b2
 }
 
