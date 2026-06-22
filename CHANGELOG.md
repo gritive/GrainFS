@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.648.0] - 2026-06-23
+
+### Fixed
+- **Linearized the bucket-versioning read at the mutating S3 edge so a follower no longer mis-versions
+  writes.** A multipart-complete / PUT / Copy issued to a group-0 follower resolved bucket versioning from
+  that node's LOCAL group-0 replica, which can lag a just-joined follower (Unversioned observed for ~90s
+  after another node enabled versioning) — so the object was silently written non-versioned. The mutating
+  edge now resolves versioning via a linearizing read (`GetBucketVersioningLinearized`: a group-0 ReadIndex
+  barrier, forwarded to the leader when this node is a follower, plus WaitApplied — the same primitive object
+  reads use), so the follower observes the leader-committed state. It DEGRADES to the local read during a
+  group-0 leaderless window rather than failing, so object writes (even to unversioned buckets) are never
+  coupled to control-plane leadership — preserving the multiraft property that data writes don't depend on
+  one group's leader. Read paths (GET/HEAD/LIST/scrub) keep the cheap local read and stay available during a
+  group-0 outage. Versioning stays on the group-0 raft log: a mutable single-cell config
+  (Enabled↔Suspended↔deleted) needs a total order and the generation-CAS delete cascade, which a quorum LWW
+  blob cannot provide.
+
 ## [0.0.647.0] - 2026-06-23
 
 ### Fixed
