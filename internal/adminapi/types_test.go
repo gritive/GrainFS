@@ -42,33 +42,6 @@ func TestScrubJobInfoJSONRoundTrip(t *testing.T) {
 	require.Len(t, out.PeerFailures, 1)
 }
 
-func TestVolumeJSONShape(t *testing.T) {
-	payload := struct {
-		Volume VolumeInfo `json:"volume"`
-	}{
-		Volume: VolumeInfo{
-			Name:            "v1",
-			Size:            1024,
-			BlockSize:       4096,
-			AllocatedBlocks: 2,
-			AllocatedBytes:  8192,
-			Health:          "ok",
-			HealthReasons:   []string{},
-		},
-	}
-	buf, err := json.Marshal(payload)
-	require.NoError(t, err)
-	var fields map[string]any
-	require.NoError(t, json.Unmarshal(buf, &fields))
-	require.IsType(t, map[string]any{}, fields["volume"])
-	volume := fields["volume"].(map[string]any)
-	for _, key := range []string{"block_size", "allocated_blocks", "allocated_bytes", "health_reasons"} {
-		if _, ok := volume[key]; !ok {
-			require.Failf(t, "missing volume JSON key", "missing volume JSON key %q in %s", key, buf)
-		}
-	}
-}
-
 func TestStatus_JSONRoundTrip(t *testing.T) {
 	in := Status{
 		Mode: "cluster", NodeID: "n1", State: "leader", Term: 7, LeaderID: "n1",

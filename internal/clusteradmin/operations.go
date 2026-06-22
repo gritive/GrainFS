@@ -16,13 +16,13 @@ import (
 // BaseOptions carries the fields shared by every package-level Run* function
 // in clusteradmin: where to connect, how long to wait, and where to read/write.
 //
-// Mirrors volumeadmin.BaseOptions in shape. Stderr/Stdin are present even on
+// Mirrors admincli.BaseOptions in shape. Stderr/Stdin are present even on
 // operations that don't read them (Peers/Events leave both nil) so the three
 // Options structs stay symmetric; RemovePeer is the only op that requires
 // Stderr (pre-flight prompt) and Stdin (y/N confirmation when !AssumeYes).
 //
 // Each Run* keeps inline strict validation (rejects nil writers / non-positive
-// Timeout). Helpers like volumeadmin's clientFor/withTimeout/stdout/stderr are
+// Timeout). Helpers like admincli's clientFor/withTimeout/stdout/stderr are
 // intentionally not adopted here — clusteradmin's strict contract catches
 // caller misuse at the boundary instead of silently falling back to os.Std*.
 type BaseOptions struct {

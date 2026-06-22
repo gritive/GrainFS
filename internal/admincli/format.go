@@ -1,4 +1,4 @@
-package volumeadmin
+package admincli
 
 import (
 	"strings"
