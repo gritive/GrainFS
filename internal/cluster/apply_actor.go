@@ -216,4 +216,7 @@ func (a *applyActor) restore(b *DistributedBackend, entry raft.LogEntry) {
 	}
 	b.lastApplied.Store(entry.Index)
 	b.lastAppliedTerm.Store(entry.Term)
+	if fn := b.onBucketPolicyApply.Load(); fn != nil {
+		(*fn)("") // snapshot replaced local state wholesale → flush the policy cache
+	}
 }

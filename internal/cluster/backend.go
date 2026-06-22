@@ -257,6 +257,12 @@ type DistributedBackend struct {
 	// apply-actor goroutine, so the callback MUST dispatch a goroutine for any
 	// proposal/Kick. Wired by the serveruntime to re-Kick the RewrapController.
 	onFSMValueResealDone func()
+
+	// onBucketPolicyApply, if set, fires after a committed CmdSetBucketPolicy /
+	// CmdDeleteBucketPolicy with the affected bucket (or "" on snapshot install)
+	// so an upper-layer compiled policy cache can invalidate and re-pull. Atomic
+	// because the apply loop reads it before boot finishes wiring it.
+	onBucketPolicyApply atomic.Pointer[func(bucket string)]
 }
 
 type backendTopology struct {
@@ -776,6 +782,13 @@ func (b *DistributedBackend) SetOnApply(fn OnApplyFunc) {
 	b.onApply = fn
 }
 
+// SetOnBucketPolicyApply wires the per-node bucket-policy cache invalidator,
+// fired after a committed policy apply (or "" on snapshot install). Safe to call
+// after RunApplyLoop has started (the field is atomic).
+func (b *DistributedBackend) SetOnBucketPolicyApply(fn func(bucket string)) {
+	b.onBucketPolicyApply.Store(&fn)
+}
+
 // SetMultiGeneration arms (true) or disarms (false) the cross-generation LWW
 // read merge for quorum-meta reads (S7-6). The coordinator calls it from
 // rebuild() with generationCount() > 1 so that, once a topology generation has
@@ -825,6 +838,26 @@ func (b *DistributedBackend) notifyOnApply(raw []byte) {
 	if cmd.Type == CmdFSMValueResealDone {
 		if b.onFSMValueResealDone != nil {
 			b.onFSMValueResealDone()
+		}
+		return
+	}
+
+	// Bucket-policy commands invalidate the upper-layer compiled policy cache so
+	// the next authz Allow re-pulls the now-committed policy. Early-return before
+	// the object-cache block (which these commands never affect).
+	switch cmd.Type {
+	case CmdSetBucketPolicy:
+		if c, derr := decodeSetBucketPolicyCmd(cmd.Data); derr == nil {
+			if fn := b.onBucketPolicyApply.Load(); fn != nil {
+				(*fn)(c.Bucket)
+			}
+		}
+		return
+	case CmdDeleteBucketPolicy:
+		if c, derr := decodeDeleteBucketPolicyCmd(cmd.Data); derr == nil {
+			if fn := b.onBucketPolicyApply.Load(); fn != nil {
+				(*fn)(c.Bucket)
+			}
 		}
 		return
 	}
