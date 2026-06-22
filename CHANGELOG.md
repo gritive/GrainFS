@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.649.0] - 2026-06-23
+
+### Fixed
+- **AppendObject's versioning-enabled 501 feature-gate now resolves bucket versioning via the linearized
+  read at the mutating edge.** The gate that rejects AppendObject on versioning-enabled buckets read the
+  plain LOCAL group-0 replica, so a just-joined follower whose replica lags (~90s) could observe
+  Unversioned for an Enabled bucket and let an append bypass the 501 gate (a feature-gate bypass, not
+  data mis-versioning). The gate now resolves via `GetBucketVersioningLinearized` — the same
+  mutating-edge contract PUT / Copy / CompleteMultipart already follow (shipped in 0.0.648.0) — which
+  degrades to the local read during a group-0 leaderless window, so the append path is never coupled to
+  control-plane leadership. Read paths keep the plain local read.
+
 ## [0.0.648.0] - 2026-06-23
 
 ### Fixed

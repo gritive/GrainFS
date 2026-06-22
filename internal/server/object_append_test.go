@@ -7,8 +7,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // Red 18: invalid x-amz-write-offset-bytes header → 400 InvalidArgument.
@@ -114,6 +117,30 @@ func TestAppendObjectVersioningBucketRejected(t *testing.T) {
 	resp.Body.Close()
 
 	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode)
+}
+
+// TestAppendObjectGateUsesLinearizedRead guards that the AppendObject 501
+// feature-gate is a MUTATING edge: it must resolve bucket versioning via the
+// LINEARIZED read (#839), not the plain local read. A just-joined group-0
+// follower whose local versioning replica lags (~90s) would otherwise read
+// "Unversioned" for an Enabled bucket and let the append bypass the 501 gate.
+// recordingVersioner returns "Enabled" from both reads, so the gate fires (501)
+// regardless; the call-count is the discriminator (same technique as
+// TestEdgeResolverSelection).
+func TestAppendObjectGateUsesLinearizedRead(t *testing.T) {
+	real, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	rv := &recordingVersioner{Backend: real}
+	srv := New("127.0.0.1:0", rv)
+
+	c := app.NewContext(0)
+	c.Request.Header.Set(appendOffsetHeader, "0")
+	handled := srv.appendObject(t.Context(), c, "b", "k")
+
+	require.True(t, handled)
+	require.Equal(t, http.StatusNotImplemented, c.Response.StatusCode())
+	require.Equal(t, 1, rv.linCalls, "append 501-gate must use the linearized read")
+	require.Equal(t, 0, rv.plainCalls, "append 501-gate must NOT use the plain (stale-prone) read")
 }
 
 // NOTE: TestAppendableObjectOverwriteByPlainPut removed — equivalent SDK
