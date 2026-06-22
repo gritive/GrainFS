@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.641.0] - 2026-06-22
+
+### Added
+- **Bucket-upstream admin-route authz regression tests.** Added `TestIAMBucketUpstreamRoutes*` covering the
+  bearer-actor authz gate on the `/v1/upstreams`, `/v1/buckets/:bucket/upstream`, and `/v1/migration/cutover`
+  routes: a denied bearer gets 403 before the handler runs (no upstream operation reaches the service, all
+  five `grainfs:IAMBucketUpstream*` actions consulted), and without a bearer the routes fall back to the
+  trusted UDS path with the authz gate never consulted. Restores upstream-route authz coverage that had
+  ridden inside the removed combined MountSA+upstream tests (Slice C, #829). Test-only — no behavior change.
+
 ## [0.0.640.0] - 2026-06-22
 
 ### Changed

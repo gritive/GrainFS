@@ -454,6 +454,70 @@ func TestIAMMutationRoutesWithoutBearerKeepUDSFallback(t *testing.T) {
 	require.Empty(t, authz.calls)
 }
 
+// TestIAMBucketUpstreamRoutesDenyBearerBeforeHandler asserts the bucket-upstream
+// admin routes (write/list/read/delete/cutover) run the bearer-actor authz gate
+// BEFORE their handler: a denied bearer gets 403 and no upstream operation
+// reaches the service. Regression guard for the upstream-route authz coverage
+// that rode inside the removed combined MountSA+upstream tests (Slice C, #829).
+func TestIAMBucketUpstreamRoutesDenyBearerBeforeHandler(t *testing.T) {
+	h, base, start := newUIRouteTestServer(t)
+	iamSvc := &routeIAMService{}
+	authz := &credentialAuthorizerStub{decision: policy.DecisionDeny, reason: "implicit Deny"}
+	admin.RegisterIAMOnly(h, &admin.Deps{
+		IAM:        iamSvc,
+		ActorAuth:  &actorAuthStub{principal: principal.OIDC("https://idp.example.com/", "alice", "oidc:example:alice", nil)},
+		AdminAuthz: authz,
+	})
+	start()
+
+	raw := doRouteTestRequestAuth(t, http.MethodPut, base+"/v1/upstreams", "Bearer route-token", nil, http.StatusForbidden)
+	require.Contains(t, string(raw), "implicit Deny")
+	doRouteTestRequestAuth(t, http.MethodGet, base+"/v1/upstreams", "Bearer route-token", nil, http.StatusForbidden)
+	doRouteTestRequestAuth(t, http.MethodGet, base+"/v1/buckets/logs/upstream", "Bearer route-token", nil, http.StatusForbidden)
+	doRouteTestRequestAuth(t, http.MethodDelete, base+"/v1/buckets/logs/upstream", "Bearer route-token", nil, http.StatusForbidden)
+	doRouteTestRequestAuth(t, http.MethodPost, base+"/v1/migration/cutover", "Bearer route-token", nil, http.StatusForbidden)
+
+	// Denied before any handler ran — nothing reached the service.
+	require.Empty(t, iamSvc.upstreamPuts)
+	require.Empty(t, iamSvc.upstreamGets)
+	require.Zero(t, iamSvc.upstreamLists)
+	require.Empty(t, iamSvc.upstreamDeletes)
+	require.Empty(t, iamSvc.upstreamCutovers)
+
+	require.Len(t, authz.calls, 5)
+	gotActions := make([]string, 0, len(authz.calls))
+	for _, call := range authz.calls {
+		require.Equal(t, principal.OIDC("https://idp.example.com/", "alice", "oidc:example:alice", nil), call.principal)
+		gotActions = append(gotActions, call.action)
+	}
+	require.Equal(t, []string{
+		"grainfs:IAMBucketUpstreamWrite",
+		"grainfs:IAMBucketUpstreamList",
+		"grainfs:IAMBucketUpstreamRead",
+		"grainfs:IAMBucketUpstreamDelete",
+		"grainfs:IAMBucketUpstreamCutover",
+	}, gotActions)
+}
+
+// TestIAMBucketUpstreamRoutesWithoutBearerKeepUDSFallback asserts that without a
+// bearer token the upstream read routes fall back to the trusted UDS path: the
+// handler runs and the bearer-actor authz gate is never consulted (even though
+// it would Deny). Pairs with the deny test above to pin the two-sided contract.
+func TestIAMBucketUpstreamRoutesWithoutBearerKeepUDSFallback(t *testing.T) {
+	h, base, start := newUIRouteTestServer(t)
+	iamSvc := &routeIAMService{}
+	authz := &credentialAuthorizerStub{decision: policy.DecisionDeny}
+	admin.RegisterIAMOnly(h, &admin.Deps{IAM: iamSvc, AdminAuthz: authz})
+	start()
+
+	doRouteTestRequestAuth(t, http.MethodGet, base+"/v1/upstreams", "", nil, http.StatusOK)
+	doRouteTestRequestAuth(t, http.MethodGet, base+"/v1/buckets/logs/upstream", "", nil, http.StatusOK)
+
+	require.Equal(t, 1, iamSvc.upstreamLists)
+	require.Equal(t, []string{"logs"}, iamSvc.upstreamGets)
+	require.Empty(t, authz.calls)
+}
+
 func doRouteTestRequestAuth(t *testing.T, method, url, bearer string, body io.Reader, wantStatus int) []byte {
 	t.Helper()
 	req, err := http.NewRequest(method, url, body)
