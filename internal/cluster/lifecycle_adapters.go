@@ -19,8 +19,8 @@ func (p *LifecycleProposer) ProposeLifecyclePut(ctx context.Context, bucket stri
 	return p.Propose(ctx, clusterpb.MetaCmdTypeBucketLifecyclePut, lifecycle.EncodePutPayload(bucket, raw))
 }
 
-func (p *LifecycleProposer) ProposeLifecycleDelete(ctx context.Context, bucket string) error {
-	return p.Propose(ctx, clusterpb.MetaCmdTypeBucketLifecycleDelete, lifecycle.EncodeDeletePayload(bucket))
+func (p *LifecycleProposer) ProposeLifecycleDelete(ctx context.Context, bucket string, observedGen uint64) error {
+	return p.Propose(ctx, clusterpb.MetaCmdTypeBucketLifecycleDelete, lifecycle.EncodeDeletePayload(bucket, observedGen))
 }
 
 // raftNodeAccess is the minimum surface RaftLeadership needs. Defined as an

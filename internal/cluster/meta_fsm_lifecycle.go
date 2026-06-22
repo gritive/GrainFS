@@ -22,16 +22,16 @@ func (f *MetaFSM) applyBucketLifecyclePut(payload []byte) error {
 	if err != nil {
 		return fmt.Errorf("meta_fsm: BucketLifecyclePut: %w", err)
 	}
-	return f.lifecycleStore.PutRaw(bucket, raw)
+	return f.lifecycleStore.PutRawBumpGen(bucket, raw)
 }
 
 func (f *MetaFSM) applyBucketLifecycleDelete(payload []byte) error {
 	if f.lifecycleStore == nil {
 		return fmt.Errorf("meta_fsm: lifecycle store not wired")
 	}
-	bucket, err := lifecycle.DecodeDeletePayload(payload)
+	bucket, observedGen, err := lifecycle.DecodeDeletePayload(payload)
 	if err != nil {
 		return fmt.Errorf("meta_fsm: BucketLifecycleDelete: %w", err)
 	}
-	return f.lifecycleStore.Delete(bucket)
+	return f.lifecycleStore.DeleteIfGen(bucket, observedGen)
 }

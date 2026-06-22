@@ -29,7 +29,7 @@ func (f *fakeProposer) ProposeLifecyclePut(ctx context.Context, bucket string, r
 	}{bucket, append([]byte(nil), raw...)})
 	return f.err
 }
-func (f *fakeProposer) ProposeLifecycleDelete(ctx context.Context, bucket string) error {
+func (f *fakeProposer) ProposeLifecycleDelete(ctx context.Context, bucket string, observedGen uint64) error {
 	f.deleteCalls = append(f.deleteCalls, bucket)
 	return f.err
 }
@@ -185,7 +185,7 @@ type fakeProposerWithStore struct {
 func (f *fakeProposerWithStore) ProposeLifecyclePut(_ context.Context, bucket string, raw []byte) error {
 	return f.store.PutRaw(bucket, raw)
 }
-func (f *fakeProposerWithStore) ProposeLifecycleDelete(_ context.Context, bucket string) error {
+func (f *fakeProposerWithStore) ProposeLifecycleDelete(_ context.Context, bucket string, observedGen uint64) error {
 	return f.store.Delete(bucket)
 }
 
