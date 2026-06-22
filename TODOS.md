@@ -35,29 +35,16 @@ dead references remain. Three dependency-ordered, independently-shippable slices
   Plan gate (codex + completeness-critic, 10 findings incl. 1 ordering BLOCKER) + 6 task reviews + opus
   whole-branch gate (✅ ready-to-merge). The MOUNT-PROTOCOL REMOVAL EPIC IS COMPLETE (A+B+C all shipped/pending).
 
-### [follow-up] Slice C deferred cleanups (low priority, out of slice scope)
+### [follow-up] Slice C deferred cleanups — ALL DONE (2026-06-22)
 
-- **[P3] Dead `adminapi.VolumeInfo` type** — leftover from the volume-removal epic (#781–#785), referenced
-  only by `internal/adminapi/storage_types_test.go`. Not part of the mount-protocol removal; remove in a
-  future adminapi cleanup (good companion to the `volumeadmin` rename below).
-- **[P3] `internal/protocred/types.go` `validResource` accepts a `volume/` resource prefix** — pre-existing
-  latent grammar inconsistency (predates the volume epic, ~PR #579): the protocred validator is more
-  permissive than the policy ARN grammar (`validProtocolCredentialResource`, which now only allows
-  s3/iceberg). Benign (`validProtocol` only permits s3/iceberg), but worth aligning in a protocred cleanup.
-- **[P3] Optional: drop the now-single-valued `policy.PrincipalType` enum entirely** — Slice C collapsed it
-  to `PrincipalTypeS3` only; `cacheKey`'s `ptype` param is now vestigial. Removing the type + param ripples
-  through `RequestContext`/`Effective` callers for zero behavior change — defer unless a future change needs it.
-- **[P3] Optional: dedicated upstream-route authz test** — Slice C T2 deleted MountSA route tests that also
-  asserted upstream-route bearer-deny/fail-closed; the middleware mechanism stays covered by surviving IAM
-  read/mutation/group tests, but the upstream-route-specific wiring assertion was lost (low value to restore).
-
-### [cleanup] Rename `internal/volumeadmin` → admin-CLI client (stale name from the volume removal epic)
-
-`internal/volumeadmin` is NOT dead — despite the name it is the shared admin HTTP client used by every
-`grainfs` admin CLI command (iam/cluster/credential/scrub) plus the live S3 EC bucket-scrub session
-client (`grainfs scrub`). The volume removal epic (#781–#785) repurposed it without renaming. Behavior-
-neutral rename to e.g. `internal/admincli` (and `adminapi.ScrubVolumeResp`→`ScrubResp`, `ScrubVolumeReq`
-etc.). Separate PR — unrelated to the mount-protocol removal. Decided 2026-06-22 (user).
+All four post-#829 cleanups shipped + merged as separate squash PRs:
+- **DONE PR #830 (v0.0.639.0):** protocred `validResource` dropped the dead `volume/` prefix.
+- **DONE PR #831 (v0.0.640.0):** collapsed the single-value `policy.PrincipalType` enum (type + param + field removed).
+- **DONE PR #832 (v0.0.641.0):** added `TestIAMBucketUpstreamRoutes*` authz regression tests (restored the
+  upstream bearer-deny / UDS-fallback coverage lost when #829 T2 deleted the combined MountSA+upstream tests).
+- **DONE PR #833 (v0.0.642.0):** renamed `internal/volumeadmin` → `internal/admincli` (behavior-neutral; it is
+  the LIVE shared admin-CLI client, not volume-specific) + removed dead `adminapi.VolumeInfo` + collapsed the
+  duplicate `adminapi.ScrubVolumeResp` into the canonical `adminapi.ScrubResp` (the rename surfaced the dup).
 
 Slice B surface to remove (map precisely before cutting):
 - `internal/nfs4server` — the self-implemented NFSv4 server (XDR/RPC), the `:2049` listener.

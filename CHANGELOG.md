@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.643.0] - 2026-06-22
+
+### Changed
+- **docs:** marked the Slice C deferred-cleanup backlog in `TODOS.md` as done — all four follow-ups shipped
+  (PRs #830–#833). No code change.
+
 ## [0.0.642.0] - 2026-06-22
 
 ### Changed
