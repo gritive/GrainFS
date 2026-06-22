@@ -10,8 +10,6 @@ Always check the running binary for authoritative CLI flags:
 grainfs serve --help
 grainfs iam --help
 grainfs cluster --help
-grainfs nfs --help
-grainfs volume --help
 ```
 
 ## Serve
@@ -34,7 +32,6 @@ Common serve options:
 | `--public-url` | Dashboard base URL shown by `grainfs dashboard`. |
 | `--node-id` | Explicit node identity. |
 | `--raft-addr` | Raft listen address. |
-| `--nfs4-port` | NFSv4 port; use `0` to disable. |
 
 At-rest encryption is always enabled and bootstraps from the KEK/DEK metadata
 under the data directory; there is no separate static encryption-key flag.
@@ -129,10 +126,6 @@ one-time `secret` as the SigV4 secret key. Read-only credentials allow read
 operations only. S3 `CopyObject` is limited to same-bucket copies for protocol
 credentials.
 
-NFS attach paths enforce protocol credentials when credential storage is wired.
-NFS uses `connection_hint.mount_path` (`bucket/credential-id:secret`). Read-only
-credentials mount successfully but reject mutation operations.
-
 List inventory can be narrowed to the same resource scope:
 
 ```bash
@@ -189,40 +182,6 @@ grainfs bucket upstream delete legacy-data
 ```
 
 See `../reference/s3-compatibility.md` for the supported S3 surface.
-
-## NFSv4
-
-NFSv4 exports are explicit. Create an S3 bucket, register it as an export, then
-mount the pseudo-root. This example assumes the `AWS_ACCESS_KEY_ID`,
-`AWS_SECRET_ACCESS_KEY`, and `AWS_DEFAULT_REGION` variables from the S3 section
-are still set.
-
-```bash
-aws --endpoint-url http://localhost:9000 s3 mb s3://mydata
-
-grainfs nfs export add mydata
-
-sudo mkdir -p /mnt/grainfs
-sudo mount -t nfs4 -o "vers=4.0,port=2049,rw,hard,intr" localhost:/ /mnt/grainfs
-
-ls /mnt/grainfs/
-echo "hello" | sudo tee /mnt/grainfs/mydata/test.txt
-
-sudo umount /mnt/grainfs
-grainfs nfs export remove mydata
-```
-
-Manage exports:
-
-```bash
-grainfs nfs export list
-grainfs nfs export add mydata --ro
-grainfs nfs export update mydata --rw
-grainfs nfs debug mydata --json
-```
-
-See `../reference/nfs-compatibility.md`, `../operators/nfs-debug.md`, and
-`../operators/nfs-export-lifecycle.md`.
 
 ## Encryption Key Rotation
 

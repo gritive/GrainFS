@@ -15,7 +15,6 @@ workflows.
 | Use DuckDB with the Iceberg REST Catalog | [Iceberg DuckDB guide](users/iceberg-duckdb.md) | How-to |
 | Query S3 audit data as an Iceberg table | [Audit Iceberg guide](users/audit-iceberg.md) | How-to / explanation |
 | Check S3 compatibility before choosing a client feature | [S3 compatibility](reference/s3-compatibility.md) | Reference |
-| Check file protocol behavior | [NFSv4 compatibility](reference/nfs-compatibility.md) | Reference |
 | Check Iceberg client support | [Iceberg compatibility](reference/iceberg-compatibility.md) | Reference |
 
 ## Operators
@@ -27,7 +26,6 @@ Use these when you are deploying, monitoring, recovering, or running drills.
 | Deploy and operate a production node or cluster | [Production runbook](operators/runbook.md) | How-to / runbook |
 | Track service objectives | [SLI/SLO](operators/sli-slo.md) | Reference |
 | Operate federated IAM authorization | [OIDC federated IAM](operators/oidc-federated-iam.md) | How-to / explanation |
-| Operate NFS exports | [NFS export lifecycle](operators/nfs-export-lifecycle.md), [NFS debug](operators/nfs-debug.md) | How-to |
 | Operate the balancer | [Balancer operations](operators/balancer.md) | How-to |
 | Roll back managed Badger paths | [Badger managed-mode rollback](operators/badger-managed-mode-rollback.md) | How-to |
 
@@ -39,7 +37,6 @@ rules.
 | Need | Document |
 | --- | --- |
 | S3 API and client compatibility | [S3 compatibility](reference/s3-compatibility.md) |
-| NFSv4 compatibility and attribute audit | [NFSv4 compatibility](reference/nfs-compatibility.md), [NFSv4 attribute audit](reference/nfsv4-attribute-audit.md) |
 | Iceberg REST Catalog compatibility | [Iceberg compatibility](reference/iceberg-compatibility.md) |
 | Benchmark methodology | [Benchmarks](reference/benchmarks.md) |
 | Rolling upgrade compatibility | [Rolling upgrade compatibility](reference/rolling-upgrade-compatibility.md) |
@@ -60,5 +57,4 @@ Use these when you need the design rationale behind the system.
 | Durability and object placement | [Durability and placement](architecture/durability-and-placement.md) |
 | Storage operation boundaries | [Storage operations facade](architecture/storage-operations-facade.md) |
 | Cache invalidation | [Cache invalidation flow](architecture/cache-invalidation-flow.md) |
-| NFS client testing approach | [NFS client spike](architecture/nfs-client-spike.md) |
 | Raft RPC stream multiplexing | [Stream multiplexing + heartbeat coalescing](architecture/quic-stream-multiplex.md) |

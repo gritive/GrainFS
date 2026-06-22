@@ -70,7 +70,7 @@ copy-on-write publish step.
   immutable snapshot or update an atomic pointer. Readers stay lock-free.
   Examples: IAM store, receipt routing cache, VFS stat/dir caches, node stats.
 - **Protocol ordering:** The lock is part of a wire protocol or stream contract.
-  Examples: raft stream send serialization, NFSv4 session slot replay cache.
+  Examples: raft stream send serialization.
 - **FSM/state-machine consistency:** A single writer or low-frequency control
   path updates multiple maps that must be observed atomically by readers.
   Examples: meta FSM, ring store, migration queues, scrub director state.
@@ -132,8 +132,6 @@ rg -n "sync\.(Mutex|RWMutex)" internal cmd --glob '*.go' --glob '!*_test.go'
   (`atomic.Pointer[IdentitySnapshot]`). (The QUIC/TCP mux locks that used to live
   here — `raft_conn.go`, `heartbeat_coalescer.go`, `group_transport_quic.go`,
   `quic.go` — were removed with the mux subsystem in v0.0.551.0.)
-- `internal/nfs4server/state.go`, `lookup_hint.go`, `lookup_ring.go`,
-  `server.go` - protect NFS filehandle/session/replay/server connection state.
 
 ### FSM And Control-Plane Consistency
 
@@ -183,8 +181,7 @@ rg -n "sync\.(Mutex|RWMutex)" internal cmd --glob '*.go' --glob '!*_test.go'
   Request evaluation (Allow) loads the snapshot without any lock.
 - `internal/resourcewatch/registry.go` - registered DB handle list; snapshots
   are copied before GC work.
-- `internal/nfsexport/store.go` - service job/config store with low-frequency
-  writes. The lifecycle and migration services no longer carry mutexes; their
+- The lifecycle and migration services no longer carry mutexes; their
   worker handles are published via `atomic.Pointer[Worker]` per ADR 0012 and
   ADR 0013.
 - `internal/scrubber/director.go`, `scrubber/scrubber.go` - scrub session

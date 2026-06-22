@@ -21,13 +21,13 @@
 - **결정 벤치는 cross-binary라 엄격성 non-negotiable**(flag 없으니 within-run A/B 불가): 외부 S3 앵커 필수 · master↔브랜치 같은 VM back-to-back · within-run 비율만 · 다회 실행. (4b-2를 inconclusive하게 만든 across-boot 노이즈 회피.)
 - **group 추가는 Phase 7에서 해제됨(v0.0.543.0)**: running cluster에 placement group 증설 가능(`grainfs cluster expand-placement`, generation-probe로 기존 객체 remap 없음). group **감소**는 여전히 미지원. 노드-in-group은 EC heal로 변동.
 - **유지**: Erasure Coding, At-rest Encryption(XAES-256-GCM), zero-CA, putpipeline streaming 산개(꼬리만 quorum-write로 교체).
-- **별개 베팅(성능 비요구, data plane 안정 후): 라이브러리 분리(raft/HRW/bounded/gossip) · 비-S3 프로토콜 재연결 · data-plane HTTP transport.**
-- **dead code 삭제** 아키텍처 변경으로 생기는 dead code는 과감히 삭제, 단, 향후 다시 연결할 nfs, nbd 등 프로토콜은 예외
+- **별개 베팅(성능 비요구, data plane 안정 후): 라이브러리 분리(raft/HRW/bounded/gossip) · data-plane HTTP transport.**
+- **dead code 삭제** 아키텍처 변경으로 생기는 dead code는 과감히 삭제
 - **테스트도 1급 변경 대상** (코드만큼 churn 큼):
   - eager-delete라 삭제 경로의 테스트는 **코드와 함께 삭제**(Phase 3=data_raft, Phase 4=meta_index서 동시). 단일 경로라 dual-path 2배 부담 없음.
   - 신규 경로(placement/quorum/LIST)는 net-new 테스트. 정확성은 S3 e2e green 게이트, 성능은 Phase 5 cross-binary 벤치가 판정.
   - must-solve(조건부 PUT CAS / LWW / version 순서)는 net-new **동시성·clock-skew·RAW** 테스트 필요(raft 직렬화가 공짜로 주던 보장 소멸).
-  - 비활성 프로토콜(Phase 1)의 e2e/colima 테스트는 삭제 아닌 **skip**(재연결 Phase 10 대비). S3 e2e는 전 구간 게이트 유지.
+  - S3 e2e는 전 구간 게이트 유지.
   - 프레임워크(CLAUDE.local): unit=testify, integration/e2e=ginkgo/gomega.
 
 ## 폐기 / 유지 / 재사용
@@ -53,10 +53,10 @@
 - **검증**: quorum-write 꼬리가 raft-commit 꼬리 대비 비상식적으로 크지 않음. 크면 STOP·재평가.
 
 ### Phase 1 — Strip-down (disable, 삭제 아님) ✅ DONE
-- 비-S3 프로토콜(NFS/NBD/Iceberg)을 seam 뒤로 **비활성화**(재연결 경계 보존, 삭제 아님), request actor 모델 → API 단일 라인. (9P는 이후 영구 제거됨.)
-- **목표**: S3-only 최소 코어·단일 경로로 data-plane 수술 전 surface 축소. greenfield = 하위호환 제거지 *프로토콜은 skip*(재연결 대비)이지 삭제 아님.
-- **검증**: S3 PUT/GET/LIST/DELETE green, 단일 경로. 토글로 프로토콜 복구 가능.
-- **결과**: NFS4/NBD port=0 기본, `--enable-iceberg` 플래그 추가, executioncluster+execution 패키지 삭제, 비-S3 e2e/colima 테스트 skip 처리.
+- 비-S3 프로토콜(NFS/NBD/Iceberg)을 seam 뒤로 **비활성화**, request actor 모델 → API 단일 라인. (NFS·NBD·9P는 이후 영구 제거됨.)
+- **목표**: S3-only 최소 코어·단일 경로로 data-plane 수술 전 surface 축소.
+- **검증**: S3 PUT/GET/LIST/DELETE green, 단일 경로.
+- **결과**: `--enable-iceberg` 플래그 추가, executioncluster+execution 패키지 삭제, 비-S3 e2e/colima 테스트 skip/제거 처리.
 
 ### Phase 2 — 결정론 placement ✅ DONE
 - placement 선택을 결정론으로 교체: group = `hash % numGroups` 동결, HRW static-weighted 노드 선택, Bounded Load → soft 격하.
@@ -226,5 +226,5 @@ Phase 5는 구현 단계가 아니라 **terminal 결정 게이트**다 (S4-0와 
   - **gossip**: gossip.go/receipt_gossip.go/nodestats.go → `internal/gossip`. cluster 결합은 인터페이스 역전으로 절단: `EvidenceReporter`(CapabilityGate가 만족, ReportEvidence만), `AddressResolver` func 타입(`cluster.NodeAddressBookResolver` 어댑터). gossip은 cluster를 import하지 않음(clusterpb 생성 패키지만). `BroadcastOnce` 공개(동기 flush). gate 통합 테스트는 `internal/cluster/gossip_capability_test.go`로 분리 유지.
   - **bounded**: 단일 primitive 아님 — pool/resourceguard는 이미 독립 패키지, putpipeline은 EC 도메인 로직(분리 대상 아님). 추가 작업 없음 확인.
 
-### Phase 10 — 비-S3 프로토콜 재연결
-- 비활성 프로토콜(NFS/NBD/Iceberg)을 신규 코어의 보존된 seam에 재활성화. Iceberg는 강일관 catalog commit → control-plane raft 의존(설계상 자연 정합).
+### Phase 10 — Iceberg 정식 통합
+- Iceberg는 강일관 catalog commit → control-plane raft 의존(설계상 자연 정합). NFS·NBD는 영구 제거됨.
