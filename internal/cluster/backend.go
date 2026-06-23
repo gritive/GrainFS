@@ -222,8 +222,6 @@ type DistributedBackend struct {
 	// invariant 5), so the per-group DB need not duplicate the META-DB check.
 	bypassBucketCheck bool
 
-	internalPathCache sync.Map // map[internalObjectCacheKey]internalObjectPath
-
 	// Phase A: FSM apply error propagation. Mirrors MetaRaft.applyErrs
 	// (meta_raft.go:797). applyErrs keys are Raft log indices; readers consume
 	// entries via ApplyError exactly once per ProposeWait.
@@ -273,16 +271,6 @@ type backendTopology struct {
 type backendRuntimeSnapshot struct {
 	topology backendTopology
 	ecConfig ECConfig
-}
-
-type internalObjectCacheKey struct {
-	bucket string
-	key    string
-}
-
-type internalObjectPath struct {
-	path    string
-	metaKey []byte
 }
 
 // NewDistributedBackend creates a new distributed storage backend over an
@@ -1366,17 +1354,6 @@ func (b *DistributedBackend) ECActive() bool {
 
 func (b *DistributedBackend) bucketDir(bucket string) string {
 	return filepath.Join(b.root, "data", bucket)
-}
-
-func (b *DistributedBackend) internalObjectPath(bucket, key string) internalObjectPath {
-	cacheKey := internalObjectCacheKey{bucket: bucket, key: key}
-	if cached, ok := b.internalPathCache.Load(cacheKey); ok {
-		return cached.(internalObjectPath)
-	}
-	path := b.objectPathV(bucket, key, "current")
-	candidate := internalObjectPath{path: path, metaKey: b.ks().ObjectMetaKey(bucket, key)}
-	actual, _ := b.internalPathCache.LoadOrStore(cacheKey, candidate)
-	return actual.(internalObjectPath)
 }
 
 // objectPath returns the legacy-unversioned local path for a full-object copy.

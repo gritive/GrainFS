@@ -95,7 +95,7 @@ func (b *DistributedBackend) headObjectMetaV(ctx context.Context, bucket, key, v
 	// deletes the ObjectMetaKeyV record, so a hard-deleted version still 404s,
 	// while a mixed-era pre-S1 version (FSM record only, no per-version blob —
 	// S1's blob write is versioning+post-S1 gated) correctly resolves.
-	versioningEnabled := !storage.IsInternalBucket(bucket) && b.bucketVersioningEnabled(ctx, bucket)
+	versioningEnabled := b.bucketVersioningEnabled(ctx, bucket)
 	if versioningEnabled {
 		if cmds, verr := b.readQuorumMetaVersions(bucket, key); verr == nil {
 			for _, cmd := range cmds {
@@ -118,7 +118,7 @@ func (b *DistributedBackend) headObjectMetaV(ctx context.Context, bucket, key, v
 	// Phase 3: quorum meta is the primary source for non-internal user objects.
 	// Skipped for versioning-enabled buckets (handled above) so a per-version
 	// miss never resurrects a stale latest-only blob.
-	if !storage.IsInternalBucket(bucket) && !versioningEnabled {
+	if !versioningEnabled {
 		if obj, pm, err := b.readQuorumMeta(bucket, key); err == nil && obj.VersionID == versionID {
 			// Fold delete markers to 405, mirroring the BadgerDB fallback below
 			// (deleteMarkerETag → ErrMethodNotAllowed) and this method's contract.
@@ -270,7 +270,7 @@ func (b *DistributedBackend) DeleteObjectVersion(bucket, key, versionID string) 
 	// legacy purge (losing the tombstone's resurrection guard). A version with no
 	// per-version blob (carve-out appendable/coalesced/legacy-bare, non-versioned, or
 	// absent) falls through to the legacy FSM-delete path below.
-	if !storage.IsInternalBucket(bucket) && b.shardSvc != nil {
+	if b.shardSvc != nil {
 		cmd, ok, rerr := b.readQuorumMetaVersionDecodeStrict(bucket, key, versionID)
 		if rerr != nil {
 			return fmt.Errorf("resolve per-version blob for delete %s/%s@%s: %w", bucket, key, versionID, rerr)
@@ -350,7 +350,7 @@ func (b *DistributedBackend) ListObjectVersions(ctx context.Context, bucket, pre
 	// coordinator (dedupVersionsKeepFirst). Disjoint from the FSM carve-out scan
 	// below: an appendable/coalesced object has its latest-only blob deleted (it is
 	// FSM-authoritative), so no key appears in both.
-	if !storage.IsInternalBucket(bucket) && b.shardSvc != nil {
+	if b.shardSvc != nil {
 		cmds, lerr := b.scatterGatherList(ctx, bucket, prefix)
 		if lerr != nil {
 			return nil, lerr

@@ -48,9 +48,6 @@ func (b *DistributedBackend) ReadAtObject(ctx context.Context, bucket, key strin
 	if len(buf) == 0 {
 		return 0, nil
 	}
-	if storage.IsInternalBucket(bucket) {
-		return b.ReadAt(ctx, bucket, key, offset, buf)
-	}
 	placementMeta := PlacementMeta{
 		VersionID:        obj.VersionID,
 		ECData:           obj.ECData,
@@ -254,7 +251,7 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 	// S2a: per-version-authoritative latest derive. On a versioning-enabled
 	// bucket, derive latest by scanning the per-version blobs (all-groups
 	// fan-out, spanning generations). Zero blobs → legacy fallback below.
-	if !storage.IsInternalBucket(bucket) && b.bucketVersioningEnabled(ctx, bucket) {
+	if b.bucketVersioningEnabled(ctx, bucket) {
 		if cmds, verr := b.readQuorumMetaVersions(bucket, key); verr == nil && len(cmds) > 0 {
 			latest, live := deriveLatestVersion(cmds)
 			if !live {
@@ -266,20 +263,17 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 		// zero per-version blobs → legacy fallback (existing readQuorumMeta + BadgerDB below)
 	}
 
-	// Phase 3: non-internal user objects are stored in the quorum meta store.
-	// Internal buckets (bucket routing via raft) still use BadgerDB.
-	if !storage.IsInternalBucket(bucket) {
-		if obj, pm, err := b.readQuorumMeta(bucket, key); err == nil {
-			if obj.ETag == deleteMarkerETag {
-				return nil, PlacementMeta{}, storage.ErrObjectNotFound
-			}
-			return obj, pm, nil
+	// Phase 3: user objects are stored in the quorum meta store.
+	if obj, pm, err := b.readQuorumMeta(bucket, key); err == nil {
+		if obj.ETag == deleteMarkerETag {
+			return nil, PlacementMeta{}, storage.ErrObjectNotFound
 		}
-		// Fall through to BadgerDB for: objects committed before Phase 3 upgrade,
-		// repair/scrubber-written entries, and legacy FSM carve-out classes
-		// (appendable / coalesced). Multipart-completed objects' meta now lives in
-		// the quorum-meta blob store (served above), not on raft.
+		return obj, pm, nil
 	}
+	// Fall through to BadgerDB for: objects committed before Phase 3 upgrade,
+	// repair/scrubber-written entries, and legacy FSM carve-out classes
+	// (appendable / coalesced). Multipart-completed objects' meta now lives in
+	// the quorum-meta blob store (served above), not on raft.
 
 	var obj storage.Object
 	var placement PlacementMeta
@@ -335,33 +329,6 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 		// Resolve via latest-version pointer when present so callers see the
 		// most recent version. Falls back to the legacy single-key read when
 		// no lat: pointer exists (e.g., legacy replay).
-		if storage.IsInternalBucket(bucket) {
-			versionID := ""
-			metaKeyBytes := b.internalObjectPath(bucket, key).metaKey
-			if latItem, lerr := txn.Get(b.ks().LatestKey(bucket, key)); lerr == nil {
-				_ = latItem.Value(func(v []byte) error {
-					versionID = string(v)
-					return nil
-				})
-				if versionID != "" {
-					metaKeyBytes = b.ks().ObjectMetaKeyV(bucket, key, versionID)
-				}
-			} else if lerr != ErrMetaKeyNotFound {
-				return lerr
-			}
-			item, err := txn.Get(metaKeyBytes)
-			if err == ErrMetaKeyNotFound {
-				return storage.ErrObjectNotFound
-			}
-			if err != nil {
-				return err
-			}
-			if versionID == "" {
-				versionID = "current"
-			}
-			return decodeMeta(item, versionID)
-		}
-
 		metaKeyBytes := b.ks().ObjectMetaKey(bucket, key)
 		versionID := ""
 		if latItem, lerr := txn.Get(b.ks().LatestKey(bucket, key)); lerr == nil {
@@ -392,11 +359,9 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 }
 
 func (b *DistributedBackend) readPlacementMeta(bucket, key, versionID string) PlacementMeta {
-	// Phase 3: quorum meta is the primary source for non-internal user objects.
-	if !storage.IsInternalBucket(bucket) {
-		if _, pm, err := b.readQuorumMeta(bucket, key); err == nil {
-			return pm
-		}
+	// Phase 3: quorum meta is the primary source for user objects.
+	if _, pm, err := b.readQuorumMeta(bucket, key); err == nil {
+		return pm
 	}
 	meta := PlacementMeta{VersionID: versionID}
 	_ = b.store.View(func(txn MetadataTxn) error {
