@@ -212,11 +212,13 @@ func (b *DistributedBackend) scanObjectsSoleAuth(bucket string) ([]scrubber.Obje
 	// Hard-delete tombstones have no live shards to scrub: drop them before the
 	// per-key collapse so a hard-deleted latest falls to its live predecessor.
 	cmds = dropHardDeletedVersions(cmds)
-	// Collapse to latest (max-VID) per key; MetaSeq tiebreak on equal VID.
+	// Collapse to latest (max-VID) per key; same-VID replicas dedup by the full
+	// LWW comparator (quorumMetaCmdWins) so the winner is deterministic regardless
+	// of scan order (mirrors readQuorumMetaVersions).
 	latest := map[string]PutObjectMetaCmd{}
 	for _, c := range cmds {
 		if ex, ok := latest[c.Key]; !ok || c.VersionID > ex.VersionID ||
-			(c.VersionID == ex.VersionID && c.MetaSeq >= ex.MetaSeq) {
+			(c.VersionID == ex.VersionID && quorumMetaCmdWins(c, ex)) {
 			latest[c.Key] = c
 		}
 	}
