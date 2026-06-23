@@ -275,21 +275,11 @@ func TestEncodeDecodeCommand_DeleteBucket(t *testing.T) {
 	assert.Equal(t, "remove-me", decoded.Bucket)
 }
 
-func TestEncodeDecodeCommand_DeleteObject(t *testing.T) {
-	orig := DeleteObjectCmd{Bucket: "b", Key: "file.txt"}
-
-	encoded, err := EncodeCommand(CmdDeleteObject, orig)
-	require.NoError(t, err)
-
-	cmd, err := DecodeCommand(encoded)
-	require.NoError(t, err)
-	assert.Equal(t, CmdDeleteObject, cmd.Type)
-
-	decoded, err := decodeDeleteObjectCmd(cmd.Data)
-	require.NoError(t, err)
-	assert.Equal(t, "b", decoded.Bucket)
-	assert.Equal(t, "file.txt", decoded.Key)
-}
+// TestEncodeDecodeCommand_DeleteObject removed: CmdDeleteObject = 4 is reserved
+// in data-plane raft-free Slice 2. EncodeCommand returns a reserved error;
+// DeleteObjectCmd struct and decode func are deleted. Covered by
+// TestCmdDeleteObject_RetiredNoOp (no-op replay) and the reserved-error check
+// in TestEncodeCommand_ReservedCmdsReturnError (if present).
 
 // TestEncodeDecodeCommand_CreateMultipartUpload, TestEncodeDecodeCommand_AbortMultipart
 // removed in M4: CmdCreateMultipartUpload/CmdAbortMultipart and their structs are deleted.

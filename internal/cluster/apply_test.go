@@ -139,46 +139,51 @@ func TestFSM_EncryptedValuesHideObjectMultipartAndPolicyPayloads(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestFSM_DeleteObjectRejectsCorruptEncryptedMeta(t *testing.T) {
+// TestCmdDeleteObject_RetiredNoOp verifies that CmdDeleteObject is a replay-safe
+// no-op in the FSM after data-plane raft-free Slice 2: FSM.Apply must return nil
+// and must not delete any object-meta key. Force-delete is now blob-physical
+// (quorum-meta + shards). EncodeCommand returns a reserved error, so we build
+// the raw command byte buffer directly to simulate a stale raft-log entry.
+func TestCmdDeleteObject_RetiredNoOp(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-	clusterID := bytes.Repeat([]byte{0x47}, 16)
-	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x47}, encrypt.KEKSize), clusterID)
-	require.NoError(t, err)
-	fsm.SetDEKKeeper(keeper, clusterID)
 
-	// CmdPutObjectMeta is a no-op on apply (data-plane raft-free Slice 2); seed via
-	// persistPutObjectMetaUpdate directly.
-	seedCmd := PutObjectMetaCmd{Bucket: "b", Key: "tampered", ETag: "etag"}
+	// Seed an FSM obj: record directly (CmdPutObjectMeta is also a no-op in Slice 2).
+	seedCmd := PutObjectMetaCmd{Bucket: "b", Key: "obj.txt", ETag: "e1"}
 	require.NoError(t, fsm.db.Update(func(txn MetadataTxn) error {
 		return fsm.persistPutObjectMetaUpdate(txn, seedCmd, buildPutObjectMeta(seedCmd))
 	}))
 
-	metaKey := fsm.keys.ObjectMetaKey("b", "tampered")
-	require.NoError(t, db.Update(func(txn *badger.Txn) error {
-		item, err := txn.Get(metaKey)
-		if err != nil {
-			return err
-		}
-		raw, err := item.ValueCopy(nil)
-		if err != nil {
-			return err
-		}
-		_, _, ok, err := decodeFSMValueFrameV2(raw)
-		require.NoError(t, err)
-		require.True(t, ok)
-		raw[len(raw)-1] ^= 0x01
-		return txn.Set(metaKey, raw)
-	}))
+	// Build a raw CmdDeleteObject entry bypassing the reserved encodePayload.
+	// Mirrors what EncodeCommand does: encodePayload → wrap in clusterpb.Command.
+	fb := clusterBuilderPool.Get()
+	bucketOff := fb.CreateString("b")
+	keyOff := fb.CreateString("obj.txt")
+	vidOff := fb.CreateString("")
+	clusterpb.DeleteObjectCmdStart(fb)
+	clusterpb.DeleteObjectCmdAddBucket(fb, bucketOff)
+	clusterpb.DeleteObjectCmdAddKey(fb, keyOff)
+	clusterpb.DeleteObjectCmdAddVersionId(fb, vidOff)
+	payload := fbFinish(fb, clusterpb.DeleteObjectCmdEnd(fb))
 
-	deleteData, err := EncodeCommand(CmdDeleteObject, DeleteObjectCmd{Bucket: "b", Key: "tampered"})
-	require.NoError(t, err)
-	require.Error(t, fsm.Apply(deleteData))
+	fb2 := flatbuffers.NewBuilder(len(payload) + 16)
+	dataOff := fb2.CreateByteVector(payload)
+	clusterpb.CommandStart(fb2)
+	clusterpb.CommandAddType(fb2, uint32(CmdDeleteObject))
+	clusterpb.CommandAddData(fb2, dataOff)
+	root := clusterpb.CommandEnd(fb2)
+	fb2.Finish(root)
+	raw := append([]byte(nil), fb2.FinishedBytes()...)
 
+	// Apply must succeed (no-op, not an error).
+	require.NoError(t, fsm.Apply(raw))
+
+	// Key must still exist — the retired no-op must not delete FSM records.
+	metaKey := fsm.keys.ObjectMetaKey("b", "obj.txt")
 	require.NoError(t, db.View(func(txn *badger.Txn) error {
 		_, err := txn.Get(metaKey)
 		return err
-	}))
+	}), "CmdDeleteObject must be a no-op — key must still exist after apply")
 }
 
 func TestFSM_DeleteBucket(t *testing.T) {
@@ -223,25 +228,10 @@ func TestPutObjectMetaCmd_RetiredNoOp(t *testing.T) {
 	require.ErrorIs(t, err, badger.ErrKeyNotFound, "CmdPutObjectMeta must be a no-op — key must not exist")
 }
 
-func TestFSM_DeleteObject(t *testing.T) {
-	db := newTestDB(t)
-	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-
-	// Seed via persistPutObjectMetaUpdate (CmdPutObjectMeta is a no-op in Slice 2).
-	seedCmd := PutObjectMetaCmd{Bucket: "b", Key: "del.txt", Size: 1, ContentType: "text/plain", ETag: "e", ModTime: 1}
-	require.NoError(t, fsm.db.Update(func(txn MetadataTxn) error {
-		return fsm.persistPutObjectMetaUpdate(txn, seedCmd, buildPutObjectMeta(seedCmd))
-	}))
-
-	data, _ := EncodeCommand(CmdDeleteObject, DeleteObjectCmd{Bucket: "b", Key: "del.txt"})
-	require.NoError(t, fsm.Apply(data))
-
-	err := db.View(func(txn *badger.Txn) error {
-		_, err := txn.Get(objectMetaKey("b", "del.txt"))
-		return err
-	})
-	assert.ErrorIs(t, err, badger.ErrKeyNotFound)
-}
+// TestFSM_DeleteObject removed: CmdDeleteObject is retired (data-plane raft-free
+// Slice 2 no-op). Force-delete is now covered by TestForceDeleteBucketNonVersioned_QmetaAndShards
+// and TestForceDeleteBucketSoleAuthOn which exercise the blob-physical path.
+// The no-op behavior is verified by TestCmdDeleteObject_RetiredNoOp.
 
 func TestFSM_SnapshotRestore(t *testing.T) {
 	db1 := newTestDB(t)
@@ -376,15 +366,9 @@ func TestFSM_DeleteBucketPolicy_NotExist(t *testing.T) {
 
 // TestFSM_AbortMultipart_NotExist removed in M4: applyAbortMultipart is deleted.
 
-func TestFSM_DeleteObject_NotExist(t *testing.T) {
-	db := newTestDB(t)
-	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-
-	// Deleting a non-existent object should not error (ErrKeyNotFound → nil)
-	data, _ := EncodeCommand(CmdDeleteObject, DeleteObjectCmd{Bucket: "b", Key: "nope.txt"})
-	err := fsm.Apply(data)
-	assert.NoError(t, err)
-}
+// TestFSM_DeleteObject_NotExist removed: CmdDeleteObject is retired (data-plane
+// raft-free Slice 2 no-op). The no-op behavior on non-existent keys is covered
+// by TestCmdDeleteObject_RetiredNoOp (Apply returns nil regardless of FSM state).
 
 func TestFSM_Apply_CorruptData(t *testing.T) {
 	db := newTestDB(t)

@@ -202,33 +202,6 @@ func (b *DistributedBackend) ForceDeleteBucket(ctx context.Context, bucket strin
 	return b.DeleteBucket(ctx, bucket)
 }
 
-// forceDeleteObject hard-deletes one Badger record for a single object without
-// creating a tombstone. Used only by ForceDeleteBucket.
-//
-// For versioned objects (versionID != ""): removes the versioned obj: key via
-// CmdDeleteObjectVersion. applyDeleteObjectVersion promotes the next-oldest
-// version to latest, or removes lat:/legacy obj: keys when the last version is
-// gone — so the final CmdDeleteObjectVersion call on each key leaves no traces.
-// For legacy unversioned objects (versionID == ""): CmdDeleteObject with empty
-// VersionID hard-deletes the unversioned obj: key (no tombstone written).
-func (b *DistributedBackend) forceDeleteObject(ctx context.Context, bucket, key, versionID string) error { //nolint:unused
-	if versionID != "" {
-		_ = os.Remove(b.objectPathV(bucket, key, versionID))
-		return b.propose(ctx, CmdDeleteObjectVersion, DeleteObjectVersionCmd{
-			Bucket:    bucket,
-			Key:       key,
-			VersionID: versionID,
-		})
-	}
-	// Legacy unversioned key: hard-delete, no tombstone.
-	_ = os.Remove(b.objectPath(bucket, key))
-	return b.propose(ctx, CmdDeleteObject, DeleteObjectCmd{
-		Bucket:    bucket,
-		Key:       key,
-		VersionID: "", // empty = legacy hard delete, no tombstone
-	})
-}
-
 // forceDeleteBucketSoleAuth is the soleauth=on (versioned) leaf ForceDeleteBucket
 // path (single-node / direct backend). It enumerates per-version blobs cluster-wide
 // (incl. delete markers, fail-closed) via scanQuorumMetaVersionsClusterAll and
@@ -253,17 +226,6 @@ func (b *DistributedBackend) forceDeleteBucketSoleAuth(ctx context.Context, buck
 		}
 	}
 	return b.DeleteBucket(ctx, bucket)
-}
-
-// HardDeleteLegacyObject hard-deletes a legacy unversioned bare obj:{bucket}/{key}
-// record (CmdDeleteObject with VersionID="", apply.go hard-delete path) — NO
-// tombstone. Used ONLY by the soleauth=on force-delete path (leaf + the
-// coordinator's all-groups fan-out) to remove a legacy-bare carve-out; off-path
-// force-delete uses forceDeleteObject's legacy branch directly. Idempotent: a
-// no-op when the bare record is absent.
-func (b *DistributedBackend) HardDeleteLegacyObject(ctx context.Context, bucket, key string) error {
-	_ = os.Remove(b.objectPath(bucket, key))
-	return b.propose(ctx, CmdDeleteObject, DeleteObjectCmd{Bucket: bucket, Key: key, VersionID: ""})
 }
 
 // SetBucketVersioning satisfies server.BucketVersioner. Replicates the

@@ -47,24 +47,9 @@ func TestForceDeleteBucketSoleAuthOn(t *testing.T) {
 	})
 }
 
-// TestHardDeleteLegacyObject covers the hard-delete primitive: it removes a legacy
-// unversioned bare obj:{bucket}/{key} record with no tombstone.
-func TestHardDeleteLegacyObject(t *testing.T) {
-	ctx := context.Background()
-	b := newTestDistributedBackend(t)
-	require.NoError(t, b.CreateBucket(ctx, "b"))
-	seedFSMObject(t, b, "b", "lk", "", objectMeta{Key: "lk", ETag: "bare"}, false)
-
-	// Present before.
-	_, err := b.HeadObject(ctx, "b", "lk")
-	require.NoError(t, err)
-
-	require.NoError(t, b.HardDeleteLegacyObject(ctx, "b", "lk"))
-
-	// Gone after (hard delete, no tombstone).
-	_, err = b.HeadObject(ctx, "b", "lk")
-	require.ErrorIs(t, err, storage.ErrObjectNotFound)
-}
+// TestHardDeleteLegacyObject removed: HardDeleteLegacyObject and its raft
+// primitive (CmdDeleteObject = 4) are retired in data-plane raft-free Slice 2.
+// Force-delete is now blob-physical; the legacy FSM-delete path is gone.
 
 // TestForceDeleteBucketNonVersioned_QmetaAndShards confirms the non-versioned
 // path uses qmeta enumerate + shards-first physical purge (not FSM-scan).

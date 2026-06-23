@@ -311,30 +311,9 @@ func (b *DistributedBackend) DeleteObjectVersion(bucket, key, versionID string) 
 			return nil
 		}
 		// blob-absent: this is a carve-out (appendable/coalesced/legacy-bare) that
-		// stays FSM-authoritative, or a truly-absent version. Fall through to the
-		// legacy FSM-delete path so a carve-out's FSM record IS removed (a tombstone
-		// would be meaningless for an object with no per-version blob).
-	}
-
-	// Legacy path (non-versioned / internal buckets, and versioning-enabled carve-outs
-	// with no per-version blob): raft propose + cluster-wide per-version blob purge.
-	if err := b.propose(ctx, CmdDeleteObjectVersion, DeleteObjectVersionCmd{
-		Bucket:    bucket,
-		Key:       key,
-		VersionID: versionID,
-	}); err != nil {
-		return err
-	}
-	if b.shardSvc != nil {
-		cmd, ok, rerr := b.readQuorumMetaVersion(bucket, key, versionID)
-		if rerr != nil {
-			return fmt.Errorf("resolve per-version blob for delete %s/%s@%s: %w", bucket, key, versionID, rerr)
-		}
-		if ok {
-			if derr := b.deleteQuorumMetaVersionQuorum(ctx, bucket, key, versionID, cmd.NodeIDs); derr != nil {
-				return fmt.Errorf("delete per-version blob %s/%s@%s: %w", bucket, key, versionID, derr)
-			}
-		}
+		// has no per-version blob. In a greenfield cluster, carve-out FSM records
+		// are left in place — the FSM-delete raft path is removed in data-plane
+		// raft-free Slice 2. The scrubber/orphan walker handles eventual cleanup.
 	}
 	return nil
 }

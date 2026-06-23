@@ -460,58 +460,6 @@ func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
 	}, nil
 }
 
-func encodeDeleteObjectCmd(c DeleteObjectCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	keyOff := b.CreateString(c.Key)
-	vidOff := b.CreateString(c.VersionID)
-	clusterpb.DeleteObjectCmdStart(b)
-	clusterpb.DeleteObjectCmdAddBucket(b, bucketOff)
-	clusterpb.DeleteObjectCmdAddKey(b, keyOff)
-	clusterpb.DeleteObjectCmdAddVersionId(b, vidOff)
-	return fbFinish(b, clusterpb.DeleteObjectCmdEnd(b)), nil
-}
-
-func decodeDeleteObjectCmd(data []byte) (DeleteObjectCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.DeleteObjectCmd {
-		return clusterpb.GetRootAsDeleteObjectCmd(d, 0)
-	})
-	if err != nil {
-		return DeleteObjectCmd{}, err
-	}
-	return DeleteObjectCmd{
-		Bucket:    string(t.Bucket()),
-		Key:       string(t.Key()),
-		VersionID: string(t.VersionId()),
-	}, nil
-}
-
-func encodeDeleteObjectVersionCmd(c DeleteObjectVersionCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	keyOff := b.CreateString(c.Key)
-	vidOff := b.CreateString(c.VersionID)
-	clusterpb.DeleteObjectVersionCmdStart(b)
-	clusterpb.DeleteObjectVersionCmdAddBucket(b, bucketOff)
-	clusterpb.DeleteObjectVersionCmdAddKey(b, keyOff)
-	clusterpb.DeleteObjectVersionCmdAddVersionId(b, vidOff)
-	return fbFinish(b, clusterpb.DeleteObjectVersionCmdEnd(b)), nil
-}
-
-func decodeDeleteObjectVersionCmd(data []byte) (DeleteObjectVersionCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.DeleteObjectVersionCmd {
-		return clusterpb.GetRootAsDeleteObjectVersionCmd(d, 0)
-	})
-	if err != nil {
-		return DeleteObjectVersionCmd{}, err
-	}
-	return DeleteObjectVersionCmd{
-		Bucket:    string(t.Bucket()),
-		Key:       string(t.Key()),
-		VersionID: string(t.VersionId()),
-	}, nil
-}
-
 func encodeSetBucketPolicyCmd(c SetBucketPolicyCmd) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 	bucketOff := b.CreateString(c.Bucket)
@@ -613,7 +561,7 @@ func buildStringVector(b *flatbuffers.Builder, ss []string, startVec func(*flatb
 
 // --- ObjectMeta codec ---
 
-func marshalObjectMeta(m objectMeta) ([]byte, error) {
+func marshalObjectMeta(m objectMeta) ([]byte, error) { //nolint:unused // referenced by codec_test.go and multiple *_test.go helpers
 	b := clusterBuilderPool.Get()
 	keyOff := b.CreateString(m.Key)
 	ctOff := b.CreateString(m.ContentType)
@@ -1142,7 +1090,8 @@ func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
 	case CmdPutObjectMeta:
 		return encodePutObjectMetaCmd(payload.(PutObjectMetaCmd))
 	case CmdDeleteObject:
-		return encodeDeleteObjectCmd(payload.(DeleteObjectCmd))
+		// reserved, removed in data-plane raft-free Slice 2 — no production proposer
+		return nil, fmt.Errorf("CmdDeleteObject = 4 reserved: removed in data-plane raft-free Slice 2")
 	case CmdCreateMultipartUpload, CmdCompleteMultipart, CmdAbortMultipart:
 		// reserved, removed v0.0.651+ — no production caller
 		return nil, fmt.Errorf("command type %d is reserved and removed (multipart-off-raft M4)", cmdType)
@@ -1155,7 +1104,8 @@ func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
 	case CmdMigrationDone:
 		return encodeMigrationDoneCmd(payload.(MigrationDoneFSMCmd))
 	case CmdDeleteObjectVersion:
-		return encodeDeleteObjectVersionCmd(payload.(DeleteObjectVersionCmd))
+		// reserved, removed in data-plane raft-free Slice 2 — no production proposer
+		return nil, fmt.Errorf("CmdDeleteObjectVersion = 14 reserved: removed in data-plane raft-free Slice 2")
 	case CmdSetBucketVersioning:
 		return encodeSetBucketVersioningCmd(payload.(SetBucketVersioningCmd))
 	case CmdSetObjectACL, CmdSetObjectTags:

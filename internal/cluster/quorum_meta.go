@@ -1780,7 +1780,7 @@ func (s *ShardService) DeleteQuorumMetaVersion(ctx context.Context, addr, bucket
 // deleteQuorumMetaVersionQuorum deletes a version's blob on every placement node.
 // FAIL-CLOSED: returns the first error so a lingering blob on a missed node cannot
 // resurface the deleted version via derive-by-scan. Mirrors deleteQuorumMetaQuorum.
-func (b *DistributedBackend) deleteQuorumMetaVersionQuorum(ctx context.Context, bucket, key, versionID string, nodeIDs []string) error {
+func (b *DistributedBackend) deleteQuorumMetaVersionQuorum(ctx context.Context, bucket, key, versionID string, nodeIDs []string) error { //nolint:unused // referenced by per_version_read_delete_test.go
 	if b.shardSvc == nil {
 		return nil
 	}

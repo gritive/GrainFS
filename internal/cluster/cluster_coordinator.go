@@ -765,48 +765,6 @@ func (c *ClusterCoordinator) forceDeleteBucketSoleAuth(ctx context.Context, buck
 	return c.DeleteBucket(ctx, bucket)
 }
 
-// hardDeleteLegacyObject fans a CmdDeleteObject{VID:""} hard-delete out to the
-// bucket-assigned group AND every shard group (deduped). A legacy-bare record
-// written via the bucket-group fallback when EC was inactive lands on a group
-// NOT in the per-generation key hash, so a generation-routed delete would miss it
-// and the trailing DeleteBucket would loop forever. The empty-VID hard delete is
-// idempotent (no-op on a group lacking the record), so the all-group fan-out is
-// safe and convergent. soleauth=on force-delete only.
-func (c *ClusterCoordinator) hardDeleteLegacyObject(ctx context.Context, bucket, key string) error { //nolint:unused
-	state := c.runtimeState()
-	args := buildDeleteObjectArgs(bucket, key)
-	seen := map[string]struct{}{}
-	del := func(target RouteTarget) error {
-		if _, dup := seen[target.GroupID]; dup {
-			return nil
-		}
-		seen[target.GroupID] = struct{}{}
-		if gb, rerr := state.localExec.ResolveWrite(ctx, target); rerr != nil {
-			return rerr
-		} else if gb != nil {
-			return gb.HardDeleteLegacyObject(ctx, bucket, key)
-		}
-		return c.forwardRuntime().mutateFrame(ctx, target, raftpb.ForwardOpHardDeleteObject, args)
-	}
-	// Bucket-assigned group (covers the EC-inactive fallback group + single-group).
-	if t, rerr := state.opRouter.RouteBucket(bucket); rerr == nil {
-		if derr := del(t); derr != nil {
-			return derr
-		}
-	}
-	// Every shard group (covers per-generation placement groups).
-	for _, g := range c.shardGroupsForVersionedList() {
-		t, rerr := state.opRouter.routeGroup(g.ID)
-		if rerr != nil {
-			return rerr
-		}
-		if derr := del(t); derr != nil {
-			return derr
-		}
-	}
-	return nil
-}
-
 func (c *ClusterCoordinator) ListBuckets(ctx context.Context) ([]string, error) {
 	buckets, err := c.base.ListBuckets(ctx)
 	if err != nil {

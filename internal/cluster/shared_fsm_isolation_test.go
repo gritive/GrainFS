@@ -189,24 +189,25 @@ func TestSharedFSM_PrefixIsolation_AllPaths(t *testing.T) {
 			},
 		},
 		{
-			// DeleteObject: A deletes obj1; B's obj1 survives.
-			name: "DeleteObject_DoesNotAffectPeer",
+			// DeleteBucket: A deletes a bucket; B's same-name bucket survives.
+			// CmdDeleteObject = 4 is retired (data-plane raft-free Slice 2 no-op);
+			// bucket-level isolation via CmdDeleteBucket exercises the same keyspace
+			// partitioning.
+			name: "DeleteBucket_DoesNotAffectPeer",
 			exercise: func(t *testing.T) {
-				_, _, _, fA, fB, backendA, backendB := setupTwoGroups(t)
+				_, _, _, fA, fB := setupTwoFSMs(t)
 
-				putObjViaApply(t, fA, bucket, "obj1", "A-etag")
-				putObjViaApply(t, fB, bucket, "obj1", "B-etag")
+				applyCmd(t, fA, CmdCreateBucket, CreateBucketCmd{Bucket: "bktX"})
+				applyCmd(t, fB, CmdCreateBucket, CreateBucketCmd{Bucket: "bktX"})
 
-				// Legacy hard-delete (no VersionID).
-				applyCmd(t, fA, CmdDeleteObject, DeleteObjectCmd{Bucket: bucket, Key: "obj1"})
+				// A deletes the bucket; B's copy must survive.
+				applyCmd(t, fA, CmdDeleteBucket, DeleteBucketCmd{Bucket: "bktX"})
 
-				ctx := context.Background()
-				_, _, err := backendA.headObjectMeta(ctx, bucket, "obj1")
-				assert.Error(t, err, "A's obj1 must be gone after delete")
-
-				objB, _, err := backendB.headObjectMeta(ctx, bucket, "obj1")
-				require.NoError(t, err, "B's obj1 must survive A's delete")
-				assert.Equal(t, "B-etag", objB.ETag)
+				// fsmHasKey takes the raw (unprefixed) key — it adds the group prefix.
+				assert.False(t, fsmHasKey(t, fA, "bucket:bktX"),
+					"A's bucket key must be gone after delete")
+				assert.True(t, fsmHasKey(t, fB, "bucket:bktX"),
+					"B's bucket key must survive A's delete")
 			},
 		},
 		{

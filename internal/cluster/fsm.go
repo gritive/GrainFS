@@ -20,7 +20,10 @@ const (
 	CmdCreateBucket  CommandType = 1
 	CmdDeleteBucket  CommandType = 2
 	CmdPutObjectMeta CommandType = 3
-	CmdDeleteObject  CommandType = 4
+	// CmdDeleteObject is reserved, removed in data-plane raft-free Slice 2.
+	// Force-delete is now blob-physical (quorum-meta + shards). No production
+	// proposer; slot MUST NOT be renumbered.
+	CmdDeleteObject CommandType = 4 // reserved, removed data-plane raft-free Slice 2
 	// CmdCreateMultipartUpload/CmdCompleteMultipart/CmdAbortMultipart are reserved,
 	// removed in the multipart-off-raft epic (M4). No production proposer; no
 	// raft-log replay (greenfield). Slots MUST NOT be renumbered.
@@ -33,10 +36,10 @@ const (
 	CmdMigrationDone         CommandType = 11
 	CmdPutShardPlacement     CommandType = 12 // reserved, removed (ring-derived placement)
 	CmdDeleteShardPlacement  CommandType = 13 // reserved, removed (ring-derived placement)
-	// Versioning — Slice 1 of the unify-storage-paths refactor.
-	// CmdDeleteObjectVersion hard-deletes a specific version (no tombstone);
-	// used by lifecycle/scrubber. Plain CmdDeleteObject creates a tombstone marker.
-	CmdDeleteObjectVersion CommandType = 14
+	// CmdDeleteObjectVersion is reserved, removed in data-plane raft-free Slice 2.
+	// Delete is now blob-tombstone/physical (per-version blob LWW + quorum-meta
+	// purge). No production proposer; slot MUST NOT be renumbered.
+	CmdDeleteObjectVersion CommandType = 14 // reserved, removed data-plane raft-free Slice 2
 	// Phase 18 v0.0.4.0 follow-up: Raft-serialized bucket versioning + object ACL.
 	CmdSetBucketVersioning CommandType = 15
 	// CmdSetObjectACL is reserved, removed in data-plane raft-free Slice 2.
@@ -193,19 +196,6 @@ type SetRingCmd struct {
 	Version  uint64
 	VNodes   []virtualNode
 	VPerNode int
-}
-
-type DeleteObjectCmd struct {
-	Bucket    string
-	Key       string
-	VersionID string // version id of the tombstone marker created by this delete (may be empty for legacy replay)
-}
-
-// DeleteObjectVersionCmd hard-deletes a specific version by id.
-type DeleteObjectVersionCmd struct {
-	Bucket    string
-	Key       string
-	VersionID string
 }
 
 type PutObjectQuarantineCmd struct {

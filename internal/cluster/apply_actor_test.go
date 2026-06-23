@@ -55,11 +55,10 @@ func dumpFSMState(t *testing.T, fsm *FSM) map[string]string {
 }
 
 // determinismCmdSequence builds a fixed sequence exercising read-modify-write
-// handlers. The PutObjectMeta(v1) -> PutObjectMeta(v2) -> DeleteObjectVersion(v2)
-// triplet on the same object exercises the iterator read-your-writes path:
-// when v2 (the latest) is deleted, applyDeleteObjectVersion's scanGroupPrefix
-// must see v1 — pending in the same shared transaction when these three land
-// in one batch.
+// handlers. CmdPutObjectMeta / CmdDeleteObjectVersion / CmdDeleteObject are
+// retired no-ops in data-plane raft-free Slice 2; the sequence exercises live
+// commands (bucket create/versioning, bucket policy) to verify batch-apply
+// determinism across different transaction groupings.
 func determinismCmdSequence(t *testing.T) [][]byte {
 	t.Helper()
 	enc := func(ct CommandType, p any) []byte {
@@ -69,13 +68,13 @@ func determinismCmdSequence(t *testing.T) [][]byte {
 	}
 	return [][]byte{
 		enc(CmdCreateBucket, CreateBucketCmd{Bucket: "b1"}),
-		enc(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: "b1", Key: "k1", Size: 10, ETag: "e1", VersionID: "v1"}),
-		enc(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: "b1", Key: "k1", Size: 20, ETag: "e2", VersionID: "v2"}),
-		enc(CmdDeleteObjectVersion, DeleteObjectVersionCmd{Bucket: "b1", Key: "k1", VersionID: "v2"}),
+		enc(CmdSetBucketVersioning, SetBucketVersioningCmd{Bucket: "b1", State: "Enabled"}),
+		enc(CmdSetBucketPolicy, SetBucketPolicyCmd{Bucket: "b1", PolicyJSON: []byte(`{"v":1}`)}),
+		enc(CmdDeleteBucketPolicy, DeleteBucketPolicyCmd{Bucket: "b1"}),
 		enc(CmdCreateBucket, CreateBucketCmd{Bucket: "b2"}),
 		enc(CmdSetBucketVersioning, SetBucketVersioningCmd{Bucket: "b2", State: "Enabled"}),
-		enc(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: "b2", Key: "k2", Size: 5, ETag: "e3", VersionID: "v3"}),
-		enc(CmdDeleteObject, DeleteObjectCmd{Bucket: "b2", Key: "k2", VersionID: "v4"}),
+		enc(CmdSetBucketPolicy, SetBucketPolicyCmd{Bucket: "b2", PolicyJSON: []byte(`{"v":2}`)}),
+		enc(CmdDeleteBucket, DeleteBucketCmd{Bucket: "b2"}),
 	}
 }
 
