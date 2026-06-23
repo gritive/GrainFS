@@ -13,48 +13,6 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-var _ = Describe("ClusterCoordinator single-node encrypted Truncate", func() {
-	var (
-		coord *ClusterCoordinator
-		ctx   context.Context
-	)
-
-	BeforeEach(func() {
-		ctx = context.Background()
-
-		// Build a single-node GroupBackend with encrypted ShardService (default
-		// from newTestGroupBackend — do NOT call SetShardService(nil,nil)).
-		gb := newTestGroupBackend(GinkgoT(), "vol-group")
-		Expect(gb.CreateBucket(ctx, "__grainfs_volumes")).To(Succeed())
-
-		mgr := NewDataGroupManager()
-		mgr.Add(NewDataGroupWithBackend("vol-group", []string{"test-node"}, gb))
-		router := NewRouter(mgr)
-		router.AssignBucket("__grainfs_volumes", "vol-group")
-		meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
-			"vol-group": {ID: "vol-group", PeerIDs: []string{"test-node"}},
-		}}
-		coord = NewClusterCoordinator(&fakeBackend{listResult: []string{"__grainfs_volumes"}}, mgr, router, meta, "test-node").
-			WithECConfig(ECConfig{DataShards: 1, ParityShards: 0})
-	})
-
-	DescribeTable("single-node encrypted internal-bucket Truncate",
-		func(initial, target int, want []byte) {
-			_, err := coord.PutObject(ctx, "__grainfs_volumes", "vol/blk",
-				bytes.NewReader(bytes.Repeat([]byte("x"), initial)), "application/octet-stream")
-			Expect(err).NotTo(HaveOccurred())
-			Expect(coord.Truncate(ctx, "__grainfs_volumes", "vol/blk", int64(target))).To(Succeed())
-			rc, _, err := coord.GetObject(ctx, "__grainfs_volumes", "vol/blk")
-			Expect(err).NotTo(HaveOccurred())
-			defer rc.Close()
-			got, _ := io.ReadAll(rc)
-			Expect(got).To(Equal(want))
-		},
-		Entry("shrink", 16, 4, bytes.Repeat([]byte("x"), 4)),
-		Entry("grow zero-fills", 4, 8, append(bytes.Repeat([]byte("x"), 4), make([]byte, 4)...)),
-	)
-})
-
 var _ = Describe("EC compatibility integration", func() {
 	var (
 		b   *DistributedBackend

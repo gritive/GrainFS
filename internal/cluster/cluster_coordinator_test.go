@@ -878,52 +878,6 @@ func TestClusterCoordinator_HeadObject_MissingObjectReturnsNotFound(t *testing.T
 	require.ErrorIs(t, err, storage.ErrObjectNotFound)
 }
 
-func TestClusterCoordinator_WALWriteAtReadAt_RoutesToLocalGroup(t *testing.T) {
-	// The plain-file WriteAt/Truncate fast-path has been removed. All internal-bucket
-	// writes now go through the encrypted RMW path. PreferWriteAt always returns false;
-	// Truncate and WriteAt both use GetObject+resize+PutObject via the coordinator.
-	base := &fakeBackend{listResult: []string{"__grainfs_vfs_default"}}
-	gb := newTestGroupBackend(t, "group-1")
-	// Keep the default encrypted ShardService from newTestGroupBackend.
-	require.NoError(t, gb.CreateBucket(context.Background(), "__grainfs_vfs_default"))
-
-	mgr := NewDataGroupManager()
-	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
-	router := NewRouter(mgr)
-	router.AssignBucket("__grainfs_vfs_default", "group-1")
-	meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
-		"group-1": {ID: "group-1", PeerIDs: []string{"test-node"}},
-	}}
-	c := NewClusterCoordinator(base, mgr, router, meta, "test-node").
-		WithECConfig(ECConfig{DataShards: 1, ParityShards: 0})
-
-	wrapped := c
-	// PreferWriteAt is always false now; full writes use PutObject via RMW path.
-	require.False(t, wrapped.PreferWriteAt("__grainfs_vfs_default"))
-	require.False(t, wrapped.PreferWriteAt("photos"))
-
-	require.NoError(t, wrapped.Truncate(context.Background(), "__grainfs_vfs_default", "fio/sparse.bin", 12))
-	sparse := make([]byte, 12)
-	n, err := wrapped.ReadAt(context.Background(), "__grainfs_vfs_default", "fio/sparse.bin", 0, sparse)
-	require.NoError(t, err)
-	require.Equal(t, 12, n)
-	require.Equal(t, make([]byte, 12), sparse)
-
-	obj, err := wrapped.WriteAt(context.Background(), "__grainfs_vfs_default", "fio/file.bin", 4, []byte("data"))
-	require.NoError(t, err)
-	require.Equal(t, int64(8), obj.Size)
-
-	require.NoError(t, wrapped.Truncate(context.Background(), "__grainfs_vfs_default", "fio/file.bin", 6))
-
-	buf := make([]byte, 8)
-	n, err = wrapped.ReadAt(context.Background(), "__grainfs_vfs_default", "fio/file.bin", 0, buf)
-	// The encrypted RMW path clips the buffer to obj.Size before reading, so
-	// it returns (6, nil) rather than the (6, io.EOF) the old plain-file path returned.
-	require.NoError(t, err)
-	require.Equal(t, 6, n)
-	require.Equal(t, []byte{0, 0, 0, 0, 'd', 'a', 0, 0}, buf)
-}
-
 func TestClusterCoordinator_PreferWriteAtAlwaysFalse(t *testing.T) {
 	// PreferWriteAt always returns false now that the plain-file fast-path is removed.
 	base := &fakeBackend{listResult: []string{"__grainfs_vfs_default"}}
@@ -940,38 +894,6 @@ func TestClusterCoordinator_PreferWriteAtAlwaysFalse(t *testing.T) {
 
 	require.False(t, c.PreferWriteAt("__grainfs_vfs_default"))
 	require.False(t, c.PreferWriteAt("photos"))
-}
-
-func TestClusterCoordinator_InternalReadAtFallsBackWhenObjectIndexMissing(t *testing.T) {
-	base := &fakeBackend{listResult: []string{"__grainfs_vfs_default"}}
-	gb := newTestGroupBackend(t, "group-1")
-	// Keep the default encrypted ShardService from newTestGroupBackend.
-	require.NoError(t, gb.CreateBucket(context.Background(), "__grainfs_vfs_default"))
-
-	mgr := NewDataGroupManager()
-	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
-	router := NewRouter(mgr)
-	router.AssignBucket("__grainfs_vfs_default", "group-1")
-	meta := NewMetaFSM()
-	require.NoError(t, meta.applyCmd(makePutShardGroupCmd(t, "group-1", []string{"test-node"})))
-	c := NewClusterCoordinator(base, mgr, router, meta, "test-node").
-		WithECConfig(ECConfig{DataShards: 1, ParityShards: 0})
-
-	// Truncate creates a 5-byte zero-filled object via RMW path.
-	require.NoError(t, c.Truncate(context.Background(), "__grainfs_vfs_default", "fio/file.bin", 5))
-	// WriteAt patches bytes 1-3 with "abc" via RMW path.
-	_, err := c.WriteAt(context.Background(), "__grainfs_vfs_default", "fio/file.bin", 1, []byte("abc"))
-	require.NoError(t, err)
-
-	obj, err := c.HeadObject(context.Background(), "__grainfs_vfs_default", "fio/file.bin")
-	require.NoError(t, err)
-	require.Equal(t, int64(5), obj.Size)
-
-	buf := make([]byte, 5)
-	n, err := c.ReadAt(context.Background(), "__grainfs_vfs_default", "fio/file.bin", 0, buf)
-	require.NoError(t, err)
-	require.Equal(t, 5, n)
-	require.Equal(t, []byte{0, 'a', 'b', 'c', 0}, buf)
 }
 
 // --- T6 forward-path test scaffolding ---

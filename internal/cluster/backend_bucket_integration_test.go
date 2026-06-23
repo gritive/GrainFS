@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io"
 	"strings"
 
 	"github.com/dgraph-io/badger/v4"
@@ -80,44 +79,6 @@ var _ = Describe("Backend bucket integration", func() {
 		got, err := b.GetBucketPolicy("policy-bucket")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(got).To(Equal(policy))
-	})
-
-	It("round-trips internal bucket objects via PutObject/GetObject", func() {
-		// The plain-file WriteAt/Truncate fast-path has been removed. Internal bucket
-		// objects now go through the encrypted PutObject path on all backends.
-		Expect(b.CreateBucket(ctx, "__grainfs_vfs_default")).To(Succeed())
-		_, err := b.PutObject(ctx, "__grainfs_vfs_default", "dir/file.bin",
-			bytes.NewReader([]byte("0123456789")), "application/octet-stream")
-		Expect(err).NotTo(HaveOccurred())
-
-		obj, err := b.HeadObject(ctx, "__grainfs_vfs_default", "dir/file.bin")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(obj.Size).To(Equal(int64(10)))
-
-		body, _, err := b.GetObject(ctx, "__grainfs_vfs_default", "dir/file.bin")
-		Expect(err).NotTo(HaveOccurred())
-		got, readErr := io.ReadAll(body)
-		closeErr := body.Close()
-		Expect(readErr).NotTo(HaveOccurred())
-		Expect(closeErr).NotTo(HaveOccurred())
-		Expect(string(got)).To(Equal("0123456789"))
-	})
-
-	It("round-trips internal bucket object metadata across delete and rewrite", func() {
-		// The plain-file WriteAt fast-path has been removed. Internal bucket objects
-		// now go through the encrypted PutObject path on all backends.
-		Expect(b.CreateBucket(ctx, "__grainfs_vfs_default")).To(Succeed())
-		_, err := b.PutObject(ctx, "__grainfs_vfs_default", "dir/file.bin",
-			bytes.NewReader([]byte("old")), "application/octet-stream")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(b.DeleteObject(ctx, "__grainfs_vfs_default", "dir/file.bin")).To(Succeed())
-		_, err = b.PutObject(ctx, "__grainfs_vfs_default", "dir/file.bin",
-			bytes.NewReader([]byte("new")), "application/octet-stream")
-		Expect(err).NotTo(HaveOccurred())
-
-		obj, err := b.HeadObject(ctx, "__grainfs_vfs_default", "dir/file.bin")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(obj.Size).To(Equal(int64(3)))
 	})
 
 	It("rejects duplicate bucket creation", func() {

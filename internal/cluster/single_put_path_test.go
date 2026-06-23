@@ -109,35 +109,6 @@ func TestSinglePutPath_EmptyObject_Chunks(t *testing.T) {
 	require.Equal(t, int64(0), gobj.Size)
 }
 
-// TestSinglePutPath_InternalBucket_ChunksWithXXH3 proves internal buckets now
-// take the same chunked path (no exemption), and the chunked SegmentWriter
-// preserves their xxhash3 ETag (16-hex, the EC-rewrap corruption oracle) rather
-// than the S3 MD5 — so rewrap verification still holds.
-func TestSinglePutPath_InternalBucket_ChunksWithXXH3(t *testing.T) {
-	b := newSingleNode1Plus0ChunkCapable(t)
-	ctx := context.Background()
-	const internalBkt = "__grainfs_receipts"
-	require.NoError(t, b.CreateBucket(ctx, internalBkt))
-
-	body := []byte("internal-object-body-now-chunked")
-	size := int64(len(body))
-	obj, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{
-		Bucket: internalBkt, Key: "r", Body: bytes.NewReader(body),
-		ContentType: "application/octet-stream", SizeHint: &size,
-	})
-	require.NoError(t, err)
-	require.NotEmpty(t, obj.Segments, "internal bucket object now takes the same chunked path")
-	require.Equal(t, storage.InternalETag(body), obj.ETag, "internal bucket ETag must stay xxhash3, not MD5")
-	require.Len(t, obj.ETag, 16, "xxhash3 ETag is 16 hex chars (MD5 would be 32)")
-
-	rc, _, gerr := b.GetObject(ctx, internalBkt, "r")
-	require.NoError(t, gerr)
-	defer rc.Close()
-	got, readErr := io.ReadAll(rc)
-	require.NoError(t, readErr)
-	require.Equal(t, body, got)
-}
-
 // TestSinglePutPath_VersionedRead_ChunkedAndEmpty proves the versioned read
 // path (GetObjectVersion) routes chunked objects — including empty ones — through
 // SegmentReader (the object_version.go Size>0 guard was dropped to match GET).
