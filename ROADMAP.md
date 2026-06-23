@@ -7,8 +7,9 @@
 
 ## 원칙
 
-- **raft는 저volume 강일관 control plane 전용**: membership + group topology + bucket/IAM + multipart manifest.
-  (원안 "membership only"에서 좁힘 — bucket/IAM/multipart 완료는 강일관 필요. PUT QPS에 안 실리므로 0.41x와 무관.)
+- **raft는 저volume 강일관 control plane 전용**: membership + group topology + bucket/IAM.
+  (원안 "membership only"에서 좁힘 — bucket/IAM은 강일관 필요. PUT QPS에 안 실리므로 0.41x와 무관.
+  multipart manifest + 완료는 raft-free로 전환됨 — manifest는 `.qmeta_mpu` quorum-meta blob, 완료는 결정론적 uploadID-derived version-id로 수렴.)
 - **고volume object data plane은 합의 없음**: 결정론 placement + per-node quorum 메타 + LWW versioning.
 - **placement = `hash(bucket+key) % numGroups`(동결)** + Rendezvous Hashing(weighted, static capacity)로 group 내 노드 선택.
   group identity 안정 → 노드 손실은 EC 복원으로 치유. GET 라우팅은 인덱스 없이 group 재계산(group→node 토폴로지만 control-plane raft에서 read, cache 가능).
@@ -70,7 +71,7 @@
 - **must-solve (스펙 단계 선결 — LWW가 깨는 지점)**:
   - 조건부 PUT(If-Match/If-None-Match) = CAS → 순수 LWW로 불가, 조정 필요. GrainFS가 광고하면 하드 요구.
   - versioned bucket = 단조 version 순서 → 코디네이터 간 clock skew가 LWW로 역전 가능.
-  - multipart 완료 객체 메타 = control-plane raft(manifest) vs quorum-LWW 경계 명확화.
+  - multipart 완료 객체 메타 = quorum-LWW 경계 명확화 (manifest는 `.qmeta_mpu` quorum-meta blob, 완료는 raft-free 결정론 version-id).
   - quorum 내구성 의미론 = quorum 크기 + commit 기준(직전 streaming-EC 에픽 교훈: data-shards-required / parity-best-effort) + 쓰기 중 노드 실패 처리.
 - **검증**: PUT/GET 무합의(data_raft) round-trip, 동시 PUT LWW, RAW(quorum write+read).
 - **★early-kill 체크포인트**: 여기서 브랜치 vs master partial 벤치. **data_raft 제거만으로 안 움직이면 = 천장 보존 조기 신호 → Phase 4 만들기 전에 중단.** (정직: quorum write = K+M majority+각 fsync = latency-free 아님, 현실적 win `data_raft 8.2ms→4~5ms`지 →0 아님 — work 이동, fire-and-forget이 보인 것.)
@@ -114,7 +115,7 @@ Phase 5는 구현 단계가 아니라 **terminal 결정 게이트**다 (S4-0와 
 - [완료] **S5-2b: ★결정 벤치 (merge go/no-go) → VERDICT = GO** (2026-06-11, 사용자 결정 eyes-open override → Phase 6 후 merge; 위 ★Phase 5 VERDICT 참조: 게이트 ① PUT win은 실측 미입증·선행 증거는 불리하나 사용자가 Phase 1-4 비-PUT 가치로 override; forward fix는 devel merge 시 동반 land; 게이트 ② GET/HEAD no-regress는 미측정=잔여 리스크). **직접 devel-vs-master A/B 미실행 상세(인프라 블록)**: forward fix 검증 후 시도(2026-06-11). master에도 동일 read-fence 코드 존재 → A/B는 fix를 양 arm 적용해야 실행(fix=측정 델타와 직교) → master-p5fix 생성·시도했으나 미완: ① IAP scp가 122MB 바이너리 간헐~지속 손상(md5/gzip 검증해도 깨끗한 전송 못 얻음) ② degraded long-running SPOT서 reset후 재부팅 genesis `WaitDEKReady`(60s, meta-raft gen-0, data-group fix 무관) marginal 타임아웃 → 2-arm reliable boot 불가(boot#1 fresh=OK, reboot=flaky; 디스크73%·메모리충분=timing). devel-fixed 단독 멀티호스트는 검증됨: PUT 343/GET 676 MiB/s, HEAD 2080 obj/s, 에러 0. 직접 A/B로 verdict 재확인하려면 안정 인프라(fix를 master land + arm마다 fresh VM/non-SPOT + GCS-relay 전송) 필요. 전제: S5-2a. — forward fix 검증 후 시도(2026-06-11). **확정**: master(옛 전체)에도 동일 read-fence 코드 존재(apply_actor:133/브리지:201/forward fence) → master도 fix 없이는 멀티호스트 forward 데드락 = devel 회귀 아닌 **production 잠재 버그**. 따라서 A/B는 fix를 양 arm에 적용해야 실행 가능(fix는 측정 델타와 직교) → `master-p5fix`(master + fix cherry-pick) 생성, devel-fixed vs master-fixed A/B 시도. **그러나 A/B 미완(인프라)**: ① IAP scp가 122MB 바이너리 간헐~지속 손상(md5 검증이 잡았으나 깨끗한 전송 못 얻음; gzip 40MB로도 일부 실패) ② degraded long-running SPOT VM서 **reset 후 재부팅 genesis가 `WaitDEKReady`(60s, meta-raft gen-0, data-group fix와 무관) marginal 타임아웃** → A/B의 2-arm reliable boot 불가(boot #1 fresh는 OK, reboot은 flaky; 디스크 73%·메모리 충분=리소스 아닌 timing). **남은 작업**: 안정 인프라(fix를 master에 cherry-pick/land + arm마다 fresh VM 또는 non-SPOT/큰 VM + GCS-relay 바이너리 전송)로 cross-binary A/B 실행 → verdict(① PUT win AND ② GET/HEAD no-regress) → GO면 Phase 6 후 merge, NO-GO면 폐기. devel-fixed 단독 멀티호스트 수치는 검증됨(S5-2a: PUT 343/GET 676 MiB/s, HEAD 2080 obj/s, 에러 0). 전제: S5-2a + 안정 인프라.
 
 ### Phase 6 — control/data plane 경계 + gossip (벤치 후) → merge ✅ DONE (MERGED master fc7473c9, PR #732)
-- raft 범위를 membership/bucket/IAM/multipart manifest로 확정, PUT 임계경로 밖 보장. gossip이 soft state(부하/용량/health) → Bounded Load/balancer 공급. (PUT-perf 무관이라 벤치 뒤.)
+- raft 범위를 membership/bucket/IAM으로 확정(multipart manifest + 완료는 raft-free — `.qmeta_mpu` quorum-meta blob + 결정론 version-id), PUT 임계경로 밖 보장. gossip이 soft state(부하/용량/health) → Bounded Load/balancer 공급. (PUT-perf 무관이라 벤치 뒤.)
 - **목표**: control/data 경계 코드 확정 후 **master merge**(비가역 지점).
 - **검증**: bucket/IAM/multipart 강일관 유지, object PUT/GET는 data-plane raft 미접촉. 전체 e2e green → merge.
 

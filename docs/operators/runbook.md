@@ -737,25 +737,28 @@ Walk/delete errors > 0 indicates filesystem permission or I/O issues.
 
 ---
 
-### Issue: CompleteMultipartUpload retry returns `ErrUploadNotFound` after ~24h
+### Issue: CompleteMultipartUpload retry returns `ErrUploadNotFound`
 
-**Symptoms:** a client (or a Raft replay) re-issues `CompleteMultipartUpload`
-for an upload that already completed successfully, and instead of the idempotent
-success it gets `ErrUploadNotFound`.
-
-**Diagnosis:** completion idempotency is provided by a durable `mpudone:` marker.
-The scrubber's mpudone GC sweep expires those markers after **24h**
-(`EnableMultipartDoneSweep(256, 24*time.Hour)`; the marker keyspace would be
-unbounded without it). A duplicate complete arriving **more than 24h** after the
-original success is therefore no longer idempotency-protected and returns
+**Symptoms:** a client re-issues `CompleteMultipartUpload` for an upload that
+already completed successfully, and instead of an idempotent success it gets
 `ErrUploadNotFound`.
 
-**Fix / expectation:** this is by design — 24h conservatively outlives realistic
-client retries and Raft replay windows, so legitimate retries are always covered.
-A complete arriving >24h later indicates a stuck client or an unusually long
-replay, not data loss: the object that the first complete produced is unaffected.
-No operator action is required; do not lengthen the retention to mask a
-misbehaving client.
+**Diagnosis:** completion idempotency is provided by the deterministic
+version-id per-version quorum-meta blob. `CompleteMultipartUpload` derives a
+stable version-id from the uploadID; a retried or concurrent complete re-derives
+the same version-id and short-circuits on the existing per-version blob
+(versioned bucket) or the latest-only blob whose `VersionID` matches
+(non-versioned bucket). There is no `mpudone:` marker and no 24h sweep — the
+completed object's quorum-meta blob is the sole idempotency record, and it
+persists as long as the object exists. An `ErrUploadNotFound` response therefore
+means the uploadID itself was never completed (or the completed object was
+subsequently deleted), not that an idempotency window expired.
+
+**Fix / expectation:** verify the uploadID is correct and that the object has
+not been deleted since the original complete. If the object exists (`HEAD
+<bucket>/<key>`) the prior complete succeeded; a duplicate complete on a live
+object will short-circuit cleanly. No operator action is required for normal
+retry scenarios — idempotency is not time-bounded.
 
 ---
 
