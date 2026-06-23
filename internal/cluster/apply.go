@@ -6,12 +6,10 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
-	"time"
 
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
-	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/reservedname"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -71,15 +69,6 @@ func (f *FSM) SetCoalesceCfg(cfg CoalesceConfig) {
 	f.mu.Unlock()
 }
 
-// snapshotCoalesceCfg returns a snapshot of the coalesce config under RLock
-// to avoid holding the lock during the cap arithmetic in the hot apply path.
-func (f *FSM) snapshotCoalesceCfg() CoalesceConfig {
-	f.mu.RLock()
-	cfg := f.coalesceCfg
-	f.mu.RUnlock()
-	return cfg
-}
-
 // NewFSM creates a new finite state machine backed by BadgerDB.
 // If keys is nil, newStateKeyspaceEmpty() is used (single-group identity mode).
 func NewFSM(db MetadataStore, keys *stateKeyspace) *FSM {
@@ -134,10 +123,10 @@ func (f *FSM) ApplyTxn(txn MetadataTxn, raw []byte) error {
 		return f.applySetObjectACL(txn, cmd.Data)
 	case CmdSetObjectTags:
 		return f.applySetObjectTags(txn, cmd.Data)
-	case CmdAppendObject:
-		return f.applyAppendObjectFromCmd(txn, cmd.Data)
-	case CmdCoalesceSegments:
-		return f.applyCoalesceSegmentsFromCmd(txn, cmd.Data)
+	case CmdAppendObject, CmdCoalesceSegments:
+		// reserved, removed in append/coalesce-off-raft Slice 1; no production
+		// proposer; greenfield — no raft-log replay of these commands. No-op on stale entries.
+		return nil
 	case CmdPutObjectQuarantine:
 		return f.applyPutObjectQuarantine(txn, cmd.Data)
 	case CmdResealFSMValues:
@@ -617,69 +606,6 @@ func mutateVersionTags(f *FSM, txn MetadataTxn, key []byte, tags []storage.Tag) 
 	})
 }
 
-// applyAppendObjectFromCmd handles a CmdAppendObject Raft entry. Mirrors the
-// applySetObjectACL read-mutate-write pattern: read existing objectMeta →
-// validate append invariants → write updated objectMeta with the new segment.
-//
-// Idempotent on replay: if the segment's BlobID already appears in
-// existing.Segments (replay of an already-applied entry), this is a no-op.
-//
-// When cmd.VersionID is non-empty (the normal AppendObject path), apply
-// dual-writes the versioned key + LatestKey alongside the legacy
-// ObjectMetaKey — matching applyPutObjectMeta — so that headObjectMeta returns
-// obj.VersionID populated and downstream commitObjectIndex can propose a
-// valid MetaPutObjectIndex entry (which rejects empty version_id).
-//
-// When cmd.VersionID is empty (legacy Raft replay or direct apply-test
-// fixtures), only the legacy ObjectMetaKey is written to preserve prior
-// semantics.
-func (f *FSM) applyAppendObjectFromCmd(txn MetadataTxn, data []byte) error {
-	cmd, err := decodeAppendObjectCmd(data)
-	if err != nil {
-		return fmt.Errorf("decode AppendObjectCmd: %w", err)
-	}
-
-	// Snapshot config once; avoids holding mu across the BadgerDB transaction.
-	coalesceCfg := f.snapshotCoalesceCfg()
-	modifiedUnixSec := cmd.ModifiedUnixSec
-	if modifiedUnixSec == 0 {
-		modifiedUnixSec = time.Now().Unix()
-	}
-
-	resolved, err := f.resolveObjectMetaForAppendUpdate(txn, cmd.Bucket, cmd.Key, cmd.BlobID)
-	if err != nil {
-		return err
-	}
-	if resolved.AlreadyApplied {
-		return nil
-	}
-
-	updated, result, err := applyAppendObjectTransition(appendObjectTransitionInput{
-		Existing:          resolved.Existing,
-		ExistingVersionID: resolved.ExistingVersionID,
-		Cmd:               cmd,
-		ModifiedUnixSec:   modifiedUnixSec,
-		CoalesceCfg:       coalesceCfg,
-	})
-	if result.Noop {
-		return nil
-	}
-	if result.SizeCapRejected {
-		metrics.AppendSizeCapRejectedTotal.Inc()
-	}
-	if err != nil {
-		return err
-	}
-
-	return f.persistObjectMetaUpdate(txn, objectMetaPersistenceInput{
-		Bucket:    cmd.Bucket,
-		Key:       cmd.Key,
-		VersionID: cmd.VersionID,
-		Meta:      updated,
-		Policy:    objectMetaPersistencePublishLatest,
-	})
-}
-
 func appendBaseCoalescedRef(key, versionID string, existing *objectMeta) CoalescedShardRef {
 	coalescedID := "base"
 	if versionID != "" {
@@ -697,57 +623,11 @@ func appendBaseCoalescedRef(key, versionID string, existing *objectMeta) Coalesc
 	}
 }
 
-// applyCoalesceSegmentsFromCmd handles a CmdCoalesceSegments Raft entry. The
-// command consumes a prefix of objectMeta.Segments and appends a single
-// CoalescedShardRef. Read-modify-write pattern mirroring
-// applyAppendObjectFromCmd.
-//
-// Idempotency rules (replay-safe):
-//   - If CoalescedID already present in objectMeta.Coalesced → no-op.
-//   - ConsumedSegmentIDs are removed by exact BlobID match; missing IDs
-//     are skipped (a concurrent append that arrived between snapshot and
-//     apply is preserved).
-//   - Size/ETag of objectMeta are NOT modified: a coalesce is metadata
-//     reorganization, not a content change.
-func (f *FSM) applyCoalesceSegmentsFromCmd(txn MetadataTxn, data []byte) error {
-	cmd, err := decodeCoalesceSegmentsCmd(data)
-	if err != nil {
-		return fmt.Errorf("decode CoalesceSegmentsCmd: %w", err)
-	}
-	if cmd.CoalescedID == "" || cmd.ShardKey == "" {
-		return fmt.Errorf("coalesce: empty CoalescedID or ShardKey")
-	}
-
-	resolved, err := f.resolveObjectMetaForCoalesceUpdate(txn, cmd.Bucket, cmd.Key)
-	if err != nil {
-		return err
-	}
-	if !resolved.Found {
-		return nil // object deleted concurrently — drop silently
-	}
-
-	updated, result, err := applyCoalesceSegmentsTransition(resolved.Meta, cmd)
-	if result.Noop {
-		return nil
-	}
-	if result.CoalescedEntriesAtCap {
-		metrics.AppendCoalescedEntriesAtCap.Inc()
-	}
-	if err != nil {
-		return err
-	}
-	return f.persistObjectMetaUpdate(txn, objectMetaPersistenceInput{
-		Bucket:    cmd.Bucket,
-		Key:       cmd.Key,
-		VersionID: resolved.VersionID,
-		Meta:      updated,
-		Policy:    objectMetaPersistenceMirrorVersion,
-	})
-}
-
 // pendingMigrationKey returns the BadgerDB key for a not-yet-executed migration task.
+// Note: this uses a bare "pending-migration:" prefix (no group prefix); used only by
+// apply_test.go to verify key format. The production writer uses f.keys.PendingMigrationKey.
 //
-//nolint:unused // referenced by apply_test.go.
+//nolint:unused // referenced by apply_test.go
 func pendingMigrationKey(bucket, key, versionID string) []byte {
 	return []byte("pending-migration:" + bucket + "/" + key + "/" + versionID)
 }

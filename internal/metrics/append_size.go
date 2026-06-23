@@ -34,10 +34,3 @@ var AppendCoalescedTotalBytes = promauto.NewHistogram(prometheus.HistogramOpts{
 		1 << 40,   // 1 TiB
 	},
 })
-
-// AppendCoalescedEntriesAtCap counts the times MaxCoalescedEntries soft limit
-// was reached, triggering a recoalesce-of-coalesced path.
-var AppendCoalescedEntriesAtCap = promauto.NewCounter(prometheus.CounterOpts{
-	Name: "grainfs_append_coalesced_entries_at_cap_total",
-	Help: "Number of times MaxCoalescedEntries soft limit was reached (recoalesce-of-coalesced trigger).",
-})

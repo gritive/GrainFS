@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -89,16 +90,29 @@ func (b *DistributedBackend) writeQuorumMeta(ctx context.Context, cmd PutObjectM
 	// Latest-only blob (LIST-latest / legacy read fast path), same K-of-N, fail-closed.
 	wctx, cancel := context.WithTimeout(ctx, quorumMetaWriteTimeout)
 	defer cancel()
-	latestErr := fanOutQuorumMeta(wctx, cmd.NodeIDs, k, func(fctx context.Context, node string) error {
-		if node == self {
-			return b.shardSvc.writeQuorumMetaLocal(cmd.Bucket, cmd.Key, blob)
-		}
+	writeLocal := func() error { return b.shardSvc.writeQuorumMetaLocal(cmd.Bucket, cmd.Key, blob) }
+	writePeer := func(fctx context.Context, node string) error {
 		addr, rerr := b.shardSvc.resolvePeerAddress(node)
 		if rerr != nil {
 			return rerr
 		}
 		return b.shardSvc.WriteQuorumMeta(fctx, addr, cmd.Bucket, cmd.Key, blob)
-	})
+	}
+	var latestErr error
+	if cmd.MetaSeqCAS {
+		// CAS write (append/coalesce): the next same-owner RMW reads this blob
+		// owner-local-first, so the owner-local copy MUST be durable before this
+		// returns (BUG-2). Owner-local-first guarantees that while preserving the
+		// exact N-K peer failure budget. LWW writers keep the plain fan-out below.
+		latestErr = fanOutQuorumMetaOwnerLocalFirst(wctx, cmd.NodeIDs, self, k, writeLocal, writePeer)
+	} else {
+		latestErr = fanOutQuorumMeta(wctx, cmd.NodeIDs, k, func(fctx context.Context, node string) error {
+			if node == self {
+				return writeLocal()
+			}
+			return writePeer(fctx, node)
+		})
+	}
 	if latestErr != nil {
 		return latestErr
 	}
@@ -193,6 +207,114 @@ func quorumMetaCmdWins(cand, cur PutObjectMetaCmd) bool {
 		return cand.IsHardDeleted && !cur.IsHardDeleted
 	}
 	return false
+}
+
+// errQuorumMetaCASReject is returned by the write-time guards when a CAS
+// candidate (MetaSeqCAS) loses the +1 base-match check: a stalled owner read
+// base=N and wrote N+1, but a newer writer already advanced existing to N+1, so
+// the late write's base no longer matches. It is DISTINGUISHABLE from a benign
+// LWW skip (which returns nil): the append/coalesce coordinator must see this
+// error to re-read the base and retry — it must NOT mistake the rejected write
+// for a successful no-op (which would silently drop the appended data).
+var errQuorumMetaCASReject = errors.New("quorum meta: CAS base mismatch")
+
+// quorumMetaCASRejectWireCode is the stable, distinguishable error-body string a
+// remote quorum-meta WRITE handler emits when its local write returns
+// errQuorumMetaCASReject. The RPC error channel is free-text (errorResponse →
+// err.Error()), so the CAS-reject signal must travel as a fixed sentinel string
+// that the client maps back to errQuorumMetaCASReject — not as the free-text
+// message (which could change) and not collide with any other handler error.
+//
+// BUG-1 fix: without this, a REMOTE replica's CAS reject reaches the client as a
+// generic "remote quorum meta error", so fanOutQuorumMeta never counts it as
+// errQuorumMetaCASReject and the append/coalesce RMW retry/SlowDown logic is
+// bypassed on a multi-node cluster.
+const quorumMetaCASRejectWireCode = "QUORUM_META_CAS_REJECT"
+
+// quorumMetaWriteErrorBody maps a local quorum-meta write error to the error-body
+// string sent over the RPC error channel. errQuorumMetaCASReject becomes the
+// stable wire code; every other error keeps its free-text message.
+func quorumMetaWriteErrorBody(err error) string {
+	if errors.Is(err, errQuorumMetaCASReject) {
+		return quorumMetaCASRejectWireCode
+	}
+	return err.Error()
+}
+
+// quorumMetaWriteRPCError maps a remote quorum-meta WRITE reply back to a local
+// error. An "Error" reply whose body is the CAS-reject wire code is reconstituted
+// as errQuorumMetaCASReject (errors.Is-able), so fanOutQuorumMeta counts a remote
+// reject identically to a local one. Any other "Error" reply stays a generic
+// remote error annotated with addr + the reported body.
+func quorumMetaWriteRPCError(addr string, body []byte) error {
+	if string(body) == quorumMetaCASRejectWireCode {
+		return errQuorumMetaCASReject
+	}
+	if len(body) == 0 {
+		return fmt.Errorf("remote quorum meta error from %s", addr)
+	}
+	return fmt.Errorf("remote quorum meta error from %s: %s", addr, string(body))
+}
+
+// quorumMetaWriteVerdict is the tri-state result of the write-time accept guard.
+type quorumMetaWriteVerdict int
+
+const (
+	// quorumMetaWriteApply: rename the candidate over the existing blob.
+	quorumMetaWriteApply quorumMetaWriteVerdict = iota
+	// quorumMetaWriteSkip: keep the existing blob, skip the rename, return nil
+	// (a benign LWW loss, or an idempotent CAS re-delivery — both are no-ops, NOT
+	// errors).
+	quorumMetaWriteSkip
+	// quorumMetaWriteRejectCAS: a CAS candidate lost the +1 base race — return the
+	// DISTINGUISHABLE errQuorumMetaCASReject so the coordinator re-reads and retries.
+	quorumMetaWriteRejectCAS
+)
+
+// decideQuorumMetaWrite is the SINGLE decision point for whether a candidate
+// quorum-meta blob may overwrite the existing one. Mutable-accumulating writes
+// (append/coalesce) set MetaSeqCAS and require strict +1 monotonicity over the
+// existing blob's MetaSeq — a failover-safe compare-and-swap fence (spec §7-A/B):
+// an absent existing is MetaSeq 0, so the first CAS write must carry MetaSeq==1.
+//
+// CAS idempotency is NOT decided here (this sees only the decoded cmds, which
+// cannot tell "the exact same candidate already landed" from "a different write
+// that happens to share MetaSeq+VersionID"). The byte-identical re-delivery skip
+// is applied at the call site, BEFORE this guard, via quorumMetaBlobIsIdempotentReplay.
+//
+// Every non-CAS write uses unchanged LWW (quorumMetaCmdWins). Both write-time
+// guards (writeQuorumMetaLocal / writeQuorumMetaVersionLocal) route through here;
+// it is the §7-F single-truth-point.
+func decideQuorumMetaWrite(existing, cand PutObjectMetaCmd) quorumMetaWriteVerdict {
+	if cand.MetaSeqCAS {
+		// Placement fence: reject a CAS write whose PlacementGroupID no longer
+		// matches the existing blob's (cross-placement rebalance safety). An absent
+		// existing (PlacementGroupID=="") passes — first write / new object is
+		// unaffected. The LWW branch is unchanged.
+		placementOK := existing.PlacementGroupID == "" || cand.PlacementGroupID == existing.PlacementGroupID
+		if existing.MetaSeq+1 == cand.MetaSeq && placementOK {
+			return quorumMetaWriteApply
+		}
+		return quorumMetaWriteRejectCAS
+	}
+	if quorumMetaCmdWins(cand, existing) {
+		return quorumMetaWriteApply
+	}
+	return quorumMetaWriteSkip
+}
+
+// quorumMetaBlobIsIdempotentReplay reports whether a CAS candidate is a
+// byte-identical re-delivery of the blob already on disk. A K-of-N CAS fan-out
+// can deliver the SAME candidate to one node more than once — directly (a
+// placement set that resolves multiple node IDs to the same physical node, e.g.
+// EC over a single host) or via retry. The exact same write landing twice on a
+// node must be a no-op SKIP, NOT a CAS reject (rejecting it would spuriously fail
+// the whole RMW). Byte-equality is the only safe discriminator: a different write
+// that happens to share (MetaSeq, VersionID) has different content, so it is NOT
+// idempotent and correctly falls through to the +1 CAS guard (→ reject). Only
+// MetaSeqCAS candidates qualify (LWW writes already no-op on a tie).
+func quorumMetaBlobIsIdempotentReplay(existing, candidate []byte, candIsCAS bool) bool {
+	return candIsCAS && bytes.Equal(existing, candidate)
 }
 
 // readQuorumMetaWinningRaw returns the raw quorum-meta blob that wins the LWW
@@ -349,6 +471,20 @@ func (b *DistributedBackend) fetchQuorumMetaFromPeers(bucket, key string) ([]byt
 // unreachable (more than N-K failures or context cancellation). Errors are
 // propagated to the caller — unlike the Phase 0 shadow, failures here fail
 // the PUT.
+//
+// errQuorumMetaCASReject handling: a CAS reject is ONE replica's vote, NOT a
+// global short-circuit. With ordinary K-of-N replica skew (some replicas at
+// MetaSeq S, some at S+1 after a prior successful write), the NEXT CAS write of
+// S+2 is ACCEPTED by the up-to-date replicas and REJECTED by the laggards — the
+// votes differ across replicas, so short-circuiting on the first reject would
+// surface a spurious reject even when K replicas accept (and a local-first retry
+// could then false-Noop without ever reaching K — the partial-publish bug). So a
+// CAS reject counts toward the N-K failure budget like any other failed vote; K
+// nil-acks still win. Only when K is UNREACHABLE do we surface the DISTINGUISHABLE
+// errQuorumMetaCASReject (if any reject was observed) so the append/coalesce RMW
+// re-reads the base and retries — preserving the §7-F single-truth contract for
+// the genuine base-advanced-everywhere case (all replicas reject → K unreachable
+// → surface the sentinel). A non-CAS-only quorum failure keeps the generic error.
 func fanOutQuorumMeta(ctx context.Context, nodes []string, k int, dispatch func(context.Context, string) error) error {
 	if k <= 0 {
 		k = 1
@@ -362,7 +498,7 @@ func fanOutQuorumMeta(ctx context.Context, nodes []string, k int, dispatch func(
 		node := node
 		go func() { results <- dispatch(ctx, node) }()
 	}
-	var ok, failed int
+	var ok, failed, casRejects int
 	for i := 0; i < n; i++ {
 		select {
 		case err := <-results:
@@ -372,8 +508,18 @@ func fanOutQuorumMeta(ctx context.Context, nodes []string, k int, dispatch func(
 					return nil
 				}
 			} else {
+				if errors.Is(err, errQuorumMetaCASReject) {
+					casRejects++
+				}
 				failed++
 				if failed > n-k {
+					// K is now unreachable. If ANY vote was a CAS reject, surface the
+					// DISTINGUISHABLE sentinel so the caller re-reads the base and
+					// retries (the genuine base-advanced case). Otherwise it is a plain
+					// availability failure.
+					if casRejects > 0 {
+						return errQuorumMetaCASReject
+					}
 					return fmt.Errorf("quorum meta: %d/%d nodes failed, quorum %d unreachable", failed, n, k)
 				}
 			}
@@ -382,6 +528,74 @@ func fanOutQuorumMeta(ctx context.Context, nodes []string, k int, dispatch func(
 		}
 	}
 	return nil
+}
+
+// fanOutQuorumMetaOwnerLocalFirst is the owner-local-first variant of
+// fanOutQuorumMeta used by the CAS read-modify-write writers (append/coalesce).
+//
+// BUG-2 fix (owner-local base freshness): plain fanOutQuorumMeta returns on the
+// k-th ack, which may NOT include the owner-local write when k peer acks arrive
+// first. The CAS RMW reads its base owner-local-first (readQuorumMetaWinningRaw),
+// so if a same-owner write returns before its OWN local copy is durable, the next
+// RMW on that owner reads a STALE local base, computes a MetaSeq the peers already
+// advanced past, and CAS-rejects forever (false offset mismatch / livelock / lost
+// update). Under a single stable leader the owner is the authoritative reader of
+// its own copy, so its local write MUST be durable before the RMW returns.
+//
+// Fix: when self is a placement node, write the owner-local copy SYNCHRONOUSLY
+// first; it must be durable before any return so a subsequent owner-local-first
+// base read sees it. The local write counts for EVERY self entry in the placement
+// set (a placement set can list self more than once — e.g. EC over a single host,
+// where the byte-identical CAS re-delivery is idempotent), exactly as plain
+// fanOutQuorumMeta acked once per self goroutine. The remaining k-selfCount acks
+// come from the true peers, preserving the N-K peer failure budget unchanged:
+// (peerCount)-(k-selfCount) = n-k. A CAS reject on the owner-local write is
+// surfaced immediately (the owner's own base advanced — the genuine retry signal).
+// When self is NOT a placement node the behavior is identical to plain
+// fanOutQuorumMeta over all nodes.
+func fanOutQuorumMetaOwnerLocalFirst(
+	ctx context.Context,
+	nodes []string,
+	self string,
+	k int,
+	writeLocal func() error,
+	writePeer func(context.Context, string) error,
+) error {
+	if k <= 0 {
+		k = 1
+	}
+	// Partition placement into the owner-local entries (all self occurrences) and
+	// the true peers. selfCount mirrors the number of acks the old all-node fan-out
+	// produced for self (one per goroutine), since the local write is idempotent.
+	selfCount := 0
+	peers := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		if node == self {
+			selfCount++
+			continue
+		}
+		peers = append(peers, node)
+	}
+	if selfCount == 0 {
+		// Owner is not a placement node — no local-first guarantee to make; fall
+		// back to the plain all-node fan-out so the peer dispatch is unchanged.
+		return fanOutQuorumMeta(ctx, nodes, k, func(fctx context.Context, node string) error {
+			return writePeer(fctx, node)
+		})
+	}
+	// Owner-local write first, SYNCHRONOUSLY (once; idempotent for duplicate self
+	// entries). A CAS reject here is the owner's own base advancing — surface it so
+	// the RMW re-reads and retries.
+	if err := writeLocal(); err != nil {
+		return err
+	}
+	// The local write satisfies selfCount of the k required acks. Require the rest
+	// from the true peers; if the local acks already meet the quorum we are done.
+	remaining := k - selfCount
+	if remaining <= 0 {
+		return nil
+	}
+	return fanOutQuorumMeta(ctx, peers, remaining, writePeer)
 }
 
 // writeQuorumMetaLocal durably writes the encoded quorum meta blob for
@@ -435,16 +649,28 @@ func (s *ShardService) writeQuorumMetaLocal(bucket, key string, data []byte) err
 	// the guard-skip path because it was registered before the lock is taken.
 	unlock := s.quorumMetaTargetLock(target)
 	defer unlock()
-	// Write-time LWW guard: a blind-writer (e.g. leaderless backfill) must not
-	// clobber a newer on-disk blob. Absent file → no-op (the common case).
-	// Use strict "existing beats candidate" (not "candidate does not beat existing")
-	// so that read-modify-write mutations (ACL/tags) with equal ModTime/MetaSeq
-	// are never suppressed — only a strictly-newer on-disk blob causes a skip.
+	// Write-time accept guard: a blind-writer (e.g. leaderless backfill) must not
+	// clobber a newer on-disk blob. Absent file → no-op accept (the common case).
+	// The single discriminator quorumMetaWriteAccepts decides: CAS candidates
+	// (append/coalesce) require existing.MetaSeq+1 == cand.MetaSeq, everything else
+	// uses LWW (read-modify-write ACL/tags bump MetaSeq, so they strictly win).
+	// A CAS reject surfaces a DISTINGUISHABLE error so the coordinator retries; an
+	// LWW loss stays a silent no-op skip. Decode failures of the existing blob keep
+	// the legacy behavior: fall through and rename (do not regress the corruption
+	// path).
 	if existing, rerr := os.ReadFile(target); rerr == nil {
 		if cand, derr := s.decodeQuorumMetaCmdBlob(data); derr == nil {
+			// Byte-identical CAS re-delivery (same write to the same node twice) is a
+			// no-op, NOT a reject — checked before the +1 guard.
+			if quorumMetaBlobIsIdempotentReplay(existing, data, cand.MetaSeqCAS) {
+				return nil
+			}
 			if cur, derr2 := s.decodeQuorumMetaCmdBlob(existing); derr2 == nil {
-				if quorumMetaBlobWins(cur.ModTime, cur.VersionID, cur.MetaSeq, cand.ModTime, cand.VersionID, cand.MetaSeq) {
-					return nil // existing strictly wins — keep it, skip the rename
+				switch decideQuorumMetaWrite(cur, cand) {
+				case quorumMetaWriteRejectCAS:
+					return errQuorumMetaCASReject // CAS base mismatch — caller retries
+				case quorumMetaWriteSkip:
+					return nil // LWW loss — keep existing, skip the rename
 				}
 			}
 		}
@@ -507,14 +733,28 @@ func (s *ShardService) writeQuorumMetaVersionLocal(bucket, versionSubpath string
 	// Mirrors writeQuorumMetaLocal — see that function for the full rationale.
 	unlock := s.quorumMetaTargetLock(target)
 	defer unlock()
-	// Write-time LWW guard: a blind-writer (e.g. leaderless backfill) must not
-	// clobber a newer on-disk blob. Absent file → no-op (the common case).
-	// decodeQuorumMetaCmdBlob is a method on *ShardService (the receiver `s` here).
+	// Write-time accept guard: a blind-writer (e.g. leaderless backfill) must not
+	// clobber a newer on-disk blob. Absent file → no-op accept (the common case).
+	// Routes through the single discriminator quorumMetaWriteAccepts: CAS
+	// candidates (append/coalesce) require existing.MetaSeq+1 == cand.MetaSeq and a
+	// reject surfaces the DISTINGUISHABLE error so the coordinator retries; LWW
+	// losses stay a silent no-op skip (byte-identical to the prior quorumMetaCmdWins
+	// guard). decodeQuorumMetaCmdBlob is a method on *ShardService (receiver `s`);
+	// a decode failure of either blob keeps the legacy behavior (fall through and
+	// rename — do not regress the corruption path).
 	if existing, rerr := os.ReadFile(target); rerr == nil {
 		if cand, derr := s.decodeQuorumMetaCmdBlob(data); derr == nil {
+			// Byte-identical CAS re-delivery (same write to the same node twice) is a
+			// no-op, NOT a reject — checked before the +1 guard.
+			if quorumMetaBlobIsIdempotentReplay(existing, data, cand.MetaSeqCAS) {
+				return nil
+			}
 			if cur, derr2 := s.decodeQuorumMetaCmdBlob(existing); derr2 == nil {
-				if !quorumMetaCmdWins(cand, cur) {
-					return nil // existing wins (or ties) — keep it, skip the rename
+				switch decideQuorumMetaWrite(cur, cand) {
+				case quorumMetaWriteRejectCAS:
+					return errQuorumMetaCASReject // CAS base mismatch — caller retries
+				case quorumMetaWriteSkip:
+					return nil // LWW loss — keep existing, skip the rename
 				}
 			}
 		}
@@ -1487,28 +1727,6 @@ func (s *ShardService) ScanQuorumMetaVersionsAll(ctx context.Context, addr, buck
 	return out, nil
 }
 
-// deleteQuorumMetaLocal removes the local quorum meta file for (bucket, key).
-// Called by deleteObjectWithMarker after the raft CmdDeleteObject commit so
-// subsequent reads fall through to BadgerDB and find the delete marker.
-// Errors are silently ignored: the raft marker is the source of truth; a
-// stale quorum meta file is handled on the next read.
-func (s *ShardService) deleteQuorumMetaLocal(bucket, key string) error {
-	if len(s.dataDirs) == 0 {
-		return nil
-	}
-	root := filepath.Join(s.dataDirs[0], quorumMetaSubDir)
-	target := filepath.Join(root, bucket, key)
-	rel, err := filepath.Rel(root, target)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("quorum meta delete: key %q escapes root", key)
-	}
-	err = os.Remove(target)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("quorum meta delete: %w", err)
-	}
-	return nil
-}
-
 // deleteQuorumMetaVersionLocalCore is the lock-free, epoch-free FS core for
 // per-version blob removal. Absent file is not an error (idempotent). The caller
 // is responsible for holding the appropriate lock before calling.
@@ -1659,12 +1877,15 @@ func (s *ShardService) WriteQuorumMeta(ctx context.Context, addr, bucket, key st
 	if err != nil {
 		return fmt.Errorf("write quorum meta to %s: %w", addr, err)
 	}
-	rpcType, _, err := unmarshalEnvelope(respEnvelope)
+	rpcType, body, err := unmarshalEnvelope(respEnvelope)
 	if err != nil {
 		return fmt.Errorf("unmarshal quorum meta response: %w", err)
 	}
 	if rpcType == "Error" {
-		return fmt.Errorf("remote quorum meta error from %s", addr)
+		// Preserve the CAS-reject signal across the RPC boundary (BUG-1): a remote
+		// replica's CAS reject must surface as errQuorumMetaCASReject so the
+		// fanOut caller counts it like a local reject.
+		return quorumMetaWriteRPCError(addr, body)
 	}
 	return nil
 }
@@ -1683,67 +1904,17 @@ func (s *ShardService) WriteQuorumMetaVersion(ctx context.Context, addr, bucket,
 	if err != nil {
 		return fmt.Errorf("write quorum meta version to %s: %w", addr, err)
 	}
-	rpcType, _, err := unmarshalEnvelope(respEnvelope)
+	rpcType, body, err := unmarshalEnvelope(respEnvelope)
 	if err != nil {
 		return fmt.Errorf("unmarshal quorum meta version response: %w", err)
 	}
 	if rpcType == "Error" {
-		return fmt.Errorf("remote quorum meta version error from %s", addr)
+		// Preserve the CAS-reject signal across the RPC boundary (BUG-1), mirroring
+		// WriteQuorumMeta. The per-version writer is LWW today, but a CAS reject must
+		// never be flattened to a generic error on this path either.
+		return quorumMetaWriteRPCError(addr, body)
 	}
 	return nil
-}
-
-// DeleteQuorumMeta removes the quorum-meta replica for (bucket, key) on a remote
-// placement node. Mirrors WriteQuorumMeta; the receiver runs deleteQuorumMetaLocal.
-func (s *ShardService) DeleteQuorumMeta(ctx context.Context, addr, bucket, key string) error {
-	if s.transport == nil {
-		return fmt.Errorf("quorum meta: no transport")
-	}
-	envb := buildShardEnvelope("DeleteQuorumMeta", bucket, key, 0, nil)
-	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
-	respEnvelope, err := s.callShardRPC(ctx, addr, envb)
-	if err != nil {
-		return fmt.Errorf("delete quorum meta on %s: %w", addr, err)
-	}
-	rpcType, _, err := unmarshalEnvelope(respEnvelope)
-	if err != nil {
-		return fmt.Errorf("unmarshal quorum meta delete response: %w", err)
-	}
-	if rpcType == "Error" {
-		return fmt.Errorf("remote quorum meta delete error from %s", addr)
-	}
-	return nil
-}
-
-// deleteQuorumMetaQuorum removes the quorum-meta replica for (bucket, key) on
-// EVERY placement node (self locally, peers via the DeleteQuorumMeta RPC).
-// Best-effort: a failed peer delete is logged-by-omission and tolerated — the
-// scrubber's orphan sweep and the next write reconcile a residual replica, and
-// the BadgerDB record (read fallback) is authoritative either way. nodeIDs is
-// the placement set captured from the object's quorum-meta before migration; an
-// empty set falls back to a local-only delete (object was BadgerDB-only).
-func (b *DistributedBackend) deleteQuorumMetaQuorum(ctx context.Context, bucket, key string, nodeIDs []string) {
-	if b.shardSvc == nil {
-		return
-	}
-	if len(nodeIDs) == 0 {
-		_ = b.shardSvc.deleteQuorumMetaLocal(bucket, key)
-		return
-	}
-	self := b.currentSelfAddr()
-	dctx, cancel := context.WithTimeout(ctx, quorumMetaWriteTimeout)
-	defer cancel()
-	for _, node := range nodeIDs {
-		if node == self {
-			_ = b.shardSvc.deleteQuorumMetaLocal(bucket, key)
-			continue
-		}
-		addr, rerr := b.shardSvc.resolvePeerAddress(node)
-		if rerr != nil {
-			continue
-		}
-		_ = b.shardSvc.DeleteQuorumMeta(dctx, addr, bucket, key)
-	}
 }
 
 // IterQuorumMetaECShardTargets walks all quorum meta files under

@@ -140,14 +140,13 @@ type DistributedBackend struct {
 	ecConfig                         ECConfig  // Phase 18: erasure coding config (k+m shard parameters)
 	ecConfigSnapshot                 atomic.Pointer[ECConfig]
 	runtimeSnapshot                  atomic.Pointer[backendRuntimeSnapshot]
-	shardLocks                       keyedRWMutex                      // scrubbable.go: per-(bucket,key) RWMutex for ReadShard/WriteShard (refcounted, bounded)
-	objectMetaRMWLocks               keyedRWMutex                      // per-(bucket,key) serialization for tag/ACL/relocation quorum-meta RMW (refcounted, bounded)
-	multipartLocks                   sync.Map                          // map[uploadID]*sync.RWMutex; serializes part writes against complete/abort cleanup
-	appendLocks                      [appendLockStripeCount]sync.Mutex // striped owner-side admission locks for same-object AppendObject
-	incidentRecorder                 IncidentRecorder                  // nil disables zero-ops incident recording
-	testBeforeChunkedMultipartCommit func() error                      // test-only hook for chunked multipart commit preflight
-	testBeforeAppendSegmentWrite     func()                            // test-only hook after append pre-check before segment write
-	testOnListObjectVersionsCtx      func(ctx context.Context)         // test-only hook: called with the ctx passed to ListObjectVersions
+	shardLocks                       keyedRWMutex              // scrubbable.go: per-(bucket,key) RWMutex for ReadShard/WriteShard (refcounted, bounded)
+	objectMetaRMWLocks               keyedRWMutex              // per-(bucket,key) serialization for append/tag/ACL/coalesce/relocation quorum-meta RMW (refcounted, bounded)
+	multipartLocks                   sync.Map                  // map[uploadID]*sync.RWMutex; serializes part writes against complete/abort cleanup
+	incidentRecorder                 IncidentRecorder          // nil disables zero-ops incident recording
+	testBeforeChunkedMultipartCommit func() error              // test-only hook for chunked multipart commit preflight
+	testBeforeAppendSegmentWrite     func()                    // test-only hook after append pre-check before segment write
+	testOnListObjectVersionsCtx      func(ctx context.Context) // test-only hook: called with the ctx passed to ListObjectVersions
 
 	// shardCache caches reconstructed/fetched EC shards. Sits in front of
 	// getObjectEC's per-shard fan-out: a full hit (every needed shard

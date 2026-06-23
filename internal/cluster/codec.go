@@ -235,6 +235,38 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 		partsOff = b.EndVector(len(partOffs))
 	}
 	tagsVec := buildTagsVector(b, c.Tags, clusterpb.PutObjectMetaCmdStartTagsVector)
+	// coalesced — build child CoalescedShardRef tables BEFORE PutObjectMetaCmdStart.
+	var coalescedOff flatbuffers.UOffsetT
+	if len(c.Coalesced) > 0 {
+		cOffs := make([]flatbuffers.UOffsetT, len(c.Coalesced))
+		for i, cr := range c.Coalesced {
+			idOff := b.CreateString(cr.CoalescedID)
+			etOff := b.CreateString(cr.ETag)
+			skOff := b.CreateString(cr.ShardKey)
+			var nodesOff flatbuffers.UOffsetT
+			if len(cr.NodeIDs) > 0 {
+				nodesOff = buildStringVector(b, cr.NodeIDs, clusterpb.CoalescedShardRefStartNodeIdsVector)
+			}
+			clusterpb.CoalescedShardRefStart(b)
+			clusterpb.CoalescedShardRefAddCoalescedId(b, idOff)
+			clusterpb.CoalescedShardRefAddSize(b, cr.Size)
+			clusterpb.CoalescedShardRefAddEtag(b, etOff)
+			clusterpb.CoalescedShardRefAddShardKey(b, skOff)
+			clusterpb.CoalescedShardRefAddVersion(b, cr.Version)
+			clusterpb.CoalescedShardRefAddEcData(b, cr.ECData)
+			clusterpb.CoalescedShardRefAddEcParity(b, cr.ECParity)
+			clusterpb.CoalescedShardRefAddStripeBytes(b, cr.StripeBytes)
+			if nodesOff != 0 {
+				clusterpb.CoalescedShardRefAddNodeIds(b, nodesOff)
+			}
+			cOffs[i] = clusterpb.CoalescedShardRefEnd(b)
+		}
+		clusterpb.PutObjectMetaCmdStartCoalescedVector(b, len(cOffs))
+		for i := len(cOffs) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(cOffs[i])
+		}
+		coalescedOff = b.EndVector(len(cOffs))
+	}
 	clusterpb.PutObjectMetaCmdStart(b)
 	clusterpb.PutObjectMetaCmdAddBucket(b, bucketOff)
 	clusterpb.PutObjectMetaCmdAddKey(b, keyOff)
@@ -282,6 +314,15 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	}
 	if c.IsHardDeleted {
 		clusterpb.PutObjectMetaCmdAddIsHardDeleted(b, true)
+	}
+	if coalescedOff != 0 {
+		clusterpb.PutObjectMetaCmdAddCoalesced(b, coalescedOff)
+	}
+	if c.IsAppendable {
+		clusterpb.PutObjectMetaCmdAddIsAppendable(b, true)
+	}
+	if c.MetaSeqCAS {
+		clusterpb.PutObjectMetaCmdAddMetaSeqCas(b, true)
 	}
 	return fbFinish(b, clusterpb.PutObjectMetaCmdEnd(b)), nil
 }
@@ -348,6 +389,34 @@ func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
 			}
 		}
 	}
+	var coalesced []CoalescedShardRef
+	if n := t.CoalescedLength(); n > 0 {
+		coalesced = make([]CoalescedShardRef, n)
+		var c clusterpb.CoalescedShardRef
+		for i := 0; i < n; i++ {
+			if !t.Coalesced(&c, i) {
+				return PutObjectMetaCmd{}, fmt.Errorf("decode coalesced[%d]", i)
+			}
+			var nodeIDs []string
+			if nn := c.NodeIdsLength(); nn > 0 {
+				nodeIDs = make([]string, nn)
+				for j := 0; j < nn; j++ {
+					nodeIDs[j] = string(c.NodeIds(j))
+				}
+			}
+			coalesced[i] = CoalescedShardRef{
+				CoalescedID: string(c.CoalescedId()),
+				Size:        c.Size(),
+				ETag:        string(c.Etag()),
+				ShardKey:    string(c.ShardKey()),
+				Version:     c.Version(),
+				ECData:      c.EcData(),
+				ECParity:    c.EcParity(),
+				StripeBytes: c.StripeBytes(),
+				NodeIDs:     nodeIDs,
+			}
+		}
+	}
 	return PutObjectMetaCmd{
 		Bucket:           string(t.Bucket()),
 		Key:              string(t.Key()),
@@ -372,6 +441,9 @@ func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
 		ACL:              t.Acl(),
 		MetaSeq:          t.MetaSeq(),
 		IsHardDeleted:    t.IsHardDeleted(),
+		Coalesced:        coalesced,
+		IsAppendable:     t.IsAppendable(),
+		MetaSeqCAS:       t.MetaSeqCas(),
 	}, nil
 }
 
@@ -1103,115 +1175,6 @@ func decodeSetObjectTagsCmd(data []byte) (SetObjectTagsCmd, error) {
 	return out, nil
 }
 
-func encodeAppendObjectCmd(c AppendObjectCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	keyOff := b.CreateString(c.Key)
-	blobIDOff := b.CreateString(c.BlobID)
-	etagOff := b.CreateString(c.SegmentETag)
-	pgOff := b.CreateString(c.PlacementGroupID)
-	vidOff := b.CreateString(c.VersionID)
-	clusterpb.AppendObjectCmdStart(b)
-	clusterpb.AppendObjectCmdAddBucket(b, bucketOff)
-	clusterpb.AppendObjectCmdAddKey(b, keyOff)
-	clusterpb.AppendObjectCmdAddExpectedOffset(b, c.ExpectedOffset)
-	clusterpb.AppendObjectCmdAddBlobId(b, blobIDOff)
-	clusterpb.AppendObjectCmdAddSegmentSize(b, c.SegmentSize)
-	clusterpb.AppendObjectCmdAddSegmentEtag(b, etagOff)
-	clusterpb.AppendObjectCmdAddPlacementGroupId(b, pgOff)
-	clusterpb.AppendObjectCmdAddVersionId(b, vidOff)
-	clusterpb.AppendObjectCmdAddModifiedUnixSec(b, c.ModifiedUnixSec)
-	return fbFinish(b, clusterpb.AppendObjectCmdEnd(b)), nil
-}
-
-func decodeAppendObjectCmd(data []byte) (AppendObjectCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.AppendObjectCmd {
-		return clusterpb.GetRootAsAppendObjectCmd(d, 0)
-	})
-	if err != nil {
-		return AppendObjectCmd{}, err
-	}
-	return AppendObjectCmd{
-		Bucket:           string(t.Bucket()),
-		Key:              string(t.Key()),
-		ExpectedOffset:   t.ExpectedOffset(),
-		BlobID:           string(t.BlobId()),
-		SegmentSize:      t.SegmentSize(),
-		SegmentETag:      string(t.SegmentEtag()),
-		PlacementGroupID: string(t.PlacementGroupId()),
-		VersionID:        string(t.VersionId()),
-		ModifiedUnixSec:  t.ModifiedUnixSec(),
-	}, nil
-}
-
-func encodeCoalesceSegmentsCmd(c CoalesceSegmentsCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	keyOff := b.CreateString(c.Key)
-	cidOff := b.CreateString(c.CoalescedID)
-	skOff := b.CreateString(c.ShardKey)
-	etOff := b.CreateString(c.ETag)
-	var consumedOff flatbuffers.UOffsetT
-	if len(c.ConsumedSegmentIDs) > 0 {
-		consumedOff = buildStringVector(b, c.ConsumedSegmentIDs, clusterpb.CoalesceSegmentsCmdStartConsumedSegmentIdsVector)
-	}
-	var placementOff flatbuffers.UOffsetT
-	if len(c.Placement) > 0 {
-		placementOff = buildStringVector(b, c.Placement, clusterpb.CoalesceSegmentsCmdStartPlacementVector)
-	}
-	clusterpb.CoalesceSegmentsCmdStart(b)
-	clusterpb.CoalesceSegmentsCmdAddBucket(b, bucketOff)
-	clusterpb.CoalesceSegmentsCmdAddKey(b, keyOff)
-	clusterpb.CoalesceSegmentsCmdAddCoalescedId(b, cidOff)
-	clusterpb.CoalesceSegmentsCmdAddShardKey(b, skOff)
-	clusterpb.CoalesceSegmentsCmdAddSize(b, c.Size)
-	clusterpb.CoalesceSegmentsCmdAddEtag(b, etOff)
-	if consumedOff != 0 {
-		clusterpb.CoalesceSegmentsCmdAddConsumedSegmentIds(b, consumedOff)
-	}
-	if placementOff != 0 {
-		clusterpb.CoalesceSegmentsCmdAddPlacement(b, placementOff)
-	}
-	clusterpb.CoalesceSegmentsCmdAddEcData(b, c.ECData)
-	clusterpb.CoalesceSegmentsCmdAddEcParity(b, c.ECParity)
-	return fbFinish(b, clusterpb.CoalesceSegmentsCmdEnd(b)), nil
-}
-
-func decodeCoalesceSegmentsCmd(data []byte) (CoalesceSegmentsCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.CoalesceSegmentsCmd {
-		return clusterpb.GetRootAsCoalesceSegmentsCmd(d, 0)
-	})
-	if err != nil {
-		return CoalesceSegmentsCmd{}, err
-	}
-	var consumed []string
-	if n := t.ConsumedSegmentIdsLength(); n > 0 {
-		consumed = make([]string, n)
-		for i := range consumed {
-			consumed[i] = string(t.ConsumedSegmentIds(i))
-		}
-	}
-	var placement []string
-	if n := t.PlacementLength(); n > 0 {
-		placement = make([]string, n)
-		for i := range placement {
-			placement[i] = string(t.Placement(i))
-		}
-	}
-	return CoalesceSegmentsCmd{
-		Bucket:             string(t.Bucket()),
-		Key:                string(t.Key()),
-		CoalescedID:        string(t.CoalescedId()),
-		ShardKey:           string(t.ShardKey()),
-		Size:               t.Size(),
-		ETag:               string(t.Etag()),
-		ConsumedSegmentIDs: consumed,
-		Placement:          placement,
-		ECData:             t.EcData(),
-		ECParity:           t.EcParity(),
-	}, nil
-}
-
 // encodeSetRingCmd serializes a SetRingCmd for Raft proposal.
 func encodeSetRingCmd(c SetRingCmd) ([]byte, error) {
 	b := clusterBuilderPool.Get()
@@ -1269,10 +1232,9 @@ func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
 		return encodeSetObjectACLCmd(payload.(SetObjectACLCmd))
 	case CmdSetObjectTags:
 		return encodeSetObjectTagsCmd(payload.(SetObjectTagsCmd))
-	case CmdAppendObject:
-		return encodeAppendObjectCmd(payload.(AppendObjectCmd))
-	case CmdCoalesceSegments:
-		return encodeCoalesceSegmentsCmd(payload.(CoalesceSegmentsCmd))
+	case CmdAppendObject, CmdCoalesceSegments:
+		// reserved, removed in append/coalesce-off-raft Slice 1 — no production caller
+		return nil, fmt.Errorf("command type %d is reserved and removed (append/coalesce-off-raft Slice 1)", cmdType)
 	case CmdSetRing:
 		return encodeSetRingCmd(payload.(SetRingCmd))
 	case CmdPutObjectQuarantine:

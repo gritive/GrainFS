@@ -523,26 +523,6 @@ func TestCoalescedShardRefRoundTrip(t *testing.T) {
 	}
 }
 
-func TestCoalesceSegmentsCmdRoundTrip(t *testing.T) {
-	in := CoalesceSegmentsCmd{
-		Bucket: "b", Key: "a", CoalescedID: "c1",
-		ShardKey: "a/coalesced/c1", Size: 1024, ETag: "etag",
-		ConsumedSegmentIDs: []string{"s1", "s2"},
-	}
-	raw, err := encodeCoalesceSegmentsCmd(in)
-	if err != nil {
-		t.Fatalf("encode: %v", err)
-	}
-	got, err := decodeCoalesceSegmentsCmd(raw)
-	if err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if got.CoalescedID != "c1" || got.ShardKey != "a/coalesced/c1" || got.Size != 1024 ||
-		len(got.ConsumedSegmentIDs) != 2 || got.ConsumedSegmentIDs[0] != "s1" {
-		t.Fatalf("CoalesceSegmentsCmd round-trip mismatch: %+v", got)
-	}
-}
-
 // TestCoalescedShardRefECParamsRoundTrip ensures the Phase B3 EC placement
 // params (ECData / ECParity / NodeIDs) survive marshal+unmarshal.
 // These fields are required by appendableReader to reconstruct the coalesced
@@ -575,34 +555,6 @@ func TestCoalescedShardRefECParamsRoundTrip(t *testing.T) {
 	}
 	if len(c.NodeIDs) != 6 || c.NodeIDs[0] != "n1" || c.NodeIDs[5] != "n6" {
 		t.Fatalf("NodeIDs mismatch: %v", c.NodeIDs)
-	}
-}
-
-// TestCoalesceSegmentsCmdECParamsRoundTrip ensures the Raft command carries
-// the EC placement decision so the FSM apply can store it on the
-// CoalescedShardRef. Without these fields the read path cannot reconstruct
-// the coalesced blob.
-func TestCoalesceSegmentsCmdECParamsRoundTrip(t *testing.T) {
-	in := CoalesceSegmentsCmd{
-		Bucket: "b", Key: "a", CoalescedID: "c1",
-		ShardKey: "a/coalesced/c1", Size: 4096, ETag: "etag",
-		ConsumedSegmentIDs: []string{"s1", "s2"},
-		Placement:          []string{"n1", "n2", "n3", "n4", "n5", "n6"},
-		ECData:             4, ECParity: 2,
-	}
-	raw, err := encodeCoalesceSegmentsCmd(in)
-	if err != nil {
-		t.Fatalf("encode: %v", err)
-	}
-	got, err := decodeCoalesceSegmentsCmd(raw)
-	if err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if got.ECData != 4 || got.ECParity != 2 {
-		t.Fatalf("EC params mismatch: ecData=%d ecParity=%d", got.ECData, got.ECParity)
-	}
-	if len(got.Placement) != 6 || got.Placement[0] != "n1" || got.Placement[5] != "n6" {
-		t.Fatalf("Placement mismatch: %v", got.Placement)
 	}
 }
 
@@ -712,4 +664,25 @@ func TestFSMValueResealDoneCmd_RoundTrip(t *testing.T) {
 	got, err := decodeFSMValueResealDoneCmd(cmd.Data)
 	require.NoError(t, err)
 	require.Equal(t, uint32(3), got.Gen)
+}
+
+func TestPutObjectMetaCmd_AppendManifestRoundTrip(t *testing.T) {
+	in := PutObjectMetaCmd{
+		Bucket: "b", Key: "k", Size: 30, ModTime: 1700000000,
+		Segments:     []SegmentMetaEntry{{BlobID: "s1", Size: 10, SegmentIdx: 0}, {BlobID: "s2", Size: 20, SegmentIdx: 1}},
+		Coalesced:    []CoalescedShardRef{{CoalescedID: "c1", Size: 30, ETag: "etag", ShardKey: "k/coalesced/c1"}},
+		IsAppendable: true, MetaSeq: 7, MetaSeqCAS: true,
+	}
+	blob, err := EncodeCommand(CmdPutObjectMeta, in)
+	require.NoError(t, err)
+	cmd, err := DecodeCommand(blob)
+	require.NoError(t, err)
+	out, err := decodePutObjectMetaCmd(cmd.Data)
+	require.NoError(t, err)
+	require.True(t, out.IsAppendable)
+	require.True(t, out.MetaSeqCAS)
+	require.Equal(t, uint64(7), out.MetaSeq)
+	require.Len(t, out.Coalesced, 1)
+	require.Equal(t, "c1", out.Coalesced[0].CoalescedID)
+	require.Len(t, out.Segments, 2)
 }

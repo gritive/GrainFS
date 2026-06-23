@@ -31,6 +31,22 @@ func TestMapError_DEKGenUnknownIsServiceUnavailable(t *testing.T) {
 	assert.Equal(t, "ServiceUnavailable", got.Code)
 }
 
+// TestMapError_StalePlacementIsRetryableSlowDown: a persistent CAS loss that
+// surfaces as ErrStalePlacement must map to 503 SlowDown, not 500 InternalError.
+// S3 clients auto-retry SlowDown; they do not retry 500.
+func TestMapError_StalePlacementIsRetryableSlowDown(t *testing.T) {
+	c := app.NewContext(0)
+
+	err := fmt.Errorf("append object: %w", cluster.ErrStalePlacement)
+	mapError(c, err)
+
+	require.Equal(t, consts.StatusServiceUnavailable, c.Response.StatusCode())
+
+	var got s3Error
+	require.NoError(t, xml.Unmarshal(c.Response.Body(), &got))
+	assert.Equal(t, "SlowDown", got.Code)
+}
+
 // TestMapError_ProposeTimeoutIsRetryableSlowDown: a propose that exhausts its
 // raft-commit deadline under load must map to a retryable 503 SlowDown, not a
 // fatal 500. S3 clients auto-retry SlowDown; they do not retry 500. This is the

@@ -95,29 +95,13 @@ func (b *DistributedBackend) QuarantineCorruptShardLocalAtShardKey(t ECShardScan
 // version still exists (no shard-ref to check). Segment: blobID still in Segments[].
 // Coalesced: target.ShardKey still in Coalesced[].ShardKey. Any read error other than
 // not-found returns false (conservative: don't act on uncertain state).
+//
+// F5: a blob-resident appendable/coalesced object has no FSM obj: record — its
+// manifest lives in the quorum-meta blob. On an FSM miss this falls back to the
+// blob manifest (per-version blob by VersionID, then latest-only) so a blob-backed
+// coalesced/segment shard is not falsely reported de-referenced.
 func (b *DistributedBackend) ShardTargetStillReferenced(ctx context.Context, t ECShardScanTarget) bool {
-	var m objectMeta
-	found := false
-	err := b.store.View(func(txn MetadataTxn) error {
-		item, err := txn.Get(b.ks().ObjectMetaKeyV(t.Bucket, t.ObjectKey, t.VersionID))
-		if errors.Is(err, ErrMetaKeyNotFound) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		val, verr := b.itemValueCopy(item)
-		if verr != nil {
-			return verr
-		}
-		decoded, derr := unmarshalObjectMeta(val)
-		if derr != nil {
-			return derr
-		}
-		m = decoded
-		found = true
-		return nil
-	})
+	m, found, err := b.readShardTargetMeta(t)
 	if err != nil {
 		log.Warn().
 			Str("bucket", t.Bucket).
@@ -153,6 +137,64 @@ func (b *DistributedBackend) ShardTargetStillReferenced(ctx context.Context, t E
 	default:
 		return false
 	}
+}
+
+// readShardTargetMeta resolves the parent object-version meta for a shard target,
+// trying the FSM obj: record first and falling back to the quorum-meta blob (F5).
+// Returns (meta, found, err): found=false means the object-version genuinely does
+// not exist in either store (de-referenced); err is reserved for an unreadable
+// FSM record (conservative: don't act on uncertain state).
+func (b *DistributedBackend) readShardTargetMeta(t ECShardScanTarget) (objectMeta, bool, error) {
+	var m objectMeta
+	found := false
+	err := b.store.View(func(txn MetadataTxn) error {
+		item, err := txn.Get(b.ks().ObjectMetaKeyV(t.Bucket, t.ObjectKey, t.VersionID))
+		if errors.Is(err, ErrMetaKeyNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		val, verr := b.itemValueCopy(item)
+		if verr != nil {
+			return verr
+		}
+		decoded, derr := unmarshalObjectMeta(val)
+		if derr != nil {
+			return derr
+		}
+		m = decoded
+		found = true
+		return nil
+	})
+	if err != nil {
+		return objectMeta{}, false, err
+	}
+	if found {
+		return m, true, nil
+	}
+
+	// FSM miss → fall back to the blob manifest. Prefer the specific per-version
+	// blob (matches the scanned version exactly); a blob-backed appendable on a
+	// non-versioned bucket has no per-version blob, so also try the latest-only
+	// blob whose VersionID matches the target.
+	if b.shardSvc == nil {
+		return objectMeta{}, false, nil
+	}
+	if t.VersionID != "" {
+		if cmd, ok, verr := b.readQuorumMetaVersion(t.Bucket, t.ObjectKey, t.VersionID); verr == nil && ok {
+			return buildPutObjectMeta(cmd), true, nil
+		}
+	}
+	if cmd, lerr := b.readQuorumMetaCmd(t.Bucket, t.ObjectKey); lerr == nil {
+		// Only accept the latest-only blob when it is the same version the scan
+		// observed (or the scan carried no version) — never quarantine a different
+		// version's shard via a stale latest blob.
+		if t.VersionID == "" || cmd.VersionID == t.VersionID {
+			return buildPutObjectMeta(cmd), true, nil
+		}
+	}
+	return objectMeta{}, false, nil
 }
 
 func (b *DistributedBackend) isObjectQuarantined(bucket, key, versionID string) (bool, PutObjectQuarantineCmd, error) {

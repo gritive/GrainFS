@@ -142,8 +142,19 @@ request `ContentType`; arbitrary user metadata remains unsupported.
 S3 Express의 `AppendObject` API를 구현한 객체 형태. PutObject로 생성된 객체와 달리
 한 객체에 여러 번 write가 이어지며, 각 write는 raw segment blob 파일로 저장된다.
 HTTP `x-amz-write-offset-bytes` 헤더가 expected offset을 가져오고, 서버는 owner 노드의
-data-Raft 그룹을 통해 단조 증가 offset을 강제한다. 비 owner 노드가 받은 append는
-클러스터 transport forward로 owner에게 위임된다.
+**quorum-meta blob**을 통해 단조 증가 offset을 강제한다 (Slice 1 이후 — raft FSM
+`CmdAppendObject`/`CmdCoalesceSegments` 은퇴, 두 커맨드는 no-op reserved slot). 비 owner
+노드가 받은 append는 클러스터 transport forward로 owner에게 위임된다.
+
+**Metadata write model (Slice 1+):** append와 coalesce 모두 owner-locked CAS
+(compare-and-swap) read-modify-write를 quorum-meta blob에 수행한다. 판별자는 per-write
+`MetaSeqCAS` + placement fence. CAS는 append/coalesce에만 사용하고, PUT/DELETE-marker/
+tags/ACL 등 나머지 mutation은 LWW(last-writer-wins)를 유지한다.
+
+**Known limitation (Slice 1):** off-raft append/coalesce는 동일 generation 내 leader
+handoff 시 failover-safe하지 않다 (acknowledged append loss 가능). single-stable-leader
+배포 가정 하에 eyes-open accepted risk. placement fence + CAS가 window를 축소하지만
+제거하지는 않는다.
 
 객체 metadata는 두 가지 referent slice를 가진다. `Segments[]`는 아직 합쳐지지 않은
 원시 segment blob ID(`<bucket>/<key>_segments/<blobID>` 파일)를 시간순으로 가리키고,
@@ -235,13 +246,18 @@ Last-Write-Wins (LWW) by `ModTime`. The fan-out waits for all peers within
 `quorumMetaReadTimeout` (5 s) so a concurrent PUT racing the read can be
 observed. If all peers miss, the read falls back to BadgerDB.
 
-**BadgerDB fallback**: the BadgerDB fallback covers three cases:
-1. Multipart-completed objects — `applyCompleteMultipart` writes object meta
-   and deletes the multipart manifest key atomically in a single BadgerDB
-   transaction (raft). Splitting that atomicity would open a window where the
-   manifest leaks or the object disappears.
-2. Objects committed before Phase 3 upgrade (pre-existing BadgerDB entries).
-3. Repair/scrubber-written entries injected via the raft control plane.
+**BadgerDB fallback**: the BadgerDB fallback covers two cases:
+1. Objects committed before Phase 3 upgrade (pre-existing BadgerDB entries).
+2. Repair/scrubber-written entries injected via the raft control plane.
+
+Note: multipart-completed objects used to be case (1) but are now off-raft
+(manifest → `.qmeta_mpu` quorum-meta blob; completion → deterministic vid from
+uploadID UUIDv7, short-circuit on existing per-version blob).
+
+**Remaining per-object FSM commands (as of Slice 1):** delete carve-out,
+tags/acl, quarantine, and `CmdPutObjectMeta` — to be retired in Slice 2. The
+former per-object FSM commands `CmdAppendObject` and `CmdCoalesceSegments` were
+retired in Slice 1 (apply as no-ops; slots reserved, not renumbered).
 
 **Internal buckets** (`_grainfs_*`) always use raft and never touch the quorum
 meta store.

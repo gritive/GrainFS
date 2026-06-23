@@ -55,9 +55,14 @@ var _ = Describe("Coalesce process integration", func() {
 		Expect(rc.Close()).To(Succeed())
 		Expect(string(got)).To(Equal("aaaabbbbcc"))
 
+		// F-step 4 (durable→publish→GC): the manifest no longer references the raw
+		// segments (asserted above: obj.Segments empty), but the raw segment FILES
+		// are NOT eager-deleted inline — a reader that observed the pre-coalesce
+		// manifest may still be streaming them. Physical cleanup is deferred to the
+		// orphan segment scrubber (reachability sweep + grace).
 		entries, err := os.ReadDir(b.objectPath(bucket, key) + "_segments")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(entries).To(BeEmpty())
+		Expect(entries).To(HaveLen(3), "raw segment files remain for the orphan sweep (no inline eager-delete)")
 
 		coalescedPath := filepath.Join(b.objectPath(bucket, key)+"_coalesced", obj.Coalesced[0].CoalescedID)
 		_, err = os.Stat(coalescedPath)

@@ -322,8 +322,52 @@ func (rcv *PutObjectMetaCmd) MutateIsHardDeleted(n bool) bool {
 	return rcv._tab.MutateBoolSlot(48, n)
 }
 
+func (rcv *PutObjectMetaCmd) Coalesced(obj *CoalescedShardRef, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(50))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *PutObjectMetaCmd) CoalescedLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(50))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func (rcv *PutObjectMetaCmd) IsAppendable() bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(52))
+	if o != 0 {
+		return rcv._tab.GetBool(o + rcv._tab.Pos)
+	}
+	return false
+}
+
+func (rcv *PutObjectMetaCmd) MutateIsAppendable(n bool) bool {
+	return rcv._tab.MutateBoolSlot(52, n)
+}
+
+func (rcv *PutObjectMetaCmd) MetaSeqCas() bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(54))
+	if o != 0 {
+		return rcv._tab.GetBool(o + rcv._tab.Pos)
+	}
+	return false
+}
+
+func (rcv *PutObjectMetaCmd) MutateMetaSeqCas(n bool) bool {
+	return rcv._tab.MutateBoolSlot(54, n)
+}
+
 func PutObjectMetaCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(23)
+	builder.StartObject(26)
 }
 func PutObjectMetaCmdAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -408,6 +452,18 @@ func PutObjectMetaCmdAddMetaSeq(builder *flatbuffers.Builder, metaSeq uint64) {
 }
 func PutObjectMetaCmdAddIsHardDeleted(builder *flatbuffers.Builder, isHardDeleted bool) {
 	builder.PrependBoolSlot(22, isHardDeleted, false)
+}
+func PutObjectMetaCmdAddCoalesced(builder *flatbuffers.Builder, coalesced flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(23, flatbuffers.UOffsetT(coalesced), 0)
+}
+func PutObjectMetaCmdStartCoalescedVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
+}
+func PutObjectMetaCmdAddIsAppendable(builder *flatbuffers.Builder, isAppendable bool) {
+	builder.PrependBoolSlot(24, isAppendable, false)
+}
+func PutObjectMetaCmdAddMetaSeqCas(builder *flatbuffers.Builder, metaSeqCas bool) {
+	builder.PrependBoolSlot(25, metaSeqCas, false)
 }
 func PutObjectMetaCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

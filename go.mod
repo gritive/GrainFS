@@ -12,7 +12,6 @@ require (
 	github.com/cloudwego/hertz v0.10.5
 	github.com/dgraph-io/badger/v4 v4.9.2
 	github.com/duckdb/duckdb-go/v2 v2.10504.0
-	github.com/go-git/go-billy/v5 v5.9.0
 	github.com/google/flatbuffers v25.12.19+incompatible
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7

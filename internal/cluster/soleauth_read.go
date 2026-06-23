@@ -134,18 +134,28 @@ func (b *DistributedBackend) fsmCarveoutObject(bucket, key, versionID string) (*
 //     record with NO lat: pointer, resolved by the caller from WHICH KEY was
 //     actually read, NOT from any versionID argument)
 //
-// SHARED PREDICATE: fsmCarveoutObject (single-object read, S4c-c-read1) and
-// DistributedBackend.ListObjectVersions's bucket-wide carve-out scan (S4c-c
-// T2) BOTH classify records through this one rule so the two paths cannot
-// drift. A plain vid-bearing versioned record (none of the three) is NOT a
-// carve-out: it is blob-authoritative under sole authority and a stale one
-// must never resurrect.
+// SHARED PREDICATE: fsmCarveoutObject (single-object read) and
+// DistributedBackend.ListObjectVersions's bucket-wide carve-out scan + the
+// soleauth scrubber scan ALL classify records through this one rule so the
+// paths cannot drift. A plain vid-bearing versioned record (none of the three)
+// is NOT a carve-out: it is blob-authoritative under sole authority and a stale
+// one must never resurrect.
+//
+// Slice 1 Task 7 NOTE — the appendable/coalesced terms are now DEAD WEIGHT under
+// soleauth (kept only as a defensive, drift-proof classifier, NOT removed so the
+// LIST/scrubber consumers stay byte-identical): soleauth == versioning-enabled,
+// AppendObject is rejected 501 on versioning-enabled buckets
+// (internal/server/object_append.go), and coalesce only acts on appendable
+// objects — so no appendable/coalesced FSM record can EXIST in a bucket where this
+// predicate is consulted under soleauth=on. The live read carve-out reachable here
+// is therefore the legacy-bare class only. (A versioning-DISABLED appendable object
+// reads via readQuorumMeta -> objectAndPlacementFromCmd entirely; it never reaches
+// fsmCarveoutObject, which is gated behind soleAuthReadOn.)
+//
+// Multipart is NOT a carve-out: a versioning-enabled multipart complete is
+// blob-authoritative (per-version blob written FAIL-CLOSED; CmdCompleteMultipart
+// propose is GONE), identical to a regular versioned PUT.
 func isFsmCarveoutClass(meta objectMeta, bareLegacy bool) bool {
-	// Multipart is NO LONGER a carve-out: a versioning-enabled multipart complete is
-	// now blob-authoritative (its per-version blob is written FAIL-CLOSED and is the
-	// sole authority for read/GC/LIST/DEK, identical to a regular versioned PUT). The
-	// CmdCompleteMultipart propose is GONE (M3 dropped it); the per-version / latest-only
-	// quorum-meta blob is both the durable commit record and the idempotency anchor.
 	return meta.IsAppendable || len(meta.Coalesced) > 0 || bareLegacy
 }
 

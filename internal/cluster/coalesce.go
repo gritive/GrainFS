@@ -1,10 +1,10 @@
 package cluster
 
 import (
-	"bytes"
 	"context"
 	"crypto/md5"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -45,6 +45,95 @@ type CoalesceSegmentsCmd struct {
 // segments keep arriving after each coalesce. Reaching this cap stalls
 // coalesce until the object is rotated/closed.
 const MaxCoalescedEntries = 1024
+
+// maxCoalesceCASRetries bounds the in-RMW retry on a quorum-meta CAS base
+// mismatch during the coalesce publish. Mirrors maxAppendCASRetries: a transient
+// concurrent-writer (append) race is absorbed before the best-effort coalesce
+// aborts (leaving the raw segments intact — safe).
+const maxCoalesceCASRetries = 2
+
+// coalesceOwnerGate reports whether this backend may PUBLISH the coalesce
+// manifest for an object (F2). The coalesce worker/backstop start on EVERY
+// backend, but only the routed owner — the leader of the object's data group —
+// may run the CAS publish, so it serializes against AppendObject on the same node
+// via the shared objectMetaRMWLock. A non-leader skips/requeues (the leader's own
+// worker/backstop covers the object). A nil node (FSM-only test backend that has
+// no leadership concept) is treated as owner so single-node/in-process paths run.
+func (b *DistributedBackend) coalesceOwnerGate() bool {
+	if b.node == nil {
+		return true
+	}
+	return b.node.IsLeader()
+}
+
+// publishCoalesceBlob performs the owner-side CAS publish of one coalesce
+// operation against the latest-only quorum-meta manifest blob (off-raft). It
+// replaces the old propose(CmdCoalesceSegments). The coalesced DATA blob is
+// already durable (B2 owner-local / B3 EC) before this is called (the
+// durable→publish→GC order); this step only advances the manifest.
+//
+// RMW under objectMetaRMWLock (the SAME lock AppendObject takes, F2): read the
+// CURRENT base, idempotency (CoalescedID already present → no-op), cap, F8
+// consumed-id removal against the CURRENT segments, build the +1 CAS candidate,
+// writeQuorumMeta. On a CAS reject (a concurrent append advanced the blob) re-read
+// and retry (bounded). Coalesce is best-effort background work: a persistent
+// reject or a missing base aborts safely (the raw segments stay intact and a
+// future trigger/backstop re-coalesces).
+func (b *DistributedBackend) publishCoalesceBlob(ctx context.Context, cmd CoalesceSegmentsCmd) error {
+	if b.shardSvc == nil {
+		return fmt.Errorf("coalesce publish: quorum-meta store unavailable")
+	}
+	unlock := b.objectMetaRMWLock(cmd.Bucket, cmd.Key)
+	defer unlock()
+
+	// F2/F3 execute-time owner-gate: the top-of-job gate is the cheap route-time
+	// skip; leadership can flip between then and here. Re-check AFTER acquiring the
+	// lock and before any read/write so the CAS publish only runs on the node that
+	// also serializes AppendObject on this same lock (mirrors LocalExecution's
+	// IsLeader re-check at write-execute time). A non-owner aborts safely — the new
+	// leader's worker/backstop re-coalesces.
+	if !b.coalesceOwnerGate() {
+		return nil
+	}
+
+	for attempt := 0; ; attempt++ {
+		base, err := b.readQuorumMetaCmd(cmd.Bucket, cmd.Key)
+		if err != nil {
+			// Object gone (deleted between merge and publish) → drop the coalesce.
+			// The merged blob becomes an orphan reclaimed by the sweep.
+			if errors.Is(err, storage.ErrObjectNotFound) {
+				return nil
+			}
+			return fmt.Errorf("coalesce publish: read base: %w", err)
+		}
+		next, res, perr := planCoalesceBlobRMW(base, cmd)
+		if perr != nil {
+			// Cap reached: stall coalesce for this object (best-effort) rather than
+			// fail the worker loudly. Segments stay intact.
+			if res.CoalescedEntriesAtCap {
+				return nil
+			}
+			return fmt.Errorf("coalesce publish: plan rmw: %w", perr)
+		}
+		if res.Noop {
+			// CoalescedID already published (idempotent retry) → success no-op.
+			return nil
+		}
+		werr := b.writeQuorumMeta(ctx, next)
+		if werr == nil {
+			return nil
+		}
+		if !errors.Is(werr, errQuorumMetaCASReject) || attempt >= maxCoalesceCASRetries {
+			if errors.Is(werr, errQuorumMetaCASReject) {
+				// Persistent CAS loss to a concurrent append: abort the best-effort
+				// coalesce; the raw segments are intact and a later trigger retries.
+				return nil
+			}
+			return fmt.Errorf("coalesce publish commit: %w", werr)
+		}
+		// CAS reject: loop, re-read the current base, recompute consumed-id removal.
+	}
+}
 
 // coalescedRefsToStorage projects cluster-level CoalescedShardRef entries
 // onto the storage-package mirror type so that storage.Object stays
@@ -140,16 +229,17 @@ func (b *DistributedBackend) coalescedSpoolDir() string {
 //  2. mergeSegmentsOwnerLocal(S) → single coalesced blob on owner disk.
 //  3. planObjectWritePlacement + writeSpooledShards distribute the coalesced
 //     blob across k+m peers. shardKey = "<key>/coalesced/<coalescedID>".
-//  4. propose CmdCoalesceSegments with EC params; FSM apply stores them on
-//     the resulting CoalescedShardRef.
-//  5. Remove owner-local coalesced blob. Raw segment metadata is pruned by
-//     the FSM commit; raw segment files are left for the orphan scrubber so
+//  4. publishCoalesceBlob CAS-publishes the CoalescedShardRef onto the
+//     quorum-meta manifest blob (owner-gated, off-raft — no FSM propose).
+//  5. Remove owner-local coalesced blob. Raw segment metadata is dropped by the
+//     manifest publish; raw segment files are left for the orphan scrubber so
 //     stale readers that observed pre-coalesce metadata can finish safely.
 //
-// Failure recovery: any error after EC write but before propose leaves
-// orphan EC shards. Best-effort cleanup (full scrubber sweep is deferred —
-// see TODOS.md "Scrubber orphan sweep production wiring [P1]").
-// Idempotent on retry — apply no-ops if CoalescedID already present.
+// Owner-gate (F2): only the routed owner (this group's leader) publishes the
+// manifest. A non-owner skips at the top (no wasted merge / EC distribute).
+// Failure recovery: any error after EC write but before publish leaves orphan EC
+// shards + the raw segments intact, so a future trigger/backstop re-coalesces.
+// Idempotent on retry — publish no-ops if CoalescedID already present.
 func (b *DistributedBackend) processCoalesceJobB3(ctx context.Context, job coalesceJob) error {
 	start := time.Now()
 	var resultLabel = "abort"
@@ -161,6 +251,12 @@ func (b *DistributedBackend) processCoalesceJobB3(ctx context.Context, job coale
 			metrics.AppendCoalesceBytes.Add(float64(coalescedBytes))
 		}
 	}()
+	// F2 owner-gate: only the routed owner (group leader) coalesces; a non-owner
+	// would race the owner's append RMW on a different node. Skip → requeue covered
+	// by the owner's own worker/backstop.
+	if !b.coalesceOwnerGate() {
+		return nil
+	}
 	obj, err := b.HeadObject(ctx, job.Bucket, job.Key)
 	if err != nil || obj == nil {
 		return nil
@@ -246,37 +342,42 @@ func (b *DistributedBackend) processCoalesceJobB3(ctx context.Context, job coale
 		ECData:             uint8(cfg.DataShards),
 		ECParity:           uint8(cfg.ParityShards),
 	}
-	if err := b.propose(ctx, CmdCoalesceSegments, cmd); err != nil {
-		// EC shards committed but never referenced. Best-effort orphan cleanup
+	if err := b.publishCoalesceBlob(ctx, cmd); err != nil {
+		// EC shards distributed but never referenced. Best-effort orphan cleanup
 		// (full sweep deferred to TODOS.md). Keep raw segments so a future retry
 		// can succeed.
 		cleanupMerged()
-		return fmt.Errorf("propose coalesce: %w", err)
+		return fmt.Errorf("publish coalesce: %w", err)
 	}
 	// Source of truth is now the EC shards. Do not unlink raw segment files
 	// here: a concurrent GET may have observed pre-coalesce metadata and still
-	// needs those blobs. The orphan segment scrubber owns physical cleanup.
+	// needs those blobs. The orphan segment scrubber owns physical cleanup
+	// (GC-after-publish-and-grace, F-step 4).
 	resultLabel = "success"
 	coalescedBytes = merged.Size
 	return nil
 }
 
-// processCoalesceJobB2 is the Phase B2 implementation (no EC). Phase B3
-// will replace the owner-local merge with an EC encode + WriteShard
-// distribution.
+// processCoalesceJobB2 is the Phase B2 implementation (no EC), kept for the
+// owner-local merge path and tests.
 //
-// Steps:
-//  1. HeadObject → snapshot S = current segments (must be owner).
-//  2. mergeSegmentsOwnerLocal(S) → single coalesced blob on owner disk.
-//  3. propose CmdCoalesceSegments.
-//  4. Unlink raw segment files for blobs in S (owner-local only).
+// Steps (durable→publish→GC):
+//  1. Owner-gate (F2): only the routed owner (group leader) publishes.
+//  2. HeadObject → snapshot S = current segments (must be owner).
+//  3. mergeSegmentsOwnerLocal(S) → single coalesced blob on owner disk (durable).
+//  4. publishCoalesceBlob CAS-publishes the CoalescedShardRef onto the
+//     quorum-meta manifest blob (off-raft — no FSM propose).
 //
-// Best-effort cleanup: an unlink failure leaves orphan raw segments
-// (full sweep deferred — see TODOS.md "Scrubber orphan sweep production wiring [P1]").
-// Idempotent on retry because apply skips already-applied CoalescedIDs.
+// GC of the consumed raw segment files is NOT done inline (F-step 4): a reader
+// that observed the pre-coalesce manifest may still be streaming those blobs, so
+// physical cleanup is deferred to the orphan segment scrubber (reachability sweep
+// + grace). Idempotent on retry: publish no-ops if CoalescedID already present.
 //
 //nolint:unused // referenced from coalesce_process_test.go / coalesce_concurrent_test.go
 func (b *DistributedBackend) processCoalesceJobB2(ctx context.Context, job coalesceJob) error {
+	if !b.coalesceOwnerGate() {
+		return nil
+	}
 	obj, err := b.HeadObject(ctx, job.Bucket, job.Key)
 	if err != nil || obj == nil {
 		return nil // object gone — drop
@@ -285,7 +386,7 @@ func (b *DistributedBackend) processCoalesceJobB2(ctx context.Context, job coale
 		return nil
 	}
 	// Snapshot segments — concurrent appends after this point are preserved
-	// by applyCoalesceSegments (consumed-set match is exact BlobID).
+	// by planCoalesceBlobRMW (consumed-set match is exact BlobID, F8).
 	coalescedID := uuid.Must(uuid.NewV7()).String()
 	coalescePlan := planCoalesceSnapshot(job.Bucket, job.Key, obj.Segments, coalescedID)
 	merged, mErr := b.mergeSegmentsOwnerLocal(job.Bucket, job.Key, coalescedID, coalescePlan.Segments)
@@ -301,18 +402,15 @@ func (b *DistributedBackend) processCoalesceJobB2(ctx context.Context, job coale
 		ETag:               merged.ETag,
 		ConsumedSegmentIDs: coalescePlan.ConsumedSegmentIDs,
 	}
-	if err := b.propose(ctx, CmdCoalesceSegments, cmd); err != nil {
+	if err := b.publishCoalesceBlob(ctx, cmd); err != nil {
 		// Cleanup intermediate coalesced blob; raw segments remain intact
 		// so a future retry can succeed.
 		_ = os.Remove(merged.Path)
-		return fmt.Errorf("propose coalesce: %w", err)
+		return fmt.Errorf("publish coalesce: %w", err)
 	}
-	// Unlink raw segment files for blobs we just absorbed. Failure → orphans
-	// remain (best-effort; full sweep deferred). Apply already removed them
-	// from metadata, so data is safe even if files persist.
-	for _, s := range coalescePlan.Segments {
-		_ = os.Remove(b.segmentBlobPath(job.Bucket, job.Key, s.BlobID))
-	}
+	// Raw segment files are NOT unlinked here (F-step 4): a concurrent GET may
+	// have observed the pre-coalesce manifest and still needs them. The orphan
+	// segment scrubber owns physical cleanup after a reachability sweep + grace.
 	return nil
 }
 
@@ -364,62 +462,43 @@ func (b *DistributedBackend) coalesceBackstopScan(ctx context.Context) {
 	}
 }
 
-// scanAppendableAndTrigger iterates ObjectMetaKey prefix entries and enqueues
-// any appendable object with raw segments whose threshold is satisfied. Each
-// object is enqueued at most once per batch thanks to coalesceFirstSeen +
-// worker dedup.
+// scanAppendableAndTrigger scans the latest-only quorum-meta blob tree (where
+// off-raft appendable objects live — Task 4: appendable metadata is blob-resident,
+// not BadgerDB) and enqueues any appendable object with raw segments whose
+// threshold is satisfied. Each object is enqueued at most once per batch thanks to
+// coalesceFirstSeen + worker dedup.
 //
-// Best-effort: decode errors / corrupt entries are skipped silently. The
-// scanner is the safety-net for missed in-process triggers (process restart,
-// dropped enqueue when buffer is full) — not a strong consistency primitive.
+// Owner-gated: only the routed owner (group leader) coalesces, so a non-owner's
+// backstop skips entirely (the owner's own scan covers its objects). Best-effort:
+// decode/scan errors are skipped silently — the scanner is the safety-net for
+// missed in-process triggers (process restart, dropped enqueue when buffer is
+// full), not a strong consistency primitive.
 func (b *DistributedBackend) scanAppendableAndTrigger(ctx context.Context) {
-	if b.store == nil || b.fsm == nil {
+	if b.shardSvc == nil {
 		return
 	}
-	rawPrefix := []byte("obj:")
-	_ = b.store.View(func(txn MetadataTxn) error {
-		return b.ks().scanGroupPrefix(txn, rawPrefix, func(rawKey []byte, item MetaItem) error {
-			select {
-			case <-ctx.Done():
-				return errStopScan
-			default:
+	if !b.coalesceOwnerGate() {
+		return
+	}
+	buckets, err := b.ListBuckets(ctx)
+	if err != nil {
+		return
+	}
+	for _, bucket := range buckets {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		cmds, serr := b.shardSvc.ScanQuorumMetaBucket(bucket, "")
+		if serr != nil {
+			continue // best-effort: skip an unreadable bucket
+		}
+		for _, cmd := range cmds {
+			if !cmd.IsAppendable || len(cmd.Segments) == 0 {
+				continue
 			}
-			// rawKey format: "obj:<bucket>/<key>" or "obj:<bucket>/<key>/<ver>".
-			// Skip versioned entries (legacy + latest share the same body via
-			// dual-write; iterating both is redundant work).
-			rest := rawKey[len("obj:"):]
-			slash := bytes.IndexByte(rest, '/')
-			if slash <= 0 {
-				return nil
-			}
-			bucket := string(rest[:slash])
-			afterBucket := rest[slash+1:]
-			// Versioned key has a second '/'; skip those — we already see the
-			// canonical legacy mirror via the bucket/key entry.
-			if bytes.IndexByte(afterBucket, '/') >= 0 {
-				return nil
-			}
-			key := string(afterBucket)
-			var meta objectMeta
-			if err := item.Value(func(raw []byte) error {
-				v, oerr := b.fsm.openValue(item.Key(), raw)
-				if oerr != nil {
-					return oerr
-				}
-				m, derr := unmarshalObjectMeta(v)
-				if derr != nil {
-					return derr
-				}
-				meta = m
-				return nil
-			}); err != nil {
-				return nil // skip undecodable
-			}
-			if !meta.IsAppendable || len(meta.Segments) == 0 {
-				return nil
-			}
-			b.maybeTriggerCoalesce(bucket, key, meta.Segments)
-			return nil
-		})
-	})
+			b.maybeTriggerCoalesce(bucket, cmd.Key, segmentMetaEntriesToRefs(cmd.Segments))
+		}
+	}
 }

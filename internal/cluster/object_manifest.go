@@ -236,6 +236,10 @@ func snapshotObjectFromQuorumCmd(bucket string, cmd PutObjectMetaCmd, isLatest b
 		Parts:            parts,
 		Tags:             tags,
 		Segments:         segmentMetaEntriesToRefs(cmd.Segments),
+		// F5: carry Coalesced so a blob-resident coalesced object's merged blob is
+		// in the segment-GC known-set (ChunkLocators pins it) — without it the sweep
+		// would orphan-delete a live coalesced blob.
+		Coalesced: coalescedRefsFromMeta(cmd.Coalesced),
 	}
 }
 
@@ -262,15 +266,14 @@ func (b *DistributedBackend) listNonVersionedBucketObjectsForGC(bucket string) (
 	return out, nil
 }
 
-// coalescedRefsFromMeta maps cluster CoalescedShardRef → storage.CoalescedRef,
-// carrying the coalesced-blob chunk identifier (the field ChunkLocators reads).
+// coalescedRefsFromMeta maps cluster CoalescedShardRef → storage.CoalescedRef for
+// the GC known-set / reachability paths. It preserves EVERY field (size, ETag,
+// shardKey, EC placement, nodeIDs) — not just CoalescedID — so a blob-resident
+// coalesced object's EC shards stay reachable in every scan path (F5): the shard
+// placement (ShardKey + NodeIDs + EC params) is what the EC reader, the rewrap
+// lane, and the shard-key resolver need to locate the merged blob's shards. It
+// delegates to coalescedRefsToStorage (the single field-preserving projector) so
+// the two never drift.
 func coalescedRefsFromMeta(in []CoalescedShardRef) []storage.CoalescedRef {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]storage.CoalescedRef, len(in))
-	for i, c := range in {
-		out[i] = storage.CoalescedRef{CoalescedID: c.CoalescedID}
-	}
-	return out
+	return coalescedRefsToStorage(in)
 }

@@ -7,11 +7,13 @@ import (
 	"testing"
 
 	"github.com/dgraph-io/badger/v4"
+	flatbuffers "github.com/google/flatbuffers/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/badgerutil"
+	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -35,6 +37,34 @@ func newTestDB(t *testing.T) *badger.DB {
 func newTestStore(t *testing.T) MetadataStore {
 	t.Helper()
 	return badgermeta.Wrap(newTestDB(t))
+}
+
+// buildNoDataCommand constructs a minimal FlatBuffer Command with the given
+// type and no payload data. Used by retirement tests to simulate stale
+// raft-log replay without a live proposer (EncodeCommand rejects retired types).
+func buildNoDataCommand(cmdType CommandType) ([]byte, error) {
+	return buildRawCommand(cmdType, nil)
+}
+
+// buildRawCommand builds a FlatBuffer Command with the given type and raw payload.
+// Unlike EncodeCommand it skips encodePayload so it works for retired command slots.
+func buildRawCommand(cmdType CommandType, data []byte) ([]byte, error) {
+	b := flatbuffers.NewBuilder(len(data) + 16)
+	var dataOff flatbuffers.UOffsetT
+	if len(data) > 0 {
+		dataOff = b.CreateByteVector(data)
+	}
+	clusterpb.CommandStart(b)
+	clusterpb.CommandAddType(b, uint32(cmdType))
+	if len(data) > 0 {
+		clusterpb.CommandAddData(b, dataOff)
+	}
+	root := clusterpb.CommandEnd(b)
+	b.Finish(root)
+	raw := b.FinishedBytes()
+	out := make([]byte, len(raw))
+	copy(out, raw)
+	return out, nil
 }
 
 func TestFSM_CreateBucket(t *testing.T) {
@@ -907,4 +937,30 @@ func TestFSM_CompleteMultipartUpload_MaterialisesTags(t *testing.T) {
 		require.Equal(t, []storage.Tag{{Key: "env", Value: "prod"}, {Key: "owner", Value: "alice"}}, m.Tags)
 		return nil
 	}))
+}
+
+// TestAppendCoalesceCommands_Retired verifies that CmdAppendObject and
+// CmdCoalesceSegments are retired in the append/coalesce-off-raft Slice 1:
+//   - EncodeCommand returns an error (no production proposer must call these)
+//   - FSM.Apply treats a stale raft-log entry as a no-op (returns nil)
+func TestAppendCoalesceCommands_Retired(t *testing.T) {
+	// EncodeCommand must reject both retired types.
+	_, err := EncodeCommand(CmdAppendObject, PutObjectMetaCmd{})
+	require.Error(t, err, "CmdAppendObject must return error from EncodeCommand")
+	_, err = EncodeCommand(CmdCoalesceSegments, PutObjectMetaCmd{})
+	require.Error(t, err, "CmdCoalesceSegments must return error from EncodeCommand")
+
+	// Build a raw Command FlatBuffer for each type manually (bypasses encodePayload
+	// so we can simulate a stale raft-log replay without a live proposer).
+	rawAppend, err := buildNoDataCommand(CmdAppendObject)
+	require.NoError(t, err)
+	rawCoalesce, err := buildNoDataCommand(CmdCoalesceSegments)
+	require.NoError(t, err)
+
+	db := newTestDB(t)
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
+
+	// Both must be no-ops on apply.
+	require.NoError(t, fsm.Apply(rawAppend), "CmdAppendObject apply must be a no-op")
+	require.NoError(t, fsm.Apply(rawCoalesce), "CmdCoalesceSegments apply must be a no-op")
 }

@@ -270,10 +270,14 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 		}
 		return obj, pm, nil
 	}
-	// Fall through to BadgerDB for: objects committed before Phase 3 upgrade,
-	// repair/scrubber-written entries, and legacy FSM carve-out classes
-	// (appendable / coalesced). Multipart-completed objects' meta now lives in
-	// the quorum-meta blob store (served above), not on raft.
+	// Fall through to BadgerDB for legacy-migrated objects only:
+	// MigrateLegacyMetaToCluster (bootAutoMigrate) re-proposes a pre-cluster
+	// local meta DB's plain obj: records through raft on a one-time migration
+	// boot; this fallback is their sole reader. NOTHING ELSE writes FSM object
+	// meta any more — appendable (Slice 1, AppendObject), coalesced (Slice 1,
+	// publishCoalesceBlob), multipart-complete, and every chunked PUT all commit
+	// to the quorum-meta blob (served above), not raft. The former
+	// appendable/coalesced FSM carve-out here is therefore DEAD and removed.
 
 	var obj storage.Object
 	var placement PlacementMeta
