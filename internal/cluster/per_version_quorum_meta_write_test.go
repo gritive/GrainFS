@@ -143,26 +143,48 @@ func TestWriteQuorumMetaLocal_SkipsWhenExistingWins(t *testing.T) {
 	require.Equal(t, newer, got)
 }
 
-// TestWriteQuorumMetaLocal_OverwritesOnTie verifies the latest-only writer
-// OVERWRITES on a full (ModTime, VersionID, MetaSeq) tie. The guard uses strict
-// "existing beats candidate" (quorum_meta.go:445-452), so a read-modify-write
-// mutation (here an ACL change) carrying equal ModTime/MetaSeq is NEVER
-// suppressed — only a strictly-newer on-disk blob causes a skip. This intent
-// previously lived only in a code comment.
-func TestWriteQuorumMetaLocal_OverwritesOnTie(t *testing.T) {
+// TestWriteQuorumMetaLocal_OverwritesOnRMWBump verifies the latest-only writer
+// OVERWRITES when a read-modify-write mutation (here an ACL change) carries a
+// bumped MetaSeq — the way every production RMW writer (SetObjectACL /
+// SetObjectTags / relocation) commits, each doing cmd.MetaSeq++ to strictly win
+// the (ModTime,VersionID) LWW tie. The single write-time discriminator
+// quorumMetaWriteAccepts → quorumMetaCmdWins accepts the higher-MetaSeq
+// candidate, so the RMW mutation is never suppressed.
+func TestWriteQuorumMetaLocal_OverwritesOnRMWBump(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	first := mustEncodeMetaCmd(t, PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: "v1", ModTime: 100, MetaSeq: 1})
-	// Same (ModTime, VID, MetaSeq) — a TIE — but a different ACL, so the encoded
-	// bytes differ. The RMW mutation must land (overwrite), not be suppressed.
-	second := mustEncodeMetaCmd(t, PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: "v1", ModTime: 100, MetaSeq: 1, ACL: uint8(s3auth.ACLPublicRead)})
-	require.NotEqual(t, first, second, "tie blobs must differ in bytes to prove an overwrite happened")
+	// Same (ModTime, VID) but a bumped MetaSeq (the RMW path), plus a different ACL
+	// so the encoded bytes differ. The RMW mutation must land (overwrite).
+	second := mustEncodeMetaCmd(t, PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: "v1", ModTime: 100, MetaSeq: 2, ACL: uint8(s3auth.ACLPublicRead)})
+	require.NotEqual(t, first, second, "RMW blobs must differ in bytes to prove an overwrite happened")
 
 	require.NoError(t, b.shardSvc.writeQuorumMetaLocal("bkt", "k", first))
 	require.NoError(t, b.shardSvc.writeQuorumMetaLocal("bkt", "k", second))
 
 	got, err := os.ReadFile(filepath.Join(b.shardSvc.dataDirs[0], quorumMetaSubDir, "bkt", "k"))
 	require.NoError(t, err)
-	require.Equal(t, second, got, "latest-only writer must overwrite on a (ModTime,VID,MetaSeq) tie so an RMW mutation is not suppressed")
+	require.Equal(t, second, got, "latest-only writer must overwrite when an RMW mutation bumps MetaSeq")
+}
+
+// TestWriteQuorumMetaLocal_SkipsOnFullTie verifies the latest-only writer now
+// shares the per-version guard's skip-on-tie semantics via the single
+// discriminator quorumMetaWriteAccepts → quorumMetaCmdWins: a candidate that
+// fully ties (ModTime, VersionID, MetaSeq) the on-disk blob does NOT overwrite
+// (no production writer commits an RMW at an unchanged MetaSeq — they all bump
+// it; see TestWriteQuorumMetaLocal_OverwritesOnRMWBump). This is the unified
+// LWW tie behavior — previously the latest-only guard overwrote on a full tie.
+func TestWriteQuorumMetaLocal_SkipsOnFullTie(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	first := mustEncodeMetaCmd(t, PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: "v1", ModTime: 100, MetaSeq: 1})
+	second := mustEncodeMetaCmd(t, PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: "v1", ModTime: 100, MetaSeq: 1, ACL: uint8(s3auth.ACLPublicRead)})
+	require.NotEqual(t, first, second, "tie blobs must differ in bytes to prove which one is kept")
+
+	require.NoError(t, b.shardSvc.writeQuorumMetaLocal("bkt", "k", first))
+	require.NoError(t, b.shardSvc.writeQuorumMetaLocal("bkt", "k", second))
+
+	got, err := os.ReadFile(filepath.Join(b.shardSvc.dataDirs[0], quorumMetaSubDir, "bkt", "k"))
+	require.NoError(t, err)
+	require.Equal(t, first, got, "full (ModTime,VID,MetaSeq) tie must be a no-op skip — existing blob is kept")
 }
 
 // TestWriteQuorumMetaVersionLocal_ConcurrentWritesLWWMax verifies that when N

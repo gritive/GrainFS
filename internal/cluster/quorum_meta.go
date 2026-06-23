@@ -195,6 +195,30 @@ func quorumMetaCmdWins(cand, cur PutObjectMetaCmd) bool {
 	return false
 }
 
+// errQuorumMetaCASReject is returned by the write-time guards when a CAS
+// candidate (MetaSeqCAS) loses the +1 base-match check: a stalled owner read
+// base=N and wrote N+1, but a newer writer already advanced existing to N+1, so
+// the late write's base no longer matches. It is DISTINGUISHABLE from a benign
+// LWW skip (which returns nil): the append/coalesce coordinator must see this
+// error to re-read the base and retry — it must NOT mistake the rejected write
+// for a successful no-op (which would silently drop the appended data).
+var errQuorumMetaCASReject = errors.New("quorum meta: CAS base mismatch")
+
+// quorumMetaWriteAccepts is the SINGLE decision point for whether a candidate
+// quorum-meta blob may overwrite the existing one. Mutable-accumulating writes
+// (append/coalesce) set MetaSeqCAS and require strict +1 monotonicity over the
+// existing blob's MetaSeq — a failover-safe compare-and-swap fence (spec §7-A/B):
+// an absent existing is MetaSeq 0, so the first CAS write must carry MetaSeq==1.
+// Every other write uses unchanged LWW (quorumMetaCmdWins). Both write-time
+// guards (writeQuorumMetaLocal / writeQuorumMetaVersionLocal) route through here;
+// it is the §7-F single-truth-point.
+func quorumMetaWriteAccepts(existing, cand PutObjectMetaCmd) bool {
+	if cand.MetaSeqCAS {
+		return existing.MetaSeq+1 == cand.MetaSeq
+	}
+	return quorumMetaCmdWins(cand, existing)
+}
+
 // readQuorumMetaWinningRaw returns the raw quorum-meta blob that wins the LWW
 // comparison for (bucket, key). It is the shared read funnel for both
 // readQuorumMeta (decodes to storage.Object) and readQuorumMetaCmd (decodes to
@@ -435,16 +459,23 @@ func (s *ShardService) writeQuorumMetaLocal(bucket, key string, data []byte) err
 	// the guard-skip path because it was registered before the lock is taken.
 	unlock := s.quorumMetaTargetLock(target)
 	defer unlock()
-	// Write-time LWW guard: a blind-writer (e.g. leaderless backfill) must not
-	// clobber a newer on-disk blob. Absent file → no-op (the common case).
-	// Use strict "existing beats candidate" (not "candidate does not beat existing")
-	// so that read-modify-write mutations (ACL/tags) with equal ModTime/MetaSeq
-	// are never suppressed — only a strictly-newer on-disk blob causes a skip.
+	// Write-time accept guard: a blind-writer (e.g. leaderless backfill) must not
+	// clobber a newer on-disk blob. Absent file → no-op accept (the common case).
+	// The single discriminator quorumMetaWriteAccepts decides: CAS candidates
+	// (append/coalesce) require existing.MetaSeq+1 == cand.MetaSeq, everything else
+	// uses LWW (read-modify-write ACL/tags bump MetaSeq, so they strictly win).
+	// A CAS reject surfaces a DISTINGUISHABLE error so the coordinator retries; an
+	// LWW loss stays a silent no-op skip. Decode failures of the existing blob keep
+	// the legacy behavior: fall through and rename (do not regress the corruption
+	// path).
 	if existing, rerr := os.ReadFile(target); rerr == nil {
 		if cand, derr := s.decodeQuorumMetaCmdBlob(data); derr == nil {
 			if cur, derr2 := s.decodeQuorumMetaCmdBlob(existing); derr2 == nil {
-				if quorumMetaBlobWins(cur.ModTime, cur.VersionID, cur.MetaSeq, cand.ModTime, cand.VersionID, cand.MetaSeq) {
-					return nil // existing strictly wins — keep it, skip the rename
+				if !quorumMetaWriteAccepts(cur, cand) {
+					if cand.MetaSeqCAS {
+						return errQuorumMetaCASReject // CAS base mismatch — caller retries
+					}
+					return nil // LWW loss — keep existing, skip the rename
 				}
 			}
 		}
@@ -507,14 +538,23 @@ func (s *ShardService) writeQuorumMetaVersionLocal(bucket, versionSubpath string
 	// Mirrors writeQuorumMetaLocal — see that function for the full rationale.
 	unlock := s.quorumMetaTargetLock(target)
 	defer unlock()
-	// Write-time LWW guard: a blind-writer (e.g. leaderless backfill) must not
-	// clobber a newer on-disk blob. Absent file → no-op (the common case).
-	// decodeQuorumMetaCmdBlob is a method on *ShardService (the receiver `s` here).
+	// Write-time accept guard: a blind-writer (e.g. leaderless backfill) must not
+	// clobber a newer on-disk blob. Absent file → no-op accept (the common case).
+	// Routes through the single discriminator quorumMetaWriteAccepts: CAS
+	// candidates (append/coalesce) require existing.MetaSeq+1 == cand.MetaSeq and a
+	// reject surfaces the DISTINGUISHABLE error so the coordinator retries; LWW
+	// losses stay a silent no-op skip (byte-identical to the prior quorumMetaCmdWins
+	// guard). decodeQuorumMetaCmdBlob is a method on *ShardService (receiver `s`);
+	// a decode failure of either blob keeps the legacy behavior (fall through and
+	// rename — do not regress the corruption path).
 	if existing, rerr := os.ReadFile(target); rerr == nil {
 		if cand, derr := s.decodeQuorumMetaCmdBlob(data); derr == nil {
 			if cur, derr2 := s.decodeQuorumMetaCmdBlob(existing); derr2 == nil {
-				if !quorumMetaCmdWins(cand, cur) {
-					return nil // existing wins (or ties) — keep it, skip the rename
+				if !quorumMetaWriteAccepts(cur, cand) {
+					if cand.MetaSeqCAS {
+						return errQuorumMetaCASReject // CAS base mismatch — caller retries
+					}
+					return nil // LWW loss (or tie) — keep existing, skip the rename
 				}
 			}
 		}
