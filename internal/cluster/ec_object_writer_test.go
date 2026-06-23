@@ -88,8 +88,8 @@ func TestECObjectWriter_WriteRemoteShardRecordsTraceBreakdown(t *testing.T) {
 	t.Cleanup(reloadPutTraceSinkForTest)
 
 	shards := &fakeECObjectWriterShards{}
-	writer := ecObjectWriter{
-		selfID:        "node-a",
+	endpoint := remoteShardEndpoint{
+		node:          "node-b",
 		shards:        shards,
 		writeAttempts: 1,
 	}
@@ -102,7 +102,7 @@ func TestECObjectWriter_WriteRemoteShardRecordsTraceBreakdown(t *testing.T) {
 		ForwardMode: PutTraceForwardNone,
 	})
 
-	err := writer.writeRemoteShard(ctx,
+	err := endpoint.writeRemoteShard(ctx,
 		func(idx int) (io.Reader, error) {
 			require.Equal(t, 2, idx)
 			return strings.NewReader("remote-shard"), nil
@@ -112,7 +112,6 @@ func TestECObjectWriter_WriteRemoteShardRecordsTraceBreakdown(t *testing.T) {
 			return int64(len("remote-shard")), nil
 		},
 		2,
-		"node-b",
 		"bucket",
 		"object/v1",
 	)
@@ -413,6 +412,36 @@ func (f *fakeECObjectWriterShards) DeleteShards(ctx context.Context, peer, bucke
 	defer f.mu.Unlock()
 	f.deleteRemoteCalls = append(f.deleteRemoteCalls, peer+"/"+bucket+"/"+key)
 	return nil
+}
+
+// Read-side methods satisfy the unified ecShardStore interface. The EC writer
+// never invokes them; they are unreachable stubs.
+func (f *fakeECObjectWriterShards) ReadLocalShard(string, string, int) ([]byte, error) {
+	panic("ReadLocalShard: not used by ecObjectWriter")
+}
+
+func (f *fakeECObjectWriterShards) OpenLocalShard(string, string, int) (io.ReadCloser, error) {
+	panic("OpenLocalShard: not used by ecObjectWriter")
+}
+
+func (f *fakeECObjectWriterShards) ReadLocalShardAt(string, string, int, int64, []byte) (int, error) {
+	panic("ReadLocalShardAt: not used by ecObjectWriter")
+}
+
+func (f *fakeECObjectWriterShards) ReadShard(context.Context, string, string, string, int) ([]byte, error) {
+	panic("ReadShard: not used by ecObjectWriter")
+}
+
+func (f *fakeECObjectWriterShards) ReadShardStream(context.Context, string, string, string, int) (io.ReadCloser, error) {
+	panic("ReadShardStream: not used by ecObjectWriter")
+}
+
+func (f *fakeECObjectWriterShards) ReadShardRange(context.Context, string, string, string, int, int64, int64) ([]byte, error) {
+	panic("ReadShardRange: not used by ecObjectWriter")
+}
+
+func (f *fakeECObjectWriterShards) ReadShardRangeStream(context.Context, string, string, string, int, int64, int64) (io.ReadCloser, error) {
+	panic("ReadShardRangeStream: not used by ecObjectWriter")
 }
 
 func TestEcObjectSegmentShardKey_EmptyBlobIDPreservesLegacy(t *testing.T) {

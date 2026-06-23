@@ -13,17 +13,6 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-type ecObjectShardStore interface {
-	WriteLocalShard(bucket, key string, shardIdx int, data []byte) error
-	WriteLocalShardContext(ctx context.Context, bucket, key string, shardIdx int, data []byte) error
-	WriteLocalShardStream(bucket, key string, shardIdx int, body io.Reader) error
-	WriteLocalShardStreamContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader) error
-	WriteShard(ctx context.Context, peer, bucket, key string, shardIdx int, data []byte) error
-	WriteShardStream(ctx context.Context, peer, bucket, key string, shardIdx int, body io.Reader) error
-	DeleteLocalShards(bucket, key string) error
-	DeleteShards(ctx context.Context, peer, bucket, key string) error
-}
-
 type ecObjectSizedShardStore interface {
 	WriteLocalShardStreamSizedContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader, streamSize int64) error
 }
@@ -35,7 +24,7 @@ type ecObjectPeerHealth interface {
 
 type ecObjectWriter struct {
 	selfID        string
-	shards        ecObjectShardStore
+	shards        ecShardStore
 	peerHealth    ecObjectPeerHealth
 	writeAttempts int
 	writeBackoff  time.Duration
@@ -91,7 +80,7 @@ func (e *ecObjectShardWriteError) Unwrap() error {
 	return e.err
 }
 
-func newECObjectWriter(selfID string, shards ecObjectShardStore, peerHealth ecObjectPeerHealth) ecObjectWriter {
+func newECObjectWriter(selfID string, shards ecShardStore, peerHealth ecObjectPeerHealth) ecObjectWriter {
 	return ecObjectWriter{
 		selfID:        selfID,
 		shards:        shards,
@@ -234,11 +223,7 @@ func (w ecObjectWriter) writeShardReadersWithSize(
 	cleanup := func() {
 		close(written)
 		for node := range written {
-			if node == w.selfID {
-				_ = w.shards.DeleteLocalShards(plan.Bucket, shardKey)
-			} else {
-				_ = w.shards.DeleteShards(ctx, node, plan.Bucket, shardKey)
-			}
+			_ = w.endpointFor(node).DeleteShards(ctx, plan.Bucket, shardKey)
 		}
 	}
 
@@ -247,71 +232,8 @@ func (w ecObjectWriter) writeShardReadersWithSize(
 	for i, node := range plan.Placement {
 		i, node := i, node
 		g.Go(func() error {
-			shardStageStart := time.Now()
-			var werr error
-			if node == w.selfID {
-				body, err := openShard(i)
-				if err != nil {
-					return fmt.Errorf("open ec shard %d: %w", i, err)
-				}
-				size, knownSize := int64(-1), false
-				if shardSize != nil {
-					if sz, sizeErr := shardSize(i); sizeErr == nil {
-						size, knownSize = sz, true
-					}
-				}
-				if knownSize && size <= ecShardBufferedLimit {
-					data := make([]byte, size)
-					_, werr = io.ReadFull(body, data)
-					if closer, ok := body.(io.Closer); ok {
-						if closeErr := closer.Close(); werr == nil && closeErr != nil {
-							werr = fmt.Errorf("close ec shard %d: %w", i, closeErr)
-						}
-					}
-					if werr == nil {
-						werr = w.shards.WriteLocalShardContext(gctx, plan.Bucket, shardKey, i, data)
-					}
-				} else {
-					if knownSize {
-						if sized, ok := w.shards.(ecObjectSizedShardStore); ok {
-							werr = sized.WriteLocalShardStreamSizedContext(gctx, plan.Bucket, shardKey, i, body, size)
-						} else {
-							werr = w.shards.WriteLocalShardStreamContext(gctx, plan.Bucket, shardKey, i, body)
-						}
-					} else {
-						werr = w.shards.WriteLocalShardStreamContext(gctx, plan.Bucket, shardKey, i, body)
-					}
-					if closer, ok := body.(io.Closer); ok {
-						if closeErr := closer.Close(); werr == nil && closeErr != nil {
-							werr = fmt.Errorf("close ec shard %d: %w", i, closeErr)
-						}
-					}
-				}
-				observePutStage("ec_write_shard", "local", shardStageStart)
-				ObservePutTraceStage(ctx, PutTraceStageShardWriteLocal, shardStageStart, PutTraceStageFields{
-					ShardIndex:       i,
-					ShardTarget:      node,
-					ShardTargetClass: "local",
-					Error:            putTraceErrorString(werr),
-				})
-			} else {
-				werr = w.writeRemoteShard(gctx, openShard, shardSize, i, node, plan.Bucket, shardKey)
-				observePutStage("ec_write_shard", "remote", shardStageStart)
-				ObservePutTraceStage(ctx, PutTraceStageShardWriteRemote, shardStageStart, PutTraceStageFields{
-					ShardIndex:       i,
-					ShardTarget:      node,
-					ShardTargetClass: "remote",
-					Error:            putTraceErrorString(werr),
-				})
-				if w.peerHealth != nil {
-					if werr != nil {
-						w.peerHealth.MarkUnhealthy(node)
-					} else {
-						w.peerHealth.MarkHealthy(node)
-					}
-				}
-			}
-			if werr != nil {
+			ep := w.endpointFor(node)
+			if werr := ep.WriteShardReader(gctx, plan.Bucket, shardKey, i, openShard, shardSize); werr != nil {
 				return &ecObjectShardWriteError{shardIdx: i, node: node, err: werr}
 			}
 			written <- node
@@ -334,115 +256,4 @@ func (w ecObjectWriter) writeShardReadersWithSize(
 		ECData:    uint8(plan.Config.DataShards),
 		ECParity:  uint8(plan.Config.ParityShards),
 	}, nil
-}
-
-func (w ecObjectWriter) writeRemoteShard(
-	ctx context.Context,
-	openShard func(int) (io.Reader, error),
-	shardSize func(int) (int64, error),
-	shardIdx int,
-	node, bucket, shardKey string,
-) error {
-	attempts := w.writeAttempts
-	if attempts <= 0 {
-		attempts = ecShardWriteAttempts
-	}
-	backoff := w.writeBackoff
-	if backoff <= 0 {
-		backoff = ecShardWriteBackoff
-	}
-
-	var lastErr error
-	for attempt := 1; attempt <= attempts; attempt++ {
-		openStart := time.Now()
-		body, err := openShard(shardIdx)
-		if err != nil {
-			ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteOpen, openStart, PutTraceStageFields{
-				ShardIndex:       shardIdx,
-				ShardTarget:      node,
-				ShardTargetClass: "remote",
-				Error:            err.Error(),
-			})
-			return fmt.Errorf("open ec shard %d: %w", shardIdx, err)
-		}
-		ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteOpen, openStart, PutTraceStageFields{
-			ShardIndex:       shardIdx,
-			ShardTarget:      node,
-			ShardTargetClass: "remote",
-		})
-
-		writeCtx, writeCancel := context.WithTimeout(ctx, shardRPCTimeout)
-		if shardSize != nil {
-			if size, sizeErr := shardSize(shardIdx); sizeErr == nil && size <= ecShardBufferedLimit {
-				bufferStart := time.Now()
-				data := make([]byte, size)
-				_, err = io.ReadFull(body, data)
-				if err == nil {
-					ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteBuffer, bufferStart, PutTraceStageFields{
-						Bytes:            int64(len(data)),
-						ShardIndex:       shardIdx,
-						ShardTarget:      node,
-						ShardTargetClass: "remote",
-					})
-					rpcStart := time.Now()
-					err = w.shards.WriteShard(writeCtx, node, bucket, shardKey, shardIdx, data)
-					ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteRPC, rpcStart, PutTraceStageFields{
-						Bytes:            int64(len(data)),
-						ShardIndex:       shardIdx,
-						ShardTarget:      node,
-						ShardTargetClass: "remote",
-						Error:            putTraceErrorString(err),
-					})
-				} else {
-					ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteBuffer, bufferStart, PutTraceStageFields{
-						ShardIndex:       shardIdx,
-						ShardTarget:      node,
-						ShardTargetClass: "remote",
-						Error:            err.Error(),
-					})
-				}
-			} else {
-				rpcStart := time.Now()
-				err = w.shards.WriteShardStream(writeCtx, node, bucket, shardKey, shardIdx, body)
-				ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteRPC, rpcStart, PutTraceStageFields{
-					ShardIndex:       shardIdx,
-					ShardTarget:      node,
-					ShardTargetClass: "remote",
-					Error:            putTraceErrorString(err),
-				})
-			}
-		} else {
-			rpcStart := time.Now()
-			err = w.shards.WriteShardStream(writeCtx, node, bucket, shardKey, shardIdx, readerWithoutWriterTo{Reader: body})
-			ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteRPC, rpcStart, PutTraceStageFields{
-				ShardIndex:       shardIdx,
-				ShardTarget:      node,
-				ShardTargetClass: "remote",
-				Error:            putTraceErrorString(err),
-			})
-		}
-		if closer, ok := body.(io.Closer); ok {
-			if closeErr := closer.Close(); err == nil && closeErr != nil {
-				err = fmt.Errorf("close ec shard %d: %w", shardIdx, closeErr)
-			}
-		}
-		writeCancel()
-		if err == nil {
-			return nil
-		}
-
-		lastErr = err
-		if ctx.Err() != nil || attempt == attempts {
-			return lastErr
-		}
-
-		timer := time.NewTimer(time.Duration(attempt) * backoff)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return lastErr
-		case <-timer.C:
-		}
-	}
-	return lastErr
 }
