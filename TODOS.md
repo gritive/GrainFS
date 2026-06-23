@@ -123,6 +123,36 @@
   completion sentinel on the blob, or return NoSuchUpload not InvalidPart when parts are gone). Deferred
   — disproportionate to the narrow non-data-loss impact.
 
+### Append/coalesce off-raft follow-ups (Slice 1, 2026-06-24)
+
+- **[P1] Slice 2 — retire remaining per-object FSM commands.** delete carve-out →
+  quorum-meta tombstone; tags/acl raft fallback removal; quarantine fold; `CmdPutObjectMeta`
+  final retirement. This is the last data-plane raft-free step: after Slice 2 no per-object
+  raft propose remains in the data plane.
+
+- **[P2] EC coalesced orphan shard leak.** `orphan_shard_walker.go` skips every `/coalesced/`
+  shard directory, so unpublished/unreferenced coalesced EC shards (B3 EC distribute) are
+  never reclaimed — a permanent leak. Needs reachability for coalesced EC shards (pre-existing
+  skip behavior, surfaced by Slice 1 code gate). Fix: extend the orphan shard walker to walk
+  `/coalesced/` directories and apply the same age-gate + two-cycle tombstone logic used for
+  segment orphans.
+
+- **[P2] Composite-ETag reconstruction after coalesce.** `AppendCallMD5s` is not persisted
+  (always nil); a post-coalesce append recomputes ETag from remaining segments. Pre-existing;
+  behavior-neutral in Slice 1. Wire `AppendCallMD5s` into the quorum-meta schema if exact
+  post-coalesce ETag continuity is required for S3 compatibility.
+
+- **[P3] `f.coalesceCfg` write-only dead field.** The FSM's copy of the coalesce config
+  (`SetCoalesceCfg` + `FSM.coalesceCfg`) is now write-only: the live config is
+  `b.coalesceCfg` (the backend `atomic.Pointer`). Remove the dead FSM copy to kill
+  the write-only state.
+
+- **[P2] off-raft append fencing-lease** *(only if the accepted failover-safety risk must
+  later be closed).* A proper single-writer lease (leader-term fencing token +
+  quorum-intersecting read) to make off-raft append/coalesce failover-safe across a
+  same-generation leader handoff. See "Known limitation" in `docs/operators/runbook.md` for
+  the full risk description.
+
 ### Tests / docs / spec polish
 
 - **[P3][test] Deterministic multi-node reproduction of the forwarded-propose apply-wait + MPU

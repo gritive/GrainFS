@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.0.656.0] - 2026-06-24
+
+### Changed
+- **Appendable and coalesced object metadata is now stored in the quorum-meta blob, off the raft
+  FSM (BREAKING: `CmdAppendObject` and `CmdCoalesceSegments` are retired).** Both FSM commands
+  apply as no-ops and their `CommandType` slots are reserved (no enum renumber). Append and
+  coalesce operations now use an owner-locked compare-and-swap (CAS) read-modify-write against
+  the quorum-meta blob, gated by a per-write `MetaSeqCAS` discriminator and a placement fence.
+  CAS is used for append/coalesce; LWW (last-writer-wins) is used for everything else (PUT,
+  DELETE marker, tags, ACL). This completes the per-object data-plane off-raft work for
+  append/coalesce; after this change the remaining per-object FSM commands are
+  delete/tags/acl/quarantine + `CmdPutObjectMeta` (to be retired in Slice 2).
+
+### Fixed
+- **`ListObjects` now returns appendable objects (pre-existing S3 LIST bug, now fixed).** Appendable
+  object metadata was previously stored only in the FSM and was therefore invisible to
+  `ListObjects` / `ListObjectsPage` / `WalkObjects`, which read the quorum-meta blob store
+  exclusively. Because append/coalesce now write metadata to the quorum-meta blob, appendable
+  objects appear in LIST results for the first time.
+
+### Known limitation
+- **Off-raft append/coalesce is not failover-safe across a same-generation leader handoff
+  (single-stable-leader deployment assumption).** The per-node CAS can split-brain — an
+  acknowledged append may be lost — during the brief window of a same-generation leader
+  handoff. The placement fence and CAS shrink but do not eliminate this window. This is an
+  eyes-open accepted limitation under the single-stable-leader deployment assumption.
+  Operators relying on strict append durability across leader failovers should be aware of
+  this risk. A proper single-writer fencing lease (leader-term token + quorum-intersecting
+  read) is tracked as a follow-up and can be added if the failover-safety gap must be closed.
+
 ## [0.0.655.0] - 2026-06-23
 
 ### Removed

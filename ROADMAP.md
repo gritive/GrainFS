@@ -229,3 +229,32 @@ Phase 5는 구현 단계가 아니라 **terminal 결정 게이트**다 (S4-0와 
 
 ### Phase 10 — Iceberg 정식 통합
 - Iceberg는 강일관 catalog commit → control-plane raft 의존(설계상 자연 정합). NFS·NBD는 영구 제거됨.
+
+---
+
+## 에픽: 데이터 플레인 raft-free 완성 (S4c-g, 3-slice)
+
+> 목표: 남은 per-object FSM 커맨드를 모두 quorum-meta blob 경로로 이전하여 데이터 플레인에서
+> raft propose를 완전 제거. 컨트롤 플레인(membership/bucket/IAM/lifecycle/migration/Iceberg)은
+> 유지.
+
+**Slice 0 ✅ MERGED #846 (v0.0.655.0, −3388 LOC)** — 내부버킷 객체 capability 제거
+(`ErrInternalBucketNotObjectStore` 405 guard, in-process+forwarded cores), VFS 전체
+(`internal/vfs/`) + `POST /admin/debug/vfs/stat` 삭제, dead shard-placement raft commands
+(`PutShardPlacementCmd`/`DeleteShardPlacementCmd`) 제거, ~27 `IsInternalBucket` routing branch
+단일 external(blob) 경로로 collapse.
+
+**Slice 1 ✅ DONE (이 브랜치)** — append/coalesce metadata off the raft FSM into quorum-meta blob.
+`CmdAppendObject`/`CmdCoalesceSegments` 은퇴 (no-op + reserved slots). Append/coalesce는
+owner-locked CAS RMW + `MetaSeqCAS` discriminator + placement fence. LIST bug fix 포함
+(appendable object이 FSM-only였던 탓에 ListObjects에 안 보이던 pre-existing 버그 해소).
+Known limitation (eyes-open, D2): 동일 generation leader handoff 시 off-raft append
+failover 불안전 (single-stable-leader 가정 하 수용).
+
+**Slice 2 — 남은 per-object FSM commands 은퇴 (NEXT)**
+- delete carve-out → quorum-meta tombstone
+- tags/acl raft fallback 제거
+- quarantine fold
+- `CmdPutObjectMeta` final retirement
+
+이후 데이터 플레인에서 per-object raft propose가 0이 됨.

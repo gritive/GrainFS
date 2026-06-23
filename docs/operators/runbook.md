@@ -672,6 +672,32 @@ ss -s
 - Check network bandwidth
 - Check for lock contention
 
+### Known limitation: off-raft append/coalesce is not failover-safe across a same-generation leader handoff
+
+**Scope:** affects `AppendObject` and the background coalesce path only. Regular PUT, multipart
+upload, GET, DELETE, and ListObjects are unaffected.
+
+**What happens:** since append/coalesce metadata was moved off the raft FSM to the quorum-meta
+blob (Slice 1), concurrent ownership of the append CAS resides per-node. During the brief
+window of a same-generation leader handoff, two nodes can each believe they hold the owner lock
+and race the CAS — an acknowledged append may be lost (split-brain within the handoff window).
+
+**Deployment assumption:** this risk is accepted under the **single-stable-leader** assumption:
+only one node serves as the effective owner for a given appendable object at a time, with no
+concurrent leader handoffs in the same Raft generation. Under this assumption, the placement
+fence + `MetaSeqCAS` discriminator shrink the race window to effectively zero.
+
+**If you need strict failover safety for append:** track the follow-up
+`[P2] off-raft append fencing-lease` in TODOS.md. A proper single-writer fencing lease
+(leader-term token + quorum-intersecting read) would close the gap. Do not use AppendObject
+as a strict durability primitive across planned leader elections without implementing that lease.
+
+**Observable symptom (if the race fires):** an append appears to succeed (HTTP 200) but the
+bytes are absent from a subsequent GET. This requires a concurrent leader handoff during the
+append; it is not expected in normal steady-state operation.
+
+---
+
 ### Issue: AppendObject HTTP 503 SlowDown
 
 **Symptoms:** `503 SlowDown` responses on AppendObject requests; clients reporting
