@@ -3,8 +3,6 @@ package cluster
 import (
 	"context"
 	"fmt"
-
-	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // ECRewrapTarget identifies a single EC-distributed shard that a DEK rewrap
@@ -75,19 +73,15 @@ func (b *DistributedBackend) CollectECRewrapTargets() ([]ECRewrapTarget, error) 
 		if serr != nil {
 			return nil, serr
 		}
-		// versioning-Enabled → per-version blob tree; non-versioned/Suspended
-		// (non-internal) → latest-only blob tree. Both cluster-wide + fail-closed so a
-		// parity node that missed the K-of-N blob still gets its shard covered via a
-		// peer's blob. Internal buckets are FSM-only (handled by the scan above).
+		// versioning-Enabled → per-version blob tree; non-versioned/Suspended →
+		// latest-only blob tree. Both cluster-wide + fail-closed so a parity node
+		// that missed the K-of-N blob still gets its shard covered via a peer's blob.
 		var cmds []PutObjectMetaCmd
 		var cerr error
-		switch {
-		case on:
+		if on {
 			cmds, cerr = b.scanQuorumMetaVersionsClusterAll(bucket, "")
-		case !storage.IsInternalBucket(bucket):
+		} else {
 			cmds, cerr = b.scanQuorumMetaClusterAll(bucket)
-		default:
-			continue // internal bucket — FSM-authoritative, covered above
 		}
 		if cerr != nil {
 			return nil, fmt.Errorf("ec rewrap blob enum %s: %w", bucket, cerr)

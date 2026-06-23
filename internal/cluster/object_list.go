@@ -46,7 +46,7 @@ func objectFromCmd(cmd PutObjectMetaCmd) *storage.Object {
 // LIST surface and avoids a DeleteBucket data-loss path where a best-effort
 // per-version write failure could make the derive omit a live object.
 func (b *DistributedBackend) listLatestEntries(ctx context.Context, bucket, prefix string) ([]PutObjectMetaCmd, error) {
-	if enabled, resolved := bucketVersioningFromContext(ctx); !storage.IsInternalBucket(bucket) && resolved && enabled {
+	if enabled, resolved := bucketVersioningFromContext(ctx); resolved && enabled {
 		return b.listObjectsPerVersion(ctx, bucket, prefix)
 	}
 	return b.scatterGatherList(ctx, bucket, prefix)
