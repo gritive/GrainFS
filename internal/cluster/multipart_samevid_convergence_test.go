@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/stretchr/testify/require"
 )
@@ -62,6 +63,40 @@ func TestReadQuorumMetaVersions_SameVIDHigherModTimeWins(t *testing.T) {
 	require.Len(t, cmds, 1, "same (key,vid) replicas dedup to one")
 	require.Equal(t, int64(200), cmds[0].ModTime, "higher ModTime wins (deterministic LWW, not last-iterated)")
 	require.Equal(t, "winner", cmds[0].ETag)
+}
+
+// TestVidDeterministicBlobNodeIDs_StableAcrossCompleters proves the recorded
+// per-version blob NodeIDs are derived deterministically from the (bucket,key,
+// vid) — NOT from a segment's random blobID — so two independent completers of
+// the same upload record the SAME NodeIDs. That set is the per-version blob
+// write target AND the hard-delete / tombstone-GC target, so divergence would
+// orphan a loser's blob; vid-keying makes it converge. The det-vid is the same
+// across completers (deriveMultipartVID), so the same vid → same NodeIDs.
+func TestVidDeterministicBlobNodeIDs_StableAcrossCompleters(t *testing.T) {
+	groups := fourPGFixture()
+	cfg := ECConfig{DataShards: 4, ParityShards: 2}
+
+	// Each "completer" is its own csb with INDEPENDENT random segment blobIDs.
+	newCompleter := func() *clusterSegmentBackend {
+		deps := newFakeBackendWithGroups(groups)
+		csb := newCSBWithDeps(deps, []string{uuid.Must(uuid.NewV7()).String()})
+		csb.ecConfigFn = func() ECConfig { return cfg }
+		return csb
+	}
+
+	const bkt, key, vid = "b", "k", "019ed400-0000-7000-8000-0000000000ab"
+	a, err := newCompleter().vidDeterministicBlobNodeIDs(bkt, key, vid, cfg)
+	require.NoError(t, err)
+	b, err := newCompleter().vidDeterministicBlobNodeIDs(bkt, key, vid, cfg)
+	require.NoError(t, err)
+	require.Equal(t, a, b, "same (bucket,key,vid) → identical recorded NodeIDs across completers")
+	require.Len(t, a, cfg.NumShards(), "recorded NodeIDs has K+M entries")
+
+	// A different vid is allowed to (and here does, via the permutation) differ —
+	// proving the placement actually keys on vid, not a constant.
+	other, err := newCompleter().vidDeterministicBlobNodeIDs(bkt, key, "019ed400-0000-7000-8000-0000000000cd", cfg)
+	require.NoError(t, err)
+	require.NotEqual(t, a, other, "a different vid keys to a different placement")
 }
 
 // TestQuorumMetaCmdWins_RelocationInvariant pins the relocation invariant the

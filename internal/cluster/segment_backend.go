@@ -146,6 +146,31 @@ func (c *clusterSegmentBackend) WriteSegmentBytes(ctx context.Context, bucket, k
 	}, nil
 }
 
+// vidDeterministicBlobNodeIDs computes the per-version blob's recorded NodeIDs
+// from (bucket, key, vid) alone — independent of any segment's RANDOM blobID — so
+// two independent completers of the same upload (which derive the SAME det-vid
+// via deriveMultipartVID) record the SAME placement. That recorded set is the
+// per-version blob WRITE target AND the hard-delete / tombstone-GC target
+// (fanOutPerVersionBlob / deleteQuorumMetaVersionQuorum / tombstoneConverged all
+// fan over cmd.NodeIDs), so a divergent placement would land a loser's blob on
+// nodes a later hard-delete never visits → orphan/resurrection. Keying on vid
+// closes that. The group is selected via the same seam as segment writes
+// (selectGroup), passing vid in the blobID slot so it hashes by vid; the
+// placement permutation is then keyed on a vid-derived shard key. Segments keep
+// their own random-blobID placement; reads are placement-blind (all-peer
+// fan-out), so regular PUTs are unaffected.
+func (c *clusterSegmentBackend) vidDeterministicBlobNodeIDs(bucket, key, vid string, cfg ECConfig) ([]string, error) {
+	group, err := c.selectGroup(bucket, key, 0, vid)
+	if err != nil {
+		return nil, fmt.Errorf("vid-deterministic blob placement: %w", err)
+	}
+	if len(group.PeerIDs) == 0 {
+		return nil, fmt.Errorf("vid-deterministic blob placement: group %q has no peers", group.ID)
+	}
+	placementKey := key + "/versions/" + vid
+	return PlacementForNodes(cfg, group.PeerIDs, placementKey), nil
+}
+
 func (c *clusterSegmentBackend) selectGroup(bucket, key string, idx int, blobID string) (ShardGroupEntry, error) {
 	if c.groupSelectorFn != nil {
 		return c.groupSelectorFn(bucket, key, idx, blobID)
@@ -426,6 +451,15 @@ func runChunkedPutWithParts(
 	// commitCompleteMultipartObjectWriteResult in object_put.go for the rationale.
 	var commitErr error
 	if completeUploadID != "" {
+		// Vid-deterministic recorded blob placement (same-vid convergence): the
+		// recorded NodeIDs must be a function of (bucket,key,det-vid), NOT segment-0's
+		// random blobID, so concurrent completers of the same upload record the same
+		// per-version blob WRITE target and hard-delete / tombstone-GC target. Segment
+		// data shards keep their own random-blobID placement (csb.placements).
+		blobNodeIDs, bnerr := csb.vidDeterministicBlobNodeIDs(bucket, key, versionID, csb.currentECConfig())
+		if bnerr != nil {
+			return nil, bnerr
+		}
 		// Blob-authoritative multipart (versioning-enabled): build the completed
 		// object's encoded PutObjectMetaCmd HERE (the proposer) — CompleteMultipartCmd
 		// does not carry UserMetadata/ACL/SSE — and pass the opaque bytes through the
@@ -444,7 +478,7 @@ func runChunkedPutWithParts(
 			SSEAlgorithm:     sseAlgorithm,
 			ACL:              csb.acl,
 			Parts:            partsMeta,
-			NodeIDs:          csb.placements[0].NodeIDs,
+			NodeIDs:          blobNodeIDs,
 			ECData:           uint8(csb.placements[0].Config.DataShards),
 			ECParity:         uint8(csb.placements[0].Config.ParityShards),
 			PlacementGroupID: csb.placements[0].PlacementGroupID,
@@ -470,7 +504,7 @@ func runChunkedPutWithParts(
 			ContentType:      contentType,
 			ModTime:          commitModTime,
 			Parts:            partsMeta,
-			NodeIDs:          csb.placements[0].NodeIDs,
+			NodeIDs:          blobNodeIDs,
 			ECData:           uint8(csb.placements[0].Config.DataShards),
 			ECParity:         uint8(csb.placements[0].Config.ParityShards),
 			PlacementGroupID: csb.placements[0].PlacementGroupID,
@@ -552,7 +586,7 @@ func runChunkedPutWithParts(
 				SSEAlgorithm:     sseAlgorithm,
 				ACL:              csb.acl,
 				Parts:            partsMeta,
-				NodeIDs:          csb.placements[0].NodeIDs,
+				NodeIDs:          blobNodeIDs,
 				ECData:           uint8(csb.placements[0].Config.DataShards),
 				ECParity:         uint8(csb.placements[0].Config.ParityShards),
 				PlacementGroupID: csb.placements[0].PlacementGroupID,
