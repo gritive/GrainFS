@@ -48,6 +48,9 @@ func (b *DistributedBackend) PutObjectWithUserMetadata(ctx context.Context, buck
 }
 
 func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req storage.PutObjectRequest) (*storage.Object, error) {
+	if err := guardInternalBucketObjectOp(req.Bucket); err != nil {
+		return nil, err
+	}
 	bucket, key, r, contentType := req.Bucket, req.Key, req.Body, req.ContentType
 	userMetadata := req.UserMetadata
 	sseAlgorithm := req.SystemMetadata.SSEAlgorithm
@@ -97,6 +100,9 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 // It delegates to putObjectECSpooled and returns a no-op commitFn for API
 // compatibility with callers that batch commitFns (e.g., block_io_executor).
 func (b *DistributedBackend) PutObjectAsync(ctx context.Context, bucket, key string, r io.Reader, contentType string) (*storage.Object, func() error, error) {
+	if err := guardInternalBucketObjectOp(bucket); err != nil {
+		return nil, nil, err
+	}
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, nil, err
 	}

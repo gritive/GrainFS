@@ -603,7 +603,7 @@ func (c *ClusterCoordinator) placementGenerationRedundant(gen placementGeneratio
 }
 
 func (c *ClusterCoordinator) requireObjectBucket(ctx context.Context, bucket string) error {
-	if storage.IsInternalBucket(bucket) || c.base == nil {
+	if c.base == nil {
 		return nil
 	}
 	if c.bucketAssigned(bucket) {
@@ -1235,10 +1235,9 @@ func (c *ClusterCoordinator) ListObjectVersions(
 ) ([]*storage.ObjectVersion, error) {
 	state := c.runtimeState()
 	groups := c.shardGroupsForVersionedList()
-	// Internal buckets are single-group and unversioned; with ≤1 group the
-	// fan-out is identical to the single-group read, so keep the simpler path
-	// (also covers legacy / minimally-wired tests with no meta source).
-	if storage.IsInternalBucket(bucket) || len(groups) <= 1 {
+	// With ≤1 group the fan-out is identical to the single-group read, so
+	// keep the simpler path (also covers minimally-wired tests with no meta source).
+	if len(groups) <= 1 {
 		return c.listObjectVersionsSingleGroup(ctx, state, bucket, prefix, maxKeys)
 	}
 	// Validate the bucket once (the single-group path returned ErrNoSuchBucket
@@ -1293,10 +1292,7 @@ func (c *ClusterCoordinator) ListObjectVersions(
 // FAIL-CLOSED on a read error (mirrors DistributedBackend.soleAuthReadOn).
 func (c *ClusterCoordinator) bucketSoleAuthOn(bucket string) (bool, error) {
 	// S2 blob-primary: blob-authoritative for every versioning-enabled bucket
-	// (mirrors DistributedBackend.soleAuthReadOn). Internal buckets stay on raft.
-	if storage.IsInternalBucket(bucket) {
-		return false, nil
-	}
+	// (mirrors DistributedBackend.soleAuthReadOn).
 	state, err := c.GetBucketVersioning(bucket)
 	if err != nil {
 		return false, fmt.Errorf("read versioning state for bucket %q: %w", bucket, err)
@@ -1767,10 +1763,11 @@ func (c *ClusterCoordinator) Truncate(ctx context.Context, bucket, key string, s
 	return err
 }
 
-// ReadAt implements the pread fast path for routed internal buckets. Local
-// leaders use the group backend's zero-copy path. Follower voters may serve
-// immutable object-index reads locally only after their local metadata matches
-// the cluster object-index entry; stale followers still forward to the leader.
+// ReadAt implements the pread fast path. Local leaders use the group backend's
+// zero-copy path. Follower voters may serve immutable object reads locally only
+// after their local metadata matches the cluster entry; stale followers still
+// forward to the leader. Internal buckets are rejected at the backend core layer
+// (guardInternalBucketObjectOp) before reaching the storage read path.
 func (c *ClusterCoordinator) ReadAt(ctx context.Context, bucket, key string, offset int64, buf []byte) (int, error) {
 	if offset < 0 {
 		return 0, errors.New("coordinator: negative ReadAt offset")

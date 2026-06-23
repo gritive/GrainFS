@@ -889,6 +889,10 @@ func mapErrorToStatus(err error) raftpb.ForwardStatus {
 	if err == nil {
 		return raftpb.ForwardStatusOK
 	}
+	if errors.Is(err, ErrInternalBucketNotObjectStore) {
+		// Client error: internal-bucket object ops are permanently rejected.
+		return raftpb.ForwardStatusMethodNotAllowed
+	}
 	if errors.Is(err, storage.ErrNoSuchBucket) {
 		return raftpb.ForwardStatusNoSuchBucket
 	}

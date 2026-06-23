@@ -7,19 +7,16 @@ import (
 )
 
 // soleAuthReadOn reports whether the bucket's per-version quorum-meta blob tree
-// is the SOLE AUTHORITY for reads: true for every versioning-enabled non-internal
-// bucket. It FAILS CLOSED — on any error reading the versioning state it returns
+// is the SOLE AUTHORITY for reads: true for every versioning-enabled bucket.
+// It FAILS CLOSED — on any error reading the versioning state it returns
 // (false, err) so callers surface the error rather than silently treating the
 // bucket as not-blob-authoritative.
 //
 // NOTE: the legacy soleauth tri-state flag + epoch fence it once consulted were
 // removed in the soleauth teardown; this now reads bucket versioning directly. The
 // "soleAuth" name is a vestige kept to bound that diff — a follow-up renames it
-// (e.g. blobAuthReadOn). Returns false for internal buckets (they stay on raft).
+// (e.g. blobAuthReadOn).
 func (b *DistributedBackend) soleAuthReadOn(bucket string) (bool, error) {
-	if storage.IsInternalBucket(bucket) {
-		return false, nil
-	}
 	state, err := b.GetBucketVersioning(bucket)
 	if err != nil {
 		return false, fmt.Errorf("read versioning state for bucket %q: %w", bucket, err)

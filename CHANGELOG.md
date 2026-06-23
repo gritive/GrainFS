@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.0.655.0] - 2026-06-23
+
+### Removed
+- **Internal-bucket object storage capability (BREAKING for the internal `__grainfs_` namespace).**
+  Object data-plane operations (PUT/GET/HEAD/ReadAt/Delete/Append/tags/ACL/List/Walk and the full
+  multipart family) targeting an internal `__grainfs_*` bucket are now rejected with `405
+  MethodNotAllowed` (`ErrInternalBucketNotObjectStore`), consistently in-process and across forwarded
+  cluster paths. Internal buckets are admin-UDS-only and had no production object writer — the
+  capability existed only to back the already-removed NFS/9P/FUSE mount and volume-block features. A
+  startup scan logs a warning and increments `grainfs_internal_bucket_orphan_objects_total` if any
+  pre-existing internal-bucket object is found, so an operator can clean it up. The ~27
+  `IsInternalBucket` object-routing branches across the cluster data path collapse to the single
+  external (blob) path. ETag XXH3 hashing, `reservedname` access control, and the orphan/scrubber
+  maintenance walkers are unchanged. External (user) bucket behavior is unchanged.
+- **Vestigial VFS layer.** Removed `internal/vfs/` (the GrainVFS filesystem shim), the
+  `POST /admin/debug/vfs/stat` diagnostic endpoint, and `storage.VFSBucketPrefix` / `IsVFSBucket`. VFS
+  backed the removed NFS/9P/FUSE server-side mounts; FUSE-over-S3 uses `rclone mount` (a standard S3
+  client) and is unaffected.
+- **Dead shard-placement raft commands.** Removed the `PutShardPlacementCmd` /
+  `DeleteShardPlacementCmd` structs, codec, and FlatBuffers tables. The commands were already no-op on
+  apply (shard placement is derived deterministically from the ring); the `CommandType` constants
+  (12, 13) are kept reserved (no enum renumber).
+
+Net: ~3.6k LOC removed; no on-disk format change.
+
 ## [0.0.654.0] - 2026-06-23
 
 ### Changed

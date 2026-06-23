@@ -1261,10 +1261,6 @@ func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
 		return encodeMigrateShardCmd(payload.(MigrateShardFSMCmd))
 	case CmdMigrationDone:
 		return encodeMigrationDoneCmd(payload.(MigrationDoneFSMCmd))
-	case CmdPutShardPlacement:
-		return encodePutShardPlacementCmd(payload.(PutShardPlacementCmd))
-	case CmdDeleteShardPlacement:
-		return encodeDeleteShardPlacementCmd(payload.(DeleteShardPlacementCmd))
 	case CmdDeleteObjectVersion:
 		return encodeDeleteObjectVersionCmd(payload.(DeleteObjectVersionCmd))
 	case CmdSetBucketVersioning:
@@ -1394,74 +1390,4 @@ func decodeFSMValueResealDoneCmd(data []byte) (FSMValueResealDoneCmd, error) {
 		return FSMValueResealDoneCmd{}, err
 	}
 	return FSMValueResealDoneCmd{Gen: t.Gen()}, nil
-}
-
-func encodePutShardPlacementCmd(c PutShardPlacementCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	keyOff := b.CreateString(c.Key)
-
-	nodeOffs := make([]flatbuffers.UOffsetT, len(c.NodeIDs))
-	for i, n := range c.NodeIDs {
-		nodeOffs[i] = b.CreateString(n)
-	}
-	clusterpb.PutShardPlacementCmdStartNodeIdsVector(b, len(c.NodeIDs))
-	for i := len(c.NodeIDs) - 1; i >= 0; i-- {
-		b.PrependUOffsetT(nodeOffs[i])
-	}
-	nodesVec := b.EndVector(len(c.NodeIDs))
-
-	clusterpb.PutShardPlacementCmdStart(b)
-	clusterpb.PutShardPlacementCmdAddBucket(b, bucketOff)
-	clusterpb.PutShardPlacementCmdAddKey(b, keyOff)
-	clusterpb.PutShardPlacementCmdAddNodeIds(b, nodesVec)
-	clusterpb.PutShardPlacementCmdAddK(b, int32(c.K))
-	clusterpb.PutShardPlacementCmdAddM(b, int32(c.M))
-	return fbFinish(b, clusterpb.PutShardPlacementCmdEnd(b)), nil
-}
-
-//nolint:unused // package tests pin command wire compatibility.
-func decodePutShardPlacementCmd(data []byte) (PutShardPlacementCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.PutShardPlacementCmd {
-		return clusterpb.GetRootAsPutShardPlacementCmd(d, 0)
-	})
-	if err != nil {
-		return PutShardPlacementCmd{}, err
-	}
-	n := t.NodeIdsLength()
-	nodes := make([]string, n)
-	for i := 0; i < n; i++ {
-		nodes[i] = string(t.NodeIds(i))
-	}
-	return PutShardPlacementCmd{
-		Bucket:  string(t.Bucket()),
-		Key:     string(t.Key()),
-		NodeIDs: nodes,
-		K:       int(t.K()),
-		M:       int(t.M()),
-	}, nil
-}
-
-func encodeDeleteShardPlacementCmd(c DeleteShardPlacementCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	keyOff := b.CreateString(c.Key)
-	clusterpb.DeleteShardPlacementCmdStart(b)
-	clusterpb.DeleteShardPlacementCmdAddBucket(b, bucketOff)
-	clusterpb.DeleteShardPlacementCmdAddKey(b, keyOff)
-	return fbFinish(b, clusterpb.DeleteShardPlacementCmdEnd(b)), nil
-}
-
-//nolint:unused // package tests pin command wire compatibility.
-func decodeDeleteShardPlacementCmd(data []byte) (DeleteShardPlacementCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.DeleteShardPlacementCmd {
-		return clusterpb.GetRootAsDeleteShardPlacementCmd(d, 0)
-	})
-	if err != nil {
-		return DeleteShardPlacementCmd{}, err
-	}
-	return DeleteShardPlacementCmd{
-		Bucket: string(t.Bucket()),
-		Key:    string(t.Key()),
-	}, nil
 }

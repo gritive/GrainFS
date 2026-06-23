@@ -46,13 +46,16 @@ func objectFromCmd(cmd PutObjectMetaCmd) *storage.Object {
 // LIST surface and avoids a DeleteBucket data-loss path where a best-effort
 // per-version write failure could make the derive omit a live object.
 func (b *DistributedBackend) listLatestEntries(ctx context.Context, bucket, prefix string) ([]PutObjectMetaCmd, error) {
-	if enabled, resolved := bucketVersioningFromContext(ctx); !storage.IsInternalBucket(bucket) && resolved && enabled {
+	if enabled, resolved := bucketVersioningFromContext(ctx); resolved && enabled {
 		return b.listObjectsPerVersion(ctx, bucket, prefix)
 	}
 	return b.scatterGatherList(ctx, bucket, prefix)
 }
 
 func (b *DistributedBackend) ListObjects(ctx context.Context, bucket, prefix string, maxKeys int) ([]*storage.Object, error) {
+	if err := guardInternalBucketObjectOp(bucket); err != nil {
+		return nil, err
+	}
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, err
 	}
@@ -74,6 +77,9 @@ func (b *DistributedBackend) ListObjects(ctx context.Context, bucket, prefix str
 // pagination. truncated is true when more matching entries remain after the
 // returned page.
 func (b *DistributedBackend) ListObjectsPage(ctx context.Context, bucket, prefix, marker string, maxKeys int) ([]*storage.Object, bool, error) {
+	if err := guardInternalBucketObjectOp(bucket); err != nil {
+		return nil, false, err
+	}
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, false, err
 	}
@@ -97,6 +103,9 @@ func (b *DistributedBackend) ListObjectsPage(ctx context.Context, bucket, prefix
 }
 
 func (b *DistributedBackend) WalkObjects(ctx context.Context, bucket, prefix string, fn func(*storage.Object) error) error {
+	if err := guardInternalBucketObjectOp(bucket); err != nil {
+		return err
+	}
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return err
 	}

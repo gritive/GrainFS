@@ -444,10 +444,13 @@ func (b *DistributedBackend) SetObjectACL(bucket, key string, acl uint8) error {
 // local object-existence pre-check after the coordinator has already resolved
 // the object through the cluster-wide object index.
 func (b *DistributedBackend) SetObjectACLPropose(bucket, key string, acl uint8) error {
+	if err := guardInternalBucketObjectOp(bucket); err != nil {
+		return err
+	}
 	ctx := context.Background()
 	// Phase 3: for objects written via quorum meta, update the quorum meta
 	// blob directly (read-modify-write) instead of proposing to data_raft.
-	if b.shardSvc != nil && !storage.IsInternalBucket(bucket) {
+	if b.shardSvc != nil {
 		handled, err := func() (bool, error) {
 			unlock := b.objectMetaRMWLock(bucket, key)
 			defer unlock() // releases at closure return, BEFORE any fall-through
@@ -494,10 +497,13 @@ func (b *DistributedBackend) SetObjectTags(bucket, key, versionID string, tags [
 // local object-existence pre-check after the coordinator has already resolved
 // the object through the cluster-wide object index.
 func (b *DistributedBackend) SetObjectTagsPropose(bucket, key, versionID string, tags []storage.Tag) error {
+	if err := guardInternalBucketObjectOp(bucket); err != nil {
+		return err
+	}
 	ctx := context.Background()
 	// Phase 3: for objects written via quorum meta, update the quorum meta
 	// blob directly (read-modify-write) instead of proposing to data_raft.
-	if b.shardSvc != nil && !storage.IsInternalBucket(bucket) {
+	if b.shardSvc != nil {
 		handled, err := func() (bool, error) {
 			// objectMetaRMWLock serializes the RMW only on THIS node. That is
 			// sufficient because ClusterCoordinator.SetObjectTags/SetObjectACL
@@ -537,6 +543,9 @@ func (b *DistributedBackend) SetObjectTagsPropose(bucket, key, versionID string,
 // FSM-consistent view; writes flow through Raft and replicate to every
 // node, so the local view is always current modulo replication lag.
 func (b *DistributedBackend) GetObjectTags(bucket, key, versionID string) ([]storage.Tag, error) {
+	if err := guardInternalBucketObjectOp(bucket); err != nil {
+		return nil, err
+	}
 	// S4c-c-read1 T3: under soleauth=on the per-version blob is the SOLE
 	// AUTHORITY for a vid-bearing versioned object's tags. A blob MISS never
 	// falls through to a stale vid-bearing FSM record — blob absence for a

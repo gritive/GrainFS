@@ -121,12 +121,8 @@ func (f *FSM) ApplyTxn(txn MetadataTxn, raw []byte) error {
 		return f.applyMigrateShard(txn, cmd.Data)
 	case CmdMigrationDone:
 		return f.applyMigrationDone(txn, cmd.Data)
-	case CmdPutShardPlacement:
-		// No-op: shard placement is now derived deterministically from the ring.
-		// Old log entries are replayed harmlessly.
-		return nil
-	case CmdDeleteShardPlacement:
-		// No-op: see CmdPutShardPlacement.
+	case CmdPutShardPlacement, CmdDeleteShardPlacement:
+		// reserved, removed: ring-derived placement. No proposer; greenfield. No-op.
 		return nil
 	case CmdSetRing:
 		return f.applySetRing(txn, cmd.Data)

@@ -97,6 +97,12 @@ func bootBackendWrap(ctx context.Context, state *bootState) error {
 	state.backend = backend
 	state.recoveryReadOnly = startupReadOnly
 
+	// Detect pre-existing internal-bucket objects (unreachable after capability
+	// removal). Runs once in the background; no-op on greenfield deployments.
+	if state.distBackend != nil {
+		go state.distBackend.WarnOnInternalBucketObjects(ctx)
+	}
+
 	// DiskCollector exposes grainfs_disk_used_pct metric. In multi-node mode
 	// the balancer owns its own collector; in singleton mode nothing else
 	// would emit disk stats. Register unconditionally — duplicate registration

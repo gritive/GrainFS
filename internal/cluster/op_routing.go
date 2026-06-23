@@ -109,17 +109,9 @@ func (r *OpRouter) generationCount() int {
 // RouteObjectReadGenerations resolves an object read to one placement-group
 // target per topology generation, newest-first (S7-4 generation probe). At a
 // single generation it returns exactly one target equal to RouteObjectRead's,
-// so the read path is byte-identical. Internal buckets and the empty-candidate
-// bootstrap case mirror RouteObjectRead. Targets whose group cannot be resolved
+// so the read path is byte-identical. Targets whose group cannot be resolved
 // are skipped; an all-unresolved result returns the first such error.
 func (r *OpRouter) RouteObjectReadGenerations(bucket, key, versionID string) ([]RouteTarget, error) {
-	if storage.IsInternalBucket(bucket) {
-		target, err := r.RouteBucket(bucket)
-		if err != nil {
-			return nil, err
-		}
-		return []RouteTarget{target}, nil
-	}
 	genGroupIDs := r.placement.readGenerationGroupIDs()
 	if len(genGroupIDs) == 0 {
 		return nil, ErrObjectIndexRequired
@@ -193,14 +185,8 @@ func (r *OpRouter) routeGroup(groupID string) (RouteTarget, error) {
 
 // RouteObjectRead resolves an object read to its placement-group target via
 // deterministic hash placement. Empty versionID means the latest version.
-// Internal buckets bypass placement selection per ADR 0004.
 // Returns ErrObjectIndexRequired when the frozen candidate list is empty (bootstrap).
 func (r *OpRouter) RouteObjectRead(bucket, key, versionID string) (RouteTarget, ObjectIndexEntry, error) {
-	if storage.IsInternalBucket(bucket) {
-		target, err := r.RouteBucket(bucket)
-		entry := ObjectIndexEntry{Bucket: bucket, Key: key, VersionID: versionID, PlacementGroupID: target.GroupID}
-		return target, entry, err
-	}
 	placementIDs := r.placement.currentGroupIDs()
 	if len(placementIDs) == 0 {
 		return RouteTarget{}, ObjectIndexEntry{}, ErrObjectIndexRequired
@@ -216,22 +202,10 @@ func (r *OpRouter) RouteObjectRead(bucket, key, versionID string) (RouteTarget, 
 // the RouteTarget so callers can commit the object-index entry after the
 // storage write succeeds (Q3).
 //
-// Internal buckets bypass placement selection (ADR 0004); EC profile too
-// large for the topology falls back to the bucket-routed group.
+// EC profile too large for the topology falls back to the bucket-routed group.
 func (r *OpRouter) RouteObjectWrite(bucket, key string) (RouteTarget, ShardGroupEntry, error) {
 	if r.groups == nil {
 		return RouteTarget{}, ShardGroupEntry{}, ErrCoordinatorNoRouter
-	}
-	if storage.IsInternalBucket(bucket) {
-		target, err := r.RouteBucket(bucket)
-		if err != nil {
-			return RouteTarget{}, ShardGroupEntry{}, err
-		}
-		group, ok := r.groups.ShardGroup(target.GroupID)
-		if !ok {
-			return RouteTarget{}, ShardGroupEntry{}, ErrNoGroup
-		}
-		return target, group, nil
 	}
 	var (
 		group ShardGroupEntry

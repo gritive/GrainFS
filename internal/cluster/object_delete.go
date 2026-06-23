@@ -41,11 +41,11 @@ func (b *DistributedBackend) deleteObjectCtx(ctx context.Context, bucket, key st
 // be stale (superseded by a versioned path) and keeping it risks GetObject
 // serving it as a fallback read.
 func (b *DistributedBackend) deleteObjectWithMarker(ctx context.Context, bucket, key string) (string, error) {
-	if err := b.HeadBucket(ctx, bucket); err != nil {
+	if err := guardInternalBucketObjectOp(bucket); err != nil {
 		return "", err
 	}
-	if storage.IsInternalBucket(bucket) {
-		return "", b.deleteInternalObject(bucket, key)
+	if err := b.HeadBucket(ctx, bucket); err != nil {
+		return "", err
 	}
 	os.Remove(b.objectPath(bucket, key))
 	markerID := newVersionID()
@@ -62,7 +62,7 @@ func (b *DistributedBackend) deleteObjectWithMarker(ctx context.Context, bucket,
 	// the blob-primary readers (a 404 instead of 405). A key with no per-version
 	// blobs (non-versioned object, or a key that never existed) falls through to the
 	// legacy path below.
-	if !storage.IsInternalBucket(bucket) && b.shardSvc != nil {
+	if b.shardSvc != nil {
 		// Decode-strict (fail-closed) read, mirroring the hard-delete path: a read
 		// ERROR must NOT fall through to the legacy FSM propose (which would write a
 		// blob-invisible marker for an actually-versioned object), so surface it. A
@@ -137,39 +137,4 @@ func (b *DistributedBackend) deleteObjectWithMarker(ctx context.Context, bucket,
 		// ErrObjectNotFound (never-existed / already-deleted) → no-op success.
 	}
 	return markerID, nil
-}
-
-func (b *DistributedBackend) deleteInternalObject(bucket, key string) error {
-	objPath := b.internalObjectPath(bucket, key)
-	_ = os.Remove(objPath.path)
-	b.internalPathCache.Delete(internalObjectCacheKey{bucket: bucket, key: key})
-	b.internalSizeCache.Delete(internalObjectCacheKey{bucket: bucket, key: key})
-	return b.store.Update(func(txn MetadataTxn) error {
-		if item, err := txn.Get(b.ks().LatestKey(bucket, key)); err == nil {
-			if err := item.Value(func(v []byte) error {
-				versionID := string(v)
-				if versionID == "" {
-					return nil
-				}
-				_ = os.Remove(b.objectPathV(bucket, key, versionID))
-				if err := txn.Delete(b.ks().ObjectMetaKeyV(bucket, key, versionID)); err != nil && err != ErrMetaKeyNotFound {
-					return err
-				}
-				return nil
-			}); err != nil {
-				return err
-			}
-		} else if err != ErrMetaKeyNotFound {
-			return err
-		}
-		for _, dbKey := range [][]byte{
-			b.ks().LatestKey(bucket, key),
-			b.ks().ObjectMetaKey(bucket, key),
-		} {
-			if err := txn.Delete(dbKey); err != nil && err != ErrMetaKeyNotFound {
-				return err
-			}
-		}
-		return nil
-	})
 }
