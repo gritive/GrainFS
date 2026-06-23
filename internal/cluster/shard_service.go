@@ -610,8 +610,6 @@ func (s *ShardService) handleRPC(payload []byte) []byte {
 		return s.handleQuorumMetaWrite(sr)
 	case "WriteQuorumMetaVersion":
 		return s.handleQuorumMetaVersionWrite(sr)
-	case "DeleteQuorumMeta":
-		return s.handleQuorumMetaDelete(sr)
 	case "ReadQuorumMeta":
 		return s.handleQuorumMetaRead(sr)
 	case "ScanQuorumMeta":
@@ -660,15 +658,6 @@ func (s *ShardService) handleQuorumMetaVersionWrite(sr *shardRequest) []byte {
 		// Mirror handleQuorumMetaWrite: surface a CAS reject as the stable wire code
 		// so the client can map it back to errQuorumMetaCASReject (BUG-1).
 		return s.errorResponse(quorumMetaWriteErrorBody(err))
-	}
-	return s.okResponse(nil)
-}
-
-// handleQuorumMetaDelete serves a DeleteQuorumMeta RPC: removes the local quorum
-// meta file for (bucket, key). Absent file is not an error (idempotent cleanup).
-func (s *ShardService) handleQuorumMetaDelete(sr *shardRequest) []byte {
-	if err := s.deleteQuorumMetaLocal(sr.Bucket, sr.Key); err != nil {
-		return s.errorResponse(err.Error())
 	}
 	return s.okResponse(nil)
 }

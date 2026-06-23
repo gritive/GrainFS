@@ -1727,28 +1727,6 @@ func (s *ShardService) ScanQuorumMetaVersionsAll(ctx context.Context, addr, buck
 	return out, nil
 }
 
-// deleteQuorumMetaLocal removes the local quorum meta file for (bucket, key).
-// Called by deleteObjectWithMarker after the raft CmdDeleteObject commit so
-// subsequent reads fall through to BadgerDB and find the delete marker.
-// Errors are silently ignored: the raft marker is the source of truth; a
-// stale quorum meta file is handled on the next read.
-func (s *ShardService) deleteQuorumMetaLocal(bucket, key string) error {
-	if len(s.dataDirs) == 0 {
-		return nil
-	}
-	root := filepath.Join(s.dataDirs[0], quorumMetaSubDir)
-	target := filepath.Join(root, bucket, key)
-	rel, err := filepath.Rel(root, target)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("quorum meta delete: key %q escapes root", key)
-	}
-	err = os.Remove(target)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("quorum meta delete: %w", err)
-	}
-	return nil
-}
-
 // deleteQuorumMetaVersionLocalCore is the lock-free, epoch-free FS core for
 // per-version blob removal. Absent file is not an error (idempotent). The caller
 // is responsible for holding the appropriate lock before calling.
@@ -1935,28 +1913,6 @@ func (s *ShardService) WriteQuorumMetaVersion(ctx context.Context, addr, bucket,
 		// WriteQuorumMeta. The per-version writer is LWW today, but a CAS reject must
 		// never be flattened to a generic error on this path either.
 		return quorumMetaWriteRPCError(addr, body)
-	}
-	return nil
-}
-
-// DeleteQuorumMeta removes the quorum-meta replica for (bucket, key) on a remote
-// placement node. Mirrors WriteQuorumMeta; the receiver runs deleteQuorumMetaLocal.
-func (s *ShardService) DeleteQuorumMeta(ctx context.Context, addr, bucket, key string) error {
-	if s.transport == nil {
-		return fmt.Errorf("quorum meta: no transport")
-	}
-	envb := buildShardEnvelope("DeleteQuorumMeta", bucket, key, 0, nil)
-	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
-	respEnvelope, err := s.callShardRPC(ctx, addr, envb)
-	if err != nil {
-		return fmt.Errorf("delete quorum meta on %s: %w", addr, err)
-	}
-	rpcType, _, err := unmarshalEnvelope(respEnvelope)
-	if err != nil {
-		return fmt.Errorf("unmarshal quorum meta delete response: %w", err)
-	}
-	if rpcType == "Error" {
-		return fmt.Errorf("remote quorum meta delete error from %s", addr)
 	}
 	return nil
 }

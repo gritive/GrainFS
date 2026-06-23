@@ -1,7 +1,6 @@
 package cluster
 
 import (
-	"encoding/hex"
 	"io"
 
 	"github.com/gritive/GrainFS/internal/storage"
@@ -48,101 +47,6 @@ func appendChunkSize(r io.Reader) int64 {
 	}
 	_, _ = seek.Seek(cur, io.SeekStart)
 	return end - cur
-}
-
-//nolint:unused // referenced by appendable_object_test.go and apply_test.go
-type appendObjectTransitionInput struct {
-	Existing          *objectMeta
-	ExistingVersionID string
-	Cmd               AppendObjectCmd
-	ModifiedUnixSec   int64
-	CoalesceCfg       CoalesceConfig
-}
-
-//nolint:unused // referenced by appendable_object_test.go
-type appendObjectTransitionResult struct {
-	Noop            bool
-	SizeCapRejected bool
-}
-
-//nolint:unused // referenced by appendable_object_test.go
-func applyAppendObjectTransition(in appendObjectTransitionInput) (objectMeta, appendObjectTransitionResult, error) {
-	cmd := in.Cmd
-	existing := in.Existing
-	if existing != nil && cmd.PlacementGroupID != "" && existing.PlacementGroupID != "" &&
-		cmd.PlacementGroupID != existing.PlacementGroupID {
-		return objectMeta{}, appendObjectTransitionResult{}, ErrStalePlacement
-	}
-
-	segDigest, _ := hex.DecodeString(cmd.SegmentETag)
-	seg := storage.SegmentRef{
-		BlobID:   cmd.BlobID,
-		Size:     cmd.SegmentSize,
-		Checksum: segDigest,
-	}
-
-	if appendObjectCommandAlreadyApplied(existing, cmd.BlobID) {
-		return objectMeta{}, appendObjectTransitionResult{Noop: true}, nil
-	}
-
-	if existing == nil {
-		if cmd.ExpectedOffset != 0 {
-			return objectMeta{}, appendObjectTransitionResult{}, storage.ErrAppendOffsetMismatch
-		}
-		return objectMeta{
-			Key:              cmd.Key,
-			Size:             seg.Size,
-			ContentType:      "application/octet-stream",
-			ETag:             storage.CompositeETag([][]byte{segDigest}),
-			LastModified:     in.ModifiedUnixSec,
-			PlacementGroupID: cmd.PlacementGroupID,
-			Segments:         []storage.SegmentRef{seg},
-			IsAppendable:     true,
-		}, appendObjectTransitionResult{}, nil
-	}
-
-	if existing.Size != cmd.ExpectedOffset {
-		return objectMeta{}, appendObjectTransitionResult{}, storage.ErrAppendOffsetMismatch
-	}
-	if len(existing.Segments) >= storage.MaxAppendSegments {
-		return objectMeta{}, appendObjectTransitionResult{}, storage.ErrAppendCapExceeded
-	}
-	if in.CoalesceCfg.SizeCapBytes > 0 && existing.Size+seg.Size > in.CoalesceCfg.SizeCapBytes {
-		return objectMeta{}, appendObjectTransitionResult{SizeCapRejected: true}, storage.ErrAppendObjectTooLarge
-	}
-
-	segs := append(append([]storage.SegmentRef(nil), existing.Segments...), seg)
-	updated := *existing
-	if !updated.IsAppendable {
-		updated.IsAppendable = true
-		if len(updated.Segments) == 0 && len(updated.Coalesced) == 0 && updated.Size > 0 {
-			updated.Coalesced = []CoalescedShardRef{appendBaseCoalescedRef(cmd.Key, in.ExistingVersionID, existing)}
-		}
-	}
-	updated.Segments = segs
-	updated.Size = existing.Size + seg.Size
-	callDigests := make([][]byte, 0, len(segs))
-	for _, s := range segs {
-		if len(s.Checksum) > 0 {
-			callDigests = append(callDigests, s.Checksum)
-		}
-	}
-	updated.ETag = storage.CompositeETag(callDigests)
-	updated.LastModified = in.ModifiedUnixSec
-	return updated, appendObjectTransitionResult{}, nil
-}
-
-//nolint:unused // referenced by object_meta_resolve.go (used in object_meta_resolve_test.go)
-func appendObjectCommandAlreadyApplied(existing *objectMeta, blobID string) bool {
-	if existing == nil {
-		return false
-	}
-	for _, s := range existing.Segments {
-		if s.BlobID == blobID {
-			return true
-		}
-	}
-	return false
 }
 
 // appendBlobRMWInput carries the inputs for one owner-side blob CAS append.
