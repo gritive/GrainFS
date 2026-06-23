@@ -56,7 +56,9 @@ func (b *DistributedBackend) listAllObjectsForGC() ([]storage.SnapshotObject, er
 		//     no blob) + any legacy records. A non-versioned regular PUT writes ONLY
 		//     the latest-only blob (writeQuorumMeta, no FSM obj: propose), so without
 		//     the blob scan the sweep would orphan its live segments.
-		//   - internal bucket → the FSM obj: tree only (it still proposes CmdPutObjectMeta).
+		//   - internal bucket → guarded: ErrInternalBucketNotObjectStore is returned
+		//     before any write reaches this path. The FSM obj: scan below retains
+		//     pre-existing internal-bucket objects for best-effort GC cleanup.
 		on, saErr := b.soleAuthReadOn(bucket)
 		if saErr != nil {
 			return nil, fmt.Errorf("list objects soleauth %s: %w", bucket, saErr)

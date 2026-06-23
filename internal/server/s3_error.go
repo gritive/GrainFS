@@ -74,6 +74,8 @@ func mapError(c *app.RequestContext, err error) {
 			msg = gateErr.PublicMessage()
 		}
 		writeXMLError(c, consts.StatusServiceUnavailable, "ServiceUnavailable", msg)
+	case errors.Is(err, cluster.ErrInternalBucketNotObjectStore):
+		writeXMLError(c, consts.StatusMethodNotAllowed, "MethodNotAllowed", "Object data-plane operations are not supported on internal buckets")
 	case errors.Is(err, storage.ErrUnsupportedOperation):
 		writeXMLError(c, consts.StatusNotImplemented, "NotImplemented", err.Error())
 	default:

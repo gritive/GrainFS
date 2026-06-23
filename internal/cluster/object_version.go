@@ -21,6 +21,9 @@ import (
 // per-version gate inside headObjectMetaV can resolve it; an in-process call
 // with an unstamped ctx falls back to a local versioning read.
 func (b *DistributedBackend) HeadObjectVersion(ctx context.Context, bucket, key, versionID string) (*storage.Object, error) {
+	if err := guardInternalBucketObjectOp(bucket); err != nil {
+		return nil, err
+	}
 	return b.headObjectVersionCtx(ctx, bucket, key, versionID)
 }
 
@@ -29,7 +32,14 @@ func (b *DistributedBackend) HeadObjectVersion(ctx context.Context, bucket, key,
 // receiver). The stamp must reach bucketVersioningEnabled inside headObjectMetaV
 // or the per-version read path stays inactive on a non-meta-group / forwarded
 // read (the latent S2a multi-group bug this PR fixes).
+//
+// Guard is present here (in addition to HeadObjectVersion) so that coordinator
+// and forward-receiver callers that call this core directly are also blocked from
+// targeting internal buckets.
 func (b *DistributedBackend) headObjectVersionCtx(ctx context.Context, bucket, key, versionID string) (*storage.Object, error) {
+	if err := guardInternalBucketObjectOp(bucket); err != nil {
+		return nil, err
+	}
 	obj, _, err := b.headObjectMetaV(ctx, bucket, key, versionID)
 	return obj, err
 }
@@ -206,7 +216,12 @@ func (b *DistributedBackend) GetObjectVersion(ctx context.Context, bucket, key, 
 
 // getObjectVersionCtx is the ctx-threaded GetObjectVersion used by callers that
 // stamp the bucket-versioning decision into ctx (coordinator + forward receiver).
+// Guard is present here so that forwarded-path callers that call this core
+// directly are blocked from targeting internal buckets.
 func (b *DistributedBackend) getObjectVersionCtx(ctx context.Context, bucket, key, versionID string) (io.ReadCloser, *storage.Object, error) {
+	if err := guardInternalBucketObjectOp(bucket); err != nil {
+		return nil, nil, err
+	}
 	obj, meta, err := b.headObjectMetaV(ctx, bucket, key, versionID)
 	if err != nil {
 		return nil, nil, err
@@ -249,6 +264,9 @@ func (b *DistributedBackend) getObjectVersionCtx(ctx context.Context, bucket, ke
 // DeleteObjectVersion hard-deletes a specific version (no tombstone).
 // Used by lifecycle/scrubber to reclaim expired versions.
 func (b *DistributedBackend) DeleteObjectVersion(bucket, key, versionID string) error {
+	if err := guardInternalBucketObjectOp(bucket); err != nil {
+		return err
+	}
 	ctx := context.Background()
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return err
@@ -326,6 +344,9 @@ func (b *DistributedBackend) DeleteObjectVersion(bucket, key, versionID string) 
 // truncated. VersionIDs are UUIDv7 (k-sortable ASC by ms timestamp), so we
 // sort DESC to get newest-first. Matches server.ObjectVersionLister.
 func (b *DistributedBackend) ListObjectVersions(ctx context.Context, bucket, prefix string, maxKeys int) ([]*storage.ObjectVersion, error) {
+	if err := guardInternalBucketObjectOp(bucket); err != nil {
+		return nil, err
+	}
 	if b.testOnListObjectVersionsCtx != nil {
 		b.testOnListObjectVersionsCtx(ctx)
 	}

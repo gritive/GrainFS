@@ -73,6 +73,99 @@ func TestInternalBucketGuard_ObjectOpsRejected(t *testing.T) {
 	})
 }
 
+// TestInternalBucketGuard_MultipartOpsRejected verifies that all multipart
+// upload operations reject internal buckets with ErrInternalBucketNotObjectStore.
+func TestInternalBucketGuard_MultipartOpsRejected(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	ctx := context.Background()
+
+	const internalBkt = "__grainfs_x"
+	require.NoError(t, b.CreateBucket(ctx, internalBkt))
+
+	t.Run("CreateMultipartUpload", func(t *testing.T) {
+		_, err := b.CreateMultipartUpload(ctx, internalBkt, "k", "application/octet-stream")
+		require.ErrorIs(t, err, ErrInternalBucketNotObjectStore)
+	})
+
+	t.Run("CreateMultipartUploadWithTags", func(t *testing.T) {
+		_, err := b.CreateMultipartUploadWithTags(ctx, internalBkt, "k", "application/octet-stream", nil)
+		require.ErrorIs(t, err, ErrInternalBucketNotObjectStore)
+	})
+
+	t.Run("UploadPart", func(t *testing.T) {
+		_, err := b.UploadPart(ctx, internalBkt, "k", "upload-id-1", 1, strings.NewReader("data"), "")
+		require.ErrorIs(t, err, ErrInternalBucketNotObjectStore)
+	})
+
+	t.Run("CompleteMultipartUpload", func(t *testing.T) {
+		_, err := b.CompleteMultipartUpload(ctx, internalBkt, "k", "upload-id-1", nil)
+		require.ErrorIs(t, err, ErrInternalBucketNotObjectStore)
+	})
+
+	t.Run("ListMultipartUploads", func(t *testing.T) {
+		_, err := b.ListMultipartUploads(ctx, internalBkt, "", 100)
+		require.ErrorIs(t, err, ErrInternalBucketNotObjectStore)
+	})
+
+	t.Run("ListParts", func(t *testing.T) {
+		_, err := b.ListParts(ctx, internalBkt, "k", "upload-id-1", 100)
+		require.ErrorIs(t, err, ErrInternalBucketNotObjectStore)
+	})
+
+	t.Run("AbortMultipartUpload", func(t *testing.T) {
+		err := b.AbortMultipartUpload(ctx, internalBkt, "k", "upload-id-1")
+		require.ErrorIs(t, err, ErrInternalBucketNotObjectStore)
+	})
+}
+
+// TestInternalBucketGuard_VersionedOpsRejected verifies that versioned and
+// async-put operations reject internal buckets with ErrInternalBucketNotObjectStore.
+func TestInternalBucketGuard_VersionedOpsRejected(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	ctx := context.Background()
+
+	const internalBkt = "__grainfs_x"
+	require.NoError(t, b.CreateBucket(ctx, internalBkt))
+
+	t.Run("HeadObjectVersion", func(t *testing.T) {
+		_, err := b.HeadObjectVersion(ctx, internalBkt, "k", "vid-1")
+		require.ErrorIs(t, err, ErrInternalBucketNotObjectStore)
+	})
+
+	t.Run("GetObjectVersion", func(t *testing.T) {
+		_, _, err := b.GetObjectVersion(ctx, internalBkt, "k", "vid-1")
+		require.ErrorIs(t, err, ErrInternalBucketNotObjectStore)
+	})
+
+	t.Run("DeleteObjectVersion", func(t *testing.T) {
+		err := b.DeleteObjectVersion(internalBkt, "k", "vid-1")
+		require.ErrorIs(t, err, ErrInternalBucketNotObjectStore)
+	})
+
+	t.Run("ListObjectVersions", func(t *testing.T) {
+		_, err := b.ListObjectVersions(ctx, internalBkt, "", 100)
+		require.ErrorIs(t, err, ErrInternalBucketNotObjectStore)
+	})
+
+	t.Run("PutObjectAsync", func(t *testing.T) {
+		_, _, err := b.PutObjectAsync(ctx, internalBkt, "k", strings.NewReader("data"), "application/octet-stream")
+		require.ErrorIs(t, err, ErrInternalBucketNotObjectStore)
+	})
+
+	// Verify that the core functions called directly by the forward receiver
+	// also reject internal buckets — this ensures coordinator-forwarded paths
+	// cannot bypass the guard.
+	t.Run("headObjectVersionCtx_core", func(t *testing.T) {
+		_, err := b.headObjectVersionCtx(ctx, internalBkt, "k", "vid-1")
+		require.ErrorIs(t, err, ErrInternalBucketNotObjectStore)
+	})
+
+	t.Run("getObjectVersionCtx_core", func(t *testing.T) {
+		_, _, err := b.getObjectVersionCtx(ctx, internalBkt, "k", "vid-1")
+		require.ErrorIs(t, err, ErrInternalBucketNotObjectStore)
+	})
+}
+
 // TestInternalBucketGuard_ExternalBucketUnaffected confirms that external
 // (user) buckets are not affected by the internal-bucket guard.
 func TestInternalBucketGuard_ExternalBucketUnaffected(t *testing.T) {

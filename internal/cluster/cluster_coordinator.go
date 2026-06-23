@@ -1763,10 +1763,11 @@ func (c *ClusterCoordinator) Truncate(ctx context.Context, bucket, key string, s
 	return err
 }
 
-// ReadAt implements the pread fast path for routed internal buckets. Local
-// leaders use the group backend's zero-copy path. Follower voters may serve
-// immutable object-index reads locally only after their local metadata matches
-// the cluster object-index entry; stale followers still forward to the leader.
+// ReadAt implements the pread fast path. Local leaders use the group backend's
+// zero-copy path. Follower voters may serve immutable object reads locally only
+// after their local metadata matches the cluster entry; stale followers still
+// forward to the leader. Internal buckets are rejected at the backend core layer
+// (guardInternalBucketObjectOp) before reaching the storage read path.
 func (c *ClusterCoordinator) ReadAt(ctx context.Context, bucket, key string, offset int64, buf []byte) (int, error) {
 	if offset < 0 {
 		return 0, errors.New("coordinator: negative ReadAt offset")

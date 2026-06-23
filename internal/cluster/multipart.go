@@ -49,6 +49,9 @@ func (b *DistributedBackend) CreateMultipartUploadWithTags(ctx context.Context, 
 // this cluster API boundary so the propose path can safely retain it (propose is
 // async); downstream code must not introduce further copies.
 func (b *DistributedBackend) createMultipartUploadInternal(ctx context.Context, bucket, key, contentType string, tags []storage.Tag) (string, int64, error) {
+	if err := guardInternalBucketObjectOp(bucket); err != nil {
+		return "", 0, err
+	}
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return "", 0, err
 	}
@@ -113,6 +116,9 @@ func (b *DistributedBackend) multipartManifestNodeIDs(ctx context.Context) []str
 }
 
 func (b *DistributedBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader, contentMD5Hex string) (*storage.Part, error) {
+	if err := guardInternalBucketObjectOp(bucket); err != nil {
+		return nil, err
+	}
 	lifeMu := b.multipartLifecycleLock(uploadID)
 	lifeMu.RLock()
 	defer lifeMu.RUnlock()
@@ -206,6 +212,9 @@ func (b *DistributedBackend) writeCompletedMultipartBlob(ctx context.Context, me
 }
 
 func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []storage.Part) (*storage.Object, error) {
+	if err := guardInternalBucketObjectOp(bucket); err != nil {
+		return nil, err
+	}
 	lifeMu := b.multipartLifecycleLock(uploadID)
 	lifeMu.Lock()
 	defer func() {
@@ -385,6 +394,9 @@ func contextForMultipartComplete(
 // missed). A leaked manifest is filtered out and best-effort re-deleted; the
 // lifecycle age-abort is the backstop if reconcile misses.
 func (b *DistributedBackend) ListMultipartUploads(ctx context.Context, bucket, prefix string, maxUploads int) ([]*storage.MultipartUpload, error) {
+	if err := guardInternalBucketObjectOp(bucket); err != nil {
+		return nil, err
+	}
 	entries, err := b.scanManifestBlobsCluster(bucket)
 	if err != nil {
 		return nil, err
@@ -492,6 +504,9 @@ func multipartUploadLess(a, b storage.MultipartUpload) bool {
 // consistently across the owning group's nodes even when no parts landed
 // locally.
 func (b *DistributedBackend) ListParts(ctx context.Context, bucket, key, uploadID string, maxParts int) ([]storage.Part, error) {
+	if err := guardInternalBucketObjectOp(bucket); err != nil {
+		return nil, err
+	}
 	_ = ctx
 	_ = key
 	if _, ok, err := b.readManifestBlob(bucket, uploadID); err != nil {
@@ -558,6 +573,9 @@ func clusterMultipartSpoolDomain(uploadID, versionID string) string {
 }
 
 func (b *DistributedBackend) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {
+	if err := guardInternalBucketObjectOp(bucket); err != nil {
+		return err
+	}
 	lifeMu := b.multipartLifecycleLock(uploadID)
 	lifeMu.Lock()
 	defer func() {
