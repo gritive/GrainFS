@@ -206,3 +206,31 @@ func segmentMetaEntriesToRefs(entries []SegmentMetaEntry) []storage.SegmentRef {
 	}
 	return refs
 }
+
+// segmentRefsToMetaEntries is the inverse of segmentMetaEntriesToRefs: it
+// projects storage.SegmentRef entries (the on-disk/owner-local segment list of
+// an appendable object) into SegmentMetaEntry records for persistence in a
+// PutObjectMetaCmd. SegmentIdx is assigned by ordinal so the entries keep a
+// deterministic order. Used by the off-raft AppendObject RMW to rebuild the
+// manifest blob's Segments slice after appending a new segment.
+func segmentRefsToMetaEntries(refs []storage.SegmentRef) []SegmentMetaEntry {
+	if len(refs) == 0 {
+		return nil
+	}
+	entries := make([]SegmentMetaEntry, len(refs))
+	for i, ref := range refs {
+		entries[i] = SegmentMetaEntry{
+			BlobID:           ref.BlobID,
+			Size:             ref.Size,
+			Checksum:         append([]byte(nil), ref.Checksum...),
+			PlacementGroupID: ref.PlacementGroupID,
+			ShardSize:        ref.ShardSize,
+			SegmentIdx:       int32(i),
+			ECData:           ref.ECData,
+			ECParity:         ref.ECParity,
+			StripeBytes:      ref.StripeBytes,
+			NodeIDs:          cloneStringSlice(ref.NodeIDs),
+		}
+	}
+	return entries
+}

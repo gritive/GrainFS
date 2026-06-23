@@ -119,34 +119,6 @@ func TestAppendChunkSizeRestoresSeekPosition(t *testing.T) {
 	}
 }
 
-func TestBuildAppendObjectCommand(t *testing.T) {
-	seg := storage.SegmentRef{
-		BlobID:   "blob-1",
-		Size:     42,
-		Checksum: []byte{0xde, 0xad, 0xbe, 0xef},
-	}
-
-	cmd := buildAppendObjectCommand(appendObjectCommandInput{
-		Bucket:           "b",
-		Key:              "k",
-		ExpectedOffset:   10,
-		Segment:          seg,
-		PlacementGroupID: "pg-1",
-		VersionID:        "version-1",
-		ModifiedUnixSec:  1234,
-	})
-
-	if cmd.Bucket != "b" || cmd.Key != "k" || cmd.ExpectedOffset != 10 {
-		t.Fatalf("command target fields = %+v", cmd)
-	}
-	if cmd.BlobID != seg.BlobID || cmd.SegmentSize != seg.Size || cmd.SegmentETag != "deadbeef" {
-		t.Fatalf("command segment fields = %+v", cmd)
-	}
-	if cmd.PlacementGroupID != "pg-1" || cmd.VersionID != "version-1" || cmd.ModifiedUnixSec != 1234 {
-		t.Fatalf("command metadata fields = %+v", cmd)
-	}
-}
-
 func TestApplyAppendObjectTransitionCreatesFirstAppendableObject(t *testing.T) {
 	updated, result, err := applyAppendObjectTransition(appendObjectTransitionInput{
 		Cmd: AppendObjectCmd{

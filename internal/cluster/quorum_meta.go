@@ -373,6 +373,13 @@ func (b *DistributedBackend) fetchQuorumMetaFromPeers(bucket, key string) ([]byt
 // unreachable (more than N-K failures or context cancellation). Errors are
 // propagated to the caller — unlike the Phase 0 shadow, failures here fail
 // the PUT.
+//
+// errQuorumMetaCASReject is special-cased: a CAS base mismatch is DETERMINISTIC
+// (every replica runs the same quorumMetaWriteAccepts guard against the same
+// MetaSeq base), not an availability failure, so it must NOT be folded into the
+// generic "quorum unreachable" error — that would mask the sentinel the
+// append/coalesce RMW relies on to re-read the base and retry. Short-circuit and
+// surface the sentinel verbatim (the §7-F single-truth contract).
 func fanOutQuorumMeta(ctx context.Context, nodes []string, k int, dispatch func(context.Context, string) error) error {
 	if k <= 0 {
 		k = 1
@@ -395,6 +402,8 @@ func fanOutQuorumMeta(ctx context.Context, nodes []string, k int, dispatch func(
 				if ok >= k {
 					return nil
 				}
+			} else if errors.Is(err, errQuorumMetaCASReject) {
+				return errQuorumMetaCASReject
 			} else {
 				failed++
 				if failed > n-k {
@@ -1753,37 +1762,6 @@ func (s *ShardService) DeleteQuorumMeta(ctx context.Context, addr, bucket, key s
 		return fmt.Errorf("remote quorum meta delete error from %s", addr)
 	}
 	return nil
-}
-
-// deleteQuorumMetaQuorum removes the quorum-meta replica for (bucket, key) on
-// EVERY placement node (self locally, peers via the DeleteQuorumMeta RPC).
-// Best-effort: a failed peer delete is logged-by-omission and tolerated — the
-// scrubber's orphan sweep and the next write reconcile a residual replica, and
-// the BadgerDB record (read fallback) is authoritative either way. nodeIDs is
-// the placement set captured from the object's quorum-meta before migration; an
-// empty set falls back to a local-only delete (object was BadgerDB-only).
-func (b *DistributedBackend) deleteQuorumMetaQuorum(ctx context.Context, bucket, key string, nodeIDs []string) {
-	if b.shardSvc == nil {
-		return
-	}
-	if len(nodeIDs) == 0 {
-		_ = b.shardSvc.deleteQuorumMetaLocal(bucket, key)
-		return
-	}
-	self := b.currentSelfAddr()
-	dctx, cancel := context.WithTimeout(ctx, quorumMetaWriteTimeout)
-	defer cancel()
-	for _, node := range nodeIDs {
-		if node == self {
-			_ = b.shardSvc.deleteQuorumMetaLocal(bucket, key)
-			continue
-		}
-		addr, rerr := b.shardSvc.resolvePeerAddress(node)
-		if rerr != nil {
-			continue
-		}
-		_ = b.shardSvc.DeleteQuorumMeta(dctx, addr, bucket, key)
-	}
 }
 
 // IterQuorumMetaECShardTargets walks all quorum meta files under

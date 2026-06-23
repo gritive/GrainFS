@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -19,65 +18,65 @@ import (
 )
 
 // ErrStalePlacement signals the placement group changed between the
-// coordinator's placement resolve and FSM apply (rebalance window). The
-// coordinator (Task 21) performs transparent retry up to 2 times before
-// returning 503 SlowDown to the client.
+// coordinator's placement resolve and the owner-side commit (rebalance window),
+// or that the owner-side blob CAS persistently lost the +1 base race to a
+// concurrent writer. The coordinator (Task 21) performs transparent retry up to
+// 2 times before returning 503 SlowDown to the client.
 var ErrStalePlacement = errors.New("append: placement group changed mid-request")
 
-const appendLockStripeCount = 256
-const appendLockFNV32AOffset = 2166136261
-const appendLockFNV32APrime = 16777619
-
-func (b *DistributedBackend) appendAdmissionLock(bucket, key string) *sync.Mutex {
-	h := uint32(appendLockFNV32AOffset)
-	h = appendLockHashString(h, bucket)
-	h *= appendLockFNV32APrime
-	h = appendLockHashString(h, key)
-	return &b.appendLocks[h&(appendLockStripeCount-1)]
-}
-
-func appendLockHashString(h uint32, s string) uint32 {
-	for i := 0; i < len(s); i++ {
-		h ^= uint32(s[i])
-		h *= appendLockFNV32APrime
-	}
-	return h
-}
+// maxAppendCASRetries bounds the in-RMW retry on a quorum-meta CAS base
+// mismatch. Mirrors the coordinator's maxAppendStaleRetries budget so a
+// transient concurrent-writer race is absorbed before surfacing to the caller.
+const maxAppendCASRetries = 2
 
 // AppendObject implements storage.AppendObjecter for DistributedBackend.
 // Owner-node entry point — ClusterCoordinator handles non-owner forwarding
 // (Task 21).
 //
-// Phase A flow:
-//  1. Cluster-aware pre-check via HeadObject (fast reject for offset / cap).
-//  2. Write segment blob to owner-node disk.
-//  3. Propose CmdAppendObject via data-Raft; b.propose surfaces apply errors
-//     transparently (Phase A Tasks 14-16).
-//  4. Re-HeadObject for fresh result reflecting committed segment list.
+// Off-raft flow (Slice 1): appendable object metadata LIVES in the quorum-meta
+// blob (no raft propose, no BadgerDB migration). AppendObject is an owner-locked
+// compare-and-swap read-modify-write against the latest-only manifest blob:
+//  1. Take objectMetaRMWLock(bucket,key) — the same owner-serialization lock
+//     SetObjectTags/SetObjectACL and coalesce use, so append/tags/coalesce never
+//     race on the same node (F2).
+//  2. Read base via readQuorumMetaCmd (owner-local authoritative; absent → new
+//     object, base MetaSeq=0) (F4).
+//  3. Validate offset == base.Size, segment-count cap, size cap, placement.
+//  4. Write the segment blob to owner-node disk (data stays owner-local; the
+//     read path fetches owner-local/peer/EC). On a later publish failure the
+//     segment is NOT eager-deleted (F7) — the delayed orphan sweep reclaims it.
+//  5. Build the next manifest (PutObjectMetaCmd) with MetaSeqCAS, MetaSeq=base+1.
+//  6. writeQuorumMeta; on a CAS reject re-read the owner-local base, re-validate
+//     offset, and retry (bounded). Persistent reject → ErrStalePlacement (the
+//     coordinator maps it to a retryable 503).
 func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key string, expectedOffset int64, r io.Reader) (*storage.Object, error) {
 	if err := guardInternalBucketObjectOp(bucket); err != nil {
 		return nil, err
 	}
-	lock := b.appendAdmissionLock(bucket, key)
-	lock.Lock()
-	defer lock.Unlock()
+	// Off-raft AppendObject requires the quorum-meta blob store; there is no
+	// raft fallback. Fail closed if the shard service is not wired (mirrors the
+	// non-versioned PUT/multipart commit contract).
+	if b.shardSvc == nil {
+		return nil, fmt.Errorf("append object: quorum-meta store unavailable")
+	}
 
-	// Step 1: cluster-aware pre-check.
-	existing, err := b.HeadObject(ctx, bucket, key)
-	if err != nil && !errors.Is(err, storage.ErrObjectNotFound) {
+	unlock := b.objectMetaRMWLock(bucket, key)
+	defer unlock()
+
+	// Step 1: read the base manifest (owner-local authoritative). Absent → a
+	// brand-new appendable object (base MetaSeq=0).
+	base, baseExists, err := b.readAppendBase(bucket, key)
+	if err != nil {
 		return nil, err
 	}
 
-	// Size-cap fast-reject hint (design § Follow-up 2). Tolerance contract:
-	// false-positive (reject what FSM would accept due to stale HeadObject)
-	// is FORBIDDEN — only reject when we are conservative-safe. existing
-	// here comes from HeadObject which can be stale OLDER than reality,
-	// meaning existing.Size <= real.Size. existing.Size+chunkSize > cap is
-	// therefore "real.Size+chunk > cap" — strict-greater on a lower bound
-	// is conservative-safe (real total is at LEAST this large). OK to
-	// reject.
-	//
-	// Body is not yet read; segment blob is not yet written; no orphan.
+	var existing *storage.Object
+	if baseExists {
+		existing, _ = objectAndPlacementFromCmd(base)
+	}
+
+	// Size-cap fast-reject hint (design § Follow-up 2). Body is not yet read;
+	// segment blob is not yet written; no orphan on rejection.
 	sizeCapBytes := int64(0)
 	if cfg := b.coalesceCfg.Load(); cfg != nil {
 		sizeCapBytes = cfg.SizeCapBytes
@@ -94,184 +93,124 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 		b.testBeforeAppendSegmentWrite()
 	}
 
-	// Step 2: write segment blob to owner-node disk.
+	// Step 2: write segment blob to owner-node disk. F7: never eager-delete this
+	// blob on a later publish failure — a partially-published manifest may
+	// reference it; the delayed orphan sweep reclaims unreferenced segments.
 	seg, err := b.writeSegmentBlobForAppend(bucket, key, r)
 	if err != nil {
 		return nil, fmt.Errorf("write segment blob: %w", err)
 	}
 
-	// Step 3: resolve placement group at propose time (cmd captures PG so the
-	// FSM can reject if it has moved since — see apply.go ErrStalePlacement).
+	// Placement group to freeze into the manifest. For an existing object this is
+	// its stored PG (an append never relocates the manifest); for a new object it
+	// is the coordinator-routed / default group.
 	pgID := b.lookupPlacementGroupForAppend(ctx, existing)
 
-	// Phase 3 migration: if the object lives in the quorum meta store (not in
-	// BadgerDB), migrate it to BadgerDB first. The FSM apply of CmdAppendObject
-	// reads BadgerDB for the existing state — if the record is absent there the
-	// FSM calculates offset 0 instead of the real size, which diverges from the
-	// coordinator's view and causes "write offset does not match object size".
-	// Proposing CmdPutObjectMeta is deterministic on all FSM nodes (no per-node
-	// filesystem read inside FSM apply) and brings the record into BadgerDB on
-	// all nodes before the append is committed.
-	// quorumMetaNodes records the placement nodes that hold a quorum-meta replica
-	// of this object, captured BEFORE migration. The quorum-meta is K-of-N
-	// replicated across these nodes (writeQuorumMeta), so the post-append cleanup
-	// MUST delete the replica on every one of them — a local-only delete leaves
-	// stale replicas on peers that shadow the BadgerDB append (headObjectMeta
-	// reads quorum-meta first, with peer fan-out), making the append invisible on
-	// a multi-node cluster.
-	var quorumMetaNodes []string
-	if b.shardSvc != nil {
-		if rawCmd, qerr := b.readQuorumMetaCmd(bucket, key); qerr == nil {
-			quorumMetaNodes = append([]string(nil), rawCmd.NodeIDs...)
-			if err := b.propose(ctx, CmdPutObjectMeta, rawCmd); err != nil {
-				_ = os.Remove(b.segmentBlobPath(bucket, key, seg.BlobID))
-				return nil, fmt.Errorf("migrate quorum meta before append: %w", err)
-			}
-		}
-	}
-
-	// Step 4: propose via data-Raft. b.propose returns FSM apply error
-	// transparently (Phase A). AppendObject is rejected for versioning-enabled
-	// buckets, so subsequent appends mutate the same latest version instead of
-	// creating one metadata/index version per segment.
 	versionID := ""
-	if existing != nil {
-		versionID = existing.VersionID
+	if baseExists {
+		versionID = base.VersionID
 	}
 	if versionID == "" {
 		versionID = uuid.Must(uuid.NewV7()).String()
 	}
-	modifiedUnixSec := time.Now().Unix()
-	cmd := buildAppendObjectCommand(appendObjectCommandInput{
-		Bucket:           bucket,
-		Key:              key,
-		ExpectedOffset:   expectedOffset,
-		Segment:          seg,
-		PlacementGroupID: pgID,
-		VersionID:        versionID,
-		ModifiedUnixSec:  modifiedUnixSec,
-	})
-	if err := b.propose(ctx, CmdAppendObject, cmd); err != nil {
-		// Best-effort cleanup of orphan segment blob on apply rejection
-		// (full sweep deferred — see TODOS.md "Scrubber orphan sweep production wiring [P1]").
-		_ = os.Remove(b.segmentBlobPath(bucket, key, seg.BlobID))
-		return nil, err
+
+	// New-object manifest placement (quorum-meta replication target). On a
+	// subsequent append the base manifest's own placement is reused.
+	var (
+		newNodeIDs  []string
+		newECData   uint8
+		newECParity uint8
+	)
+	if !baseExists {
+		plan, perr := b.planObjectWritePlacement(ctx, ObjectWritePlacementInput{
+			Operation:        "append_object",
+			PlacementGroupID: pgID,
+			ShardKey:         ecObjectShardKey(key, versionID),
+		})
+		if perr != nil {
+			return nil, fmt.Errorf("append object: plan placement: %w", perr)
+		}
+		newNodeIDs = plan.NodeIDs
+		newECData = uint8(plan.Config.DataShards)
+		newECParity = uint8(plan.Config.ParityShards)
+		pgID = plan.PlacementGroupID
 	}
 
-	// Phase 3: remove the stale quorum-meta replica on EVERY placement node so
-	// subsequent HeadObject calls read from BadgerDB (which the FSM just updated,
-	// and which alone can represent an appendable object — PutObjectMetaCmd has no
-	// IsAppendable/Coalesced fields). The quorum-meta is K-of-N replicated, so a
-	// local-only delete would leave peer replicas that shadow the append. Mirrors
-	// the fan-out in writeQuorumMeta. Best-effort — the raft state is authoritative.
-	if b.shardSvc != nil {
-		b.deleteQuorumMetaQuorum(ctx, bucket, key, quorumMetaNodes)
+	// Steps 3, 5, 6: validate + build + CAS-write the manifest, retrying on a
+	// CAS base mismatch (concurrent writer advanced the blob). On retry re-read
+	// the owner-local base and re-validate the offset (F4) — a concurrent append
+	// at the same offset turns the retry into a correct ErrAppendOffsetMismatch.
+	cur, curExists := base, baseExists
+	for attempt := 0; ; attempt++ {
+		modifiedUnixSec := time.Now().Unix()
+		cmd, perr := planAppendObjectBlobRMW(appendBlobRMWInput{
+			Bucket:            bucket,
+			Key:               key,
+			ExpectedOffset:    expectedOffset,
+			Segment:           seg,
+			PlacementGroupID:  pgID,
+			VersionID:         versionID,
+			ModifiedUnixSec:   modifiedUnixSec,
+			Base:              cur,
+			BaseExists:        curExists,
+			SizeCapBytes:      sizeCapBytes,
+			NewObjectNodeIDs:  newNodeIDs,
+			NewObjectECData:   newECData,
+			NewObjectECParity: newECParity,
+		})
+		if perr != nil {
+			return nil, perr
+		}
+		werr := b.writeQuorumMeta(ctx, cmd)
+		if werr == nil {
+			obj, _ := objectAndPlacementFromCmd(cmd)
+			// NOTE: coalesce is NOT triggered here. Appendable metadata now lives
+			// in the quorum-meta blob (off-raft), but the coalesce worker still
+			// proposes CmdCoalesceSegments to the FSM, which can no longer find the
+			// blob-backed object. Coalesce-over-blob is Task 4 (Slice 1) — until it
+			// lands, raw segments accumulate in the manifest and the appendable
+			// reader stitches them, so reads stay correct. Re-enable in Task 4.
+			if obj != nil {
+				metrics.AppendCoalescedDepth.Observe(float64(len(obj.Coalesced)))
+				metrics.AppendCoalescedTotalBytes.Observe(float64(obj.Size))
+			}
+			return obj, nil
+		}
+		if !errors.Is(werr, errQuorumMetaCASReject) || attempt >= maxAppendCASRetries {
+			if errors.Is(werr, errQuorumMetaCASReject) {
+				// Persistent CAS loss: surface the existing retryable signal so the
+				// coordinator maps it to 503 SlowDown (mirrors ErrStalePlacement).
+				return nil, fmt.Errorf("append object: %w: %w", ErrStalePlacement, werr)
+			}
+			return nil, fmt.Errorf("append object commit: %w", werr)
+		}
+		// CAS reject: re-read the owner-local base and loop (re-validate offset).
+		cur, curExists, err = b.readAppendBase(bucket, key)
+		if err != nil {
+			return nil, err
+		}
 	}
-
-	obj := appendObjectResult(existing, key, versionID, pgID, seg, modifiedUnixSec)
-	if obj != nil && obj.IsAppendable {
-		b.maybeTriggerCoalesce(bucket, key, obj.Segments)
-	}
-	if obj != nil {
-		metrics.AppendCoalescedDepth.Observe(float64(len(obj.Coalesced)))
-		metrics.AppendCoalescedTotalBytes.Observe(float64(obj.Size))
-	}
-	return obj, nil
 }
 
-func appendObjectResult(existing *storage.Object, key, versionID, placementGroupID string, seg storage.SegmentRef, modifiedUnixSec int64) *storage.Object {
-	if existing == nil {
-		return &storage.Object{
-			Key:              key,
-			Size:             seg.Size,
-			ContentType:      "application/octet-stream",
-			ETag:             storage.CompositeETag([][]byte{seg.Checksum}),
-			LastModified:     modifiedUnixSec,
-			VersionID:        versionID,
-			PlacementGroupID: placementGroupID,
-			Segments:         []storage.SegmentRef{cloneSegmentRef(seg)},
-			IsAppendable:     true,
-		}
+// readAppendBase reads the latest-only quorum-meta manifest for (bucket, key)
+// from the owner-local authoritative store. Returns (cmd, true, nil) on a hit,
+// (zero, false, nil) when the object does not yet exist (a brand-new append),
+// and a non-nil error on any other read failure.
+func (b *DistributedBackend) readAppendBase(bucket, key string) (PutObjectMetaCmd, bool, error) {
+	cmd, err := b.readQuorumMetaCmd(bucket, key)
+	if err == nil {
+		return cmd, true, nil
 	}
-
-	obj := &storage.Object{
-		Key:              existing.Key,
-		Size:             existing.Size + seg.Size,
-		ContentType:      existing.ContentType,
-		LastModified:     modifiedUnixSec,
-		VersionID:        versionID,
-		ACL:              existing.ACL,
-		UserMetadata:     cloneStringMap(existing.UserMetadata),
-		SSEAlgorithm:     existing.SSEAlgorithm,
-		PlacementGroupID: placementGroupID,
-		Coalesced:        cloneStorageCoalescedRefs(existing.Coalesced),
-		IsAppendable:     true,
-		Parts:            cloneMultipartPartEntries(existing.Parts),
-		Tags:             append([]storage.Tag(nil), existing.Tags...),
-		AppendCallMD5s:   nil,
+	if errors.Is(err, storage.ErrObjectNotFound) {
+		return PutObjectMetaCmd{}, false, nil
 	}
-	if obj.Key == "" {
-		obj.Key = key
-	}
-	if obj.ContentType == "" {
-		obj.ContentType = "application/octet-stream"
-	}
-	if !existing.IsAppendable && len(existing.Segments) == 0 && len(existing.Coalesced) == 0 && existing.Size > 0 {
-		coalescedID := "base"
-		if versionID != "" {
-			coalescedID = "base-" + versionID
-		}
-		// This synthetic base ref is metadata-only (client-facing Size/ETag on the
-		// optimistic append response); it is NOT an EC read source. It intentionally
-		// omits ECData/ECParity/NodeIDs/ShardKey/StripeBytes — every coalesced read
-		// path gates on ECData>0 (openCoalescedECReader, readAtChunk), so this ref
-		// never reaches EC reconstruction. The persisted, read-capable base ref is
-		// built independently by appendBaseCoalescedRef (carries StripeBytes). Do not
-		// turn this into a read source without populating the full EC fields.
-		obj.Coalesced = []storage.CoalescedRef{{
-			CoalescedID: coalescedID,
-			Size:        existing.Size,
-			ETag:        existing.ETag,
-		}}
-	}
-	obj.Segments = append(cloneSegmentRefs(existing.Segments), cloneSegmentRef(seg))
-	callDigests := make([][]byte, 0, len(obj.Segments))
-	for _, s := range obj.Segments {
-		if len(s.Checksum) > 0 {
-			callDigests = append(callDigests, s.Checksum)
-		}
-	}
-	obj.ETag = storage.CompositeETag(callDigests)
-	return obj
-}
-
-func cloneSegmentRefs(in []storage.SegmentRef) []storage.SegmentRef {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]storage.SegmentRef, len(in))
-	for i := range in {
-		out[i] = cloneSegmentRef(in[i])
-	}
-	return out
+	return PutObjectMetaCmd{}, false, fmt.Errorf("append object: read base manifest: %w", err)
 }
 
 func cloneSegmentRef(in storage.SegmentRef) storage.SegmentRef {
 	in.Checksum = append([]byte(nil), in.Checksum...)
 	in.NodeIDs = append([]string(nil), in.NodeIDs...)
 	return in
-}
-
-func cloneStorageCoalescedRefs(in []storage.CoalescedRef) []storage.CoalescedRef {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]storage.CoalescedRef, len(in))
-	for i := range in {
-		out[i] = in[i]
-		out[i].NodeIDs = append([]string(nil), in[i].NodeIDs...)
-	}
-	return out
 }
 
 // writeSegmentBlobForAppend writes one segment blob to owner-node disk under

@@ -163,10 +163,12 @@ var _ = ginkgo.Describe("append off-raft regression-lock", func() {
 	// close: once metadata moves to the quorum-meta store, ListObjects will
 	// see appendable objects here.
 	//
-	// Marked ginkgo.PIt (pending) so this file can be committed without
-	// breaking CI; the pending entry is the regression gate — it turns green
-	// when Slice 1 lands and must never be re-silenced without a fix.
-	ginkgo.PIt("list reports appendable size; delete then 404", func() {
+	// Slice 1 Task 3 (append write path → quorum-meta blob) closed this gap:
+	// appendable metadata now lives in the quorum-meta blob, so scatterGatherList
+	// (ScanQuorumMetaBucket) sees appendable objects and ListObjectsV2 reports
+	// them. Flipped PIt → It; it must stay green (the regression gate). It must
+	// never be re-silenced without a fix.
+	ginkgo.It("list reports appendable size; delete then 404", func() {
 		t := ginkgo.GinkgoTB()
 		bucket := tgt.uniqueBucket(t, "append-reglock-list")
 		client := tgt.pickNode(0)
