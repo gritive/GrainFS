@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // newTestBackendWithQuorumMeta builds a single-node EC 1+0 backend with the
@@ -18,11 +20,13 @@ func newTestBackendWithQuorumMeta(t *testing.T) *DistributedBackend {
 	return newSingleNode1Plus0ChunkCapable(t)
 }
 
-// TestAppendObject_BlobRMW_AppendsAndIsIdempotent proves AppendObject is an
-// owner-locked blob CAS read-modify-write: two appends accumulate Size, the
-// object is appendable, and the quorum-meta blob (the authority) advances
-// MetaSeq by exactly 2 with the CAS flags set.
-func TestAppendObject_BlobRMW_AppendsAndIsIdempotent(t *testing.T) {
+// TestAppendObject_BlobRMW_AccumulatesAndRejectsStaleOffset proves AppendObject
+// is an owner-locked blob CAS read-modify-write: two appends accumulate Size,
+// the object is appendable, the quorum-meta blob advances MetaSeq by exactly 2,
+// and a retry issued at the old (stale) offset is rejected with
+// ErrAppendOffsetMismatch WITHOUT changing the object's size or segment count
+// (at-most-once guarantee).
+func TestAppendObject_BlobRMW_AccumulatesAndRejectsStaleOffset(t *testing.T) {
 	b := newTestBackendWithQuorumMeta(t)
 	ctx := context.Background()
 	require.NoError(t, b.CreateBucket(ctx, "bk"))
@@ -41,6 +45,19 @@ func TestAppendObject_BlobRMW_AppendsAndIsIdempotent(t *testing.T) {
 	require.True(t, cmd.IsAppendable && cmd.MetaSeqCAS)
 	require.Equal(t, int64(7), cmd.Size)
 	require.Len(t, cmd.Segments, 2)
+
+	// At-most-once: a retried append issued at the stale offset (3, which is now
+	// behind the current size of 7) must be rejected and must NOT change the
+	// object's size or segment count.
+	_, retryErr := b.AppendObject(ctx, "bk", "k", 3, bytes.NewReader([]byte("retry")))
+	require.ErrorIs(t, retryErr, storage.ErrAppendOffsetMismatch)
+
+	after, err := b.readQuorumMetaCmd("bk", "k")
+	require.NoError(t, err)
+	require.Equal(t, int64(7), after.Size,
+		"object size must not change after stale-offset rejection")
+	require.Len(t, after.Segments, 2,
+		"segment count must not change after stale-offset rejection")
 }
 
 // TestAppendObject_CASRejectsStaleOwnerWrite proves the failover lost-update
