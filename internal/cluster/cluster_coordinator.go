@@ -722,6 +722,14 @@ func (c *ClusterCoordinator) ForceDeleteBucket(ctx context.Context, bucket strin
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		// Fail-closed on empty placement: a corrupt/incomplete qmeta blob with no
+		// NodeIDs would silently no-op both deleteShardsQuorum and
+		// deleteQuorumMetaQuorum, stranding shards and the local qmeta blob.
+		// Greenfield writers always populate NodeIDs, so an empty set indicates
+		// a corrupt blob — abort rather than silently strand residue.
+		if len(cmd.NodeIDs) == 0 {
+			return fmt.Errorf("force delete cluster: object %q has empty placement (corrupt qmeta blob) — aborting to avoid stranding shards", cmd.Key)
+		}
 		// Shards FIRST (fail-closed): abort if shards cannot be confirmed gone.
 		shardKey := ecObjectShardKey(cmd.Key, "")
 		if serr := b.deleteShardsQuorum(ctx, bucket, shardKey, cmd.NodeIDs); serr != nil {
@@ -1156,13 +1164,13 @@ func (c *ClusterCoordinator) DeleteObjectVersion(bucket, key, versionID string) 
 	}
 	// A version record lives in exactly one generation group — whichever the key
 	// hashed to when that version was written — but routing cannot tell which
-	// without reading. applyDeleteObjectVersion is idempotent (no-op when the
+	// without reading. The per-version FSM delete is idempotent (no-op when the
 	// version is absent), so we cannot use probeRead's stop-on-first-success loop
 	// (the newest-gen group would "succeed" by no-op and we'd never reach the
 	// resident older-gen group). Instead fan the delete out to every generation
 	// group: the resident group deletes the record, the rest no-op idempotently
 	// (a group that holds neither this version nor a stale lat: pointer to it does
-	// nothing; the apply.go:394-427 latest-recompute is local and harmless).
+	// nothing; the per-group latest-recompute is local and harmless).
 	// Dedup repeated group IDs (a key may hash to the same group across
 	// generations) and fail-closed on the first real error so the client retries
 	// the whole (idempotent) fan-out rather than leaving the record behind in a

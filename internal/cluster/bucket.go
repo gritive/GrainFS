@@ -188,6 +188,14 @@ func (b *DistributedBackend) ForceDeleteBucket(ctx context.Context, bucket strin
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		// Fail-closed on empty placement: a corrupt/incomplete qmeta blob with no
+		// NodeIDs would silently no-op both deleteShardsQuorum and
+		// deleteQuorumMetaQuorum, stranding shards and the local qmeta blob.
+		// Greenfield writers always populate NodeIDs, so an empty set indicates
+		// a corrupt blob — abort rather than silently strand residue.
+		if len(cmd.NodeIDs) == 0 {
+			return fmt.Errorf("force delete: object %q has empty placement (corrupt qmeta blob) — aborting to avoid stranding shards", cmd.Key)
+		}
 		// Shards FIRST (fail-closed): abort if shards cannot be confirmed gone.
 		// Deleting the qmeta first would strand shards with no placement record.
 		shardKey := ecObjectShardKey(cmd.Key, "")

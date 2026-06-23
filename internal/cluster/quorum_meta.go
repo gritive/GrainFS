@@ -1777,33 +1777,6 @@ func (s *ShardService) DeleteQuorumMetaVersion(ctx context.Context, addr, bucket
 	return nil
 }
 
-// deleteQuorumMetaVersionQuorum deletes a version's blob on every placement node.
-// FAIL-CLOSED: returns the first error so a lingering blob on a missed node cannot
-// resurface the deleted version via derive-by-scan. Mirrors deleteQuorumMetaQuorum.
-func (b *DistributedBackend) deleteQuorumMetaVersionQuorum(ctx context.Context, bucket, key, versionID string, nodeIDs []string) error { //nolint:unused // referenced by per_version_read_delete_test.go
-	if b.shardSvc == nil {
-		return nil
-	}
-	self := b.currentSelfAddr()
-	dctx, cancel := context.WithTimeout(ctx, quorumMetaWriteTimeout)
-	defer cancel()
-	var firstErr error
-	for _, node := range nodeIDs {
-		var err error
-		if node == self {
-			err = b.shardSvc.deleteQuorumMetaVersionLocal(bucket, key, versionID)
-		} else if addr, rerr := b.shardSvc.resolvePeerAddress(node); rerr == nil {
-			err = b.shardSvc.DeleteQuorumMetaVersion(dctx, addr, bucket, key, versionID)
-		} else {
-			err = rerr
-		}
-		if err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	return firstErr
-}
-
 // deleteQuorumMetaLocal removes the local latest-only quorum-meta blob for
 // (bucket, key) under {dataDirs[0]}/.quorum_meta/{bucket}/{key}.
 // Absent file is not an error (idempotent). Mirrors deleteQuorumMetaVersionLocal.
@@ -1846,7 +1819,6 @@ func (s *ShardService) DeleteQuorumMeta(ctx context.Context, addr, bucket, key s
 // deleteQuorumMetaQuorum deletes the latest-only quorum-meta blob on every
 // placement node. FAIL-CLOSED: returns the first error encountered so a blob
 // left on a missed node cannot resurface the object via derive-by-scan.
-// Mirrors deleteQuorumMetaVersionQuorum.
 func (b *DistributedBackend) deleteQuorumMetaQuorum(ctx context.Context, bucket, key string, nodeIDs []string) error {
 	if b.shardSvc == nil {
 		return nil

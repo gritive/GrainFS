@@ -15,8 +15,9 @@
   not as a separate `quarantine:` FSM key.** Quarantine is a flag+cause pair written via an
   owner-serialized blob RMW (`IsQuarantined`/`QuarantineCause` in `PutObjectMetaCmd`). In a cluster
   the quarantine-set call is owner-routed via a new `ForwardOpSetObjectQuarantine=24` forward op
-  (four-file extension to the forward-RPC layer). Semantics: set-once/monotonic; re-uploading the same
-  key writes a fresh blob without the flag (intentional clear). The scrubber/verifier inject a
+  (four-file extension to the forward-RPC layer). Semantics: set-once/monotonic; a PUT to a quarantined
+  key is rejected with `ErrObjectQuarantined` — re-upload cannot clear the flag. Recovery requires a
+  direct operator repair (quorum-meta blob rewrite clearing `IsQuarantined`). The scrubber/verifier inject a
   narrow `QuarantineRouter` interface so only the quarantine call is owner-routed; the `Scrubbable`
   leaf backend for shard ops is unchanged.
 - **`ForceDeleteBucket` now physically purges non-versioned (latest-only) blobs and EC shards,

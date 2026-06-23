@@ -147,7 +147,7 @@ func (c *clusterSegmentBackend) WriteSegmentBytes(ctx context.Context, bucket, k
 // two independent completers of the same upload (which derive the SAME det-vid
 // via deriveMultipartVID) record the SAME placement. That recorded set is the
 // per-version blob WRITE target AND the hard-delete / tombstone-GC target
-// (fanOutPerVersionBlob / deleteQuorumMetaVersionQuorum / tombstoneConverged all
+// (fanOutPerVersionBlob / deleteQuorumMetaQuorum / tombstoneConverged all
 // fan over cmd.NodeIDs), so a divergent placement would land a loser's blob on
 // nodes a later hard-delete never visits → orphan/resurrection. Keying on vid
 // closes that. The group is selected via the same seam as segment writes

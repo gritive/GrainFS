@@ -265,7 +265,7 @@ func (f *FSM) applyDeleteBucket(txn MetadataTxn, data []byte) error {
 	// Clear the per-bucket state so a recreated same-name bucket starts fresh (S3
 	// semantics — a new bucket inherits nothing from a prior incarnation): the
 	// existence record, the bucket policy, and the versioning state. Tolerate
-	// absent keys (most are unset on a plain bucket), mirroring applyDeleteObject.
+	// absent keys (most are unset on a plain bucket).
 	// (Per-bucket state in other subsystems — lifecycle config, IAM bucket-upstream
 	// — lives outside this FSM keyspace and is tracked separately; object obj:/lat:
 	// records are GC'd by the orphan scrubber and DeleteBucket requires an empty

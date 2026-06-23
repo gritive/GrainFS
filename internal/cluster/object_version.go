@@ -101,8 +101,8 @@ func (b *DistributedBackend) headObjectMetaV(ctx context.Context, bucket, key, v
 	// On a MISS we fall through to the BadgerDB ObjectMetaKeyV FSM read ONLY,
 	// SKIPPING the stale latest-only readQuorumMeta block below — that step would
 	// resurrect a hard-deleted version from the latest-only blob (not maintained
-	// on hard-delete-of-latest). The FSM read is safe: applyDeleteObjectVersion
-	// deletes the ObjectMetaKeyV record, so a hard-deleted version still 404s,
+	// on hard-delete-of-latest). The FSM read is safe: the ObjectMetaKeyV record
+	// is absent for a hard-deleted version, so a hard-deleted version still 404s,
 	// while a mixed-era pre-S1 version (FSM record only, no per-version blob —
 	// S1's blob write is versioning+post-S1 gated) correctly resolves.
 	versioningEnabled := b.bucketVersioningEnabled(ctx, bucket)

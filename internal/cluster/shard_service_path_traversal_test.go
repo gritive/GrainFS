@@ -125,3 +125,23 @@ func TestShardPathUnderDataDir_RejectsSeparatorBucket(t *testing.T) {
 	require.NoError(t, err, "a flat bucket with a nested key must be accepted")
 	require.True(t, svc.ShardPathUnderDataDir("bucket", 0, p))
 }
+
+// TestDeleteLocalShards_RejectsEscapingKey asserts the containment guard added to
+// DeleteLocalShards: a key with ".." segments that would escape {dataDir}/{bucket}
+// must be rejected with an error, and no path outside the shard root may be removed.
+// This mirrors the guard already present in deleteQuorumMetaLocal.
+func TestDeleteLocalShards_RejectsEscapingKey(t *testing.T) {
+	svc, root := newTraversalTestShardService(t)
+
+	// A key designed to escape: "../../escape" from {dataDir}/bucket/key → outside root.
+	err := svc.DeleteLocalShards("bucket", "../../escape")
+	require.Error(t, err, "DeleteLocalShards must reject a key that escapes the shard root")
+
+	// Nothing may have been created or removed outside the shard root.
+	escaped := filepath.Join(filepath.Dir(filepath.Dir(root)), "escape")
+	_, statErr := os.Stat(escaped)
+	require.Truef(t, os.IsNotExist(statErr), "no path may be removed outside the shard root; found %s", escaped)
+
+	// Benign key must still work (no regression).
+	require.NoError(t, svc.DeleteLocalShards("bucket", "a/b/c"), "benign key must be accepted by DeleteLocalShards")
+}

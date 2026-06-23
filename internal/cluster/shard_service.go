@@ -1726,9 +1726,18 @@ func (r *skipThenLimitReader) Read(p []byte) (int, error) {
 }
 
 // DeleteLocalShards removes every shard for key on the local node (all indices).
+// Each candidate directory is validated against its per-dataDir containment root
+// before removal — a key containing ".." segments that would escape {dataDir}/{bucket}
+// is rejected (same guard as deleteQuorumMetaLocal). This prevents a malformed key
+// from a decoded qmeta blob or trusted RPC from targeting paths outside the shard root.
 func (s *ShardService) DeleteLocalShards(bucket, key string) error {
-	for _, dataDir := range s.dataDirs {
+	for i, dataDir := range s.dataDirs {
 		dir := filepath.Join(dataDir, bucket, key)
+		// Containment check: mirror the ShardPathUnderDataDir guard used by
+		// getShardDir. Use i as a representative shard index for this dataDir.
+		if !s.ShardPathUnderDataDir(bucket, i, dir) {
+			return fmt.Errorf("delete local shards: key %q escapes shard root", key)
+		}
 		if err := os.RemoveAll(dir); err != nil {
 			return err
 		}
