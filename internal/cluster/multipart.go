@@ -55,7 +55,9 @@ func (b *DistributedBackend) createMultipartUploadInternal(ctx context.Context, 
 		return "", 0, err
 	}
 
-	uploadID := uuid.New().String()
+	// Mint a UUIDv7 uploadID: deriveMultipartVID reuses its 48-bit ms timestamp
+	// so the completed object's deterministic VersionID stays create-time ordered.
+	uploadID := uuid.Must(uuid.NewV7()).String()
 	if err := os.MkdirAll(b.partDir(uploadID), 0o755); err != nil {
 		return "", 0, fmt.Errorf("create part dir: %w", err)
 	}
@@ -283,7 +285,14 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 		return nil, err
 	}
 
-	versionID := newVersionID()
+	// Deterministic, manifest-independent VersionID derived from the (raw)
+	// uploadID: concurrent completes of the same upload converge on one version
+	// and an idempotent retry re-derives the same id. uploadID here is RAW (the
+	// coordinator strips any "mpg:" group prefix before the backend call).
+	versionID, verr := deriveMultipartVID(uploadID)
+	if verr != nil {
+		return nil, verr
+	}
 	var obj *storage.Object
 	if b.currentECConfig().NumShards() > 0 && b.shardSvc != nil {
 		// Single multipart-complete path: every completion (any total size) takes

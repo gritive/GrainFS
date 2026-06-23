@@ -1,9 +1,12 @@
 package cluster
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/google/uuid"
 
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -90,6 +93,44 @@ func (c *ClusterCoordinator) wrapMultipartUploads(uploads []*storage.MultipartUp
 		out[i] = c.wrapMultipartUpload(u, groupID)
 	}
 	return out
+}
+
+// multipartVIDNamespace is the stable UUIDv5 namespace for the legacy (non-v7)
+// uploadID fallback in deriveMultipartVID. It must never change: a different
+// namespace would derive a different vid for the same legacy uploadID and break
+// idempotent / concurrent same-vid convergence for any in-flight legacy upload.
+var multipartVIDNamespace = uuid.MustParse("6f1d8b2e-9c3a-4d57-8e21-0a4b6c8d1f30")
+
+// deriveMultipartVID maps a backend (raw) multipart uploadID to the completed
+// object's VersionID, deterministically and independent of the manifest. Two
+// completions of the same uploadID derive the SAME vid, so concurrent completes
+// converge on one version and an idempotent retry re-derives the same id.
+//
+// For a UUIDv7 uploadID (the create path mints v7), the derived vid reuses the
+// raw's 48-bit millisecond timestamp in bytes [0:6] so vids stay create-time
+// ordered at MILLISECOND granularity (sub-ms is hash-arbitrary by design), and
+// fills bytes [6:16] from sha256(raw) — re-forcing the version-7 and RFC4122
+// variant nibbles — so the vid differs from the raw uploadID while remaining a
+// valid, k-sortable UUIDv7. For a legacy non-v7 (e.g. v4) tail that fails v7
+// parse, a deterministic UUIDv5 over the raw is returned: still deterministic +
+// manifest-independent, ordering best-effort. Segment blobIDs stay random.
+func deriveMultipartVID(rawUploadID string) (string, error) {
+	sum := sha256.Sum256([]byte(rawUploadID))
+	parsed, err := uuid.Parse(rawUploadID)
+	if err != nil {
+		// Legacy non-UUID / un-parseable tail: deterministic v5 over the raw.
+		return uuid.NewSHA1(multipartVIDNamespace, []byte(rawUploadID)).String(), nil
+	}
+	var b [16]byte
+	copy(b[0:6], parsed[0:6])   // reuse the raw's 48-bit ms timestamp (create-time order)
+	copy(b[6:16], sum[0:10])    // deterministic, manifest-independent tail
+	b[6] = (b[6] & 0x0f) | 0x70 // version 7
+	b[8] = (b[8] & 0x3f) | 0x80 // RFC4122 variant
+	out, ferr := uuid.FromBytes(b[:])
+	if ferr != nil {
+		return "", fmt.Errorf("derive multipart vid: %w", ferr)
+	}
+	return out.String(), nil
 }
 
 // routeMultipartSession resolves the target for an op on an EXISTING multipart
