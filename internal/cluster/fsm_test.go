@@ -51,16 +51,7 @@ func TestEncodeDecodeCommand_AllTypes(t *testing.T) {
 			Bucket: "b", Key: "k", Size: 100, ContentType: "text/plain", ETag: "abc", ModTime: 12345,
 		}},
 		{"delete_object", CmdDeleteObject, DeleteObjectCmd{Bucket: "b", Key: "k"}},
-		{"create_multipart", CmdCreateMultipartUpload, CreateMultipartUploadCmd{
-			UploadID: "u1", Bucket: "b", Key: "k", ContentType: "binary", CreatedAt: 100,
-		}},
-		{"complete_multipart", CmdCompleteMultipart, CompleteMultipartCmd{
-			Bucket: "b", Key: "k", UploadID: "u1", Size: 500,
-			ContentType: "binary", ETag: "etag", ModTime: 200,
-		}},
-		{"abort_multipart", CmdAbortMultipart, AbortMultipartCmd{
-			Bucket: "b", Key: "k", UploadID: "u1",
-		}},
+		// CmdCreateMultipartUpload/CmdCompleteMultipart/CmdAbortMultipart removed in M4.
 		{"set_bucket_policy", CmdSetBucketPolicy, SetBucketPolicyCmd{
 			Bucket: "b", PolicyJSON: []byte(`{"policy":true}`),
 		}},

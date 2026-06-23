@@ -898,10 +898,7 @@ func (b *DistributedBackend) notifyOnApply(raw []byte) {
 			bucket, key = c.Bucket, c.Key
 		}
 	case CmdCompleteMultipart:
-		c, err := decodeCompleteMultipartCmd(cmd.Data)
-		if err == nil {
-			bucket, key = c.Bucket, c.Key
-		}
+		// reserved, removed v0.0.651+ — no cache invalidation needed
 	default:
 		// Other commands don't affect object cache
 		bucket = ""

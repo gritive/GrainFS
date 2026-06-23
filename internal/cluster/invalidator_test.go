@@ -169,7 +169,9 @@ func TestDistributedBackend_NotifyOnApply_CallsLegacyCallbackAfterRegistry(t *te
 		calls = append(calls, "legacy:"+bucket+"/"+key)
 	})
 
-	raw, err := EncodeCommand(CmdCompleteMultipart, CompleteMultipartCmd{Bucket: "mybkt", Key: "mykey"})
+	// CmdCompleteMultipart was removed (M4); test uses CmdPutObjectMeta instead
+	// which also triggers both registry and legacy callbacks.
+	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: "mybkt", Key: "mykey"})
 	require.NoError(t, err)
 
 	backend.notifyOnApply(raw)
