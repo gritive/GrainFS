@@ -172,3 +172,45 @@ func TestCompleteMultipart_NonVersionedLatestOnlyFailClosed(t *testing.T) {
 	_, err = b.HeadObject(ctx, bkt, key)
 	require.ErrorIs(t, err, storage.ErrObjectNotFound, "no object may be readable after a fail-closed complete")
 }
+
+// TestCompleteMultipart_VersionedDuplicateReturnsDeterministicVersion is the
+// regression test for the versioned short-circuit bug: if a newer PutObject
+// lands on the same key between the original complete and a duplicate/retry
+// complete, the retry must return the MULTIPART version's metadata (det-vid,
+// ETag, Size) — not the newer PUT's metadata. Before the fix, the short-circuit
+// called headObjectMeta (latest) which returned the newer version.
+func TestCompleteMultipart_VersionedDuplicateReturnsDeterministicVersion(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	const bkt, key = "vbkt", "mp-dup.bin"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+
+	// First: complete a multipart upload and capture the committed object.
+	up, err := b.CreateMultipartUpload(ctx, bkt, key, "application/octet-stream")
+	require.NoError(t, err)
+	mpPayload := bytes.Repeat([]byte("m"), 64)
+	part, err := b.UploadPart(ctx, bkt, key, up.UploadID, 1, bytes.NewReader(mpPayload), "")
+	require.NoError(t, err)
+
+	obj1, err := b.CompleteMultipartUpload(ctx, bkt, key, up.UploadID, []storage.Part{*part})
+	require.NoError(t, err)
+	require.NotEmpty(t, obj1.VersionID, "first complete must return a versioned object")
+
+	// Second: PUT a different object to the SAME key → this lands a NEWER version.
+	newObj, err := b.PutObject(ctx, bkt, key, bytes.NewReader([]byte("newer-put-data")), "text/plain")
+	require.NoError(t, err)
+	require.NotEqual(t, obj1.VersionID, newObj.VersionID, "PutObject must produce a different version")
+
+	// Third: duplicate/retry CompleteMultipartUpload for the SAME uploadID.
+	// Must return the MULTIPART object's metadata (det-vid == obj1.VersionID),
+	// NOT the newer PUT's metadata.
+	obj2, err := b.CompleteMultipartUpload(ctx, bkt, key, up.UploadID, []storage.Part{*part})
+	require.NoError(t, err, "idempotent retry must succeed, not return ErrUploadNotFound")
+	require.Equal(t, obj1.VersionID, obj2.VersionID,
+		"retry must return the det-vid version, not the newer PutObject version")
+	require.Equal(t, obj1.ETag, obj2.ETag,
+		"retry must return the multipart ETag, not the newer PutObject ETag")
+	require.Equal(t, obj1.Size, obj2.Size,
+		"retry must return the multipart size, not the newer PutObject size")
+}

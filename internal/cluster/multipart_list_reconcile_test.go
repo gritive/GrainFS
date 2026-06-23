@@ -84,7 +84,7 @@ func TestMultipartCompletedObjectExists_VersionedNoVersioningContext(t *testing.
 	require.NoError(t, err)
 
 	// Plain context — no versioning stamp, simulating the ListMultipartUploads path.
-	exists, err := b.multipartCompletedObjectExists(context.Background(), bkt, "obj.bin", up.UploadID)
+	_, exists, err := b.multipartCompletedObjectExists(context.Background(), bkt, "obj.bin", up.UploadID)
 	require.NoError(t, err)
 	require.True(t, exists, "version-agnostic check must find the completed versioned upload even without versioning context")
 }

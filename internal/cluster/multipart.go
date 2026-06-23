@@ -170,11 +170,9 @@ func (b *DistributedBackend) UploadPart(ctx context.Context, bucket, key, upload
 
 // buildMultipartMetaBlob encodes the completed multipart object's PutObjectMetaCmd
 // — the per-version blob authority — for a versioning-enabled, non-internal bucket,
-// returning nil for non-versioned/Suspended/internal buckets (which keep the legacy
-// FSM obj:/lat: write). The opaque bytes travel through CmdCompleteMultipart into the
-// done-marker (applyCompleteMultipart stores them verbatim), so any retry or
-// concurrent-complete loser can re-write the WINNER's blob from the marker. Built on
-// the PROPOSER because CompleteMultipartCmd does not carry UserMetadata/ACL/SSE.
+// returning nil for non-versioned/Suspended/internal buckets (which use the
+// latest-only quorum-meta blob path). Built on the PROPOSER because CompleteMultipartCmd
+// does not carry UserMetadata/ACL/SSE.
 func (b *DistributedBackend) buildMultipartMetaBlob(ctx context.Context, cmd PutObjectMetaCmd) ([]byte, error) {
 	if storage.IsInternalBucket(cmd.Bucket) || cmd.VersionID == "" || !b.bucketVersioningEnabled(ctx, cmd.Bucket) {
 		return nil, nil
@@ -186,15 +184,13 @@ func (b *DistributedBackend) buildMultipartMetaBlob(ctx context.Context, cmd Put
 	return blob, nil
 }
 
-// writeCompletedMultipartBlob decodes the winning multipart object's encoded
-// PutObjectMetaCmd (the done-marker's meta_blob) and durably writes its per-version
-// quorum-meta blob, FAIL-CLOSED. The per-version blob is the sole authority for the
-// completed versioned object (reads/LIST/GC/DEK all derive from it). The meta_blob
-// bytes are stored verbatim, so the per-version blob is byte-identical to the
-// done-marker copy. Idempotent: a dup write of the same vid+bytes no-ops via the LWW
-// guard, so the winner's blob lands regardless of which complete attempt (winner or
-// concurrent loser, original or retry) observed the done-marker. Returns the decoded
-// winning object so callers can answer the S3 CompleteMultipartUpload response.
+// writeCompletedMultipartBlob decodes the completed multipart object's encoded
+// PutObjectMetaCmd and durably writes its per-version quorum-meta blob, FAIL-CLOSED.
+// The per-version blob is the sole authority for the completed versioned object
+// (reads/LIST/GC/DEK all derive from it). Idempotent: a dup write of the same
+// vid+bytes no-ops via the LWW guard, so the blob lands regardless of which complete
+// attempt (concurrent completer or idempotent retry) writes it. Returns the decoded
+// object so callers can answer the S3 CompleteMultipartUpload response.
 func (b *DistributedBackend) writeCompletedMultipartBlob(ctx context.Context, metaBlob []byte) (PutObjectMetaCmd, error) {
 	env, err := DecodeCommand(metaBlob)
 	if err != nil {
@@ -235,13 +231,12 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 	// is version-agnostic (per-version blob for versioned buckets, latest-only blob
 	// whose VersionID == det-vid for non-versioned), so it works on every retry path
 	// regardless of whether this completer's manifest blob was already deleted.
-	if done, derr := b.multipartCompletedObjectExists(ctx, bucket, key, uploadID); derr != nil {
+	//
+	// multipartCompletedObjectExists returns the matched object directly so versioned
+	// buckets always get the det-vid version (not the latest, which may be a newer PUT).
+	if obj, done, derr := b.multipartCompletedObjectExists(ctx, bucket, key, uploadID); derr != nil {
 		return nil, derr
 	} else if done {
-		obj, _, herr := b.headObjectMeta(ctx, bucket, key)
-		if herr != nil {
-			return nil, herr
-		}
 		return obj, nil
 	}
 
@@ -412,7 +407,7 @@ func (b *DistributedBackend) ListMultipartUploads(ctx context.Context, bucket, p
 			continue
 		}
 		// Reconcile a leaked manifest: a completed upload whose object exists.
-		if done, derr := b.multipartCompletedObjectExists(ctx, m.Bucket, m.Key, e.UploadID); derr != nil {
+		if _, done, derr := b.multipartCompletedObjectExists(ctx, m.Bucket, m.Key, e.UploadID); derr != nil {
 			return nil, derr
 		} else if done {
 			_ = b.deleteManifestBlob(m.Bucket, e.UploadID) // best-effort re-delete
@@ -436,37 +431,48 @@ func (b *DistributedBackend) ListMultipartUploads(ctx context.Context, bucket, p
 }
 
 // multipartCompletedObjectExists reports whether the multipart upload rawUploadID
-// already completed — i.e. its deterministic det-vid object exists. The check is
-// VERSION-AGNOSTIC: it returns true if EITHER the per-version blob (covers versioned
-// buckets) OR the latest-only blob whose VersionID matches det-vid (covers
-// non-versioned buckets) is present. Checking both blobs avoids the need to call
-// bucketVersioningEnabled, which requires a versioning-context stamp that is not
+// already completed — i.e. its deterministic det-vid object exists — and returns
+// the matched object directly so the caller does not need a second read. The check
+// is VERSION-AGNOSTIC: it returns (obj, true, nil) if EITHER the per-version blob
+// (covers versioned buckets) OR the latest-only blob whose VersionID matches det-vid
+// (covers non-versioned buckets) is present. Checking both blobs avoids the need to
+// call bucketVersioningEnabled, which requires a versioning-context stamp that is not
 // available on the ListMultipartUploads path (GroupBackend reads per-group BadgerDB
 // which has no bucket keys and always returns "Unversioned").
-func (b *DistributedBackend) multipartCompletedObjectExists(_ context.Context, bucket, key, rawUploadID string) (bool, error) {
+//
+// Returning the matched cmd's object directly is important for versioned buckets: the
+// short-circuit caller must return the det-vid version's object, not headObjectMeta's
+// latest (which may be a newer PutObject that landed between the original complete and
+// a duplicate/retry call).
+func (b *DistributedBackend) multipartCompletedObjectExists(_ context.Context, bucket, key, rawUploadID string) (*storage.Object, bool, error) {
 	detVID, err := deriveMultipartVID(rawUploadID)
 	if err != nil {
-		return false, err
+		return nil, false, err
 	}
 	// Per-version blob: authoritative for versioned buckets.
-	_, ok, verr := b.readQuorumMetaVersion(bucket, key, detVID)
+	cmd, ok, verr := b.readQuorumMetaVersion(bucket, key, detVID)
 	if verr != nil {
-		return false, verr
+		return nil, false, verr
 	}
 	if ok {
-		return true, nil
+		obj, _ := objectAndPlacementFromCmd(cmd)
+		return obj, true, nil
 	}
 	// Latest-only blob: authoritative for non-versioned buckets.
 	// An unrelated later PUT to the same key produces a different VersionID, so
 	// we only treat the latest blob as evidence of completion when its VID matches.
-	cmd, lerr := b.readQuorumMetaCmd(bucket, key)
+	latestCmd, lerr := b.readQuorumMetaCmd(bucket, key)
 	if lerr != nil {
 		if errors.Is(lerr, storage.ErrObjectNotFound) {
-			return false, nil
+			return nil, false, nil
 		}
-		return false, lerr
+		return nil, false, lerr
 	}
-	return cmd.VersionID == detVID, nil
+	if latestCmd.VersionID != detVID {
+		return nil, false, nil
+	}
+	obj, _ := objectAndPlacementFromCmd(latestCmd)
+	return obj, true, nil
 }
 
 func multipartUploadLess(a, b storage.MultipartUpload) bool {

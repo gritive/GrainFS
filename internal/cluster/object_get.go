@@ -266,9 +266,10 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 			}
 			return obj, pm, nil
 		}
-		// Fall through to BadgerDB for: multipart-completed objects (their meta
-		// lives on raft — see commitCompleteMultipartObjectWriteResult), objects
-		// committed before Phase 3 upgrade, and repair/scrubber-written entries.
+		// Fall through to BadgerDB for: objects committed before Phase 3 upgrade,
+		// repair/scrubber-written entries, and legacy FSM carve-out classes
+		// (appendable / coalesced). Multipart-completed objects' meta now lives in
+		// the quorum-meta blob store (served above), not on raft.
 	}
 
 	var obj storage.Object

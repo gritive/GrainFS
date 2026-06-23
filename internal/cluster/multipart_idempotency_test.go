@@ -109,7 +109,7 @@ func TestCompleteMultipartUpload_IdempotentRetryAfterSuccess(t *testing.T) {
 	obj1, err := b.CompleteMultipartUpload(ctx, "bucket", "obj", up.UploadID, []storage.Part{*part})
 	require.NoError(t, err)
 
-	// Retry: manifest is gone; marker must be found; return committed object.
+	// Retry: manifest is gone; det-vid latest-only blob must be found; return committed object.
 	obj2, err := b.CompleteMultipartUpload(ctx, "bucket", "obj", up.UploadID, []storage.Part{*part})
 	require.NoError(t, err, "retry after success must be idempotent, not ErrUploadNotFound")
 	require.Equal(t, obj1.VersionID, obj2.VersionID)
