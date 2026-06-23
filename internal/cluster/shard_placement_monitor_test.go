@@ -53,7 +53,7 @@ func TestShardPlacementMonitor_Scan_AllPresent(t *testing.T) {
 	assert.Equal(t, 0, missing)
 }
 
-// CmdPutShardPlacement is a no-op; Scan finds no placement rows and reports 0 missing.
+// CmdPutShardPlacement is reserved/removed; Scan on empty FSM reports 0 missing.
 func TestShardPlacementMonitor_Scan_DetectsMissing(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
@@ -62,22 +62,8 @@ func TestShardPlacementMonitor_Scan_DetectsMissing(t *testing.T) {
 	const self = "node-A"
 	monitor := NewShardPlacementMonitor(fsm, nil, svc, self, time.Second)
 
-	// These applies are no-ops; no placement rows are written.
-	p1 := PutShardPlacementCmd{
-		Bucket: "b", Key: "obj1", NodeIDs: []string{self, "other", "other2"},
-	}
-	p2 := PutShardPlacementCmd{
-		Bucket: "b", Key: "obj2", NodeIDs: []string{"other", "other2", self},
-	}
-	for _, p := range []PutShardPlacementCmd{p1, p2} {
-		raw, _ := EncodeCommand(CmdPutShardPlacement, p)
-		require.NoError(t, fsm.Apply(raw))
-	}
-
 	var reported []string
 	monitor.SetOnMissing(func(target ECShardScanTarget, shardIdx int) {
-		// ShardKey is empty for object-version targets; format from
-		// ObjectKey/VersionID to match the other callbacks. (Never fires here.)
 		reported = append(reported, fmtShardRef(target.Bucket, target.ObjectKey+"/"+target.VersionID, shardIdx))
 	})
 
@@ -212,17 +198,8 @@ func TestFSM_IterShardPlacements(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, count)
 
-	// CmdPutShardPlacement is now a no-op — no placement rows are written.
-	entries := []PutShardPlacementCmd{
-		{Bucket: "b1", Key: "k1", NodeIDs: []string{"n0", "n1"}, K: 2, M: 1},
-		{Bucket: "b2", Key: "k/with/slashes", NodeIDs: []string{"n2", "n3", "n4"}, K: 3, M: 2},
-		{Bucket: "버킷", Key: "한글", NodeIDs: []string{"n0"}, K: 1, M: 1},
-	}
-	for _, e := range entries {
-		raw, _ := EncodeCommand(CmdPutShardPlacement, e)
-		require.NoError(t, fsm.Apply(raw))
-	}
-
+	// CmdPutShardPlacement is reserved/removed; placement is ring-derived.
+	// IterShardPlacements always returns 0 rows (no BadgerDB footprint).
 	seen := make(map[string][]string)
 	err = fsm.IterShardPlacements(func(bucket, key string, rec PlacementRecord) error {
 		seen[bucket+"/"+key] = rec.Nodes

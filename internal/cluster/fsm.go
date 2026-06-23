@@ -31,9 +31,8 @@ const (
 	CmdDeleteBucketPolicy    CommandType = 9
 	CmdMigrateShard          CommandType = 10
 	CmdMigrationDone         CommandType = 11
-	// Phase 18 Cluster EC — Slice 1: shard placement metadata
-	CmdPutShardPlacement    CommandType = 12
-	CmdDeleteShardPlacement CommandType = 13
+	CmdPutShardPlacement     CommandType = 12 // reserved, removed (ring-derived placement)
+	CmdDeleteShardPlacement  CommandType = 13 // reserved, removed (ring-derived placement)
 	// Versioning — Slice 1 of the unify-storage-paths refactor.
 	// CmdDeleteObjectVersion hard-deletes a specific version (no tombstone);
 	// used by lifecycle/scrubber. Plain CmdDeleteObject creates a tombstone marker.
@@ -242,24 +241,6 @@ type MigrationDoneFSMCmd struct {
 	VersionID string
 	SrcNode   string
 	DstNode   string
-}
-
-// PutShardPlacementCmd records the EC shard placement for an object.
-// NodeIDs[i] holds shard index i; len(NodeIDs) == k+m. Phase 18 Cluster EC.
-// K and M store the actual EC parameters used (dynamic EC). Zero values mean
-// legacy placement recorded before dynamic EC; callers fall back to global ecConfig.
-type PutShardPlacementCmd struct {
-	Bucket  string
-	Key     string
-	NodeIDs []string
-	K       int
-	M       int
-}
-
-// DeleteShardPlacementCmd removes the EC placement record for an object.
-type DeleteShardPlacementCmd struct {
-	Bucket string
-	Key    string
 }
 
 // SetBucketVersioningCmd persists the S3 versioning state for a bucket.
