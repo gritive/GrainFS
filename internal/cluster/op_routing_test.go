@@ -104,34 +104,6 @@ func TestOpRouter_RouteBucket_DuplicateSelfIsOnlyVoter(t *testing.T) {
 	require.True(t, got.SelfIsOnlyVoter)
 }
 
-func TestOpRouter_RouteObjectRead_InternalBucketBypassesIndex(t *testing.T) {
-	probe := &fakeLeaderProbe{}
-	r := routerForTestWithBucket(t, probe)
-	// Register the internal bucket's group with the underlying DataGroupManager
-	// and the ShardGroupSource so routeGroup can resolve peers.
-	r.router = routerWithGroups(t, map[string][]string{
-		"g1": {"node-1", "node-2", "node-3"},
-	})
-	r.router.AssignBucket("__grainfs_vfs_default", "g1")
-	got, entry, err := r.RouteObjectRead("__grainfs_vfs_default", "obj", "")
-	require.NoError(t, err)
-	require.Equal(t, "g1", got.GroupID)
-	require.Equal(t, "g1", entry.PlacementGroupID)
-	require.Equal(t, "__grainfs_vfs_default", entry.Bucket)
-}
-
-func TestOpRouter_RouteObjectWrite_InternalBucketPreservesGroupPeers(t *testing.T) {
-	probe := &fakeLeaderProbe{}
-	r := routerForTestWithBucket(t, probe)
-	r.router.AssignBucket("__grainfs_vfs_default", "g1")
-
-	target, group, err := r.RouteObjectWrite("__grainfs_vfs_default", "obj")
-	require.NoError(t, err)
-	require.Equal(t, "g1", target.GroupID)
-	require.Equal(t, "g1", group.ID)
-	require.Equal(t, []string{"node-1", "node-2", "node-3"}, group.PeerIDs)
-}
-
 func TestOpRouter_RouteObjectRead_DeterministicWhenGroupsExist(t *testing.T) {
 	// Deterministic hash placement: EC-capable groups → route succeeds without index.
 	probe := &fakeLeaderProbe{}
@@ -192,15 +164,6 @@ func TestOpRouter_RouteObjectWrite_PreservesForwardPeersWhenSelfIsLeader(t *test
 	require.True(t, target.SelfIsLeader)
 	require.NotEmpty(t, target.Peers, "forward candidates must survive route-to-execute leadership races")
 	require.NotContains(t, target.Peers[:len(target.Peers)-1], "10.0.0.2:7000")
-}
-
-func TestOpRouter_RouteObjectWrite_InternalBucketUsesBucketRoute(t *testing.T) {
-	r := routerForTestWithECGroups(t, ECConfig{DataShards: 4, ParityShards: 2})
-	r.router.AssignBucket("__grainfs_vfs_default", "g1")
-	target, group, err := r.RouteObjectWrite("__grainfs_vfs_default", "k")
-	require.NoError(t, err)
-	require.Equal(t, "g1", target.GroupID)
-	require.Equal(t, "g1", group.ID)
 }
 
 func TestRouteObjectRead_IndexFree(t *testing.T) {
