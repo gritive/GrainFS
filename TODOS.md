@@ -74,6 +74,44 @@
   onto the true meta-raft (`bucketAssignments`) so group-0 becomes a plain data group. Larger; touches
   bucket-lifecycle atomicity + the #838 delete cascade. Not needed for the read-linearization fix.
 
+### Multipart off-raft (M1-M5) follow-ups (2026-06-23)
+
+- **[P2][deferred] ModTime-primary latest rule — 7-site migration.** The current `deriveLatestVersion`
+  rule is max-VID (UUIDv7 lexicographic = create-time order). When a multipart upload is CREATED
+  (T1) before a concurrent PutObject (T2 > T1) but COMPLETED after, the PUT remains latest because
+  its vid is larger (T2 > T1). The intended long-term rule is ModTime-primary: the LAST COMPLETED
+  write is latest. Changing it requires a coordinated migration across ALL 7 sites:
+    • `deriveLatestVersion` (`quorum_meta.go`)
+    • `listObjectVersionsSoleAuth` maxVID loop (`object_version.go` ~line 551)
+    • `listSoleAuthBucketObjectsForGC` maxVID loop (`object_manifest.go` ~line 172)
+    • `localSoleAuthScrubObjects` latest-collapse (`scrubbable.go` ~line 218)
+    • `reconcileVersionIsLatest` / `sortObjectVersions` (`cluster_coordinator.go`)
+    • latest-version resolution (`object_delete.go` ~line 78)
+    • `listObjectVersions` latestVID pre-scan (non-sole-auth path, `object_version.go` ~line 370)
+
+  Additional caveats before migration:
+    • GET (per-version blob) and LIST (version enumeration) must use the SAME latest rule — split
+      implementations are a trap (the listed `IsLatest` flag would disagree with HEAD).
+    • A concurrent regular PutObject with the same key can land at any ms; without a global
+      sequence tie-breaker, "last completed" is ambiguous when a multipart complete and a PutObject
+      complete within the same clock tick.
+  The regression-lock is `TestCompleteMultipart_VersionedLatestEdge` — it MUST FAIL (then be updated)
+  as part of the migration.
+
+- **[P3][known-edge] Create-ordering is ms-granular only.** `deriveMultipartVID` encodes the
+  uploadID's 48-bit UUIDv7 ms timestamp into the derived vid. Two uploads created in the SAME
+  millisecond get a hash-arbitrary relative ordering (bytes [6:16] are sha256(rawUploadID), which
+  differs per upload). Same-ms concurrent uploads are not ordered by wall clock; their relative
+  latest is hash-arbitrary. This is documented in `multipart_upload_id.go`. No action required;
+  the test `TestCompleteMultipart_VersionedLatestEdge` handles the same-ms case gracefully (logs
+  and skips the latest assertion).
+
+- **[P3][cleanup] M4 stale comment + dead `MultipartDoneKey` cleanup (final-review batch).** In the
+  M4 commit several files carry stale cross-reference comments (e.g., references to the removed
+  `CmdCompleteMultipart` flow, or the removed `readDoneMarker` / `MultipartDoneKey` usage sites).
+  These are cosmetic and safe to batch-clean in a follow-up PR once the off-raft branch lands and
+  the repo is stable post-merge.
+
 ### Tests / docs / spec polish
 
 - **[P3][test] Deterministic multi-node reproduction of the forwarded-propose apply-wait + MPU
