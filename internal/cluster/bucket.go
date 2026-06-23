@@ -430,8 +430,9 @@ func (b *DistributedBackend) DeleteBucketPolicyPropose(bucket string) error {
 }
 
 // SetObjectACL satisfies storage.ACLSetter. Updates the ACL via the quorum-meta
-// blob RMW (sole authority — no raft path). HeadObject pre-check guarantees
-// existence; a blob miss here is a real not-found or a race.
+// blob RMW on the object's latest-only quorum-meta blob (sole authority — no
+// raft path). HeadObject pre-check guarantees existence; a blob miss in the
+// propose path is a real not-found or a race.
 func (b *DistributedBackend) SetObjectACL(bucket, key string, acl uint8) error {
 	ctx := context.Background()
 	// Pre-check: verify object exists locally before proposing.
@@ -455,6 +456,10 @@ func (b *DistributedBackend) SetObjectACLPropose(bucket, key string, acl uint8) 
 	defer unlock()
 	cmd, err := b.readQuorumMetaCmd(bucket, key)
 	if err != nil {
+		// ErrObjectNotFound here covers two legitimate cases: (1) a real
+		// not-found or a race after the HeadObject pre-check, and (2) this node
+		// has no shardSvc (non-owner) so readQuorumMetaCmd returns NotFound by
+		// construction — the correct outcome, since the owning peer handles it.
 		if errors.Is(err, storage.ErrObjectNotFound) {
 			return storage.ErrObjectNotFound
 		}
@@ -469,9 +474,15 @@ func (b *DistributedBackend) SetObjectACLPropose(bucket, key string, acl uint8) 
 }
 
 // SetObjectTags satisfies storage.ObjectTagsSetter. Mutates tags via the
-// quorum-meta blob RMW (sole authority — no raft path). VersionID="" targets
-// the current version; VersionID!="" targets a specific version. Passing nil
-// tags clears the tag set. Does not modify ETag, LastModified, ACL, or blob bytes.
+// quorum-meta blob RMW on the object's latest-only quorum-meta blob (sole
+// authority — no raft path). Passing nil tags clears the tag set. Does not
+// modify ETag, LastModified, ACL, or blob bytes.
+//
+// versionID is currently NOT version-scoped: the RMW reads and writes the
+// latest-only blob via readQuorumMetaCmd(bucket, key), which ignores versionID.
+// The only versionID-aware path was the now-retired CmdSetObjectTags raft
+// command (data-plane raft-free Slice 2). Per-version tag targeting is a
+// follow-up, not implemented here.
 func (b *DistributedBackend) SetObjectTags(bucket, key, versionID string, tags []storage.Tag) error {
 	ctx := context.Background()
 	// Pre-check: object must exist locally before we propose. Mirrors SetObjectACL.
@@ -497,6 +508,10 @@ func (b *DistributedBackend) SetObjectTagsPropose(bucket, key, versionID string,
 	defer unlock()
 	cmd, err := b.readQuorumMetaCmd(bucket, key)
 	if err != nil {
+		// ErrObjectNotFound here covers two legitimate cases: (1) a real
+		// not-found or a race after the HeadObject pre-check, and (2) this node
+		// has no shardSvc (non-owner) so readQuorumMetaCmd returns NotFound by
+		// construction — the correct outcome, since the owning peer handles it.
 		if errors.Is(err, storage.ErrObjectNotFound) {
 			return storage.ErrObjectNotFound
 		}
