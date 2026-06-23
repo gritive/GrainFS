@@ -69,7 +69,7 @@ func (b *DistributedBackend) listAllObjectsForGC() ([]storage.SnapshotObject, er
 			result = append(result, objs...)
 			continue
 		}
-		if !storage.IsInternalBucket(bucket) && b.shardSvc != nil {
+		if b.shardSvc != nil {
 			// Non-versioned/Suspended user bucket: regular objects on the latest-only
 			// blob tree. Falls through to the FSM scan for carve-outs/legacy (additive
 			// — a regular non-versioned object has no FSM obj: record, so no dup).

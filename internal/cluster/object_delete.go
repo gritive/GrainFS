@@ -62,7 +62,7 @@ func (b *DistributedBackend) deleteObjectWithMarker(ctx context.Context, bucket,
 	// the blob-primary readers (a 404 instead of 405). A key with no per-version
 	// blobs (non-versioned object, or a key that never existed) falls through to the
 	// legacy path below.
-	if !storage.IsInternalBucket(bucket) && b.shardSvc != nil {
+	if b.shardSvc != nil {
 		// Decode-strict (fail-closed) read, mirroring the hard-delete path: a read
 		// ERROR must NOT fall through to the legacy FSM propose (which would write a
 		// blob-invisible marker for an actually-versioned object), so surface it. A

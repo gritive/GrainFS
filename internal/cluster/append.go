@@ -120,7 +120,7 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 	// reads quorum-meta first, with peer fan-out), making the append invisible on
 	// a multi-node cluster.
 	var quorumMetaNodes []string
-	if b.shardSvc != nil && !storage.IsInternalBucket(bucket) {
+	if b.shardSvc != nil {
 		if rawCmd, qerr := b.readQuorumMetaCmd(bucket, key); qerr == nil {
 			quorumMetaNodes = append([]string(nil), rawCmd.NodeIDs...)
 			if err := b.propose(ctx, CmdPutObjectMeta, rawCmd); err != nil {
@@ -164,7 +164,7 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 	// IsAppendable/Coalesced fields). The quorum-meta is K-of-N replicated, so a
 	// local-only delete would leave peer replicas that shadow the append. Mirrors
 	// the fan-out in writeQuorumMeta. Best-effort — the raft state is authoritative.
-	if b.shardSvc != nil && !storage.IsInternalBucket(bucket) {
+	if b.shardSvc != nil {
 		b.deleteQuorumMetaQuorum(ctx, bucket, key, quorumMetaNodes)
 	}
 

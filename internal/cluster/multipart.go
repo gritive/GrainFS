@@ -173,7 +173,7 @@ func (b *DistributedBackend) UploadPart(ctx context.Context, bucket, key, upload
 // latest-only quorum-meta blob path). Built on the PROPOSER because CompleteMultipartCmd
 // does not carry UserMetadata/ACL/SSE.
 func (b *DistributedBackend) buildMultipartMetaBlob(ctx context.Context, cmd PutObjectMetaCmd) ([]byte, error) {
-	if storage.IsInternalBucket(cmd.Bucket) || cmd.VersionID == "" || !b.bucketVersioningEnabled(ctx, cmd.Bucket) {
+	if cmd.VersionID == "" || !b.bucketVersioningEnabled(ctx, cmd.Bucket) {
 		return nil, nil
 	}
 	blob, err := EncodeCommand(CmdPutObjectMeta, cmd)

@@ -50,11 +50,6 @@ func (b *DistributedBackend) bucketVersioningEnabled(ctx context.Context, bucket
 }
 
 func (b *DistributedBackend) writeQuorumMeta(ctx context.Context, cmd PutObjectMetaCmd) error {
-	// Internal buckets stay on raft (control-plane; headObjectMeta reads BadgerDB
-	// for them). Non-internal user buckets use per-node quorum (data_raft bypass).
-	if storage.IsInternalBucket(cmd.Bucket) {
-		return b.propose(ctx, CmdPutObjectMeta, cmd)
-	}
 	// Blob-primary (raft-free): for versioning-enabled buckets the per-version blob
 	// (written below via fanOutPerVersionBlob) is the SOLE AUTHORITY for object
 	// metadata — there is no CmdPutObjectMeta propose. Reads, LIST, the orphan GCs,

@@ -450,7 +450,7 @@ func (b *DistributedBackend) SetObjectACLPropose(bucket, key string, acl uint8) 
 	ctx := context.Background()
 	// Phase 3: for objects written via quorum meta, update the quorum meta
 	// blob directly (read-modify-write) instead of proposing to data_raft.
-	if b.shardSvc != nil && !storage.IsInternalBucket(bucket) {
+	if b.shardSvc != nil {
 		handled, err := func() (bool, error) {
 			unlock := b.objectMetaRMWLock(bucket, key)
 			defer unlock() // releases at closure return, BEFORE any fall-through
@@ -503,7 +503,7 @@ func (b *DistributedBackend) SetObjectTagsPropose(bucket, key, versionID string,
 	ctx := context.Background()
 	// Phase 3: for objects written via quorum meta, update the quorum meta
 	// blob directly (read-modify-write) instead of proposing to data_raft.
-	if b.shardSvc != nil && !storage.IsInternalBucket(bucket) {
+	if b.shardSvc != nil {
 		handled, err := func() (bool, error) {
 			// objectMetaRMWLock serializes the RMW only on THIS node. That is
 			// sufficient because ClusterCoordinator.SetObjectTags/SetObjectACL
