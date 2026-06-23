@@ -411,18 +411,15 @@ func TestMultipartComplete_WritesQuorumMeta(t *testing.T) {
 	require.Contains(t, keys, "multi.bin", "completed multipart object must be enumerable by LIST")
 }
 
-// TestMultipartComplete_QuorumMirrorMissing_BadgerDBFallback guards the
-// degraded path the multipart-LIST fix relies on: the group-raft propose is the
-// authoritative commit (object meta in FSM + manifest deleted atomically), and
-// the quorum-meta write is a best-effort LIST-visibility mirror. If that mirror
-// is absent (write failed, or a repair has not yet run), HeadObject must still
-// serve the object by falling back to BadgerDB — the object is durably
-// committed and must remain retrievable.
+// TestMultipartComplete_NonVersionedQuorumMetaIsSoleAuthority pins the M3
+// non-versioned authority shift: a non-versioned multipart complete writes NO FSM
+// obj: record — the latest-only quorum-meta blob is the SOLE authority. HeadObject
+// serves the object from that blob; deleting the blob makes the object 404 (there
+// is no BadgerDB FSM fallback for the multipart object anymore).
 //
-// We simulate the missing mirror by deleting the quorum-meta file after a
-// normal complete. Neuter test: if the BadgerDB fallback is removed from
-// headObjectMeta, this test is RED (storage.ErrObjectNotFound).
-func TestMultipartComplete_QuorumMirrorMissing_BadgerDBFallback(t *testing.T) {
+// Neuter test: re-introduce the FSM obj:/lat: write in applyCompleteMultipart AND a
+// propose, and the "blob is sole authority" assertion below is RED.
+func TestMultipartComplete_NonVersionedQuorumMetaIsSoleAuthority(t *testing.T) {
 	ctx := context.Background()
 	b := newTestDistributedBackend(t)
 	require.NoError(t, b.CreateBucket(ctx, "bucket"))
@@ -439,14 +436,25 @@ func TestMultipartComplete_QuorumMirrorMissing_BadgerDBFallback(t *testing.T) {
 	}})
 	require.NoError(t, err)
 
-	// Drop the quorum-meta mirror, leaving only the authoritative FSM commit.
-	qmetaPath := filepath.Join(b.root, "shards", quorumMetaSubDir, "bucket", "multi.bin")
-	require.NoError(t, os.Remove(qmetaPath))
+	// No FSM obj: record — the latest-only blob is the sole authority.
+	require.NoError(t, b.store.View(func(txn MetadataTxn) error {
+		_, gerr := txn.Get(b.ks().ObjectMetaKey("bucket", "multi.bin"))
+		require.ErrorIs(t, gerr, ErrMetaKeyNotFound, "non-versioned multipart must not write an FSM obj: record")
+		return nil
+	}))
 
+	// Served from the latest-only quorum-meta blob.
 	head, err := b.HeadObject(ctx, "bucket", "multi.bin")
-	require.NoError(t, err, "HeadObject must fall back to BadgerDB when the quorum-meta mirror is absent")
+	require.NoError(t, err)
 	require.Equal(t, obj.ETag, head.ETag)
 	require.Equal(t, int64(len(payload)), head.Size)
+
+	// Drop the latest-only blob → the object is gone (no FSM fallback).
+	qmetaPath := filepath.Join(b.root, "shards", quorumMetaSubDir, "bucket", "multi.bin")
+	require.NoError(t, os.Remove(qmetaPath))
+	_, err = b.HeadObject(ctx, "bucket", "multi.bin")
+	require.ErrorIs(t, err, storage.ErrObjectNotFound,
+		"with the sole-authority blob gone the object must 404 (no FSM obj: fallback)")
 }
 
 // TestReadQuorumMeta_PeerFallback_ParityNodeMiss proves the N-K node hazard fix:

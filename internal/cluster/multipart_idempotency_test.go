@@ -117,11 +117,13 @@ func TestCompleteMultipartUpload_IdempotentRetryAfterSuccess(t *testing.T) {
 	require.Equal(t, obj1.Size, obj2.Size)
 }
 
-// TestCompleteMultipartUpload_MarkerMismatchErrors verifies that the client path
-// returns a descriptive (non-ErrUploadNotFound) error when the done marker's
-// (bucket,key) does not match the retry's (bucket,key) — mirroring the FSM contract
-// (applyCompleteMultipart), not silently collapsing a real conflict into a 404.
-func TestCompleteMultipartUpload_MarkerMismatchErrors(t *testing.T) {
+// TestCompleteMultipartUpload_MismatchedKeyRetryNotFound verifies the M3 model: a
+// same-uploadID retry against a DIFFERENT key returns ErrUploadNotFound (S3
+// NoSuchUpload). The idempotency anchor is the per-(bucket,key) det-vid object, not
+// a per-uploadID done-marker — so a wrong-key retry has no completed object under
+// that key and (after the original complete deleted the manifest) no session, which
+// is exactly NoSuchUpload.
+func TestCompleteMultipartUpload_MismatchedKeyRetryNotFound(t *testing.T) {
 	ctx := context.Background()
 	b := newTestDistributedBackend(t)
 	require.NoError(t, b.CreateBucket(ctx, "b"))
@@ -135,11 +137,10 @@ func TestCompleteMultipartUpload_MarkerMismatchErrors(t *testing.T) {
 	_, err = b.CompleteMultipartUpload(ctx, "b", "obj", up.UploadID, []storage.Part{*part})
 	require.NoError(t, err)
 
-	// Retry with the SAME uploadID but a DIFFERENT key: manifest gone, marker
-	// bucket/key "b"/"obj" != "b"/"other" → must be a descriptive conflict error.
+	// Retry with the SAME uploadID but a DIFFERENT key: the manifest is gone and no
+	// det-vid object exists under "other" → ErrUploadNotFound.
 	_, err = b.CompleteMultipartUpload(ctx, "b", "other", up.UploadID, []storage.Part{*part})
-	require.Error(t, err)
-	require.NotErrorIs(t, err, storage.ErrUploadNotFound)
+	require.ErrorIs(t, err, storage.ErrUploadNotFound)
 }
 
 // TestSweepStaleMultipartDoneMarkers verifies that SweepStaleMultipartDoneMarkers

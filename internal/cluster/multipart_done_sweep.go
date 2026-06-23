@@ -6,35 +6,6 @@ import (
 	"time"
 )
 
-// readDoneMarker reads the mpudone marker for uploadID from the local store.
-// Returns (nil, nil) when the marker does not exist (no completion recorded yet).
-// Used by the phantom-winner guard in commitCompleteMultipartObjectWriteResult.
-func (b *DistributedBackend) readDoneMarker(uploadID string) (*multipartDone, error) {
-	var marker *multipartDone
-	if err := b.store.View(func(txn MetadataTxn) error {
-		item, err := txn.Get(b.ks().MultipartDoneKey(uploadID))
-		if err == ErrMetaKeyNotFound {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		raw, err := b.itemValueCopy(item)
-		if err != nil {
-			return err
-		}
-		m, err := unmarshalMultipartDone(raw)
-		if err != nil {
-			return err
-		}
-		marker = &m
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-	return marker, nil
-}
-
 // SweepStaleMultipartDoneMarkers scans the local mpudone: keyspace for markers
 // older than minAge and proposes a CmdDeleteMultipartDone batch to GC them.
 // At most maxPerCycle upload IDs are collected per call. Returns the count

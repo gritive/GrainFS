@@ -218,71 +218,54 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 		b.multipartLocks.Delete(uploadID)
 	}()
 
-	// Read the upload manifest off the .qmeta_mpu blob (M2b). The done-marker is
-	// still an FSM key (written by applyCompleteMultipart) so an idempotent retry —
-	// whose manifest blob the original complete already deleted — still resolves to
-	// the committed object. Read the blob first; on a miss, fall back to the marker.
+	// Deterministic, manifest-independent VersionID derived from the (raw)
+	// uploadID: concurrent completes of the same upload converge on one version and
+	// an idempotent retry re-derives the same id. uploadID here is RAW (the
+	// coordinator strips any "mpg:" group prefix before the backend call).
+	versionID, verr := deriveMultipartVID(uploadID)
+	if verr != nil {
+		return nil, verr
+	}
+
+	// Det-vid existence short-circuit (M3): the completed object's per-version /
+	// latest-only blob IS the idempotency record — there is no done-marker (the
+	// CmdCompleteMultipart propose is gone). If the det-vid object already exists for
+	// this (bucket, key), this is an idempotent retry (or a concurrent loser whose
+	// twin already won) — return the committed object WITHOUT re-assembling. The check
+	// is version-agnostic (per-version blob for versioned buckets, latest-only blob
+	// whose VersionID == det-vid for non-versioned), so it works on every retry path
+	// regardless of whether this completer's manifest blob was already deleted.
+	if done, derr := b.multipartCompletedObjectExists(ctx, bucket, key, uploadID); derr != nil {
+		return nil, derr
+	} else if done {
+		obj, _, herr := b.headObjectMeta(ctx, bucket, key)
+		if herr != nil {
+			return nil, herr
+		}
+		return obj, nil
+	}
+
+	// Read the upload manifest off the .qmeta_mpu blob (M2b). With the det-vid object
+	// absent (no short-circuit above), the manifest is the sole session record: its
+	// absence means the upload never existed / was aborted / already completed for a
+	// DIFFERENT key — all NoSuchUpload (ErrUploadNotFound) under the per-(bucket,key)
+	// det-vid model.
 	manifestMeta, manifestOK, err := b.readManifestBlob(bucket, uploadID)
 	if err != nil {
 		return nil, err
 	}
-	var meta clusterMultipartMeta
-	var doneMarker *multipartDone
-	if manifestOK {
-		// The manifest blob is now the upload's authority: validate the requested
-		// (bucket, key) against it (the check the FSM apply used to do against the
-		// mpu: manifest before M2b moved it off-raft). A mismatch means the client
-		// addressed the wrong object for this uploadID.
-		if manifestMeta.Bucket != bucket || manifestMeta.Key != key {
-			return nil, fmt.Errorf("complete multipart upload %s mismatch: manifest is for %s/%s, got %s/%s",
-				uploadID, manifestMeta.Bucket, manifestMeta.Key, bucket, key)
-		}
-		meta = manifestMeta
-	} else {
-		derr := b.store.View(func(txn MetadataTxn) error {
-			doneItem, gerr := txn.Get(b.ks().MultipartDoneKey(uploadID))
-			if gerr == ErrMetaKeyNotFound {
-				return storage.ErrUploadNotFound
-			}
-			if gerr != nil {
-				return gerr
-			}
-			raw, gerr := b.itemValueCopy(doneItem)
-			if gerr != nil {
-				return gerr
-			}
-			marker, gerr := unmarshalMultipartDone(raw)
-			if gerr != nil {
-				return gerr
-			}
-			if marker.Bucket != bucket || marker.Key != key {
-				return fmt.Errorf("multipart upload %s already completed for %s/%s", uploadID, marker.Bucket, marker.Key)
-			}
-			doneMarker = &marker
-			return nil
-		})
-		if derr != nil {
-			return nil, derr
-		}
+	if !manifestOK {
+		return nil, storage.ErrUploadNotFound
 	}
-	// Idempotent retry: manifest is gone but marker exists; return committed object.
-	if doneMarker != nil {
-		// Blob-authoritative: if the marker carries the winning meta_blob, re-write
-		// the per-version blob FAIL-CLOSED before the readback. The original complete
-		// may have crashed/failed after the propose but before the blob landed — the
-		// marker is the only metadata copy until the blob is durable, so without this
-		// the object would be permanently 404. Idempotent: same vid+bytes, LWW no-op.
-		if len(doneMarker.MetaBlob) > 0 {
-			if _, werr := b.writeCompletedMultipartBlob(ctx, doneMarker.MetaBlob); werr != nil {
-				return nil, werr
-			}
-		}
-		obj, _, err := b.headObjectMetaV(ctx, bucket, key, doneMarker.VersionID)
-		if err != nil {
-			return nil, err
-		}
-		return obj, nil
+	// The manifest blob is the upload's authority: validate the requested (bucket,
+	// key) against it (the check the FSM apply used to do against the mpu: manifest
+	// before M2b moved it off-raft). A mismatch means the client addressed the wrong
+	// object for this uploadID.
+	if manifestMeta.Bucket != bucket || manifestMeta.Key != key {
+		return nil, fmt.Errorf("complete multipart upload %s mismatch: manifest is for %s/%s, got %s/%s",
+			uploadID, manifestMeta.Bucket, manifestMeta.Key, bucket, key)
 	}
+	meta := manifestMeta
 	if meta.PlacementGroupID != "" {
 		var ctxErr error
 		ctx, ctxErr = contextForMultipartComplete(ctx, meta, func(id string) (ShardGroupEntry, bool) {
@@ -302,14 +285,6 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 		return nil, err
 	}
 
-	// Deterministic, manifest-independent VersionID derived from the (raw)
-	// uploadID: concurrent completes of the same upload converge on one version
-	// and an idempotent retry re-derives the same id. uploadID here is RAW (the
-	// coordinator strips any "mpg:" group prefix before the backend call).
-	versionID, verr := deriveMultipartVID(uploadID)
-	if verr != nil {
-		return nil, verr
-	}
 	var obj *storage.Object
 	if b.currentECConfig().NumShards() > 0 && b.shardSvc != nil {
 		// Single multipart-complete path: every completion (any total size) takes
@@ -347,10 +322,10 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 	if err := os.RemoveAll(b.partDir(uploadID)); err != nil {
 		b.logger.Debug().Err(err).Str("upload_id", uploadID).Msg("multipart part cleanup after complete failed")
 	}
-	// The CmdCompleteMultipart propose committed (obj is non-nil), so the done-marker
-	// is durable and the session is finished — drop the off-FSM manifest blob.
-	// Best-effort: a leaked manifest is reconciled by ListMultipartUploads (the
-	// completed object exists) and aborted by the lifecycle age backstop.
+	// The completed object's blob is durable (obj is non-nil), so the session is
+	// finished — drop the off-FSM manifest blob. Best-effort: a leaked manifest is
+	// reconciled by ListMultipartUploads (the det-vid object exists) and aborted by
+	// the lifecycle age backstop.
 	if derr := b.deleteManifestBlob(bucket, uploadID); derr != nil {
 		b.logger.Debug().Err(derr).Str("upload_id", uploadID).Msg("multipart manifest blob cleanup after complete failed")
 	}

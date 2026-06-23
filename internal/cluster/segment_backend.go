@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -42,15 +41,12 @@ type clusterSegmentBackend struct {
 
 	// Test seams. Production constructor leaves these nil; defaults route
 	// through b.shardGroup / newECObjectWriter / b.shardSvc.DeleteShards /
-	// b.writeQuorumMeta / b.propose. Tests inject all six to exercise
-	// putObjectChunked without a full RaftNode + ShardService.
+	// b.writeQuorumMeta. Tests inject these to exercise putObjectChunked without
+	// a full RaftNode + ShardService.
 	writeSegmentFn    func(ctx context.Context, idx int, in writeSegmentInput) (PlacementRecord, string, string, error)
 	groupSelectorFn   func(bucket, key string, idx int, blobID string) (ShardGroupEntry, error)
 	deleteShardsFn    func(ctx context.Context, peer, bucket, shardKey string) error
-	proposeFn         func(ctx context.Context, cmdType CommandType, payload any) error
 	writeQuorumMetaFn func(ctx context.Context, cmd PutObjectMetaCmd) error
-	readDoneMarkerFn  func(uploadID string) (*multipartDone, error) // seam for phantom-winner guard
-	headObjectMetaVFn func(ctx context.Context, bucket, key, versionID string) (*storage.Object, error)
 	ecConfigFn        func() ECConfig
 	// peerWeightsFn returns the per-peer disk-capacity weight snapshot aligned
 	// 1:1 with peers and whether weighting is enabled. Production constructor
@@ -378,22 +374,16 @@ func runChunkedPutWithParts(
 	completeUploadID string,
 ) (*storage.Object, error) {
 
-	// Best-effort blob cleanup on any error path before raft commit.
+	// Best-effort blob cleanup on any error path before the commit.
 	// SegmentWriter.Write joins all workers before returning, so by the time
-	// defer runs csb.placements is settled — no race.
+	// defer runs csb.placements is settled — no race. M3: the multipart-complete
+	// commit (per-version blob or latest-only quorum-meta) is synchronous and
+	// FAIL-CLOSED, so a commit error means nothing is durable — the segment shards
+	// are eager-cleaned here, same as the non-multipart chunked PUT. There is no
+	// raft propose and therefore no phantom-commit window to preserve shards for.
 	var committed bool
-	// preserveSegmentsOnProposeError suppresses the eager cleanup below ONLY for
-	// the phantom-commit window of a multipart-complete propose (timeout /
-	// cancellation, per shardCleanupSafeOnProposeError): the raft entry may still
-	// commit and write object meta referencing these segment shards, so eager
-	// deletion would orphan a committed object. Definite-no-commit propose errors,
-	// pre-commit errors (SegmentWriter.Write, beforeCommit), and the non-multipart
-	// chunked PUT (synchronous writeQuorumMeta, no phantom window) still clean up
-	// eagerly — there is no EC orphan scrubber to reclaim them later (see
-	// shardCleanupSafeOnProposeError).
-	var preserveSegmentsOnProposeError bool
 	defer func() {
-		if committed || preserveSegmentsOnProposeError {
+		if committed {
 			return
 		}
 		for _, p := range csb.placements {
@@ -446,9 +436,13 @@ func runChunkedPutWithParts(
 	obj.VersionID = versionID
 	segments := buildSegmentMetaEntries(csb.placements, obj.Segments)
 
-	// 6. Single atomic raft commit.
-	// completeUploadID path intentionally uses data_raft (Phase 3 boundary): see
-	// commitCompleteMultipartObjectWriteResult in object_put.go for the rationale.
+	// 6. Commit. M3: the multipart complete is raft-free — there is no
+	// CmdCompleteMultipart propose. The completed object's quorum-meta blob IS the
+	// durable commit, FAIL-CLOSED: a write failure leaves nothing committed, so the
+	// segment shards are eager-cleaned by the defer (committed stays false). Same-vid
+	// convergence across concurrent completers / idempotent retry is provided by the
+	// deterministic VersionID + the det-vid existence short-circuit in
+	// CompleteMultipartUpload — NOT a done-marker.
 	var commitErr error
 	if completeUploadID != "" {
 		// Vid-deterministic recorded blob placement (same-vid convergence): the
@@ -460,12 +454,6 @@ func runChunkedPutWithParts(
 		if bnerr != nil {
 			return nil, bnerr
 		}
-		// Blob-authoritative multipart (versioning-enabled): build the completed
-		// object's encoded PutObjectMetaCmd HERE (the proposer) — CompleteMultipartCmd
-		// does not carry UserMetadata/ACL/SSE — and pass the opaque bytes through the
-		// command so applyCompleteMultipart stores them verbatim in the done-marker.
-		// The per-version blob (written after the propose, from the marker) is then the
-		// sole authority. nil for non-versioned/Suspended (legacy FSM obj:/lat:).
 		metaCmd := PutObjectMetaCmd{
 			Bucket:           bucket,
 			Key:              key,
@@ -485,118 +473,29 @@ func runChunkedPutWithParts(
 			Segments:         segments,
 			Tags:             tags,
 		}
+		// Versioning-enabled buckets get an encoded per-version blob; non-versioned /
+		// Suspended get nil and commit via the latest-only quorum-meta write below.
 		metaBlob, mberr := csb.buildMultipartMetaBlob(ctx, metaCmd)
 		if mberr != nil {
 			return nil, mberr
 		}
-		// Authoritative commit: atomic {write object meta to FSM, delete the
-		// manifest} via data_raft (applyCompleteMultipart). That atomicity
-		// prevents a manifest leak / upload-ID reuse, so it stays the durable
-		// commit and drives the cleanup defer below — on failure the manifest is
-		// intact and the client can retry CompleteMultipartUpload.
-		commitErr = csb.propose(ctx, CmdCompleteMultipart, CompleteMultipartCmd{
-			Bucket:           bucket,
-			Key:              key,
-			UploadID:         completeUploadID,
-			Size:             obj.Size,
-			ETag:             obj.ETag,
-			VersionID:        versionID,
-			ContentType:      contentType,
-			ModTime:          commitModTime,
-			Parts:            partsMeta,
-			NodeIDs:          blobNodeIDs,
-			ECData:           uint8(csb.placements[0].Config.DataShards),
-			ECParity:         uint8(csb.placements[0].Config.ParityShards),
-			PlacementGroupID: csb.placements[0].PlacementGroupID,
-			Segments:         segments,
-			Tags:             tags,
-			MetaBlob:         metaBlob,
-		})
-		if commitErr != nil && !shardCleanupSafeOnProposeError(commitErr) {
-			// Phantom-commit window (timeout / cancellation): the raft entry may
-			// still commit, so do NOT eager-delete the possibly-committed
-			// object's segment shards. See preserveSegmentsOnProposeError above.
-			preserveSegmentsOnProposeError = true
-		}
-		if commitErr == nil && len(metaBlob) > 0 {
-			// Blob-authoritative path. The object is durably committed via raft (the
-			// done-marker carries the winner's meta_blob), so suppress the cleanup
-			// defer BEFORE the blob write: a blob-write failure must NOT delete the
-			// segments — they are the winner's data and the client's retry re-writes
-			// the blob from the marker. (A concurrent loser's segments are orphans the
-			// segment scrubber reclaims; either way they must survive this call.)
-			committed = true
-			marker, merr := csb.readDoneMarker(completeUploadID)
-			if merr != nil {
-				// Fail closed: the marker is the authority on who won; without it we
-				// cannot safely choose whose blob to publish. Retry re-reads it.
-				return nil, fmt.Errorf("multipart complete: done-marker readback: %w", merr)
-			}
-			// Write the WINNER's per-version blob FAIL-CLOSED. winner+loser both run
-			// this (idempotent same vid+bytes); the loser uses the marker's meta_blob.
-			winnerBlob := metaBlob
-			if marker != nil && len(marker.MetaBlob) > 0 {
-				winnerBlob = marker.MetaBlob
-			}
-			winCmd, werr := csb.writeCompletedMultipartBlob(ctx, winnerBlob)
+		if len(metaBlob) > 0 {
+			// VERSIONED: the per-version quorum-meta blob is the sole authority,
+			// written FAIL-CLOSED. On failure nothing is committed; the segment shards
+			// are cleaned by the defer and the client retries CompleteMultipartUpload.
+			winCmd, werr := csb.writeCompletedMultipartBlob(ctx, metaBlob)
 			if werr != nil {
 				return nil, werr
 			}
+			committed = true
 			metrics.ChunkFanoutBreadth.Observe(float64(countDistinctPlacementGroups(csb.placements)))
 			winObj, _ := objectAndPlacementFromCmd(winCmd)
 			return winObj, nil
 		}
-		if commitErr == nil {
-			// Legacy non-versioned/Suspended path (no meta_blob).
-			// Phantom-winner guard: after a successful propose, check who actually
-			// won this uploadID. If another concurrent completion committed first
-			// (its marker holds a different versionID), our FSM apply was a no-op
-			// — do NOT mirror our v2 into quorum-meta (that would publish a
-			// duplicate version). Instead return the winner's object. Our segment
-			// shards become orphans collected by the segment scrubber (same as
-			// relocation's old-blob handling); set committed=true to suppress the
-			// cleanup defer.
-			if marker, merr := csb.readDoneMarker(completeUploadID); merr != nil {
-				log.Warn().Err(merr).Str("bucket", bucket).Str("key", key).Str("upload_id", completeUploadID).
-					Msg("chunked multipart complete: done-marker readback failed; proceeding with mirror")
-			} else if marker != nil && marker.VersionID != versionID {
-				// Another completion won this uploadID. Suppress our mirror and
-				// return the winner's committed object.
-				committed = true // suppress cleanup defer — orphans go to scrubber
-				winObj, werr := csb.headObjectMetaVWinner(ctx, bucket, key, marker.VersionID)
-				if werr != nil {
-					return nil, fmt.Errorf("multipart complete: winner readback: %w", werr)
-				}
-				return winObj, nil
-			}
-
-			// LIST-visibility mirror into quorum-meta (Phase 4 index-free LIST
-			// scans it). Best-effort: the object is already durably committed
-			// above, so a mirror failure must NOT fail the op or trip the cleanup
-			// defer — only LIST visibility lags until a repair re-derives it.
-			if perr := csb.writeQuorumMeta(ctx, PutObjectMetaCmd{
-				Bucket:           bucket,
-				Key:              key,
-				Size:             obj.Size,
-				ETag:             obj.ETag,
-				VersionID:        versionID,
-				ContentType:      contentType,
-				ModTime:          commitModTime,
-				UserMetadata:     userMetadata,
-				SSEAlgorithm:     sseAlgorithm,
-				ACL:              csb.acl,
-				Parts:            partsMeta,
-				NodeIDs:          blobNodeIDs,
-				ECData:           uint8(csb.placements[0].Config.DataShards),
-				ECParity:         uint8(csb.placements[0].Config.ParityShards),
-				PlacementGroupID: csb.placements[0].PlacementGroupID,
-				Segments:         segments,
-				Tags:             tags,
-			}); perr != nil {
-				log.Warn().Err(perr).Str("bucket", bucket).Str("key", key).Str("upload_id", completeUploadID).
-					Msg("chunked multipart complete: quorum-meta mirror failed (object committed via raft; LIST visibility deferred until repair)")
-			}
-		}
+		// NON-VERSIONED / Suspended: the latest-only quorum-meta blob is the sole
+		// authority, written FAIL-CLOSED (M3 F7) — mirrors the regular non-versioned
+		// PUT. On failure nothing is committed; the cleanup defer reclaims the shards.
+		commitErr = csb.writeQuorumMeta(ctx, metaCmd)
 	} else {
 		// Phase 3: commit via per-node quorum meta write (bypasses data_raft).
 		commitErr = csb.writeQuorumMeta(ctx, PutObjectMetaCmd{
@@ -634,13 +533,6 @@ func runChunkedPutWithParts(
 	return obj, nil
 }
 
-func (c *clusterSegmentBackend) propose(ctx context.Context, cmdType CommandType, payload any) error {
-	if c.proposeFn != nil {
-		return c.proposeFn(ctx, cmdType, payload)
-	}
-	return c.b.propose(ctx, cmdType, payload)
-}
-
 func (c *clusterSegmentBackend) writeQuorumMeta(ctx context.Context, cmd PutObjectMetaCmd) error {
 	if c.writeQuorumMetaFn != nil {
 		return c.writeQuorumMetaFn(ctx, cmd)
@@ -665,53 +557,6 @@ func (c *clusterSegmentBackend) writeCompletedMultipartBlob(ctx context.Context,
 		return PutObjectMetaCmd{}, fmt.Errorf("multipart complete: no backend for per-version blob write")
 	}
 	return c.b.writeCompletedMultipartBlob(ctx, metaBlob)
-}
-
-// readDoneMarker reads the mpudone marker for uploadID. Returns (nil, nil) when
-// the marker does not exist. Uses the test seam when injected; falls back to
-// the DistributedBackend's store.
-func (c *clusterSegmentBackend) readDoneMarker(uploadID string) (*multipartDone, error) {
-	if c.readDoneMarkerFn != nil {
-		return c.readDoneMarkerFn(uploadID)
-	}
-	if c.b == nil {
-		return nil, nil
-	}
-	var marker *multipartDone
-	if err := c.b.store.View(func(txn MetadataTxn) error {
-		item, err := txn.Get(c.b.ks().MultipartDoneKey(uploadID))
-		if err == ErrMetaKeyNotFound {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		raw, err := c.b.itemValueCopy(item)
-		if err != nil {
-			return err
-		}
-		m, err := unmarshalMultipartDone(raw)
-		if err != nil {
-			return err
-		}
-		marker = &m
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-	return marker, nil
-}
-
-// headObjectMetaVWinner reads a specific version for the winner-readback path.
-func (c *clusterSegmentBackend) headObjectMetaVWinner(ctx context.Context, bucket, key, versionID string) (*storage.Object, error) {
-	if c.headObjectMetaVFn != nil {
-		return c.headObjectMetaVFn(ctx, bucket, key, versionID)
-	}
-	if c.b == nil {
-		return nil, fmt.Errorf("multipart complete: winner readback: backend not wired")
-	}
-	obj, _, err := c.b.headObjectMetaV(ctx, bucket, key, versionID)
-	return obj, err
 }
 
 // chunkedChooseModTime returns ModTime according to the preserveModTime
