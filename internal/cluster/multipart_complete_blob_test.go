@@ -11,11 +11,9 @@ import (
 )
 
 // TestCompleteMultipart_BlobAuthorityNoFSM proves the blob-primary multipart
-// complete: for a versioning-enabled bucket, CompleteMultipartUpload's per-version
-// quorum-meta blob is the SOLE AUTHORITY — no FSM obj:/lat: record is written, the
-// object reads back via the blob, and the done-marker carries the encoded meta_blob
-// so a retry/loser can re-write the winner's blob. Mirrors
-// TestDeleteObjectMarker_BlobDurableNoPropose for the multipart path.
+// complete (M3): for a versioning-enabled bucket, CompleteMultipartUpload's
+// per-version quorum-meta blob is the SOLE AUTHORITY — no FSM obj:/lat: record is
+// written, no CmdCompleteMultipart propose, and the object reads back via the blob.
 func TestCompleteMultipart_BlobAuthorityNoFSM(t *testing.T) {
 	b := newSingleNode1Plus0ChunkCapable(t)
 	ctx := context.Background()
@@ -58,13 +56,6 @@ func TestCompleteMultipart_BlobAuthorityNoFSM(t *testing.T) {
 		return nil
 	}))
 
-	// The done-marker carries the encoded meta_blob so a retry re-writes the blob.
-	marker, err := b.readDoneMarker(up.UploadID)
-	require.NoError(t, err)
-	require.NotNil(t, marker, "multipart complete must leave a done-marker")
-	require.Equal(t, vid, marker.VersionID)
-	require.NotEmpty(t, marker.MetaBlob, "done-marker must carry the winning meta_blob")
-
 	// HEAD/GET read back via the per-version blob.
 	head, err := b.HeadObject(ctx, bkt, key)
 	require.NoError(t, err)
@@ -79,12 +70,12 @@ func TestCompleteMultipart_BlobAuthorityNoFSM(t *testing.T) {
 	require.Equal(t, payload, got.Bytes(), "multipart object body must read back from the blob")
 }
 
-// TestCompleteMultipart_RetryRewritesBlobFromMarker proves the lost-object fix:
-// if the per-version blob is missing after a complete (a crash/failure after the
-// propose but before the blob landed), a retried CompleteMultipartUpload hits the
-// done-marker idempotent branch and re-writes the WINNER's blob from the marker's
-// meta_blob — so the object is never permanently 404.
-func TestCompleteMultipart_RetryRewritesBlobFromMarker(t *testing.T) {
+// TestCompleteMultipart_RetryShortCircuitsOnBlob proves the M3 idempotency anchor:
+// the completed object's per-version blob — not a done-marker — IS the idempotency
+// record. A retried CompleteMultipartUpload (manifest already deleted by the first)
+// short-circuits on the existing det-vid per-version blob and returns the committed
+// object without re-assembling.
+func TestCompleteMultipart_RetryShortCircuitsOnBlob(t *testing.T) {
 	b := newSingleNode1Plus0ChunkCapable(t)
 	ctx := context.Background()
 	const bkt, key = "vbkt", "mp.bin"
@@ -93,35 +84,37 @@ func TestCompleteMultipart_RetryRewritesBlobFromMarker(t *testing.T) {
 
 	up, err := b.CreateMultipartUpload(ctx, bkt, key, "application/octet-stream")
 	require.NoError(t, err)
-	payload := []byte("retry-rewrites-blob")
+	payload := []byte("retry-short-circuits-on-blob")
 	part, err := b.UploadPart(ctx, bkt, key, up.UploadID, 1, bytes.NewReader(payload), "")
 	require.NoError(t, err)
 	obj, err := b.CompleteMultipartUpload(ctx, bkt, key, up.UploadID, []storage.Part{*part})
 	require.NoError(t, err)
 	vid := obj.VersionID
 
-	// Simulate the crash window: the object is committed (done-marker + segments)
-	// but the per-version blob never landed.
-	require.NoError(t, b.shardSvc.deleteQuorumMetaVersionLocal(bkt, key, vid))
-	_, err = b.HeadObject(ctx, bkt, key)
-	require.ErrorIs(t, err, storage.ErrObjectNotFound, "blob gone → object reads 404 before the retry")
-
-	// Retry: manifest is gone, so this hits the done-marker idempotent branch,
-	// which re-writes the winner's blob from the marker's meta_blob.
-	retried, err := b.CompleteMultipartUpload(ctx, bkt, key, up.UploadID, []storage.Part{*part})
+	// The per-version blob is the durable idempotency record.
+	_, ok, err := b.readQuorumMetaVersion(bkt, key, vid)
 	require.NoError(t, err)
-	require.Equal(t, vid, retried.VersionID, "retry returns the original winning version")
+	require.True(t, ok, "completed object's per-version blob must be durable")
 
-	// The blob is durable again; HEAD/GET succeed.
+	// Retry: manifest is gone; the det-vid existence short-circuit returns the same
+	// committed object.
+	retried, err := b.CompleteMultipartUpload(ctx, bkt, key, up.UploadID, []storage.Part{*part})
+	require.NoError(t, err, "retry must be idempotent via the per-version blob short-circuit")
+	require.Equal(t, vid, retried.VersionID, "retry returns the original winning version")
+	require.Equal(t, obj.ETag, retried.ETag)
+	require.Equal(t, obj.Size, retried.Size)
+
+	// HEAD/GET still succeed from the blob.
 	head, err := b.HeadObject(ctx, bkt, key)
 	require.NoError(t, err)
 	require.Equal(t, int64(len(payload)), head.Size)
 }
 
-// TestCompleteMultipart_NonVersionedKeepsFSM proves the carve-out: a
-// non-versioned (Suspended/unset) bucket's multipart complete KEEPS the legacy
-// FSM obj: write (no meta_blob) — non-versioned blob authority is a separate task.
-func TestCompleteMultipart_NonVersionedKeepsFSM(t *testing.T) {
+// TestCompleteMultipart_NonVersionedBlobAuthority proves M3's non-versioned shift:
+// a non-versioned (Suspended/unset) bucket's multipart complete writes NO FSM
+// obj:/lat: record — the latest-only quorum-meta blob (VersionID == det-vid) is the
+// sole authority, read back via HEAD/GET. No CmdCompleteMultipart propose.
+func TestCompleteMultipart_NonVersionedBlobAuthority(t *testing.T) {
 	b := newSingleNode1Plus0ChunkCapable(t)
 	ctx := context.Background()
 	const bkt, key = "plainbkt", "mp.bin"
@@ -136,22 +129,26 @@ func TestCompleteMultipart_NonVersionedKeepsFSM(t *testing.T) {
 	obj, err := b.CompleteMultipartUpload(ctx, bkt, key, up.UploadID, []storage.Part{*part})
 	require.NoError(t, err)
 
-	// Legacy: the FSM latest obj: record is written (non-versioned authority).
+	detVID, err := deriveMultipartVID(up.UploadID)
+	require.NoError(t, err)
+	require.Equal(t, detVID, obj.VersionID, "non-versioned completed object carries the det-vid")
+
+	// No FSM obj:/lat: records — the latest-only blob is the sole authority.
 	require.NoError(t, b.store.View(func(txn MetadataTxn) error {
 		_, gerr := txn.Get(b.ks().ObjectMetaKey(bkt, key))
-		require.NoError(t, gerr, "non-versioned multipart must write the legacy FSM obj: record")
+		require.ErrorIs(t, gerr, ErrMetaKeyNotFound, "non-versioned multipart must not write an FSM obj: record")
+		_, gerr = txn.Get(b.ks().LatestKey(bkt, key))
+		require.ErrorIs(t, gerr, ErrMetaKeyNotFound, "non-versioned multipart must not write an FSM lat: pointer")
 		return nil
 	}))
 
-	// The done-marker carries NO meta_blob (legacy mode).
-	marker, err := b.readDoneMarker(up.UploadID)
+	// The latest-only quorum-meta blob is durable and carries the det-vid.
+	cmd, err := b.readQuorumMetaCmd(bkt, key)
 	require.NoError(t, err)
-	require.NotNil(t, marker)
-	require.Empty(t, marker.MetaBlob, "non-versioned done-marker must not carry a meta_blob")
+	require.Equal(t, detVID, cmd.VersionID, "latest-only blob VersionID must be the det-vid")
 
-	// Read-back still works via the legacy FSM/latest-only path.
+	// Read-back works via the latest-only blob.
 	head, err := b.HeadObject(ctx, bkt, key)
 	require.NoError(t, err)
 	require.Equal(t, int64(len(payload)), head.Size)
-	_ = obj
 }

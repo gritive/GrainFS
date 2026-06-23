@@ -674,10 +674,13 @@ func (b *DistributedBackend) readQuorumMetaVersions(bucket, key string) ([]PutOb
 		return nil, nil
 	}
 	byVID := map[string]PutObjectMetaCmd{}
-	// keep the higher-MetaSeq blob for a same-VID replica (mirrors quorumMetaBlobWins's
-	// MetaSeq tiebreak so a relocation re-write wins deterministically).
+	// Same-VID dedup by the full LWW comparator (quorumMetaCmdWins): higher
+	// ModTime wins, then higher VersionID, then higher MetaSeq, with the
+	// hard-delete tombstone as the top tiebreak. Deterministic regardless of
+	// fan-out iteration order (the old "MetaSeq >= keeps last-iterated" tiebreak
+	// was non-deterministic for same-MetaSeq replicas).
 	put := func(c PutObjectMetaCmd) {
-		if ex, ok := byVID[c.VersionID]; !ok || c.MetaSeq >= ex.MetaSeq {
+		if ex, ok := byVID[c.VersionID]; !ok || quorumMetaCmdWins(c, ex) {
 			byVID[c.VersionID] = c
 		}
 	}
@@ -731,11 +734,12 @@ func (b *DistributedBackend) listObjectsPerVersion(ctx context.Context, bucket, 
 		return nil, nil
 	}
 	byKey := map[string]PutObjectMetaCmd{}
-	// Inline max-vid + same-VID MetaSeq>= tiebreak (mirrors readQuorumMetaVersions'
-	// put), NOT deriveLatestVersion (which lacks the MetaSeq tiebreak).
+	// Latest stays vid-primary (cross-vid max-VID wins); on a SAME-vid replica
+	// dedup by the full LWW comparator (quorumMetaCmdWins) so it is deterministic
+	// regardless of fan-out iteration order, mirroring readQuorumMetaVersions.
 	put := func(c PutObjectMetaCmd) {
 		if ex, ok := byKey[c.Key]; !ok || c.VersionID > ex.VersionID ||
-			(c.VersionID == ex.VersionID && c.MetaSeq >= ex.MetaSeq) {
+			(c.VersionID == ex.VersionID && quorumMetaCmdWins(c, ex)) {
 			byKey[c.Key] = c
 		}
 	}
@@ -804,11 +808,12 @@ func (b *DistributedBackend) scanQuorumMetaVersionsClusterAll(bucket, prefix str
 	}
 	type vkey struct{ key, vid string }
 	byKey := map[vkey]PutObjectMetaCmd{}
-	// keep the higher-MetaSeq blob for a same-(Key,VID) replica (mirrors the
-	// MetaSeq tiebreak in readQuorumMetaVersions so a relocation re-write wins).
+	// Same-(Key,VID) dedup by the full LWW comparator (quorumMetaCmdWins) — higher
+	// ModTime/VID/MetaSeq with the tombstone tiebreak — so it is deterministic
+	// regardless of fan-out iteration order (mirrors readQuorumMetaVersions).
 	put := func(c PutObjectMetaCmd) {
 		k := vkey{c.Key, c.VersionID}
-		if ex, ok := byKey[k]; !ok || c.MetaSeq >= ex.MetaSeq {
+		if ex, ok := byKey[k]; !ok || quorumMetaCmdWins(c, ex) {
 			byKey[k] = c
 		}
 	}
@@ -988,8 +993,9 @@ func (b *DistributedBackend) readQuorumMetaVersionsDecodeStrict(bucket, key stri
 			}
 		}
 	}
-	// strict decode + dedup (keep the higher-MetaSeq blob for a same-VID replica,
-	// mirroring readQuorumMetaVersions).
+	// strict decode + dedup. Same-VID replicas dedup by the full LWW comparator
+	// (quorumMetaCmdWins) so the winner is deterministic regardless of fan-out
+	// order, mirroring readQuorumMetaVersions.
 	byVID := map[string]PutObjectMetaCmd{}
 	for _, blob := range rawBlobs {
 		cmd, derr := b.shardSvc.decodeQuorumMetaCmdBlob(blob)
@@ -998,7 +1004,7 @@ func (b *DistributedBackend) readQuorumMetaVersionsDecodeStrict(bucket, key stri
 			// out that it WAS the authoritative latest. Fail closed.
 			return nil, fmt.Errorf("decode-strict version read %s/%s: %w", bucket, key, derr)
 		}
-		if ex, ok := byVID[cmd.VersionID]; !ok || cmd.MetaSeq >= ex.MetaSeq {
+		if ex, ok := byVID[cmd.VersionID]; !ok || quorumMetaCmdWins(cmd, ex) {
 			byVID[cmd.VersionID] = cmd
 		}
 	}
@@ -1302,8 +1308,10 @@ func (s *ShardService) ScanQuorumMetaVersionsBucket(bucket, prefix string) ([]Pu
 		if prefix != "" && !strings.HasPrefix(cmd.Key, prefix) {
 			return nil
 		}
+		// Latest stays vid-primary (cross-vid max-VID); same-vid replicas dedup by
+		// the full LWW comparator (quorumMetaCmdWins) for fan-out-order independence.
 		if ex, ok := byKey[cmd.Key]; !ok || cmd.VersionID > ex.VersionID ||
-			(cmd.VersionID == ex.VersionID && cmd.MetaSeq >= ex.MetaSeq) {
+			(cmd.VersionID == ex.VersionID && quorumMetaCmdWins(cmd, ex)) {
 			byKey[cmd.Key] = cmd
 		}
 		return nil

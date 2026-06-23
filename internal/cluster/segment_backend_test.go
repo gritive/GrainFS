@@ -39,8 +39,6 @@ type fakeSegmentBackendDeps struct {
 
 	deleteCalls []deleteCall
 
-	proposeCalls         []proposeCall
-	proposeErr           error
 	deleteShardErr       error
 	writeQuorumMetaCalls []PutObjectMetaCmd
 	writeQuorumMetaErr   error
@@ -48,11 +46,6 @@ type fakeSegmentBackendDeps struct {
 
 type deleteCall struct {
 	peer, bucket, shardKey string
-}
-
-type proposeCall struct {
-	cmdType CommandType
-	cmd     any
 }
 
 func (f *fakeSegmentBackendDeps) groupSelector(bucket, key string, idx int, blobID string) (ShardGroupEntry, error) {
@@ -96,13 +89,6 @@ func (f *fakeSegmentBackendDeps) deleteShards(ctx context.Context, peer, bucket,
 	return f.deleteShardErr
 }
 
-func (f *fakeSegmentBackendDeps) propose(ctx context.Context, cmdType CommandType, payload any) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.proposeCalls = append(f.proposeCalls, proposeCall{cmdType: cmdType, cmd: payload})
-	return f.proposeErr
-}
-
 func (f *fakeSegmentBackendDeps) writeQuorumMeta(ctx context.Context, cmd PutObjectMetaCmd) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -124,7 +110,6 @@ func newCSBWithDeps(deps *fakeSegmentBackendDeps, blobIDs []string) *clusterSegm
 		writeSegmentFn:    deps.writeSegment,
 		groupSelectorFn:   deps.groupSelector,
 		deleteShardsFn:    deps.deleteShards,
-		proposeFn:         deps.propose,
 		writeQuorumMetaFn: deps.writeQuorumMeta,
 		ecConfigFn:        func() ECConfig { return ECConfig{DataShards: 4, ParityShards: 2} },
 	}
@@ -250,7 +235,6 @@ func TestPutObjectChunked_SingleAtomicMetaCommit(t *testing.T) {
 	assert.Len(t, obj.Segments, 4)
 
 	require.Len(t, deps.writeQuorumMetaCalls, 1, "exactly one quorum meta write")
-	require.Empty(t, deps.proposeCalls, "PutObjectMeta must not go through raft propose")
 	cmd := deps.writeQuorumMetaCalls[0]
 	require.Len(t, cmd.Segments, 4)
 	for i, seg := range cmd.Segments {
@@ -367,10 +351,12 @@ func TestRunChunkedPutWithParts_CommitsPartsAndSegments(t *testing.T) {
 	require.NotNil(t, obj)
 	require.Equal(t, parts, obj.Parts)
 
-	require.Len(t, deps.proposeCalls, 1)
-	require.Equal(t, CmdCompleteMultipart, deps.proposeCalls[0].cmdType)
-	cmd := deps.proposeCalls[0].cmd.(CompleteMultipartCmd)
-	require.Equal(t, "upload-1", cmd.UploadID)
+	// M3: the multipart complete is raft-free. The non-versioned (c.b == nil → no
+	// meta_blob) commit is a single FAIL-CLOSED latest-only quorum-meta write — no
+	// CmdCompleteMultipart propose (proven at the integration level via
+	// recordingMultipartRaftNode in multipart_complete_offraft_test.go).
+	require.Len(t, deps.writeQuorumMetaCalls, 1, "non-versioned multipart commits via one quorum-meta write")
+	cmd := deps.writeQuorumMetaCalls[0]
 	require.Len(t, cmd.Segments, 2)
 	require.Equal(t, parts, cmd.Parts)
 
@@ -379,90 +365,39 @@ func TestRunChunkedPutWithParts_CommitsPartsAndSegments(t *testing.T) {
 	require.Equal(t, wantParts, cmd.Parts)
 }
 
-// TestRunChunkedPutWithParts_ProposeError_ShardCleanup guards the
-// propose-timeout shard-cleanup fix. On a multipart-complete propose error the
-// segment shards are eager-deleted ONLY when the entry definitely did not
-// commit. For the phantom-commit window (timeout / cancellation) the raft entry
-// may still commit and write object meta referencing those shards, so deletion
-// is suppressed to avoid orphaning a committed object. There is no EC orphan
-// scrubber, so definite-no-commit errors MUST still clean up eagerly (else a
-// permanent leak).
+// TestRunChunkedPutWithParts_CommitError_ShardCleanup guards the M3 fail-closed
+// commit: the non-versioned (c.b == nil → no meta_blob) multipart complete commits
+// via a single synchronous latest-only quorum-meta write. On any commit error
+// nothing is durable, so the segment shards are ALWAYS eager-deleted (there is no
+// raft propose and therefore no phantom-commit window) and the error surfaces.
 //
 // Contrast: TestPutObjectChunked_PartialFailRollsBackBlobs_* prove PRE-commit
-// failures (segment write, beforeCommit) clean up eagerly — nothing proposed.
+// failures (segment write, beforeCommit) clean up eagerly too — nothing committed.
 //
-// Neuter test: drop the !shardCleanupSafeOnProposeError guard (always preserve,
-// or never preserve) and the relevant sub-case is RED.
-func TestRunChunkedPutWithParts_ProposeError_ShardCleanup(t *testing.T) {
-	cases := []struct {
-		name        string
-		err         error
-		wantCleanup bool // true = shards eager-deleted (definite no-commit)
-	}{
-		{"propose_timeout_preserves", ErrProposeTimeout, false},
-		{"wrapped_timeout_preserves", fmt.Errorf("commit: %w", ErrProposeTimeout), false},
-		{"context_canceled_preserves", context.Canceled, false},
-		{"definite_error_cleans", errors.New("encode command failed"), true},
-		{"apply_error_cleans", fmt.Errorf("apply: %w", storage.ErrObjectNotFound), true},
+// Neuter test: drop the `committed = true` after a successful commit (or skip the
+// eager-delete defer) and this is RED.
+func TestRunChunkedPutWithParts_CommitError_ShardCleanup(t *testing.T) {
+	chunk := storage.DefaultChunkSize
+	payload := bytes.Repeat([]byte("Q"), chunk+1)
+	sp := makeSpool(t, payload)
+	deps := newFakeBackendWithGroups(fourPGFixture())
+	deps.writeQuorumMetaErr = errors.New("quorum-meta write failed")
+	blobIDs := []string{uuid.Must(uuid.NewV7()).String(), uuid.Must(uuid.NewV7()).String()}
+	csb := newCSBWithDeps(deps, blobIDs)
+	parts := []storage.MultipartPartEntry{
+		{PartNumber: 1, Size: int64(chunk), ETag: "etag-1"},
+		{PartNumber: 2, Size: 1, ETag: "etag-2"},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			chunk := storage.DefaultChunkSize
-			payload := bytes.Repeat([]byte("Q"), chunk+1)
-			sp := makeSpool(t, payload)
-			deps := newFakeBackendWithGroups(fourPGFixture())
-			deps.proposeErr = tc.err
-			blobIDs := []string{uuid.Must(uuid.NewV7()).String(), uuid.Must(uuid.NewV7()).String()}
-			csb := newCSBWithDeps(deps, blobIDs)
-			parts := []storage.MultipartPartEntry{
-				{PartNumber: 1, Size: int64(chunk), ETag: "etag-1"},
-				{PartNumber: 2, Size: 1, ETag: "etag-2"},
-			}
 
-			body, err := sp.Open()
-			require.NoError(t, err)
-			defer body.Close()
-			_, err = runChunkedPutWithParts(context.Background(), csb, body,
-				"bucket", "large-mp.bin", "v1", "application/octet-stream",
-				nil, "", 0, false, "", nil, parts, nil, "upload-1")
-			require.Error(t, err, "propose error must surface to the caller")
-			require.Len(t, deps.proposeCalls, 1)
-			require.Equal(t, CmdCompleteMultipart, deps.proposeCalls[0].cmdType)
-
-			if tc.wantCleanup {
-				require.NotEmpty(t, deps.deleteCalls,
-					"definite-no-commit propose error must eager-delete shards (no EC orphan scrubber)")
-			} else {
-				require.Empty(t, deps.deleteCalls,
-					"phantom-commit window must NOT eager-delete a possibly-committed object's shards")
-			}
-		})
-	}
-}
-
-// TestShardCleanupSafeOnProposeError pins the classification: only the
-// phantom-commit window (server-side timeout, client cancellation) suppresses
-// eager shard cleanup; every other error is a definite no-commit and is safe to
-// clean. Neuter: change the helper to `return true` (or `return false`) → RED.
-func TestShardCleanupSafeOnProposeError(t *testing.T) {
-	cases := []struct {
-		name string
-		err  error
-		want bool
-	}{
-		{"timeout", ErrProposeTimeout, false},
-		{"wrapped_timeout", fmt.Errorf("propose: leader commit timed out: %w", ErrProposeTimeout), false},
-		{"canceled", context.Canceled, false},
-		{"wrapped_canceled", fmt.Errorf("ctx: %w", context.Canceled), false},
-		{"deadline_exceeded_not_our_sentinel", context.DeadlineExceeded, true},
-		{"encode_error", errors.New("encode command: boom"), true},
-		{"apply_error", fmt.Errorf("apply: %w", storage.ErrObjectNotFound), true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, shardCleanupSafeOnProposeError(tc.err))
-		})
-	}
+	body, err := sp.Open()
+	require.NoError(t, err)
+	defer body.Close()
+	_, err = runChunkedPutWithParts(context.Background(), csb, body,
+		"bucket", "large-mp.bin", "v1", "application/octet-stream",
+		nil, "", 0, false, "", nil, parts, nil, "upload-1")
+	require.Error(t, err, "commit error must surface to the caller")
+	require.NotEmpty(t, deps.deleteCalls,
+		"a fail-closed commit error must eager-delete the un-committed segment shards")
 }
 
 func TestPutObjectChunked_ObservesChunkFanoutBreadth(t *testing.T) {
@@ -512,8 +447,8 @@ func TestPutObjectChunked_PartialFailRollsBackBlobs_WorkerError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "segment write")
 
-	// No raft commit.
-	assert.Empty(t, deps.proposeCalls)
+	// No commit (pre-commit failure).
+	assert.Empty(t, deps.writeQuorumMetaCalls)
 
 	// Cleanup called for the two segments that DID complete (0 and 1).
 	// Each segment has 6 placement peers in the 4+2 fixture, so 2 × 6 = 12
@@ -556,7 +491,7 @@ func TestPutObjectChunked_PartialFailRollsBackBlobs_BeforeCommitError(t *testing
 	require.Error(t, err)
 	assert.ErrorIs(t, err, hookErr)
 
-	assert.Empty(t, deps.proposeCalls, "beforeCommit failure must not commit")
+	assert.Empty(t, deps.writeQuorumMetaCalls, "beforeCommit failure must not commit")
 	cleanedBlobs := map[string]struct{}{}
 	for _, dc := range deps.deleteCalls {
 		cleanedBlobs[dc.shardKey] = struct{}{}
@@ -623,7 +558,7 @@ func TestPutObjectChunked_PartialFailRollsBackBlobs_DeleteShardsBestEffort(t *te
 		nil, "", 0, false, "", nil, nil, nil)
 	require.Error(t, err)
 	// PUT errors cleanly even though cleanup also failed (no panic).
-	assert.Empty(t, deps.proposeCalls)
+	assert.Empty(t, deps.writeQuorumMetaCalls)
 }
 
 func TestPutObjectChunked_CommitsMultipartParts(t *testing.T) {
@@ -791,8 +726,8 @@ func TestPutObjectChunked_PartialFailRollsBackBlobs_ChunkerError(t *testing.T) {
 	assert.ErrorIs(t, err, io.ErrUnexpectedEOF,
 		"io.ErrUnexpectedEOF from the body must propagate through runChunkedPut")
 
-	// No raft commit on chunker failure.
-	assert.Empty(t, deps.proposeCalls, "chunker error must not propose meta")
+	// No commit on chunker failure.
+	assert.Empty(t, deps.writeQuorumMetaCalls, "chunker error must not commit meta")
 
 	// Every blob that the placement layer recorded MUST appear in the
 	// cleanup recorder. We don't pin the exact count (segment 0 always
@@ -816,145 +751,4 @@ func TestPutObjectChunked_PartialFailRollsBackBlobs_ChunkerError(t *testing.T) {
 	}
 	assert.True(t, recordedAny,
 		"chunker error after segment 0 must have allowed at least one placement to be recorded")
-}
-
-// TestCompleteMultipart_PhantomWinnerGuard_SkipsMirrorWhenAnotherVIDWon guards
-// the BLOCK fixed by S4c-0 PR2: when a phantom-commit retry proposes
-// CmdCompleteMultipart with a NEW versionID (v2) but the FSM's no-op returns
-// nil (because the first complete already wrote the marker with v1), the client
-// path must NOT mirror v2 into quorum-meta (which would publish a duplicate
-// version). Instead it must return the WINNER's object (v1).
-//
-// RED: remove the phantom-winner guard from runChunkedPutWithParts — the test
-// observes a writeQuorumMeta call with versionID "v2-loser" and returned
-// object.VersionID "v2-loser" (not "v1-winner").
-//
-// GREEN: with the guard, no mirror is emitted and the returned object has the
-// winner's versionID "v1-winner".
-func TestCompleteMultipart_PhantomWinnerGuard_SkipsMirrorWhenAnotherVIDWon(t *testing.T) {
-	const (
-		uploadID      = "upload-phantom"
-		winnerVID     = "v1-winner"
-		loserVID      = "v2-loser"
-		bucket        = "bucket"
-		key           = "obj.bin"
-		winnerETag    = "etag-winner"
-		winnerModTime = int64(1000)
-	)
-
-	winnerObj := &storage.Object{
-		Key:          key,
-		VersionID:    winnerVID,
-		ETag:         winnerETag,
-		Size:         42,
-		LastModified: winnerModTime,
-	}
-
-	// Inject: done marker already holds the WINNER's versionID (v1-winner),
-	// simulating the state after the first complete's FSM apply committed.
-	deps := newFakeBackendWithGroups(fourPGFixture())
-
-	blobIDs := []string{uuid.Must(uuid.NewV7()).String()}
-	csb := newCSBWithDeps(deps, blobIDs)
-	csb.versionID = loserVID
-
-	// Wire the phantom-winner seams.
-	csb.readDoneMarkerFn = func(uid string) (*multipartDone, error) {
-		if uid != uploadID {
-			return nil, nil
-		}
-		return &multipartDone{
-			UploadID:  uploadID,
-			Bucket:    bucket,
-			Key:       key,
-			VersionID: winnerVID,
-		}, nil
-	}
-	csb.headObjectMetaVFn = func(ctx context.Context, b, k, v string) (*storage.Object, error) {
-		require.Equal(t, bucket, b)
-		require.Equal(t, key, k)
-		require.Equal(t, winnerVID, v, "winner readback must use marker's versionID")
-		return winnerObj, nil
-	}
-
-	// Run the chunked multipart complete with the LOSER versionID.
-	payload := bytes.Repeat([]byte("Z"), testChunkedPutChunkSize)
-	sp := makeSpool(t, payload)
-	body, err := sp.Open()
-	require.NoError(t, err)
-	defer body.Close()
-
-	parts := []storage.MultipartPartEntry{{PartNumber: 1, Size: int64(testChunkedPutChunkSize), ETag: "etag-1"}}
-	obj, err := runChunkedPutWithParts(context.Background(), csb, body,
-		bucket, key, loserVID, "application/octet-stream",
-		nil, "", 0, false, "", nil, parts, nil, uploadID)
-
-	require.NoError(t, err)
-	require.NotNil(t, obj)
-
-	// The WINNER's object must be returned, not the loser's.
-	assert.Equal(t, winnerVID, obj.VersionID,
-		"phantom-winner guard must return the winner's versionID, not the loser's")
-
-	// No quorum-meta mirror must be emitted for the loser versionID.
-	assert.Empty(t, deps.writeQuorumMetaCalls,
-		"phantom-winner guard must skip quorum-meta mirror to prevent duplicate version publication")
-
-	// The propose call (CmdCompleteMultipart) still happened — it was the
-	// FSM's no-op path that returned nil.
-	require.Len(t, deps.proposeCalls, 1)
-	assert.Equal(t, CmdCompleteMultipart, deps.proposeCalls[0].cmdType)
-	cmd := deps.proposeCalls[0].cmd.(CompleteMultipartCmd)
-	assert.Equal(t, loserVID, cmd.VersionID, "propose carries the loser's versionID (FSM's no-op gated it)")
-}
-
-// TestCompleteMultipart_PhantomWinnerGuard_ProceedsWhenSameVIDWon verifies that
-// the guard does NOT suppress the mirror when the marker holds the SAME
-// versionID as what was proposed (the happy path: this node won the race).
-func TestCompleteMultipart_PhantomWinnerGuard_ProceedsWhenSameVIDWon(t *testing.T) {
-	const (
-		uploadID = "upload-winner"
-		vid      = "v1"
-		bucket   = "bucket"
-		key      = "obj.bin"
-	)
-
-	deps := newFakeBackendWithGroups(fourPGFixture())
-	blobIDs := []string{uuid.Must(uuid.NewV7()).String()}
-	csb := newCSBWithDeps(deps, blobIDs)
-	csb.versionID = vid
-
-	// Marker holds the SAME versionID: this node won.
-	csb.readDoneMarkerFn = func(uid string) (*multipartDone, error) {
-		return &multipartDone{
-			UploadID:  uploadID,
-			Bucket:    bucket,
-			Key:       key,
-			VersionID: vid,
-		}, nil
-	}
-	// headObjectMetaVFn must NOT be called (same VID = winner proceeds normally).
-	csb.headObjectMetaVFn = func(ctx context.Context, b, k, v string) (*storage.Object, error) {
-		t.Errorf("headObjectMetaVFn must not be called when same versionID won")
-		return nil, fmt.Errorf("unexpected call")
-	}
-
-	payload := bytes.Repeat([]byte("W"), testChunkedPutChunkSize)
-	sp := makeSpool(t, payload)
-	body, err := sp.Open()
-	require.NoError(t, err)
-	defer body.Close()
-
-	parts := []storage.MultipartPartEntry{{PartNumber: 1, Size: int64(testChunkedPutChunkSize), ETag: "etag-1"}}
-	obj, err := runChunkedPutWithParts(context.Background(), csb, body,
-		bucket, key, vid, "application/octet-stream",
-		nil, "", 0, false, "", nil, parts, nil, uploadID)
-
-	require.NoError(t, err)
-	require.NotNil(t, obj)
-
-	// Mirror must have been emitted (normal winner path).
-	require.Len(t, deps.writeQuorumMetaCalls, 1,
-		"when same VID won, quorum-meta mirror must proceed")
-	assert.Equal(t, vid, deps.writeQuorumMetaCalls[0].VersionID)
 }

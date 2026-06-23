@@ -171,97 +171,8 @@ func TestPutObjectMetaCmd_EmptySegmentsLegacyCompatible(t *testing.T) {
 	assert.Equal(t, "small.txt", decoded.Key)
 }
 
-func TestEncodeDecodeCommand_CompleteMultipart(t *testing.T) {
-	orig := CompleteMultipartCmd{
-		Bucket:           "uploads",
-		Key:              "video.mp4",
-		UploadID:         "upload-abc-123",
-		Size:             5242880,
-		ContentType:      "video/mp4",
-		ETag:             "abc123def456",
-		ModTime:          1700001000,
-		PlacementGroupID: "group-3",
-		ECData:           2,
-		ECParity:         1,
-		NodeIDs:          []string{"n1", "n2", "n3"},
-	}
-
-	encoded, err := EncodeCommand(CmdCompleteMultipart, orig)
-	require.NoError(t, err)
-
-	cmd, err := DecodeCommand(encoded)
-	require.NoError(t, err)
-	assert.Equal(t, CmdCompleteMultipart, cmd.Type)
-
-	decoded, err := decodeCompleteMultipartCmd(cmd.Data)
-	require.NoError(t, err)
-	assert.Equal(t, "uploads", decoded.Bucket)
-	assert.Equal(t, "video.mp4", decoded.Key)
-	assert.Equal(t, "upload-abc-123", decoded.UploadID)
-	assert.Equal(t, int64(5242880), decoded.Size)
-	assert.Equal(t, "video/mp4", decoded.ContentType)
-	assert.Equal(t, "abc123def456", decoded.ETag)
-	assert.Equal(t, int64(1700001000), decoded.ModTime)
-	assert.Equal(t, "group-3", decoded.PlacementGroupID)
-	assert.Equal(t, uint8(2), decoded.ECData)
-	assert.Equal(t, uint8(1), decoded.ECParity)
-	assert.Equal(t, []string{"n1", "n2", "n3"}, decoded.NodeIDs)
-}
-
-func TestCompleteMultipartCmd_PartsSegmentsRoundTrip(t *testing.T) {
-	orig := CompleteMultipartCmd{
-		Bucket:           "uploads",
-		Key:              "large-video.mp4",
-		UploadID:         "upload-with-layout",
-		Size:             40 << 20,
-		ContentType:      "video/mp4",
-		ETag:             "complete-etag",
-		ModTime:          1700001001,
-		VersionID:        "v-complete",
-		PlacementGroupID: "group-a",
-		ECData:           4,
-		ECParity:         2,
-		NodeIDs:          []string{"n1", "n2", "n3", "n4", "n5", "n6"},
-		Tags:             []storage.Tag{{Key: "env", Value: "prod"}},
-		Parts: []storage.MultipartPartEntry{
-			{PartNumber: 1, Size: 5 << 20, ETag: "part-1"},
-			{PartNumber: 2, Size: 35 << 20, ETag: "part-2"},
-		},
-		Segments: []SegmentMetaEntry{
-			{
-				BlobID:           "blob-0",
-				Size:             16 << 20,
-				Checksum:         []byte{0x01, 0x02, 0x03, 0x04},
-				PlacementGroupID: "group-a",
-				ShardSize:        4 << 20,
-				SegmentIdx:       0,
-				NodeIDs:          []string{"n1", "n2", "n3", "n4", "n5", "n6"},
-				ECData:           4,
-				ECParity:         2,
-			},
-			{
-				BlobID:           "blob-1",
-				Size:             24 << 20,
-				Checksum:         []byte{0x05, 0x06, 0x07, 0x08},
-				PlacementGroupID: "group-b",
-				ShardSize:        4 << 20,
-				SegmentIdx:       1,
-				NodeIDs:          []string{"n2", "n3", "n4", "n5", "n6", "n7"},
-				ECData:           4,
-				ECParity:         2,
-			},
-		},
-	}
-
-	raw, err := encodeCompleteMultipartCmd(orig)
-	require.NoError(t, err)
-	got, err := decodeCompleteMultipartCmd(raw)
-	require.NoError(t, err)
-
-	assert.Equal(t, orig.Parts, got.Parts)
-	assert.Equal(t, orig.Segments, got.Segments)
-	assert.Equal(t, orig.Tags, got.Tags)
-}
+// TestEncodeDecodeCommand_CompleteMultipart, TestCompleteMultipartCmd_PartsSegmentsRoundTrip
+// removed in M4: CmdCompleteMultipart/CompleteMultipartCmd are deleted.
 
 func TestObjectMetaCodecRoundTrip(t *testing.T) {
 	orig := objectMeta{
@@ -380,46 +291,8 @@ func TestEncodeDecodeCommand_DeleteObject(t *testing.T) {
 	assert.Equal(t, "file.txt", decoded.Key)
 }
 
-func TestEncodeDecodeCommand_CreateMultipartUpload(t *testing.T) {
-	orig := CreateMultipartUploadCmd{
-		UploadID: "mpu-123", Bucket: "b", Key: "big.bin",
-		ContentType: "application/octet-stream", CreatedAt: 1700000000,
-		PlacementGroupID: "group-4",
-	}
-
-	encoded, err := EncodeCommand(CmdCreateMultipartUpload, orig)
-	require.NoError(t, err)
-
-	cmd, err := DecodeCommand(encoded)
-	require.NoError(t, err)
-	assert.Equal(t, CmdCreateMultipartUpload, cmd.Type)
-
-	decoded, err := decodeCreateMultipartUploadCmd(cmd.Data)
-	require.NoError(t, err)
-	assert.Equal(t, "mpu-123", decoded.UploadID)
-	assert.Equal(t, "b", decoded.Bucket)
-	assert.Equal(t, "big.bin", decoded.Key)
-	assert.Equal(t, "application/octet-stream", decoded.ContentType)
-	assert.Equal(t, int64(1700000000), decoded.CreatedAt)
-	assert.Equal(t, "group-4", decoded.PlacementGroupID)
-}
-
-func TestEncodeDecodeCommand_AbortMultipart(t *testing.T) {
-	orig := AbortMultipartCmd{Bucket: "b", Key: "abort.bin", UploadID: "mpu-abort"}
-
-	encoded, err := EncodeCommand(CmdAbortMultipart, orig)
-	require.NoError(t, err)
-
-	cmd, err := DecodeCommand(encoded)
-	require.NoError(t, err)
-	assert.Equal(t, CmdAbortMultipart, cmd.Type)
-
-	decoded, err := decodeAbortMultipartCmd(cmd.Data)
-	require.NoError(t, err)
-	assert.Equal(t, "b", decoded.Bucket)
-	assert.Equal(t, "abort.bin", decoded.Key)
-	assert.Equal(t, "mpu-abort", decoded.UploadID)
-}
+// TestEncodeDecodeCommand_CreateMultipartUpload, TestEncodeDecodeCommand_AbortMultipart
+// removed in M4: CmdCreateMultipartUpload/CmdAbortMultipart and their structs are deleted.
 
 func TestEncodeDecodeCommand_SetBucketPolicy(t *testing.T) {
 	policyJSON := []byte(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow"}]}`)
@@ -828,17 +701,7 @@ func TestCodec_ClusterMultipartMeta_RoundTrip_WithTags(t *testing.T) {
 	require.Equal(t, orig, got)
 }
 
-func TestCodec_CreateMultipartUploadCmd_RoundTrip_WithTags(t *testing.T) {
-	cmd := CreateMultipartUploadCmd{
-		Bucket: "b", Key: "k", UploadID: "u1", ContentType: "text/plain",
-		Tags: []storage.Tag{{Key: "env", Value: "prod"}},
-	}
-	raw, err := encodeCreateMultipartUploadCmd(cmd)
-	require.NoError(t, err)
-	got, err := decodeCreateMultipartUploadCmd(raw)
-	require.NoError(t, err)
-	require.Equal(t, cmd, got)
-}
+// TestCodec_CreateMultipartUploadCmd_RoundTrip_WithTags removed in M4.
 
 func TestFSMValueResealDoneCmd_RoundTrip(t *testing.T) {
 	data, err := EncodeCommand(CmdFSMValueResealDone, FSMValueResealDoneCmd{Gen: 3})

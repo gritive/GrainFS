@@ -109,12 +109,10 @@ func (f *FSM) ApplyTxn(txn MetadataTxn, raw []byte) error {
 		return f.applyPutObjectMeta(txn, cmd.Data)
 	case CmdDeleteObject:
 		return f.applyDeleteObject(txn, cmd.Data)
-	case CmdCreateMultipartUpload:
-		return f.applyCreateMultipartUpload(txn, cmd.Data)
-	case CmdCompleteMultipart:
-		return f.applyCompleteMultipart(txn, cmd.Data)
-	case CmdAbortMultipart:
-		return f.applyAbortMultipart(txn, cmd.Data)
+	case CmdCreateMultipartUpload, CmdCompleteMultipart, CmdAbortMultipart:
+		// reserved, removed in multipart-off-raft epic (M4): no production proposer,
+		// greenfield — no raft-log replay of these commands. No-op on stale entries.
+		return nil
 	case CmdSetBucketPolicy:
 		return f.applySetBucketPolicy(txn, cmd.Data)
 	case CmdDeleteBucketPolicy:
@@ -155,7 +153,8 @@ func (f *FSM) ApplyTxn(txn MetadataTxn, raw []byte) error {
 		// for logging/observability only — the re-Kick is gen-agnostic. S7-1a-2.
 		return nil
 	case CmdDeleteMultipartDone:
-		return f.applyDeleteMultipartDone(txn, cmd.Data)
+		// reserved, removed in multipart-off-raft epic (M4): no-op on stale entries.
+		return nil
 	default:
 		log.Warn().Uint8("type", uint8(cmd.Type)).Msg("fsm: unknown command type")
 		return nil
@@ -446,165 +445,6 @@ func (f *FSM) applyDeleteObjectVersion(txn MetadataTxn, data []byte) error {
 		}
 	} else if gerr != ErrMetaKeyNotFound {
 		return gerr
-	}
-	return nil
-}
-
-func (f *FSM) applyCreateMultipartUpload(txn MetadataTxn, data []byte) error {
-	c, err := decodeCreateMultipartUploadCmd(data)
-	if err != nil {
-		return err
-	}
-	meta, err := marshalClusterMultipartMeta(clusterMultipartMeta{
-		Bucket:           c.Bucket,
-		Key:              c.Key,
-		CreatedAt:        c.CreatedAt,
-		ContentType:      c.ContentType,
-		PlacementGroupID: c.PlacementGroupID,
-		Tags:             c.Tags,
-	})
-	if err != nil {
-		return fmt.Errorf("marshal multipart meta: %w", err)
-	}
-	return f.setValue(txn, f.keys.MultipartKey(c.UploadID), meta)
-}
-
-// applyCompleteMultipart is intentionally on data_raft (Phase 3 boundary): it
-// atomically writes object meta and deletes the multipart manifest key in one
-// BadgerDB txn. Splitting the two operations would violate that atomicity.
-// Reads fall back to this BadgerDB entry when quorum meta is absent (headObjectMeta).
-func (f *FSM) applyCompleteMultipart(txn MetadataTxn, data []byte) error {
-	c, err := decodeCompleteMultipartCmd(data)
-	if err != nil {
-		return err
-	}
-	// Blob-authoritative multipart (versioning-enabled): the proposer built the
-	// completed object's encoded PutObjectMetaCmd and passed it as meta_blob. In
-	// this mode the per-version quorum-meta blob (written by the proposer after this
-	// commit, from the done-marker) is the SOLE AUTHORITY — apply writes NO FSM
-	// obj:/lat: record, only the done-marker carrying meta_blob. Non-versioned /
-	// Suspended completes carry no meta_blob and keep the legacy FSM obj:/lat: write
-	// (non-versioned blob authority is a separate task).
-	blobAuthoritative := len(c.MetaBlob) > 0
-	mpuKey := f.keys.MultipartKey(c.UploadID)
-	item, err := txn.Get(mpuKey)
-	if err == ErrMetaKeyNotFound {
-		// Manifest absent: check for a done marker written by a prior commit.
-		mb, merr := txn.Get(f.keys.MultipartDoneKey(c.UploadID))
-		if merr == ErrMetaKeyNotFound {
-			return storage.ErrUploadNotFound
-		}
-		if merr != nil {
-			return fmt.Errorf("get multipart done marker: %w", merr)
-		}
-		raw, merr := f.itemValueCopy(mb)
-		if merr != nil {
-			return fmt.Errorf("read multipart done marker: %w", merr)
-		}
-		marker, merr := unmarshalMultipartDone(raw)
-		if merr != nil {
-			return fmt.Errorf("unmarshal multipart done marker: %w", merr)
-		}
-		if marker.Bucket == c.Bucket && marker.Key == c.Key {
-			return nil // idempotent — prior commit won
-		}
-		return fmt.Errorf("complete multipart upload id %s already completed for %s/%s, got %s/%s",
-			c.UploadID, marker.Bucket, marker.Key, c.Bucket, c.Key)
-	}
-	if err != nil {
-		return err
-	}
-	raw, err := f.itemValueCopy(item)
-	if err != nil {
-		return err
-	}
-	mpu, err := unmarshalClusterMultipartMeta(raw)
-	if err != nil {
-		return err
-	}
-	if mpu.Bucket != c.Bucket || mpu.Key != c.Key {
-		return fmt.Errorf("complete multipart upload mismatch: upload %s is for %s/%s, got %s/%s", c.UploadID, mpu.Bucket, mpu.Key, c.Bucket, c.Key)
-	}
-
-	// Legacy FSM write (non-versioned/Suspended only). Blob-authoritative completes
-	// skip this entirely — their per-version blob is the sole authority.
-	if !blobAuthoritative {
-		objMeta, merr := marshalObjectMeta(objectMeta{
-			Key:              c.Key,
-			Size:             c.Size,
-			ContentType:      c.ContentType,
-			ETag:             c.ETag,
-			LastModified:     c.ModTime,
-			ECData:           c.ECData,
-			ECParity:         c.ECParity,
-			NodeIDs:          c.NodeIDs,
-			PlacementGroupID: c.PlacementGroupID,
-			Parts:            c.Parts,
-			Segments:         segmentMetaEntriesToRefs(c.Segments),
-			Tags:             c.Tags,
-		})
-		if merr != nil {
-			return fmt.Errorf("marshal object meta: %w", merr)
-		}
-		// Dual-write legacy + versioned, same pattern as applyPutObjectMeta.
-		if err := f.setValue(txn, f.keys.ObjectMetaKey(c.Bucket, c.Key), objMeta); err != nil {
-			return err
-		}
-		if c.VersionID != "" {
-			if err := f.setValue(txn, f.keys.ObjectMetaKeyV(c.Bucket, c.Key, c.VersionID), objMeta); err != nil {
-				return err
-			}
-			if err := txn.Set(f.keys.LatestKey(c.Bucket, c.Key), []byte(c.VersionID)); err != nil {
-				return err
-			}
-		}
-	}
-	// Write a done marker so that a retried apply of the same command is idempotent.
-	// For blob-authoritative completes the marker carries meta_blob so any retry /
-	// concurrent loser re-writes the winner's per-version blob from it.
-	doneMarker := multipartDone{
-		UploadID:  c.UploadID,
-		Bucket:    c.Bucket,
-		Key:       c.Key,
-		VersionID: c.VersionID,
-		ModTime:   c.ModTime,
-		MetaBlob:  c.MetaBlob,
-	}
-	doneBytes, err := marshalMultipartDone(doneMarker)
-	if err != nil {
-		return fmt.Errorf("marshal multipart done marker: %w", err)
-	}
-	// mpudone marker is retained until GC sweeps it (S4c-0 PR2 Task 5) — it must outlive the client retry window.
-	if err := f.setValue(txn, f.keys.MultipartDoneKey(c.UploadID), doneBytes); err != nil {
-		return fmt.Errorf("set multipart done marker: %w", err)
-	}
-	return txn.Delete(mpuKey)
-}
-
-func (f *FSM) applyAbortMultipart(txn MetadataTxn, data []byte) error {
-	c, err := decodeAbortMultipartCmd(data)
-	if err != nil {
-		return err
-	}
-	err = txn.Delete(f.keys.MultipartKey(c.UploadID))
-	if err == ErrMetaKeyNotFound {
-		return nil
-	}
-	return err
-}
-
-// applyDeleteMultipartDone handles CmdDeleteMultipartDone: it batch-deletes
-// mpudone idempotency markers for the listed upload IDs.  Missing markers are
-// silently ignored so the command is idempotent across retries.
-func (f *FSM) applyDeleteMultipartDone(txn MetadataTxn, data []byte) error {
-	c, err := decodeDeleteMultipartDoneCmd(data)
-	if err != nil {
-		return err
-	}
-	for _, id := range c.UploadIDs {
-		if derr := txn.Delete(f.keys.MultipartDoneKey(id)); derr != nil && derr != ErrMetaKeyNotFound {
-			return derr
-		}
 	}
 	return nil
 }

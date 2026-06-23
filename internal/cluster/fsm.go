@@ -17,13 +17,16 @@ const (
 	// The FSM ignores it; it exists only to advance advanceCommitIndex.
 	CmdNoOp CommandType = 0
 
-	CmdCreateBucket          CommandType = 1
-	CmdDeleteBucket          CommandType = 2
-	CmdPutObjectMeta         CommandType = 3
-	CmdDeleteObject          CommandType = 4
-	CmdCreateMultipartUpload CommandType = 5
-	CmdCompleteMultipart     CommandType = 6
-	CmdAbortMultipart        CommandType = 7
+	CmdCreateBucket  CommandType = 1
+	CmdDeleteBucket  CommandType = 2
+	CmdPutObjectMeta CommandType = 3
+	CmdDeleteObject  CommandType = 4
+	// CmdCreateMultipartUpload/CmdCompleteMultipart/CmdAbortMultipart are reserved,
+	// removed in the multipart-off-raft epic (M4). No production proposer; no
+	// raft-log replay (greenfield). Slots MUST NOT be renumbered.
+	CmdCreateMultipartUpload CommandType = 5 // reserved, removed v0.0.651+
+	CmdCompleteMultipart     CommandType = 6 // reserved, removed v0.0.651+
+	CmdAbortMultipart        CommandType = 7 // reserved, removed v0.0.651+
 	CmdSetBucketPolicy       CommandType = 8
 	CmdDeleteBucketPolicy    CommandType = 9
 	CmdMigrateShard          CommandType = 10
@@ -59,11 +62,9 @@ const (
 	// so the per-node post-apply hook fires with the node's store already
 	// clean. Gen is a log hint only — the re-Kick is gen-agnostic. S7-1a-2.
 	CmdFSMValueResealDone CommandType = 42
-	// CmdDeleteMultipartDone is a deterministic raft-proposed batch delete of
-	// mpudone:{uploadID} idempotency markers.  Proposed by the periodic GC
-	// sweep (Task 5b) after confirming each upload is old enough to GC.
-	// Using a raft command (rather than a TTL) keeps all replicas consistent.
-	CmdDeleteMultipartDone CommandType = 43
+	// CmdDeleteMultipartDone is reserved, removed in the multipart-off-raft epic (M4).
+	// No production proposer; slot MUST NOT be renumbered.
+	CmdDeleteMultipartDone CommandType = 43 // reserved, removed v0.0.651+
 	// NOTE: CommandType 44 was CmdSetBucketSoleAuthority (per-bucket sole-authority
 	// tri-state flag) — removed in the soleauth teardown (blob-primary epic).
 	// The slot is retired; do NOT reuse 44 for a new command.
@@ -211,56 +212,10 @@ type FSMValueResealDoneCmd struct {
 	Gen uint32
 }
 
-// DeleteMultipartDoneCmd is the payload for CmdDeleteMultipartDone: a batch of
-// upload IDs whose mpudone idempotency markers should be deleted.
-type DeleteMultipartDoneCmd struct {
-	UploadIDs []string
-}
-
-type CreateMultipartUploadCmd struct {
-	UploadID    string
-	Bucket      string
-	Key         string
-	ContentType string
-	CreatedAt   int64
-	// PlacementGroupID is selected at upload creation and reused on complete.
-	PlacementGroupID string
-	// Tags are carried through Raft and persisted on clusterMultipartMeta.
-	// Materialised onto the finalised object at CompleteMultipartUpload.
-	Tags []storage.Tag
-}
-
-type CompleteMultipartCmd struct {
-	Bucket      string
-	Key         string
-	UploadID    string
-	Size        int64
-	ContentType string
-	ETag        string
-	ModTime     int64
-	VersionID   string
-	// PlacementGroupID is the data Raft group that owns the completed object.
-	PlacementGroupID string
-	ECData           uint8
-	ECParity         uint8
-	NodeIDs          []string
-	Parts            []storage.MultipartPartEntry
-	Segments         []SegmentMetaEntry
-	Tags             []storage.Tag
-	// MetaBlob is the encoded per-version PutObjectMetaCmd for the completed object,
-	// built on the proposer (carries UserMetadata/ACL/SSEAlgorithm which the flat
-	// fields above omit). Set only for versioning-enabled buckets; its presence
-	// switches applyCompleteMultipart to the blob-authoritative path (no obj:/lat:
-	// write) and is persisted into the done-marker for retry-safety. Empty →
-	// legacy FSM-authoritative multipart (non-versioned/Suspended).
-	MetaBlob []byte
-}
-
-type AbortMultipartCmd struct {
-	Bucket   string
-	Key      string
-	UploadID string
-}
+// DeleteMultipartDoneCmd, CreateMultipartUploadCmd, CompleteMultipartCmd, and
+// AbortMultipartCmd are removed in the multipart-off-raft epic (M4).
+// The CommandType constants (5, 6, 7, 43) are kept reserved above; the structs
+// are deleted because no production code constructs or decodes them.
 
 type SetBucketPolicyCmd struct {
 	Bucket     string

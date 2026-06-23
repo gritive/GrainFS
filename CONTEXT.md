@@ -535,12 +535,14 @@ The single hot-path touch of `base` is `requireObjectBucket` → `HeadBucket`, a
 `TestControlDataPlaneBoundary_ObjectHotPathDoesNotTouchControlRaft` guards this
 dynamically on a non-collapsed topology.
 
-Two boundary nuances: (1) multipart completion proposes on **group-raft (data
-plane)**, not meta-raft — the manifest lives on group-raft (not quorum-meta) only
-for single-txn atomicity, and it is off the hot path; (2) legacy single-backend
-deployments intentionally collapse both planes onto one raft node
-(`WrapDistributedBackend`), so the boundary is meaningful for multi-group
-topologies with a dedicated meta-raft.
+Two boundary nuances: (1) multipart completion is **raft-free** — the manifest
+lives on a `.qmeta_mpu` quorum-meta blob (not the raft FSM), and
+`CompleteMultipartUpload` writes the completed object's per-version (or
+non-versioned latest-only) quorum-meta blob fail-closed with no group-raft
+propose; concurrent completes converge via a deterministic uploadID-derived
+version-id; (2) legacy single-backend deployments intentionally collapse both
+planes onto one raft node (`WrapDistributedBackend`), so the boundary is
+meaningful for multi-group topologies with a dedicated meta-raft.
 
 Gossip carries soft state — per-node disk used/available and `RequestsPerSec` — off
 the critical path. `DiskCollector` and `RequestRateCollector` each own their field

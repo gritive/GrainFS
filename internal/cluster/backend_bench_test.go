@@ -231,13 +231,12 @@ func BenchmarkDistributedBackend_ListMultipartUploads(b *testing.B) {
 	}
 }
 
-func writeMultipartMeta(b testing.TB, bk *DistributedBackend, db *badger.DB, uploadID string, meta clusterMultipartMeta) {
+func writeMultipartMeta(b testing.TB, bk *DistributedBackend, _ *badger.DB, uploadID string, meta clusterMultipartMeta) {
 	b.Helper()
+	// M2b: manifests live on the .qmeta_mpu blob, not the FSM mpu: key.
 	raw, err := marshalClusterMultipartMeta(meta)
 	require.NoError(b, err)
-	require.NoError(b, db.Update(func(txn *badger.Txn) error {
-		return txn.Set(bk.ks().MultipartKey(uploadID), raw)
-	}))
+	require.NoError(b, bk.shardSvc.writeManifestBlobLocal(meta.Bucket, uploadID, raw))
 }
 
 func BenchmarkDistributedBackend_CompleteSinglePartMultipart64KiB(b *testing.B) {

@@ -73,15 +73,8 @@ func TestFSM_EncryptedValuesHideObjectMultipartAndPolicyPayloads(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, fsm.Apply(putData))
 
-	mpuData, err := EncodeCommand(CmdCreateMultipartUpload, CreateMultipartUploadCmd{
-		UploadID:    "upload-secret",
-		Bucket:      "b",
-		Key:         "secret-object",
-		ContentType: "application/private",
-	})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(mpuData))
-
+	// CmdCreateMultipartUpload removed in M4; mpu: key encryption is no longer
+	// exercised here (no production writer). Remaining: obj: and policy: are checked.
 	policy := []byte(`{"Statement":[{"Resource":"secret-policy-resource"}]}`)
 	policyData, err := EncodeCommand(CmdSetBucketPolicy, SetBucketPolicyCmd{Bucket: "b", PolicyJSON: policy})
 	require.NoError(t, err)
@@ -93,7 +86,6 @@ func TestFSM_EncryptedValuesHideObjectMultipartAndPolicyPayloads(t *testing.T) {
 			forbidden string
 		}{
 			{fsm.keys.ObjectMetaKeyV("b", "secret-object", "v1"), "customer-private-metadata"},
-			{fsm.keys.MultipartKey("upload-secret"), "application/private"},
 			{fsm.keys.BucketPolicyKey("b"), "secret-policy-resource"},
 		} {
 			item, err := txn.Get(tc.key)
@@ -263,246 +255,42 @@ func TestFSM_SnapshotRestore(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestFSM_MultipartCycle(t *testing.T) {
-	db := newTestDB(t)
-	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
+// TestFSM_MultipartCycle exercises the apply-side of a non-versioned complete:
+// applyCompleteMultipart writes the legacy obj:/lat: record and a done-marker.
+// M2b moved the in-progress manifest off the FSM, so the apply no longer reads
+// or deletes any mpu: key — the proposer owns the .qmeta_mpu blob lifecycle.
+// TestFSM_MultipartCycle removed in M4: applyCompleteMultipart and the done-marker
+// machinery are deleted. CmdCompleteMultipart is now a no-op reserved command.
 
-	// Create multipart
-	data, _ := EncodeCommand(CmdCreateMultipartUpload, CreateMultipartUploadCmd{
-		UploadID: "upload-1", Bucket: "b", Key: "mp.bin", ContentType: "application/octet-stream", CreatedAt: 100,
-	})
-	require.NoError(t, fsm.Apply(data))
+// TestFSM_CompleteMultipartPersistsPartsSegments, TestFSM_CompleteMultipart_IdempotentOnDuplicateApply
+// removed in M4: applyCompleteMultipart is deleted.
 
-	// Verify exists
-	err := db.View(func(txn *badger.Txn) error {
-		_, err := txn.Get(multipartKey("upload-1"))
-		return err
-	})
-	assert.NoError(t, err)
+// TestMultipartComplete_RejectsUploadMismatch is the M2b proposer-level twin of
+// the former apply-level mismatch guard. With the manifest off the FSM, the
+// (bucket, key) mismatch is caught by CompleteMultipartUpload reading the
+// manifest blob — not by applyCompleteMultipart (which no longer reads any mpu:
+// key). Completing an upload created for one key against a different key fails,
+// and no object is committed for the wrong key.
+func TestMultipartComplete_RejectsUploadMismatch(t *testing.T) {
+	b, _ := newTestDistributedBackendWithDB(t)
+	configureChunkedMultipartTestBackend(b)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "b"))
 
-	// Complete multipart
-	data, _ = EncodeCommand(CmdCompleteMultipart, CompleteMultipartCmd{
-		Bucket: "b", Key: "mp.bin", UploadID: "upload-1", Size: 1024,
-		ContentType: "application/octet-stream", ETag: "final-etag", ModTime: 200,
-	})
-	require.NoError(t, fsm.Apply(data))
+	up, err := b.CreateMultipartUpload(ctx, "b", "expected.bin", "application/octet-stream")
+	require.NoError(t, err)
+	part, err := b.UploadPart(ctx, "b", "expected.bin", up.UploadID, 1, bytes.NewReader([]byte("payload")), "")
+	require.NoError(t, err)
 
-	// Upload record should be gone
-	err = db.View(func(txn *badger.Txn) error {
-		_, err := txn.Get(multipartKey("upload-1"))
-		return err
-	})
-	assert.ErrorIs(t, err, badger.ErrKeyNotFound)
+	_, err = b.CompleteMultipartUpload(ctx, "b", "wrong.bin", up.UploadID, []storage.Part{*part})
+	require.Error(t, err)
 
-	// Object should exist
-	err = db.View(func(txn *badger.Txn) error {
-		_, err := txn.Get(objectMetaKey("b", "mp.bin"))
-		return err
-	})
-	assert.NoError(t, err)
+	_, err = b.HeadObject(ctx, "b", "wrong.bin")
+	require.ErrorIs(t, err, storage.ErrObjectNotFound)
 }
 
-func TestFSM_CompleteMultipartPersistsPartsSegmentsAndDeletesUpload(t *testing.T) {
-	db := newTestDB(t)
-	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-
-	data, err := EncodeCommand(CmdCreateMultipartUpload, CreateMultipartUploadCmd{
-		UploadID: "upload-layout", Bucket: "b", Key: "mp.bin", ContentType: "application/octet-stream", CreatedAt: 100,
-	})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(data))
-
-	parts := []storage.MultipartPartEntry{
-		{PartNumber: 1, Size: 5 << 20, ETag: "part-1"},
-		{PartNumber: 2, Size: 7 << 20, ETag: "part-2"},
-	}
-	tags := []storage.Tag{{Key: "env", Value: "prod"}}
-	segments := []SegmentMetaEntry{
-		{
-			BlobID:           "blob-0",
-			Size:             6 << 20,
-			Checksum:         []byte{0x01, 0x02},
-			PlacementGroupID: "group-a",
-			ShardSize:        4 << 20,
-			SegmentIdx:       0,
-			NodeIDs:          []string{"n1", "n2", "n3"},
-			ECData:           2,
-			ECParity:         1,
-		},
-		{
-			BlobID:           "blob-1",
-			Size:             6 << 20,
-			Checksum:         []byte{0x03, 0x04},
-			PlacementGroupID: "group-b",
-			ShardSize:        4 << 20,
-			SegmentIdx:       1,
-			NodeIDs:          []string{"n4", "n5", "n6"},
-			ECData:           2,
-			ECParity:         1,
-		},
-	}
-
-	data, err = EncodeCommand(CmdCompleteMultipart, CompleteMultipartCmd{
-		Bucket:           "b",
-		Key:              "mp.bin",
-		UploadID:         "upload-layout",
-		Size:             12 << 20,
-		ContentType:      "application/octet-stream",
-		ETag:             "complete-etag",
-		ModTime:          200,
-		VersionID:        "v1",
-		PlacementGroupID: "group-a",
-		ECData:           2,
-		ECParity:         1,
-		NodeIDs:          []string{"n1", "n2", "n3"},
-		Parts:            parts,
-		Segments:         segments,
-		Tags:             tags,
-	})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(data))
-
-	err = db.View(func(txn *badger.Txn) error {
-		_, err := txn.Get(multipartKey("upload-layout"))
-		require.ErrorIs(t, err, badger.ErrKeyNotFound)
-
-		item, err := txn.Get(objectMetaKey("b", "mp.bin"))
-		require.NoError(t, err)
-		raw, err := item.ValueCopy(nil)
-		require.NoError(t, err)
-		meta, err := unmarshalObjectMeta(raw)
-		require.NoError(t, err)
-		require.Equal(t, parts, meta.Parts)
-		require.Equal(t, segmentMetaEntriesToRefs(segments), meta.Segments)
-		require.Equal(t, tags, meta.Tags)
-		return nil
-	})
-	require.NoError(t, err)
-}
-
-func TestFSM_CompleteMultipart_IdempotentOnDuplicateApply(t *testing.T) {
-	db := newTestDB(t)
-	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-
-	data, err := EncodeCommand(CmdCreateMultipartUpload, CreateMultipartUploadCmd{
-		UploadID: "upload-once", Bucket: "b", Key: "mp.bin", ContentType: "application/octet-stream", CreatedAt: 100,
-	})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(data))
-
-	first, err := EncodeCommand(CmdCompleteMultipart, CompleteMultipartCmd{
-		Bucket: "b", Key: "mp.bin", UploadID: "upload-once", Size: 1024,
-		ContentType: "application/octet-stream", ETag: "first-etag", ModTime: 200, VersionID: "v1",
-	})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(first))
-
-	duplicate, err := EncodeCommand(CmdCompleteMultipart, CompleteMultipartCmd{
-		Bucket: "b", Key: "mp.bin", UploadID: "upload-once", Size: 2048,
-		ContentType: "application/octet-stream", ETag: "second-etag", ModTime: 300, VersionID: "v2",
-	})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(duplicate))
-
-	require.NoError(t, db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(objectMetaKey("b", "mp.bin"))
-		require.NoError(t, err)
-		raw, err := fsm.itemValueCopy(item)
-		require.NoError(t, err)
-		meta, err := unmarshalObjectMeta(raw)
-		require.NoError(t, err)
-		require.Equal(t, "first-etag", meta.ETag)
-
-		item, err = txn.Get(fsm.keys.LatestKey("b", "mp.bin"))
-		require.NoError(t, err)
-		latest, err := item.ValueCopy(nil)
-		require.NoError(t, err)
-		require.Equal(t, "v1", string(latest))
-
-		_, err = txn.Get(objectMetaKeyV("b", "mp.bin", "v2"))
-		require.ErrorIs(t, err, badger.ErrKeyNotFound)
-		return nil
-	}))
-}
-
-func TestFSM_CompleteMultipartRejectsUploadMismatch(t *testing.T) {
-	db := newTestDB(t)
-	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-
-	data, err := EncodeCommand(CmdCreateMultipartUpload, CreateMultipartUploadCmd{
-		UploadID: "upload-other", Bucket: "b", Key: "expected.bin", ContentType: "application/octet-stream", CreatedAt: 100,
-	})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(data))
-
-	data, err = EncodeCommand(CmdCompleteMultipart, CompleteMultipartCmd{
-		Bucket: "b", Key: "wrong.bin", UploadID: "upload-other", Size: 1024,
-		ContentType: "application/octet-stream", ETag: "etag", ModTime: 200, VersionID: "v1",
-	})
-	require.NoError(t, err)
-	require.Error(t, fsm.Apply(data))
-
-	require.NoError(t, db.View(func(txn *badger.Txn) error {
-		_, err := txn.Get(fsm.keys.MultipartKey("upload-other"))
-		require.NoError(t, err)
-		_, err = txn.Get(objectMetaKey("b", "wrong.bin"))
-		require.ErrorIs(t, err, badger.ErrKeyNotFound)
-		return nil
-	}))
-}
-
-func TestFSM_CreateMultipartUploadPersistsListingMetadata(t *testing.T) {
-	db := newTestDB(t)
-	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-
-	data, err := EncodeCommand(CmdCreateMultipartUpload, CreateMultipartUploadCmd{
-		UploadID:         "upload-listing",
-		Bucket:           "bucket",
-		Key:              "prefix/mp.bin",
-		ContentType:      "application/octet-stream",
-		CreatedAt:        123456,
-		PlacementGroupID: "group-7",
-	})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(data))
-
-	err = db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(multipartKey("upload-listing"))
-		require.NoError(t, err)
-		raw, err := item.ValueCopy(nil)
-		require.NoError(t, err)
-		meta, err := unmarshalClusterMultipartMeta(raw)
-		require.NoError(t, err)
-		require.Equal(t, "bucket", meta.Bucket)
-		require.Equal(t, "prefix/mp.bin", meta.Key)
-		require.Equal(t, int64(123456), meta.CreatedAt)
-		require.Equal(t, "application/octet-stream", meta.ContentType)
-		require.Equal(t, "group-7", meta.PlacementGroupID)
-		return nil
-	})
-	require.NoError(t, err)
-}
-
-func TestFSM_AbortMultipart(t *testing.T) {
-	db := newTestDB(t)
-	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-
-	data, _ := EncodeCommand(CmdCreateMultipartUpload, CreateMultipartUploadCmd{
-		UploadID: "upload-abort", Bucket: "b", Key: "abort.bin", ContentType: "binary", CreatedAt: 100,
-	})
-	require.NoError(t, fsm.Apply(data))
-
-	data, _ = EncodeCommand(CmdAbortMultipart, AbortMultipartCmd{
-		Bucket: "b", Key: "abort.bin", UploadID: "upload-abort",
-	})
-	require.NoError(t, fsm.Apply(data))
-
-	err := db.View(func(txn *badger.Txn) error {
-		_, err := txn.Get(multipartKey("upload-abort"))
-		return err
-	})
-	assert.ErrorIs(t, err, badger.ErrKeyNotFound)
-}
+// TestFSM_CreateMultipartUploadPersistsListingMetadata, TestFSM_AbortMultipart
+// removed in M4: applyCreateMultipartUpload and applyAbortMultipart are deleted.
 
 func TestFSM_SetBucketPolicy(t *testing.T) {
 	db := newTestDB(t)
@@ -564,17 +352,7 @@ func TestFSM_DeleteBucketPolicy_NotExist(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestFSM_AbortMultipart_NotExist(t *testing.T) {
-	db := newTestDB(t)
-	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-
-	// Aborting a non-existent multipart should not error (ErrKeyNotFound → nil)
-	data, _ := EncodeCommand(CmdAbortMultipart, AbortMultipartCmd{
-		Bucket: "b", Key: "nope.bin", UploadID: "nonexistent",
-	})
-	err := fsm.Apply(data)
-	assert.NoError(t, err)
-}
+// TestFSM_AbortMultipart_NotExist removed in M4: applyAbortMultipart is deleted.
 
 func TestFSM_DeleteObject_NotExist(t *testing.T) {
 	db := newTestDB(t)
@@ -1097,53 +875,20 @@ func TestFSM_ApplyCreateBucket_KeyLayoutUnchanged(t *testing.T) {
 	}
 }
 
-func TestFSM_CreateMultipartUpload_PersistsTags(t *testing.T) {
-	db := newTestDB(t)
-	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-
-	data, err := EncodeCommand(CmdCreateMultipartUpload, CreateMultipartUploadCmd{
-		UploadID:    "upload-tags-1",
-		Bucket:      "b",
-		Key:         "k",
-		ContentType: "text/plain",
-		CreatedAt:   100,
-		Tags:        []storage.Tag{{Key: "env", Value: "prod"}},
-	})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(data))
-
-	require.NoError(t, db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(multipartKey("upload-tags-1"))
-		require.NoError(t, err)
-		raw, err := item.ValueCopy(nil)
-		require.NoError(t, err)
-		meta, err := unmarshalClusterMultipartMeta(raw)
-		require.NoError(t, err)
-		require.Equal(t, []storage.Tag{{Key: "env", Value: "prod"}}, meta.Tags)
-		return nil
-	}))
-}
+// TestFSM_CreateMultipartUpload_PersistsTags removed in M4: applyCreateMultipartUpload deleted.
 
 // TestFSM_CompleteMultipartUpload_MaterialisesTags verifies that the
 // finalisation command (CmdPutObjectMeta — what production proposes from
 // CompleteMultipartUpload) writes Tags onto objectMeta. The Raft path for
-// completion goes through commitECObjectWriteResult → CmdPutObjectMeta, not
-// the legacy CmdCompleteMultipart, so this is where parity must hold.
+// completion goes through commitECObjectWriteResult → CmdPutObjectMeta.
+// CmdCreateMultipartUpload is a reserved no-op in M4; the FSM row is omitted.
 func TestFSM_CompleteMultipartUpload_MaterialisesTags(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
-	// 1) create multipart with tags
-	data, err := EncodeCommand(CmdCreateMultipartUpload, CreateMultipartUploadCmd{
-		UploadID: "upload-mat-1", Bucket: "b", Key: "k", ContentType: "text/plain", CreatedAt: 100,
-		Tags: []storage.Tag{{Key: "env", Value: "prod"}, {Key: "owner", Value: "alice"}},
-	})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(data))
-
-	// 2) finalise via the production cmd that materialises object meta on
+	// Finalise via the production cmd that materialises object meta on
 	// CompleteMultipartUpload (CmdPutObjectMeta with Parts + Tags).
-	data, err = EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+	data, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
 		Bucket: "b", Key: "k", Size: 1024, ContentType: "text/plain",
 		ETag: "final-etag", ModTime: 200,
 		Parts: []storage.MultipartPartEntry{{PartNumber: 1, Size: 1024, ETag: "p1"}},

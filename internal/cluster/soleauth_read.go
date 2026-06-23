@@ -147,8 +147,8 @@ func isFsmCarveoutClass(meta objectMeta, bareLegacy bool) bool {
 	// Multipart is NO LONGER a carve-out: a versioning-enabled multipart complete is
 	// now blob-authoritative (its per-version blob is written FAIL-CLOSED and is the
 	// sole authority for read/GC/LIST/DEK, identical to a regular versioned PUT). The
-	// CmdCompleteMultipart propose is retained only for manifest-teardown atomicity +
-	// the phantom-winner done-marker; it no longer writes an FSM obj:/lat: record.
+	// CmdCompleteMultipart propose is GONE (M3 dropped it); the per-version / latest-only
+	// quorum-meta blob is both the durable commit record and the idempotency anchor.
 	return meta.IsAppendable || len(meta.Coalesced) > 0 || bareLegacy
 }
 

@@ -210,38 +210,6 @@ func TestSharedFSM_PrefixIsolation_AllPaths(t *testing.T) {
 			},
 		},
 		{
-			// Multipart: same uploadID in both groups → two separate mpu: keys.
-			// Aborting one leaves the other intact.
-			name: "Multipart_SameUploadID_TwoKeys",
-			exercise: func(t *testing.T) {
-				_, ksA, ksB, fA, fB := setupTwoFSMs(t)
-
-				const uploadID = "upload-42"
-
-				applyCmd(t, fA, CmdCreateMultipartUpload, CreateMultipartUploadCmd{
-					UploadID: uploadID, Bucket: bucket, Key: "k1", ContentType: "application/octet-stream",
-				})
-				applyCmd(t, fB, CmdCreateMultipartUpload, CreateMultipartUploadCmd{
-					UploadID: uploadID, Bucket: bucket, Key: "k1", ContentType: "application/octet-stream",
-				})
-
-				// Two encoded keys must both exist and be distinct.
-				keyA := ksA.MultipartKey(uploadID)
-				keyB := ksB.MultipartKey(uploadID)
-				assert.NotEqual(t, keyA, keyB, "mpu keys must be distinct")
-				assert.True(t, dbHasKey(t, fA.db, keyA), "A's mpu key must exist")
-				assert.True(t, dbHasKey(t, fB.db, keyB), "B's mpu key must exist")
-
-				// Abort A's upload.
-				applyCmd(t, fA, CmdAbortMultipart, AbortMultipartCmd{
-					Bucket: bucket, Key: "k1", UploadID: uploadID,
-				})
-
-				assert.False(t, dbHasKey(t, fA.db, keyA), "A's mpu key must be gone after abort")
-				assert.True(t, dbHasKey(t, fB.db, keyB), "B's mpu key must survive A's abort")
-			},
-		},
-		{
 			// SetBucketPolicy / DeleteBucketPolicy: distinct policy keys per group.
 			name: "BucketPolicy_Isolation",
 			exercise: func(t *testing.T) {

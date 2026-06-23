@@ -205,45 +205,8 @@ table FSMValueResealDoneCmd {
   gen:uint32;
 }
 
-table CreateMultipartUploadCmd {
-  upload_id:string;
-  bucket:string;
-  key:string;
-  content_type:string;
-  created_at:int64;
-  placement_group_id:string;
-  tags:[Tag];
-}
-
-table CompleteMultipartCmd {
-  bucket:string;
-  key:string;
-  upload_id:string;
-  size:int64;
-  content_type:string;
-  etag:string;
-  mod_time:int64;
-  version_id:string;
-  placement_group_id:string;
-  ec_data:uint8 = 0;
-  ec_parity:uint8 = 0;
-  node_ids:[string];
-  parts:[MultipartPartEntry];
-  segments:[SegmentMetaEntry];
-  tags:[Tag];
-  // Blob-primary multipart (S3): the encoded per-version PutObjectMetaCmd for the
-  // completed object, built on the proposer (carries UserMetadata/ACL/SSE which the
-  // flat fields above do not). Set ONLY for versioning-enabled buckets; its presence
-  // switches applyCompleteMultipart to the blob-authoritative path (no obj:/lat:
-  // write). Absent → legacy FSM-authoritative multipart (non-versioned/Suspended).
-  meta_blob:[ubyte];
-}
-
-table AbortMultipartCmd {
-  bucket:string;
-  key:string;
-  upload_id:string;
-}
+// CreateMultipartUploadCmd, CompleteMultipartCmd, AbortMultipartCmd are removed in
+// the multipart-off-raft epic (M4). CommandType slots 5/6/7 are reserved.
 
 table SetBucketPolicyCmd {
   bucket:string;
@@ -1505,28 +1468,5 @@ table DropClusterKeyAcceptCmd {
   stamped_config_index:uint64;
 }
 
-// MultipartDone is the on-disk idempotency marker written when a CompleteMultipartUpload
-// is committed.  Retried completes with a matching upload_id can short-circuit and return
-// the already-committed result without re-running the full assembly.
-table MultipartDone {
-  upload_id:string;
-  bucket:string;
-  key:string;
-  version_id:string;
-  mod_time:long;
-  // Blob-primary multipart (S3): the encoded per-version PutObjectMetaCmd for the
-  // completed object. Lets a retry (or the loser of a concurrent complete) re-write
-  // the winner's per-version blob fail-closed, so a blob-write failure after the
-  // manifest is torn down is not a lost object. Set only for the blob-authoritative
-  // (versioning-enabled) path; the GC sweep refuses to delete a marker whose blob is
-  // not yet cluster-wide durable. Absent → legacy FSM-authoritative multipart.
-  meta_blob:[ubyte];
-}
-
-// DeleteMultipartDoneCmd (cmd 43): deterministic raft-proposed batch delete of
-// mpudone idempotency markers.  Proposed by the periodic GC sweep (Task 5b)
-// after confirming the upload is sufficiently old.  Using a raft command (rather
-// than a TTL) keeps all replicas consistent.
-table DeleteMultipartDoneCmd {
-  upload_ids:[string];
-}
+// MultipartDone and DeleteMultipartDoneCmd are removed in the multipart-off-raft
+// epic (M4). CommandType slot 43 is reserved; see fsm.go.

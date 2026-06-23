@@ -442,13 +442,13 @@ func writeScrubLegacyObjectMeta(b *DistributedBackend, db *badger.DB, bucket, ke
 	})).To(Succeed())
 }
 
-func writeScrubMultipartMeta(b *DistributedBackend, db *badger.DB, uploadID string, meta clusterMultipartMeta) {
+func writeScrubMultipartMeta(b *DistributedBackend, _ *badger.DB, uploadID string, meta clusterMultipartMeta) {
 	GinkgoHelper()
+	// M2b: ScanLocalMultipartUploads walks the local .qmeta_mpu manifest replicas,
+	// so seed the manifest blob (not the FSM mpu: key).
 	raw, err := marshalClusterMultipartMeta(meta)
 	Expect(err).NotTo(HaveOccurred())
-	Expect(db.Update(func(txn *badger.Txn) error {
-		return txn.Set(b.ks().MultipartKey(uploadID), raw)
-	})).To(Succeed())
+	Expect(b.shardSvc.writeManifestBlobLocal(meta.Bucket, uploadID, raw)).To(Succeed())
 }
 
 func scrubDrainObjectRecords(ch <-chan scrubber.ObjectRecord) []scrubber.ObjectRecord {

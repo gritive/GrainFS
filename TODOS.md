@@ -74,6 +74,55 @@
   onto the true meta-raft (`bucketAssignments`) so group-0 becomes a plain data group. Larger; touches
   bucket-lifecycle atomicity + the #838 delete cascade. Not needed for the read-linearization fix.
 
+### Multipart off-raft (M1-M5) follow-ups (2026-06-23)
+
+- **[P2][deferred] ModTime-primary latest rule — 7-site migration.** The current `deriveLatestVersion`
+  rule is max-VID (UUIDv7 lexicographic = create-time order). When a multipart upload is CREATED
+  (T1) before a concurrent PutObject (T2 > T1) but COMPLETED after, the PUT remains latest because
+  its vid is larger (T2 > T1). The intended long-term rule is ModTime-primary: the LAST COMPLETED
+  write is latest. Changing it requires a coordinated migration across ALL 7 sites:
+    • `deriveLatestVersion` (`quorum_meta.go`)
+    • `listObjectVersionsSoleAuth` maxVID loop (`object_version.go` ~line 551)
+    • `listSoleAuthBucketObjectsForGC` maxVID loop (`object_manifest.go` ~line 172)
+    • `localSoleAuthScrubObjects` latest-collapse (`scrubbable.go` ~line 218)
+    • `reconcileVersionIsLatest` / `sortObjectVersions` (`cluster_coordinator.go`)
+    • latest-version resolution (`object_delete.go` ~line 78)
+    • `listObjectVersions` latestVID pre-scan (non-sole-auth path, `object_version.go` ~line 370)
+
+  Additional caveats before migration:
+    • GET (per-version blob) and LIST (version enumeration) must use the SAME latest rule — split
+      implementations are a trap (the listed `IsLatest` flag would disagree with HEAD).
+    • A concurrent regular PutObject with the same key can land at any ms; without a global
+      sequence tie-breaker, "last completed" is ambiguous when a multipart complete and a PutObject
+      complete within the same clock tick.
+  The regression-lock is `TestCompleteMultipart_VersionedLatestEdge` — it MUST FAIL (then be updated)
+  as part of the migration.
+
+- **[P3][known-edge] Create-ordering is ms-granular only.** `deriveMultipartVID` encodes the
+  uploadID's 48-bit UUIDv7 ms timestamp into the derived vid. Two uploads created in the SAME
+  millisecond get a hash-arbitrary relative ordering (bytes [6:16] are sha256(rawUploadID), which
+  differs per upload). Same-ms concurrent uploads are not ordered by wall clock; their relative
+  latest is hash-arbitrary. This is documented in `multipart_upload_id.go`. No action required;
+  the test `TestCompleteMultipart_VersionedLatestEdge` handles the same-ms case gracefully (logs
+  and skips the latest assertion).
+
+- **[DONE] M4 stale comment + dead `MultipartDoneKey` cleanup (final-review batch).** Stale
+  cross-reference comments (references to the removed `CmdCompleteMultipart` flow, removed
+  `readDoneMarker` / `MultipartDoneKey` usage sites, stale `//nolint:unused` directives) cleaned
+  up; `MultipartDoneKey` (zero callers after M4) removed.
+
+- **[P3][follow-up] Non-versioned multipart-complete idempotency fence weakened vs the removed done-marker.**
+  The deterministic-vid existence short-circuit is keyed on the latest-only blob's current VID, so for a
+  NON-VERSIONED bucket a client retry of an already-succeeded CompleteMultipartUpload that is preceded by
+  an intervening same-key PutObject no longer returns an idempotent 200 — it returns InvalidPart (if a
+  leaked manifest replica survives) or NoSuchUpload. NOT data loss (parts are deleted on the first
+  successful complete at multipart.go:317 BEFORE the best-effort manifest delete, so re-assembly fails
+  closed and never overwrites the newer object — codex final-review P0 'stale overwrite' REFUTED on this
+  linchpin). Narrow reachability: non-versioned + lost original 200 + concurrent same-key PUT. A proper
+  fix re-introduces the uploadID-keyed completion fence the done-marker provided (e.g. a short-lived
+  completion sentinel on the blob, or return NoSuchUpload not InvalidPart when parts are gone). Deferred
+  — disproportionate to the narrow non-data-loss impact.
+
 ### Tests / docs / spec polish
 
 - **[P3][test] Deterministic multi-node reproduction of the forwarded-propose apply-wait + MPU

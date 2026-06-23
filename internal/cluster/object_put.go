@@ -7,8 +7,6 @@ import (
 	"io"
 	"time"
 
-	"github.com/rs/zerolog/log"
-
 	"github.com/gritive/GrainFS/internal/gossip"
 	"github.com/gritive/GrainFS/internal/hrw"
 	"github.com/gritive/GrainFS/internal/metrics"
@@ -360,21 +358,19 @@ func (b *DistributedBackend) commitECObjectWriteResult(
 	}, nil
 }
 
-// commitCompleteMultipartObjectWriteResult commits the completed object via the
-// *group* raft (b.node — data plane) FIRST: applyCompleteMultipart atomically
-// writes the object meta to the FSM AND deletes the multipart manifest key in a
-// single BadgerDB txn. That atomicity is load-bearing — it prevents a manifest
-// leak / upload-ID reuse (re-completing the same upload would mint a duplicate
-// version), so the raft propose stays the authoritative durable commit. On
-// failure nothing is committed and the manifest is intact, so clean up the
-// shards and fail; the client can safely retry CompleteMultipartUpload.
+// commitCompleteMultipartObjectWriteResult commits the completed object's
+// quorum-meta blob, FAIL-CLOSED — M3: the multipart complete is raft-free (no
+// CmdCompleteMultipart propose). For a versioning-enabled bucket the per-version
+// blob is the sole authority; non-versioned / Suspended commits the latest-only
+// quorum-meta blob (also fail-closed, mirroring the regular non-versioned PUT). On
+// any commit error nothing is durable, so the EC shards are eager-deleted and the
+// client can safely retry CompleteMultipartUpload (its manifest blob is intact). The
+// idempotency anchor is the deterministic det-vid blob + the existence short-circuit
+// in CompleteMultipartUpload, NOT a done-marker. This is off the PUT/GET/HEAD hot
+// path (CompleteMultipartUpload is its own S3 API).
 //
-// After the durable commit, the object is mirrored into quorum-meta so Phase 4
-// index-free LIST can enumerate it (the same source as a regular PUT). A failure
-// of that mirror must NOT delete shards or fail the op — the object is already
-// committed and served by GET/HEAD via the BadgerDB FSM fallback; only LIST
-// visibility lags until a repair re-derives quorum-meta. This is off the
-// PUT/GET/HEAD hot path (CompleteMultipartUpload is its own S3 API). Phase 3/4 경계.
+// Used only by the legacy spool path (backends without a ShardGroupSource — never
+// production); the production chunked path is runChunkedPutWithParts.
 func (b *DistributedBackend) commitCompleteMultipartObjectWriteResult(
 	ctx context.Context,
 	uploadID string,
@@ -382,15 +378,12 @@ func (b *DistributedBackend) commitCompleteMultipartObjectWriteResult(
 	result ecObjectWriteResult,
 	metricPath string,
 ) (*storage.Object, error) {
+	_ = uploadID
 	stageStart := time.Now()
 	modTime := result.ModTime
 	if plan.PreserveModTime {
 		modTime = plan.ModTime
 	}
-	// Blob-authoritative multipart (versioning-enabled): build the completed object's
-	// encoded PutObjectMetaCmd here (the proposer) and pass it as meta_blob; the
-	// per-version blob (written after the propose, from the done-marker) is then the
-	// sole authority. nil for non-versioned/Suspended (legacy FSM obj:/lat:).
 	metaCmd := PutObjectMetaCmd{
 		Bucket:           plan.Bucket,
 		Key:              plan.Key,
@@ -409,50 +402,18 @@ func (b *DistributedBackend) commitCompleteMultipartObjectWriteResult(
 		Parts:            result.Parts,
 		Tags:             result.Tags,
 	}
+	// Versioning-enabled buckets get an encoded per-version blob; non-versioned /
+	// Suspended get nil and commit via the latest-only quorum-meta write below.
 	metaBlob, mberr := b.buildMultipartMetaBlob(ctx, metaCmd)
 	if mberr != nil {
 		return nil, mberr
 	}
-	// Authoritative commit: atomic {write object meta to FSM, delete manifest}.
-	if merr := b.propose(ctx, CmdCompleteMultipart, CompleteMultipartCmd{
-		Bucket:           plan.Bucket,
-		Key:              plan.Key,
-		UploadID:         uploadID,
-		Size:             result.Size,
-		ContentType:      plan.ContentType,
-		ETag:             result.ETag,
-		ModTime:          modTime,
-		VersionID:        plan.VersionID,
-		PlacementGroupID: plan.PlacementGroupID,
-		ECData:           result.ECData,
-		ECParity:         result.ECParity,
-		NodeIDs:          result.Placement,
-		Parts:            result.Parts,
-		Tags:             result.Tags,
-		MetaBlob:         metaBlob,
-	}); merr != nil {
-		ObservePutTraceStage(ctx, PutTraceStageDataRaftProposeMeta, stageStart, PutTraceStageFields{Error: merr.Error()})
-		if shardCleanupSafeOnProposeError(merr) {
-			go b.deleteShardsAsync(plan.Bucket, result.Placement, result.ShardKey)
-		}
-		return nil, merr
-	}
-
-	// Blob-authoritative: write the WINNER's per-version blob from the done-marker's
-	// meta_blob, FAIL-CLOSED. winner+loser both run this (idempotent same vid+bytes);
-	// the loser uses the marker's meta_blob. The object is durably committed via raft,
-	// so a blob-write failure returns an error and the client's retry re-writes it.
 	if len(metaBlob) > 0 {
-		marker, merr := b.readDoneMarker(uploadID)
-		if merr != nil {
-			return nil, fmt.Errorf("multipart complete: done-marker readback: %w", merr)
-		}
-		winnerBlob := metaBlob
-		if marker != nil && len(marker.MetaBlob) > 0 {
-			winnerBlob = marker.MetaBlob
-		}
-		winCmd, werr := b.writeCompletedMultipartBlob(ctx, winnerBlob)
+		// VERSIONED: the per-version blob is the sole authority, FAIL-CLOSED. On
+		// failure nothing is durable — eager-delete the shards and let the client retry.
+		winCmd, werr := b.writeCompletedMultipartBlob(ctx, metaBlob)
 		if werr != nil {
+			go b.deleteShardsAsync(plan.Bucket, result.Placement, result.ShardKey)
 			return nil, werr
 		}
 		ObservePutTraceStage(ctx, PutTraceStageDataRaftProposeMeta, stageStart, PutTraceStageFields{})
@@ -461,38 +422,13 @@ func (b *DistributedBackend) commitCompleteMultipartObjectWriteResult(
 		return winObj, nil
 	}
 
-	// Non-versioned/Suspended legacy path (no meta_blob).
-	// Phantom-winner guard: after a successful propose, check who actually won
-	// this uploadID. If another concurrent completion committed first (its
-	// marker holds a different versionID), our FSM apply was a no-op — do NOT
-	// mirror our version into quorum-meta (that would publish a duplicate
-	// version for versioning-enabled buckets). Return the winner's object;
-	// our shards become orphans collected by the segment scrubber.
-	var winnerObj *storage.Object
-	if marker, merr := b.readDoneMarker(uploadID); merr != nil {
-		log.Warn().Err(merr).Str("bucket", plan.Bucket).Str("key", plan.Key).Str("upload_id", uploadID).
-			Msg("multipart complete: done-marker readback failed; proceeding with mirror")
-	} else if marker != nil && marker.VersionID != plan.VersionID {
-		obj, herr := func() (*storage.Object, error) {
-			o, _, e := b.headObjectMetaV(ctx, plan.Bucket, plan.Key, marker.VersionID)
-			return o, e
-		}()
-		if herr != nil {
-			return nil, fmt.Errorf("multipart complete: winner readback: %w", herr)
-		}
-		winnerObj = obj
-	}
-	if winnerObj != nil {
-		ObservePutTraceStage(ctx, PutTraceStageDataRaftProposeMeta, stageStart, PutTraceStageFields{})
-		observePutStage(metricPath, "propose_meta", stageStart)
-		return winnerObj, nil
-	}
-
-	// LIST-visibility mirror into quorum-meta (best-effort; the object is already
-	// durably committed above). Must NOT delete shards or fail the op on error.
+	// NON-VERSIONED / Suspended: the latest-only quorum-meta blob is the sole
+	// authority, written FAIL-CLOSED (M3 F7) — mirrors the regular non-versioned PUT
+	// (commitECObjectWriteResult). On failure nothing is durable; eager-delete shards.
 	if merr := b.writeQuorumMeta(ctx, metaCmd); merr != nil {
-		log.Warn().Err(merr).Str("bucket", plan.Bucket).Str("key", plan.Key).Str("upload_id", uploadID).
-			Msg("multipart complete: quorum-meta mirror failed (object committed via raft; LIST visibility deferred until repair)")
+		ObservePutTraceStage(ctx, PutTraceStageDataRaftProposeMeta, stageStart, PutTraceStageFields{Error: merr.Error()})
+		go b.deleteShardsAsync(plan.Bucket, result.Placement, result.ShardKey)
+		return nil, merr
 	}
 	ObservePutTraceStage(ctx, PutTraceStageDataRaftProposeMeta, stageStart, PutTraceStageFields{})
 	observePutStage(metricPath, "propose_meta", stageStart)
@@ -515,32 +451,11 @@ func (b *DistributedBackend) commitCompleteMultipartObjectWriteResult(
 	}, nil
 }
 
-// shardCleanupSafeOnProposeError reports whether a failed CmdCompleteMultipart
-// propose may safely trigger eager shard deletion. It is false ONLY for the
-// phantom-commit window — a server-side propose timeout (ErrProposeTimeout) or
-// a client cancellation mid-commit (context.Canceled). In those cases the raft
-// entry may still commit later; applyCompleteMultipart would then write object
-// meta referencing the now-deleted shards, yielding an unreadable committed
-// object with no retry. Every other error (encode failure, FSM apply error,
-// terminal non-leader / forward failure where no entry was accepted) means the
-// entry did not and will not commit, so the shards are true orphans and eager
-// deletion reclaims them immediately.
-//
-// NOTE: there is currently no orphan-shard scrubber for EC shards in production
-// (the OrphanWalkable interface is unimplemented by DistributedBackend), so
-// shards retained here on the phantom-commit window are NOT reclaimed if the
-// entry ultimately does not commit — a bounded, rare slow-leak. The proper
-// foundation (an EC orphan-shard sweep) is tracked in TODOS.md; until then the
-// trade is: rare bounded leak on ambiguous failure vs. destroying a committed
-// object's data.
-func shardCleanupSafeOnProposeError(err error) bool {
-	return !errors.Is(err, ErrProposeTimeout) && !errors.Is(err, context.Canceled)
-}
-
-// deleteShardsAsync는 propose 실패 시 고아 샤드를 백그라운드에서 삭제한다.
+// deleteShardsAsync는 쓰기 commit 실패 시 고아 샤드를 백그라운드에서 삭제한다.
 // best-effort: 실패는 무시한다. 현재 EC 샤드용 orphan scrubber가 없으므로
-// (OrphanWalkable 미구현) 이 호출이 유일한 회수 경로다 — 따라서 propose가
-// 확정적으로 commit되지 않은 경우(shardCleanupSafeOnProposeError)에만 호출한다.
+// (OrphanWalkable 미구현) 이 호출이 유일한 회수 경로다. M3 이후 multipart-complete의
+// quorum-meta blob 쓰기는 동기적(fail-closed)이므로 commit 실패 = 확정 미커밋이고,
+// 항상 즉시 회수해도 안전하다(과거의 propose phantom-commit window는 없다).
 func (b *DistributedBackend) deleteShardsAsync(bucket string, placement []string, shardKey string) {
 	// Drop any cached entries for this shardKey before/after the disk
 	// delete. Reads after this point must miss the cache so they can

@@ -427,264 +427,6 @@ func decodeDeleteObjectVersionCmd(data []byte) (DeleteObjectVersionCmd, error) {
 	}, nil
 }
 
-func encodeCreateMultipartUploadCmd(c CreateMultipartUploadCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	uidOff := b.CreateString(c.UploadID)
-	bucketOff := b.CreateString(c.Bucket)
-	keyOff := b.CreateString(c.Key)
-	ctOff := b.CreateString(c.ContentType)
-	pgOff := b.CreateString(c.PlacementGroupID)
-	tagsVec := buildTagsVector(b, c.Tags, clusterpb.CreateMultipartUploadCmdStartTagsVector)
-	clusterpb.CreateMultipartUploadCmdStart(b)
-	clusterpb.CreateMultipartUploadCmdAddUploadId(b, uidOff)
-	clusterpb.CreateMultipartUploadCmdAddBucket(b, bucketOff)
-	clusterpb.CreateMultipartUploadCmdAddKey(b, keyOff)
-	clusterpb.CreateMultipartUploadCmdAddContentType(b, ctOff)
-	clusterpb.CreateMultipartUploadCmdAddCreatedAt(b, c.CreatedAt)
-	clusterpb.CreateMultipartUploadCmdAddPlacementGroupId(b, pgOff)
-	if tagsVec != 0 {
-		clusterpb.CreateMultipartUploadCmdAddTags(b, tagsVec)
-	}
-	return fbFinish(b, clusterpb.CreateMultipartUploadCmdEnd(b)), nil
-}
-
-func decodeCreateMultipartUploadCmd(data []byte) (CreateMultipartUploadCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.CreateMultipartUploadCmd {
-		return clusterpb.GetRootAsCreateMultipartUploadCmd(d, 0)
-	})
-	if err != nil {
-		return CreateMultipartUploadCmd{}, err
-	}
-	return CreateMultipartUploadCmd{
-		UploadID:         string(t.UploadId()),
-		Bucket:           string(t.Bucket()),
-		Key:              string(t.Key()),
-		ContentType:      string(t.ContentType()),
-		CreatedAt:        t.CreatedAt(),
-		PlacementGroupID: string(t.PlacementGroupId()),
-		Tags:             readTagsVector(t.TagsLength(), t.Tags),
-	}, nil
-}
-
-// copyByteVector returns a fresh copy of a FlatBuffers byte vector (which aliases
-// the decode buffer); nil for an absent/empty vector.
-func copyByteVector(b []byte) []byte {
-	if len(b) == 0 {
-		return nil
-	}
-	return append([]byte(nil), b...)
-}
-
-func encodeCompleteMultipartCmd(c CompleteMultipartCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	keyOff := b.CreateString(c.Key)
-	uidOff := b.CreateString(c.UploadID)
-	ctOff := b.CreateString(c.ContentType)
-	etagOff := b.CreateString(c.ETag)
-	vidOff := b.CreateString(c.VersionID)
-	pgOff := b.CreateString(c.PlacementGroupID)
-	var nodeIDsOff flatbuffers.UOffsetT
-	if len(c.NodeIDs) > 0 {
-		nodeIDsOff = buildStringVector(b, c.NodeIDs, clusterpb.CompleteMultipartCmdStartNodeIdsVector)
-	}
-	var partsOff flatbuffers.UOffsetT
-	if len(c.Parts) > 0 {
-		partOffs := make([]flatbuffers.UOffsetT, len(c.Parts))
-		for i, p := range c.Parts {
-			etOff := b.CreateString(p.ETag)
-			clusterpb.MultipartPartEntryStart(b)
-			clusterpb.MultipartPartEntryAddPartNumber(b, int32(p.PartNumber))
-			clusterpb.MultipartPartEntryAddSize(b, p.Size)
-			clusterpb.MultipartPartEntryAddEtag(b, etOff)
-			partOffs[i] = clusterpb.MultipartPartEntryEnd(b)
-		}
-		clusterpb.CompleteMultipartCmdStartPartsVector(b, len(partOffs))
-		for i := len(partOffs) - 1; i >= 0; i-- {
-			b.PrependUOffsetT(partOffs[i])
-		}
-		partsOff = b.EndVector(len(partOffs))
-	}
-	var segmentsOff flatbuffers.UOffsetT
-	if len(c.Segments) > 0 {
-		segOffs := make([]flatbuffers.UOffsetT, len(c.Segments))
-		for i, s := range c.Segments {
-			blobOff := b.CreateString(s.BlobID)
-			pgOff := b.CreateString(s.PlacementGroupID)
-			var checksumOff flatbuffers.UOffsetT
-			if len(s.Checksum) > 0 {
-				checksumOff = b.CreateByteVector(s.Checksum)
-			}
-			var nodeIdsOff flatbuffers.UOffsetT
-			if len(s.NodeIDs) > 0 {
-				nodeIdsOff = buildStringVector(b, s.NodeIDs, clusterpb.SegmentMetaEntryStartNodeIdsVector)
-			}
-			clusterpb.SegmentMetaEntryStart(b)
-			clusterpb.SegmentMetaEntryAddBlobId(b, blobOff)
-			clusterpb.SegmentMetaEntryAddSize(b, s.Size)
-			if checksumOff != 0 {
-				clusterpb.SegmentMetaEntryAddChecksum(b, checksumOff)
-			}
-			clusterpb.SegmentMetaEntryAddPlacementGroupId(b, pgOff)
-			clusterpb.SegmentMetaEntryAddShardSize(b, s.ShardSize)
-			clusterpb.SegmentMetaEntryAddSegmentIdx(b, s.SegmentIdx)
-			if nodeIdsOff != 0 {
-				clusterpb.SegmentMetaEntryAddNodeIds(b, nodeIdsOff)
-			}
-			clusterpb.SegmentMetaEntryAddEcData(b, s.ECData)
-			clusterpb.SegmentMetaEntryAddEcParity(b, s.ECParity)
-			clusterpb.SegmentMetaEntryAddStripeBytes(b, s.StripeBytes)
-			segOffs[i] = clusterpb.SegmentMetaEntryEnd(b)
-		}
-		clusterpb.CompleteMultipartCmdStartSegmentsVector(b, len(segOffs))
-		for i := len(segOffs) - 1; i >= 0; i-- {
-			b.PrependUOffsetT(segOffs[i])
-		}
-		segmentsOff = b.EndVector(len(segOffs))
-	}
-	tagsOff := buildTagsVector(b, c.Tags, clusterpb.CompleteMultipartCmdStartTagsVector)
-	var metaBlobOff flatbuffers.UOffsetT
-	if len(c.MetaBlob) > 0 {
-		metaBlobOff = b.CreateByteVector(c.MetaBlob)
-	}
-	clusterpb.CompleteMultipartCmdStart(b)
-	clusterpb.CompleteMultipartCmdAddBucket(b, bucketOff)
-	clusterpb.CompleteMultipartCmdAddKey(b, keyOff)
-	clusterpb.CompleteMultipartCmdAddUploadId(b, uidOff)
-	clusterpb.CompleteMultipartCmdAddSize(b, c.Size)
-	clusterpb.CompleteMultipartCmdAddContentType(b, ctOff)
-	clusterpb.CompleteMultipartCmdAddEtag(b, etagOff)
-	clusterpb.CompleteMultipartCmdAddModTime(b, c.ModTime)
-	clusterpb.CompleteMultipartCmdAddVersionId(b, vidOff)
-	clusterpb.CompleteMultipartCmdAddPlacementGroupId(b, pgOff)
-	clusterpb.CompleteMultipartCmdAddEcData(b, c.ECData)
-	clusterpb.CompleteMultipartCmdAddEcParity(b, c.ECParity)
-	if nodeIDsOff != 0 {
-		clusterpb.CompleteMultipartCmdAddNodeIds(b, nodeIDsOff)
-	}
-	if partsOff != 0 {
-		clusterpb.CompleteMultipartCmdAddParts(b, partsOff)
-	}
-	if segmentsOff != 0 {
-		clusterpb.CompleteMultipartCmdAddSegments(b, segmentsOff)
-	}
-	if tagsOff != 0 {
-		clusterpb.CompleteMultipartCmdAddTags(b, tagsOff)
-	}
-	if metaBlobOff != 0 {
-		clusterpb.CompleteMultipartCmdAddMetaBlob(b, metaBlobOff)
-	}
-	return fbFinish(b, clusterpb.CompleteMultipartCmdEnd(b)), nil
-}
-
-func decodeCompleteMultipartCmd(data []byte) (CompleteMultipartCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.CompleteMultipartCmd {
-		return clusterpb.GetRootAsCompleteMultipartCmd(d, 0)
-	})
-	if err != nil {
-		return CompleteMultipartCmd{}, err
-	}
-	var nodeIDs []string
-	if n := t.NodeIdsLength(); n > 0 {
-		nodeIDs = make([]string, n)
-		for i := range nodeIDs {
-			nodeIDs[i] = string(t.NodeIds(i))
-		}
-	}
-	var parts []storage.MultipartPartEntry
-	if n := t.PartsLength(); n > 0 {
-		parts = make([]storage.MultipartPartEntry, n)
-		var pe clusterpb.MultipartPartEntry
-		for i := 0; i < n; i++ {
-			if !t.Parts(&pe, i) {
-				return CompleteMultipartCmd{}, fmt.Errorf("decode complete multipart parts[%d]", i)
-			}
-			parts[i] = storage.MultipartPartEntry{
-				PartNumber: int(pe.PartNumber()),
-				Size:       pe.Size(),
-				ETag:       string(pe.Etag()),
-			}
-		}
-	}
-	var segments []SegmentMetaEntry
-	if n := t.SegmentsLength(); n > 0 {
-		segments = make([]SegmentMetaEntry, n)
-		var se clusterpb.SegmentMetaEntry
-		for i := 0; i < n; i++ {
-			if !t.Segments(&se, i) {
-				return CompleteMultipartCmd{}, fmt.Errorf("decode complete multipart segments[%d]", i)
-			}
-			var nodeIDs []string
-			if nn := se.NodeIdsLength(); nn > 0 {
-				nodeIDs = make([]string, nn)
-				for j := 0; j < nn; j++ {
-					nodeIDs[j] = string(se.NodeIds(j))
-				}
-			}
-			var checksum []byte
-			if cb := se.ChecksumBytes(); len(cb) > 0 {
-				checksum = append([]byte(nil), cb...)
-			}
-			segments[i] = SegmentMetaEntry{
-				BlobID:           string(se.BlobId()),
-				Size:             se.Size(),
-				Checksum:         checksum,
-				PlacementGroupID: string(se.PlacementGroupId()),
-				ShardSize:        se.ShardSize(),
-				SegmentIdx:       se.SegmentIdx(),
-				NodeIDs:          nodeIDs,
-				ECData:           se.EcData(),
-				ECParity:         se.EcParity(),
-				StripeBytes:      se.StripeBytes(),
-			}
-		}
-	}
-	return CompleteMultipartCmd{
-		Bucket:           string(t.Bucket()),
-		Key:              string(t.Key()),
-		UploadID:         string(t.UploadId()),
-		Size:             t.Size(),
-		ContentType:      string(t.ContentType()),
-		ETag:             string(t.Etag()),
-		ModTime:          t.ModTime(),
-		VersionID:        string(t.VersionId()),
-		PlacementGroupID: string(t.PlacementGroupId()),
-		ECData:           t.EcData(),
-		ECParity:         t.EcParity(),
-		NodeIDs:          nodeIDs,
-		Parts:            parts,
-		Segments:         segments,
-		Tags:             readTagsVector(t.TagsLength(), t.Tags),
-		MetaBlob:         copyByteVector(t.MetaBlobBytes()),
-	}, nil
-}
-
-func encodeAbortMultipartCmd(c AbortMultipartCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	keyOff := b.CreateString(c.Key)
-	uidOff := b.CreateString(c.UploadID)
-	clusterpb.AbortMultipartCmdStart(b)
-	clusterpb.AbortMultipartCmdAddBucket(b, bucketOff)
-	clusterpb.AbortMultipartCmdAddKey(b, keyOff)
-	clusterpb.AbortMultipartCmdAddUploadId(b, uidOff)
-	return fbFinish(b, clusterpb.AbortMultipartCmdEnd(b)), nil
-}
-
-func decodeAbortMultipartCmd(data []byte) (AbortMultipartCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.AbortMultipartCmd {
-		return clusterpb.GetRootAsAbortMultipartCmd(d, 0)
-	})
-	if err != nil {
-		return AbortMultipartCmd{}, err
-	}
-	return AbortMultipartCmd{
-		Bucket:   string(t.Bucket()),
-		Key:      string(t.Key()),
-		UploadID: string(t.UploadId()),
-	}, nil
-}
-
 func encodeSetBucketPolicyCmd(c SetBucketPolicyCmd) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 	bucketOff := b.CreateString(c.Bucket)
@@ -1189,61 +931,6 @@ func unmarshalClusterMultipartMeta(data []byte) (clusterMultipartMeta, error) {
 	}, nil
 }
 
-// --- MultipartDone codec ---
-
-// multipartDone records that a multipart upload has been finalized.
-type multipartDone struct {
-	UploadID  string
-	Bucket    string
-	Key       string
-	VersionID string
-	ModTime   int64
-	// MetaBlob is the encoded per-version PutObjectMetaCmd for the completed object
-	// (blob-authoritative multipart, S3). Lets a retry / the loser of a concurrent
-	// complete re-write the winner's per-version blob fail-closed. Empty for the
-	// legacy FSM-authoritative (non-versioned) path.
-	MetaBlob []byte
-}
-
-func marshalMultipartDone(m multipartDone) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	uploadIDOff := b.CreateString(m.UploadID)
-	bucketOff := b.CreateString(m.Bucket)
-	keyOff := b.CreateString(m.Key)
-	versionIDOff := b.CreateString(m.VersionID)
-	var metaBlobOff flatbuffers.UOffsetT
-	if len(m.MetaBlob) > 0 {
-		metaBlobOff = b.CreateByteVector(m.MetaBlob)
-	}
-	clusterpb.MultipartDoneStart(b)
-	clusterpb.MultipartDoneAddUploadId(b, uploadIDOff)
-	clusterpb.MultipartDoneAddBucket(b, bucketOff)
-	clusterpb.MultipartDoneAddKey(b, keyOff)
-	clusterpb.MultipartDoneAddVersionId(b, versionIDOff)
-	clusterpb.MultipartDoneAddModTime(b, m.ModTime)
-	if metaBlobOff != 0 {
-		clusterpb.MultipartDoneAddMetaBlob(b, metaBlobOff)
-	}
-	return fbFinish(b, clusterpb.MultipartDoneEnd(b)), nil
-}
-
-func unmarshalMultipartDone(data []byte) (multipartDone, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.MultipartDone {
-		return clusterpb.GetRootAsMultipartDone(d, 0)
-	})
-	if err != nil {
-		return multipartDone{}, fmt.Errorf("unmarshal MultipartDone: %w", err)
-	}
-	return multipartDone{
-		UploadID:  string(t.UploadId()),
-		Bucket:    string(t.Bucket()),
-		Key:       string(t.Key()),
-		VersionID: string(t.VersionId()),
-		ModTime:   t.ModTime(),
-		MetaBlob:  copyByteVector(t.MetaBlobBytes()),
-	}, nil
-}
-
 // --- MigrateShard / MigrationDone codec ---
 
 func encodeMigrateShardCmd(c MigrateShardFSMCmd) ([]byte, error) {
@@ -1563,12 +1250,9 @@ func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
 		return encodePutObjectMetaCmd(payload.(PutObjectMetaCmd))
 	case CmdDeleteObject:
 		return encodeDeleteObjectCmd(payload.(DeleteObjectCmd))
-	case CmdCreateMultipartUpload:
-		return encodeCreateMultipartUploadCmd(payload.(CreateMultipartUploadCmd))
-	case CmdCompleteMultipart:
-		return encodeCompleteMultipartCmd(payload.(CompleteMultipartCmd))
-	case CmdAbortMultipart:
-		return encodeAbortMultipartCmd(payload.(AbortMultipartCmd))
+	case CmdCreateMultipartUpload, CmdCompleteMultipart, CmdAbortMultipart:
+		// reserved, removed v0.0.651+ — no production caller
+		return nil, fmt.Errorf("command type %d is reserved and removed (multipart-off-raft M4)", cmdType)
 	case CmdSetBucketPolicy:
 		return encodeSetBucketPolicyCmd(payload.(SetBucketPolicyCmd))
 	case CmdDeleteBucketPolicy:
@@ -1602,7 +1286,8 @@ func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
 	case CmdFSMValueResealDone:
 		return encodeFSMValueResealDoneCmd(payload.(FSMValueResealDoneCmd))
 	case CmdDeleteMultipartDone:
-		return encodeDeleteMultipartDoneCmd(payload.(DeleteMultipartDoneCmd))
+		// reserved, removed v0.0.651+ — no production caller
+		return nil, fmt.Errorf("command type %d is reserved and removed (multipart-off-raft M4)", cmdType)
 	default:
 		return nil, fmt.Errorf("unknown command type: %d", cmdType)
 	}
@@ -1709,34 +1394,6 @@ func decodeFSMValueResealDoneCmd(data []byte) (FSMValueResealDoneCmd, error) {
 		return FSMValueResealDoneCmd{}, err
 	}
 	return FSMValueResealDoneCmd{Gen: t.Gen()}, nil
-}
-
-func encodeDeleteMultipartDoneCmd(c DeleteMultipartDoneCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	var idsOff flatbuffers.UOffsetT
-	if len(c.UploadIDs) > 0 {
-		idsOff = buildStringVector(b, c.UploadIDs, clusterpb.DeleteMultipartDoneCmdStartUploadIdsVector)
-	}
-	clusterpb.DeleteMultipartDoneCmdStart(b)
-	if len(c.UploadIDs) > 0 {
-		clusterpb.DeleteMultipartDoneCmdAddUploadIds(b, idsOff)
-	}
-	return fbFinish(b, clusterpb.DeleteMultipartDoneCmdEnd(b)), nil
-}
-
-func decodeDeleteMultipartDoneCmd(data []byte) (DeleteMultipartDoneCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.DeleteMultipartDoneCmd {
-		return clusterpb.GetRootAsDeleteMultipartDoneCmd(d, 0)
-	})
-	if err != nil {
-		return DeleteMultipartDoneCmd{}, err
-	}
-	n := t.UploadIdsLength()
-	ids := make([]string, n)
-	for i := 0; i < n; i++ {
-		ids[i] = string(t.UploadIds(i))
-	}
-	return DeleteMultipartDoneCmd{UploadIDs: ids}, nil
 }
 
 func encodePutShardPlacementCmd(c PutShardPlacementCmd) ([]byte, error) {
