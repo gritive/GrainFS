@@ -50,8 +50,6 @@ const (
 	routePathAdminHealthRaft   = "/admin/health/raft"
 	routePathAdminHealthScrub  = "/admin/health/scrub"
 	routePathAdminRaftSnapshot = "/admin/raft/snapshot"
-	routePathAdminDebug        = "/admin/debug"
-	routePathAdminDebugVFSStat = "/vfs/stat"
 
 	routePrefixAdminUDSCluster       = "/v1/cluster"
 	routePathAdminUDSClusterStatus   = "/status"
