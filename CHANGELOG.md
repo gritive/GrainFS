@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.0.653.0] - 2026-06-23
+
+### Changed
+- **S3 multipart upload lifecycle is now fully raft-free.** Completing a multipart upload no longer
+  proposes to data-raft. The completed object's version-id is derived deterministically from the
+  uploadID (a create-time UUIDv7), so concurrent or retried `CompleteMultipartUpload` calls target the
+  same per-version quorum-meta blob and converge with no consensus — the single-winner decision the old
+  raft done-marker provided is dissolved rather than replaced. The upload manifest moves from the raft
+  FSM (`mpu:<uploadID>`) to a sibling-root quorum-meta blob (`.qmeta_mpu/{bucket}/{uploadID}`) placed on
+  the uploadID's owning group; `CreateMultipartUpload` / `AbortMultipartUpload` / `UploadPart` /
+  `ListParts` read and write that blob, and `ListMultipartUploads` scans it cluster-wide (strict,
+  fail-closed) with a completed-blob reconcile that filters leaked manifests. Non-versioned multipart
+  completion is now sole-authoritative on the latest-only quorum-meta blob, written fail-closed (the
+  legacy FSM `obj:`/`lat:` write is gone). The per-version blob placement is keyed on the version-id and
+  uses the same weighted HRW as segment writes, so concurrent completers converge.
+
+### Removed
+- **The four multipart raft commands and the done-marker machinery.** `CmdCreateMultipartUpload`,
+  `CmdCompleteMultipart`, `CmdAbortMultipart`, and `CmdDeleteMultipartDone` (with their apply functions,
+  codecs, and FlatBuffers tables), the `mpudone:` done-marker (struct + codec), and the leader-gated
+  done-marker scrubber sweep plus its boot wiring are deleted. The data-plane `CommandType` constants
+  5/6/7/43 are reserved, not renumbered. BREAKING (greenfield only): no in-place upgrade across a
+  persisted raft log/snapshot carrying these commands.
+
+### Notes
+- Completion idempotency is now provided by the deterministic-version-id per-version quorum-meta blob,
+  not the `mpudone:` marker (there is no 24h GC sweep); the operator runbook diagnosis is updated. Two
+  follow-ups are tracked in `TODOS.md`: (1) the latest-version pointer for a multipart object interleaved
+  with a same-key PUT during the upload window stays create-ordered (vid-primary; a ModTime-primary fix
+  is deferred), and (2) the non-versioned retry idempotency fence is narrower than the removed
+  done-marker — a retry of an already-completed non-versioned upload that is preceded by an intervening
+  same-key PUT returns an error instead of an idempotent 200 (not data loss).
+
 ## [0.0.652.0] - 2026-06-23
 
 ### Fixed
