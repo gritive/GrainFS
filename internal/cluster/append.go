@@ -50,6 +50,10 @@ const maxAppendCASRetries = 2
 //     offset, and retry (bounded). Persistent reject → ErrStalePlacement (the
 //     coordinator maps it to a retryable 503).
 func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key string, expectedOffset int64, r io.Reader) (*storage.Object, error) {
+	// F8: append-rejection for versioning-enabled buckets is enforced UPSTREAM in
+	// the HTTP handler (internal/server/object_append.go, via a linearized
+	// GetBucketVersioning read → 501), NOT here. The off-raft blob path does not
+	// re-check versioning; this backend assumes the bucket is versioning-disabled.
 	if err := guardInternalBucketObjectOp(bucket); err != nil {
 		return nil, err
 	}
