@@ -79,3 +79,43 @@ func TestMultipart_CompleteOffFSM_FirstCompleteSucceeds(t *testing.T) {
 	require.NoError(t, rc.Close())
 	require.Equal(t, payload, got)
 }
+
+// TestScanLocalMultipartUploads_RepointAndIdempotentAbort proves the F5 lifecycle
+// repoint on the REAL backend: ScanLocalMultipartUploads emits the in-progress
+// upload off its local .qmeta_mpu manifest replica; AbortMultipartUpload removes
+// it so a re-scan is empty; and a duplicate abort of the already-gone manifest is
+// an idempotent no-op (no error) — the property the every-node lifecycle worker
+// relies on.
+func TestScanLocalMultipartUploads_RepointAndIdempotentAbort(t *testing.T) {
+	b, _ := newTestDistributedBackendWithDB(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "bucket"))
+
+	up, err := b.CreateMultipartUpload(ctx, "bucket", "mp.bin", "application/octet-stream")
+	require.NoError(t, err)
+
+	scan := func() []storage.MultipartUploadRecord {
+		ch, serr := b.ScanLocalMultipartUploads("bucket")
+		require.NoError(t, serr)
+		var out []storage.MultipartUploadRecord
+		for r := range ch {
+			out = append(out, r)
+		}
+		return out
+	}
+
+	recs := scan()
+	require.Len(t, recs, 1)
+	require.Equal(t, up.UploadID, recs[0].UploadID)
+	require.Equal(t, "mp.bin", recs[0].Key)
+	require.Equal(t, up.CreatedAt, recs[0].InitiatedAt)
+
+	require.NoError(t, b.AbortMultipartUpload(ctx, "bucket", "mp.bin", up.UploadID))
+	require.Empty(t, scan(), "scan must be empty after the abort drops the manifest blob")
+
+	// A second node's / re-run abort of the already-gone manifest is a no-op.
+	// (The manifest is gone, so the existence check returns ErrUploadNotFound — the
+	// idempotent terminal state the every-node worker tolerates.)
+	err = b.AbortMultipartUpload(ctx, "bucket", "mp.bin", up.UploadID)
+	require.ErrorIs(t, err, storage.ErrUploadNotFound)
+}
