@@ -123,12 +123,59 @@
   completion sentinel on the blob, or return NoSuchUpload not InvalidPart when parts are gone). Deferred
   — disproportionate to the narrow non-data-loss impact.
 
+### Data-plane raft-free Slice 2 follow-ups (2026-06-24)
+
+- **[DONE] Retire remaining per-object FSM commands (Slice 2).** `CmdSetObjectTags`,
+  `CmdSetObjectACL`, `CmdPutObjectMeta` apply, `CmdPutObjectQuarantine`, `CmdDeleteObject`,
+  `CmdDeleteObjectVersion` all retired. FSM is pure control-plane. See CHANGELOG Unreleased entry.
+
+- **[P2][pre-existing] Non-versioned `DeleteBucket` (non-force) emptiness check is FSM-blind
+  (`bucket.go` ~line 129–136 scans `obj:` FSM records; greenfield non-versioned objects are
+  stored in `.quorum_meta` blobs only, so the check always sees an empty bucket).** A
+  non-empty non-versioned bucket may be deleted without error by the non-force path.
+  Fix: enumerate `scanQuorumMetaBucketStrict` / `scanQuorumMetaClusterAll` (mirror the
+  ForceDeleteBucket non-versioned enumerate) and return `ErrBucketNotEmpty` on the first hit.
+
+- **[P3][pre-existing] `HeadObject` / `HeadObjectVersion` do not check quarantine status.**
+  A quarantined object is HEAD-able (200) even though GET returns `ErrObjectQuarantined`.
+  Whether this is intentional behavior or a gap depends on S3 compatibility requirements.
+  If HEAD should reflect quarantine, add an `isObjectQuarantined` check in the HEAD paths.
+
+- **[P3][design] Normal non-versioned `DeleteObject` leaves a latest-only tombstone blob
+  (the `IsHardDeleted` marker in the quorum-meta blob) that persists indefinitely.** EC shards
+  are reclaimed by the orphan-shard walker (which sees no live qmeta referencing them). The
+  tombstone blob itself is not reclaimed — confirm there is no unbounded growth path in
+  long-lived buckets with high churn, or add a tombstone GC sweep (age-gated, similar to the
+  per-version hard-delete tombstone GC already planned).
+
+- **[P3][naming] `soleAuthReadOn` / `forceDeleteBucketSoleAuth` are vestigial names from the
+  soleauth era** (the soleauth machinery was removed in #821–#824; the concept is now
+  "blob-authoritative read"). Rename to `blobAuthReadOn` / `forceDeleteBucketBlobAuth` for
+  clarity. No behavior change.
+
+- **[P3][pre-existing] Per-version tags/acl are latest-only.** `SetObjectTags` / `SetObjectACL`
+  blob RMW reads/writes the latest-only quorum-meta blob; the `versionID` parameter is accepted
+  but ignored. The only versionID-aware path was the retired `CmdSetObjectTags/ACL` raft command.
+  To implement version-scoped tag/acl, wire the RMW through `readQuorumMetaVersion` +
+  per-version write. Verified pre-existing (the blob path ignored versionID before Slice 2 too);
+  not a Slice 2 regression.
+
+- **[P2] `deleteShardsQuorum` empty-placement guard missing.** If `placement` is empty
+  (zero-node placement record, e.g. from an incomplete or corrupt write), `deleteShardsQuorum`
+  succeeds trivially — but if the shards actually exist on unknown nodes, they are stranded
+  permanently. Add an early `if len(placement) == 0 { return error }` guard so the caller
+  can decide how to handle the ambiguity rather than silently completing. Closes the
+  shard-stranding class for force-delete on objects with corrupt placement metadata.
+
+- **[P3][cleanup] Three stale comments referencing removed functions remain in the codebase:**
+  (a) `apply.go` ~line 268: references a deleted apply helper; (b) `object_version.go`
+  ~lines 104–107: cross-ref to the removed `DeleteObjectVersion` raft carve-out; (c)
+  `cluster_coordinator.go` ~lines 1159–1162: references `hardDeleteLegacyObject` (removed
+  in Slice 2). All are cosmetic; fix in a standalone cleanup PR.
+
 ### Append/coalesce off-raft follow-ups (Slice 1, 2026-06-24)
 
-- **[P1] Slice 2 — retire remaining per-object FSM commands.** delete carve-out →
-  quorum-meta tombstone; tags/acl raft fallback removal; quarantine fold; `CmdPutObjectMeta`
-  final retirement. This is the last data-plane raft-free step: after Slice 2 no per-object
-  raft propose remains in the data plane.
+- **[DONE] Slice 2 — retire remaining per-object FSM commands.** See Slice 2 section above.
 
 - **[P2] EC coalesced orphan shard leak.** `orphan_shard_walker.go` skips every `/coalesced/`
   shard directory, so unpublished/unreferenced coalesced EC shards (B3 EC distribute) are

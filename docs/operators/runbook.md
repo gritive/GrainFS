@@ -206,6 +206,8 @@ The periodic placement monitor proactively detects and repairs segment (`<key>/s
 
 The placement monitor quarantines an object **only** on confirmed shard corruption (CRC mismatch, structural decode failure, truncation, or AEAD auth failure). Every other non-ENOENT local shard read error — `EIO`, `EMFILE` ("too many open files"), `EBUSY`, permission denied, or unknown — is treated as **transient**: it is logged at Debug level, counted by `grainfs_placement_monitor_transient_read_error_total{kind="object_version|segment|coalesced|unknown"}`, and skipped (the next scan retries it), **not** quarantined. This prevents a transient or failing-disk node-day from mass-quarantining otherwise healthy objects. A sustained transient rate is a signal about the **node's** disk/FD health (failing disk, fd exhaustion), not about the objects — investigate the node (`dmesg`, SMART, open-fd count, `--max-open-files`), not the named objects.
 
+**Quarantine storage (Slice 2+):** Object quarantine status (`IsQuarantined`/`QuarantineCause`) is stored in the quorum-meta blob alongside the object's regular metadata, not as a separate FSM key. Quarantine state is replicated across quorum nodes exactly like other object metadata and persists across restarts without FSM replay. Re-uploading the same key writes a fresh blob without the quarantine flag — the new upload replaces the corrupted object. In a cluster, the quarantine-set call is owner-routed to the node that holds the object's placement group; no raft consensus is required.
+
 For `fd_exhaustion_risk`, inspect the decision text first. It includes current FD usage, projected threshold ETA when available, and best-effort categories such as `socket`, `badger`, or `nfs_session`.
 
 ```bash
