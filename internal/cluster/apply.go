@@ -469,10 +469,14 @@ func (f *FSM) applyCreateMultipartUpload(txn MetadataTxn, data []byte) error {
 	return f.setValue(txn, f.keys.MultipartKey(c.UploadID), meta)
 }
 
-// applyCompleteMultipart is intentionally on data_raft (Phase 3 boundary): it
-// atomically writes object meta and deletes the multipart manifest key in one
-// BadgerDB txn. Splitting the two operations would violate that atomicity.
-// Reads fall back to this BadgerDB entry when quorum meta is absent (headObjectMeta).
+// applyCompleteMultipart writes the done-marker idempotency record (and, for
+// non-versioned/Suspended completes, the legacy FSM obj:/lat: record) in one
+// BadgerDB txn. The in-progress manifest now lives on the .qmeta_mpu blob (M2b),
+// NOT an FSM mpu: key — the proposer validated the manifest blob before proposing,
+// so the apply no longer reads or deletes any mpu: key. The done-marker remains
+// the cross-retry idempotency anchor: a retried apply whose marker already exists
+// no-ops. Reads fall back to this BadgerDB obj:/lat: entry when quorum meta is
+// absent (headObjectMeta) for non-versioned objects.
 func (f *FSM) applyCompleteMultipart(txn MetadataTxn, data []byte) error {
 	c, err := decodeCompleteMultipartCmd(data)
 	if err != nil {
@@ -486,44 +490,25 @@ func (f *FSM) applyCompleteMultipart(txn MetadataTxn, data []byte) error {
 	// Suspended completes carry no meta_blob and keep the legacy FSM obj:/lat: write
 	// (non-versioned blob authority is a separate task).
 	blobAuthoritative := len(c.MetaBlob) > 0
-	mpuKey := f.keys.MultipartKey(c.UploadID)
-	item, err := txn.Get(mpuKey)
-	if err == ErrMetaKeyNotFound {
-		// Manifest absent: check for a done marker written by a prior commit.
-		mb, merr := txn.Get(f.keys.MultipartDoneKey(c.UploadID))
-		if merr == ErrMetaKeyNotFound {
-			return storage.ErrUploadNotFound
+	// Idempotent retry: a prior commit already wrote the done-marker. The manifest
+	// blob is off-FSM (gone after the winner's complete), so the marker is the sole
+	// cross-retry anchor here.
+	if mb, merr := txn.Get(f.keys.MultipartDoneKey(c.UploadID)); merr == nil {
+		raw, rerr := f.itemValueCopy(mb)
+		if rerr != nil {
+			return fmt.Errorf("read multipart done marker: %w", rerr)
 		}
-		if merr != nil {
-			return fmt.Errorf("get multipart done marker: %w", merr)
-		}
-		raw, merr := f.itemValueCopy(mb)
-		if merr != nil {
-			return fmt.Errorf("read multipart done marker: %w", merr)
-		}
-		marker, merr := unmarshalMultipartDone(raw)
-		if merr != nil {
-			return fmt.Errorf("unmarshal multipart done marker: %w", merr)
+		marker, rerr := unmarshalMultipartDone(raw)
+		if rerr != nil {
+			return fmt.Errorf("unmarshal multipart done marker: %w", rerr)
 		}
 		if marker.Bucket == c.Bucket && marker.Key == c.Key {
 			return nil // idempotent — prior commit won
 		}
 		return fmt.Errorf("complete multipart upload id %s already completed for %s/%s, got %s/%s",
 			c.UploadID, marker.Bucket, marker.Key, c.Bucket, c.Key)
-	}
-	if err != nil {
-		return err
-	}
-	raw, err := f.itemValueCopy(item)
-	if err != nil {
-		return err
-	}
-	mpu, err := unmarshalClusterMultipartMeta(raw)
-	if err != nil {
-		return err
-	}
-	if mpu.Bucket != c.Bucket || mpu.Key != c.Key {
-		return fmt.Errorf("complete multipart upload mismatch: upload %s is for %s/%s, got %s/%s", c.UploadID, mpu.Bucket, mpu.Key, c.Bucket, c.Key)
+	} else if merr != ErrMetaKeyNotFound {
+		return fmt.Errorf("get multipart done marker: %w", merr)
 	}
 
 	// Legacy FSM write (non-versioned/Suspended only). Blob-authoritative completes
@@ -578,7 +563,9 @@ func (f *FSM) applyCompleteMultipart(txn MetadataTxn, data []byte) error {
 	if err := f.setValue(txn, f.keys.MultipartDoneKey(c.UploadID), doneBytes); err != nil {
 		return fmt.Errorf("set multipart done marker: %w", err)
 	}
-	return txn.Delete(mpuKey)
+	// No FSM mpu: key to delete — the manifest is off-FSM (.qmeta_mpu blob), dropped
+	// by the proposer after this commit.
+	return nil
 }
 
 func (f *FSM) applyAbortMultipart(txn MetadataTxn, data []byte) error {

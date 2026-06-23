@@ -11,12 +11,10 @@ package cluster
 //     sidesteps the issue entirely by iterating `lat:` pointers instead.
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/gritive/GrainFS/internal/scrubber"
@@ -567,46 +565,39 @@ func (b *DistributedBackend) ScanObjectsGrouped(bucket string) (<-chan storage.O
 }
 
 // ScanLocalMultipartUploads enumerates in-progress multipart uploads in the
-// given bucket on THIS node by iterating the local `mpu:` keyspace. Each
-// cluster node enumerates its own stranded uploads — there is no cross-node
-// MPU aggregation by design (see lifecycle-minio-parity-design.md).
+// given bucket on THIS node by walking the LOCAL .qmeta_mpu/{bucket} manifest
+// replicas (M2b). Each owning-group voter holds the manifests local to it, so
+// every node enumerates its own stranded uploads — there is no cross-node MPU
+// aggregation by design (see lifecycle-minio-parity-design.md). The lifecycle
+// MPU worker runs on every node and aborts via the idempotent deleteManifestBlob,
+// so a K-fold duplicate abort across the owning group's voters is a harmless
+// no-op (mirrors the per-group FSM mpu: model this replaces).
 //
-// Mirrors ListMultipartUploads's iteration pattern but filters by bucket and
-// emits MultipartUploadRecord for the lifecycle worker.
+// Emits MultipartUploadRecord (InitiatedAt = manifest CreatedAt) for the worker.
 func (b *DistributedBackend) ScanLocalMultipartUploads(bucket string) (<-chan storage.MultipartUploadRecord, error) {
 	if err := b.HeadBucket(context.Background(), bucket); err != nil {
 		return nil, err
 	}
 	out := make(chan storage.MultipartUploadRecord, 16)
-	bucketBytes := []byte(bucket)
 	go func() {
 		defer close(out)
-		_ = b.store.View(func(txn MetadataTxn) error {
-			return b.ks().scanGroupPrefix(txn, []byte("mpu:"), func(rawKey []byte, item MetaItem) error {
-				raw, err := b.itemValueCopy(item)
-				if err != nil {
-					return err
-				}
-				meta, err := unmarshalClusterMultipartMeta(raw)
-				if err != nil {
-					return fmt.Errorf("unmarshal clusterMultipartMeta: %w", err)
-				}
-				if meta.Bucket == "" || meta.Key == "" {
-					return nil
-				}
-				if !bytes.Equal([]byte(meta.Bucket), bucketBytes) {
-					return nil
-				}
-				uploadID := strings.TrimPrefix(string(rawKey), "mpu:")
-				out <- storage.MultipartUploadRecord{
-					Bucket:      meta.Bucket,
-					Key:         meta.Key,
-					UploadID:    uploadID,
-					InitiatedAt: meta.CreatedAt,
-				}
-				return nil
-			})
-		})
+		entries, err := b.scanManifestBlobsLocalStrict(bucket)
+		if err != nil {
+			b.logger.Error().Str("bucket", bucket).Err(err).Msg("scan local multipart manifests")
+			return
+		}
+		for _, e := range entries {
+			m := e.Meta
+			if m.Bucket == "" || m.Key == "" || m.Bucket != bucket {
+				continue
+			}
+			out <- storage.MultipartUploadRecord{
+				Bucket:      m.Bucket,
+				Key:         m.Key,
+				UploadID:    e.UploadID,
+				InitiatedAt: m.CreatedAt,
+			}
+		}
 	}()
 	return out, nil
 }

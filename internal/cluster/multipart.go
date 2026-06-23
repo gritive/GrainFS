@@ -1,9 +1,9 @@
 package cluster
 
 import (
-	"bytes"
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -78,20 +77,39 @@ func (b *DistributedBackend) createMultipartUploadInternal(ctx context.Context, 
 		copy(tagsCopy, tags)
 	}
 
-	err := b.propose(ctx, CmdCreateMultipartUpload, CreateMultipartUploadCmd{
-		UploadID:         uploadID,
+	// Off-FSM manifest (M2b hinge): the in-progress upload's manifest lives on the
+	// .qmeta_mpu blob — written FAIL-CLOSED to the owning group's node set — not the
+	// FSM mpu: key. UploadPart/ListParts/Complete/Abort and the lifecycle abort scan
+	// all derive the session from this blob; there is no CmdCreateMultipartUpload
+	// propose. The node set is the same one routing resolves for the owning group:
+	// the placement-group PeerIDs carried in context (GroupBackend / forward path),
+	// falling back to this node alone for the single-node / direct-backend wiring.
+	manifest := clusterMultipartMeta{
 		Bucket:           bucket,
 		Key:              key,
-		ContentType:      contentType,
 		CreatedAt:        now,
+		ContentType:      contentType,
 		PlacementGroupID: placementGroupID,
 		Tags:             tagsCopy,
-	})
-	if err != nil {
+	}
+	if err := b.writeManifestBlob(ctx, manifest, uploadID, b.multipartManifestNodeIDs(ctx)); err != nil {
 		os.RemoveAll(b.partDir(uploadID))
-		return "", 0, err
+		return "", 0, fmt.Errorf("create multipart: write manifest blob: %w", err)
 	}
 	return uploadID, now, nil
+}
+
+// multipartManifestNodeIDs resolves the owning group's node set for the manifest
+// blob write — the same node set routing uses for the upload's group. The
+// placement-group entry carried in context (injected by GroupBackend on the
+// owning-group node, both local-exec and forwarded paths) holds the resolved
+// voter set; on the single-node / direct-backend wiring (no context placement)
+// the manifest is written to this node alone.
+func (b *DistributedBackend) multipartManifestNodeIDs(ctx context.Context) []string {
+	if group, ok := PlacementGroupEntryFromContext(ctx); ok && len(group.PeerIDs) > 0 {
+		return group.PeerIDs
+	}
+	return b.selfNodeIDs()
 }
 
 func (b *DistributedBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader, contentMD5Hex string) (*storage.Part, error) {
@@ -99,16 +117,12 @@ func (b *DistributedBackend) UploadPart(ctx context.Context, bucket, key, upload
 	lifeMu.RLock()
 	defer lifeMu.RUnlock()
 
-	// Verify upload exists (read local metadata)
-	err := b.store.View(func(txn MetadataTxn) error {
-		_, err := txn.Get(b.ks().MultipartKey(uploadID))
-		if err == ErrMetaKeyNotFound {
-			return storage.ErrUploadNotFound
-		}
-		return err
-	})
-	if err != nil {
+	// Verify the upload exists by reading its off-FSM manifest blob (local-first,
+	// peer fan-out on a local miss).
+	if _, ok, err := b.readManifestBlob(bucket, uploadID); err != nil {
 		return nil, err
+	} else if !ok {
+		return nil, storage.ErrUploadNotFound
 	}
 
 	// Data write is local — no Raft needed for part data
@@ -203,50 +217,52 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 		b.multipartLocks.Delete(uploadID)
 	}()
 
-	// Read upload metadata
+	// Read the upload manifest off the .qmeta_mpu blob (M2b). The done-marker is
+	// still an FSM key (written by applyCompleteMultipart) so an idempotent retry —
+	// whose manifest blob the original complete already deleted — still resolves to
+	// the committed object. Read the blob first; on a miss, fall back to the marker.
+	manifestMeta, manifestOK, err := b.readManifestBlob(bucket, uploadID)
+	if err != nil {
+		return nil, err
+	}
 	var meta clusterMultipartMeta
 	var doneMarker *multipartDone
-	err := b.store.View(func(txn MetadataTxn) error {
-		item, err := txn.Get(b.ks().MultipartKey(uploadID))
-		if err == ErrMetaKeyNotFound {
-			// Manifest is gone; check for a done marker (idempotent retry).
-			doneItem, derr := txn.Get(b.ks().MultipartDoneKey(uploadID))
-			if derr == ErrMetaKeyNotFound {
+	if manifestOK {
+		// The manifest blob is now the upload's authority: validate the requested
+		// (bucket, key) against it (the check the FSM apply used to do against the
+		// mpu: manifest before M2b moved it off-raft). A mismatch means the client
+		// addressed the wrong object for this uploadID.
+		if manifestMeta.Bucket != bucket || manifestMeta.Key != key {
+			return nil, fmt.Errorf("complete multipart upload %s mismatch: manifest is for %s/%s, got %s/%s",
+				uploadID, manifestMeta.Bucket, manifestMeta.Key, bucket, key)
+		}
+		meta = manifestMeta
+	} else {
+		derr := b.store.View(func(txn MetadataTxn) error {
+			doneItem, gerr := txn.Get(b.ks().MultipartDoneKey(uploadID))
+			if gerr == ErrMetaKeyNotFound {
 				return storage.ErrUploadNotFound
 			}
-			if derr != nil {
-				return derr
+			if gerr != nil {
+				return gerr
 			}
-			raw, derr := b.itemValueCopy(doneItem)
-			if derr != nil {
-				return derr
+			raw, gerr := b.itemValueCopy(doneItem)
+			if gerr != nil {
+				return gerr
 			}
-			marker, derr := unmarshalMultipartDone(raw)
-			if derr != nil {
-				return derr
+			marker, gerr := unmarshalMultipartDone(raw)
+			if gerr != nil {
+				return gerr
 			}
 			if marker.Bucket != bucket || marker.Key != key {
 				return fmt.Errorf("multipart upload %s already completed for %s/%s", uploadID, marker.Bucket, marker.Key)
 			}
 			doneMarker = &marker
 			return nil
+		})
+		if derr != nil {
+			return nil, derr
 		}
-		if err != nil {
-			return err
-		}
-		val, err := b.itemValueCopy(item)
-		if err != nil {
-			return err
-		}
-		m, err := unmarshalClusterMultipartMeta(val)
-		if err != nil {
-			return err
-		}
-		meta = m
-		return nil
-	})
-	if err != nil {
-		return nil, err
 	}
 	// Idempotent retry: manifest is gone but marker exists; return committed object.
 	if doneMarker != nil {
@@ -330,6 +346,13 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 	if err := os.RemoveAll(b.partDir(uploadID)); err != nil {
 		b.logger.Debug().Err(err).Str("upload_id", uploadID).Msg("multipart part cleanup after complete failed")
 	}
+	// The CmdCompleteMultipart propose committed (obj is non-nil), so the done-marker
+	// is durable and the session is finished — drop the off-FSM manifest blob.
+	// Best-effort: a leaked manifest is reconciled by ListMultipartUploads (the
+	// completed object exists) and aborted by the lifecycle age backstop.
+	if derr := b.deleteManifestBlob(bucket, uploadID); derr != nil {
+		b.logger.Debug().Err(derr).Str("upload_id", uploadID).Msg("multipart manifest blob cleanup after complete failed")
+	}
 	return obj, nil
 }
 
@@ -381,44 +404,51 @@ func contextForMultipartComplete(
 	return ContextWithPlacementGroupEntry(ctx, group), nil
 }
 
+// ListMultipartUploads enumerates in-progress uploads off the .qmeta_mpu blobs
+// (M2b). It runs a STRICT cluster scan (scanManifestBlobsCluster dedups an
+// uploadID across its K replicas), keeps only manifests this backend's group
+// owns (a GroupBackend sees the shared meta-FSM's every-group peer set, so it
+// must filter to its own PlacementGroupID; the single-node / direct backend has
+// no group and keeps all), applies the bucket/prefix filter, and reconciles a
+// LEAKED manifest — one whose completed object already exists (its complete
+// dropped the per-version/latest blob's twin but a best-effort manifest delete
+// missed). A leaked manifest is filtered out and best-effort re-deleted; the
+// lifecycle age-abort is the backstop if reconcile misses.
 func (b *DistributedBackend) ListMultipartUploads(ctx context.Context, bucket, prefix string, maxUploads int) ([]*storage.MultipartUpload, error) {
-	_ = ctx
-	var uploads []*storage.MultipartUpload
-	bucketBytes := []byte(bucket)
-	prefixBytes := []byte(prefix)
-	err := b.store.View(func(txn MetadataTxn) error {
-		return b.ks().scanGroupPrefix(txn, []byte("mpu:"), func(rawKey []byte, item MetaItem) error {
-			raw, err := b.itemValueCopy(item)
-			if err != nil {
-				return err
-			}
-			meta, err := fbSafe(raw, func(d []byte) *clusterpb.MultipartMeta {
-				return clusterpb.GetRootAsMultipartMeta(d, 0)
-			})
-			if err != nil {
-				return fmt.Errorf("unmarshal MultipartMeta: %w", err)
-			}
-			metaBucket := meta.Bucket()
-			metaKey := meta.Key()
-			if len(metaBucket) == 0 || len(metaKey) == 0 {
-				return nil
-			}
-			if !bytes.Equal(metaBucket, bucketBytes) || !bytes.HasPrefix(metaKey, prefixBytes) {
-				return nil
-			}
-			uploadID := strings.TrimPrefix(string(rawKey), "mpu:")
-			uploads = append(uploads, &storage.MultipartUpload{
-				UploadID:    uploadID,
-				Bucket:      string(metaBucket),
-				Key:         string(metaKey),
-				ContentType: string(meta.ContentType()),
-				CreatedAt:   meta.CreatedAt(),
-			})
-			return nil
-		})
-	})
+	entries, err := b.scanManifestBlobsCluster(bucket)
 	if err != nil {
 		return nil, err
+	}
+	var uploads []*storage.MultipartUpload
+	for _, e := range entries {
+		m := e.Meta
+		if m.Bucket == "" || m.Key == "" {
+			continue
+		}
+		if m.Bucket != bucket || !strings.HasPrefix(m.Key, prefix) {
+			continue
+		}
+		// A GroupBackend owns exactly one group; the cluster scan reaches every
+		// group's nodes via the shared meta-FSM, so drop manifests another group
+		// owns (the coordinator lists per-group and wraps each result with that
+		// group's ID). A group-less single-node backend keeps all.
+		if b.groupID != "" && m.PlacementGroupID != b.groupID {
+			continue
+		}
+		// Reconcile a leaked manifest: a completed upload whose object exists.
+		if done, derr := b.multipartCompletedObjectExists(ctx, m.Bucket, m.Key, e.UploadID); derr != nil {
+			return nil, derr
+		} else if done {
+			_ = b.deleteManifestBlob(m.Bucket, e.UploadID) // best-effort re-delete
+			continue
+		}
+		uploads = append(uploads, &storage.MultipartUpload{
+			UploadID:    e.UploadID,
+			Bucket:      m.Bucket,
+			Key:         m.Key,
+			ContentType: m.ContentType,
+			CreatedAt:   m.CreatedAt,
+		})
 	}
 	sort.Slice(uploads, func(i, j int) bool {
 		return multipartUploadLess(*uploads[i], *uploads[j])
@@ -427,6 +457,33 @@ func (b *DistributedBackend) ListMultipartUploads(ctx context.Context, bucket, p
 		uploads = uploads[:maxUploads]
 	}
 	return uploads, nil
+}
+
+// multipartCompletedObjectExists reports whether the multipart upload rawUploadID
+// already completed — i.e. its deterministic det-vid object exists. VERSIONED:
+// the per-version blob at deriveMultipartVID(raw) is present. NON-VERSIONED:
+// the latest-only blob exists AND its VersionID equals the det-vid (so an
+// unrelated later PUT to the same key does not mask an in-flight upload).
+func (b *DistributedBackend) multipartCompletedObjectExists(ctx context.Context, bucket, key, rawUploadID string) (bool, error) {
+	detVID, err := deriveMultipartVID(rawUploadID)
+	if err != nil {
+		return false, err
+	}
+	if b.bucketVersioningEnabled(ctx, bucket) {
+		_, ok, verr := b.readQuorumMetaVersion(bucket, key, detVID)
+		if verr != nil {
+			return false, verr
+		}
+		return ok, nil
+	}
+	cmd, lerr := b.readQuorumMetaCmd(bucket, key)
+	if lerr != nil {
+		if errors.Is(lerr, storage.ErrObjectNotFound) {
+			return false, nil
+		}
+		return false, lerr
+	}
+	return cmd.VersionID == detVID, nil
 }
 
 func multipartUploadLess(a, b storage.MultipartUpload) bool {
@@ -443,22 +500,16 @@ func multipartUploadLess(a, b storage.MultipartUpload) bool {
 // uploaded against another node's routed group are not visible from here;
 // callers that need the full set should target the routed group directly
 // (see ClusterCoordinator routing). uploadID existence is checked against
-// the FSM-replicated multipart record so a missing uploadID returns
-// ErrUploadNotFound consistently across nodes even when no parts landed
+// the off-FSM manifest blob so a missing uploadID returns ErrUploadNotFound
+// consistently across the owning group's nodes even when no parts landed
 // locally.
 func (b *DistributedBackend) ListParts(ctx context.Context, bucket, key, uploadID string, maxParts int) ([]storage.Part, error) {
 	_ = ctx
-	_ = bucket
 	_ = key
-	err := b.store.View(func(txn MetadataTxn) error {
-		_, err := txn.Get(b.ks().MultipartKey(uploadID))
-		if err == ErrMetaKeyNotFound {
-			return storage.ErrUploadNotFound
-		}
-		return err
-	})
-	if err != nil {
+	if _, ok, err := b.readManifestBlob(bucket, uploadID); err != nil {
 		return nil, err
+	} else if !ok {
+		return nil, storage.ErrUploadNotFound
 	}
 	entries, err := os.ReadDir(b.partDir(uploadID))
 	if os.IsNotExist(err) {
@@ -526,22 +577,17 @@ func (b *DistributedBackend) AbortMultipartUpload(ctx context.Context, bucket, k
 		b.multipartLocks.Delete(uploadID)
 	}()
 
-	err := b.store.View(func(txn MetadataTxn) error {
-		_, err := txn.Get(b.ks().MultipartKey(uploadID))
-		if err == ErrMetaKeyNotFound {
-			return storage.ErrUploadNotFound
-		}
+	if _, ok, err := b.readManifestBlob(bucket, uploadID); err != nil {
 		return err
-	})
-	if err != nil {
-		return err
+	} else if !ok {
+		return storage.ErrUploadNotFound
 	}
 
-	if err := b.propose(ctx, CmdAbortMultipart, AbortMultipartCmd{
-		Bucket:   bucket,
-		Key:      key,
-		UploadID: uploadID,
-	}); err != nil {
+	// Off-FSM abort (M2b): drop the manifest blob (idempotent local + best-effort
+	// peer deletes) — no CmdAbortMultipart propose. The local staged parts are then
+	// removed. A K-fold duplicate abort (each owning-group voter, or a re-scan) is a
+	// harmless idempotent no-op.
+	if err := b.deleteManifestBlob(bucket, uploadID); err != nil {
 		return err
 	}
 

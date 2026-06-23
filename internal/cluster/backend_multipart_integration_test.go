@@ -309,13 +309,19 @@ func configureChunkedMultipartTestBackend(b *DistributedBackend) {
 
 const testChunkedMultipartChunkSize = 5 << 20
 
-func writeMultipartMetaSpec(b *DistributedBackend, db *badger.DB, uploadID string, meta clusterMultipartMeta) {
+func writeMultipartMetaSpec(b *DistributedBackend, _ *badger.DB, uploadID string, meta clusterMultipartMeta) {
+	GinkgoHelper()
+	// M2b: the in-progress manifest lives on the .qmeta_mpu blob, not the FSM
+	// mpu: key. Write it where ListMultipartUploads (scanManifestBlobsCluster)
+	// reads it — the local owning-group replica.
+	Expect(b.shardSvc.writeManifestBlobLocal(meta.Bucket, uploadID, mustMarshalClusterMultipartMeta(meta))).To(Succeed())
+}
+
+func mustMarshalClusterMultipartMeta(meta clusterMultipartMeta) []byte {
 	GinkgoHelper()
 	raw, err := marshalClusterMultipartMeta(meta)
 	Expect(err).NotTo(HaveOccurred())
-	Expect(db.Update(func(txn *badger.Txn) error {
-		return txn.Set(b.ks().MultipartKey(uploadID), raw)
-	})).To(Succeed())
+	return raw
 }
 
 func multipartUploadIDs(uploads []*storage.MultipartUpload) []string {

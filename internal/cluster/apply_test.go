@@ -263,54 +263,44 @@ func TestFSM_SnapshotRestore(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+// TestFSM_MultipartCycle exercises the apply-side of a non-versioned complete:
+// applyCompleteMultipart writes the legacy obj:/lat: record and a done-marker.
+// M2b moved the in-progress manifest off the FSM, so the apply no longer reads
+// or deletes any mpu: key — the proposer owns the .qmeta_mpu blob lifecycle.
 func TestFSM_MultipartCycle(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
-	// Create multipart
-	data, _ := EncodeCommand(CmdCreateMultipartUpload, CreateMultipartUploadCmd{
-		UploadID: "upload-1", Bucket: "b", Key: "mp.bin", ContentType: "application/octet-stream", CreatedAt: 100,
-	})
-	require.NoError(t, fsm.Apply(data))
-
-	// Verify exists
-	err := db.View(func(txn *badger.Txn) error {
-		_, err := txn.Get(multipartKey("upload-1"))
-		return err
-	})
-	assert.NoError(t, err)
-
-	// Complete multipart
-	data, _ = EncodeCommand(CmdCompleteMultipart, CompleteMultipartCmd{
+	// Complete multipart (non-versioned: no VersionID, no MetaBlob → legacy write).
+	data, _ := EncodeCommand(CmdCompleteMultipart, CompleteMultipartCmd{
 		Bucket: "b", Key: "mp.bin", UploadID: "upload-1", Size: 1024,
 		ContentType: "application/octet-stream", ETag: "final-etag", ModTime: 200,
 	})
 	require.NoError(t, fsm.Apply(data))
 
-	// Upload record should be gone
-	err = db.View(func(txn *badger.Txn) error {
-		_, err := txn.Get(multipartKey("upload-1"))
+	// Object should exist (legacy obj: record for the non-versioned complete).
+	err := db.View(func(txn *badger.Txn) error {
+		_, err := txn.Get(objectMetaKey("b", "mp.bin"))
 		return err
 	})
-	assert.ErrorIs(t, err, badger.ErrKeyNotFound)
+	assert.NoError(t, err)
 
-	// Object should exist
+	// The done-marker anchors cross-retry idempotency.
 	err = db.View(func(txn *badger.Txn) error {
-		_, err := txn.Get(objectMetaKey("b", "mp.bin"))
+		_, err := txn.Get(fsm.keys.MultipartDoneKey("upload-1"))
 		return err
 	})
 	assert.NoError(t, err)
 }
 
-func TestFSM_CompleteMultipartPersistsPartsSegmentsAndDeletesUpload(t *testing.T) {
+// TestFSM_CompleteMultipartPersistsPartsSegments verifies the apply persists the
+// completed object's parts/segments/tags on the legacy obj: record for a
+// non-versioned complete. M2b: the apply no longer writes or deletes any FSM
+// mpu: manifest key (the manifest is the off-FSM .qmeta_mpu blob), so the test
+// no longer seeds or asserts on it.
+func TestFSM_CompleteMultipartPersistsPartsSegments(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-
-	data, err := EncodeCommand(CmdCreateMultipartUpload, CreateMultipartUploadCmd{
-		UploadID: "upload-layout", Bucket: "b", Key: "mp.bin", ContentType: "application/octet-stream", CreatedAt: 100,
-	})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(data))
 
 	parts := []storage.MultipartPartEntry{
 		{PartNumber: 1, Size: 5 << 20, ETag: "part-1"},
@@ -342,7 +332,7 @@ func TestFSM_CompleteMultipartPersistsPartsSegmentsAndDeletesUpload(t *testing.T
 		},
 	}
 
-	data, err = EncodeCommand(CmdCompleteMultipart, CompleteMultipartCmd{
+	data, err := EncodeCommand(CmdCompleteMultipart, CompleteMultipartCmd{
 		Bucket:           "b",
 		Key:              "mp.bin",
 		UploadID:         "upload-layout",
@@ -363,9 +353,6 @@ func TestFSM_CompleteMultipartPersistsPartsSegmentsAndDeletesUpload(t *testing.T
 	require.NoError(t, fsm.Apply(data))
 
 	err = db.View(func(txn *badger.Txn) error {
-		_, err := txn.Get(multipartKey("upload-layout"))
-		require.ErrorIs(t, err, badger.ErrKeyNotFound)
-
 		item, err := txn.Get(objectMetaKey("b", "mp.bin"))
 		require.NoError(t, err)
 		raw, err := item.ValueCopy(nil)
@@ -425,30 +412,28 @@ func TestFSM_CompleteMultipart_IdempotentOnDuplicateApply(t *testing.T) {
 	}))
 }
 
-func TestFSM_CompleteMultipartRejectsUploadMismatch(t *testing.T) {
-	db := newTestDB(t)
-	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
+// TestMultipartComplete_RejectsUploadMismatch is the M2b proposer-level twin of
+// the former apply-level mismatch guard. With the manifest off the FSM, the
+// (bucket, key) mismatch is caught by CompleteMultipartUpload reading the
+// manifest blob — not by applyCompleteMultipart (which no longer reads any mpu:
+// key). Completing an upload created for one key against a different key fails,
+// and no object is committed for the wrong key.
+func TestMultipartComplete_RejectsUploadMismatch(t *testing.T) {
+	b, _ := newTestDistributedBackendWithDB(t)
+	configureChunkedMultipartTestBackend(b)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "b"))
 
-	data, err := EncodeCommand(CmdCreateMultipartUpload, CreateMultipartUploadCmd{
-		UploadID: "upload-other", Bucket: "b", Key: "expected.bin", ContentType: "application/octet-stream", CreatedAt: 100,
-	})
+	up, err := b.CreateMultipartUpload(ctx, "b", "expected.bin", "application/octet-stream")
 	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(data))
-
-	data, err = EncodeCommand(CmdCompleteMultipart, CompleteMultipartCmd{
-		Bucket: "b", Key: "wrong.bin", UploadID: "upload-other", Size: 1024,
-		ContentType: "application/octet-stream", ETag: "etag", ModTime: 200, VersionID: "v1",
-	})
+	part, err := b.UploadPart(ctx, "b", "expected.bin", up.UploadID, 1, bytes.NewReader([]byte("payload")), "")
 	require.NoError(t, err)
-	require.Error(t, fsm.Apply(data))
 
-	require.NoError(t, db.View(func(txn *badger.Txn) error {
-		_, err := txn.Get(fsm.keys.MultipartKey("upload-other"))
-		require.NoError(t, err)
-		_, err = txn.Get(objectMetaKey("b", "wrong.bin"))
-		require.ErrorIs(t, err, badger.ErrKeyNotFound)
-		return nil
-	}))
+	_, err = b.CompleteMultipartUpload(ctx, "b", "wrong.bin", up.UploadID, []storage.Part{*part})
+	require.Error(t, err)
+
+	_, err = b.HeadObject(ctx, "b", "wrong.bin")
+	require.ErrorIs(t, err, storage.ErrObjectNotFound)
 }
 
 func TestFSM_CreateMultipartUploadPersistsListingMetadata(t *testing.T) {
