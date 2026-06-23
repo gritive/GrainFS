@@ -53,6 +53,9 @@ func (b *DistributedBackend) listLatestEntries(ctx context.Context, bucket, pref
 }
 
 func (b *DistributedBackend) ListObjects(ctx context.Context, bucket, prefix string, maxKeys int) ([]*storage.Object, error) {
+	if err := guardInternalBucketObjectOp(bucket); err != nil {
+		return nil, err
+	}
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, err
 	}
@@ -74,6 +77,9 @@ func (b *DistributedBackend) ListObjects(ctx context.Context, bucket, prefix str
 // pagination. truncated is true when more matching entries remain after the
 // returned page.
 func (b *DistributedBackend) ListObjectsPage(ctx context.Context, bucket, prefix, marker string, maxKeys int) ([]*storage.Object, bool, error) {
+	if err := guardInternalBucketObjectOp(bucket); err != nil {
+		return nil, false, err
+	}
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, false, err
 	}

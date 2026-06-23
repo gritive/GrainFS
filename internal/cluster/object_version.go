@@ -198,6 +198,9 @@ func (b *DistributedBackend) headObjectMetaV(ctx context.Context, bucket, key, v
 // Satisfies storage.VersionedGetter. See HeadObjectVersion — ctx carries the
 // authoritative bucket-versioning stamp set at the server edge.
 func (b *DistributedBackend) GetObjectVersion(ctx context.Context, bucket, key, versionID string) (io.ReadCloser, *storage.Object, error) {
+	if err := guardInternalBucketObjectOp(bucket); err != nil {
+		return nil, nil, err
+	}
 	return b.getObjectVersionCtx(ctx, bucket, key, versionID)
 }
 

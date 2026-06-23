@@ -223,7 +223,6 @@ type DistributedBackend struct {
 	bypassBucketCheck bool
 
 	internalPathCache sync.Map // map[internalObjectCacheKey]internalObjectPath
-	internalSizeCache sync.Map // map[internalObjectCacheKey]int64
 
 	// Phase A: FSM apply error propagation. Mirrors MetaRaft.applyErrs
 	// (meta_raft.go:797). applyErrs keys are Raft log indices; readers consume

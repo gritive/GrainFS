@@ -644,4 +644,12 @@ var (
 		Help:    "Tag count per PUT (header or body).",
 		Buckets: []float64{0, 1, 2, 3, 5, 10},
 	})
+
+	// InternalBucketOrphanObjectsTotal counts internal-bucket objects found at
+	// startup detect scan. Non-zero means pre-existing data unreachable after
+	// the capability removal — operator manual cleanup required.
+	InternalBucketOrphanObjectsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_internal_bucket_orphan_objects_total",
+		Help: "Internal-bucket objects found at startup; unreachable after capability removal.",
+	})
 )

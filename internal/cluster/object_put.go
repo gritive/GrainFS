@@ -48,6 +48,9 @@ func (b *DistributedBackend) PutObjectWithUserMetadata(ctx context.Context, buck
 }
 
 func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req storage.PutObjectRequest) (*storage.Object, error) {
+	if err := guardInternalBucketObjectOp(req.Bucket); err != nil {
+		return nil, err
+	}
 	bucket, key, r, contentType := req.Bucket, req.Key, req.Body, req.ContentType
 	userMetadata := req.UserMetadata
 	sseAlgorithm := req.SystemMetadata.SSEAlgorithm

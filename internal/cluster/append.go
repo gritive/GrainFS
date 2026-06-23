@@ -55,6 +55,9 @@ func appendLockHashString(h uint32, s string) uint32 {
 //     transparently (Phase A Tasks 14-16).
 //  4. Re-HeadObject for fresh result reflecting committed segment list.
 func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key string, expectedOffset int64, r io.Reader) (*storage.Object, error) {
+	if err := guardInternalBucketObjectOp(bucket); err != nil {
+		return nil, err
+	}
 	lock := b.appendAdmissionLock(bucket, key)
 	lock.Lock()
 	defer lock.Unlock()

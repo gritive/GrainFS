@@ -13,6 +13,9 @@ import (
 // direct pread path. EC user buckets read only the data shard segments that
 // overlap the requested byte range when those data shards are available.
 func (b *DistributedBackend) ReadAt(ctx context.Context, bucket, key string, offset int64, buf []byte) (int, error) {
+	if err := guardInternalBucketObjectOp(bucket); err != nil {
+		return 0, err
+	}
 	if offset < 0 {
 		return 0, fmt.Errorf("ReadAt negative offset %d", offset)
 	}
@@ -114,6 +117,9 @@ func (b *DistributedBackend) encryptedShardStorage() bool {
 }
 
 func (b *DistributedBackend) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error) {
+	if err := guardInternalBucketObjectOp(bucket); err != nil {
+		return nil, nil, err
+	}
 	obj, placementMeta, err := b.headObjectMeta(ctx, bucket, key)
 	if err != nil {
 		return nil, nil, err
@@ -194,6 +200,9 @@ func (b *DistributedBackend) readAtViaGetObject(ctx context.Context, bucket, key
 }
 
 func (b *DistributedBackend) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
+	if err := guardInternalBucketObjectOp(bucket); err != nil {
+		return nil, err
+	}
 	obj, _, err := b.headObjectMeta(ctx, bucket, key)
 	return obj, err
 }
