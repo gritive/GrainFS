@@ -90,16 +90,29 @@ func (b *DistributedBackend) writeQuorumMeta(ctx context.Context, cmd PutObjectM
 	// Latest-only blob (LIST-latest / legacy read fast path), same K-of-N, fail-closed.
 	wctx, cancel := context.WithTimeout(ctx, quorumMetaWriteTimeout)
 	defer cancel()
-	latestErr := fanOutQuorumMeta(wctx, cmd.NodeIDs, k, func(fctx context.Context, node string) error {
-		if node == self {
-			return b.shardSvc.writeQuorumMetaLocal(cmd.Bucket, cmd.Key, blob)
-		}
+	writeLocal := func() error { return b.shardSvc.writeQuorumMetaLocal(cmd.Bucket, cmd.Key, blob) }
+	writePeer := func(fctx context.Context, node string) error {
 		addr, rerr := b.shardSvc.resolvePeerAddress(node)
 		if rerr != nil {
 			return rerr
 		}
 		return b.shardSvc.WriteQuorumMeta(fctx, addr, cmd.Bucket, cmd.Key, blob)
-	})
+	}
+	var latestErr error
+	if cmd.MetaSeqCAS {
+		// CAS write (append/coalesce): the next same-owner RMW reads this blob
+		// owner-local-first, so the owner-local copy MUST be durable before this
+		// returns (BUG-2). Owner-local-first guarantees that while preserving the
+		// exact N-K peer failure budget. LWW writers keep the plain fan-out below.
+		latestErr = fanOutQuorumMetaOwnerLocalFirst(wctx, cmd.NodeIDs, self, k, writeLocal, writePeer)
+	} else {
+		latestErr = fanOutQuorumMeta(wctx, cmd.NodeIDs, k, func(fctx context.Context, node string) error {
+			if node == self {
+				return writeLocal()
+			}
+			return writePeer(fctx, node)
+		})
+	}
 	if latestErr != nil {
 		return latestErr
 	}
@@ -204,6 +217,44 @@ func quorumMetaCmdWins(cand, cur PutObjectMetaCmd) bool {
 // error to re-read the base and retry — it must NOT mistake the rejected write
 // for a successful no-op (which would silently drop the appended data).
 var errQuorumMetaCASReject = errors.New("quorum meta: CAS base mismatch")
+
+// quorumMetaCASRejectWireCode is the stable, distinguishable error-body string a
+// remote quorum-meta WRITE handler emits when its local write returns
+// errQuorumMetaCASReject. The RPC error channel is free-text (errorResponse →
+// err.Error()), so the CAS-reject signal must travel as a fixed sentinel string
+// that the client maps back to errQuorumMetaCASReject — not as the free-text
+// message (which could change) and not collide with any other handler error.
+//
+// BUG-1 fix: without this, a REMOTE replica's CAS reject reaches the client as a
+// generic "remote quorum meta error", so fanOutQuorumMeta never counts it as
+// errQuorumMetaCASReject and the append/coalesce RMW retry/SlowDown logic is
+// bypassed on a multi-node cluster.
+const quorumMetaCASRejectWireCode = "QUORUM_META_CAS_REJECT"
+
+// quorumMetaWriteErrorBody maps a local quorum-meta write error to the error-body
+// string sent over the RPC error channel. errQuorumMetaCASReject becomes the
+// stable wire code; every other error keeps its free-text message.
+func quorumMetaWriteErrorBody(err error) string {
+	if errors.Is(err, errQuorumMetaCASReject) {
+		return quorumMetaCASRejectWireCode
+	}
+	return err.Error()
+}
+
+// quorumMetaWriteRPCError maps a remote quorum-meta WRITE reply back to a local
+// error. An "Error" reply whose body is the CAS-reject wire code is reconstituted
+// as errQuorumMetaCASReject (errors.Is-able), so fanOutQuorumMeta counts a remote
+// reject identically to a local one. Any other "Error" reply stays a generic
+// remote error annotated with addr + the reported body.
+func quorumMetaWriteRPCError(addr string, body []byte) error {
+	if string(body) == quorumMetaCASRejectWireCode {
+		return errQuorumMetaCASReject
+	}
+	if len(body) == 0 {
+		return fmt.Errorf("remote quorum meta error from %s", addr)
+	}
+	return fmt.Errorf("remote quorum meta error from %s: %s", addr, string(body))
+}
 
 // quorumMetaWriteVerdict is the tri-state result of the write-time accept guard.
 type quorumMetaWriteVerdict int
@@ -477,6 +528,74 @@ func fanOutQuorumMeta(ctx context.Context, nodes []string, k int, dispatch func(
 		}
 	}
 	return nil
+}
+
+// fanOutQuorumMetaOwnerLocalFirst is the owner-local-first variant of
+// fanOutQuorumMeta used by the CAS read-modify-write writers (append/coalesce).
+//
+// BUG-2 fix (owner-local base freshness): plain fanOutQuorumMeta returns on the
+// k-th ack, which may NOT include the owner-local write when k peer acks arrive
+// first. The CAS RMW reads its base owner-local-first (readQuorumMetaWinningRaw),
+// so if a same-owner write returns before its OWN local copy is durable, the next
+// RMW on that owner reads a STALE local base, computes a MetaSeq the peers already
+// advanced past, and CAS-rejects forever (false offset mismatch / livelock / lost
+// update). Under a single stable leader the owner is the authoritative reader of
+// its own copy, so its local write MUST be durable before the RMW returns.
+//
+// Fix: when self is a placement node, write the owner-local copy SYNCHRONOUSLY
+// first; it must be durable before any return so a subsequent owner-local-first
+// base read sees it. The local write counts for EVERY self entry in the placement
+// set (a placement set can list self more than once — e.g. EC over a single host,
+// where the byte-identical CAS re-delivery is idempotent), exactly as plain
+// fanOutQuorumMeta acked once per self goroutine. The remaining k-selfCount acks
+// come from the true peers, preserving the N-K peer failure budget unchanged:
+// (peerCount)-(k-selfCount) = n-k. A CAS reject on the owner-local write is
+// surfaced immediately (the owner's own base advanced — the genuine retry signal).
+// When self is NOT a placement node the behavior is identical to plain
+// fanOutQuorumMeta over all nodes.
+func fanOutQuorumMetaOwnerLocalFirst(
+	ctx context.Context,
+	nodes []string,
+	self string,
+	k int,
+	writeLocal func() error,
+	writePeer func(context.Context, string) error,
+) error {
+	if k <= 0 {
+		k = 1
+	}
+	// Partition placement into the owner-local entries (all self occurrences) and
+	// the true peers. selfCount mirrors the number of acks the old all-node fan-out
+	// produced for self (one per goroutine), since the local write is idempotent.
+	selfCount := 0
+	peers := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		if node == self {
+			selfCount++
+			continue
+		}
+		peers = append(peers, node)
+	}
+	if selfCount == 0 {
+		// Owner is not a placement node — no local-first guarantee to make; fall
+		// back to the plain all-node fan-out so the peer dispatch is unchanged.
+		return fanOutQuorumMeta(ctx, nodes, k, func(fctx context.Context, node string) error {
+			return writePeer(fctx, node)
+		})
+	}
+	// Owner-local write first, SYNCHRONOUSLY (once; idempotent for duplicate self
+	// entries). A CAS reject here is the owner's own base advancing — surface it so
+	// the RMW re-reads and retries.
+	if err := writeLocal(); err != nil {
+		return err
+	}
+	// The local write satisfies selfCount of the k required acks. Require the rest
+	// from the true peers; if the local acks already meet the quorum we are done.
+	remaining := k - selfCount
+	if remaining <= 0 {
+		return nil
+	}
+	return fanOutQuorumMeta(ctx, peers, remaining, writePeer)
 }
 
 // writeQuorumMetaLocal durably writes the encoded quorum meta blob for
@@ -1780,12 +1899,15 @@ func (s *ShardService) WriteQuorumMeta(ctx context.Context, addr, bucket, key st
 	if err != nil {
 		return fmt.Errorf("write quorum meta to %s: %w", addr, err)
 	}
-	rpcType, _, err := unmarshalEnvelope(respEnvelope)
+	rpcType, body, err := unmarshalEnvelope(respEnvelope)
 	if err != nil {
 		return fmt.Errorf("unmarshal quorum meta response: %w", err)
 	}
 	if rpcType == "Error" {
-		return fmt.Errorf("remote quorum meta error from %s", addr)
+		// Preserve the CAS-reject signal across the RPC boundary (BUG-1): a remote
+		// replica's CAS reject must surface as errQuorumMetaCASReject so the
+		// fanOut caller counts it like a local reject.
+		return quorumMetaWriteRPCError(addr, body)
 	}
 	return nil
 }
@@ -1804,12 +1926,15 @@ func (s *ShardService) WriteQuorumMetaVersion(ctx context.Context, addr, bucket,
 	if err != nil {
 		return fmt.Errorf("write quorum meta version to %s: %w", addr, err)
 	}
-	rpcType, _, err := unmarshalEnvelope(respEnvelope)
+	rpcType, body, err := unmarshalEnvelope(respEnvelope)
 	if err != nil {
 		return fmt.Errorf("unmarshal quorum meta version response: %w", err)
 	}
 	if rpcType == "Error" {
-		return fmt.Errorf("remote quorum meta version error from %s", addr)
+		// Preserve the CAS-reject signal across the RPC boundary (BUG-1), mirroring
+		// WriteQuorumMeta. The per-version writer is LWW today, but a CAS reject must
+		// never be flattened to a generic error on this path either.
+		return quorumMetaWriteRPCError(addr, body)
 	}
 	return nil
 }
