@@ -94,6 +94,7 @@ func (b *DistributedBackend) createMultipartUploadInternal(ctx context.Context, 
 	}
 	if err := b.writeManifestBlob(ctx, manifest, uploadID, b.multipartManifestNodeIDs(ctx)); err != nil {
 		os.RemoveAll(b.partDir(uploadID))
+		_ = b.deleteManifestBlob(manifest.Bucket, uploadID) // best-effort cleanup of any partial replicas
 		return "", 0, fmt.Errorf("create multipart: write manifest blob: %w", err)
 	}
 	return uploadID, now, nil
@@ -460,22 +461,29 @@ func (b *DistributedBackend) ListMultipartUploads(ctx context.Context, bucket, p
 }
 
 // multipartCompletedObjectExists reports whether the multipart upload rawUploadID
-// already completed — i.e. its deterministic det-vid object exists. VERSIONED:
-// the per-version blob at deriveMultipartVID(raw) is present. NON-VERSIONED:
-// the latest-only blob exists AND its VersionID equals the det-vid (so an
-// unrelated later PUT to the same key does not mask an in-flight upload).
-func (b *DistributedBackend) multipartCompletedObjectExists(ctx context.Context, bucket, key, rawUploadID string) (bool, error) {
+// already completed — i.e. its deterministic det-vid object exists. The check is
+// VERSION-AGNOSTIC: it returns true if EITHER the per-version blob (covers versioned
+// buckets) OR the latest-only blob whose VersionID matches det-vid (covers
+// non-versioned buckets) is present. Checking both blobs avoids the need to call
+// bucketVersioningEnabled, which requires a versioning-context stamp that is not
+// available on the ListMultipartUploads path (GroupBackend reads per-group BadgerDB
+// which has no bucket keys and always returns "Unversioned").
+func (b *DistributedBackend) multipartCompletedObjectExists(_ context.Context, bucket, key, rawUploadID string) (bool, error) {
 	detVID, err := deriveMultipartVID(rawUploadID)
 	if err != nil {
 		return false, err
 	}
-	if b.bucketVersioningEnabled(ctx, bucket) {
-		_, ok, verr := b.readQuorumMetaVersion(bucket, key, detVID)
-		if verr != nil {
-			return false, verr
-		}
-		return ok, nil
+	// Per-version blob: authoritative for versioned buckets.
+	_, ok, verr := b.readQuorumMetaVersion(bucket, key, detVID)
+	if verr != nil {
+		return false, verr
 	}
+	if ok {
+		return true, nil
+	}
+	// Latest-only blob: authoritative for non-versioned buckets.
+	// An unrelated later PUT to the same key produces a different VersionID, so
+	// we only treat the latest blob as evidence of completion when its VID matches.
 	cmd, lerr := b.readQuorumMetaCmd(bucket, key)
 	if lerr != nil {
 		if errors.Is(lerr, storage.ErrObjectNotFound) {

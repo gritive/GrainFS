@@ -65,6 +65,30 @@ func TestListMultipartUploads_StrictScanAndLeakedManifestReconcile(t *testing.T)
 	require.False(t, ok, "reconcile must best-effort re-delete the leaked manifest blob")
 }
 
+// TestMultipartCompletedObjectExists_VersionedNoVersioningContext proves that
+// multipartCompletedObjectExists detects a completed versioned upload even when
+// no versioning context is stamped on the context (as on the ListMultipartUploads
+// path). Without the version-agnostic fix this would fall to the non-versioned leg
+// and return false (ErrObjectNotFound from readQuorumMetaCmd on a versioned bucket).
+func TestMultipartCompletedObjectExists_VersionedNoVersioningContext(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	const bkt = "vbkt2"
+	require.NoError(t, b.CreateBucket(context.Background(), bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+
+	up, err := b.CreateMultipartUpload(context.Background(), bkt, "obj.bin", "application/octet-stream")
+	require.NoError(t, err)
+	part, err := b.UploadPart(context.Background(), bkt, "obj.bin", up.UploadID, 1, bytes.NewReader([]byte("body")), "")
+	require.NoError(t, err)
+	_, err = b.CompleteMultipartUpload(context.Background(), bkt, "obj.bin", up.UploadID, []storage.Part{*part})
+	require.NoError(t, err)
+
+	// Plain context — no versioning stamp, simulating the ListMultipartUploads path.
+	exists, err := b.multipartCompletedObjectExists(context.Background(), bkt, "obj.bin", up.UploadID)
+	require.NoError(t, err)
+	require.True(t, exists, "version-agnostic check must find the completed versioned upload even without versioning context")
+}
+
 // TestListMultipartUploads_NonVersionedReconcileMatchesDetVID proves the
 // non-versioned reconcile leg: a leaked manifest is filtered only when the
 // latest-only blob's VersionID equals the upload's det-vid. An UNRELATED later

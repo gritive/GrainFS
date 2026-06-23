@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -162,7 +163,13 @@ func (w *MPUWorker) applyAbortRules(ctx context.Context, u storage.MultipartUplo
 			return
 		}
 		if err := w.deleter.AbortMultipartUpload(ctx, u.Bucket, u.Key, u.UploadID); err != nil {
-			w.logger.Error().Str("bucket", u.Bucket).Str("key", u.Key).Str("uploadID", u.UploadID).Err(err).Msg("lifecycle/mpu: abort")
+			if errors.Is(err, storage.ErrUploadNotFound) {
+				// K-fold duplicate abort across owning-group voters — expected
+				// idempotent outcome when manifests are K-of-N replicated.
+				w.logger.Debug().Str("bucket", u.Bucket).Str("key", u.Key).Str("uploadID", u.UploadID).Msg("lifecycle/mpu: abort already completed (idempotent)")
+			} else {
+				w.logger.Error().Str("bucket", u.Bucket).Str("key", u.Key).Str("uploadID", u.UploadID).Err(err).Msg("lifecycle/mpu: abort")
+			}
 			continue
 		}
 		w.aborted.Add(1)
