@@ -155,6 +155,19 @@ func (c *clusterSegmentBackend) WriteSegmentBytes(ctx context.Context, bucket, k
 // placement permutation is then keyed on a vid-derived shard key. Segments keep
 // their own random-blobID placement; reads are placement-blind (all-peer
 // fan-out), so regular PUTs are unaffected.
+//
+// Placement uses the SAME weighted HRW as segment writes (selectShardPlacement
+// with the group's peer weights), consistent with the cluster-wide weighted-HRW
+// placement model (FNV modulo was retired in #843). The vid-derived key — not
+// the segment's random blobID — makes two completers converge whenever they
+// share a peer-weight snapshot (the common case). A rare divergent weight
+// snapshot (gossip lag) can place the same vid's blob on different nodes; that
+// residual is resolved without a strict placement guarantee: the per-version
+// read-merge LWW (quorumMetaCmdWins, F1.1) makes reads deterministic
+// (higher-ModTime winner), a hard-delete's tombstone is read-gathered and
+// shadows the loser, and the orphan walker reclaims the stale loser blob after
+// delete. The divergence is thus a rare transient extra-replica, not a
+// correctness or resurrection hazard.
 func (c *clusterSegmentBackend) vidDeterministicBlobNodeIDs(bucket, key, vid string, cfg ECConfig) ([]string, error) {
 	group, err := c.selectGroup(bucket, key, 0, vid)
 	if err != nil {
@@ -164,7 +177,8 @@ func (c *clusterSegmentBackend) vidDeterministicBlobNodeIDs(bucket, key, vid str
 		return nil, fmt.Errorf("vid-deterministic blob placement: group %q has no peers", group.ID)
 	}
 	placementKey := key + "/versions/" + vid
-	return PlacementForNodes(cfg, group.PeerIDs, placementKey), nil
+	weights, weightedEnabled := c.peerWeights(group.PeerIDs)
+	return selectShardPlacement(cfg, group.PeerIDs, placementKey, weights, weightedEnabled), nil
 }
 
 func (c *clusterSegmentBackend) selectGroup(bucket, key string, idx int, blobID string) (ShardGroupEntry, error) {
