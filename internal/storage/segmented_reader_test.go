@@ -118,13 +118,20 @@ func TestSegmentedReaderEncryptedTamperRejected(t *testing.T) {
 		t.Fatalf("append: %v", err)
 	}
 
-	// segment blob 1바이트 tamper → AES-GCM tag mismatch
+	// segment blob 1바이트 tamper → AES-GCM tag mismatch.
+	// Flip the existing byte (XOR 0xff) rather than overwriting with a fixed
+	// value: a fixed 0xff would be a no-op ~1/256 of the time when the random
+	// ciphertext already holds 0xff at this offset, making the test flaky.
 	path := b.segmentPath("test", "k", obj.Segments[0].BlobID)
 	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if _, err := f.WriteAt([]byte{0xff}, 100); err != nil {
+	var orig [1]byte
+	if _, err := f.ReadAt(orig[:], 100); err != nil {
+		t.Fatalf("read tamper byte: %v", err)
+	}
+	if _, err := f.WriteAt([]byte{orig[0] ^ 0xff}, 100); err != nil {
 		t.Fatalf("tamper: %v", err)
 	}
 	if err := f.Close(); err != nil {
