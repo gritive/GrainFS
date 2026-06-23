@@ -91,7 +91,9 @@ func TestFSM_EncryptedValuesHideObjectMultipartAndPolicyPayloads(t *testing.T) {
 	require.NoError(t, err)
 	fsm.SetDEKKeeper(keeper, clusterID)
 
-	putData, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+	// CmdPutObjectMeta is a no-op on apply (data-plane raft-free Slice 2); seed via
+	// persistPutObjectMetaUpdate directly to exercise FSM encryption.
+	cmd := PutObjectMetaCmd{
 		Bucket:      "b",
 		Key:         "secret-object",
 		ContentType: "text/secret",
@@ -99,9 +101,10 @@ func TestFSM_EncryptedValuesHideObjectMultipartAndPolicyPayloads(t *testing.T) {
 			"x-amz-meta-secret": "customer-private-metadata",
 		},
 		VersionID: "v1",
-	})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(putData))
+	}
+	require.NoError(t, fsm.db.Update(func(txn MetadataTxn) error {
+		return fsm.persistPutObjectMetaUpdate(txn, cmd, buildPutObjectMeta(cmd))
+	}))
 
 	// CmdCreateMultipartUpload removed in M4; mpu: key encryption is no longer
 	// exercised here (no production writer). Remaining: obj: and policy: are checked.
@@ -144,13 +147,12 @@ func TestFSM_DeleteObjectRejectsCorruptEncryptedMeta(t *testing.T) {
 	require.NoError(t, err)
 	fsm.SetDEKKeeper(keeper, clusterID)
 
-	putData, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
-		Bucket: "b",
-		Key:    "tampered",
-		ETag:   "etag",
-	})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(putData))
+	// CmdPutObjectMeta is a no-op on apply (data-plane raft-free Slice 2); seed via
+	// persistPutObjectMetaUpdate directly.
+	seedCmd := PutObjectMetaCmd{Bucket: "b", Key: "tampered", ETag: "etag"}
+	require.NoError(t, fsm.db.Update(func(txn MetadataTxn) error {
+		return fsm.persistPutObjectMetaUpdate(txn, seedCmd, buildPutObjectMeta(seedCmd))
+	}))
 
 	metaKey := fsm.keys.ObjectMetaKey("b", "tampered")
 	require.NoError(t, db.Update(func(txn *badger.Txn) error {
@@ -197,52 +199,41 @@ func TestFSM_DeleteBucket(t *testing.T) {
 	assert.ErrorIs(t, err, badger.ErrKeyNotFound)
 }
 
-func TestFSM_PutObjectMeta(t *testing.T) {
+// TestPutObjectMetaCmd_RetiredNoOp verifies that CmdPutObjectMeta is a replay-safe
+// no-op in the FSM after data-plane raft-free Slice 2: FSM.Apply must return nil
+// and must not write any object-meta key. The live write path is writeQuorumMeta.
+func TestPutObjectMetaCmd_RetiredNoOp(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
-	data, _ := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
-		Bucket:      "b",
-		Key:         "hello.txt",
-		Size:        42,
-		ContentType: "text/plain",
-		ETag:        "abc123",
-		ModTime:     1000,
-	})
-	require.NoError(t, fsm.Apply(data))
-
-	// Verify
-	var meta objectMeta
-	err := db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(objectMetaKey("b", "hello.txt"))
-		if err != nil {
-			return err
-		}
-		return item.Value(func(val []byte) error {
-			m, err := unmarshalObjectMeta(val)
-			if err != nil {
-				return err
-			}
-			meta = m
-			return nil
-		})
+	// EncodeCommand still works (codec/struct/constant kept for quorum-meta blob use).
+	data, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket: "b", Key: "hello.txt", Size: 42, ETag: "abc123",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "hello.txt", meta.Key)
-	assert.Equal(t, int64(42), meta.Size)
+
+	// Apply must succeed (no-op, not an error).
+	require.NoError(t, fsm.Apply(data))
+
+	// Must not have written any object-meta key.
+	err = db.View(func(txn *badger.Txn) error {
+		_, err := txn.Get(objectMetaKey("b", "hello.txt"))
+		return err
+	})
+	require.ErrorIs(t, err, badger.ErrKeyNotFound, "CmdPutObjectMeta must be a no-op — key must not exist")
 }
 
 func TestFSM_DeleteObject(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
-	// Put then delete
-	data, _ := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
-		Bucket: "b", Key: "del.txt", Size: 1, ContentType: "text/plain", ETag: "e", ModTime: 1,
-	})
-	require.NoError(t, fsm.Apply(data))
+	// Seed via persistPutObjectMetaUpdate (CmdPutObjectMeta is a no-op in Slice 2).
+	seedCmd := PutObjectMetaCmd{Bucket: "b", Key: "del.txt", Size: 1, ContentType: "text/plain", ETag: "e", ModTime: 1}
+	require.NoError(t, fsm.db.Update(func(txn MetadataTxn) error {
+		return fsm.persistPutObjectMetaUpdate(txn, seedCmd, buildPutObjectMeta(seedCmd))
+	}))
 
-	data, _ = EncodeCommand(CmdDeleteObject, DeleteObjectCmd{Bucket: "b", Key: "del.txt"})
+	data, _ := EncodeCommand(CmdDeleteObject, DeleteObjectCmd{Bucket: "b", Key: "del.txt"})
 	require.NoError(t, fsm.Apply(data))
 
 	err := db.View(func(txn *badger.Txn) error {
@@ -256,13 +247,14 @@ func TestFSM_SnapshotRestore(t *testing.T) {
 	db1 := newTestDB(t)
 	fsm1 := NewFSM(badgermeta.Wrap(db1), newStateKeyspaceEmpty())
 
-	// Apply some commands
+	// Apply some commands. CmdPutObjectMeta is a no-op in Slice 2; seed via
+	// persistPutObjectMetaUpdate directly.
 	data, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "snap-bucket"})
 	require.NoError(t, fsm1.Apply(data))
-	data, _ = EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
-		Bucket: "snap-bucket", Key: "file.txt", Size: 10, ContentType: "text/plain", ETag: "e", ModTime: 1,
-	})
-	require.NoError(t, fsm1.Apply(data))
+	seedCmd := PutObjectMetaCmd{Bucket: "snap-bucket", Key: "file.txt", Size: 10, ContentType: "text/plain", ETag: "e", ModTime: 1}
+	require.NoError(t, fsm1.db.Update(func(txn MetadataTxn) error {
+		return fsm1.persistPutObjectMetaUpdate(txn, seedCmd, buildPutObjectMeta(seedCmd))
+	}))
 
 	// Take snapshot
 	snap, err := fsm1.Snapshot()
@@ -642,25 +634,23 @@ func TestFSM_ApplyCreateBucket_KeyLayoutUnchanged(t *testing.T) {
 
 // TestFSM_CreateMultipartUpload_PersistsTags removed in M4: applyCreateMultipartUpload deleted.
 
-// TestFSM_CompleteMultipartUpload_MaterialisesTags verifies that the
-// finalisation command (CmdPutObjectMeta — what production proposes from
-// CompleteMultipartUpload) writes Tags onto objectMeta. The Raft path for
-// completion goes through commitECObjectWriteResult → CmdPutObjectMeta.
-// CmdCreateMultipartUpload is a reserved no-op in M4; the FSM row is omitted.
-func TestFSM_CompleteMultipartUpload_MaterialisesTags(t *testing.T) {
+// TestPersistPutObjectMetaUpdate_MaterialisesTags verifies that
+// persistPutObjectMetaUpdate (the live write path via writeQuorumMeta, not FSM
+// apply) correctly materialises Tags onto objectMeta. Previously exercised
+// via CmdPutObjectMeta FSM apply; Slice 2 retires that raft path.
+func TestPersistPutObjectMetaUpdate_MaterialisesTags(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
-	// Finalise via the production cmd that materialises object meta on
-	// CompleteMultipartUpload (CmdPutObjectMeta with Parts + Tags).
-	data, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+	cmd := PutObjectMetaCmd{
 		Bucket: "b", Key: "k", Size: 1024, ContentType: "text/plain",
 		ETag: "final-etag", ModTime: 200,
 		Parts: []storage.MultipartPartEntry{{PartNumber: 1, Size: 1024, ETag: "p1"}},
 		Tags:  []storage.Tag{{Key: "env", Value: "prod"}, {Key: "owner", Value: "alice"}},
-	})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(data))
+	}
+	require.NoError(t, fsm.db.Update(func(txn MetadataTxn) error {
+		return fsm.persistPutObjectMetaUpdate(txn, cmd, buildPutObjectMeta(cmd))
+	}))
 
 	require.NoError(t, db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get(objectMetaKey("b", "k"))

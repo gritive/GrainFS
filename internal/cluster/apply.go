@@ -95,7 +95,10 @@ func (f *FSM) ApplyTxn(txn MetadataTxn, raw []byte) error {
 	case CmdDeleteBucket:
 		return f.applyDeleteBucket(txn, cmd.Data)
 	case CmdPutObjectMeta:
-		return f.applyPutObjectMeta(txn, cmd.Data)
+		// reserved, removed in data-plane raft-free Slice 2; blob CAS-quorum is
+		// authoritative. No production proposer; greenfield — no raft-log replay of
+		// these commands. No-op on any stale entries.
+		return nil
 	case CmdDeleteObject:
 		return f.applyDeleteObject(txn, cmd.Data)
 	case CmdCreateMultipartUpload, CmdCompleteMultipart, CmdAbortMultipart:
@@ -283,18 +286,6 @@ func (f *FSM) applyDeleteBucket(txn MetadataTxn, data []byte) error {
 		}
 	}
 	return nil
-}
-
-func (f *FSM) applyPutObjectMeta(txn MetadataTxn, data []byte) error {
-	c, err := decodePutObjectMetaCmd(data)
-	if err != nil {
-		return err
-	}
-	metaObj := buildPutObjectMeta(c)
-	if err := f.checkPutObjectExpectedETag(txn, c.Bucket, c.Key, c.ExpectedETag); err != nil {
-		return err
-	}
-	return f.persistPutObjectMetaUpdate(txn, c, metaObj)
 }
 
 func (f *FSM) applyDeleteObject(txn MetadataTxn, data []byte) error {

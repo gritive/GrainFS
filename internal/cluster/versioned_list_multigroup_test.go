@@ -174,7 +174,9 @@ func TestListObjectVersions_SplitKeyNoLocalLatest(t *testing.T) {
 	require.NoError(t, b.CreateBucket(ctx, bkt))
 
 	// PreserveLatest: writes obj:{bkt}/{key}/{vid} but NOT lat:{bkt}/{key}.
-	require.NoError(t, b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
+	// CmdPutObjectMeta is a no-op in apply.go (raft-free Slice 2), so we persist
+	// directly via persistPutObjectMetaUpdate.
+	putCmd := PutObjectMetaCmd{
 		Bucket:         bkt,
 		Key:            key,
 		VersionID:      vid,
@@ -182,6 +184,9 @@ func TestListObjectVersions_SplitKeyNoLocalLatest(t *testing.T) {
 		ETag:           "etag",
 		ModTime:        1,
 		PreserveLatest: true,
+	}
+	require.NoError(t, b.fsm.db.Update(func(txn MetadataTxn) error {
+		return b.fsm.persistPutObjectMetaUpdate(txn, putCmd, buildPutObjectMeta(putCmd))
 	}))
 
 	versions, err := b.ListObjectVersions(ctx, bkt, "", 0)

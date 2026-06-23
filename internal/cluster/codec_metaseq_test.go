@@ -59,23 +59,25 @@ func TestObjectMeta_MetaSeqDefaultZero(t *testing.T) {
 	require.Equal(t, uint64(0), got.MetaSeq)
 }
 
-// TestFSM_PutObjectMetaSeqRoundTrip applies a CmdPutObjectMeta carrying
-// MetaSeq:1 and reads the FSM-stored objectMeta back to confirm MetaSeq
-// round-trips through propose/apply.
+// TestFSM_PutObjectMetaSeqRoundTrip applies a PutObjectMetaCmd carrying
+// MetaSeq:1 and reads the stored objectMeta back to confirm MetaSeq
+// round-trips through persistPutObjectMetaUpdate (the live write path via
+// writeQuorumMeta). CmdPutObjectMeta FSM apply is retired in Slice 2.
 func TestFSM_PutObjectMetaSeqRoundTrip(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
-	data, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+	cmd := PutObjectMetaCmd{
 		Bucket:    "b",
 		Key:       "k",
 		Size:      1,
 		ETag:      "e",
 		VersionID: "v1",
 		MetaSeq:   1,
-	})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(data))
+	}
+	require.NoError(t, fsm.db.Update(func(txn MetadataTxn) error {
+		return fsm.persistPutObjectMetaUpdate(txn, cmd, buildPutObjectMeta(cmd))
+	}))
 
 	var stored objectMeta
 	require.NoError(t, db.View(func(txn *badger.Txn) error {

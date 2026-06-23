@@ -32,16 +32,17 @@ func TestLookupObjectECShards_ECMode(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
-	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+	putCmd := PutObjectMetaCmd{
 		Bucket:    "bkt",
 		Key:       "key",
 		VersionID: "v1",
 		Size:      1024,
 		ECData:    2,
 		ECParity:  1,
-	})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(raw))
+	}
+	require.NoError(t, fsm.db.Update(func(txn MetadataTxn) error {
+		return fsm.persistPutObjectMetaUpdate(txn, putCmd, buildPutObjectMeta(putCmd))
+	}))
 
 	k, m, err := fsm.LookupObjectECShards("bkt", "key", "v1")
 	require.NoError(t, err)

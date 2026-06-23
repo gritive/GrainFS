@@ -159,10 +159,10 @@ func TestApplyBatch_BusinessErrorDoesNotAbortBatch(t *testing.T) {
 	}
 	cmds := [][]byte{
 		enc(CmdCreateBucket, CreateBucketCmd{Bucket: "b1"}),
-		enc(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: "b1", Key: "k1", Size: 1, ETag: "e1"}),
-		// CAS against a wrong ETag -> business error, no write.
-		enc(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: "b1", Key: "k1", Size: 2, ETag: "e2", ExpectedETag: "WRONG"}),
-		enc(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: "b1", Key: "k3", Size: 3, ETag: "e3"}),
+		enc(CmdCreateBucket, CreateBucketCmd{Bucket: "b2"}),
+		// Delete a reserved bucket name → business error, no write.
+		enc(CmdDeleteBucket, DeleteBucketCmd{Bucket: "_grainfs-reserved"}),
+		enc(CmdCreateBucket, CreateBucketCmd{Bucket: "b3"}),
 	}
 	batch := make([]raft.LogEntry, len(cmds))
 	for i, c := range cmds {
@@ -175,12 +175,12 @@ func TestApplyBatch_BusinessErrorDoesNotAbortBatch(t *testing.T) {
 
 	require.NoError(t, results[0])
 	require.NoError(t, results[1])
-	require.Error(t, results[2], "CAS mismatch must be reported")
+	require.Error(t, results[2], "reserved bucket delete must be reported as error")
 	require.NoError(t, results[3])
 
-	// Entry 3 (k3) committed despite entry 2's error.
+	// Entry 3 (b3) committed despite entry 2's error.
 	err := fsm.db.View(func(txn MetadataTxn) error {
-		_, e := txn.Get(fsm.keys.ObjectMetaKey("b1", "k3"))
+		_, e := txn.Get(fsm.keys.BucketKey("b3"))
 		return e
 	})
 	require.NoError(t, err, "entries after a business error must still commit")

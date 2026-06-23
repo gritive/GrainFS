@@ -335,22 +335,26 @@ func TestSharedFSM_PrefixIsolation_AllPaths(t *testing.T) {
 				_, _, _, fA, fB, backendA, _ := setupTwoGroups(t)
 
 				// ListAllObjectsStrict iterates obj: versioned keys; need a VersionID.
-				raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+				// CmdPutObjectMeta is a no-op in the FSM after Slice 2; write via
+				// persistPutObjectMetaUpdate directly.
+				cmdA := PutObjectMetaCmd{
 					Bucket: bucket, Key: "snap-a", Size: 1, ContentType: "text/plain",
 					ETag: "A-snap", ModTime: 1, VersionID: "v1",
-				})
-				require.NoError(t, err)
-				require.NoError(t, fA.Apply(raw))
+				}
+				require.NoError(t, fA.db.Update(func(txn MetadataTxn) error {
+					return fA.persistPutObjectMetaUpdate(txn, cmdA, buildPutObjectMeta(cmdA))
+				}))
 
-				raw, err = EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+				cmdB := PutObjectMetaCmd{
 					Bucket: bucket, Key: "snap-b", Size: 1, ContentType: "text/plain",
 					ETag: "B-snap", ModTime: 1, VersionID: "v1",
-				})
-				require.NoError(t, err)
-				require.NoError(t, fB.Apply(raw))
+				}
+				require.NoError(t, fB.db.Update(func(txn MetadataTxn) error {
+					return fB.persistPutObjectMetaUpdate(txn, cmdB, buildPutObjectMeta(cmdB))
+				}))
 
 				// Also create the bucket in A (needed for ListAllObjectsStrict → ListBuckets).
-				raw, err = EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
+				raw, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
 				require.NoError(t, err)
 				_ = fA.Apply(raw)
 

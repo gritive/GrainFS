@@ -80,7 +80,7 @@ func TestShardPlacementMonitor_Scan_DetectsMetadataOnlyMissingShard(t *testing.T
 	svc, _ := newTestShardService(t)
 
 	const self = "node-A"
-	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+	putCmd := PutObjectMetaCmd{
 		Bucket:      "b",
 		Key:         "obj",
 		VersionID:   "v1",
@@ -91,9 +91,10 @@ func TestShardPlacementMonitor_Scan_DetectsMetadataOnlyMissingShard(t *testing.T
 		ECData:      2,
 		ECParity:    1,
 		NodeIDs:     []string{self, "node-B", "node-C"},
-	})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(raw))
+	}
+	require.NoError(t, fsm.db.Update(func(txn MetadataTxn) error {
+		return fsm.persistPutObjectMetaUpdate(txn, putCmd, buildPutObjectMeta(putCmd))
+	}))
 
 	monitor := NewShardPlacementMonitor(fsm, backend, svc, self, time.Second)
 	var reported []string
@@ -231,13 +232,14 @@ func seedCorruptShardKind(t *testing.T, backend *DistributedBackend, fsm *FSM, s
 	var target ECShardScanTarget
 	switch kind {
 	case ECShardObjectVersion:
-		raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+		corruptCmd := PutObjectMetaCmd{
 			Bucket: "b", Key: "obj", VersionID: "v1", Size: 10,
 			ContentType: "application/octet-stream", ETag: "etag", ModTime: 1,
 			ECData: 2, ECParity: 1, NodeIDs: nodes,
-		})
-		require.NoError(t, err)
-		require.NoError(t, fsm.Apply(raw))
+		}
+		require.NoError(t, fsm.db.Update(func(txn MetadataTxn) error {
+			return fsm.persistPutObjectMetaUpdate(txn, corruptCmd, buildPutObjectMeta(corruptCmd))
+		}))
 		shardKey = "obj/v1"
 		// Object-version targets carry raw object EC fields; the placement is
 		// resolved separately and is NOT echoed back on the target, so the
