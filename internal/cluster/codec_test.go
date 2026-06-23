@@ -382,14 +382,8 @@ func TestCodec_SetBucketVersioningCmd_RoundTrip(t *testing.T) {
 	assert.Equal(t, cmd, got)
 }
 
-func TestCodec_SetObjectACLCmd_RoundTrip(t *testing.T) {
-	cmd := SetObjectACLCmd{Bucket: "b", Key: "file.txt", ACL: 2}
-	raw, err := encodeSetObjectACLCmd(cmd)
-	require.NoError(t, err)
-	got, err := decodeSetObjectACLCmd(raw)
-	require.NoError(t, err)
-	assert.Equal(t, cmd, got)
-}
+// TestCodec_SetObjectACLCmd_RoundTrip removed: CmdSetObjectACL is retired in
+// data-plane raft-free Slice 2; encode/decode funcs deleted; codec returns reserved error.
 
 func TestCodec_ObjectMeta_ACL_RoundTrip(t *testing.T) {
 	m := objectMeta{Key: "f", Size: 5, ContentType: "text/plain", ETag: "e", LastModified: 1, ACL: 2}
@@ -617,28 +611,9 @@ func TestCodec_ObjectMeta_TagsRoundTrip(t *testing.T) {
 	require.Equal(t, original.Tags, got.Tags)
 }
 
-func TestCodec_SetObjectTagsCmd_RoundTrip(t *testing.T) {
-	cmd := SetObjectTagsCmd{
-		Bucket:    "b",
-		Key:       "k",
-		VersionID: "v1",
-		Tags:      []storage.Tag{{Key: "env", Value: "prod"}, {Key: "owner", Value: "alice"}},
-	}
-	raw, err := encodeSetObjectTagsCmd(cmd)
-	require.NoError(t, err)
-	got, err := decodeSetObjectTagsCmd(raw)
-	require.NoError(t, err)
-	require.Equal(t, cmd, got)
-}
-
-func TestCodec_SetObjectTagsCmd_EmptyTags_RoundTrip(t *testing.T) {
-	cmd := SetObjectTagsCmd{Bucket: "b", Key: "k", VersionID: ""}
-	raw, err := encodeSetObjectTagsCmd(cmd)
-	require.NoError(t, err)
-	got, err := decodeSetObjectTagsCmd(raw)
-	require.NoError(t, err)
-	require.Equal(t, cmd, got)
-}
+// TestCodec_SetObjectTagsCmd_RoundTrip and TestCodec_SetObjectTagsCmd_EmptyTags_RoundTrip
+// removed: CmdSetObjectTags is retired in data-plane raft-free Slice 2;
+// encode/decode funcs deleted; codec returns reserved error.
 
 func TestCodec_ClusterMultipartMeta_RoundTrip_WithTags(t *testing.T) {
 	orig := clusterMultipartMeta{

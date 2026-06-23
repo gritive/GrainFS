@@ -260,19 +260,16 @@ func TestSharedFSM_PrefixIsolation_AllPaths(t *testing.T) {
 			},
 		},
 		{
-			// SetObjectACL: A sets ACL on obj1; B has the same obj1 but different ACL
-			// (or none). Quarantine: A quarantines obj1; B's obj1 unaffected.
-			name: "ObjectACL_Quarantine_Isolation",
+			// Quarantine: A quarantines obj1; B's obj1 is unaffected.
+			// Note: CmdSetObjectACL is retired (data-plane raft-free Slice 2) — ACL
+			// isolation is now covered by the quorum-meta blob path; this case tests
+			// quarantine key isolation only.
+			name: "Quarantine_Isolation",
 			exercise: func(t *testing.T) {
 				_, ksA, ksB, fA, fB := setupTwoFSMs(t)
 
 				putObjViaApply(t, fA, bucket, "obj1", "A-etag")
 				putObjViaApply(t, fB, bucket, "obj1", "B-etag")
-
-				// Set ACL on A's obj1.
-				applyCmd(t, fA, CmdSetObjectACL, SetObjectACLCmd{
-					Bucket: bucket, Key: "obj1", ACL: 2,
-				})
 
 				// Quarantine A's obj1.
 				applyCmd(t, fA, CmdPutObjectQuarantine, PutObjectQuarantineCmd{

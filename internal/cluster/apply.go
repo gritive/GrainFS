@@ -119,10 +119,11 @@ func (f *FSM) ApplyTxn(txn MetadataTxn, raw []byte) error {
 		return f.applyDeleteObjectVersion(txn, cmd.Data)
 	case CmdSetBucketVersioning:
 		return f.applySetBucketVersioning(txn, cmd.Data)
-	case CmdSetObjectACL:
-		return f.applySetObjectACL(txn, cmd.Data)
-	case CmdSetObjectTags:
-		return f.applySetObjectTags(txn, cmd.Data)
+	case CmdSetObjectACL, CmdSetObjectTags:
+		// reserved, removed in data-plane raft-free Slice 2; blob RMW is
+		// authoritative. No production proposer; no raft-log replay of these
+		// commands in a greenfield cluster. No-op on any stale entries.
+		return nil
 	case CmdAppendObject, CmdCoalesceSegments:
 		// reserved, removed in append/coalesce-off-raft Slice 1; no production
 		// proposer; greenfield — no raft-log replay of these commands. No-op on stale entries.
@@ -466,144 +467,6 @@ func (f *FSM) applySetBucketVersioning(txn MetadataTxn, data []byte) error {
 		return err
 	}
 	return txn.Set(f.keys.BucketVerKey(c.Bucket), []byte(c.State))
-}
-
-func (f *FSM) applySetObjectACL(txn MetadataTxn, data []byte) error {
-	c, err := decodeSetObjectACLCmd(data)
-	if err != nil {
-		return err
-	}
-	legacyKey := f.keys.ObjectMetaKey(c.Bucket, c.Key)
-	item, err := txn.Get(legacyKey)
-	if err == ErrMetaKeyNotFound {
-		return storage.ErrObjectNotFound
-	}
-	if err != nil {
-		return err
-	}
-	return item.Value(func(raw []byte) error {
-		val, err := f.openValue(item.Key(), raw)
-		if err != nil {
-			return err
-		}
-		m, merr := unmarshalObjectMeta(val)
-		if merr != nil {
-			return merr
-		}
-		m.ACL = c.ACL
-		newVal, merr := marshalObjectMeta(m)
-		if merr != nil {
-			return merr
-		}
-		if err := f.setValue(txn, legacyKey, newVal); err != nil {
-			return err
-		}
-		// Also update the versioned record if this bucket has versioning enabled.
-		latItem, lerr := txn.Get(f.keys.LatestKey(c.Bucket, c.Key))
-		if lerr != nil {
-			return nil //nolint:nilerr // no versioned key, nothing more to do
-		}
-		var versionID string
-		_ = latItem.Value(func(v []byte) error { versionID = string(v); return nil })
-		if versionID == "" {
-			return nil
-		}
-		vKey := f.keys.ObjectMetaKeyV(c.Bucket, c.Key, versionID)
-		vItem, verr := txn.Get(vKey)
-		if verr != nil {
-			return nil //nolint:nilerr // versioned record missing, skip
-		}
-		return vItem.Value(func(raw []byte) error {
-			vval, err := f.openValue(vItem.Key(), raw)
-			if err != nil {
-				return err
-			}
-			vm, merr := unmarshalObjectMeta(vval)
-			if merr != nil {
-				return merr
-			}
-			vm.ACL = c.ACL
-			vNewVal, merr := marshalObjectMeta(vm)
-			if merr != nil {
-				return merr
-			}
-			return f.setValue(txn, vKey, vNewVal)
-		})
-	})
-}
-
-func (f *FSM) applySetObjectTags(txn MetadataTxn, data []byte) error {
-	c, err := decodeSetObjectTagsCmd(data)
-	if err != nil {
-		return err
-	}
-	if c.VersionID != "" {
-		vKey := f.keys.ObjectMetaKeyV(c.Bucket, c.Key, c.VersionID)
-		if err := mutateVersionTags(f, txn, vKey, c.Tags); err != nil {
-			return err
-		}
-		latItem, lerr := txn.Get(f.keys.LatestKey(c.Bucket, c.Key))
-		if lerr != nil {
-			return nil //nolint:nilerr // no latest marker, so no legacy-current mirror to update
-		}
-		var latest string
-		if err := latItem.Value(func(v []byte) error {
-			latest = string(v)
-			return nil
-		}); err != nil {
-			return err
-		}
-		if latest != c.VersionID {
-			return nil
-		}
-		return mutateVersionTags(f, txn, f.keys.ObjectMetaKey(c.Bucket, c.Key), c.Tags)
-	}
-	// VersionID == "" → mutate legacy (current) record, and if LatestKey
-	// exists also dual-write the latest versioned record.
-	legacyKey := f.keys.ObjectMetaKey(c.Bucket, c.Key)
-	if err := mutateVersionTags(f, txn, legacyKey, c.Tags); err != nil {
-		return err
-	}
-	// Best-effort dual-write to latest versioned record (mirrors SetObjectACL semantics).
-	latItem, lerr := txn.Get(f.keys.LatestKey(c.Bucket, c.Key))
-	if lerr != nil {
-		return nil //nolint:nilerr // no versioning, nothing more to do
-	}
-	var versionID string
-	_ = latItem.Value(func(v []byte) error { versionID = string(v); return nil })
-	if versionID == "" {
-		return nil
-	}
-	vKey := f.keys.ObjectMetaKeyV(c.Bucket, c.Key, versionID)
-	return mutateVersionTags(f, txn, vKey, c.Tags)
-}
-
-// mutateVersionTags reads the objectMeta at key, replaces .Tags, writes back.
-// Returns storage.ErrObjectNotFound if the key doesn't exist.
-func mutateVersionTags(f *FSM, txn MetadataTxn, key []byte, tags []storage.Tag) error {
-	item, err := txn.Get(key)
-	if err == ErrMetaKeyNotFound {
-		return storage.ErrObjectNotFound
-	}
-	if err != nil {
-		return err
-	}
-	return item.Value(func(raw []byte) error {
-		val, err := f.openValue(item.Key(), raw)
-		if err != nil {
-			return err
-		}
-		m, merr := unmarshalObjectMeta(val)
-		if merr != nil {
-			return merr
-		}
-		m.Tags = append([]storage.Tag(nil), tags...) // defensive copy
-		newVal, merr := marshalObjectMeta(m)
-		if merr != nil {
-			return merr
-		}
-		return f.setValue(txn, key, newVal)
-	})
 }
 
 func appendBaseCoalescedRef(key, versionID string, existing *objectMeta) CoalescedShardRef {

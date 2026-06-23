@@ -39,17 +39,18 @@ const (
 	CmdDeleteObjectVersion CommandType = 14
 	// Phase 18 v0.0.4.0 follow-up: Raft-serialized bucket versioning + object ACL.
 	CmdSetBucketVersioning CommandType = 15
-	CmdSetObjectACL        CommandType = 16
-	CmdSetRing             CommandType = 17
+	// CmdSetObjectACL is reserved, removed in data-plane raft-free Slice 2.
+	// Blob RMW (SetObjectACLPropose) is the sole authority. Slot MUST NOT be renumbered.
+	CmdSetObjectACL CommandType = 16 // reserved, removed data-plane raft-free Slice 2
+	CmdSetRing      CommandType = 17
 	// CmdAppendObject/CmdCoalesceSegments are reserved, removed in the
 	// append/coalesce-off-raft Slice 1. No production proposer; no raft-log
 	// replay (greenfield). Slots MUST NOT be renumbered.
 	CmdAppendObject     CommandType = 18 // reserved, removed append-off-raft Slice 1
 	CmdCoalesceSegments CommandType = 19 // reserved, removed append-off-raft Slice 1
-	// CmdSetObjectTags replaces the tag set on an object version.
-	// VersionID="" targets the current (legacy + latest) records;
-	// VersionID!="" targets a specific versioned record only.
-	CmdSetObjectTags       CommandType = 20
+	// CmdSetObjectTags is reserved, removed in data-plane raft-free Slice 2.
+	// Blob RMW (SetObjectTagsPropose) is the sole authority. Slot MUST NOT be renumbered.
+	CmdSetObjectTags       CommandType = 20 // reserved, removed data-plane raft-free Slice 2
 	CmdPutObjectQuarantine CommandType = 40
 	// CmdResealFSMValues re-seals a batch of data-group FSM state values
 	// (policy:, obj:) from a retired DEK generation onto the active generation.
@@ -257,23 +258,6 @@ type MigrationDoneFSMCmd struct {
 type SetBucketVersioningCmd struct {
 	Bucket string
 	State  string // "Enabled" | "Suspended"
-}
-
-// SetObjectACLCmd updates the ACL bitmask for an existing object.
-type SetObjectACLCmd struct {
-	Bucket string
-	Key    string
-	ACL    uint8
-}
-
-// SetObjectTagsCmd replaces the tag set on an object version.
-// VersionID="" targets the current (legacy + latest) records;
-// VersionID!="" targets a specific versioned record only.
-type SetObjectTagsCmd struct {
-	Bucket    string
-	Key       string
-	VersionID string
-	Tags      []storage.Tag
 }
 
 // AppendObjectCmd records one appended segment. Only PlacementGroupID is
