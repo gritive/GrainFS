@@ -7,7 +7,8 @@ package cluster
 //
 // To force EC active (IsActive requires >= 3 nodes), we set allNodes to
 // contain the same selfAddr repeated 3 times. liveNodes() returns 3 entries,
-// IsActive(3)=true, and PlacementForNodes routes all shards to selfAddr (local).
+// IsActive(3)=true, and HRW placement routes all shards to selfAddr (local):
+// identical node strings tie on score, so the top-count are all selfAddr.
 
 import (
 	"bytes"
@@ -22,7 +23,7 @@ import (
 
 // setupECBackend creates a backend with EC active (k=1, m=1) but no ring.
 // The selfAddr is repeated 3 times in allNodes so IsActive(3)=true and all
-// shards are placed locally (PlacementForNodes maps all to selfAddr).
+// shards are placed locally (HRW maps all to selfAddr — identical node strings).
 func setupECBackend(t *testing.T) *DistributedBackend {
 	t.Helper()
 	backend := NewSingletonBackendForTest(t)

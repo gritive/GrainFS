@@ -13,6 +13,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/gritive/GrainFS/internal/hrw"
 	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -189,7 +190,7 @@ func TestECObjectWriter_WriteOneSegmentRotatesPlacementBySegmentShardKey(t *test
 	cfg := ECConfig{DataShards: 2, ParityShards: 2}
 	peers := []string{"node-a", "node-b", "node-c", "node-d"}
 	blobID := "blob-1"
-	expected := PlacementForNodes(cfg, peers, "object/segments/"+blobID)
+	expected := hrw.PlaceShards("object/segments/"+blobID, peers, nil, cfg.NumShards())
 
 	rec, _, _, err := writer.writeOneSegment(context.Background(), writeSegmentInput{
 		Bucket:        "bucket",
@@ -207,6 +208,78 @@ func TestECObjectWriter_WriteOneSegmentRotatesPlacementBySegmentShardKey(t *test
 	for _, write := range shards.bufferedWrites {
 		require.Contains(t, expected, write.peer)
 	}
+}
+
+// TestWriteOneSegment_HRWPlacement pins the chunked segment-write path onto
+// weighted HRW. The recorded placement (PlacementRecord.Nodes) must equal
+// hrw.PlaceShards(placementKey, group.PeerIDs, weights, NumShards) — NOT the
+// legacy FNV-32 modulo order (PlacementForNodes). With nil weights / no node
+// stats this is unweighted HRW (the all-stale fallback the object_put.go path
+// already uses).
+func TestWriteOneSegment_HRWPlacement(t *testing.T) {
+	shards := &fakeECObjectWriterShards{}
+	writer := ecObjectWriter{
+		selfID: "not-a-placement-node",
+		shards: shards,
+	}
+	cfg := ECConfig{DataShards: 2, ParityShards: 2}
+	peers := []string{"node-a", "node-b", "node-c", "node-d"}
+	blobID := "blob-1"
+	placementKey := "object/segments/" + blobID
+	wantHRW := hrw.PlaceShards(placementKey, peers, nil, cfg.NumShards())
+
+	rec, _, _, err := writer.writeOneSegment(context.Background(), writeSegmentInput{
+		Bucket:        "bucket",
+		Key:           "object",
+		SegmentBlobID: blobID,
+		SegmentIdx:    0,
+		Group:         ShardGroupEntry{ID: "group-1", PeerIDs: peers},
+		Cfg:           cfg,
+		Data:          []byte("segment payload"),
+	})
+	require.NoError(t, err)
+	require.Equal(t, wantHRW, rec.Nodes,
+		"segment placement must use weighted HRW, not FNV-32 modulo")
+	require.Len(t, rec.Nodes, cfg.NumShards())
+
+	// All shards land on distinct nodes when group N == k+m.
+	seen := make(map[string]struct{}, len(rec.Nodes))
+	for _, n := range rec.Nodes {
+		_, dup := seen[n]
+		require.Falsef(t, dup, "shard placed twice on %s", n)
+		seen[n] = struct{}{}
+	}
+}
+
+// TestWriteOneSegment_HRWPlacement_Weighted pins the weighted variant: when a
+// per-peer weight slice is supplied (mirroring b.nodeStatsStore disk-avail) the
+// recorded placement must equal the weighted HRW order.
+func TestWriteOneSegment_HRWPlacement_Weighted(t *testing.T) {
+	shards := &fakeECObjectWriterShards{}
+	writer := ecObjectWriter{
+		selfID: "not-a-placement-node",
+		shards: shards,
+	}
+	cfg := ECConfig{DataShards: 2, ParityShards: 2}
+	peers := []string{"node-a", "node-b", "node-c", "node-d"}
+	weights := []float64{100, 200, 50, 400}
+	blobID := "blob-w"
+	placementKey := "object/segments/" + blobID
+	wantHRW := hrw.PlaceShards(placementKey, peers, weights, cfg.NumShards())
+
+	rec, _, _, err := writer.writeOneSegment(context.Background(), writeSegmentInput{
+		Bucket:          "bucket",
+		Key:             "object",
+		SegmentBlobID:   blobID,
+		SegmentIdx:      0,
+		Group:           ShardGroupEntry{ID: "group-1", PeerIDs: peers},
+		Cfg:             cfg,
+		Data:            []byte("segment payload"),
+		Weights:         weights,
+		WeightedEnabled: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, wantHRW, rec.Nodes)
 }
 
 func readECObjectWriterTraceEvents(t *testing.T, path string) []PutTraceEvent {

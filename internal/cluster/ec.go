@@ -1,15 +1,15 @@
 package cluster
 
 // Phase 18 Cluster EC: production EC helpers shared by PutObject/GetObject.
-// Placement formula matches internal/cluster/ecspike/ intentionally — the spike
-// validated this choice. When cluster size N == k+m, each key's shards land on
-// N distinct nodes.
+// Intra-group shard placement uses weighted Rendezvous Hashing (see
+// selectShardPlacement / internal/hrw); the writer records the chosen NodeIDs in
+// segment metadata and readers replay them, so placement is computed exactly
+// once per write.
 
 import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"path/filepath"
 	"sync"
@@ -80,27 +80,6 @@ func EffectiveConfig(n int, target ECConfig) ECConfig {
 		return ECConfig{}
 	}
 	return target
-}
-
-// Placement returns the node index (into the ordered node slice) that holds
-// shardIdx for the given key. Formula: (FNV32(key) + shardIdx) mod N.
-// When shardCount == N, all shards for a key land on N distinct nodes.
-func Placement(key string, shardIdx, numNodes int) int {
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(key))
-	return (int(h.Sum32()) + shardIdx) % numNodes
-}
-
-// PlacementForNodes returns the ordered list of nodeIDs responsible for each
-// shardIdx of the given key. Length equals cfg.NumShards().
-// nodes must be deterministically ordered across the cluster (sorted).
-func PlacementForNodes(cfg ECConfig, nodes []string, key string) []string {
-	n := cfg.NumShards()
-	out := make([]string, n)
-	for i := 0; i < n; i++ {
-		out[i] = nodes[Placement(key, i, len(nodes))]
-	}
-	return out
 }
 
 // shardHeaderSize is the per-shard prefix that records original object size

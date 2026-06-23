@@ -133,6 +133,14 @@ type writeSegmentInput struct {
 	Group                  ShardGroupEntry
 	Cfg                    ECConfig
 	Data                   []byte
+	// Weights is the per-peer disk-capacity weight aligned 1:1 with
+	// Group.PeerIDs (Weights[i] is the weight of Group.PeerIDs[i]). nil ⇒
+	// unweighted HRW. Computed once by the writer (clusterSegmentBackend) so the
+	// recorded placement is deterministic; readers never recompute.
+	Weights []float64
+	// WeightedEnabled mirrors ClusterConfig.WeightedHRWEnabled(). When false the
+	// segment placement uses plain (unweighted) HRW regardless of Weights.
+	WeightedEnabled bool
 }
 
 // writeOneSegment is a thin wrapper around writeDataShards that fills in the
@@ -151,7 +159,10 @@ func (w ecObjectWriter) writeOneSegment(ctx context.Context, in writeSegmentInpu
 		VersionID:     in.VersionID,
 		SegmentBlobID: in.SegmentBlobID,
 	})
-	placement := PlacementForNodes(in.Cfg, in.Group.PeerIDs, placementKey)
+	placement := selectShardPlacement(in.Cfg, in.Group.PeerIDs, placementKey, in.Weights, in.WeightedEnabled)
+	if len(placement) != nShards {
+		return PlacementRecord{}, "", "", fmt.Errorf("group %s: placement has %d nodes, need %d", in.Group.ID, len(placement), nShards)
+	}
 	plan := ecObjectWritePlan{
 		Bucket:           in.Bucket,
 		Key:              in.Key,
