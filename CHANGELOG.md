@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.0.652.0] - 2026-06-23
+
+### Fixed
+- **EC intra-group shard placement is now unified on weighted HRW (was FNV-32 modulo on the chunked
+  hot path).** The dominant data path — every normal PUT flows `PutObject → putObjectChunked →
+  clusterSegmentBackend.WriteSegmentBytes → writeOneSegment` — placed shards via
+  `(FNV32(key)+shardIdx) % N` (`PlacementForNodes`/`Placement`), ignoring disk-capacity weights, while
+  only the non-chunked fallback (rewrap / multipart-complete / test backends) used weighted Rendezvous
+  Hashing (`hrw.PlaceShards`). The chunked path now routes through a single shared
+  `selectShardPlacement` helper extracted from `selectECPlacementFromNodeStates`, so the chunked PUT,
+  multipart-complete, and redundancy-relocation paths all honor `WeightedHRWEnabled` and per-peer
+  disk-availability weighting (`b.nodeStatsStore`). The writer computes placement once and records the
+  chosen NodeIDs in segment metadata; reads are record-driven and replay those NodeIDs verbatim, so
+  already-written objects are unaffected (no on-disk migration). Falls back to unweighted HRW when
+  weighting is disabled, no node stats are available (boot before first gossip), or weight-0 (stale)
+  peers would shrink the stripe below `NumShards` — a distinct `weight_shortfall_fallback` metric makes
+  that degradation observable. The RFC's failure-domain motivation was not the real driver (there is no
+  rack model and modulo already placed all shards on distinct nodes when group N == k+m); the real wins
+  are disk-capacity-weighted balancing and HRW's minimal-reshuffle property on cluster expansion.
+- **Flaky `TestSegmentedReaderEncryptedTamperRejected` fixed.** The 1-byte tamper overwrote offset 100
+  with a fixed `0xff`, a no-op ~1/256 of the time when the random ciphertext already held `0xff` there.
+  It now flips the existing byte (`b ^ 0xff`), guaranteeing the AES-GCM tag mismatch the test asserts.
+
+### Removed
+- **Dead FNV-32 modulo placement code.** Deleted `Placement` and `PlacementForNodes`
+  (`internal/cluster/ec.go`) — zero non-test callers after the HRW unification — plus the throwaway
+  `internal/cluster/ecspike` de-risk-spike package and its `tests/e2e/cluster_ecspike_test.go`. Net
+  −262 LOC.
+
 ## [0.0.651.0] - 2026-06-23
 
 ### Fixed
