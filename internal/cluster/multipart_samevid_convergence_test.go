@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -72,29 +73,66 @@ func TestReadQuorumMetaVersions_SameVIDHigherModTimeWins(t *testing.T) {
 // write target AND the hard-delete / tombstone-GC target, so divergence would
 // orphan a loser's blob; vid-keying makes it converge. The det-vid is the same
 // across completers (deriveMultipartVID), so the same vid → same NodeIDs.
+//
+// The fake groupSelector hashes the blobID argument (which vidDeterministicBlobNodeIDs
+// passes as the vid) into the group index — mirroring the production
+// hashSegmentPlacementKey logic — so the test exercises group-selection
+// vid-determinism, not just PlacementForNodes permutation.
 func TestVidDeterministicBlobNodeIDs_StableAcrossCompleters(t *testing.T) {
 	groups := fourPGFixture()
 	cfg := ECConfig{DataShards: 4, ParityShards: 2}
+
+	// vidAwareSelector hashes (bucket, key, idx, blobID) to a group index,
+	// matching the production SelectSegmentPlacementGroup hash. This ensures
+	// group selection is keyed on the blobID/vid argument, not ignored.
+	vidAwareSelector := func(bucket, key string, idx int, blobID string) (ShardGroupEntry, error) {
+		if len(groups) == 0 {
+			return ShardGroupEntry{}, fmt.Errorf("no groups")
+		}
+		i := hashSegmentPlacementKey(bucket, key, idx, blobID) % uint64(len(groups))
+		return groups[i], nil
+	}
 
 	// Each "completer" is its own csb with INDEPENDENT random segment blobIDs.
 	newCompleter := func() *clusterSegmentBackend {
 		deps := newFakeBackendWithGroups(groups)
 		csb := newCSBWithDeps(deps, []string{uuid.Must(uuid.NewV7()).String()})
 		csb.ecConfigFn = func() ECConfig { return cfg }
+		csb.groupSelectorFn = vidAwareSelector
 		return csb
 	}
 
-	const bkt, key, vid = "b", "k", "019ed400-0000-7000-8000-0000000000ab"
-	a, err := newCompleter().vidDeterministicBlobNodeIDs(bkt, key, vid, cfg)
+	const bkt, key = "b", "k"
+	// vid1 and vid2 are chosen to hash to DIFFERENT groups (idx 0 and 1
+	// respectively with the fourPGFixture) so the distinct-group assertion is not
+	// vacuous. Verified via hashSegmentPlacementKey("b","k",0,vid) % 4.
+	const vid1 = "019ed400-0000-7000-8000-0000000000ab" // → group idx 0
+	const vid2 = "019ed400-0001-7000-8000-0000000000ab" // → group idx 1
+
+	a, err := newCompleter().vidDeterministicBlobNodeIDs(bkt, key, vid1, cfg)
 	require.NoError(t, err)
-	b, err := newCompleter().vidDeterministicBlobNodeIDs(bkt, key, vid, cfg)
+	b, err := newCompleter().vidDeterministicBlobNodeIDs(bkt, key, vid1, cfg)
 	require.NoError(t, err)
 	require.Equal(t, a, b, "same (bucket,key,vid) → identical recorded NodeIDs across completers")
 	require.Len(t, a, cfg.NumShards(), "recorded NodeIDs has K+M entries")
 
-	// A different vid is allowed to (and here does, via the permutation) differ —
-	// proving the placement actually keys on vid, not a constant.
-	other, err := newCompleter().vidDeterministicBlobNodeIDs(bkt, key, "019ed400-0000-7000-8000-0000000000cd", cfg)
+	// Assert group-selection vid-determinism: same vid always picks the same group.
+	g1a, err := newCompleter().selectGroup(bkt, key, 0, vid1)
+	require.NoError(t, err)
+	g1b, err := newCompleter().selectGroup(bkt, key, 0, vid1)
+	require.NoError(t, err)
+	require.Equal(t, g1a.ID, g1b.ID, "same vid always selects the same group")
+
+	// Assert that two distinct vids can land on different groups (group selection
+	// actually hashes on vid, not a constant). With 4 groups and two chosen vids
+	// that hash differently, they must not collide.
+	g2, err := newCompleter().selectGroup(bkt, key, 0, vid2)
+	require.NoError(t, err)
+	require.NotEqual(t, g1a.ID, g2.ID, "distinct vids must select different groups (group selection keys on vid)")
+
+	// A different vid is allowed to (and here does) produce different overall
+	// NodeIDs — proving placement keys on vid end-to-end.
+	other, err := newCompleter().vidDeterministicBlobNodeIDs(bkt, key, vid2, cfg)
 	require.NoError(t, err)
 	require.NotEqual(t, a, other, "a different vid keys to a different placement")
 }
