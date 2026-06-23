@@ -71,6 +71,11 @@ func TestInternalBucketGuard_ObjectOpsRejected(t *testing.T) {
 		_, err := b.ListObjects(ctx, internalBkt, "", 100)
 		require.ErrorIs(t, err, ErrInternalBucketNotObjectStore)
 	})
+
+	t.Run("WalkObjects", func(t *testing.T) {
+		err := b.WalkObjects(ctx, internalBkt, "", func(*storage.Object) error { return nil })
+		require.ErrorIs(t, err, ErrInternalBucketNotObjectStore)
+	})
 }
 
 // TestInternalBucketGuard_MultipartOpsRejected verifies that all multipart

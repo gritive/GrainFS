@@ -103,6 +103,9 @@ func (b *DistributedBackend) ListObjectsPage(ctx context.Context, bucket, prefix
 }
 
 func (b *DistributedBackend) WalkObjects(ctx context.Context, bucket, prefix string, fn func(*storage.Object) error) error {
+	if err := guardInternalBucketObjectOp(bucket); err != nil {
+		return err
+	}
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return err
 	}
