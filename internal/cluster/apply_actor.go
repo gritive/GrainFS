@@ -68,8 +68,8 @@ func (a *applyActor) applyBatch(batch []raft.LogEntry) []error {
 
 	// Check ErrTxnTooBig BEFORE committing. A partial commit followed by
 	// individual replay would double-apply the entries that fit and corrupt
-	// the result vector for delete-style handlers (applyCompleteMultipart
-	// re-run sees the mpu key already gone -> spurious ErrUploadNotFound).
+	// the result vector for delete-style handlers (e.g. a re-run that
+	// expects a key to be present on the first write would see it missing).
 	needFallback := false
 	for _, r := range results {
 		if errors.Is(r, ErrMetaTxnTooBig) {

@@ -32,11 +32,10 @@ func (b *DistributedBackend) CreateMultipartUpload(ctx context.Context, bucket, 
 }
 
 // CreateMultipartUploadWithTags creates a multipart upload with tags in cluster mode.
-// Tags travel through CreateMultipartUploadCmd (Raft replicated) and live on
-// clusterMultipartMeta until CompleteMultipartUpload, where they are materialised
-// onto the finalised object's objectMeta.Tags via the same Raft path that
-// materialises content (CmdPutObjectMeta carries the Tags vector — no separate
-// SetObjectTags proposal).
+// Tags are stored in the clusterMultipartMeta manifest blob (written to
+// .qmeta_mpu/{bucket}/{uploadID}) and carried through to the finalised object's
+// per-version quorum-meta blob at CompleteMultipartUpload (no Raft proposal;
+// blob path only).
 func (b *DistributedBackend) CreateMultipartUploadWithTags(ctx context.Context, bucket, key, contentType string, tags []storage.Tag) (string, error) {
 	uploadID, _, err := b.createMultipartUploadInternal(ctx, bucket, key, contentType, tags)
 	if err != nil {

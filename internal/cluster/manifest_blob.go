@@ -317,8 +317,6 @@ func (b *DistributedBackend) dataDir0() string {
 
 // selfNodeIDs returns a slice containing only this node's address, for use as a
 // single-node placement set in writeManifestBlob.
-//
-//nolint:unused // referenced by manifest_blob_test.go.
 func (b *DistributedBackend) selfNodeIDs() []string {
 	return []string{b.currentSelfAddr()}
 }
@@ -327,8 +325,6 @@ func (b *DistributedBackend) selfNodeIDs() []string {
 // the owning group's node set, K-of-N fail-closed via fanOutQuorumMeta.
 // nodeIDs must be the placement nodes of the owning group (the caller — Create,
 // M2b — computes them from PickVoters / the group peer set).
-//
-//nolint:unused // wired by M2b (CreateMultipartUpload); referenced by manifest_blob_test.go.
 func (b *DistributedBackend) writeManifestBlob(ctx context.Context, m clusterMultipartMeta, uploadID string, nodeIDs []string) error {
 	if b.shardSvc == nil || len(nodeIDs) == 0 {
 		return fmt.Errorf("manifest blob write: no shard service or empty placement")
@@ -359,8 +355,6 @@ func (b *DistributedBackend) writeManifestBlob(ctx context.Context, m clusterMul
 // readManifestBlob reads the manifest for (bucket, uploadID): local-first fast
 // path, then peer fan-out on a local miss. Returns (zero, false, nil) when no
 // node has the manifest.
-//
-//nolint:unused // wired by M2b; referenced by manifest_blob_test.go.
 func (b *DistributedBackend) readManifestBlob(bucket, uploadID string) (clusterMultipartMeta, bool, error) {
 	if b.shardSvc == nil {
 		return clusterMultipartMeta{}, false, nil
@@ -411,8 +405,6 @@ func (b *DistributedBackend) readManifestBlob(bucket, uploadID string) (clusterM
 
 // deleteManifestBlob removes the manifest for (bucket, uploadID): idempotent
 // local delete + best-effort peer deletes.
-//
-//nolint:unused // wired by M2b (AbortMultipartUpload / CompleteMultipartUpload); referenced by manifest_blob_test.go.
 func (b *DistributedBackend) deleteManifestBlob(bucket, uploadID string) error {
 	if b.shardSvc == nil {
 		return nil
@@ -445,8 +437,6 @@ func (b *DistributedBackend) deleteManifestBlob(bucket, uploadID string) error {
 
 // scanManifestBlobsLocalStrict is the node-local fail-closed scan of
 // .qmeta_mpu/{bucket}. Returns an error if any manifest cannot be read or decoded.
-//
-//nolint:unused // wired by M2b (ScanLocalMultipartUploads); referenced by manifest_blob_test.go.
 func (b *DistributedBackend) scanManifestBlobsLocalStrict(bucket string) ([]manifestEntry, error) {
 	if b.shardSvc == nil {
 		return nil, nil
@@ -458,8 +448,6 @@ func (b *DistributedBackend) scanManifestBlobsLocalStrict(bucket string) ([]mani
 // peer. Any peer address resolution error or RPC error aborts the scan (mirrors
 // scanQuorumMetaVersionsClusterAll). When shardGroup is nil (single-node), returns
 // the local STRICT scan.
-//
-//nolint:unused // wired by M2b (ListMultipartUploads); referenced by manifest_blob_test.go.
 func (b *DistributedBackend) scanManifestBlobsCluster(bucket string) ([]manifestEntry, error) {
 	if b.shardSvc == nil {
 		return nil, nil
