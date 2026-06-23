@@ -142,11 +142,14 @@ var _ = ginkgo.Describe("Append failover and concurrency", func() {
 			gomega.Expect(int64(len(body))).To(gomega.Equal(headSize),
 				"GetObject body length must equal HeadObject ContentLength (no torn read)")
 
-			// If append succeeded, its data must be present in the final object.
-			if appendErr == nil {
-				gomega.Expect(body).To(gomega.ContainSubstring(string(appendBody)),
-					"append returned SUCCESS: its data must be present in the final object (no silent drop)")
-			}
+			// Consistency invariant: the final body is a COMPLETE valid state —
+			// either the PUT body (a concurrent PUT legitimately overwrote the
+			// append: PUT is LWW and a newer ModTime wins) or the append body
+			// (append won). We do NOT assert the append's data survives a later
+			// PUT overwrite — that is correct S3 semantics, not a silent drop.
+			// What we DO assert: no torn/partial mix of the two writes.
+			gomega.Expect(body).To(gomega.Or(gomega.Equal(putBody), gomega.Equal(appendBody)),
+				"final body must be a complete valid state (PUT body or append body), not a torn mix")
 
 			// If PUT succeeded (it always does — PUT is unconditional), its body
 			// must appear unless it was subsequently overwritten by the append.
@@ -235,10 +238,11 @@ var _ = ginkgo.Describe("Append failover and concurrency", func() {
 			gomega.Expect(int64(len(body))).To(gomega.Equal(headSize),
 				"cluster GetObject body length must equal HeadObject ContentLength")
 
-			if appendErr == nil {
-				gomega.Expect(body).To(gomega.ContainSubstring(string(appendBody)),
-					"cluster append returned SUCCESS: data must be present in final object")
-			}
+			// Consistency invariant only (not which writer won): a concurrent PUT
+			// may legitimately overwrite a successful append (LWW). Assert the body
+			// is a complete valid state, not a torn mix.
+			gomega.Expect(body).To(gomega.Or(gomega.Equal(putBody), gomega.Equal(appendBody)),
+				"cluster final body must be a complete valid state (PUT body or append body), not a torn mix")
 		})
 	})
 
