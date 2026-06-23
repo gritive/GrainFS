@@ -1175,6 +1175,7 @@ func decodeSetObjectTagsCmd(data []byte) (SetObjectTagsCmd, error) {
 	return out, nil
 }
 
+//nolint:unused // referenced by append_integration_test.go
 func encodeAppendObjectCmd(c AppendObjectCmd) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 	bucketOff := b.CreateString(c.Bucket)
@@ -1196,6 +1197,7 @@ func encodeAppendObjectCmd(c AppendObjectCmd) ([]byte, error) {
 	return fbFinish(b, clusterpb.AppendObjectCmdEnd(b)), nil
 }
 
+//nolint:unused // referenced by applyAppendObjectFromCmd (used by append_integration_test.go)
 func decodeAppendObjectCmd(data []byte) (AppendObjectCmd, error) {
 	t, err := fbSafe(data, func(d []byte) *clusterpb.AppendObjectCmd {
 		return clusterpb.GetRootAsAppendObjectCmd(d, 0)
@@ -1216,6 +1218,7 @@ func decodeAppendObjectCmd(data []byte) (AppendObjectCmd, error) {
 	}, nil
 }
 
+//nolint:unused // referenced by codec_test.go, apply_coalesce_test.go
 func encodeCoalesceSegmentsCmd(c CoalesceSegmentsCmd) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 	bucketOff := b.CreateString(c.Bucket)
@@ -1249,6 +1252,7 @@ func encodeCoalesceSegmentsCmd(c CoalesceSegmentsCmd) ([]byte, error) {
 	return fbFinish(b, clusterpb.CoalesceSegmentsCmdEnd(b)), nil
 }
 
+//nolint:unused // referenced by codec_test.go
 func decodeCoalesceSegmentsCmd(data []byte) (CoalesceSegmentsCmd, error) {
 	t, err := fbSafe(data, func(d []byte) *clusterpb.CoalesceSegmentsCmd {
 		return clusterpb.GetRootAsCoalesceSegmentsCmd(d, 0)
@@ -1341,10 +1345,9 @@ func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
 		return encodeSetObjectACLCmd(payload.(SetObjectACLCmd))
 	case CmdSetObjectTags:
 		return encodeSetObjectTagsCmd(payload.(SetObjectTagsCmd))
-	case CmdAppendObject:
-		return encodeAppendObjectCmd(payload.(AppendObjectCmd))
-	case CmdCoalesceSegments:
-		return encodeCoalesceSegmentsCmd(payload.(CoalesceSegmentsCmd))
+	case CmdAppendObject, CmdCoalesceSegments:
+		// reserved, removed in append/coalesce-off-raft Slice 1 — no production caller
+		return nil, fmt.Errorf("command type %d is reserved and removed (append/coalesce-off-raft Slice 1)", cmdType)
 	case CmdSetRing:
 		return encodeSetRingCmd(payload.(SetRingCmd))
 	case CmdPutObjectQuarantine:

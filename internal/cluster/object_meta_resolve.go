@@ -5,6 +5,7 @@ import (
 	"fmt"
 )
 
+//nolint:unused // referenced by object_meta_resolve_test.go
 type objectMetaForCoalesceUpdate struct {
 	Found     bool
 	MetaKey   []byte
@@ -12,6 +13,7 @@ type objectMetaForCoalesceUpdate struct {
 	Meta      objectMeta
 }
 
+//nolint:unused // referenced by object_meta_resolve_test.go
 type objectMetaForAppendUpdate struct {
 	Found             bool
 	Existing          *objectMeta
@@ -19,6 +21,7 @@ type objectMetaForAppendUpdate struct {
 	ExistingVersionID string
 }
 
+//nolint:unused // referenced by object_meta_resolve_test.go
 func (f *FSM) resolveObjectMetaForAppendUpdate(txn MetadataTxn, bucket, key, blobID string) (objectMetaForAppendUpdate, error) {
 	existing, err := f.readLegacyObjectMetaForUpdate(txn, bucket, key)
 	if err != nil {
@@ -48,6 +51,7 @@ func (f *FSM) resolveObjectMetaForAppendUpdate(txn MetadataTxn, bucket, key, blo
 	}, nil
 }
 
+//nolint:unused // called by resolveObjectMetaForAppendUpdate (used in object_meta_resolve_test.go)
 func (f *FSM) readLegacyObjectMetaForUpdate(txn MetadataTxn, bucket, key string) (*objectMeta, error) {
 	metaKey := f.keys.ObjectMetaKey(bucket, key)
 	item, err := txn.Get(metaKey)
@@ -75,6 +79,7 @@ func (f *FSM) readLegacyObjectMetaForUpdate(txn MetadataTxn, bucket, key string)
 	return &meta, nil
 }
 
+//nolint:unused // called by resolveObjectMetaForAppendUpdate (used in object_meta_resolve_test.go)
 func (f *FSM) readLatestObjectVersionForAppend(txn MetadataTxn, bucket, key string) (string, error) {
 	item, err := txn.Get(f.keys.LatestKey(bucket, key))
 	if err != nil {
@@ -95,6 +100,7 @@ func (f *FSM) readLatestObjectVersionForAppend(txn MetadataTxn, bucket, key stri
 	return versionID, nil
 }
 
+//nolint:unused // referenced by object_meta_resolve_test.go
 func (f *FSM) resolveObjectMetaForCoalesceUpdate(txn MetadataTxn, bucket, key string) (objectMetaForCoalesceUpdate, error) {
 	legacyKey := f.keys.ObjectMetaKey(bucket, key)
 	metaKey := legacyKey

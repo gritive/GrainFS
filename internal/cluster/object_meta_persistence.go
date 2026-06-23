@@ -4,14 +4,17 @@ import (
 	"fmt"
 )
 
+//nolint:unused // used only by applyAppendObjectFromCmd / applyCoalesceSegmentsFromCmd (test-only since append-off-raft Slice 1)
 type objectMetaPersistencePolicy uint8
 
+//nolint:unused // used only by applyAppendObjectFromCmd / applyCoalesceSegmentsFromCmd (test-only since append-off-raft Slice 1)
 const (
 	objectMetaPersistenceLegacyOnly objectMetaPersistencePolicy = iota
 	objectMetaPersistencePublishLatest
 	objectMetaPersistenceMirrorVersion
 )
 
+//nolint:unused // used only by applyAppendObjectFromCmd / applyCoalesceSegmentsFromCmd (test-only since append-off-raft Slice 1)
 type objectMetaPersistenceInput struct {
 	Bucket    string
 	Key       string
@@ -20,6 +23,7 @@ type objectMetaPersistenceInput struct {
 	Policy    objectMetaPersistencePolicy
 }
 
+//nolint:unused // used only by applyAppendObjectFromCmd / applyCoalesceSegmentsFromCmd (test-only since append-off-raft Slice 1)
 func (f *FSM) persistObjectMetaUpdate(txn MetadataTxn, in objectMetaPersistenceInput) error {
 	out, err := marshalObjectMeta(in.Meta)
 	if err != nil {

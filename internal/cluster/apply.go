@@ -73,6 +73,8 @@ func (f *FSM) SetCoalesceCfg(cfg CoalesceConfig) {
 
 // snapshotCoalesceCfg returns a snapshot of the coalesce config under RLock
 // to avoid holding the lock during the cap arithmetic in the hot apply path.
+//
+//nolint:unused // referenced by applyAppendObjectFromCmd, which is used in append_integration_test.go
 func (f *FSM) snapshotCoalesceCfg() CoalesceConfig {
 	f.mu.RLock()
 	cfg := f.coalesceCfg
@@ -134,10 +136,10 @@ func (f *FSM) ApplyTxn(txn MetadataTxn, raw []byte) error {
 		return f.applySetObjectACL(txn, cmd.Data)
 	case CmdSetObjectTags:
 		return f.applySetObjectTags(txn, cmd.Data)
-	case CmdAppendObject:
-		return f.applyAppendObjectFromCmd(txn, cmd.Data)
-	case CmdCoalesceSegments:
-		return f.applyCoalesceSegmentsFromCmd(txn, cmd.Data)
+	case CmdAppendObject, CmdCoalesceSegments:
+		// reserved, removed in append/coalesce-off-raft Slice 1; no production
+		// proposer; greenfield — no raft-log replay of these commands. No-op on stale entries.
+		return nil
 	case CmdPutObjectQuarantine:
 		return f.applyPutObjectQuarantine(txn, cmd.Data)
 	case CmdResealFSMValues:
@@ -633,6 +635,11 @@ func mutateVersionTags(f *FSM, txn MetadataTxn, key []byte, tags []storage.Tag) 
 // When cmd.VersionID is empty (legacy Raft replay or direct apply-test
 // fixtures), only the legacy ObjectMetaKey is written to preserve prior
 // semantics.
+//
+// NOTE: CmdAppendObject is reserved/removed in append-off-raft Slice 1.
+// This function is kept for append_integration_test.go / apply_coalesce_test.go.
+//
+//nolint:unused // referenced by append_integration_test.go
 func (f *FSM) applyAppendObjectFromCmd(txn MetadataTxn, data []byte) error {
 	cmd, err := decodeAppendObjectCmd(data)
 	if err != nil {
@@ -709,6 +716,11 @@ func appendBaseCoalescedRef(key, versionID string, existing *objectMeta) Coalesc
 //     apply is preserved).
 //   - Size/ETag of objectMeta are NOT modified: a coalesce is metadata
 //     reorganization, not a content change.
+//
+// NOTE: CmdCoalesceSegments is reserved/removed in append-off-raft Slice 1.
+// This function is kept for apply_coalesce_test.go.
+//
+//nolint:unused // referenced by apply_coalesce_test.go
 func (f *FSM) applyCoalesceSegmentsFromCmd(txn MetadataTxn, data []byte) error {
 	cmd, err := decodeCoalesceSegmentsCmd(data)
 	if err != nil {

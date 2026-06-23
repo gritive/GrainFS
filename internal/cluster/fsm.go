@@ -41,11 +41,11 @@ const (
 	CmdSetBucketVersioning CommandType = 15
 	CmdSetObjectACL        CommandType = 16
 	CmdSetRing             CommandType = 17
-	// Phase 4 Append-Object: records one appended segment.
-	CmdAppendObject CommandType = 18
-	// Phase B2 Coalesce: merges a prefix of appendable object segments into a
-	// single coalesced blob ref.
-	CmdCoalesceSegments CommandType = 19
+	// CmdAppendObject/CmdCoalesceSegments are reserved, removed in the
+	// append/coalesce-off-raft Slice 1. No production proposer; no raft-log
+	// replay (greenfield). Slots MUST NOT be renumbered.
+	CmdAppendObject     CommandType = 18 // reserved, removed append-off-raft Slice 1
+	CmdCoalesceSegments CommandType = 19 // reserved, removed append-off-raft Slice 1
 	// CmdSetObjectTags replaces the tag set on an object version.
 	// VersionID="" targets the current (legacy + latest) records;
 	// VersionID!="" targets a specific versioned record only.

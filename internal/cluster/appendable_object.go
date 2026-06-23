@@ -50,6 +50,7 @@ func appendChunkSize(r io.Reader) int64 {
 	return end - cur
 }
 
+//nolint:unused // referenced by appendable_object_test.go and apply_test.go
 type appendObjectTransitionInput struct {
 	Existing          *objectMeta
 	ExistingVersionID string
@@ -58,11 +59,13 @@ type appendObjectTransitionInput struct {
 	CoalesceCfg       CoalesceConfig
 }
 
+//nolint:unused // referenced by appendable_object_test.go
 type appendObjectTransitionResult struct {
 	Noop            bool
 	SizeCapRejected bool
 }
 
+//nolint:unused // referenced by appendable_object_test.go
 func applyAppendObjectTransition(in appendObjectTransitionInput) (objectMeta, appendObjectTransitionResult, error) {
 	cmd := in.Cmd
 	existing := in.Existing
@@ -129,6 +132,7 @@ func applyAppendObjectTransition(in appendObjectTransitionInput) (objectMeta, ap
 	return updated, appendObjectTransitionResult{}, nil
 }
 
+//nolint:unused // referenced by object_meta_resolve.go (used in object_meta_resolve_test.go)
 func appendObjectCommandAlreadyApplied(existing *objectMeta, blobID string) bool {
 	if existing == nil {
 		return false

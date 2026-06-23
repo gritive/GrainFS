@@ -13,6 +13,7 @@ type coalesceSegmentsTransitionResult struct {
 	CoalescedEntriesAtCap bool
 }
 
+//nolint:unused // referenced by coalesce_transition_test.go and apply_coalesce_test.go
 func applyCoalesceSegmentsTransition(existing objectMeta, cmd CoalesceSegmentsCmd) (objectMeta, coalesceSegmentsTransitionResult, error) {
 	for _, c := range existing.Coalesced {
 		if c.CoalescedID == cmd.CoalescedID {
