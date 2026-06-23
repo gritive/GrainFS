@@ -144,6 +144,7 @@ type DistributedBackend struct {
 	objectMetaRMWLocks               keyedRWMutex              // per-(bucket,key) serialization for append/tag/ACL/coalesce/relocation quorum-meta RMW (refcounted, bounded)
 	multipartLocks                   sync.Map                  // map[uploadID]*sync.RWMutex; serializes part writes against complete/abort cleanup
 	incidentRecorder                 IncidentRecorder          // nil disables zero-ops incident recording
+	quarantineRouter                 QuarantineRouter          // nil → leaf-local quarantine SET; set on group backends to route the SET to the owner
 	testBeforeChunkedMultipartCommit func() error              // test-only hook for chunked multipart commit preflight
 	testBeforeAppendSegmentWrite     func()                    // test-only hook after append pre-check before segment write
 	testOnListObjectVersionsCtx      func(ctx context.Context) // test-only hook: called with the ctx passed to ListObjectVersions
@@ -1337,6 +1338,34 @@ func (b *DistributedBackend) FSMRef() *FSM { return b.fsm }
 
 func (b *DistributedBackend) SetIncidentRecorder(rec IncidentRecorder) {
 	b.incidentRecorder = rec
+}
+
+// QuarantineRouter routes a quarantine SET to the object's owning group so the
+// owner's objectMetaRMWLock serializes it against concurrent owner-side writes
+// (tags/ACL/PUT). The scrubber's placement monitor can run on a non-owner node
+// (the balancer floats shards across nodes), where a leaf-local RMW would only
+// hold THIS node's lock — racing the owner's blob writer and risking a lost
+// quarantine flag on the MetaSeq LWW tiebreak. Satisfied by *ClusterCoordinator
+// (cluster) and by *DistributedBackend itself (single-node leaf fallback).
+type QuarantineRouter interface {
+	QuarantineObject(ctx context.Context, bucket, key, versionID, cause, reason string) error
+}
+
+// SetQuarantineRouter installs the owner-routing path for the quarantine SET
+// portion of QuarantineCorruptShardLocal/...AtShardKey. nil (default) keeps the
+// leaf-local SET (correct for single-node and for the owner's own backend).
+func (b *DistributedBackend) SetQuarantineRouter(r QuarantineRouter) {
+	b.quarantineRouter = r
+}
+
+// quarantineSet performs the quarantine write: through the owner-routing
+// QuarantineRouter when wired (cluster placement monitor on a possibly-non-owner
+// node), else the leaf-local blob RMW (single-node / owner-local).
+func (b *DistributedBackend) quarantineSet(ctx context.Context, bucket, key, versionID, cause, reason string) error {
+	if b.quarantineRouter != nil {
+		return b.quarantineRouter.QuarantineObject(ctx, bucket, key, versionID, cause, reason)
+	}
+	return b.QuarantineObject(ctx, bucket, key, versionID, cause, reason)
 }
 
 // LiveNodes returns the list of cluster nodes currently considered reachable.

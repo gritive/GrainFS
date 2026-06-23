@@ -148,6 +148,3 @@ func (ks *stateKeyspace) ShardPlacementKey(b, k string) []byte {
 func (ks *stateKeyspace) PendingMigrationKey(b, k, ver string) []byte {
 	return ks.Key([]byte("pending-migration:" + b + "/" + k + "/" + ver))
 }
-func (ks *stateKeyspace) QuarantineKey(bucket, key, versionID string) []byte {
-	return ks.Key([]byte("quarantine:" + bucket + "\x00" + key + "\x00" + versionID))
-}

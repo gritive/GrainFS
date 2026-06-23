@@ -37,13 +37,7 @@ func (b *DistributedBackend) QuarantineObject(ctx context.Context, bucket, key, 
 			}
 		}
 		if !found {
-			// Last resort: derive cmd from the BadgerDB FSM record so the
-			// quarantine can be written to quorum-meta even when the object
-			// was seeded without a quorum-meta blob (e.g. scrubber-test setup).
-			cmd, found = b.readObjectMetaFromFSMAsCmd(bucket, key, versionID)
-			if !found {
-				return fmt.Errorf("object not found: %s/%s@%s", bucket, key, versionID)
-			}
+			return fmt.Errorf("object not found: %s/%s@%s", bucket, key, versionID)
 		}
 	} else {
 		cmd, err = b.readQuorumMetaCmd(bucket, key)
@@ -78,7 +72,9 @@ func (b *DistributedBackend) QuarantineCorruptShardLocal(bucket, key, versionID 
 		{CorrelationID: cid, Type: incident.FactObserved, Cause: incident.CauseCorruptShard, Scope: scope, At: now},
 		{CorrelationID: cid, Type: incident.FactActionStarted, Action: incident.ActionIsolateObject, At: now.Add(time.Millisecond)},
 	}
-	if err := b.QuarantineObject(context.Background(), bucket, key, versionID, string(incident.CauseCorruptShard), reason); err != nil {
+	// The placement monitor may run on a NON-OWNER node; route the SET to the
+	// owner so its RMW lock serializes it (incident recording stays local).
+	if err := b.quarantineSet(context.Background(), bucket, key, versionID, string(incident.CauseCorruptShard), reason); err != nil {
 		facts = append(facts, incident.Fact{CorrelationID: cid, Type: incident.FactActionFailed, Action: incident.ActionIsolateObject, ErrorCode: "quarantine_failed", At: time.Now().UTC()})
 		_ = recordIncident(context.Background(), b.incidentRecorder, facts)
 		return err
@@ -119,7 +115,9 @@ func (b *DistributedBackend) QuarantineCorruptShardLocalAtShardKey(t ECShardScan
 		{CorrelationID: cid, Type: incident.FactObserved, Cause: incident.CauseCorruptShard, Scope: scope, Message: "shard_key=" + t.ShardKey, At: now},
 		{CorrelationID: cid, Type: incident.FactActionStarted, Action: incident.ActionIsolateObject, At: now.Add(time.Millisecond)},
 	}
-	if err := b.QuarantineObject(context.Background(), t.Bucket, t.ObjectKey, t.VersionID, string(incident.CauseCorruptShard), reason); err != nil {
+	// The placement monitor may run on a NON-OWNER node; route the SET to the
+	// owner so its RMW lock serializes it (re-verification + incident stay local).
+	if err := b.quarantineSet(context.Background(), t.Bucket, t.ObjectKey, t.VersionID, string(incident.CauseCorruptShard), reason); err != nil {
 		facts = append(facts, incident.Fact{CorrelationID: cid, Type: incident.FactActionFailed, Action: incident.ActionIsolateObject, ErrorCode: "quarantine_failed", At: time.Now().UTC()})
 		_ = recordIncident(context.Background(), b.incidentRecorder, facts)
 		return err
@@ -282,60 +280,4 @@ func (b *DistributedBackend) isObjectQuarantined(bucket, key, versionID string) 
 
 func objectQuarantinedError(bucket, key, cause string) error {
 	return fmt.Errorf("%w: %s cause=%s", ErrObjectQuarantined, bucket+"/"+key, cause)
-}
-
-// readObjectMetaFromFSMAsCmd reads an object-version meta from BadgerDB (FSM)
-// and converts it to a minimal PutObjectMetaCmd for use as a quarantine write
-// base. Returns (cmd, true) on success, (zero, false) when the key is absent.
-// This is only needed as a fallback when no quorum-meta blob exists (e.g. legacy
-// / test-seeded objects).
-func (b *DistributedBackend) readObjectMetaFromFSMAsCmd(bucket, key, versionID string) (PutObjectMetaCmd, bool) {
-	var m objectMeta
-	found := false
-	_ = b.store.View(func(txn MetadataTxn) error {
-		dbKey := b.ks().ObjectMetaKeyV(bucket, key, versionID)
-		item, err := txn.Get(dbKey)
-		if err != nil {
-			return nil // not found or error — treat as absent
-		}
-		val, err := b.itemValueCopy(item)
-		if err != nil {
-			return nil
-		}
-		decoded, err := unmarshalObjectMeta(val)
-		if err != nil {
-			return nil
-		}
-		m = decoded
-		found = true
-		return nil
-	})
-	if !found {
-		return PutObjectMetaCmd{}, false
-	}
-	// Convert objectMeta to PutObjectMetaCmd (placement fields only).
-	// If top-level NodeIDs is empty, derive from the first segment (chunked PUT).
-	nodeIDs := m.NodeIDs
-	ecData := m.ECData
-	ecParity := m.ECParity
-	stripeBytes := m.StripeBytes
-	pgID := m.PlacementGroupID
-	if len(nodeIDs) == 0 && len(m.Segments) > 0 {
-		nodeIDs = m.Segments[0].NodeIDs
-		ecData = m.Segments[0].ECData
-		ecParity = m.Segments[0].ECParity
-		stripeBytes = m.Segments[0].StripeBytes
-	}
-	cmd := PutObjectMetaCmd{
-		Bucket:           bucket,
-		Key:              key,
-		VersionID:        versionID,
-		ECData:           ecData,
-		ECParity:         ecParity,
-		StripeBytes:      stripeBytes,
-		NodeIDs:          nodeIDs,
-		PlacementGroupID: pgID,
-		MetaSeq:          m.MetaSeq,
-	}
-	return cmd, true
 }

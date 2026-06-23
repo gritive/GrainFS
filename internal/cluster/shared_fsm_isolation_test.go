@@ -271,11 +271,15 @@ func TestSharedFSM_PrefixIsolation_AllPaths(t *testing.T) {
 				putObjViaApply(t, fA, bucket, "obj1", "A-etag")
 				putObjViaApply(t, fB, bucket, "obj1", "B-etag")
 
-				// CmdPutObjectQuarantine is no-op: encode returns an error for the
-				// reserved slot, so we apply a raw no-op command directly to the FSM
-				// to confirm no quarantine key is written.
-				qA := ksA.QuarantineKey(bucket, "obj1", "")
-				qB := ksB.QuarantineKey(bucket, "obj1", "")
+				// CmdPutObjectQuarantine is reserved/removed: quarantine now lives in
+				// the quorum-meta blob, never in the FSM. The retired QuarantineKey
+				// helper is gone (no production reader), so the legacy FSM key is
+				// inlined here purely for this negative assertion.
+				legacyQKey := func(ks *stateKeyspace) []byte {
+					return ks.Key([]byte("quarantine:" + bucket + "\x00obj1\x00"))
+				}
+				qA := legacyQKey(ksA)
+				qB := legacyQKey(ksB)
 				assert.NotEqual(t, qA, qB, "quarantine keys must be distinct")
 				assert.False(t, dbHasKey(t, fA.db, qA), "A's quarantine key must NOT be written (removed Slice 2)")
 				assert.False(t, dbHasKey(t, fB.db, qB), "B must not have a quarantine key")

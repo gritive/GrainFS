@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -77,4 +78,30 @@ func TestQuarantine_PutOverwriteGuard_RejectsWhenQuarantined(t *testing.T) {
 		SizeHint:    &sz,
 	})
 	require.ErrorIs(t, putErr, ErrObjectQuarantined)
+}
+
+// TestClusterCoordinator_QuarantineObject_Forwarded proves the owner-routing
+// forward op end-to-end at the coordinator boundary: when the object's owning
+// group is NOT locally resolvable (peer "a", self="self"), the coordinator
+// forwards ForwardOpSetObjectQuarantine to the owner with the correct args,
+// rather than executing the quarantine SET locally. This is the path the
+// scrubber's QuarantineRouter takes from a non-owner node — without it, a
+// leaf-local RMW could lose the quarantine flag to a concurrent owner write.
+func TestClusterCoordinator_QuarantineObject_Forwarded(t *testing.T) {
+	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
+	d.replyByOp[raftpb.ForwardOpSetObjectQuarantine] = buildOKReply()
+
+	err := c.QuarantineObject(context.Background(), "bk", "key.txt", "v9", "corrupt-shard", "scrub-CRC")
+	require.NoError(t, err)
+
+	require.Len(t, d.calls, 1, "QuarantineObject must route through forward.Send to the owner")
+	require.Equal(t, raftpb.ForwardOpSetObjectQuarantine, d.calls[0].op)
+	require.Equal(t, "g1", d.calls[0].gid)
+
+	args := raftpb.GetRootAsSetObjectQuarantineArgs(d.calls[0].args, 0)
+	require.Equal(t, "bk", string(args.Bucket()))
+	require.Equal(t, "key.txt", string(args.Key()))
+	require.Equal(t, "v9", string(args.VersionId()))
+	require.Equal(t, "corrupt-shard", string(args.Cause()))
+	require.Equal(t, "scrub-CRC", string(args.Reason()))
 }
