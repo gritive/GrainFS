@@ -236,7 +236,12 @@ const (
 // it is the §7-F single-truth-point.
 func decideQuorumMetaWrite(existing, cand PutObjectMetaCmd) quorumMetaWriteVerdict {
 	if cand.MetaSeqCAS {
-		if existing.MetaSeq+1 == cand.MetaSeq {
+		// Placement fence: reject a CAS write whose PlacementGroupID no longer
+		// matches the existing blob's (cross-placement rebalance safety). An absent
+		// existing (PlacementGroupID=="") passes — first write / new object is
+		// unaffected. The LWW branch is unchanged.
+		placementOK := existing.PlacementGroupID == "" || cand.PlacementGroupID == existing.PlacementGroupID
+		if existing.MetaSeq+1 == cand.MetaSeq && placementOK {
 			return quorumMetaWriteApply
 		}
 		return quorumMetaWriteRejectCAS

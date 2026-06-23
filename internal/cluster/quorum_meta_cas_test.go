@@ -100,6 +100,29 @@ func TestQuorumMetaWriteAccepts_CrossType(t *testing.T) {
 	require.True(t, quorumMetaWriteAccepts(existing, PutObjectMetaCmd{MetaSeqCAS: false, VersionID: "v", MetaSeq: 99, ModTime: 200}))
 }
 
+// TestQuorumMetaWriteAccepts_CASRejectsStalePlacement verifies the placement fence
+// in the CAS branch: a CAS write whose PlacementGroupID differs from the existing
+// blob's is rejected (cross-placement rebalance safety). Three cases:
+//  1. stale placement (pg-old → pg-new exists) → false
+//  2. same PG + base+1 → true
+//  3. absent existing (first write, no PlacementGroupID on existing) → true
+func TestQuorumMetaWriteAccepts_CASRejectsStalePlacement(t *testing.T) {
+	// 1. Stale placement: existing carries pg-new, candidate offers pg-old → reject.
+	existing := PutObjectMetaCmd{MetaSeq: 5, PlacementGroupID: "pg-new"}
+	cand := PutObjectMetaCmd{MetaSeqCAS: true, MetaSeq: 6, PlacementGroupID: "pg-old"}
+	require.False(t, quorumMetaWriteAccepts(existing, cand))
+
+	// 2. Same PG + correct base → accept.
+	cand2 := PutObjectMetaCmd{MetaSeqCAS: true, MetaSeq: 6, PlacementGroupID: "pg-new"}
+	require.True(t, quorumMetaWriteAccepts(existing, cand2))
+
+	// 3. Absent existing (first write): existing.PlacementGroupID=="" → placement
+	//    check passes regardless of what PG the candidate carries.
+	var absent PutObjectMetaCmd
+	first := PutObjectMetaCmd{MetaSeqCAS: true, MetaSeq: 1, PlacementGroupID: "pg-new"}
+	require.True(t, quorumMetaWriteAccepts(absent, first))
+}
+
 // TestWriteQuorumMetaLocal_CASRejectSurfacesError verifies F3 in the latest-only
 // guard: a CAS candidate (MetaSeqCAS) whose base no longer matches returns the
 // DISTINGUISHABLE errQuorumMetaCASReject — NOT a silent nil — so the append /
