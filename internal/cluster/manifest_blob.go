@@ -18,6 +18,7 @@ package cluster
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io/fs"
 	"os"
@@ -196,8 +197,8 @@ func (s *ShardService) handleManifestBlobDelete(sr *shardRequest) []byte {
 }
 
 // handleManifestBlobScan serves a ScanManifestBlobs RPC: walks .qmeta_mpu/{bucket}/
-// on this node (fail-closed) and returns a packBlobList-encoded payload where each
-// blob is marshalClusterMultipartMeta(meta) prefixed with the uploadID length+bytes
+// on this node (fail-closed) and returns a packManifestEntries-encoded payload where
+// each frame is [4-byte-uploadID-len][uploadID][4-byte-meta-len][meta-bytes]
 // (see packManifestEntries / unpackManifestEntries).
 func (s *ShardService) handleManifestBlobScan(sr *shardRequest) []byte {
 	entries, err := s.scanManifestBlobsLocalStrict(sr.Bucket)
@@ -229,7 +230,7 @@ func (s *ShardService) WriteManifestBlob(ctx context.Context, addr, bucket, uplo
 		return fmt.Errorf("manifest blob write: unmarshal response: %w", err)
 	}
 	if rpcType == "Error" {
-		return fmt.Errorf("remote manifest blob write error from %s", addr)
+		return fmt.Errorf("remote manifest blob write error from %s: %s", addr, data)
 	}
 	return nil
 }
@@ -251,7 +252,7 @@ func (s *ShardService) ReadManifestBlobRaw(ctx context.Context, addr, bucket, up
 		return nil, fmt.Errorf("manifest blob read: unmarshal response: %w", err)
 	}
 	if rpcType == "Error" {
-		return nil, fmt.Errorf("remote manifest blob read error from %s", addr)
+		return nil, fmt.Errorf("remote manifest blob read error from %s: %s", addr, data)
 	}
 	return data, nil // nil data = not found on peer
 }
@@ -267,12 +268,12 @@ func (s *ShardService) DeleteManifestBlob(ctx context.Context, addr, bucket, upl
 	if err != nil {
 		return fmt.Errorf("delete manifest blob on %s: %w", addr, err)
 	}
-	rpcType, _, err := unmarshalEnvelope(respEnvelope)
+	rpcType, data, err := unmarshalEnvelope(respEnvelope)
 	if err != nil {
 		return fmt.Errorf("manifest blob delete: unmarshal response: %w", err)
 	}
 	if rpcType == "Error" {
-		return fmt.Errorf("remote manifest blob delete error from %s", addr)
+		return fmt.Errorf("remote manifest blob delete error from %s: %s", addr, data)
 	}
 	return nil
 }
@@ -293,7 +294,7 @@ func (s *ShardService) ScanManifestBlobsRPC(ctx context.Context, addr, bucket st
 		return nil, fmt.Errorf("manifest blob scan: unmarshal response: %w", err)
 	}
 	if rpcType == "Error" {
-		return nil, fmt.Errorf("remote manifest blob scan error from %s", addr)
+		return nil, fmt.Errorf("remote manifest blob scan error from %s: %s", addr, data)
 	}
 	if len(data) == 0 {
 		return nil, nil
@@ -499,6 +500,9 @@ func (b *DistributedBackend) scanManifestBlobsCluster(bucket string) ([]manifest
 			}
 			for _, e := range remote {
 				if _, exists := byUploadID[e.UploadID]; !exists {
+					// First-writer-wins is correct by design: a manifest is
+					// immutable from Create until Abort/Complete (no ModTime/
+					// MetaSeq LWW field), so any replica is authoritative.
 					byUploadID[e.UploadID] = e
 				}
 			}
@@ -552,18 +556,20 @@ func packManifestEntries(entries []manifestEntry) ([]byte, error) {
 }
 
 // unpackManifestEntries deserialises the wire format written by packManifestEntries.
+// Uses unsigned length decoding (binary.BigEndian.Uint32) to match unpackBlobList,
+// so a crafted/corrupt length with bit-31 set never produces a negative slice index.
 func unpackManifestEntries(data []byte) ([]manifestEntry, error) {
 	var out []manifestEntry
-	get4 := func() (int, error) {
+	get4 := func() (uint32, error) {
 		if len(data) < 4 {
 			return 0, fmt.Errorf("unpack manifest entries: short read")
 		}
-		n := int(data[0])<<24 | int(data[1])<<16 | int(data[2])<<8 | int(data[3])
+		n := binary.BigEndian.Uint32(data[:4])
 		data = data[4:]
 		return n, nil
 	}
-	getBytes := func(n int) ([]byte, error) {
-		if len(data) < n {
+	getBytes := func(n uint32) ([]byte, error) {
+		if uint32(len(data)) < n {
 			return nil, fmt.Errorf("unpack manifest entries: short read (%d < %d)", len(data), n)
 		}
 		b := data[:n]
