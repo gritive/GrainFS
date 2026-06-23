@@ -80,7 +80,7 @@ func (d *mockDst) GetObject(_ context.Context, _, _ string) (io.ReadCloser, *sto
 }
 
 func TestWorker_ProcessJob_CopiesObjects_ProposesJobDone(t *testing.T) {
-	db := newTestDB(t)
+	db := newTestStore(t)
 	store := NewJobStore(db)
 	require.NoError(t, store.SaveJob(&JobState{Bucket: "b", Status: StatusRunning}))
 
@@ -110,7 +110,7 @@ func TestWorker_ProcessJob_CopiesObjects_ProposesJobDone(t *testing.T) {
 }
 
 func TestWorker_ProcessJob_SavesCursorAfterLastPage(t *testing.T) {
-	db := newTestDB(t)
+	db := newTestStore(t)
 	store := NewJobStore(db)
 	require.NoError(t, store.SaveJob(&JobState{Bucket: "b", Status: StatusRunning}))
 
@@ -140,7 +140,7 @@ func TestWorker_ProcessJob_SavesCursorAfterLastPage(t *testing.T) {
 }
 
 func TestWorker_Run_ProcessesJobOnTrigger(t *testing.T) {
-	db := newTestDB(t)
+	db := newTestStore(t)
 	store := NewJobStore(db)
 	prop := &fakeProposer{}
 	// Configure source and save job BEFORE starting the worker to avoid
@@ -171,7 +171,7 @@ func TestWorker_Run_ProcessesJobOnTrigger(t *testing.T) {
 }
 
 func TestWorker_Run_ResumesRunningJobsOnStart(t *testing.T) {
-	db := newTestDB(t)
+	db := newTestStore(t)
 	store := NewJobStore(db)
 	require.NoError(t, store.SaveJob(&JobState{Bucket: "pre", Status: StatusRunning}))
 
@@ -207,7 +207,7 @@ func (e *errorSource) GetObject(_, _ string) (io.ReadCloser, *storage.Object, er
 }
 
 func TestWorker_ProposeJobFailed_OnListObjectsPageError(t *testing.T) {
-	db := newTestDB(t)
+	db := newTestStore(t)
 	store := NewJobStore(db)
 	require.NoError(t, store.SaveJob(&JobState{Bucket: "b", Status: StatusRunning}))
 

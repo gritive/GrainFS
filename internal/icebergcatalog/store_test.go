@@ -8,6 +8,8 @@ import (
 
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/badgermeta"
 )
 
 func openTestStore(t *testing.T) (*Store, func() *Store) {
@@ -19,10 +21,10 @@ func openTestStore(t *testing.T) (*Store, func() *Store) {
 		require.NoError(t, db.Close())
 		db, err = badger.Open(badger.DefaultOptions(dir).WithLogger(nil))
 		require.NoError(t, err)
-		return NewStore(db, "s3://grainfs-tables/warehouse")
+		return NewStore(badgermeta.Wrap(db), "s3://grainfs-tables/warehouse")
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	return NewStore(db, "s3://grainfs-tables/warehouse"), reopen
+	return NewStore(badgermeta.Wrap(db), "s3://grainfs-tables/warehouse"), reopen
 }
 
 func TestStore_NamespaceLifecyclePersistsAcrossRestart(t *testing.T) {

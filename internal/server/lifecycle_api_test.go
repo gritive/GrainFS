@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/server/servertest"
@@ -56,7 +57,7 @@ func setupLifecycleServer(t *testing.T) (base string, svc *lifecycle.Service, ba
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
 
-	store := lifecycle.NewStore(db)
+	store := lifecycle.NewStore(badgermeta.Wrap(db))
 	svc = lifecycle.NewService(store, &directProposer{store: store}, noopLeadership{}, nil, nil, 0)
 
 	port := servertest.FreePort(t)

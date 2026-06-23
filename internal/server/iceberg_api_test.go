@@ -18,10 +18,6 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-type noDBProviderBackend struct {
-	storage.Backend
-}
-
 type fakeIcebergCatalog struct {
 	warehouse string
 }
@@ -433,7 +429,9 @@ func setupNoIcebergStoreServer(t *testing.T) string {
 
 	port := servertest.FreePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	srv := New(addr, noDBProviderBackend{Backend: backend})
+	// No catalog is wired and the DBProvider fallback was removed, so the
+	// server starts with s.icebergCatalog == nil → Iceberg routes 501.
+	srv := New(addr, backend)
 	go srv.Run() //nolint:errcheck
 	for i := 0; i < 50; i++ {
 		conn, err := net.Dial("tcp", addr)

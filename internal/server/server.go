@@ -21,17 +21,9 @@ import (
 
 func NewServerStorage(backend storage.Backend, policyStore *CompiledPolicyStore) ServerStorage {
 	return ServerStorage{
-		Ops:        storage.NewOperations(backend, storage.WithPolicyStore(policyStore)),
-		Backend:    backend,
-		DBProvider: storageDBProvider(backend),
+		Ops:     storage.NewOperations(backend, storage.WithPolicyStore(policyStore)),
+		Backend: backend,
 	}
-}
-
-func storageDBProvider(backend storage.Backend) storage.DBProvider {
-	if dbp, ok := unwrapBackend(backend).(storage.DBProvider); ok {
-		return dbp
-	}
-	return nil
 }
 
 // broadcastLoggerOnce guards the global zerolog.Logger setup so it is wired
@@ -71,7 +63,6 @@ func NewWithServerStorage(addr string, ss ServerStorage, policyStore *CompiledPo
 	s.wireBroadcastLogger()
 
 	h := s.newHertzEngine(addr)
-	s.ensureRuntimeDefaults(ss)
 	s.iceberg = iceberg.NewHandler(iceberg.Deps{
 		Ops:                    s.ops,
 		IAMStore:               s.iamStore,

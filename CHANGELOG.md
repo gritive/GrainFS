@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.0.654.0] - 2026-06-23
+
+### Changed
+- **Metadata data-stores now route through the `metastore.Store` interface instead of a raw `*badger.DB`.**
+  The `lifecycle.Store`, `migration.JobStore`, and `icebergcatalog.Store` constructors took a raw
+  `*badger.DB` and reached straight into the BadgerDB transaction API, leaking the storage engine
+  through what should have been a clean metadata boundary. They now accept `metastore.Store` (the same
+  5-method contract `internal/cluster` already consumes) and their bodies are rewritten against
+  `metastore.Txn`/`Iterator` with `metastore.ErrKeyNotFound`. `serveruntime` injects the already-wrapped
+  `sharedFSMStore` for lifecycle/migration and wraps the meta DB once via `badgermeta.Wrap` for the
+  legacy singleton Iceberg catalog. Behavior-preserving mechanical refactor — no on-disk format change,
+  no new features. The previously reported "broad MetadataStore leak" was narrow: the cluster↔metastore
+  boundary and metadata-migration were already abstracted; this closes the residual data-store
+  constructor leaks.
+- `eventstore` deliberately stays on the raw `*badger.DB` handle: it uses BadgerDB per-entry TTL
+  (`NewEntry().WithTTL()`), which `metastore.Store` does not (and should not) expose. It is a leaf infra
+  store, not part of the metadata contract.
+
+### Removed
+- Deleted the dead `DBProvider` escape hatch that let callers reach back to the raw `*badger.DB`:
+  `storage.DBProvider`, `LocalBackend.DB()`, `server.storageDBProvider`, the `ServerStorage.DBProvider`
+  field, the now-unused `unwrapBackend`/`unwrapper` helpers, and the iceberg-catalog auto-fallback in
+  `server.ensureRuntimeDefaults`. The fallback was prod-unreachable (production always wires the catalog
+  explicitly via `WithIcebergCatalog`/`WithIcebergDisabled`); `WithIcebergDisabled()` is retained as a
+  documented no-op so the boot wiring keeps a symmetric `EnableIceberg=false` branch.
+
 ## [0.0.653.0] - 2026-06-23
 
 ### Changed

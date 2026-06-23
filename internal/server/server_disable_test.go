@@ -10,25 +10,26 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-// TestWithIcebergDisabled_PreventsFallbackCatalog verifies that
-// ensureRuntimeDefaults creates an icebergCatalog via fallback when no
-// WithIcebergDisabled() option is set, making Iceberg routes available.
-func TestWithIcebergDisabled_PreventsFallbackCatalog(t *testing.T) {
+// TestIceberg_AvailableWhenCatalogWired verifies that wiring an Iceberg catalog
+// via WithIcebergCatalog makes the Iceberg routes available.
+func TestIceberg_AvailableWhenCatalogWired(t *testing.T) {
 	dir := t.TempDir()
 	backend, err := storage.NewLocalBackend(dir)
 	require.NoError(t, err)
 	t.Cleanup(func() { backend.Close() })
 
 	addr := fmt.Sprintf("127.0.0.1:%d", servertest.FreePort(t))
-	srv := startTestServer(t, addr, backend)
+	srv := startTestServer(t, addr, backend, WithIcebergCatalog(fakeIcebergCatalog{warehouse: "warehouse"}))
 	require.True(t, srv.routeFeatureAvailable(routeFeatureIceberg),
-		"without disable, iceberg should be available via fallback catalog")
+		"iceberg should be available when a catalog is wired")
 }
 
-// TestWithIcebergDisabled_DisablesFeature verifies that WithIcebergDisabled()
-// prevents ensureRuntimeDefaults from creating the fallback icebergCatalog,
-// leaving the route unavailable.
-func TestWithIcebergDisabled_DisablesFeature(t *testing.T) {
+// TestIceberg_UnavailableWithoutCatalog verifies that, absent an explicitly
+// wired catalog, the Iceberg routes are unavailable. No DBProvider fallback
+// auto-creates a catalog (the dead escape hatch was removed), so a plain
+// backend leaves the feature off; WithIcebergDisabled is the symmetric way to
+// express that intent at the boot edge.
+func TestIceberg_UnavailableWithoutCatalog(t *testing.T) {
 	dir := t.TempDir()
 	backend, err := storage.NewLocalBackend(dir)
 	require.NoError(t, err)
@@ -37,5 +38,5 @@ func TestWithIcebergDisabled_DisablesFeature(t *testing.T) {
 	addr := fmt.Sprintf("127.0.0.1:%d", servertest.FreePort(t))
 	srv := startTestServer(t, addr, backend, WithIcebergDisabled())
 	require.False(t, srv.routeFeatureAvailable(routeFeatureIceberg),
-		"WithIcebergDisabled must prevent fallback catalog creation")
+		"iceberg must be unavailable when no catalog is wired")
 }

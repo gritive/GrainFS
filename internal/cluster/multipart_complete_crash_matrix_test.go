@@ -75,7 +75,7 @@ func TestCompleteMultipart_CrashMatrix_LeakedManifestReconcileAndReclaim(t *test
 	// MPUWorker enumerates the leaked manifest via ScanLocalMultipartUploads (which does
 	// NOT reconcile) and aborts it once the age threshold is crossed — reclaiming the
 	// manifest blob + the orphan part dir.
-	store := lifecycle.NewStore(newTestLifecycleDB(t))
+	store := lifecycle.NewStore(newTestLifecycleStore(t))
 	require.NoError(t, store.PutRaw(bkt, []byte(`<LifecycleConfiguration><Rule><ID>r</ID><Status>Enabled</Status><AbortIncompleteMultipartUpload><DaysAfterInitiation>3</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>`)))
 
 	// now = manifest CreatedAt + 4 days, past the 3-day abort threshold.

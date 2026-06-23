@@ -129,8 +129,7 @@ func newWorker(store *Store, backend *mockBackend, deleter *mockDeleter) *Worker
 var _ ObjectDeleter = (*storage.Operations)(nil)
 
 func TestWorker_UsesStorageOperationsForMutations(t *testing.T) {
-	db := newTestDB(t)
-	store := NewStore(db)
+	store := NewStore(newWrappedStore(t))
 	require.NoError(t, store.put("bucket", &LifecycleConfiguration{
 		Rules: []Rule{{
 			ID:         "expire-1",
@@ -183,8 +182,7 @@ func (b *operationsLifecycleBackend) ListObjectVersions(_ context.Context, bucke
 // TestWorker_ExpiresOldObject verifies that an object older than Expiration.Days
 // triggers DeleteObject.
 func TestWorker_ExpiresOldObject(t *testing.T) {
-	db := newTestDB(t)
-	store := NewStore(db)
+	store := NewStore(newWrappedStore(t))
 
 	cfg := &LifecycleConfiguration{
 		Rules: []Rule{{
@@ -211,8 +209,7 @@ func TestWorker_ExpiresOldObject(t *testing.T) {
 }
 
 func TestWorker_ExpirationDaysSkipsDeleteMarkers(t *testing.T) {
-	db := newTestDB(t)
-	store := NewStore(db)
+	store := NewStore(newWrappedStore(t))
 	now := time.Unix(1700000000, 0).UTC()
 
 	cfg := &LifecycleConfiguration{
@@ -249,8 +246,7 @@ func TestWorker_ExpirationDaysSkipsDeleteMarkers(t *testing.T) {
 // TestWorker_SkipsRecentObject verifies that an object newer than Expiration.Days
 // is NOT deleted.
 func TestWorker_SkipsRecentObject(t *testing.T) {
-	db := newTestDB(t)
-	store := NewStore(db)
+	store := NewStore(newWrappedStore(t))
 
 	cfg := &LifecycleConfiguration{
 		Rules: []Rule{{ID: "r", Status: "Enabled", Expiration: &Expiration{Days: 30}}},
@@ -274,8 +270,7 @@ func TestWorker_SkipsRecentObject(t *testing.T) {
 
 // TestWorker_SkipsDisabledRule verifies that a disabled rule has no effect.
 func TestWorker_SkipsDisabledRule(t *testing.T) {
-	db := newTestDB(t)
-	store := NewStore(db)
+	store := NewStore(newWrappedStore(t))
 
 	cfg := &LifecycleConfiguration{
 		Rules: []Rule{{ID: "r", Status: "Disabled", Expiration: &Expiration{Days: 1}}},
@@ -299,8 +294,7 @@ func TestWorker_SkipsDisabledRule(t *testing.T) {
 
 // TestWorker_PrefixFilter verifies that only objects matching the prefix are expired.
 func TestWorker_PrefixFilter(t *testing.T) {
-	db := newTestDB(t)
-	store := NewStore(db)
+	store := NewStore(newWrappedStore(t))
 
 	cfg := &LifecycleConfiguration{
 		Rules: []Rule{{
@@ -332,8 +326,7 @@ func TestWorker_PrefixFilter(t *testing.T) {
 
 // TestWorker_NoBucketConfig verifies that buckets without lifecycle config are skipped.
 func TestWorker_NoBucketConfig(t *testing.T) {
-	db := newTestDB(t)
-	store := NewStore(db)
+	store := NewStore(newWrappedStore(t))
 	// no config stored
 
 	oldTime := time.Now().Add(-100 * 24 * time.Hour).Unix()
@@ -355,8 +348,7 @@ func TestWorker_NoBucketConfig(t *testing.T) {
 // NewerNoncurrentVersions versions works. Drives the post-Task-9 worker which
 // walks g.Versions directly (no per-object ListObjectVersions call).
 func TestWorker_NoncurrentVersionExpiration_ByCount(t *testing.T) {
-	db := newTestDB(t)
-	store := NewStore(db)
+	store := NewStore(newWrappedStore(t))
 
 	cfg := &LifecycleConfiguration{
 		Rules: []Rule{{
@@ -397,8 +389,7 @@ func TestWorker_NoncurrentVersionExpiration_ByCount(t *testing.T) {
 // TestWorker_NoncurrentVersionExpiration_ByAge verifies that NoncurrentDays
 // deletes versions older than the threshold.
 func TestWorker_NoncurrentVersionExpiration_ByAge(t *testing.T) {
-	db := newTestDB(t)
-	store := NewStore(db)
+	store := NewStore(newWrappedStore(t))
 
 	cfg := &LifecycleConfiguration{
 		Rules: []Rule{{
@@ -435,8 +426,7 @@ func TestWorker_NoncurrentVersionExpiration_ByAge(t *testing.T) {
 
 // TestWorker_Stats tracks ObjectsChecked and Expired counts.
 func TestWorker_Stats(t *testing.T) {
-	db := newTestDB(t)
-	store := NewStore(db)
+	store := NewStore(newWrappedStore(t))
 
 	cfg := &LifecycleConfiguration{
 		Rules: []Rule{{ID: "r", Status: "Enabled", Expiration: &Expiration{Days: 1}}},
@@ -536,8 +526,7 @@ func itoa(i int) string {
 // scan was actually invoked, so the test cannot pass by silently doing nothing.
 func TestWorker_NoNListVersionsCalls(t *testing.T) {
 	const N = 100
-	db := newTestDB(t)
-	store := NewStore(db)
+	store := NewStore(newWrappedStore(t))
 	raw := []byte(`<LifecycleConfiguration><Rule><ID>r</ID><Status>Enabled</Status><Expiration><Days>1</Days></Expiration></Rule></LifecycleConfiguration>`)
 	require.NoError(t, store.PutRaw("b", raw))
 

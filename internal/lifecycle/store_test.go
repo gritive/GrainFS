@@ -6,26 +6,29 @@ import (
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/badgermeta"
+	"github.com/gritive/GrainFS/internal/metastore"
 )
 
-func newTestDB(t *testing.T) *badger.DB {
+func newWrappedStore(t *testing.T) metastore.Store {
 	t.Helper()
 	opts := badger.DefaultOptions(t.TempDir()).WithLogger(nil)
 	db, err := badger.Open(opts)
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
-	return db
+	return badgermeta.Wrap(db)
 }
 
 func TestStore_GetReturnsNilWhenNotSet(t *testing.T) {
-	s := NewStore(newTestDB(t))
+	s := NewStore(newWrappedStore(t))
 	cfg, err := s.Get("no-such-bucket")
 	require.NoError(t, err)
 	assert.Nil(t, cfg)
 }
 
 func TestStore_PutAndGet(t *testing.T) {
-	s := NewStore(newTestDB(t))
+	s := NewStore(newWrappedStore(t))
 	cfg := &LifecycleConfiguration{
 		Rules: []Rule{{ID: "r1", Status: "Enabled", Expiration: &Expiration{Days: 30}}},
 	}
@@ -40,7 +43,7 @@ func TestStore_PutAndGet(t *testing.T) {
 }
 
 func TestStore_Delete(t *testing.T) {
-	s := NewStore(newTestDB(t))
+	s := NewStore(newWrappedStore(t))
 	cfg := &LifecycleConfiguration{Rules: []Rule{{ID: "r", Status: "Enabled"}}}
 	require.NoError(t, s.put("b", cfg))
 
@@ -52,12 +55,12 @@ func TestStore_Delete(t *testing.T) {
 }
 
 func TestStore_DeleteNonExistent(t *testing.T) {
-	s := NewStore(newTestDB(t))
+	s := NewStore(newWrappedStore(t))
 	assert.NoError(t, s.Delete("no-bucket"))
 }
 
 func TestStore_PutOverwrites(t *testing.T) {
-	s := NewStore(newTestDB(t))
+	s := NewStore(newWrappedStore(t))
 	cfg1 := &LifecycleConfiguration{Rules: []Rule{{ID: "old", Status: "Enabled"}}}
 	cfg2 := &LifecycleConfiguration{Rules: []Rule{{ID: "new", Status: "Disabled"}}}
 
@@ -70,8 +73,7 @@ func TestStore_PutOverwrites(t *testing.T) {
 }
 
 func TestStore_PutRaw_RoundTrip(t *testing.T) {
-	db := newTestDB(t)
-	s := NewStore(db)
+	s := NewStore(newWrappedStore(t))
 	raw := []byte(`<LifecycleConfiguration><Rule><ID>r1</ID><Status>Enabled</Status></Rule></LifecycleConfiguration>`)
 	require.NoError(t, s.PutRaw("b", raw))
 	got, err := s.Get("b")
@@ -82,8 +84,7 @@ func TestStore_PutRaw_RoundTrip(t *testing.T) {
 }
 
 func TestStore_GetRaw_ReturnsByteForByte(t *testing.T) {
-	db := newTestDB(t)
-	s := NewStore(db)
+	s := NewStore(newWrappedStore(t))
 	raw := []byte(`<LifecycleConfiguration><Rule><ID>r1</ID><Status>Enabled</Status></Rule></LifecycleConfiguration>`)
 	require.NoError(t, s.PutRaw("b", raw))
 	got, err := s.GetRaw("b")
@@ -92,14 +93,14 @@ func TestStore_GetRaw_ReturnsByteForByte(t *testing.T) {
 }
 
 func TestStore_GetRaw_NotFound(t *testing.T) {
-	s := NewStore(newTestDB(t))
+	s := NewStore(newWrappedStore(t))
 	got, err := s.GetRaw("nope")
 	require.NoError(t, err)
 	assert.Nil(t, got)
 }
 
 func TestStore_ListBuckets(t *testing.T) {
-	st := NewStore(newTestDB(t))
+	st := NewStore(newWrappedStore(t))
 	require.NoError(t, st.PutRaw("bucket-a", []byte("<x/>")))
 	require.NoError(t, st.PutRaw("bucket-c", []byte("<x/>")))
 	require.NoError(t, st.PutRaw("bucket-b", []byte("<x/>")))
@@ -109,7 +110,7 @@ func TestStore_ListBuckets(t *testing.T) {
 }
 
 func TestStore_ListBuckets_Empty(t *testing.T) {
-	st := NewStore(newTestDB(t))
+	st := NewStore(newWrappedStore(t))
 	got, err := st.ListBuckets()
 	require.NoError(t, err)
 	assert.Empty(t, got)

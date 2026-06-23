@@ -4,13 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
-
-	badger "github.com/dgraph-io/badger/v4"
 )
-
-// DBProvider is implemented by backends that expose their underlying BadgerDB
-// for shared use (lifecycle, events).
-type DBProvider interface{ DB() *badger.DB }
 
 // ErrOperationNotSupported is returned when a backend does not implement an
 // optional capability interface required by the requested operation.

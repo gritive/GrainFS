@@ -13,6 +13,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/alerts"
 	"github.com/gritive/GrainFS/internal/audit"
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
@@ -144,7 +145,7 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 	}
 	var metaCatalog *cluster.MetaCatalog
 	if len(peers) == 0 && !cfg.RaftAddrExplicit && !state.inviteJoinMode {
-		legacyStore := icebergcatalog.NewStore(state.db, "s3://grainfs-tables/warehouse")
+		legacyStore := icebergcatalog.NewStore(badgermeta.Wrap(state.db), "s3://grainfs-tables/warehouse")
 		metaCatalog = cluster.NewMetaCatalog(metaRaft, state.backend, "s3://grainfs-tables/warehouse")
 		if err := MigrateLegacySingletonIcebergCatalog(ctx, legacyStore, metaCatalog, state.backend); err != nil {
 			return fmt.Errorf("migrate singleton Iceberg catalog: %w", err)
@@ -259,12 +260,13 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 	// Bucket Lifecycle Policy (ADR 0011): replicate via meta-Raft FSM,
 	// executor leader-only.
 	if cfg.LifecycleInterval > 0 {
-		if state.sharedFSMDB == nil {
-			return fmt.Errorf("lifecycle: shared FSM DB not opened (boot ordering)")
+		if state.sharedFSMStore == nil {
+			return fmt.Errorf("lifecycle: shared FSM store not opened (boot ordering)")
 		}
-		// Phase 6.5 S3: the lifecycle store shares the FSM-state DB; serveruntime
-		// owns the raw handle (the backend no longer exposes it).
-		lstore := lifecycle.NewStore(state.sharedFSMDB)
+		// Phase 6.5 S3: the lifecycle store shares the FSM-state DB, routed
+		// through the MetadataStore contract (serveruntime owns the raw handle
+		// lifecycle; the backend no longer exposes it).
+		lstore := lifecycle.NewStore(state.sharedFSMStore)
 		state.lifecycleStore = lstore
 		prop := &cluster.LifecycleProposer{Propose: state.metaRaft.Propose}
 		// Use Node() (interface) — not RaftNode() (v1 concrete) — so the
@@ -287,10 +289,10 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 		srvOpts = append(srvOpts, server.WithLifecycleService(state.lifecycleSvc))
 	}
 
-	if state.sharedFSMDB == nil {
-		return fmt.Errorf("migration: shared FSM DB not opened (boot ordering)")
+	if state.sharedFSMStore == nil {
+		return fmt.Errorf("migration: shared FSM store not opened (boot ordering)")
 	}
-	mstore := migration.NewJobStore(state.sharedFSMDB)
+	mstore := migration.NewJobStore(state.sharedFSMStore)
 	state.metaRaft.FSM().SetMigration(mstore)
 	if state.capabilityGate == nil {
 		state.capabilityGate = cluster.NewCapabilityGate(compat.DefaultRegistry, capabilityEvidenceTTL(state))

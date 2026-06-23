@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/lifecycle"
 )
@@ -36,7 +37,7 @@ func TestLifecycleStatus_WithService_Returns200(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
 
-	store := lifecycle.NewStore(db)
+	store := lifecycle.NewStore(badgermeta.Wrap(db))
 	svc := lifecycle.NewService(store, nil, nil, nil, nil, 0)
 
 	base := setupTestServerWithOptions(t, WithLifecycleService(svc))
@@ -62,7 +63,7 @@ func TestLifecycleStatusAPI_IncludesNewFields(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
 
-	store := lifecycle.NewStore(db)
+	store := lifecycle.NewStore(badgermeta.Wrap(db))
 	svc := lifecycle.NewService(store, nil, nil, nil, nil, 0)
 
 	base := setupTestServerWithOptions(t, WithLifecycleService(svc))
