@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -10,14 +11,15 @@ import (
 )
 
 // TestForceDeleteBucketSoleAuthOn covers the soleauth=on leaf ForceDeleteBucket
-// path: the deletion set is enumerated from the per-version blob authority +
-// carve-out FSM (NOT the stale FSM obj:/lat: scan), vid-bearing entries are
-// deleted with their per-version blob purged, legacy-bare carve-outs are
-// hard-deleted, and the trailing blob-aware DeleteBucket empties the bucket.
+// path: the deletion set is enumerated from the per-version blob authority
+// (scanQuorumMetaVersionsClusterAll + DeleteObjectVersion), and the trailing
+// blob-aware DeleteBucket empties the bucket. The legacy FSM carve-out tail
+// (scanFsmCarveoutVersions + HardDeleteLegacyObject) was dropped in Task 4b:
+// greenfield versioned buckets have no FSM carve-outs.
 func TestForceDeleteBucketSoleAuthOn(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("mixed authoritative content → force-delete empties the bucket", func(t *testing.T) {
+	t.Run("versioned blobs only → force-delete empties the bucket", func(t *testing.T) {
 		b := newSingleNode1Plus0ChunkCapable(t)
 		require.NoError(t, b.CreateBucket(ctx, "b"))
 		setVersioningForTest(t, b, "b", "Enabled")
@@ -27,10 +29,6 @@ func TestForceDeleteBucketSoleAuthOn(t *testing.T) {
 		seedVersionBlob(t, b, "b", "k2", vidB1, PutObjectMetaCmd{ETag: "k2v1", NodeIDs: []string{"self"}})
 		// A delete-marker blob (a record that must also be removed).
 		seedVersionBlob(t, b, "b", "k2", vidB2, PutObjectMetaCmd{ETag: deleteMarkerETag, IsDeleteMarker: true, NodeIDs: []string{"self"}})
-		// Appendable carve-out (vid-bearing, FSM-authoritative, no blob).
-		seedFSMObject(t, b, "b", "ak", vidA1, objectMeta{Key: "ak", ETag: "app", IsAppendable: true}, true)
-		// Legacy-bare carve-out (unversioned, no lat:).
-		seedFSMObject(t, b, "b", "lk", "", objectMeta{Key: "lk", ETag: "bare"}, false)
 		// Stale non-carve-out vid-bearing FSM record with NO blob — non-authoritative
 		// under `on`: must NOT be enumerated/resurrected, and must NOT block the delete.
 		seedFSMObject(t, b, "b", "ghost", vidB1, objectMeta{Key: "ghost", ETag: "stale"}, true)
@@ -49,8 +47,8 @@ func TestForceDeleteBucketSoleAuthOn(t *testing.T) {
 	})
 }
 
-// TestHardDeleteLegacyObject covers the new on-gated hard-delete primitive: it
-// removes a legacy unversioned bare obj:{bucket}/{key} record with no tombstone.
+// TestHardDeleteLegacyObject covers the hard-delete primitive: it removes a legacy
+// unversioned bare obj:{bucket}/{key} record with no tombstone.
 func TestHardDeleteLegacyObject(t *testing.T) {
 	ctx := context.Background()
 	b := newTestDistributedBackend(t)
@@ -68,17 +66,22 @@ func TestHardDeleteLegacyObject(t *testing.T) {
 	require.ErrorIs(t, err, storage.ErrObjectNotFound)
 }
 
-// TestForceDeleteBucketSoleAuthOffUnchanged confirms the off path still uses the
-// FSM-scan + two-pass forceDeleteObject and empties the bucket.
-func TestForceDeleteBucketSoleAuthOffUnchanged(t *testing.T) {
+// TestForceDeleteBucketNonVersioned_QmetaAndShards confirms the non-versioned
+// path uses qmeta enumerate + shards-first physical purge (not FSM-scan).
+// It verifies that after ForceDeleteBucket, no qmeta blobs or shard files remain.
+func TestForceDeleteBucketNonVersioned_QmetaAndShards(t *testing.T) {
 	ctx := context.Background()
-	b := newTestDistributedBackend(t)
+	b, dataDir := newSingleNodeBackendWithDirForTest(t)
 	require.NoError(t, b.CreateBucket(ctx, "b"))
-	setVersioningForTest(t, b, "b", "Enabled")
-	seedFSMObject(t, b, "b", "k", vidA1, objectMeta{Key: "k", ETag: "v1"}, true)
-	seedFSMObject(t, b, "b", "lk", "", objectMeta{Key: "lk", ETag: "bare"}, false)
-	// soleauth off (default)
+	// Two real objects via the full quorum-meta path.
+	putTestObjectForRetire(t, b, "b", "k1", []byte("payload1"))
+	putTestObjectForRetire(t, b, "b", "k2", []byte("payload2"))
 
 	require.NoError(t, b.ForceDeleteBucket(ctx, "b"))
 	require.ErrorIs(t, b.HeadBucket(ctx, "b"), storage.ErrBucketNotFound)
+
+	// No qmeta blobs remain.
+	require.NoFileExists(t, filepath.Join(dataDir, ".quorum_meta", "b"))
+	// No shard files remain.
+	require.Empty(t, residualShardFilesForTest(t, dataDir, "b"))
 }

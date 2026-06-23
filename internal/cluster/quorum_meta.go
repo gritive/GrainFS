@@ -1778,9 +1778,8 @@ func (s *ShardService) DeleteQuorumMetaVersion(ctx context.Context, addr, bucket
 }
 
 // deleteQuorumMetaVersionQuorum deletes a version's blob on every placement node.
-// FAIL-CLOSED (unlike deleteQuorumMetaQuorum): returns the first error so a
-// lingering blob on a missed node cannot resurface the deleted version via
-// derive-by-scan.
+// FAIL-CLOSED: returns the first error so a lingering blob on a missed node cannot
+// resurface the deleted version via derive-by-scan. Mirrors deleteQuorumMetaQuorum.
 func (b *DistributedBackend) deleteQuorumMetaVersionQuorum(ctx context.Context, bucket, key, versionID string, nodeIDs []string) error {
 	if b.shardSvc == nil {
 		return nil
@@ -1848,7 +1847,7 @@ func (s *ShardService) DeleteQuorumMeta(ctx context.Context, addr, bucket, key s
 // placement node. FAIL-CLOSED: returns the first error encountered so a blob
 // left on a missed node cannot resurface the object via derive-by-scan.
 // Mirrors deleteQuorumMetaVersionQuorum.
-func (b *DistributedBackend) deleteQuorumMetaQuorum(ctx context.Context, bucket, key string, nodeIDs []string) error { //nolint:unused
+func (b *DistributedBackend) deleteQuorumMetaQuorum(ctx context.Context, bucket, key string, nodeIDs []string) error {
 	if b.shardSvc == nil {
 		return nil
 	}
@@ -1877,7 +1876,7 @@ func (b *DistributedBackend) deleteQuorumMetaQuorum(ctx context.Context, bucket,
 // are NOT silenced — the caller must confirm shards are gone before removing
 // the qmeta blob to avoid stranded shards with no placement record.
 // self → DeleteLocalShards; peers → DeleteShards RPC.
-func (b *DistributedBackend) deleteShardsQuorum(ctx context.Context, bucket, shardKey string, placement []string) error { //nolint:unused
+func (b *DistributedBackend) deleteShardsQuorum(ctx context.Context, bucket, shardKey string, placement []string) error {
 	if b.shardSvc == nil {
 		return nil
 	}

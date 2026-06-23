@@ -8,7 +8,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/google/uuid"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -150,103 +149,54 @@ func (b *DistributedBackend) DeleteBucket(ctx context.Context, bucket string) er
 // ForceDeleteBucket deletes all objects in the bucket and then removes it.
 // Unlike DeleteBucket, it does not fail when the bucket is non-empty.
 //
-// Scans all obj:<bucket>/ keys directly (not via WalkObjects) so that older
-// versions of multi-version objects are collected too. WalkObjects only returns
-// the latest version per key; skipping older versions would leave their Badger
-// keys behind, causing DeleteBucket to still see them and return ErrBucketNotEmpty.
+// Branches on bucket versioning:
+//   - versioned (soleauth=on): enumerate per-version blobs via
+//     forceDeleteBucketSoleAuth and delete each via DeleteObjectVersion.
+//   - non-versioned: enumerate live latest-only qmeta blobs via
+//     scanQuorumMetaBucketStrict, then for each object physically purge shards
+//     (fail-closed first) then the qmeta blob. ORDER IS CRITICAL (P0-1d): shards
+//     must be gone before the qmeta blob is removed because the qmeta is the only
+//     placement record for non-versioned objects; deleting it first would strand
+//     shards permanently (the orphan-shard walker does NOT GC non-versioned shards).
 func (b *DistributedBackend) ForceDeleteBucket(ctx context.Context, bucket string) error {
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return err
 	}
-	// Under soleauth=on the per-version blob tree + carve-out FSM are the SOLE
-	// AUTHORITY: enumerate the deletion set from there (NOT the stale FSM obj:
-	// scan), purge blobs, and hard-delete carve-outs. Branch once at the top so
-	// off/pending keep the FSM-scan + two-pass forceDeleteObject verbatim (and
-	// never read soleauth per-object). This is the single-DistributedBackend
-	// (single-node / direct) path; the cluster path is ClusterCoordinator.
+	// Versioned buckets: per-version blob tree is SOLE AUTHORITY.
+	// Delegate to forceDeleteBucketSoleAuth which enumerates via
+	// scanQuorumMetaVersionsClusterAll + DeleteObjectVersion (purges per-version
+	// blob+shards). This is the single-DistributedBackend (single-node / direct)
+	// path; the cluster path is ClusterCoordinator.
 	if on, serr := b.soleAuthReadOn(bucket); serr != nil {
 		return serr // fail closed
 	} else if on {
 		return b.forceDeleteBucketSoleAuth(ctx, bucket)
 	}
-	// Collect all obj: refs first so the Badger View is closed before any
-	// Raft propose. Calling propose inside db.View holds the MVCC snapshot for
-	// N×RTT and blocks Badger GC.
-	type objRef struct {
-		key       string
-		versionID string // empty for legacy unversioned keys
-	}
-	var refs []objRef
-	if err := b.store.View(func(txn MetadataTxn) error {
-		// Build latMap so we can distinguish versioned sub-keys from unversioned
-		// legacy keys. A key of the form obj:<bucket>/<base>/<vid> is a versioned
-		// object iff <base> appears in latMap (i.e. lat:<bucket>/<base> exists)
-		// AND <vid> is a valid UUID (all version IDs are UUID v4/v7). The UUID
-		// check prevents misclassifying a legacy key like "a/b" as key="a"
-		// versionID="b" when a versioned key "a" happens to share its prefix.
-		latMap := make(map[string]struct{})
-		rawLatPfx := []byte("lat:" + bucket + "/")
-		latPfx := b.ks().Prefix(rawLatPfx)
-		itLat := txn.NewIterator(MetaIteratorOptions{PrefetchValues: true})
-		for itLat.Seek(latPfx); itLat.ValidForPrefix(latPfx); itLat.Next() {
-			rawK := b.ks().MustStrip(itLat.Item().Key())
-			latMap[string(rawK[len(rawLatPfx):])] = struct{}{}
-		}
-		itLat.Close()
 
-		rawBucketPfx := []byte("obj:" + bucket + "/")
-		pfx := b.ks().Prefix(rawBucketPfx)
-		it := txn.NewIterator(MetaIteratorOptions{PrefetchValues: true})
-		defer it.Close()
-		for it.Seek(pfx); it.ValidForPrefix(pfx); it.Next() {
-			rawK := b.ks().MustStrip(it.Item().Key())
-			rest := string(rawK[len(rawBucketPfx):])
-			key, versionID := rest, ""
-			if slash := strings.LastIndex(rest, "/"); slash >= 0 {
-				candidateBase := rest[:slash]
-				candidateVID := rest[slash+1:]
-				if _, inLat := latMap[candidateBase]; inLat {
-					if _, err := uuid.Parse(candidateVID); err == nil {
-						key, versionID = candidateBase, candidateVID
-					}
-				}
-			}
-			refs = append(refs, objRef{key: key, versionID: versionID})
-		}
-		return nil
-	}); err != nil {
-		return fmt.Errorf("force delete: scan objects: %w", err)
+	// Non-versioned path: enumerate live latest-only qmeta blobs (local-only for
+	// the single-node backend; cluster uses scanQuorumMetaClusterAll). For each
+	// object, purge shards fail-closed FIRST, then delete the qmeta blob.
+	if b.shardSvc == nil {
+		// No shardSvc means no qmeta blobs and no shards — fall straight to DeleteBucket.
+		return b.DeleteBucket(ctx, bucket)
 	}
-	// Two-pass deletion to prevent ring refcount double-decRef:
-	//
-	// Pass 1 — versioned refs first. applyDeleteObjectVersion calls decRef(rv)
-	// for each version's ring. When the last versioned ref for a key is removed,
-	// applyDeleteObjectVersion also deletes the unversioned ObjectMetaKey, so
-	// Pass 2 finds it absent and skips decRef.
-	//
-	// Pass 2 — unversioned refs. applyDeleteObject("") only calls decRef if
-	// ObjectMetaKey still exists. If Pass 1 already removed it, rv stays 0 and
-	// decRef is not called, preventing a double-decRef of the ring refcount.
-	for _, ref := range refs {
-		if ref.versionID == "" {
-			continue
-		}
+	cmds, err := b.shardSvc.scanQuorumMetaBucketStrict(bucket)
+	if err != nil {
+		return fmt.Errorf("force delete: enumerate qmeta: %w", err)
+	}
+	for _, cmd := range cmds {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if err := b.forceDeleteObject(ctx, bucket, ref.key, ref.versionID); err != nil {
-			return fmt.Errorf("force delete: %q: %w", ref.key, err)
+		// Shards FIRST (fail-closed): abort if shards cannot be confirmed gone.
+		// Deleting the qmeta first would strand shards with no placement record.
+		shardKey := ecObjectShardKey(cmd.Key, "")
+		if serr := b.deleteShardsQuorum(ctx, bucket, shardKey, cmd.NodeIDs); serr != nil {
+			return fmt.Errorf("force delete: delete shards for %q: %w", cmd.Key, serr)
 		}
-	}
-	for _, ref := range refs {
-		if ref.versionID != "" {
-			continue
-		}
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if err := b.forceDeleteObject(ctx, bucket, ref.key, ref.versionID); err != nil {
-			return fmt.Errorf("force delete: %q: %w", ref.key, err)
+		// Only after shards confirmed gone: remove the qmeta placement blob.
+		if qerr := b.deleteQuorumMetaQuorum(ctx, bucket, cmd.Key, cmd.NodeIDs); qerr != nil {
+			return fmt.Errorf("force delete: delete qmeta for %q: %w", cmd.Key, qerr)
 		}
 	}
 	return b.DeleteBucket(ctx, bucket)
@@ -261,7 +211,7 @@ func (b *DistributedBackend) ForceDeleteBucket(ctx context.Context, bucket strin
 // gone — so the final CmdDeleteObjectVersion call on each key leaves no traces.
 // For legacy unversioned objects (versionID == ""): CmdDeleteObject with empty
 // VersionID hard-deletes the unversioned obj: key (no tombstone written).
-func (b *DistributedBackend) forceDeleteObject(ctx context.Context, bucket, key, versionID string) error {
+func (b *DistributedBackend) forceDeleteObject(ctx context.Context, bucket, key, versionID string) error { //nolint:unused
 	if versionID != "" {
 		_ = os.Remove(b.objectPathV(bucket, key, versionID))
 		return b.propose(ctx, CmdDeleteObjectVersion, DeleteObjectVersionCmd{
@@ -279,57 +229,27 @@ func (b *DistributedBackend) forceDeleteObject(ctx context.Context, bucket, key,
 	})
 }
 
-// forceDeleteBucketSoleAuth is the soleauth=on leaf ForceDeleteBucket path
-// (single-node / direct backend). It enumerates the authoritative deletion set —
-// per-version blobs (incl. delete markers, fail-closed cluster-wide) + this
-// node's local carve-out FSM records (appendable/coalesced/legacy-bare) — then
-// removes each: vid-bearing entries via DeleteObjectVersion (S2a dual-delete
-// purges the per-version blob); legacy-bare (VersionID=="") via the hard-delete
-// path. Non-carve-out vid-bearing FSM records are NON-authoritative under `on`
-// and intentionally left as orphans (the orphan scrubber GCs them; they do not
-// count toward emptiness). Finishes with the blob-aware DeleteBucket.
+// forceDeleteBucketSoleAuth is the soleauth=on (versioned) leaf ForceDeleteBucket
+// path (single-node / direct backend). It enumerates per-version blobs cluster-wide
+// (incl. delete markers, fail-closed) via scanQuorumMetaVersionsClusterAll and
+// deletes each via DeleteObjectVersion, which already purges the per-version blob +
+// shards. Finishes with the blob-aware DeleteBucket.
+//
+// The legacy raft tail (scanFsmCarveoutVersions + HardDeleteLegacyObject) has been
+// dropped: greenfield versioned buckets have no legacy-bare FSM carve-outs, and Task
+// 4c will retire CmdDeleteObject entirely.
 func (b *DistributedBackend) forceDeleteBucketSoleAuth(ctx context.Context, bucket string) error {
-	type objRef struct {
-		key       string
-		versionID string
-	}
-	var refs []objRef
-	seen := map[[2]string]bool{}
-	add := func(key, vid string) {
-		k := [2]string{key, vid}
-		if !seen[k] {
-			seen[k] = true
-			refs = append(refs, objRef{key: key, versionID: vid})
-		}
-	}
 	// Versioned blobs (every version, incl. delete markers), fail-closed.
 	cmds, err := b.scanQuorumMetaVersionsClusterAll(bucket, "")
 	if err != nil {
 		return fmt.Errorf("force delete (soleauth): enumerate blobs: %w", err)
 	}
 	for _, c := range cmds {
-		add(c.Key, c.VersionID)
-	}
-	// Local carve-out records (blob-wins collisions already excluded via `seen`).
-	carve, err := b.scanFsmCarveoutVersions(bucket, "", seen)
-	if err != nil {
-		return fmt.Errorf("force delete (soleauth): enumerate carve-out: %w", err)
-	}
-	for _, v := range carve {
-		add(v.Key, v.VersionID)
-	}
-	for _, ref := range refs {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if ref.versionID != "" {
-			if derr := b.DeleteObjectVersion(bucket, ref.key, ref.versionID); derr != nil {
-				return fmt.Errorf("force delete (soleauth): delete %q@%s: %w", ref.key, ref.versionID, derr)
-			}
-			continue
-		}
-		if derr := b.HardDeleteLegacyObject(ctx, bucket, ref.key); derr != nil {
-			return fmt.Errorf("force delete (soleauth): hard delete %q: %w", ref.key, derr)
+		if derr := b.DeleteObjectVersion(bucket, c.Key, c.VersionID); derr != nil {
+			return fmt.Errorf("force delete (soleauth): delete %q@%s: %w", c.Key, c.VersionID, derr)
 		}
 	}
 	return b.DeleteBucket(ctx, bucket)
