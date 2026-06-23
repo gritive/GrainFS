@@ -713,3 +713,24 @@ func TestFSMValueResealDoneCmd_RoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint32(3), got.Gen)
 }
+
+func TestPutObjectMetaCmd_AppendManifestRoundTrip(t *testing.T) {
+	in := PutObjectMetaCmd{
+		Bucket: "b", Key: "k", Size: 30, ModTime: 1700000000,
+		Segments:     []SegmentMetaEntry{{BlobID: "s1", Size: 10, SegmentIdx: 0}, {BlobID: "s2", Size: 20, SegmentIdx: 1}},
+		Coalesced:    []CoalescedShardRef{{CoalescedID: "c1", Size: 30, ETag: "etag", ShardKey: "k/coalesced/c1"}},
+		IsAppendable: true, MetaSeq: 7, MetaSeqCAS: true,
+	}
+	blob, err := EncodeCommand(CmdPutObjectMeta, in)
+	require.NoError(t, err)
+	cmd, err := DecodeCommand(blob)
+	require.NoError(t, err)
+	out, err := decodePutObjectMetaCmd(cmd.Data)
+	require.NoError(t, err)
+	require.True(t, out.IsAppendable)
+	require.True(t, out.MetaSeqCAS)
+	require.Equal(t, uint64(7), out.MetaSeq)
+	require.Len(t, out.Coalesced, 1)
+	require.Equal(t, "c1", out.Coalesced[0].CoalescedID)
+	require.Len(t, out.Segments, 2)
+}

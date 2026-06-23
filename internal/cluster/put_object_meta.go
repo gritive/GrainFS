@@ -31,6 +31,8 @@ func buildPutObjectMeta(cmd PutObjectMetaCmd) objectMeta {
 		SSEAlgorithm:     cmd.SSEAlgorithm,
 		Parts:            cmd.Parts,
 		Segments:         segmentMetaEntriesToRefs(cmd.Segments),
+		Coalesced:        cmd.Coalesced,
+		IsAppendable:     cmd.IsAppendable,
 		Tags:             cmd.Tags,
 		ACL:              cmd.ACL,
 		MetaSeq:          cmd.MetaSeq,

@@ -147,6 +147,17 @@ table PutObjectMetaCmd {
   // reconciled/GC'd by the orphan walker. Appended last for backward-compatible
   // reading of old blobs (absent decodes false = a normal data blob).
   is_hard_deleted:bool = false;
+  // Slice 1 (append off-raft): coalesced blob refs for appendable objects.
+  // Empty/absent for non-appendable objects (backward-compatible default).
+  coalesced:[CoalescedShardRef];
+  // Slice 1: object was created via AppendObject. Read path uses this to derive
+  // Segments/Coalesced from this blob and dispatch the appendable reader.
+  is_appendable:bool = false;
+  // Slice 1: per-WRITE CAS intent. When true the quorum-meta write-time guard
+  // requires existing.MetaSeq+1 == cand.MetaSeq (mutable-accumulating RMW:
+  // append/coalesce). When false the guard uses LWW (immutable PUT/multipart,
+  // commutative tags/acl, tombstone). Absent decodes false → LWW (unchanged).
+  meta_seq_cas:bool = false;
 }
 
 // SegmentMetaEntry carries the per-segment placement metadata for a chunked

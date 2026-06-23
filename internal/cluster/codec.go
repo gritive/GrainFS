@@ -235,6 +235,38 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 		partsOff = b.EndVector(len(partOffs))
 	}
 	tagsVec := buildTagsVector(b, c.Tags, clusterpb.PutObjectMetaCmdStartTagsVector)
+	// coalesced — build child CoalescedShardRef tables BEFORE PutObjectMetaCmdStart.
+	var coalescedOff flatbuffers.UOffsetT
+	if len(c.Coalesced) > 0 {
+		cOffs := make([]flatbuffers.UOffsetT, len(c.Coalesced))
+		for i, cr := range c.Coalesced {
+			idOff := b.CreateString(cr.CoalescedID)
+			etOff := b.CreateString(cr.ETag)
+			skOff := b.CreateString(cr.ShardKey)
+			var nodesOff flatbuffers.UOffsetT
+			if len(cr.NodeIDs) > 0 {
+				nodesOff = buildStringVector(b, cr.NodeIDs, clusterpb.CoalescedShardRefStartNodeIdsVector)
+			}
+			clusterpb.CoalescedShardRefStart(b)
+			clusterpb.CoalescedShardRefAddCoalescedId(b, idOff)
+			clusterpb.CoalescedShardRefAddSize(b, cr.Size)
+			clusterpb.CoalescedShardRefAddEtag(b, etOff)
+			clusterpb.CoalescedShardRefAddShardKey(b, skOff)
+			clusterpb.CoalescedShardRefAddVersion(b, cr.Version)
+			clusterpb.CoalescedShardRefAddEcData(b, cr.ECData)
+			clusterpb.CoalescedShardRefAddEcParity(b, cr.ECParity)
+			clusterpb.CoalescedShardRefAddStripeBytes(b, cr.StripeBytes)
+			if nodesOff != 0 {
+				clusterpb.CoalescedShardRefAddNodeIds(b, nodesOff)
+			}
+			cOffs[i] = clusterpb.CoalescedShardRefEnd(b)
+		}
+		clusterpb.PutObjectMetaCmdStartCoalescedVector(b, len(cOffs))
+		for i := len(cOffs) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(cOffs[i])
+		}
+		coalescedOff = b.EndVector(len(cOffs))
+	}
 	clusterpb.PutObjectMetaCmdStart(b)
 	clusterpb.PutObjectMetaCmdAddBucket(b, bucketOff)
 	clusterpb.PutObjectMetaCmdAddKey(b, keyOff)
@@ -282,6 +314,15 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	}
 	if c.IsHardDeleted {
 		clusterpb.PutObjectMetaCmdAddIsHardDeleted(b, true)
+	}
+	if coalescedOff != 0 {
+		clusterpb.PutObjectMetaCmdAddCoalesced(b, coalescedOff)
+	}
+	if c.IsAppendable {
+		clusterpb.PutObjectMetaCmdAddIsAppendable(b, true)
+	}
+	if c.MetaSeqCAS {
+		clusterpb.PutObjectMetaCmdAddMetaSeqCas(b, true)
 	}
 	return fbFinish(b, clusterpb.PutObjectMetaCmdEnd(b)), nil
 }
@@ -348,6 +389,34 @@ func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
 			}
 		}
 	}
+	var coalesced []CoalescedShardRef
+	if n := t.CoalescedLength(); n > 0 {
+		coalesced = make([]CoalescedShardRef, n)
+		var c clusterpb.CoalescedShardRef
+		for i := 0; i < n; i++ {
+			if !t.Coalesced(&c, i) {
+				return PutObjectMetaCmd{}, fmt.Errorf("decode coalesced[%d]", i)
+			}
+			var nodeIDs []string
+			if nn := c.NodeIdsLength(); nn > 0 {
+				nodeIDs = make([]string, nn)
+				for j := 0; j < nn; j++ {
+					nodeIDs[j] = string(c.NodeIds(j))
+				}
+			}
+			coalesced[i] = CoalescedShardRef{
+				CoalescedID: string(c.CoalescedId()),
+				Size:        c.Size(),
+				ETag:        string(c.Etag()),
+				ShardKey:    string(c.ShardKey()),
+				Version:     c.Version(),
+				ECData:      c.EcData(),
+				ECParity:    c.EcParity(),
+				StripeBytes: c.StripeBytes(),
+				NodeIDs:     nodeIDs,
+			}
+		}
+	}
 	return PutObjectMetaCmd{
 		Bucket:           string(t.Bucket()),
 		Key:              string(t.Key()),
@@ -372,6 +441,9 @@ func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
 		ACL:              t.Acl(),
 		MetaSeq:          t.MetaSeq(),
 		IsHardDeleted:    t.IsHardDeleted(),
+		Coalesced:        coalesced,
+		IsAppendable:     t.IsAppendable(),
+		MetaSeqCAS:       t.MetaSeqCas(),
 	}, nil
 }
 

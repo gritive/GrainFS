@@ -141,6 +141,16 @@ type PutObjectMetaCmd struct {
 	// excluded from every read (→404), and is reconciled/GC'd by the orphan walker.
 	// Default false = a normal data blob (old blobs decode false).
 	IsHardDeleted bool
+	// Coalesced carries coalesced blob refs for appendable objects (Slice 1).
+	// Empty/nil for non-appendable objects (backward-compatible default).
+	Coalesced []CoalescedShardRef
+	// IsAppendable indicates the object was created via AppendObject (Slice 1).
+	// Read path uses this to dispatch the appendable reader.
+	IsAppendable bool
+	// MetaSeqCAS signals per-write CAS intent (Slice 1). When true the
+	// quorum-meta write-time guard requires existing.MetaSeq+1 == cand.MetaSeq
+	// (mutable-accumulating RMW: append/coalesce). When false → LWW.
+	MetaSeqCAS bool
 }
 
 // SegmentMetaEntry records the placement of one chunked-PUT segment. The
