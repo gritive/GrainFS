@@ -626,6 +626,14 @@ func (s *ShardService) handleRPC(payload []byte) []byte {
 		return s.handleQuorumMetaVersionsReadRaw(sr)
 	case "DeleteQuorumMetaVersion":
 		return s.handleQuorumMetaVersionDelete(sr)
+	case "WriteManifestBlob":
+		return s.handleManifestBlobWrite(sr)
+	case "ReadManifestBlob":
+		return s.handleManifestBlobRead(sr)
+	case "DeleteManifestBlob":
+		return s.handleManifestBlobDelete(sr)
+	case "ScanManifestBlobs":
+		return s.handleManifestBlobScan(sr)
 	default:
 		return s.errorResponse("unknown shard RPC: " + rpcType)
 	}
