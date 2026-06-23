@@ -170,6 +170,11 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	if c.ExpectedETag != "" {
 		expectedETagOff = b.CreateString(c.ExpectedETag)
 	}
+	// Slice 2: quarantine cause string — must be created before PutObjectMetaCmdStart.
+	var quarantineCauseOff flatbuffers.UOffsetT
+	if c.QuarantineCause != "" {
+		quarantineCauseOff = b.CreateString(c.QuarantineCause)
+	}
 	var nodeIDsOff flatbuffers.UOffsetT
 	if len(c.NodeIDs) > 0 {
 		nodeIDsOff = buildStringVector(b, c.NodeIDs, clusterpb.PutObjectMetaCmdStartNodeIdsVector)
@@ -324,6 +329,12 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	if c.MetaSeqCAS {
 		clusterpb.PutObjectMetaCmdAddMetaSeqCas(b, true)
 	}
+	if c.IsQuarantined {
+		clusterpb.PutObjectMetaCmdAddIsQuarantined(b, true)
+	}
+	if quarantineCauseOff != 0 {
+		clusterpb.PutObjectMetaCmdAddQuarantineCause(b, quarantineCauseOff)
+	}
 	return fbFinish(b, clusterpb.PutObjectMetaCmdEnd(b)), nil
 }
 
@@ -444,6 +455,8 @@ func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
 		Coalesced:        coalesced,
 		IsAppendable:     t.IsAppendable(),
 		MetaSeqCAS:       t.MetaSeqCas(),
+		IsQuarantined:    t.IsQuarantined(),
+		QuarantineCause:  string(t.QuarantineCause()),
 	}, nil
 }
 
@@ -1154,7 +1167,9 @@ func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
 	case CmdSetRing:
 		return encodeSetRingCmd(payload.(SetRingCmd))
 	case CmdPutObjectQuarantine:
-		return encodePutObjectQuarantineCmd(payload.(PutObjectQuarantineCmd))
+		// reserved, removed in data-plane raft-free Slice 2 — quarantine is now
+		// stored in the quorum-meta blob (IsQuarantined/QuarantineCause).
+		return nil, fmt.Errorf("CmdPutObjectQuarantine = 40 reserved: removed in data-plane raft-free Slice 2")
 	case CmdResealFSMValues:
 		return encodeResealFSMValuesCmd(payload.(ResealFSMValuesCmd))
 	case CmdFSMValueResealDone:
@@ -1165,62 +1180,6 @@ func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
 	default:
 		return nil, fmt.Errorf("unknown command type: %d", cmdType)
 	}
-}
-
-func encodePutObjectQuarantineCmd(c PutObjectQuarantineCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	keyOff := b.CreateString(c.Key)
-	vidOff := b.CreateString(c.VersionID)
-	causeOff := b.CreateString(c.Cause)
-	reasonOff := b.CreateString(c.Reason)
-	clusterpb.PutObjectQuarantineCmdStart(b)
-	clusterpb.PutObjectQuarantineCmdAddBucket(b, bucketOff)
-	clusterpb.PutObjectQuarantineCmdAddKey(b, keyOff)
-	clusterpb.PutObjectQuarantineCmdAddVersionId(b, vidOff)
-	clusterpb.PutObjectQuarantineCmdAddCause(b, causeOff)
-	clusterpb.PutObjectQuarantineCmdAddReason(b, reasonOff)
-	return fbFinish(b, clusterpb.PutObjectQuarantineCmdEnd(b)), nil
-}
-
-func decodePutObjectQuarantineCmd(data []byte) (PutObjectQuarantineCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.PutObjectQuarantineCmd {
-		return clusterpb.GetRootAsPutObjectQuarantineCmd(d, 0)
-	})
-	if err != nil {
-		return PutObjectQuarantineCmd{}, err
-	}
-	return PutObjectQuarantineCmd{
-		Bucket:    string(t.Bucket()),
-		Key:       string(t.Key()),
-		VersionID: string(t.VersionId()),
-		Cause:     string(t.Cause()),
-		Reason:    string(t.Reason()),
-	}, nil
-}
-
-// decodePutObjectQuarantineCmdStorage is the storage-safe variant of
-// decodePutObjectQuarantineCmd. Unlike the RPC version, it wraps BOTH
-// GetRootAs AND all field access in defer-recover so a malformed FB blob
-// produces a typed error instead of panicking through callers. (Existing
-// fbSafe only wraps the GetRootAs call.)
-//
-// Used by FSM apply paths that read raft-derived badger values.
-func decodePutObjectQuarantineCmdStorage(data []byte) (cmd PutObjectQuarantineCmd, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("decode quarantine storage: malformed FB: %v", r)
-		}
-	}()
-	t := clusterpb.GetRootAsPutObjectQuarantineCmd(data, 0)
-	cmd = PutObjectQuarantineCmd{
-		Bucket:    string(t.Bucket()),
-		Key:       string(t.Key()),
-		VersionID: string(t.VersionId()),
-		Cause:     string(t.Cause()),
-		Reason:    string(t.Reason()),
-	}
-	return cmd, nil
 }
 
 func encodeResealFSMValuesCmd(c ResealFSMValuesCmd) ([]byte, error) {

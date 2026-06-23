@@ -4,24 +4,63 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/incident"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 var ErrObjectQuarantined = errors.New("object quarantined")
 
 func (b *DistributedBackend) QuarantineObject(ctx context.Context, bucket, key, versionID, cause, reason string) error {
-	return b.propose(ctx, CmdPutObjectQuarantine, PutObjectQuarantineCmd{
-		Bucket:    bucket,
-		Key:       key,
-		VersionID: versionID,
-		Cause:     cause,
-		Reason:    reason,
-	})
+	unlock := b.objectMetaRMWLock(bucket, key)
+	defer unlock()
+
+	var cmd PutObjectMetaCmd
+	var err error
+	if versionID != "" {
+		var found bool
+		cmd, found, err = b.readQuorumMetaVersion(bucket, key, versionID)
+		if err != nil {
+			return fmt.Errorf("read quorum meta version: %w", err)
+		}
+		if !found {
+			// Fall back to the latest-only blob when versionID matches.
+			cmd, err = b.readQuorumMetaCmd(bucket, key)
+			if err != nil && !errors.Is(err, storage.ErrObjectNotFound) {
+				return fmt.Errorf("read quorum meta: %w", err)
+			}
+			if err == nil && cmd.VersionID == versionID {
+				found = true
+			}
+		}
+		if !found {
+			// Last resort: derive cmd from the BadgerDB FSM record so the
+			// quarantine can be written to quorum-meta even when the object
+			// was seeded without a quorum-meta blob (e.g. scrubber-test setup).
+			cmd, found = b.readObjectMetaFromFSMAsCmd(bucket, key, versionID)
+			if !found {
+				return fmt.Errorf("object not found: %s/%s@%s", bucket, key, versionID)
+			}
+		}
+	} else {
+		cmd, err = b.readQuorumMetaCmd(bucket, key)
+		if errors.Is(err, storage.ErrObjectNotFound) {
+			return fmt.Errorf("object not found: %s/%s", bucket, key)
+		}
+		if err != nil {
+			return fmt.Errorf("read quorum meta: %w", err)
+		}
+		if cmd.Key == "" {
+			return fmt.Errorf("object not found: %s/%s", bucket, key)
+		}
+	}
+	cmd.IsQuarantined = true
+	cmd.QuarantineCause = cause
+	cmd.MetaSeq++
+	return b.writeQuorumMeta(ctx, cmd)
 }
 
 func (b *DistributedBackend) QuarantineCorruptShardLocal(bucket, key, versionID string, shardIdx int, reason string) error {
@@ -197,35 +236,106 @@ func (b *DistributedBackend) readShardTargetMeta(t ECShardScanTarget) (objectMet
 	return objectMeta{}, false, nil
 }
 
-func (b *DistributedBackend) isObjectQuarantined(bucket, key, versionID string) (bool, PutObjectQuarantineCmd, error) {
-	var out PutObjectQuarantineCmd
-	err := b.store.View(func(txn MetadataTxn) error {
-		for _, candidate := range []string{versionID, ""} {
-			item, err := txn.Get(b.ks().QuarantineKey(bucket, key, candidate))
-			if err == ErrMetaKeyNotFound {
-				continue
+func (b *DistributedBackend) isObjectQuarantined(bucket, key, versionID string) (bool, string, error) {
+	var cmd PutObjectMetaCmd
+	var err error
+	if versionID != "" {
+		// Prefer the per-version blob (versioned bucket); fall back to the
+		// latest-only blob when the version matches (non-versioned bucket: the
+		// quarantine RMW writes to the latest-only blob since there is only one
+		// live version at a time).
+		var found bool
+		cmd, found, err = b.readQuorumMetaVersion(bucket, key, versionID)
+		if err != nil {
+			return false, "", fmt.Errorf("isObjectQuarantined: %w", err)
+		}
+		if !found {
+			// Fall back to latest-only blob — valid for non-versioned buckets
+			// where QuarantineObject writes to the latest-only blob.
+			cmd, err = b.readQuorumMetaCmd(bucket, key)
+			if errors.Is(err, storage.ErrObjectNotFound) {
+				// Object has no quorum-meta blob yet; not quarantined.
+				return false, "", nil
 			}
 			if err != nil {
-				return err
+				return false, "", fmt.Errorf("isObjectQuarantined: %w", err)
 			}
-			return item.Value(func(v []byte) error {
-				var decErr error
-				out, decErr = decodePutObjectQuarantineCmdStorage(v)
-				return decErr
-			})
+			// Only honour the latest-only blob's quarantine flag when it
+			// matches the queried version (prevents stale reads after a
+			// re-upload that cleared the quarantine flag).
+			if cmd.VersionID != versionID {
+				return false, "", nil
+			}
 		}
-		return nil
-	})
-	if err != nil {
-		return false, out, err
+	} else {
+		cmd, err = b.readQuorumMetaCmd(bucket, key)
+		if errors.Is(err, storage.ErrObjectNotFound) {
+			// Object has no quorum-meta blob yet; not quarantined.
+			return false, "", nil
+		}
+		if err != nil {
+			return false, "", fmt.Errorf("isObjectQuarantined: %w", err)
+		}
 	}
-	return out.Bucket != "", out, nil
+	return cmd.IsQuarantined, cmd.QuarantineCause, nil
 }
 
-func objectQuarantinedError(bucket, key string, q PutObjectQuarantineCmd) error {
-	scope := bucket + "/" + key
-	if q.VersionID != "" {
-		scope += "@" + q.VersionID
+func objectQuarantinedError(bucket, key, cause string) error {
+	return fmt.Errorf("%w: %s cause=%s", ErrObjectQuarantined, bucket+"/"+key, cause)
+}
+
+// readObjectMetaFromFSMAsCmd reads an object-version meta from BadgerDB (FSM)
+// and converts it to a minimal PutObjectMetaCmd for use as a quarantine write
+// base. Returns (cmd, true) on success, (zero, false) when the key is absent.
+// This is only needed as a fallback when no quorum-meta blob exists (e.g. legacy
+// / test-seeded objects).
+func (b *DistributedBackend) readObjectMetaFromFSMAsCmd(bucket, key, versionID string) (PutObjectMetaCmd, bool) {
+	var m objectMeta
+	found := false
+	_ = b.store.View(func(txn MetadataTxn) error {
+		dbKey := b.ks().ObjectMetaKeyV(bucket, key, versionID)
+		item, err := txn.Get(dbKey)
+		if err != nil {
+			return nil // not found or error — treat as absent
+		}
+		val, err := b.itemValueCopy(item)
+		if err != nil {
+			return nil
+		}
+		decoded, err := unmarshalObjectMeta(val)
+		if err != nil {
+			return nil
+		}
+		m = decoded
+		found = true
+		return nil
+	})
+	if !found {
+		return PutObjectMetaCmd{}, false
 	}
-	return fmt.Errorf("%w: %s cause=%s reason=%s", ErrObjectQuarantined, scope, q.Cause, strings.TrimSpace(q.Reason))
+	// Convert objectMeta to PutObjectMetaCmd (placement fields only).
+	// If top-level NodeIDs is empty, derive from the first segment (chunked PUT).
+	nodeIDs := m.NodeIDs
+	ecData := m.ECData
+	ecParity := m.ECParity
+	stripeBytes := m.StripeBytes
+	pgID := m.PlacementGroupID
+	if len(nodeIDs) == 0 && len(m.Segments) > 0 {
+		nodeIDs = m.Segments[0].NodeIDs
+		ecData = m.Segments[0].ECData
+		ecParity = m.Segments[0].ECParity
+		stripeBytes = m.Segments[0].StripeBytes
+	}
+	cmd := PutObjectMetaCmd{
+		Bucket:           bucket,
+		Key:              key,
+		VersionID:        versionID,
+		ECData:           ecData,
+		ECParity:         ecParity,
+		StripeBytes:      stripeBytes,
+		NodeIDs:          nodeIDs,
+		PlacementGroupID: pgID,
+		MetaSeq:          m.MetaSeq,
+	}
+	return cmd, true
 }

@@ -1678,6 +1678,22 @@ func (c *ClusterCoordinator) SetObjectTags(bucket, key, versionID string, tags [
 	return c.forwardRuntime().mutateFrame(ctx, target, raftpb.ForwardOpSetObjectTags, args)
 }
 
+// QuarantineObject routes the quarantine operation to the owning group backend
+// (local exec if self is leader) or forwards to the owning peer.
+func (c *ClusterCoordinator) QuarantineObject(ctx context.Context, bucket, key, versionID, cause, reason string) error {
+	target, err := c.routeReadOrBucket(bucket, key, "")
+	if err != nil {
+		return err
+	}
+	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
+		return err
+	} else if gb != nil {
+		return gb.QuarantineObject(ctx, bucket, key, versionID, cause, reason)
+	}
+	args := buildSetObjectQuarantineArgs(bucket, key, versionID, cause, reason)
+	return c.forwardRuntime().mutateFrame(ctx, target, raftpb.ForwardOpSetObjectQuarantine, args)
+}
+
 // GetObjectTags satisfies storage.ObjectTagsGetter. Routes the tag read to
 // the locally-resolvable group backend when available, otherwise forwards to
 // the owning peer via ForwardOpGetObjectTags. Mirrors SetObjectTags's forward

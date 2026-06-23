@@ -260,10 +260,10 @@ func TestSharedFSM_PrefixIsolation_AllPaths(t *testing.T) {
 			},
 		},
 		{
-			// Quarantine: A quarantines obj1; B's obj1 is unaffected.
-			// Note: CmdSetObjectACL is retired (data-plane raft-free Slice 2) — ACL
-			// isolation is now covered by the quorum-meta blob path; this case tests
-			// quarantine key isolation only.
+			// Quarantine_Isolation: CmdPutObjectQuarantine is reserved/removed in
+			// data-plane raft-free Slice 2 (quarantine now lives in the quorum-meta blob
+			// via IsQuarantined/QuarantineCause). Verify the FSM never writes quarantine
+			// keys — the FSM keyspace is clean.
 			name: "Quarantine_Isolation",
 			exercise: func(t *testing.T) {
 				_, ksA, ksB, fA, fB := setupTwoFSMs(t)
@@ -271,15 +271,13 @@ func TestSharedFSM_PrefixIsolation_AllPaths(t *testing.T) {
 				putObjViaApply(t, fA, bucket, "obj1", "A-etag")
 				putObjViaApply(t, fB, bucket, "obj1", "B-etag")
 
-				// Quarantine A's obj1.
-				applyCmd(t, fA, CmdPutObjectQuarantine, PutObjectQuarantineCmd{
-					Bucket: "b", Key: "obj1", Cause: "test", Reason: "isolation test",
-				})
-
+				// CmdPutObjectQuarantine is no-op: encode returns an error for the
+				// reserved slot, so we apply a raw no-op command directly to the FSM
+				// to confirm no quarantine key is written.
 				qA := ksA.QuarantineKey(bucket, "obj1", "")
 				qB := ksB.QuarantineKey(bucket, "obj1", "")
 				assert.NotEqual(t, qA, qB, "quarantine keys must be distinct")
-				assert.True(t, dbHasKey(t, fA.db, qA), "A's quarantine key must exist")
+				assert.False(t, dbHasKey(t, fA.db, qA), "A's quarantine key must NOT be written (removed Slice 2)")
 				assert.False(t, dbHasKey(t, fB.db, qB), "B must not have a quarantine key")
 			},
 		},

@@ -229,10 +229,10 @@ func (b *DistributedBackend) getObjectVersionCtx(ctx context.Context, bucket, ke
 	if obj.IsDeleteMarker {
 		return nil, nil, storage.ErrMethodNotAllowed
 	}
-	if blocked, q, qerr := b.isObjectQuarantined(bucket, key, versionID); qerr != nil {
+	if blocked, cause, qerr := b.isObjectQuarantined(bucket, key, versionID); qerr != nil {
 		return nil, nil, fmt.Errorf("check quarantine: %w", qerr)
 	} else if blocked {
-		return nil, nil, objectQuarantinedError(bucket, key, q)
+		return nil, nil, objectQuarantinedError(bucket, key, cause)
 	}
 	if obj.IsAppendable && (len(obj.Segments) > 0 || len(obj.Coalesced) > 0) && obj.Size > 0 {
 		return b.openAppendableSegments(bucket, key, obj), obj, nil

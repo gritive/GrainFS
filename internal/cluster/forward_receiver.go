@@ -653,6 +653,14 @@ func (r *ForwardReceiver) handleGetObjectTags(dg *DataGroup, args []byte) []byte
 	return buildGetObjectTagsReply(tags)
 }
 
+func (r *ForwardReceiver) handleSetObjectQuarantine(dg *DataGroup, args []byte) []byte {
+	a := raftpb.GetRootAsSetObjectQuarantineArgs(args, 0)
+	if err := dg.Backend().QuarantineObject(context.Background(), string(a.Bucket()), string(a.Key()), string(a.VersionId()), string(a.Cause()), string(a.Reason())); err != nil {
+		return statusReply(mapErrorToStatus(err))
+	}
+	return buildOKReply()
+}
+
 func (r *ForwardReceiver) handleDeleteObjectVersion(dg *DataGroup, args []byte) []byte {
 	da := raftpb.GetRootAsDeleteObjectVersionArgs(args, 0)
 	bucket := string(da.Bucket())

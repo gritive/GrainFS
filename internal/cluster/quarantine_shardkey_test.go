@@ -31,9 +31,11 @@ func TestQuarantineCorruptShardLocalAtShardKey_VersionExists(t *testing.T) {
 	require.NoError(t, b.CreateBucket(ctx, "b"))
 
 	// Seed a versioned object-meta whose Segments[] references blob "seg-1".
+	// Use 1+0 EC so quorum-meta write succeeds with the singleton test backend.
+	selfAddr := b.selfAddr
 	seedObjectMetaVersion(t, b, "b", "obj", "v1", objectMeta{
 		Segments: []storage.SegmentRef{
-			{BlobID: "seg-1", ECData: 4, ECParity: 2, NodeIDs: []string{"n1", "n2", "n3", "n4", "n5", "n6"}},
+			{BlobID: "seg-1", ECData: 1, ECParity: 0, NodeIDs: []string{selfAddr}},
 		},
 	})
 

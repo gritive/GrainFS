@@ -30,7 +30,8 @@ enum ForwardOp : byte {
   HeadObjectVersion = 20,  // reserved: matches origin/master 4722a758; do not reuse
   SetObjectTags = 21,
   GetObjectTags = 22,
-  HardDeleteObject = 23  // S4c-c-read2b: routed legacy-bare hard delete (CmdDeleteObject VID=""), on-gated
+  HardDeleteObject = 23,  // S4c-c-read2b: routed legacy-bare hard delete (CmdDeleteObject VID=""), on-gated
+  SetObjectQuarantine = 24  // Slice 2: quarantine folded into quorum-meta blob
 }
 
 // Tag mirrors storagepb.Tag (key/value) for the Raft forward path.
@@ -154,6 +155,16 @@ table GetObjectTagsArgs {
   bucket:string;
   key:string;
   version_id:string;   // empty -> current version
+}
+
+// Slice 2: quarantine state is stored in the quorum-meta blob.
+// This args table carries the quarantine op forwarded to the owning group peer.
+table SetObjectQuarantineArgs {
+  bucket:string;
+  key:string;
+  version_id:string;   // empty -> current version
+  cause:string;
+  reason:string;
 }
 
 table DeleteObjectVersionArgs {

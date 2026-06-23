@@ -158,6 +158,12 @@ table PutObjectMetaCmd {
   // append/coalesce). When false the guard uses LWW (immutable PUT/multipart,
   // commutative tags/acl, tombstone). Absent decodes false → LWW (unchanged).
   meta_seq_cas:bool = false;
+  // Slice 2: object is quarantined (corrupt shard or other issue). Stored in
+  // the quorum-meta blob; replaces the legacy FSM quarantine: key. Absent decodes
+  // false = not quarantined (backward-compatible with old blobs).
+  is_quarantined:bool = false;
+  // Slice 2: cause string set at quarantine time (e.g. "corrupt-shard").
+  quarantine_cause:string;
 }
 
 // SegmentMetaEntry carries the per-segment placement metadata for a chunked

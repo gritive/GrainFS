@@ -2,7 +2,6 @@ package cluster
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strconv"
 	"sync"
@@ -132,7 +131,10 @@ func (f *FSM) ApplyTxn(txn MetadataTxn, raw []byte) error {
 		// proposer; greenfield — no raft-log replay of these commands. No-op on stale entries.
 		return nil
 	case CmdPutObjectQuarantine:
-		return f.applyPutObjectQuarantine(txn, cmd.Data)
+		// reserved, removed in data-plane raft-free Slice 2; quarantine is now
+		// stored in the quorum-meta blob (IsQuarantined/QuarantineCause). No
+		// production proposer; no raft-log replay in a greenfield cluster.
+		return nil
 	case CmdResealFSMValues:
 		return f.applyResealFSMValues(txn, cmd.Data)
 	case CmdFSMValueResealDone:
@@ -156,21 +158,6 @@ func (f *FSM) Apply(raw []byte) error {
 	return f.db.Update(func(txn MetadataTxn) error {
 		return f.ApplyTxn(txn, raw)
 	})
-}
-
-func (f *FSM) applyPutObjectQuarantine(txn MetadataTxn, data []byte) error {
-	c, err := decodePutObjectQuarantineCmd(data)
-	if err != nil {
-		return err
-	}
-	if c.Bucket == "" || c.Key == "" {
-		return errors.New("quarantine: bucket and key are required")
-	}
-	value, err := encodePutObjectQuarantineCmd(c)
-	if err != nil {
-		return err
-	}
-	return txn.Set(f.keys.QuarantineKey(c.Bucket, c.Key, c.VersionID), value)
 }
 
 // applyResealFSMValues handles CmdResealFSMValues in the serialized apply loop.

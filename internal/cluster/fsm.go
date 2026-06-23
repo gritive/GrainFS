@@ -50,8 +50,11 @@ const (
 	CmdCoalesceSegments CommandType = 19 // reserved, removed append-off-raft Slice 1
 	// CmdSetObjectTags is reserved, removed in data-plane raft-free Slice 2.
 	// Blob RMW (SetObjectTagsPropose) is the sole authority. Slot MUST NOT be renumbered.
-	CmdSetObjectTags       CommandType = 20 // reserved, removed data-plane raft-free Slice 2
-	CmdPutObjectQuarantine CommandType = 40
+	CmdSetObjectTags CommandType = 20 // reserved, removed data-plane raft-free Slice 2
+	// CmdPutObjectQuarantine is reserved, removed in data-plane raft-free Slice 2.
+	// Quarantine is now folded into the quorum-meta blob (IsQuarantined/QuarantineCause).
+	// Slot MUST NOT be renumbered.
+	CmdPutObjectQuarantine CommandType = 40 // reserved, removed data-plane raft-free Slice 2
 	// CmdResealFSMValues re-seals a batch of data-group FSM state values
 	// (policy:, obj:) from a retired DEK generation onto the active generation.
 	// Applied in the serialized apply loop for race-freedom. S7-1a.
@@ -152,6 +155,13 @@ type PutObjectMetaCmd struct {
 	// quorum-meta write-time guard requires existing.MetaSeq+1 == cand.MetaSeq
 	// (mutable-accumulating RMW: append/coalesce). When false → LWW.
 	MetaSeqCAS bool
+	// IsQuarantined marks this object version as quarantined (corrupt shard or
+	// other issue). Stored in the quorum-meta blob; replaces the legacy FSM
+	// quarantine: key (Slice 2). Default false = not quarantined.
+	IsQuarantined bool
+	// QuarantineCause is the cause string set at quarantine time
+	// (e.g. incident.CauseCorruptShard). Empty if not quarantined.
+	QuarantineCause string
 }
 
 // SegmentMetaEntry records the placement of one chunked-PUT segment. The

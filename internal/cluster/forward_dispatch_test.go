@@ -32,6 +32,7 @@ func TestBucketForwardOpSpecsCoverBucketOps(t *testing.T) {
 		raftpb.ForwardOpHeadObjectVersion,
 		raftpb.ForwardOpAppendObject,
 		raftpb.ForwardOpHardDeleteObject,
+		raftpb.ForwardOpSetObjectQuarantine,
 	}
 	require.Len(t, bucketForwardOpSpecs, len(bucketOps))
 	for _, op := range bucketOps {
