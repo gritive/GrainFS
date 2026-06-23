@@ -1805,6 +1805,100 @@ func (b *DistributedBackend) deleteQuorumMetaVersionQuorum(ctx context.Context, 
 	return firstErr
 }
 
+// deleteQuorumMetaLocal removes the local latest-only quorum-meta blob for
+// (bucket, key) under {dataDirs[0]}/.quorum_meta/{bucket}/{key}.
+// Absent file is not an error (idempotent). Mirrors deleteQuorumMetaVersionLocal.
+func (s *ShardService) deleteQuorumMetaLocal(bucket, key string) error {
+	if len(s.dataDirs) == 0 {
+		return nil
+	}
+	root := filepath.Join(s.dataDirs[0], quorumMetaSubDir)
+	target := filepath.Join(root, bucket, key)
+	rel, err := filepath.Rel(root, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("quorum meta delete: key %q escapes root", key)
+	}
+	return s.deleteQuorumMetaVersionLocalCore(target)
+}
+
+// DeleteQuorumMeta removes the latest-only quorum-meta blob on a remote
+// placement node. Mirrors DeleteQuorumMetaVersion; the receiver runs
+// deleteQuorumMetaLocal.
+func (s *ShardService) DeleteQuorumMeta(ctx context.Context, addr, bucket, key string) error {
+	if s.transport == nil {
+		return fmt.Errorf("quorum meta delete: no transport")
+	}
+	envb := buildShardEnvelope("DeleteQuorumMeta", bucket, key, 0, nil)
+	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
+	respEnvelope, err := s.callShardRPC(ctx, addr, envb)
+	if err != nil {
+		return fmt.Errorf("delete quorum meta on %s: %w", addr, err)
+	}
+	rpcType, _, err := unmarshalEnvelope(respEnvelope)
+	if err != nil {
+		return fmt.Errorf("unmarshal quorum meta delete response: %w", err)
+	}
+	if rpcType == "Error" {
+		return fmt.Errorf("remote quorum meta delete error from %s", addr)
+	}
+	return nil
+}
+
+// deleteQuorumMetaQuorum deletes the latest-only quorum-meta blob on every
+// placement node. FAIL-CLOSED: returns the first error encountered so a blob
+// left on a missed node cannot resurface the object via derive-by-scan.
+// Mirrors deleteQuorumMetaVersionQuorum.
+func (b *DistributedBackend) deleteQuorumMetaQuorum(ctx context.Context, bucket, key string, nodeIDs []string) error { //nolint:unused
+	if b.shardSvc == nil {
+		return nil
+	}
+	self := b.currentSelfAddr()
+	dctx, cancel := context.WithTimeout(ctx, quorumMetaWriteTimeout)
+	defer cancel()
+	var firstErr error
+	for _, node := range nodeIDs {
+		var err error
+		if node == self {
+			err = b.shardSvc.deleteQuorumMetaLocal(bucket, key)
+		} else if addr, rerr := b.shardSvc.resolvePeerAddress(node); rerr == nil {
+			err = b.shardSvc.DeleteQuorumMeta(dctx, addr, bucket, key)
+		} else {
+			err = rerr
+		}
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// deleteShardsQuorum deletes EC shards on every placement node synchronously
+// and fail-closed (returns the first error). Unlike deleteShardsAsync, errors
+// are NOT silenced — the caller must confirm shards are gone before removing
+// the qmeta blob to avoid stranded shards with no placement record.
+// self → DeleteLocalShards; peers → DeleteShards RPC.
+func (b *DistributedBackend) deleteShardsQuorum(ctx context.Context, bucket, shardKey string, placement []string) error { //nolint:unused
+	if b.shardSvc == nil {
+		return nil
+	}
+	self := b.currentSelfAddr()
+	dctx, cancel := context.WithTimeout(ctx, quorumMetaWriteTimeout)
+	defer cancel()
+	var firstErr error
+	for _, node := range placement {
+		var err error
+		if node == self {
+			err = b.shardSvc.DeleteLocalShards(bucket, shardKey)
+		} else {
+			err = b.shardSvc.DeleteShards(dctx, node, bucket, shardKey)
+		}
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
 // decodeQuorumMetaCmdBlob decodes a raw quorum meta blob to a PutObjectMetaCmd.
 func (s *ShardService) decodeQuorumMetaCmdBlob(data []byte) (PutObjectMetaCmd, error) {
 	cmd, err := DecodeCommand(data)

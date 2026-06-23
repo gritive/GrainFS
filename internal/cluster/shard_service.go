@@ -622,6 +622,8 @@ func (s *ShardService) handleRPC(payload []byte) []byte {
 		return s.handleQuorumMetaVersionsRead(sr)
 	case "ReadQuorumMetaVersionsRaw":
 		return s.handleQuorumMetaVersionsReadRaw(sr)
+	case "DeleteQuorumMeta":
+		return s.handleQuorumMetaDelete(sr)
 	case "DeleteQuorumMetaVersion":
 		return s.handleQuorumMetaVersionDelete(sr)
 	case "WriteManifestBlob":
@@ -770,6 +772,16 @@ func (s *ShardService) handleQuorumMetaVersionDelete(sr *shardRequest) []byte {
 		return s.errorResponse("quorum meta version delete: missing version id")
 	}
 	if err := s.deleteQuorumMetaVersionLocal(sr.Bucket, key, versionID); err != nil {
+		return s.errorResponse(err.Error())
+	}
+	return s.okResponse(nil)
+}
+
+// handleQuorumMetaDelete serves a DeleteQuorumMeta RPC: removes the local
+// latest-only quorum-meta blob. sr.Key carries the object key directly (no
+// versionID). Absent file is not an error (idempotent).
+func (s *ShardService) handleQuorumMetaDelete(sr *shardRequest) []byte {
+	if err := s.deleteQuorumMetaLocal(sr.Bucket, sr.Key); err != nil {
 		return s.errorResponse(err.Error())
 	}
 	return s.okResponse(nil)
