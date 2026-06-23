@@ -61,7 +61,7 @@ var _ = Describe("Coalesce EC integration", func() {
 		}, 5*time.Second, 20*time.Millisecond).Should(BeTrue())
 	}
 
-	XIt("distributes B3 coalesced data across the EC placement [Slice 1 Task 4: coalesce-over-blob not yet implemented]", func() {
+	It("distributes B3 coalesced data across the EC placement", func() {
 		configureEC()
 		appendTriggerChunks()
 		expectCoalesceComplete()
@@ -80,7 +80,7 @@ var _ = Describe("Coalesce EC integration", func() {
 		Expect(os.IsNotExist(err)).To(BeTrue(), "owner-local coalesced blob should be removed after EC distribution")
 	})
 
-	XIt("observes successful coalesce metrics [Slice 1 Task 4: coalesce-over-blob not yet implemented]", func() {
+	It("observes successful coalesce metrics", func() {
 		configureEC()
 		successBefore := testutil.ToFloat64(metrics.AppendCoalesceTotal.WithLabelValues("success"))
 		bytesBefore := testutil.ToFloat64(metrics.AppendCoalesceBytes)
@@ -103,7 +103,7 @@ var _ = Describe("Coalesce EC integration", func() {
 		}, 5*time.Second, 20*time.Millisecond).Should(BeTrue())
 	})
 
-	XIt("round-trips B3 coalesced EC data through encrypted shard storage [Slice 1 Task 4: coalesce-over-blob not yet implemented]", func() {
+	It("round-trips B3 coalesced EC data through encrypted shard storage", func() {
 		configureEC()
 
 		expected, _ := appendTriggerChunks()

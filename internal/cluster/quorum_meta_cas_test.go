@@ -1,12 +1,58 @@
 package cluster
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
+
+// TestFanOutQuorumMeta_CASRejectIsAVoteNotShortCircuit verifies the fixed
+// quorum primitive: a CAS reject is ONE failed vote, not a global short-circuit.
+// With K-of-N replica skew, K accepting nodes win even when laggard replicas
+// CAS-reject; the sentinel only surfaces when K is genuinely UNREACHABLE.
+func TestFanOutQuorumMeta_CASRejectIsAVoteNotShortCircuit(t *testing.T) {
+	ctx := context.Background()
+
+	// 6 nodes, K=4: 4 accept, 2 CAS-reject (laggards). K reached → success, NOT a
+	// spurious reject (the partial-publish bug this fixes).
+	nodes := []string{"a", "b", "c", "d", "e", "f"}
+	reject := map[string]bool{"e": true, "f": true}
+	err := fanOutQuorumMeta(ctx, nodes, 4, func(_ context.Context, node string) error {
+		if reject[node] {
+			return errQuorumMetaCASReject
+		}
+		return nil
+	})
+	require.NoError(t, err, "K accepts must win even though laggard replicas CAS-rejected")
+
+	// All 6 reject (genuine base-advanced-everywhere): K unreachable → surface the
+	// DISTINGUISHABLE sentinel so the caller re-reads and retries.
+	err = fanOutQuorumMeta(ctx, nodes, 4, func(_ context.Context, _ string) error {
+		return errQuorumMetaCASReject
+	})
+	require.ErrorIs(t, err, errQuorumMetaCASReject, "all-reject must surface the CAS sentinel")
+
+	// Mixed: 3 accept, 3 CAS-reject, K=4 unreachable, a reject was seen → sentinel.
+	rejectHalf := map[string]bool{"d": true, "e": true, "f": true}
+	err = fanOutQuorumMeta(ctx, nodes, 4, func(_ context.Context, node string) error {
+		if rejectHalf[node] {
+			return errQuorumMetaCASReject
+		}
+		return nil
+	})
+	require.ErrorIs(t, err, errQuorumMetaCASReject, "K-unreachable with a CAS reject surfaces the sentinel")
+}
+
+// quorumMetaWriteAccepts is the bool projection of decideQuorumMetaWrite used by
+// the guard unit tests: a candidate is "accepted" only when it is APPLIED (renamed
+// over the existing blob). Both a CAS reject and a no-op skip (LWW loss /
+// byte-identical CAS re-delivery) are "not applied" → false.
+func quorumMetaWriteAccepts(existing, cand PutObjectMetaCmd) bool {
+	return decideQuorumMetaWrite(existing, cand) == quorumMetaWriteApply
+}
 
 // TestQuorumMetaWriteAccepts_CAS exercises the CAS branch: a candidate with
 // MetaSeqCAS=true is accepted iff its MetaSeq is exactly existing.MetaSeq+1.
@@ -76,6 +122,33 @@ func TestWriteQuorumMetaLocal_CASRejectSurfacesError(t *testing.T) {
 	// A correctly-fenced CAS write (base+1 == 4) is accepted.
 	good := mustEncodeMetaCmd(t, PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: "v1", ModTime: 100, MetaSeq: 4, MetaSeqCAS: true})
 	require.NoError(t, b.shardSvc.writeQuorumMetaLocal("bkt", "k", good))
+}
+
+// TestWriteQuorumMetaLocal_IdempotentCASReplayIsNoOp verifies the K-of-N
+// re-delivery case: the SAME CAS candidate written to the same node twice (a
+// placement set that resolves multiple node IDs to one physical node, e.g. EC
+// over a single host) is a byte-identical no-op SKIP, NOT a CAS reject. Without
+// this the second fan-out write would surface errQuorumMetaCASReject and fail the
+// whole append/coalesce RMW.
+func TestWriteQuorumMetaLocal_IdempotentCASReplayIsNoOp(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	// First CAS write onto an absent base (MetaSeq 0 → 1) is applied.
+	cand := mustEncodeMetaCmd(t, PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: "v1", ModTime: 100, MetaSeq: 1, MetaSeqCAS: true})
+	require.NoError(t, b.shardSvc.writeQuorumMetaLocal("bkt", "k", cand))
+
+	// Re-delivering the EXACT same candidate is an idempotent no-op (nil, not reject).
+	require.NoError(t, b.shardSvc.writeQuorumMetaLocal("bkt", "k", cand),
+		"byte-identical CAS re-delivery must be a no-op, not errQuorumMetaCASReject")
+
+	got, rerr := os.ReadFile(filepath.Join(b.shardSvc.dataDirs[0], quorumMetaSubDir, "bkt", "k"))
+	require.NoError(t, rerr)
+	require.Equal(t, cand, got, "the blob is unchanged after the idempotent replay")
+
+	// A DIFFERENT candidate at the SAME MetaSeq (not byte-identical) is still a
+	// genuine CAS reject — idempotency must not mask a real base mismatch.
+	other := mustEncodeMetaCmd(t, PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: "v1", ModTime: 100, MetaSeq: 1, MetaSeqCAS: true, ContentType: "text/plain"})
+	require.ErrorIs(t, b.shardSvc.writeQuorumMetaLocal("bkt", "k", other), errQuorumMetaCASReject,
+		"a non-identical CAS candidate at the same MetaSeq must still reject")
 }
 
 // TestWriteQuorumMetaVersionLocal_CASRejectSurfacesError mirrors the F3 check on

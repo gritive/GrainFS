@@ -66,7 +66,7 @@ var _ = Describe("Append size integration", func() {
 		Expect(errors.Is(err, storage.ErrAppendObjectTooLarge)).To(BeTrue())
 	})
 
-	XIt("observes append size cap and coalesced size metrics [Slice 1 Task 4: coalesce-over-blob not yet implemented]", func() {
+	It("observes append size cap and coalesced size metrics", func() {
 		_, err := b.AppendObject(ctx, bucket, "k-cap", 0, &noSeekReader{bytes.NewReader([]byte("hello"))})
 		Expect(err).NotTo(HaveOccurred())
 

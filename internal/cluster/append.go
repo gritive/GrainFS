@@ -87,6 +87,12 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 		ChunkSize:      appendChunkSize(r),
 		SizeCapBytes:   sizeCapBytes,
 	}); err != nil {
+		// Size-cap fast-reject (seekable body, known chunk size): own the counter
+		// here. The authoritative cap re-check in the RMW loop below covers the
+		// non-seekable path; the two are mutually exclusive (this returns early).
+		if errors.Is(err, storage.ErrAppendObjectTooLarge) {
+			metrics.AppendSizeCapRejectedTotal.Inc()
+		}
 		return nil, err
 	}
 	if b.testBeforeAppendSegmentWrite != nil {
@@ -159,18 +165,24 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 			NewObjectECParity: newECParity,
 		})
 		if perr != nil {
+			// Mirror the FSM apply path's size-cap metric (apply.go): the off-raft
+			// RMW is now the authoritative cap check, so it owns the counter.
+			if errors.Is(perr, storage.ErrAppendObjectTooLarge) {
+				metrics.AppendSizeCapRejectedTotal.Inc()
+			}
 			return nil, perr
 		}
 		werr := b.writeQuorumMeta(ctx, cmd)
 		if werr == nil {
 			obj, _ := objectAndPlacementFromCmd(cmd)
-			// NOTE: coalesce is NOT triggered here. Appendable metadata now lives
-			// in the quorum-meta blob (off-raft), but the coalesce worker still
-			// proposes CmdCoalesceSegments to the FSM, which can no longer find the
-			// blob-backed object. Coalesce-over-blob is Task 4 (Slice 1) — until it
-			// lands, raw segments accumulate in the manifest and the appendable
-			// reader stitches them, so reads stay correct. Re-enable in Task 4.
+			// Re-enable coalesce over the blob (Task 4): the manifest now lives in
+			// the quorum-meta blob and the coalesce worker publishes via blob CAS
+			// (publishCoalesceBlob), not an FSM propose. Evaluate the trigger against
+			// the freshly-written segment list so a blob-resident appendable that
+			// crosses a count/size/idle threshold gets enqueued. The worker's
+			// owner-gate + objectMetaRMWLock serialize the publish against this append.
 			if obj != nil {
+				b.maybeTriggerCoalesce(bucket, key, segmentMetaEntriesToRefs(cmd.Segments))
 				metrics.AppendCoalescedDepth.Observe(float64(len(obj.Coalesced)))
 				metrics.AppendCoalescedTotalBytes.Observe(float64(obj.Size))
 			}

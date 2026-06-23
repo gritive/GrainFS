@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -204,19 +205,60 @@ func quorumMetaCmdWins(cand, cur PutObjectMetaCmd) bool {
 // for a successful no-op (which would silently drop the appended data).
 var errQuorumMetaCASReject = errors.New("quorum meta: CAS base mismatch")
 
-// quorumMetaWriteAccepts is the SINGLE decision point for whether a candidate
+// quorumMetaWriteVerdict is the tri-state result of the write-time accept guard.
+type quorumMetaWriteVerdict int
+
+const (
+	// quorumMetaWriteApply: rename the candidate over the existing blob.
+	quorumMetaWriteApply quorumMetaWriteVerdict = iota
+	// quorumMetaWriteSkip: keep the existing blob, skip the rename, return nil
+	// (a benign LWW loss, or an idempotent CAS re-delivery — both are no-ops, NOT
+	// errors).
+	quorumMetaWriteSkip
+	// quorumMetaWriteRejectCAS: a CAS candidate lost the +1 base race — return the
+	// DISTINGUISHABLE errQuorumMetaCASReject so the coordinator re-reads and retries.
+	quorumMetaWriteRejectCAS
+)
+
+// decideQuorumMetaWrite is the SINGLE decision point for whether a candidate
 // quorum-meta blob may overwrite the existing one. Mutable-accumulating writes
 // (append/coalesce) set MetaSeqCAS and require strict +1 monotonicity over the
 // existing blob's MetaSeq — a failover-safe compare-and-swap fence (spec §7-A/B):
 // an absent existing is MetaSeq 0, so the first CAS write must carry MetaSeq==1.
-// Every other write uses unchanged LWW (quorumMetaCmdWins). Both write-time
+//
+// CAS idempotency is NOT decided here (this sees only the decoded cmds, which
+// cannot tell "the exact same candidate already landed" from "a different write
+// that happens to share MetaSeq+VersionID"). The byte-identical re-delivery skip
+// is applied at the call site, BEFORE this guard, via quorumMetaBlobIsIdempotentReplay.
+//
+// Every non-CAS write uses unchanged LWW (quorumMetaCmdWins). Both write-time
 // guards (writeQuorumMetaLocal / writeQuorumMetaVersionLocal) route through here;
 // it is the §7-F single-truth-point.
-func quorumMetaWriteAccepts(existing, cand PutObjectMetaCmd) bool {
+func decideQuorumMetaWrite(existing, cand PutObjectMetaCmd) quorumMetaWriteVerdict {
 	if cand.MetaSeqCAS {
-		return existing.MetaSeq+1 == cand.MetaSeq
+		if existing.MetaSeq+1 == cand.MetaSeq {
+			return quorumMetaWriteApply
+		}
+		return quorumMetaWriteRejectCAS
 	}
-	return quorumMetaCmdWins(cand, existing)
+	if quorumMetaCmdWins(cand, existing) {
+		return quorumMetaWriteApply
+	}
+	return quorumMetaWriteSkip
+}
+
+// quorumMetaBlobIsIdempotentReplay reports whether a CAS candidate is a
+// byte-identical re-delivery of the blob already on disk. A K-of-N CAS fan-out
+// can deliver the SAME candidate to one node more than once — directly (a
+// placement set that resolves multiple node IDs to the same physical node, e.g.
+// EC over a single host) or via retry. The exact same write landing twice on a
+// node must be a no-op SKIP, NOT a CAS reject (rejecting it would spuriously fail
+// the whole RMW). Byte-equality is the only safe discriminator: a different write
+// that happens to share (MetaSeq, VersionID) has different content, so it is NOT
+// idempotent and correctly falls through to the +1 CAS guard (→ reject). Only
+// MetaSeqCAS candidates qualify (LWW writes already no-op on a tie).
+func quorumMetaBlobIsIdempotentReplay(existing, candidate []byte, candIsCAS bool) bool {
+	return candIsCAS && bytes.Equal(existing, candidate)
 }
 
 // readQuorumMetaWinningRaw returns the raw quorum-meta blob that wins the LWW
@@ -374,12 +416,19 @@ func (b *DistributedBackend) fetchQuorumMetaFromPeers(bucket, key string) ([]byt
 // propagated to the caller — unlike the Phase 0 shadow, failures here fail
 // the PUT.
 //
-// errQuorumMetaCASReject is special-cased: a CAS base mismatch is DETERMINISTIC
-// (every replica runs the same quorumMetaWriteAccepts guard against the same
-// MetaSeq base), not an availability failure, so it must NOT be folded into the
-// generic "quorum unreachable" error — that would mask the sentinel the
-// append/coalesce RMW relies on to re-read the base and retry. Short-circuit and
-// surface the sentinel verbatim (the §7-F single-truth contract).
+// errQuorumMetaCASReject handling: a CAS reject is ONE replica's vote, NOT a
+// global short-circuit. With ordinary K-of-N replica skew (some replicas at
+// MetaSeq S, some at S+1 after a prior successful write), the NEXT CAS write of
+// S+2 is ACCEPTED by the up-to-date replicas and REJECTED by the laggards — the
+// votes differ across replicas, so short-circuiting on the first reject would
+// surface a spurious reject even when K replicas accept (and a local-first retry
+// could then false-Noop without ever reaching K — the partial-publish bug). So a
+// CAS reject counts toward the N-K failure budget like any other failed vote; K
+// nil-acks still win. Only when K is UNREACHABLE do we surface the DISTINGUISHABLE
+// errQuorumMetaCASReject (if any reject was observed) so the append/coalesce RMW
+// re-reads the base and retries — preserving the §7-F single-truth contract for
+// the genuine base-advanced-everywhere case (all replicas reject → K unreachable
+// → surface the sentinel). A non-CAS-only quorum failure keeps the generic error.
 func fanOutQuorumMeta(ctx context.Context, nodes []string, k int, dispatch func(context.Context, string) error) error {
 	if k <= 0 {
 		k = 1
@@ -393,7 +442,7 @@ func fanOutQuorumMeta(ctx context.Context, nodes []string, k int, dispatch func(
 		node := node
 		go func() { results <- dispatch(ctx, node) }()
 	}
-	var ok, failed int
+	var ok, failed, casRejects int
 	for i := 0; i < n; i++ {
 		select {
 		case err := <-results:
@@ -402,11 +451,19 @@ func fanOutQuorumMeta(ctx context.Context, nodes []string, k int, dispatch func(
 				if ok >= k {
 					return nil
 				}
-			} else if errors.Is(err, errQuorumMetaCASReject) {
-				return errQuorumMetaCASReject
 			} else {
+				if errors.Is(err, errQuorumMetaCASReject) {
+					casRejects++
+				}
 				failed++
 				if failed > n-k {
+					// K is now unreachable. If ANY vote was a CAS reject, surface the
+					// DISTINGUISHABLE sentinel so the caller re-reads the base and
+					// retries (the genuine base-advanced case). Otherwise it is a plain
+					// availability failure.
+					if casRejects > 0 {
+						return errQuorumMetaCASReject
+					}
 					return fmt.Errorf("quorum meta: %d/%d nodes failed, quorum %d unreachable", failed, n, k)
 				}
 			}
@@ -479,11 +536,16 @@ func (s *ShardService) writeQuorumMetaLocal(bucket, key string, data []byte) err
 	// path).
 	if existing, rerr := os.ReadFile(target); rerr == nil {
 		if cand, derr := s.decodeQuorumMetaCmdBlob(data); derr == nil {
+			// Byte-identical CAS re-delivery (same write to the same node twice) is a
+			// no-op, NOT a reject — checked before the +1 guard.
+			if quorumMetaBlobIsIdempotentReplay(existing, data, cand.MetaSeqCAS) {
+				return nil
+			}
 			if cur, derr2 := s.decodeQuorumMetaCmdBlob(existing); derr2 == nil {
-				if !quorumMetaWriteAccepts(cur, cand) {
-					if cand.MetaSeqCAS {
-						return errQuorumMetaCASReject // CAS base mismatch — caller retries
-					}
+				switch decideQuorumMetaWrite(cur, cand) {
+				case quorumMetaWriteRejectCAS:
+					return errQuorumMetaCASReject // CAS base mismatch — caller retries
+				case quorumMetaWriteSkip:
 					return nil // LWW loss — keep existing, skip the rename
 				}
 			}
@@ -558,12 +620,17 @@ func (s *ShardService) writeQuorumMetaVersionLocal(bucket, versionSubpath string
 	// rename — do not regress the corruption path).
 	if existing, rerr := os.ReadFile(target); rerr == nil {
 		if cand, derr := s.decodeQuorumMetaCmdBlob(data); derr == nil {
+			// Byte-identical CAS re-delivery (same write to the same node twice) is a
+			// no-op, NOT a reject — checked before the +1 guard.
+			if quorumMetaBlobIsIdempotentReplay(existing, data, cand.MetaSeqCAS) {
+				return nil
+			}
 			if cur, derr2 := s.decodeQuorumMetaCmdBlob(existing); derr2 == nil {
-				if !quorumMetaWriteAccepts(cur, cand) {
-					if cand.MetaSeqCAS {
-						return errQuorumMetaCASReject // CAS base mismatch — caller retries
-					}
-					return nil // LWW loss (or tie) — keep existing, skip the rename
+				switch decideQuorumMetaWrite(cur, cand) {
+				case quorumMetaWriteRejectCAS:
+					return errQuorumMetaCASReject // CAS base mismatch — caller retries
+				case quorumMetaWriteSkip:
+					return nil // LWW loss — keep existing, skip the rename
 				}
 			}
 		}

@@ -69,7 +69,7 @@ var _ = Describe("Coalesce recovery integration", func() {
 		Expect(int64(len(body))).To(Equal(obj.Size))
 	}
 
-	XIt("recovers when B3 coalesce crashes after EC write before metadata commit [Slice 1 Task 4: coalesce-over-blob not yet implemented]", func() {
+	It("recovers when B3 coalesce crashes after EC write before metadata commit", func() {
 		configureDistributedEC()
 
 		cfg := *b.coalesceCfg.Load()
@@ -110,7 +110,7 @@ var _ = Describe("Coalesce recovery integration", func() {
 		Expect(body).To(Equal(expected))
 	})
 
-	XIt("preserves body size while appends and coalesce interleave [Slice 1 Task 4: coalesce-over-blob not yet implemented]", func() {
+	It("preserves body size while appends and coalesce interleave", func() {
 		cfg := *b.coalesceCfg.Load()
 		cfg.SegmentCount = 8
 		b.SetCoalesceConfig(cfg)
@@ -130,7 +130,7 @@ var _ = Describe("Coalesce recovery integration", func() {
 		expectBodySizeMatchesObject()
 	})
 
-	XIt("keeps a raced append visible after B2 coalesce [Slice 1 Task 4: coalesce-over-blob not yet implemented]", func() {
+	It("keeps a raced append visible after B2 coalesce", func() {
 		cfg := *b.coalesceCfg.Load()
 		cfg.SegmentCount = 1 << 30
 		b.SetCoalesceConfig(cfg)
@@ -162,7 +162,7 @@ var _ = Describe("Coalesce recovery integration", func() {
 		Expect(obj.Size).To(Equal(int64(6)))
 	})
 
-	XIt("reads B3 coalesced data after owner-local files disappear [Slice 1 Task 4: coalesce-over-blob not yet implemented]", func() {
+	It("reads B3 coalesced data after owner-local files disappear", func() {
 		configureDistributedEC()
 		expected := appendECTriggerChunks()
 

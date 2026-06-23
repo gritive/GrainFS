@@ -53,7 +53,7 @@ var _ = Describe("Coalesce read and trigger integration", func() {
 		}, timeout, 20*time.Millisecond).Should(BeTrue())
 	}
 
-	XIt("triggers coalesce on segment count [Slice 1 Task 4: coalesce-over-blob not yet implemented]", func() {
+	It("triggers coalesce on segment count", func() {
 		cfg := *b.coalesceCfg.Load()
 		cfg.SegmentCount = 3
 		b.SetCoalesceConfig(cfg)
@@ -69,7 +69,7 @@ var _ = Describe("Coalesce read and trigger integration", func() {
 		}, 2*time.Second, 10*time.Millisecond).Should(BeTrue())
 	})
 
-	XIt("reads a B3 coalesced object after EC distribution [Slice 1 Task 4: coalesce-over-blob not yet implemented]", func() {
+	It("reads a B3 coalesced object after EC distribution", func() {
 		configureDistributedEC()
 
 		var off int64
@@ -93,7 +93,7 @@ var _ = Describe("Coalesce read and trigger integration", func() {
 		Expect(body).To(Equal(expected))
 	})
 
-	XIt("reads ranges across coalesced and raw append segments [Slice 1 Task 4: coalesce-over-blob not yet implemented]", func() {
+	It("reads ranges across coalesced and raw append segments", func() {
 		configureDistributedEC()
 
 		var off int64
