@@ -97,7 +97,7 @@ func (s *signalLeadership) set(leader bool) {
 
 func TestService_SubmitJob_CallsProposer(t *testing.T) {
 	prop := &fakeProposer{}
-	svc := NewService(NewJobStore(newTestDB(t)), prop, &fakeLeadership{}, nil, nil, 0)
+	svc := NewService(NewJobStore(newTestStore(t)), prop, &fakeLeadership{}, nil, nil, 0)
 	require.NoError(t, svc.SubmitJob(context.Background(), "b"))
 	prop.mu.Lock()
 	defer prop.mu.Unlock()
@@ -107,14 +107,14 @@ func TestService_SubmitJob_CallsProposer(t *testing.T) {
 
 func TestService_SubmitJob_ProposerError_ReturnsError(t *testing.T) {
 	prop := &fakeProposer{err: assert.AnError}
-	svc := NewService(NewJobStore(newTestDB(t)), prop, &fakeLeadership{}, nil, nil, 0)
+	svc := NewService(NewJobStore(newTestStore(t)), prop, &fakeLeadership{}, nil, nil, 0)
 	err := svc.SubmitJob(context.Background(), "b")
 	require.Error(t, err)
 }
 
 func TestService_Run_StartsWorkerOnLeader_StopsOnFollower(t *testing.T) {
 	lead := &signalLeadership{leader: false}
-	svc := NewService(NewJobStore(newTestDB(t)), &fakeProposer{}, lead,
+	svc := NewService(NewJobStore(newTestStore(t)), &fakeProposer{}, lead,
 		&noopSource{}, &noopDst{}, 20*time.Millisecond)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -217,7 +217,7 @@ func (fakeDst) GetObject(_ context.Context, _, _ string) (io.ReadCloser, *storag
 }
 
 func TestService_SubmitJob_ThenWorkerProcesses(t *testing.T) {
-	db := newTestDB(t)
+	db := newTestStore(t)
 	store := NewJobStore(db)
 
 	// Seed a running job.

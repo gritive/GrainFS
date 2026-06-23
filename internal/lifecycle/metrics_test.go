@@ -22,7 +22,7 @@ func TestMPUWorker_EmitsAbortedUploadsMetric(t *testing.T) {
 		{Bucket: "b", Key: "k", UploadID: "u", InitiatedAt: now.Add(-4 * 24 * time.Hour).Unix()},
 	}}
 	deleter := &fakeMPUDeleter{}
-	store := lifecycle.NewStore(newBadger(t))
+	store := lifecycle.NewStore(newWrappedStore(t))
 	require.NoError(t, store.PutRaw("b", []byte(`<LifecycleConfiguration><Rule><ID>r</ID><Status>Enabled</Status><AbortIncompleteMultipartUpload><DaysAfterInitiation>3</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>`)))
 
 	abortedBefore := testutil.ToFloat64(metrics.LifecycleAbortedUploads.WithLabelValues("b", "node-1"))

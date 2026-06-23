@@ -9,25 +9,9 @@ import (
 	"github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/cloudwego/hertz/pkg/network/standard"
 
-	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/nodeconfig"
 	"github.com/gritive/GrainFS/internal/storage"
 )
-
-// unwrapBackend returns the innermost backend, unwrapping decorators like CachedBackend.
-type unwrapper interface {
-	Unwrap() storage.Backend
-}
-
-func unwrapBackend(b storage.Backend) storage.Backend {
-	for {
-		u, ok := b.(unwrapper)
-		if !ok {
-			return b
-		}
-		b = u.Unwrap()
-	}
-}
 
 func normalizeServerStorage(ss ServerStorage, policyStore *CompiledPolicyStore) (ServerStorage, *CompiledPolicyStore) {
 	if policyStore == nil {
@@ -84,14 +68,6 @@ func (s *Server) installMiddlewares(h *server.Hertz) {
 	h.Use(s.auditEnvelopeMiddleware())
 	h.Use(s.s3RequestLogMiddleware())
 	h.Use(s.authzMiddleware())
-}
-
-func (s *Server) ensureRuntimeDefaults(ss ServerStorage) {
-	if s.icebergCatalog == nil && !s.icebergDisabled {
-		if dbp := ss.DBProvider; dbp != nil {
-			s.icebergCatalog = icebergcatalog.NewStore(dbp.DB(), "s3://grainfs-tables/warehouse")
-		}
-	}
 }
 
 func (s *Server) wireAlertState() {

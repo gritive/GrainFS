@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 
-	badger "github.com/dgraph-io/badger/v4"
+	"github.com/gritive/GrainFS/internal/metastore"
 )
 
 var lifecyclePrefix = []byte("lifecycle:")
@@ -18,15 +18,15 @@ var lifecyclePrefix = []byte("lifecycle:")
 // delete payloads that predate per-record generations.
 const UnconditionalDeleteGen = ^uint64(0)
 
-// Store persists lifecycle configurations in BadgerDB.
+// Store persists lifecycle configurations through the metastore.Store contract.
 // Key format: "lifecycle:{bucket}"
 type Store struct {
-	db *badger.DB
+	store metastore.Store
 }
 
-// NewStore creates a Store backed by the given BadgerDB instance.
-func NewStore(db *badger.DB) *Store {
-	return &Store{db: db}
+// NewStore creates a Store backed by the given metadata store.
+func NewStore(store metastore.Store) *Store {
+	return &Store{store: store}
 }
 
 func (s *Store) key(bucket string) []byte {
@@ -41,7 +41,7 @@ func (s *Store) genKey(bucket string) []byte {
 // the record (or its generation) is absent.
 func (s *Store) GetGen(bucket string) (uint64, error) {
 	var gen uint64
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.store.View(func(txn metastore.Txn) error {
 		item, err := txn.Get(s.genKey(bucket))
 		if err != nil {
 			return err
@@ -53,7 +53,7 @@ func (s *Store) GetGen(bucket string) (uint64, error) {
 			return nil
 		})
 	})
-	if errors.Is(err, badger.ErrKeyNotFound) {
+	if errors.Is(err, metastore.ErrKeyNotFound) {
 		return 0, nil
 	}
 	if err != nil {
@@ -66,7 +66,7 @@ func (s *Store) GetGen(bucket string) (uint64, error) {
 // (current + 1) atomically in one transaction. Replaces PutRaw on the FSM apply
 // path so every put advances the CAS generation deterministically.
 func (s *Store) PutRawBumpGen(bucket string, raw []byte) error {
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.store.Update(func(txn metastore.Txn) error {
 		var cur uint64
 		if item, err := txn.Get(s.genKey(bucket)); err == nil {
 			_ = item.Value(func(val []byte) error {
@@ -75,7 +75,7 @@ func (s *Store) PutRawBumpGen(bucket string, raw []byte) error {
 				}
 				return nil
 			})
-		} else if !errors.Is(err, badger.ErrKeyNotFound) {
+		} else if !errors.Is(err, metastore.ErrKeyNotFound) {
 			return err
 		}
 		var genBuf [8]byte
@@ -92,7 +92,7 @@ func (s *Store) PutRawBumpGen(bucket string, raw []byte) error {
 // UnconditionalDeleteGen. A mismatch is a no-op (returns nil): a newer put won
 // the race, so the record now belongs to a different bucket incarnation.
 func (s *Store) DeleteIfGen(bucket string, observedGen uint64) error {
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.store.Update(func(txn metastore.Txn) error {
 		if observedGen != UnconditionalDeleteGen {
 			var cur uint64
 			if item, err := txn.Get(s.genKey(bucket)); err == nil {
@@ -102,7 +102,7 @@ func (s *Store) DeleteIfGen(bucket string, observedGen uint64) error {
 					}
 					return nil
 				})
-			} else if !errors.Is(err, badger.ErrKeyNotFound) {
+			} else if !errors.Is(err, metastore.ErrKeyNotFound) {
 				return err
 			}
 			if cur != observedGen {
@@ -119,7 +119,7 @@ func (s *Store) DeleteIfGen(bucket string, observedGen uint64) error {
 // Get returns the lifecycle configuration for bucket, or nil if not set.
 func (s *Store) Get(bucket string) (*LifecycleConfiguration, error) {
 	var cfg LifecycleConfiguration
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.store.View(func(txn metastore.Txn) error {
 		item, err := txn.Get(s.key(bucket))
 		if err != nil {
 			return err
@@ -128,7 +128,7 @@ func (s *Store) Get(bucket string) (*LifecycleConfiguration, error) {
 			return xml.Unmarshal(val, &cfg)
 		})
 	})
-	if errors.Is(err, badger.ErrKeyNotFound) {
+	if errors.Is(err, metastore.ErrKeyNotFound) {
 		return nil, nil
 	}
 	if err != nil {
@@ -146,7 +146,7 @@ func (s *Store) put(bucket string, cfg *LifecycleConfiguration) error {
 	if err != nil {
 		return err
 	}
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.store.Update(func(txn metastore.Txn) error {
 		return txn.Set(s.key(bucket), data)
 	})
 }
@@ -155,7 +155,7 @@ func (s *Store) put(bucket string, cfg *LifecycleConfiguration) error {
 // bucket. Used by the meta-Raft FSM apply path so the operator's GET round-
 // trip remains byte-for-byte. Callers must have validated the XML upstream.
 func (s *Store) PutRaw(bucket string, raw []byte) error {
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.store.Update(func(txn metastore.Txn) error {
 		return txn.Set(s.key(bucket), append([]byte(nil), raw...))
 	})
 }
@@ -165,7 +165,7 @@ func (s *Store) PutRaw(bucket string, raw []byte) error {
 // (ADR 0011).
 func (s *Store) GetRaw(bucket string) ([]byte, error) {
 	var out []byte
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.store.View(func(txn metastore.Txn) error {
 		item, err := txn.Get(s.key(bucket))
 		if err != nil {
 			return err
@@ -175,7 +175,7 @@ func (s *Store) GetRaw(bucket string) ([]byte, error) {
 			return nil
 		})
 	})
-	if errors.Is(err, badger.ErrKeyNotFound) {
+	if errors.Is(err, metastore.ErrKeyNotFound) {
 		return nil, nil
 	}
 	if err != nil {
@@ -186,7 +186,7 @@ func (s *Store) GetRaw(bucket string) ([]byte, error) {
 
 // Delete removes the lifecycle configuration for bucket (no-op if not set).
 func (s *Store) Delete(bucket string) error {
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.store.Update(func(txn metastore.Txn) error {
 		return txn.Delete(s.key(bucket))
 	})
 }
@@ -196,11 +196,8 @@ func (s *Store) Delete(bucket string) error {
 // must not assume the list matches FSM-applied state on a follower.
 func (s *Store) ListBuckets() ([]string, error) {
 	var out []string
-	err := s.db.View(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
-		opts.PrefetchValues = false
-		opts.Prefix = lifecyclePrefix
-		it := txn.NewIterator(opts)
+	err := s.store.View(func(txn metastore.Txn) error {
+		it := txn.NewIterator(metastore.IteratorOptions{Prefix: lifecyclePrefix, PrefetchValues: false})
 		defer it.Close()
 		for it.Rewind(); it.ValidForPrefix(lifecyclePrefix); it.Next() {
 			key := it.Item().KeyCopy(nil)

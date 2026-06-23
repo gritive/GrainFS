@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
@@ -688,13 +689,13 @@ func TestMetaFSM_Dispatch_UnknownCmd_GracefulNoOp(t *testing.T) {
 	assert.Equal(t, before+1, after, "unknown cmd must increment the rolling-upgrade telemetry counter")
 }
 
-func newTestLifecycleDB(t *testing.T) *badger.DB {
+func newTestLifecycleStore(t *testing.T) MetadataStore {
 	t.Helper()
 	opts := badgerutil.SmallOptions(t.TempDir())
 	db, err := badger.Open(opts)
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
-	return db
+	return badgermeta.Wrap(db)
 }
 
 func openTestBadgerAt(t *testing.T, dir string) *badger.DB {
@@ -706,7 +707,7 @@ func openTestBadgerAt(t *testing.T, dir string) *badger.DB {
 
 func TestApplyBucketLifecyclePut_WritesStore(t *testing.T) {
 	f := NewMetaFSM()
-	store := lifecycle.NewStore(newTestLifecycleDB(t))
+	store := lifecycle.NewStore(newTestLifecycleStore(t))
 	f.SetLifecycle(store)
 
 	raw := []byte(`<LifecycleConfiguration><Rule><ID>r1</ID><Status>Enabled</Status></Rule></LifecycleConfiguration>`)
@@ -722,7 +723,7 @@ func TestApplyBucketLifecyclePut_WritesStore(t *testing.T) {
 
 func TestApplyBucketLifecycleDelete_RemovesStore(t *testing.T) {
 	f := NewMetaFSM()
-	store := lifecycle.NewStore(newTestLifecycleDB(t))
+	store := lifecycle.NewStore(newTestLifecycleStore(t))
 	f.SetLifecycle(store)
 	require.NoError(t, store.PutRaw("b1", []byte(`<LifecycleConfiguration><Rule><ID>r1</ID></Rule></LifecycleConfiguration>`)))
 

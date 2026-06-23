@@ -9,20 +9,23 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/time/rate"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/lifecycle"
+	"github.com/gritive/GrainFS/internal/metastore"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-// newBadger opens an in-process badger DB rooted at t.TempDir(). External-
-// package twin of the internal newTestDB helper (store_test.go).
-func newBadger(t *testing.T) *badger.DB {
+// newWrappedStore opens an in-process badger DB rooted at t.TempDir() and
+// adapts it to the metastore.Store contract. External-package twin of the
+// internal newWrappedStore helper (store_test.go).
+func newWrappedStore(t *testing.T) metastore.Store {
 	t.Helper()
 	opts := badger.DefaultOptions(t.TempDir()).WithLogger(nil)
 	db, err := badger.Open(opts)
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
-	return db
+	return badgermeta.Wrap(db)
 }
 
 // --- backend double ---
@@ -93,7 +96,7 @@ func TestMPUWorker_AbortsExpiredUploads(t *testing.T) {
 		{Bucket: "b", Key: "k2", UploadID: "u2", InitiatedAt: now.Add(-1 * time.Hour).Unix()},
 	}}
 	deleter := &fakeMPUDeleter{}
-	store := lifecycle.NewStore(newBadger(t))
+	store := lifecycle.NewStore(newWrappedStore(t))
 	require.NoError(t, store.PutRaw("b", []byte(`<LifecycleConfiguration><Rule><ID>r</ID><Status>Enabled</Status><AbortIncompleteMultipartUpload><DaysAfterInitiation>3</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>`)))
 
 	limiter := rate.NewLimiter(100, 10)
@@ -113,7 +116,7 @@ func TestMPUWorker_RespectsPrefixFilter(t *testing.T) {
 		{Bucket: "b", Key: "other/u2", UploadID: "u2", InitiatedAt: now.Add(-4 * 24 * time.Hour).Unix()},
 	}}
 	deleter := &fakeMPUDeleter{}
-	store := lifecycle.NewStore(newBadger(t))
+	store := lifecycle.NewStore(newWrappedStore(t))
 	require.NoError(t, store.PutRaw("b", []byte(`<LifecycleConfiguration><Rule><ID>r</ID><Status>Enabled</Status><Filter><Prefix>tmp/</Prefix></Filter><AbortIncompleteMultipartUpload><DaysAfterInitiation>3</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>`)))
 
 	limiter := rate.NewLimiter(100, 10)
@@ -134,7 +137,7 @@ func TestMPUWorker_PartCountAboveBurst(t *testing.T) {
 		{Bucket: "b", Key: "k1", UploadID: "u1", InitiatedAt: now.Add(-4 * 24 * time.Hour).Unix()},
 	}}
 	deleter := &fakeMPUDeleter{partCount: 1000} // far above burst
-	store := lifecycle.NewStore(newBadger(t))
+	store := lifecycle.NewStore(newWrappedStore(t))
 	require.NoError(t, store.PutRaw("b", []byte(`<LifecycleConfiguration><Rule><ID>r</ID><Status>Enabled</Status><AbortIncompleteMultipartUpload><DaysAfterInitiation>3</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>`)))
 
 	limiter := rate.NewLimiter(rate.Inf, 10)
@@ -217,7 +220,7 @@ func TestMPUWorker_F5RepointIdempotent(t *testing.T) {
 		"u1": {Bucket: "b", Key: "k1", UploadID: "u1", InitiatedAt: overAge},
 	}}
 	deleter := &manifestBlobDeleter{store: mstore}
-	store := lifecycle.NewStore(newBadger(t))
+	store := lifecycle.NewStore(newWrappedStore(t))
 	require.NoError(t, store.PutRaw("b", []byte(`<LifecycleConfiguration><Rule><ID>r</ID><Status>Enabled</Status><AbortIncompleteMultipartUpload><DaysAfterInitiation>3</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>`)))
 
 	limiter := rate.NewLimiter(rate.Inf, 10)

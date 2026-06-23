@@ -114,13 +114,12 @@ type Server struct {
 	hub         *Hub
 	policyStore *CompiledPolicyStore
 
-	lifecycle       *lifecycle.Service
-	icebergCatalog  icebergcatalog.Catalog
-	icebergDisabled bool
-	auditEmitter    *audit.Emitter
-	auditOutbox     *audit.Outbox
-	auditSearcher   auditSearcher
-	auditNodeID     string
+	lifecycle      *lifecycle.Service
+	icebergCatalog icebergcatalog.Catalog
+	auditEmitter   *audit.Emitter
+	auditOutbox    *audit.Outbox
+	auditSearcher  auditSearcher
+	auditNodeID    string
 
 	auditInternalAccessKey string
 	auditInternalSecretKey string
@@ -155,7 +154,6 @@ type Server struct {
 }
 
 type ServerStorage struct {
-	Ops        *storage.Operations
-	Backend    storage.Backend
-	DBProvider storage.DBProvider
+	Ops     *storage.Operations
+	Backend storage.Backend
 }

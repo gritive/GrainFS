@@ -204,7 +204,7 @@ func TestMetaFSMCapabilityEvidenceAdvertisesAfterWiring(t *testing.T) {
 	f := NewMetaFSM()
 	iamStore := iam.NewStore()
 	f.SetIAM(iamStore, iam.NewApplier(iamStore, nil))
-	f.SetMigration(migration.NewJobStore(newMigrationTestDB(t)))
+	f.SetMigration(migration.NewJobStore(newMigrationTestStore(t)))
 	ev := f.CapabilityEvidence("node-1", time.Unix(10, 0))
 	require.True(t, ev.Capabilities[compat.CapabilityMigrationCutoverV1])
 	require.True(t, ev.Ready)

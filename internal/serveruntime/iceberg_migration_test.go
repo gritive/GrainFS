@@ -12,6 +12,7 @@ import (
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/raft"
@@ -34,7 +35,7 @@ func newLegacyStoreForMigrationTest(t *testing.T) (*badger.DB, *icebergcatalog.S
 	db, err := badger.Open(badger.DefaultOptions(t.TempDir()).WithLogger(nil))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
-	return db, icebergcatalog.NewStore(db, "s3://grainfs-tables/warehouse")
+	return db, icebergcatalog.NewStore(badgermeta.Wrap(db), "s3://grainfs-tables/warehouse")
 }
 
 func TestMigrateLegacySingletonIcebergCatalogBackfillsMissingMetadataObject(t *testing.T) {

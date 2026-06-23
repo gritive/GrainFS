@@ -51,13 +51,13 @@ func WithIcebergCatalog(catalog icebergcatalog.Catalog) Option {
 	}
 }
 
-// WithIcebergDisabled prevents ensureRuntimeDefaults from creating the
-// automatic Iceberg catalog fallback. Re-enable: omit this option or pass
-// WithIcebergCatalog explicitly.
+// WithIcebergDisabled records the operator's intent to leave the Iceberg REST
+// catalog off. It is a no-op: with no catalog wired the Iceberg routes are
+// already unavailable (routeFeatureAvailable checks s.icebergCatalog != nil).
+// The option is retained so the boot wiring can express the EnableIceberg=false
+// branch symmetrically. Re-enable: pass WithIcebergCatalog explicitly.
 func WithIcebergDisabled() Option {
-	return func(s *Server) {
-		s.icebergDisabled = true
-	}
+	return func(*Server) {}
 }
 
 func WithIcebergCatalogStore(store *icebergcatalog.Store) Option {

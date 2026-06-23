@@ -5,6 +5,8 @@ import (
 
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/badgermeta"
 )
 
 func newTestStore(t *testing.T) *Store {
@@ -12,7 +14,7 @@ func newTestStore(t *testing.T) *Store {
 	db, err := badger.Open(badger.DefaultOptions("").WithInMemory(true).WithLogger(nil))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
-	return NewStore(db)
+	return NewStore(badgermeta.Wrap(db))
 }
 
 func TestStore_PutRawBumpGen_MonotonicFromZero(t *testing.T) {

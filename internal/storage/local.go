@@ -67,10 +67,6 @@ var (
 	_ Truncatable        = (*LocalBackend)(nil)
 )
 
-// DB exposes the underlying BadgerDB for shared use (lifecycle, events).
-// DB exposes the underlying BadgerDB for shared use (lifecycle, events).
-func (b *LocalBackend) DB() *badger.DB { return b.db }
-
 // NewLocalBackend creates a new local storage backend.
 func NewLocalBackend(root string) (*LocalBackend, error) {
 	return newLocalBackend(root, []string{root})

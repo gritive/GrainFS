@@ -9,7 +9,7 @@ import (
 	"sort"
 	"strings"
 
-	badger "github.com/dgraph-io/badger/v4"
+	"github.com/gritive/GrainFS/internal/metastore"
 )
 
 var (
@@ -59,7 +59,7 @@ type Catalog interface {
 }
 
 type Store struct {
-	db        *badger.DB
+	store     metastore.Store
 	warehouse string
 }
 
@@ -86,15 +86,15 @@ type LegacyTable struct {
 // cluster in return).
 const defaultWarehouse = "default"
 
-func NewStore(db *badger.DB, warehouse string) *Store {
-	return &Store{db: db, warehouse: warehouse}
+func NewStore(store metastore.Store, warehouse string) *Store {
+	return &Store{store: store, warehouse: warehouse}
 }
 
 func (s *Store) Warehouse() string { return s.warehouse }
 
 // checkWarehouse returns an error when the caller requests a warehouse that
 // does not match this Store's own warehouse. Store is a single-warehouse
-// implementation whose BadgerDB keys are not partitioned by warehouse name.
+// implementation whose keys are not partitioned by warehouse name.
 // Silently accepting a foreign warehouse would cause data written for
 // warehouse-A to be readable under warehouse-B keys, violating isolation.
 //
@@ -116,10 +116,10 @@ func (s *Store) CreateNamespace(_ context.Context, warehouse string, namespace [
 	if err != nil {
 		return err
 	}
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.store.Update(func(txn metastore.Txn) error {
 		if _, err := txn.Get(key); err == nil {
 			return ErrNamespaceExists
-		} else if err != badger.ErrKeyNotFound {
+		} else if !errors.Is(err, metastore.ErrKeyNotFound) {
 			return err
 		}
 		return txn.Set(key, val)
@@ -131,9 +131,9 @@ func (s *Store) LoadNamespace(_ context.Context, warehouse string, namespace []s
 		return nil, err
 	}
 	var rec namespaceRecord
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.store.View(func(txn metastore.Txn) error {
 		item, err := txn.Get(namespaceKey(namespace))
-		if err == badger.ErrKeyNotFound {
+		if errors.Is(err, metastore.ErrKeyNotFound) {
 			return ErrNamespaceNotFound
 		}
 		if err != nil {
@@ -152,8 +152,8 @@ func (s *Store) ListNamespaces(_ context.Context, warehouse string) ([][]string,
 		return nil, err
 	}
 	var out [][]string
-	err := s.db.View(func(txn *badger.Txn) error {
-		it := txn.NewIterator(badger.DefaultIteratorOptions)
+	err := s.store.View(func(txn metastore.Txn) error {
+		it := txn.NewIterator(metastore.IteratorOptions{})
 		defer it.Close()
 		for it.Seek(nsPrefix); it.ValidForPrefix(nsPrefix); it.Next() {
 			var rec namespaceRecord
@@ -170,8 +170,8 @@ func (s *Store) ListNamespaces(_ context.Context, warehouse string) ([][]string,
 
 func (s *Store) ExportLegacyRows(_ context.Context) (LegacyExport, error) {
 	var out LegacyExport
-	err := s.db.View(func(txn *badger.Txn) error {
-		nsIt := txn.NewIterator(badger.DefaultIteratorOptions)
+	err := s.store.View(func(txn metastore.Txn) error {
+		nsIt := txn.NewIterator(metastore.IteratorOptions{})
 		defer nsIt.Close()
 		for nsIt.Seek(nsPrefix); nsIt.ValidForPrefix(nsPrefix); nsIt.Next() {
 			var rec namespaceRecord
@@ -184,7 +184,7 @@ func (s *Store) ExportLegacyRows(_ context.Context) (LegacyExport, error) {
 			})
 		}
 
-		tableIt := txn.NewIterator(badger.DefaultIteratorOptions)
+		tableIt := txn.NewIterator(metastore.IteratorOptions{})
 		defer tableIt.Close()
 		for tableIt.Seek(tablePrefix); tableIt.ValidForPrefix(tablePrefix); tableIt.Next() {
 			var rec tableRecord
@@ -215,15 +215,13 @@ func (s *Store) DeleteNamespace(_ context.Context, warehouse string, namespace [
 	if err := s.checkWarehouse(warehouse); err != nil {
 		return err
 	}
-	return s.db.Update(func(txn *badger.Txn) error {
-		if _, err := txn.Get(namespaceKey(namespace)); err == badger.ErrKeyNotFound {
+	return s.store.Update(func(txn metastore.Txn) error {
+		if _, err := txn.Get(namespaceKey(namespace)); errors.Is(err, metastore.ErrKeyNotFound) {
 			return ErrNamespaceNotFound
 		} else if err != nil {
 			return err
 		}
-		opts := badger.DefaultIteratorOptions
-		opts.PrefetchValues = false
-		it := txn.NewIterator(opts)
+		it := txn.NewIterator(metastore.IteratorOptions{PrefetchValues: false})
 		defer it.Close()
 		prefix := tableNamespacePrefix(namespace)
 		it.Seek(prefix)
@@ -248,15 +246,15 @@ func (s *Store) CreateTable(_ context.Context, warehouse string, ident Identifie
 	if err != nil {
 		return nil, err
 	}
-	err = s.db.Update(func(txn *badger.Txn) error {
-		if _, err := txn.Get(namespaceKey(ident.Namespace)); err == badger.ErrKeyNotFound {
+	err = s.store.Update(func(txn metastore.Txn) error {
+		if _, err := txn.Get(namespaceKey(ident.Namespace)); errors.Is(err, metastore.ErrKeyNotFound) {
 			return ErrNamespaceNotFound
 		} else if err != nil {
 			return err
 		}
 		if _, err := txn.Get(tableKey(ident)); err == nil {
 			return ErrTableExists
-		} else if err != badger.ErrKeyNotFound {
+		} else if !errors.Is(err, metastore.ErrKeyNotFound) {
 			return err
 		}
 		return txn.Set(tableKey(ident), val)
@@ -272,10 +270,10 @@ func (s *Store) LoadTable(_ context.Context, warehouse string, ident Identifier)
 		return nil, err
 	}
 	var rec tableRecord
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.store.View(func(txn metastore.Txn) error {
 		item, err := txn.Get(tableKey(ident))
-		if err == badger.ErrKeyNotFound {
-			if _, nsErr := txn.Get(namespaceKey(ident.Namespace)); nsErr == badger.ErrKeyNotFound {
+		if errors.Is(err, metastore.ErrKeyNotFound) {
+			if _, nsErr := txn.Get(namespaceKey(ident.Namespace)); errors.Is(nsErr, metastore.ErrKeyNotFound) {
 				return ErrNamespaceNotFound
 			}
 			return ErrTableNotFound
@@ -297,13 +295,13 @@ func (s *Store) ListTables(_ context.Context, warehouse string, namespace []stri
 	}
 	prefix := tableNamespacePrefix(namespace)
 	var out []Identifier
-	err := s.db.View(func(txn *badger.Txn) error {
-		if _, err := txn.Get(namespaceKey(namespace)); err == badger.ErrKeyNotFound {
+	err := s.store.View(func(txn metastore.Txn) error {
+		if _, err := txn.Get(namespaceKey(namespace)); errors.Is(err, metastore.ErrKeyNotFound) {
 			return ErrNamespaceNotFound
 		} else if err != nil {
 			return err
 		}
-		it := txn.NewIterator(badger.DefaultIteratorOptions)
+		it := txn.NewIterator(metastore.IteratorOptions{})
 		defer it.Close()
 		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
 			var rec tableRecord
@@ -322,9 +320,9 @@ func (s *Store) DeleteTable(_ context.Context, warehouse string, ident Identifie
 	if err := s.checkWarehouse(warehouse); err != nil {
 		return err
 	}
-	return s.db.Update(func(txn *badger.Txn) error {
-		if _, err := txn.Get(tableKey(ident)); err == badger.ErrKeyNotFound {
-			if _, nsErr := txn.Get(namespaceKey(ident.Namespace)); nsErr == badger.ErrKeyNotFound {
+	return s.store.Update(func(txn metastore.Txn) error {
+		if _, err := txn.Get(tableKey(ident)); errors.Is(err, metastore.ErrKeyNotFound) {
+			if _, nsErr := txn.Get(namespaceKey(ident.Namespace)); errors.Is(nsErr, metastore.ErrKeyNotFound) {
 				return ErrNamespaceNotFound
 			}
 			return ErrTableNotFound
@@ -340,9 +338,9 @@ func (s *Store) CommitTable(_ context.Context, warehouse string, ident Identifie
 		return nil, err
 	}
 	var rec tableRecord
-	err := s.db.Update(func(txn *badger.Txn) error {
+	err := s.store.Update(func(txn metastore.Txn) error {
 		item, err := txn.Get(tableKey(ident))
-		if err == badger.ErrKeyNotFound {
+		if errors.Is(err, metastore.ErrKeyNotFound) {
 			return ErrTableNotFound
 		}
 		if err != nil {

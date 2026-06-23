@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 
-	badger "github.com/dgraph-io/badger/v4"
+	"github.com/gritive/GrainFS/internal/metastore"
 )
 
 var (
@@ -14,14 +14,15 @@ var (
 	cursorPrefix = []byte("migration:cursor:")
 )
 
-// JobStore persists migration job state and per-bucket cursors in BadgerDB.
+// JobStore persists migration job state and per-bucket cursors through the
+// metastore.Store contract (the shared FSM-state DB in production).
 type JobStore struct {
-	db *badger.DB
+	store metastore.Store
 }
 
-// NewJobStore creates a JobStore backed by the given BadgerDB instance.
-func NewJobStore(db *badger.DB) *JobStore {
-	return &JobStore{db: db}
+// NewJobStore creates a JobStore backed by the given metadata store.
+func NewJobStore(store metastore.Store) *JobStore {
+	return &JobStore{store: store}
 }
 
 func (s *JobStore) jobKey(bucket string) []byte {
@@ -35,7 +36,7 @@ func (s *JobStore) cursorKey(bucket string) []byte {
 // GetCursor returns the last saved S3 pagination cursor for bucket, or "" if none.
 func (s *JobStore) GetCursor(bucket string) (string, error) {
 	var out string
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.store.View(func(txn metastore.Txn) error {
 		item, err := txn.Get(s.cursorKey(bucket))
 		if err != nil {
 			return err
@@ -45,15 +46,15 @@ func (s *JobStore) GetCursor(bucket string) (string, error) {
 			return nil
 		})
 	})
-	if errors.Is(err, badger.ErrKeyNotFound) {
+	if errors.Is(err, metastore.ErrKeyNotFound) {
 		return "", nil
 	}
 	return out, err
 }
 
-// SaveCursor writes cursor directly to BadgerDB (bypasses Raft).
+// SaveCursor writes cursor directly to the metadata store (bypasses Raft).
 func (s *JobStore) SaveCursor(bucket, cursor string) error {
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.store.Update(func(txn metastore.Txn) error {
 		return txn.Set(s.cursorKey(bucket), []byte(cursor))
 	})
 }
@@ -61,7 +62,7 @@ func (s *JobStore) SaveCursor(bucket, cursor string) error {
 // GetJob returns the JobState for bucket, or (nil, nil) if not found.
 func (s *JobStore) GetJob(bucket string) (*JobState, error) {
 	var state JobState
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.store.View(func(txn metastore.Txn) error {
 		item, err := txn.Get(s.jobKey(bucket))
 		if err != nil {
 			return err
@@ -70,7 +71,7 @@ func (s *JobStore) GetJob(bucket string) (*JobState, error) {
 			return json.Unmarshal(val, &state)
 		})
 	})
-	if errors.Is(err, badger.ErrKeyNotFound) {
+	if errors.Is(err, metastore.ErrKeyNotFound) {
 		return nil, nil
 	}
 	if err != nil {
@@ -79,13 +80,13 @@ func (s *JobStore) GetJob(bucket string) (*JobState, error) {
 	return &state, nil
 }
 
-// SaveJob writes state to BadgerDB.
+// SaveJob writes state to the metadata store.
 func (s *JobStore) SaveJob(state *JobState) error {
 	data, err := json.Marshal(state)
 	if err != nil {
 		return fmt.Errorf("migration: marshal job state: %w", err)
 	}
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.store.Update(func(txn metastore.Txn) error {
 		return txn.Set(s.jobKey(state.Bucket), data)
 	})
 }
@@ -93,11 +94,8 @@ func (s *JobStore) SaveJob(state *JobState) error {
 // ListJobs returns all job records with the given status.
 func (s *JobStore) ListJobs(status JobStatus) ([]*JobState, error) {
 	var out []*JobState
-	err := s.db.View(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
-		opts.PrefetchValues = true
-		opts.Prefix = jobPrefix
-		it := txn.NewIterator(opts)
+	err := s.store.View(func(txn metastore.Txn) error {
+		it := txn.NewIterator(metastore.IteratorOptions{Prefix: jobPrefix, PrefetchValues: true})
 		defer it.Close()
 		for it.Rewind(); it.ValidForPrefix(jobPrefix); it.Next() {
 			var state JobState
@@ -121,7 +119,7 @@ func (s *JobStore) ListJobs(status JobStatus) ([]*JobState, error) {
 
 // DeleteJob removes the job state and cursor for bucket. No-op if not found.
 func (s *JobStore) DeleteJob(bucket string) error {
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.store.Update(func(txn metastore.Txn) error {
 		_ = txn.Delete(s.jobKey(bucket))
 		_ = txn.Delete(s.cursorKey(bucket))
 		return nil
@@ -131,11 +129,8 @@ func (s *JobStore) DeleteJob(bucket string) error {
 // ListBuckets returns all bucket names that have a job record.
 func (s *JobStore) ListBuckets() ([]string, error) {
 	var out []string
-	err := s.db.View(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
-		opts.PrefetchValues = false
-		opts.Prefix = jobPrefix
-		it := txn.NewIterator(opts)
+	err := s.store.View(func(txn metastore.Txn) error {
+		it := txn.NewIterator(metastore.IteratorOptions{Prefix: jobPrefix, PrefetchValues: false})
 		defer it.Close()
 		for it.Rewind(); it.ValidForPrefix(jobPrefix); it.Next() {
 			key := it.Item().KeyCopy(nil)
