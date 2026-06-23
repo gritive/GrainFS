@@ -65,3 +65,63 @@ func TestSelectECPlacement_PartialDead(t *testing.T) {
 	expected := hrw.PlaceShards(triggerKey, liveNodes, nil, cfg.NumShards())
 	assert.Equal(t, expected, placement)
 }
+
+// TestSelectShardPlacement_Weighted exercises the shared helper's weighted path
+// directly: a non-degenerate weight slice must produce the weighted HRW order.
+func TestSelectShardPlacement_Weighted(t *testing.T) {
+	cfg := ECConfig{DataShards: 2, ParityShards: 2}
+	peers := []string{"a", "b", "c", "d"}
+	weights := []float64{10, 20, 30, 40}
+
+	got := selectShardPlacement(cfg, peers, "obj/seg", weights, true)
+	want := hrw.PlaceShards("obj/seg", peers, weights, cfg.NumShards())
+	assert.Equal(t, want, got)
+	assert.Len(t, got, cfg.NumShards())
+}
+
+// TestSelectShardPlacement_DisabledIgnoresWeights: weightedEnabled=false must
+// ignore the supplied weights and use unweighted HRW.
+func TestSelectShardPlacement_DisabledIgnoresWeights(t *testing.T) {
+	cfg := ECConfig{DataShards: 2, ParityShards: 2}
+	peers := []string{"a", "b", "c", "d"}
+	weights := []float64{10, 20, 30, 40}
+
+	got := selectShardPlacement(cfg, peers, "obj/seg", weights, false)
+	want := hrw.PlaceShards("obj/seg", peers, nil, cfg.NumShards())
+	assert.Equal(t, want, got)
+}
+
+// TestSelectShardPlacement_AllStaleFallback: when every supplied weight is 0
+// (no current capacity stats), the helper falls back to unweighted HRW over all
+// peers so the write still places a full-width stripe.
+func TestSelectShardPlacement_AllStaleFallback(t *testing.T) {
+	cfg := ECConfig{DataShards: 2, ParityShards: 2}
+	peers := []string{"a", "b", "c", "d"}
+	weights := []float64{0, 0, 0, 0}
+
+	got := selectShardPlacement(cfg, peers, "obj/seg", weights, true)
+	want := hrw.PlaceShards("obj/seg", peers, nil, cfg.NumShards())
+	assert.Equal(t, want, got)
+	assert.Len(t, got, cfg.NumShards())
+}
+
+// TestSelectShardPlacement_WeightShortfallFallback: an exactly-k+m group where
+// some peers have weight 0 (stale stats) would shrink weighted HRW below
+// NumShards; the helper must fall back to unweighted HRW over all peers
+// (including the stale ones) so the full-width stripe still places.
+func TestSelectShardPlacement_WeightShortfallFallback(t *testing.T) {
+	cfg := ECConfig{DataShards: 2, ParityShards: 2}
+	peers := []string{"a", "b", "c", "d"} // NumShards == 4 == len(peers)
+	weights := []float64{100, 0, 0, 0}    // only 1 peer has positive weight
+
+	got := selectShardPlacement(cfg, peers, "obj/seg", weights, true)
+	require.Len(t, got, cfg.NumShards(), "must still place a full-width stripe")
+	want := hrw.PlaceShards("obj/seg", peers, nil, cfg.NumShards())
+	assert.Equal(t, want, got, "shortfall falls back to unweighted HRW over all peers")
+	// All shards distinct (group N == k+m).
+	seen := make(map[string]bool, len(got))
+	for _, n := range got {
+		assert.Falsef(t, seen[n], "dup node %q", n)
+		seen[n] = true
+	}
+}

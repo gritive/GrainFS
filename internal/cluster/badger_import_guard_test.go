@@ -25,7 +25,7 @@ func TestNoBadgerImportsInProductionFiles(t *testing.T) {
 		"GrainFS/internal/badgerutil",
 	}
 	// Recursive walk so every current and future subpackage (putpipeline,
-	// clusterpb, ecspike, ...) is covered — an explicit dir list would
+	// clusterpb, ...) is covered — an explicit dir list would
 	// silently exempt new subdirectories.
 	fset := token.NewFileSet()
 	var violations []string

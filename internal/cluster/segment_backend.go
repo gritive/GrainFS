@@ -52,7 +52,11 @@ type clusterSegmentBackend struct {
 	readDoneMarkerFn  func(uploadID string) (*multipartDone, error) // seam for phantom-winner guard
 	headObjectMetaVFn func(ctx context.Context, bucket, key, versionID string) (*storage.Object, error)
 	ecConfigFn        func() ECConfig
-	chunkSize         int
+	// peerWeightsFn returns the per-peer disk-capacity weight snapshot aligned
+	// 1:1 with peers and whether weighting is enabled. Production constructor
+	// leaves it nil; the default routes through b.nodeStatsStore + b.clusterCfg.
+	peerWeightsFn func(peers []string) (weights []float64, enabled bool)
+	chunkSize     int
 }
 
 // segmentPlacement captures the post-write placement metadata for one
@@ -95,15 +99,21 @@ func (c *clusterSegmentBackend) WriteSegmentBytes(ctx context.Context, bucket, k
 
 	// 2. Delegate to writeOneSegment.
 	cfg := c.currentECConfig()
+	// Compute the per-peer weight snapshot for THIS group's peers once, on the
+	// coordinating writer. writeOneSegment passes it to weighted HRW; the chosen
+	// NodeIDs are recorded and replayed on read, so readers never recompute.
+	weights, weightedEnabled := c.peerWeights(group.PeerIDs)
 	in := writeSegmentInput{
-		Bucket:        bucket,
-		Key:           key,
-		VersionID:     c.versionID,
-		SegmentBlobID: c.blobIDs[idx],
-		SegmentIdx:    idx,
-		Group:         group,
-		Cfg:           cfg,
-		Data:          data,
+		Bucket:          bucket,
+		Key:             key,
+		VersionID:       c.versionID,
+		SegmentBlobID:   c.blobIDs[idx],
+		SegmentIdx:      idx,
+		Group:           group,
+		Cfg:             cfg,
+		Data:            data,
+		Weights:         weights,
+		WeightedEnabled: weightedEnabled,
 	}
 	rec, _, blobID, werr := c.writeOne(ctx, idx, in)
 	if werr != nil {
@@ -151,6 +161,20 @@ func (c *clusterSegmentBackend) currentECConfig() ECConfig {
 		return c.ecConfigFn()
 	}
 	return c.b.currentECConfig()
+}
+
+// peerWeights returns the per-peer disk-capacity weight snapshot for this
+// group's peers (aligned 1:1 with peers) and whether weighting is enabled.
+// Tests inject peerWeightsFn; production reads b.nodeStatsStore + b.clusterCfg.
+// A nil backend (test seam wiring) means unweighted placement.
+func (c *clusterSegmentBackend) peerWeights(peers []string) ([]float64, bool) {
+	if c.peerWeightsFn != nil {
+		return c.peerWeightsFn(peers)
+	}
+	if c.b == nil {
+		return nil, false
+	}
+	return c.b.peerPlacementWeights(peers)
 }
 
 func (c *clusterSegmentBackend) writeOne(ctx context.Context, idx int, in writeSegmentInput) (PlacementRecord, string, string, error) {

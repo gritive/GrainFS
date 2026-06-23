@@ -695,6 +695,29 @@ func (b *DistributedBackend) effectivePlacementNodes() []string {
 	return replicated
 }
 
+// peerPlacementWeights returns the per-peer disk-capacity weight snapshot
+// aligned 1:1 with peers (weights[i] is peers[i]'s DiskAvailBytes, 0 when
+// unknown/stale) and whether weighted placement is enabled. It mirrors the
+// non-chunked fallback's weighting source (b.nodeStatsStore via
+// objectWritePlacementNodeStatesFromRuntime + b.clusterCfg.WeightedHRWEnabled).
+// selectShardPlacement applies the all-stale safeguard, so a nil/empty store
+// degrades to unweighted HRW.
+func (b *DistributedBackend) peerPlacementWeights(peers []string) ([]float64, bool) {
+	enabled := b.clusterCfg.WeightedHRWEnabled()
+	if !enabled {
+		return nil, false
+	}
+	states := objectWritePlacementNodeStatesFromRuntime(peers, b.nodeStatsStore)
+	if len(states) == 0 {
+		return nil, true
+	}
+	weights := make([]float64, len(peers))
+	for i, state := range states {
+		weights[i] = float64(state.DiskAvailBytes)
+	}
+	return weights, true
+}
+
 // TriggerRaftSnapshot forces a Raft FSM snapshot on the current leader.
 // As of M5 PR 29 v2 owns snapshot lifecycle exclusively; the apply loop
 // forwards through RaftNode.CreateSnapshot (formerly the RaftV2Snapshotter

@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/hrw"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -74,7 +75,15 @@ func (f *fakeSegmentBackendDeps) writeSegment(ctx context.Context, idx int, in w
 	if f.writePeer != nil {
 		peers = f.writePeer(idx)
 	} else {
-		peers = append([]string(nil), in.Group.PeerIDs...)
+		// Mirror the production writeOneSegment placement: weighted HRW over the
+		// chosen group's peers, keyed by the segment-scoped shardKey. This keeps
+		// the recorded NodeIDs HRW-derived so commit-path tests can assert it.
+		placementKey := ecObjectSegmentShardKey(ecObjectWritePlan{
+			Key:           in.Key,
+			VersionID:     in.VersionID,
+			SegmentBlobID: in.SegmentBlobID,
+		})
+		peers = selectShardPlacement(in.Cfg, in.Group.PeerIDs, placementKey, in.Weights, in.WeightedEnabled)
 	}
 	rec := PlacementRecord{Nodes: peers, K: in.Cfg.DataShards, M: in.Cfg.ParityShards}
 	return rec, "etag-seg-" + fmt.Sprint(idx), in.SegmentBlobID, nil
@@ -258,6 +267,81 @@ func TestPutObjectChunked_SingleAtomicMetaCommit(t *testing.T) {
 
 	// No cleanup calls on success path.
 	assert.Empty(t, deps.deleteCalls)
+}
+
+// TestWriteSegment_RecordsHRWPlacement guards the WriteSegmentBytes → record →
+// segmentPlacement plumbing: the recorded NodeIDs must be the HRW-derived order
+// the writer chose. The fake writeSegment mirrors the production weighted-HRW
+// selection (selectShardPlacement) so this pins the recorded-placement wiring;
+// the production writeOneSegment HRW swap itself is pinned by
+// TestWriteOneSegment_HRWPlacement.
+func TestWriteSegment_RecordsHRWPlacement(t *testing.T) {
+	groups := fourPGFixture()
+	deps := newFakeBackendWithGroups(groups)
+	blobIDs := make([]string, 4)
+	for i := range blobIDs {
+		blobIDs[i] = uuid.Must(uuid.NewV7()).String()
+	}
+	csb := newCSBWithDeps(deps, blobIDs)
+	cfg := csb.currentECConfig()
+
+	for i := 0; i < 4; i++ {
+		_, err := csb.WriteSegment(context.Background(), csb.bucket, csb.key, i, bytes.NewReader([]byte("payload")))
+		require.NoError(t, err)
+	}
+
+	for i, p := range csb.placements {
+		group := groups[i%len(groups)] // matches round-robin groupSelector
+		placementKey := ecObjectSegmentShardKey(ecObjectWritePlan{
+			Key:           csb.key,
+			VersionID:     csb.versionID,
+			SegmentBlobID: blobIDs[i],
+		})
+		want := hrw.PlaceShards(placementKey, group.PeerIDs, nil, cfg.NumShards())
+		assert.Equalf(t, want, p.NodeIDs, "placement[%d].NodeIDs must be HRW-derived", i)
+	}
+}
+
+// TestWriteSegment_WeightedHRWPlacement guards that the per-peer weight snapshot
+// (from peerWeightsFn → b.nodeStatsStore in production) is threaded into the
+// segment placement so the dominant data path is under disk-capacity weighting.
+func TestWriteSegment_WeightedHRWPlacement(t *testing.T) {
+	groups := fourPGFixture()
+	deps := newFakeBackendWithGroups(groups)
+	blobIDs := []string{uuid.Must(uuid.NewV7()).String()}
+	csb := newCSBWithDeps(deps, blobIDs)
+	cfg := csb.currentECConfig()
+
+	// Skew weights so the weighted order differs from the unweighted one.
+	weightByPeer := map[string]float64{}
+	for _, g := range groups {
+		for j, peer := range g.PeerIDs {
+			weightByPeer[peer] = float64((j + 1) * 1000)
+		}
+	}
+	csb.peerWeightsFn = func(peers []string) ([]float64, bool) {
+		w := make([]float64, len(peers))
+		for i, p := range peers {
+			w[i] = weightByPeer[p]
+		}
+		return w, true
+	}
+
+	_, err := csb.WriteSegment(context.Background(), csb.bucket, csb.key, 0, bytes.NewReader([]byte("payload")))
+	require.NoError(t, err)
+
+	group := groups[0]
+	weights := make([]float64, len(group.PeerIDs))
+	for i, p := range group.PeerIDs {
+		weights[i] = weightByPeer[p]
+	}
+	placementKey := ecObjectSegmentShardKey(ecObjectWritePlan{
+		Key:           csb.key,
+		VersionID:     csb.versionID,
+		SegmentBlobID: blobIDs[0],
+	})
+	want := hrw.PlaceShards(placementKey, group.PeerIDs, weights, cfg.NumShards())
+	assert.Equal(t, want, csb.placements[0].NodeIDs, "weighted HRW must thread through WriteSegment")
 }
 
 func TestRunChunkedPutWithParts_CommitsPartsAndSegments(t *testing.T) {

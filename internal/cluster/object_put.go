@@ -138,52 +138,77 @@ func selectECPlacementFromNodeStates(
 	weightedEnabled bool,
 ) []string {
 	if !weightedEnabled || len(nodeStates) == 0 {
-		return hrw.PlaceShards(shardKey, liveNodes, nil, cfg.NumShards())
+		return selectShardPlacement(cfg, liveNodes, shardKey, nil, weightedEnabled)
 	}
 	stateByNode := make(map[string]ObjectWritePlacementNodeState, len(nodeStates))
 	for _, state := range nodeStates {
 		stateByNode[state.NodeID] = state
 	}
 	weights := make([]float64, len(liveNodes))
-	skipReason := make([]string, len(liveNodes))
-	active := 0
 	for i, nodeID := range liveNodes {
 		state, ok := stateByNode[nodeID]
 		if !ok || state.DiskAvailBytes == 0 {
 			weights[i] = 0
-			skipReason[i] = "stale"
 			continue
 		}
 		weights[i] = float64(state.DiskAvailBytes)
+	}
+	return selectShardPlacement(cfg, liveNodes, shardKey, weights, weightedEnabled)
+}
+
+// selectShardPlacement is the single shared placement helper used by BOTH the
+// non-chunked fallback (selectECPlacementFromNodeStates) and the chunked
+// segment hot path (ecObjectWriter.writeOneSegment). It returns the ordered
+// per-shard NodeIDs for shardKey across peers via weighted Rendezvous Hashing.
+//
+// weights, when non-nil, is aligned 1:1 with peers (weights[i] is peers[i]'s
+// disk-capacity weight; 0 ⇒ drain). It honors weightedEnabled and falls back to
+// unweighted HRW when weighting is disabled, no weights are supplied, or every
+// peer's weight is stale/zero (all-stale safeguard so a boot-before-first-gossip
+// write does not fail). It also degrades to unweighted HRW when weighting drops
+// the placement below cfg.NumShards() (weight-0 peers excluded by PlaceShards).
+//
+// The caller computes weights once (single coordinator) and records the result;
+// readers never recompute placement, so per-node/per-time weight divergence is
+// irrelevant (see generation_placement.go).
+func selectShardPlacement(cfg ECConfig, peers []string, shardKey string, weights []float64, weightedEnabled bool) []string {
+	nShards := cfg.NumShards()
+	if !weightedEnabled || len(weights) == 0 {
+		return hrw.PlaceShards(shardKey, peers, nil, nShards)
+	}
+
+	active := 0
+	for i, w := range weights {
+		if w <= 0 {
+			if i < len(peers) {
+				metrics.ClusterPlacementSkipped.WithLabelValues(peers[i], "stale").Inc()
+			}
+			continue
+		}
 		active++
 	}
 
-	// All-stale safeguard: if no live data (e.g. boot before first gossip),
-	// fall back to legacy unweighted placement so writes don't fail.
-	if active == 0 && countSkippedFor(skipReason, "stale") == len(liveNodes) {
+	// All-stale safeguard: no live weight data (e.g. boot before first gossip).
+	// Fall back to unweighted placement so writes don't fail.
+	if active == 0 {
 		metrics.ClusterPlacementSkipped.WithLabelValues("*", "all_stale_fallback").Inc()
-		return hrw.PlaceShards(shardKey, liveNodes, nil, cfg.NumShards())
+		return hrw.PlaceShards(shardKey, peers, nil, nShards)
 	}
 
-	// Emit per-reason skip metrics.
-	for i, r := range skipReason {
-		if r != "" {
-			metrics.ClusterPlacementSkipped.WithLabelValues(liveNodes[i], r).Inc()
-		}
+	placement := hrw.PlaceShards(shardKey, peers, weights, nShards)
+	// Weight-0 peers are excluded by PlaceShards. If that drops the stripe below
+	// the required width, fall back to unweighted HRW (which considers every
+	// peer) so the len(placement) == NumShards guard downstream still holds. A
+	// weight-0 peer here means "no current capacity stats" (stale gossip), not an
+	// operator drain — there is no drain concept — so re-including it is correct:
+	// availability over capacity-optimization while stats are incomplete. Emit a
+	// distinct metric so this degradation is visible (the all-stale path above
+	// has its own marker).
+	if len(placement) < nShards {
+		metrics.ClusterPlacementSkipped.WithLabelValues("*", "weight_shortfall_fallback").Inc()
+		return hrw.PlaceShards(shardKey, peers, nil, nShards)
 	}
-
-	return hrw.PlaceShards(shardKey, liveNodes, weights, cfg.NumShards())
-}
-
-// countSkippedFor returns the number of entries in reasons matching target.
-func countSkippedFor(reasons []string, target string) int {
-	n := 0
-	for _, r := range reasons {
-		if r == target {
-			n++
-		}
-	}
-	return n
+	return placement
 }
 
 func (b *DistributedBackend) putObjectECSpooled(ctx context.Context, bucket, key, versionID string, sp *spooledObject, contentType string, userMetadata map[string]string, sseAlgorithm string, acl uint8) (*storage.Object, error) {

@@ -268,6 +268,11 @@ func (s *recordingSegmentRangeStore) ReadAtSegment(ctx context.Context, ref stor
 
 func TestClusterSegmentStore_PlacementRecordUsesSegmentMetadata(t *testing.T) {
 	store := &clusterSegmentStore{}
+	// Recorded NodeIDs are arbitrary and NOT HRW-derivable from any key — reads
+	// must replay them verbatim and never recompute placement. This is the read
+	// regression guard for the write-side modulo→HRW swap: changing the write
+	// algorithm cannot affect already-written objects because the read path is
+	// record-driven (see internal/cluster/generation_placement.go).
 	ref := storage.SegmentRef{
 		BlobID:   "seg-1",
 		ECData:   2,
