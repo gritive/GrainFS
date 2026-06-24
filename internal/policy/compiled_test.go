@@ -113,6 +113,32 @@ func TestSetClearsNegativeCache(t *testing.T) {
 	require.False(t, cs.Allow(context.Background(), inp("AKIA", s3auth.PutObject, "b", "k"))) // Deny now enforced, no Invalidate needed
 }
 
+// A Set() that fails to compile (malformed committed policy read back via the
+// admin ?policy path) must DROP the bucket's stale cache — in particular a stale
+// negative "no policy -> allow" entry — so the next Allow re-pulls and fail-closes
+// the malformed policy to deny.
+func TestSetDropsStaleNegativeCacheOnCompileError(t *testing.T) {
+	cs := NewCompiledPolicyStore()
+	policyExists := false
+	cs.SetLoader(func(string) ([]byte, bool, error) {
+		if !policyExists {
+			return nil, false, nil // no policy yet -> negative-cache + allow
+		}
+		return []byte("{not json"), true, nil // malformed committed policy -> re-pull fail-closes to deny
+	})
+
+	// 1. Prime the stale negative cache (resolves "no policy" -> allow).
+	require.True(t, cs.Allow(context.Background(), inp("AKIA", s3auth.PutObject, "b", "k")))
+
+	// 2. A malformed policy now exists; the admin ?policy read compiles it -> Set errors.
+	policyExists = true
+	require.Error(t, cs.Set("b", []byte("{not json")))
+
+	// 3. The stale negative entry must be gone -> Allow re-pulls and DENIES.
+	require.False(t, cs.Allow(context.Background(), inp("AKIA", s3auth.PutObject, "b", "k")),
+		"a Set() compile error must drop the stale negative cache so the next Allow fail-closes")
+}
+
 func TestInvalidateTightensCachedAllowToDeny(t *testing.T) {
 	cs := NewCompiledPolicyStore()
 	deny := false

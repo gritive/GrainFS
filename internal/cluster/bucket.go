@@ -7,6 +7,8 @@ import (
 	"os"
 	"sort"
 
+	"github.com/rs/zerolog/log"
+
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -162,11 +164,25 @@ func (b *DistributedBackend) DeleteBucket(ctx context.Context, bucket string) er
 		return err
 	}
 
-	// Physical remove only after consensus has committed.
+	// Physical remove only after consensus has committed. The delete is now
+	// COMMITTED, so physical cleanup is best-effort: a transient FS error must not
+	// report the delete as failed (the bucket record is already gone, so a retry
+	// hits HeadBucket-not-found and could never re-run this cleanup — it would just
+	// leave inert residue AND a misleading error). Log residue for operator
+	// visibility instead; os.RemoveAll is idempotent.
 	// b.removeAll is always set in NewDistributedBackend (to os.RemoveAll by
 	// default; tests may inject a spy). The nil guard was removed in Task 12.
 	if err := b.removeAll(b.bucketDir(bucket)); err != nil {
-		return fmt.Errorf("remove bucket dir: %w", err)
+		log.Warn().Err(err).Str("bucket", bucket).Msg("delete bucket: physical bucket-dir removal failed after committed delete (inert residue left)")
+	}
+
+	// os.RemoveAll(bucketDir) clears only {root}/data/{bucket}; the off-raft
+	// quorum-meta blob trees live in a separate subtree and must be removed too,
+	// else hard-delete tombstone blobs from purgePerVersionBlobs persist as residue.
+	if b.shardSvc != nil {
+		if err := b.shardSvc.RemoveBucketMetaTrees(bucket); err != nil {
+			log.Warn().Err(err).Str("bucket", bucket).Msg("delete bucket: quorum-meta tree removal failed after committed delete (inert residue left)")
+		}
 	}
 	return nil
 }

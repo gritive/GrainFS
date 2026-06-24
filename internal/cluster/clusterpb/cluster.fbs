@@ -8,6 +8,13 @@ table Command {
   data:[ubyte];
 }
 
+// BytesValue wraps a single [ubyte] so a parent table can carry a
+// vector-of-vectors (FlatBuffers forbids a direct nested-vector field). Mirrors
+// storagepb.BytesValue. Used by PutObjectMetaCmd.append_call_md5s.
+table BytesValue {
+  v_bytes:[ubyte];
+}
+
 // --- ClusterConfig optional-field boxes (Slice 1 of admin-API config) ---
 table BoolBox   { v:bool;   }
 table Int32Box  { v:int32;  }
@@ -164,6 +171,10 @@ table PutObjectMetaCmd {
   is_quarantined:bool = false;
   // Slice 2: cause string set at quarantine time (e.g. "corrupt-shard").
   quarantine_cause:string;
+  // Per-AppendObject-call digest history (one entry per append call). Persisted
+  // so the composite ETag survives a coalesce (which consumes Segments). Empty/absent
+  // for non-appendable objects. Appended last for slot stability.
+  append_call_md5s:[BytesValue];
 }
 
 // SegmentMetaEntry carries the per-segment placement metadata for a chunked

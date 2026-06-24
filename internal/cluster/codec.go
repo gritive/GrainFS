@@ -256,6 +256,22 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 		}
 		coalescedOff = b.EndVector(len(cOffs))
 	}
+	// append_call_md5s — build child BytesValue tables BEFORE PutObjectMetaCmdStart.
+	var appendMD5sOff flatbuffers.UOffsetT
+	if len(c.AppendCallMD5s) > 0 {
+		md5Offs := make([]flatbuffers.UOffsetT, len(c.AppendCallMD5s))
+		for i, d := range c.AppendCallMD5s {
+			vOff := b.CreateByteVector(d)
+			clusterpb.BytesValueStart(b)
+			clusterpb.BytesValueAddVBytes(b, vOff)
+			md5Offs[i] = clusterpb.BytesValueEnd(b)
+		}
+		clusterpb.PutObjectMetaCmdStartAppendCallMd5sVector(b, len(md5Offs))
+		for i := len(md5Offs) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(md5Offs[i])
+		}
+		appendMD5sOff = b.EndVector(len(md5Offs))
+	}
 	clusterpb.PutObjectMetaCmdStart(b)
 	clusterpb.PutObjectMetaCmdAddBucket(b, bucketOff)
 	clusterpb.PutObjectMetaCmdAddKey(b, keyOff)
@@ -318,6 +334,9 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	}
 	if quarantineCauseOff != 0 {
 		clusterpb.PutObjectMetaCmdAddQuarantineCause(b, quarantineCauseOff)
+	}
+	if appendMD5sOff != 0 {
+		clusterpb.PutObjectMetaCmdAddAppendCallMd5s(b, appendMD5sOff)
 	}
 	return fbFinish(b, clusterpb.PutObjectMetaCmdEnd(b)), nil
 }
@@ -438,6 +457,19 @@ func decodePutObjectMetaCmd(data []byte) (out PutObjectMetaCmd, err error) {
 			}
 		}
 	}
+	var appendCallMD5s [][]byte
+	if n := t.AppendCallMd5sLength(); n > 0 {
+		appendCallMD5s = make([][]byte, n)
+		var bv clusterpb.BytesValue
+		for i := 0; i < n; i++ {
+			if !t.AppendCallMd5s(&bv, i) {
+				return PutObjectMetaCmd{}, fmt.Errorf("decode append_call_md5s[%d]", i)
+			}
+			if v := bv.VBytesBytes(); len(v) > 0 {
+				appendCallMD5s[i] = append([]byte(nil), v...)
+			}
+		}
+	}
 	return PutObjectMetaCmd{
 		Bucket:           string(t.Bucket()),
 		Key:              string(t.Key()),
@@ -467,6 +499,7 @@ func decodePutObjectMetaCmd(data []byte) (out PutObjectMetaCmd, err error) {
 		MetaSeqCAS:       t.MetaSeqCas(),
 		IsQuarantined:    t.IsQuarantined(),
 		QuarantineCause:  string(t.QuarantineCause()),
+		AppendCallMD5s:   appendCallMD5s,
 	}, nil
 }
 

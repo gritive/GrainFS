@@ -33,6 +33,14 @@ func relocationStillEligible(cur PutObjectMetaCmd, in relocateInput, clusterRedu
 		return fmt.Errorf("%w: cluster not redundant", ErrRelocateSkipped)
 	case cur.IsDeleteMarker:
 		return fmt.Errorf("%w: delete marker", ErrRelocateSkipped)
+	case cur.IsAppendable || len(cur.Coalesced) > 0:
+		// Relocation re-encodes the body via runChunkedPut, which writes a plain
+		// chunked manifest with no IsAppendable / Coalesced / AppendCallMD5s. Relocating
+		// an appendable/coalesced object would therefore drop its append-call digest
+		// history (resetting the composite ETag on the next append) and its coalesced
+		// refs. Skip it — it stays 1+0 (no redundancy upgrade) rather than be corrupted.
+		// Redundancy upgrade for appendable/coalesced objects is a separate feature.
+		return fmt.Errorf("%w: appendable/coalesced object (manifest shape not preserved by chunked re-encode)", ErrRelocateSkipped)
 	case cur.ECParity != 0:
 		return fmt.Errorf("%w: already redundant (parity=%d)", ErrRelocateSkipped, cur.ECParity)
 	case cur.ECData < 1:

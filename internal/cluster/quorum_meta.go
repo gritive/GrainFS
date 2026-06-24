@@ -2268,3 +2268,29 @@ func filterAndSortEntries(entries []PutObjectMetaCmd) []PutObjectMetaCmd {
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	return out
 }
+
+// RemoveBucketMetaTrees physically removes a bucket's off-raft quorum-meta blob
+// trees (.quorum_meta/{bucket} and .quorum_meta_versions/{bucket}) under every
+// data dir. Called on bucket delete: os.RemoveAll(bucketDir) only clears the
+// data subtree and leaves these blob trees (incl. hard-delete tombstone blobs
+// written by purgePerVersionBlobs) behind. Idempotent. Coordinator-local only;
+// see DeleteBucket's scope note.
+func (s *ShardService) RemoveBucketMetaTrees(bucket string) error {
+	for _, dataDir := range s.DataDirs() {
+		for _, sub := range []string{quorumMetaSubDir, quorumMetaVersionsSubDir} {
+			root := filepath.Join(dataDir, sub)
+			target := filepath.Join(root, bucket)
+			// Containment guard: never let a crafted bucket name escape the meta-tree
+			// root via traversal (mirrors the filepath.Rel guards on the quorum-meta
+			// write/delete paths).
+			rel, rerr := filepath.Rel(root, target)
+			if rerr != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				return fmt.Errorf("remove bucket meta trees: %q escapes %s", bucket, sub)
+			}
+			if err := os.RemoveAll(target); err != nil {
+				return fmt.Errorf("remove %s/%s: %w", sub, bucket, err)
+			}
+		}
+	}
+	return nil
+}

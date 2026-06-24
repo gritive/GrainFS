@@ -386,8 +386,28 @@ func (rcv *PutObjectMetaCmd) QuarantineCause() []byte {
 	return nil
 }
 
+func (rcv *PutObjectMetaCmd) AppendCallMd5s(obj *BytesValue, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(60))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *PutObjectMetaCmd) AppendCallMd5sLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(60))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
 func PutObjectMetaCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(28)
+	builder.StartObject(29)
 }
 func PutObjectMetaCmdAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -490,6 +510,12 @@ func PutObjectMetaCmdAddIsQuarantined(builder *flatbuffers.Builder, isQuarantine
 }
 func PutObjectMetaCmdAddQuarantineCause(builder *flatbuffers.Builder, quarantineCause flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(27, flatbuffers.UOffsetT(quarantineCause), 0)
+}
+func PutObjectMetaCmdAddAppendCallMd5s(builder *flatbuffers.Builder, appendCallMd5s flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(28, flatbuffers.UOffsetT(appendCallMd5s), 0)
+}
+func PutObjectMetaCmdStartAppendCallMd5sVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
 }
 func PutObjectMetaCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.669.0] - 2026-06-25
+
+### Fixed
+- **AppendObject now fails closed on a versioning-read fault.** A genuine fault while resolving a
+  bucket's versioning status during AppendObject is now surfaced (the request is rejected) instead of
+  silently allowing the append, matching the mutating-edge contract PUT / Copy / CompleteMultipartUpload
+  already follow. A backend that does not track versioning is still treated as unversioned (unchanged).
+- **The composite ETag of an appendable object stays correct after an internal coalesce.** The
+  per-append-call digest history is now persisted in the object's metadata, so an append that lands
+  after the object's segments are coalesced returns the full S3 multipart-style composite ETag
+  (the MD5 of all per-call digests) instead of one derived only from the surviving post-coalesce
+  segments.
+- **A bucket policy that fails to compile now reliably denies.** Reading or setting a malformed bucket
+  policy no longer leaves a stale cached "allow" decision behind; authorization re-resolves the policy
+  from the committed replica and fails closed (deny) until the policy is rewritten.
+- **Bucket delete no longer leaves per-bucket metadata residue.** Deleting a bucket now also removes the
+  off-raft quorum-meta blob trees on the node that runs the delete, instead of stranding hard-delete
+  tombstone blobs under `.quorum_meta_versions/{bucket}/`.
+
 ## [0.0.668.0] - 2026-06-25
 
 ### Removed

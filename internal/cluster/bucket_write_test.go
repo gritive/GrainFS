@@ -185,6 +185,29 @@ func TestBucketWrite_Delete_MetaErrorAbortsRemoveAll(t *testing.T) {
 	assert.False(t, removeAllCalled, "removeAll must NOT be called when meta DeleteBucket fails")
 }
 
+// TestBucketWrite_Delete_PhysicalCleanupErrorIsBestEffort verifies that once the
+// consensus delete has COMMITTED, a physical-cleanup FS error does NOT fail the
+// delete: the bucket record is already gone, so reporting failure would be
+// misleading and non-retryable (a retry hits HeadBucket-not-found). The error is
+// logged and the delete reports success.
+func TestBucketWrite_Delete_PhysicalCleanupErrorIsBestEffort(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	fake := &fakeMetaBucketStore{}
+	b.SetMetaBucketStore(fake)
+
+	ctx := context.Background()
+	seedBucketForDelete(t, b, "del-bucket")
+
+	b.removeAll = func(path string) error {
+		return errors.New("fs boom: read-only filesystem")
+	}
+
+	// Consensus committed (fake has no deleteErr); the post-commit removeAll fault
+	// must be swallowed as best-effort residue, not returned as a delete failure.
+	require.NoError(t, b.DeleteBucket(ctx, "del-bucket"),
+		"a post-commit physical-cleanup error must not fail the already-committed delete")
+}
+
 // --- SetBucketVersioningPropose tests ---
 
 // TestBucketWrite_SetVersioning_GoesToMetaBucketStore verifies that
