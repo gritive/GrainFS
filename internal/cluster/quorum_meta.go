@@ -1189,7 +1189,7 @@ func (b *DistributedBackend) readQuorumMetaVersion(bucket, key, versionID string
 // read strict (local read failure → fail closed).
 //
 // Distinct from the tolerant readQuorumMetaVersions, which silently drops per-blob
-// decode failures and is correct for the off-path / non-sole-authority consumers.
+// decode failures and is correct for the off-path / non-blob-authority consumers.
 func (b *DistributedBackend) readQuorumMetaVersionsDecodeStrict(bucket, key string) ([]PutObjectMetaCmd, error) {
 	if b.shardSvc == nil {
 		return nil, nil
@@ -1709,7 +1709,7 @@ func (s *ShardService) ScanQuorumMetaVersionsAll(ctx context.Context, addr, buck
 		// silently skipped — that would return a partial authoritative version
 		// list, omitting versions from a blob-authoritative listing. (The per-key-max
 		// tolerant clients keep skipping by design; this all-version path is the
-		// sole-authority enumerator and must fail closed.)
+		// blob-authority enumerator and must fail closed.)
 		cmd, derr := s.decodeQuorumMetaCmdBlob(blob)
 		if derr != nil {
 			return nil, fmt.Errorf("decode scan quorum meta versions all response from %s: %w", addr, derr)

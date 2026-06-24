@@ -158,7 +158,7 @@ func TestCompleteMultipart_NonVersionedLatestOnlyFailClosed(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(qmetaBucketDir, 0o755) })
 
 	_, err = b.CompleteMultipartUpload(ctx, bkt, key, up.UploadID, []storage.Part{*part})
-	require.Error(t, err, "a failed latest-only sole-authority write must FAIL the complete (no phantom success)")
+	require.Error(t, err, "a failed latest-only blob-authority write must FAIL the complete (no phantom success)")
 
 	// No FSM obj: record was written (apply is never reached — the complete is raft-free).
 	require.NoError(t, b.store.View(func(txn MetadataTxn) error {

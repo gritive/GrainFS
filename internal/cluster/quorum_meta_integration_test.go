@@ -454,7 +454,7 @@ func TestMultipartComplete_NonVersionedQuorumMetaIsBlobAuthority(t *testing.T) {
 	require.NoError(t, os.Remove(qmetaPath))
 	_, err = b.HeadObject(ctx, "bucket", "multi.bin")
 	require.ErrorIs(t, err, storage.ErrObjectNotFound,
-		"with the sole-authority blob gone the object must 404 (no FSM obj: fallback)")
+		"with the authoritative blob gone the object must 404 (no FSM obj: fallback)")
 }
 
 // TestReadQuorumMeta_PeerFallback_ParityNodeMiss proves the N-K node hazard fix:

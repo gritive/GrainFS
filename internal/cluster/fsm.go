@@ -64,7 +64,7 @@ const (
 	//   20 CmdSetObjectTags        (blob RMW SetObjectTagsPropose)
 	//   40 CmdPutObjectQuarantine  (folded into quorum-meta blob)
 	//   43 CmdDeleteMultipartDone
-	//   44 CmdSetBucketSoleAuthority (blob-primary teardown, blob-primary epic)
+	//   44 CmdSetBucketSoleAuthority (soleauth teardown, blob-primary epic)
 )
 
 // Command is a serializable FSM command for Raft log entries.
