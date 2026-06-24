@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.658.0] - 2026-06-24
+
+### Changed
+- **Unified EC shard local/remote dispatch behind a single shard-target endpoint (behavior-neutral
+  refactor).** The scattered `if node == selfID { local } else { remote RPC }` branches in the EC
+  data plane (2 in `ec_object_writer.go`, 4 in `ec_object_reader.go`) are collapsed into one
+  consumer-defined seam: a new `shardEndpoint` interface (`internal/cluster/shard_target.go`) with
+  `localShardEndpoint` / `remoteShardEndpoint` implementations and a single `endpointFor(node)`
+  selector that makes the local-vs-remote decision exactly once per placement slot. Single-node
+  deployments (where every placement slot resolves to self) now flow through the general path
+  instead of a special branch. On-disk format, wire protocol, metrics, PutTrace stages, and
+  peerHealth marking are unchanged; the reader's `localDataFastPath` goroutine-skip optimization is
+  preserved (the per-slot local test now uses `endpointFor(node).IsLocal()`). The retry/backoff,
+  buffered-vs-stream size threshold, and trace breakdown logic moved verbatim into
+  `remoteShardEndpoint`. The cancel-aware peerHealth marking in the reader's k-of-n early-exit path
+  stays in the reader. The previously split write-only (`ecObjectShardStore`) and read-only
+  (`ecObjectShardFetcher`) interfaces are consolidated into one `ecShardStore` interface satisfied
+  by `*ShardService`.
+
 ## [0.0.657.0] - 2026-06-24 — data-plane raft-free Slice 2
 
 ### Changed

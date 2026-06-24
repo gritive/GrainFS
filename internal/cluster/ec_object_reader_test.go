@@ -114,6 +114,32 @@ func (f *fakeECObjectShardFetcher) ReadShardRangeStream(ctx context.Context, pee
 	return io.NopCloser(bytes.NewReader(data)), nil
 }
 
+// Write-side methods satisfy the unified ecShardStore interface. The EC reader
+// never invokes them; they are unreachable stubs.
+func (f *fakeECObjectShardFetcher) WriteLocalShardContext(context.Context, string, string, int, []byte) error {
+	panic("WriteLocalShardContext: not used by ecObjectReader")
+}
+
+func (f *fakeECObjectShardFetcher) WriteLocalShardStreamContext(context.Context, string, string, int, io.Reader) error {
+	panic("WriteLocalShardStreamContext: not used by ecObjectReader")
+}
+
+func (f *fakeECObjectShardFetcher) DeleteLocalShards(string, string) error {
+	panic("DeleteLocalShards: not used by ecObjectReader")
+}
+
+func (f *fakeECObjectShardFetcher) WriteShard(context.Context, string, string, string, int, []byte) error {
+	panic("WriteShard: not used by ecObjectReader")
+}
+
+func (f *fakeECObjectShardFetcher) WriteShardStream(context.Context, string, string, string, int, io.Reader) error {
+	panic("WriteShardStream: not used by ecObjectReader")
+}
+
+func (f *fakeECObjectShardFetcher) DeleteShards(context.Context, string, string, string) error {
+	panic("DeleteShards: not used by ecObjectReader")
+}
+
 // fakeECObjectPeerHealth records mark calls.
 type fakeECObjectPeerHealth struct {
 	mu        sync.Mutex

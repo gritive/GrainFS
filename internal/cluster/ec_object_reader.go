@@ -19,17 +19,6 @@ type hotChecker interface {
 	IsHot(nodeID string) bool
 }
 
-// ecObjectShardFetcher abstracts local and remote shard I/O for EC reads.
-type ecObjectShardFetcher interface {
-	ReadLocalShard(bucket, key string, shardIdx int) ([]byte, error)
-	ReadShard(ctx context.Context, peer, bucket, key string, shardIdx int) ([]byte, error)
-	OpenLocalShard(bucket, key string, shardIdx int) (io.ReadCloser, error)
-	ReadShardStream(ctx context.Context, peer, bucket, key string, shardIdx int) (io.ReadCloser, error)
-	ReadLocalShardAt(bucket, key string, shardIdx int, offset int64, buf []byte) (int, error)
-	ReadShardRange(ctx context.Context, peer, bucket, key string, shardIdx int, offset, length int64) ([]byte, error)
-	ReadShardRangeStream(ctx context.Context, peer, bucket, key string, shardIdx int, offset, length int64) (io.ReadCloser, error)
-}
-
 // ecObjectShardCache abstracts the shard LRU cache for EC reads.
 type ecObjectShardCache interface {
 	Peek(key string) ([]byte, bool)
@@ -40,7 +29,7 @@ type ecObjectShardCache interface {
 }
 
 // Verify that concrete types satisfy the interfaces at compile time.
-var _ ecObjectShardFetcher = (*ShardService)(nil)
+var _ ecShardStore = (*ShardService)(nil)
 var _ ecObjectShardCache = (*shardcache.Cache)(nil)
 
 // ecObjectReader reconstructs EC-encoded objects from their constituent shards.
@@ -48,7 +37,7 @@ var _ ecObjectShardCache = (*shardcache.Cache)(nil)
 // DistributedBackend fields it already holds.
 type ecObjectReader struct {
 	selfID     string
-	shards     ecObjectShardFetcher
+	shards     ecShardStore
 	peerHealth ecObjectPeerHealth // nil = disabled
 	cache      ecObjectShardCache // nil = disabled
 	ecConfig   ECConfig           // cluster-level fallback; per-object rec overrides
@@ -383,7 +372,6 @@ func (r ecObjectReader) readShards(ctx context.Context, bucket, shardKey string,
 		return true
 	}
 
-	selfID := r.selfID
 	fetchShards := func(indices []int, stopAtK bool) {
 		if len(indices) == 0 || available >= recCfg.DataShards {
 			return
@@ -403,17 +391,18 @@ func (r ecObjectReader) readShards(ctx context.Context, bucket, shardKey string,
 			}
 			dispatched++
 			go func() {
+				ep := r.endpointFor(node)
 				var data []byte
 				var err error
 				var peer string
 				var peerOK, canceled bool
-				if node == selfID {
-					data, err = r.shards.ReadLocalShard(bucket, shardKey, i)
+				if ep.IsLocal() {
+					data, err = ep.ReadShard(ctx, bucket, shardKey, i)
 				} else {
 					peer = node
 					shardCtx, shardCancel := context.WithTimeout(readCtx, shardRPCTimeout)
 					defer shardCancel()
-					data, err = r.shards.ReadShard(shardCtx, node, bucket, shardKey, i)
+					data, err = ep.ReadShard(shardCtx, bucket, shardKey, i)
 					if err != nil {
 						if errors.Is(err, context.Canceled) && readCtx.Err() != nil {
 							canceled = true
@@ -454,7 +443,7 @@ func (r ecObjectReader) readShards(ctx context.Context, bucket, shardKey string,
 	// read them without spinning up goroutines.
 	localDataFastPath := true
 	for _, i := range primary {
-		if !cached[i] && rec.Nodes[i] != selfID {
+		if !cached[i] && !r.endpointFor(rec.Nodes[i]).IsLocal() {
 			localDataFastPath = false
 			break
 		}
@@ -511,9 +500,9 @@ func (r ecObjectReader) openShardReaders(ctx context.Context, bucket, shardKey s
 	available := 0
 	openShard := func(i int) bool {
 		readamp.RecordECShard(shardCacheKey(bucket, shardKey, i))
-		node := rec.Nodes[i]
-		if node == r.selfID {
-			rc, err := r.shards.OpenLocalShard(bucket, shardKey, i)
+		ep := r.endpointFor(rec.Nodes[i])
+		if ep.IsLocal() {
+			rc, err := ep.OpenShardStream(ctx, bucket, shardKey, i)
 			if err != nil {
 				return false
 			}
@@ -523,16 +512,10 @@ func (r ecObjectReader) openShardReaders(ctx context.Context, bucket, shardKey s
 		}
 
 		shardCtx, shardCancel := context.WithTimeout(ctx, shardRPCTimeout)
-		rc, err := r.shards.ReadShardStream(shardCtx, node, bucket, shardKey, i)
+		rc, err := ep.OpenShardStream(shardCtx, bucket, shardKey, i)
 		if err != nil {
 			shardCancel()
-			if r.peerHealth != nil {
-				r.peerHealth.MarkUnhealthy(node)
-			}
 			return false
-		}
-		if r.peerHealth != nil {
-			r.peerHealth.MarkHealthy(node)
 		}
 		shardReaders[i] = &multiReadCloser{Reader: rc, close: func() error {
 			err := rc.Close()
@@ -593,42 +576,14 @@ func (r ecObjectReader) readDataShardAt(ctx context.Context, bucket, shardKey, n
 			return copy(buf, data), nil
 		}
 	}
-	if node == r.selfID {
-		return r.shards.ReadLocalShardAt(bucket, shardKey, shardIdx, shardHeaderSize+shardOffset, buf)
+	ep := r.endpointFor(node)
+	if ep.IsLocal() {
+		return ep.ReadShardAt(ctx, bucket, shardKey, shardIdx, shardHeaderSize+shardOffset, buf)
 	}
 
 	shardCtx, shardCancel := context.WithTimeout(ctx, shardRPCTimeout)
 	defer shardCancel()
-	if len(buf) <= maxShardRangeReplyBytes {
-		data, err := r.shards.ReadShardRange(shardCtx, node, bucket, shardKey, shardIdx, shardHeaderSize+shardOffset, int64(len(buf)))
-		if err != nil {
-			if r.peerHealth != nil {
-				r.peerHealth.MarkUnhealthy(node)
-			}
-			return 0, err
-		}
-		if r.peerHealth != nil {
-			r.peerHealth.MarkHealthy(node)
-		}
-		n := copy(buf, data)
-		if n != len(buf) || n != len(data) {
-			return n, io.ErrUnexpectedEOF
-		}
-		r.cacheReadAtRange(rangeCacheKey, buf[:n], n, len(buf), nil)
-		return n, nil
-	}
-	rc, err := r.shards.ReadShardRangeStream(shardCtx, node, bucket, shardKey, shardIdx, shardHeaderSize+shardOffset, int64(len(buf)))
-	if err != nil {
-		if r.peerHealth != nil {
-			r.peerHealth.MarkUnhealthy(node)
-		}
-		return 0, err
-	}
-	defer rc.Close()
-	if r.peerHealth != nil {
-		r.peerHealth.MarkHealthy(node)
-	}
-	n, err := io.ReadFull(rc, buf)
+	n, err := ep.ReadShardAt(shardCtx, bucket, shardKey, shardIdx, shardHeaderSize+shardOffset, buf)
 	r.cacheReadAtRange(rangeCacheKey, buf[:n], n, len(buf), err)
 	return n, err
 }
@@ -645,7 +600,7 @@ func (r ecObjectReader) cacheReadAtRange(key string, data []byte, n, want int, e
 // hasLocalDataShard reports whether any of the K data shards is stored on self.
 func (r ecObjectReader) hasLocalDataShard(rec PlacementRecord, cfg ECConfig) bool {
 	for i := 0; i < cfg.DataShards && i < len(rec.Nodes); i++ {
-		if rec.Nodes[i] == r.selfID {
+		if r.endpointFor(rec.Nodes[i]).IsLocal() {
 			return true
 		}
 	}
