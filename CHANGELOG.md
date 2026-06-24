@@ -40,6 +40,22 @@
   that has applied this change will find the apply side is a no-op. This is safe for greenfield
   deployments (no live proposers existed before this change); it is not safe for a mixed-version
   rolling upgrade where old nodes were actively proposing these commands.
+- **Object quarantine is now K-of-N eventually consistent (previously raft-strong / all-node).**
+  Folding quarantine into the quorum-meta blob makes it follow the same consistency model as all
+  other object metadata (tags, ACL, delete markers): the set is a K-of-N blob write and reads are
+  local-first. A node that was outside the write quorum (e.g. briefly unreachable during the
+  quarantine write) can serve a GET of a quarantined object until its replica converges. This is a
+  deliberate consequence of the data-plane-raft-free model and matches the consistency of every
+  other per-object mutation; the prior raft-replicated quarantine was the only per-object state with
+  all-node-strong consistency. Operators relying on instant cluster-wide quarantine should account
+  for this convergence window.
+- **`ForceDeleteBucket` racing a concurrent PUT can leave the racing object's blob/shards.**
+  Force-delete enumerates the live objects, purges each, then deletes the bucket. A PUT that commits
+  its quorum-meta blob + shards after the enumeration (but around bucket deletion) is not seen by the
+  purge and its bytes can remain under `.quorum_meta/<bucket>/` or `shards/<bucket>/` (outside the
+  `os.RemoveAll(bucketDir)` reach). This is a narrow TOCTOU window; deleting a bucket concurrently
+  with writes to it is undefined under S3 semantics. Stranded bytes are reclaimable by the orphan/
+  segment scrubber.
 
 ## [0.0.656.0] - 2026-06-24
 
