@@ -18,13 +18,26 @@ import (
 // walker treats a directory holding ≥1 such file as a shard-leaf dir.
 var shardFileRe = regexp.MustCompile(`^shard_\d+$`)
 
-// minOrphanShardAge floors the orphan-shard age gate. A full-object EC write
-// renames its shard files before the metadata commit; a multipart-complete may
-// preserve shards on an ErrProposeTimeout (bounded by proposeForwardTimeout).
-// Flooring the age gate at 2*proposeForwardTimeout guarantees a dir is never
-// eligible until long after the commit has resolved, so peer-fallback liveness
-// (hasLiveShardRecord) sees any committed record before deletion is considered.
-const minOrphanShardAge = 2 * proposeForwardTimeout
+// minOrphanShardAge floors the orphan-shard age gate ABOVE the worst-case healthy
+// EC write→commit wall-clock, so a shard is never reclaimed while its write may
+// still be in flight. An EC write renames each shard_N BEFORE the metadata commit
+// (object_put.go), and the slowest shard takes up to ecShardWriteAttempts ×
+// (shardRPCTimeout + ecShardWriteBackoff) — a remote shard write retries that many
+// times, each bounded by shardRPCTimeout. The commit then fans the quorum-meta blob
+// out to the placement nodes; a coalesce publish CAS-retries up to
+// maxCoalesceCASRetries, each bounded by quorumMetaReadTimeout + quorumMetaWriteTimeout
+// (the widest commit window, which also dominates the plain full-object commit of
+// two quorum-meta writes). Flooring above their sum guarantees that once a shard is
+// age-eligible its write has either committed (→ kept by hasLiveShardRecord, which
+// also fail-closes on an unreachable peer) or definitively failed (→ reclaimed).
+//
+// The legacy floor was only 2*proposeForwardTimeout (60s), which ignored the
+// multi-minute shard-write window: a slow in-flight write whose early shard_N was
+// renamed >60s before its commit could have that shard reclaimed mid-write — a
+// pre-2026-06 data-loss bug. Reclaim is a background sweep, so the larger floor only
+// delays reclaim of genuine orphans (harmless).
+const minOrphanShardAge = ecShardWriteAttempts*(shardRPCTimeout+ecShardWriteBackoff) +
+	(1+maxCoalesceCASRetries)*(quorumMetaReadTimeout+quorumMetaWriteTimeout)
 
 // SetOrphanShardSweepGate wires the boot-computed predicate that permits the EC
 // full-object orphan-shard sweep. Default (unset) is fail-closed: the sweep
@@ -272,8 +285,9 @@ func (b *DistributedBackend) WalkOrphanShards(known map[string]bool, fn func(dir
 	return nil
 }
 
-// effectiveOrphanShardAge is the configured orphan age gate, floored so the
-// in-flight commit window (≤ proposeForwardTimeout) can never reach it.
+// effectiveOrphanShardAge is the configured orphan age gate, floored to
+// minOrphanShardAge so an in-flight EC write's full write+commit window (the
+// bounded shard-RPC retries plus the quorum-meta commit) can never reach it.
 func (b *DistributedBackend) effectiveOrphanShardAge() time.Duration {
 	age := b.scrubOrphanAge
 	if age < minOrphanShardAge {
@@ -453,18 +467,23 @@ func (b *DistributedBackend) hasLiveShardRecord(bucket, key, versionID string) (
 		// FSM tombstone: no shards expected; fall through to quorum-meta to be sure.
 	}
 
-	obj, _, qerr := b.readQuorumMeta(bucket, key)
-	switch {
-	case qerr == nil && obj != nil:
+	// Certainty-aware reclaim read: plain readQuorumMeta maps an exhausted peer
+	// fan-out to ErrObjectNotFound even when a metadata-holding peer was merely
+	// unreachable, so reclaiming on its NotFound could delete a live object whose
+	// quorum-meta sits on a briefly-down peer (K-of-N). readQuorumMetaForReclaim
+	// fails CLOSED on any peer-uncertainty; a negative (absent / different-version)
+	// claim is honored only when the responding set is complete.
+	obj, found, certain := b.readQuorumMetaForReclaim(bucket, key)
+	if !certain {
+		return false, false // peer-uncertainty or read error → keep
+	}
+	if found && obj != nil {
 		if obj.VersionID == versionID && !obj.IsDeleteMarker {
 			return true, true // live regular-PUT (this exact version is the winner)
 		}
 		return false, true // a different/newer version won → this one is overwritten
-	case errors.Is(qerr, storage.ErrObjectNotFound):
-		return false, true // not live in FSM or quorum-meta → orphan-eligible
-	default:
-		return false, false // quorum-meta read error → UNCERTAIN → keep
 	}
+	return false, true // proven absent in FSM and quorum-meta → orphan-eligible
 }
 
 // fsmCarveoutShardLive judges shard liveness from the FSM obj: record for a

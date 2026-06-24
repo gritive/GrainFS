@@ -28,11 +28,12 @@ func waitCaughtUp(t *testing.T, b *DistributedBackend) {
 
 // orphanWalkerBackend returns a single-dataDir backend wired so the orphan-shard
 // sweep is ALLOWED (gate on, empty frozen source). The age gate is floored to
-// minOrphanShardAge (60s), so "old" shards must be back-dated > that.
+// minOrphanShardAge (the EC write+commit window, ~466s), so "old" shards must be
+// back-dated > that — use oldEnough.
 func orphanWalkerBackend(t *testing.T) *DistributedBackend {
 	t.Helper()
 	b := newTestDistributedBackend(t)
-	b.SetScrubOrphanAge(time.Second) // floored to minOrphanShardAge (60s) by the walker
+	b.SetScrubOrphanAge(time.Second) // floored to minOrphanShardAge by the walker
 	b.SetOrphanShardSweepGate(func() bool { return true })
 	b.SetFrozenObjectVersionSource(func() ([]storage.SnapshotObjectRef, error) { return nil, nil })
 	waitCaughtUp(t, b)
@@ -103,6 +104,28 @@ func TestWalkOrphanShards_AgeGateSkipsRecent(t *testing.T) {
 	root := b.shardSvc.DataDirs()[0]
 	writeShardLeaf(t, root, "bkt/key/ver-fresh", []int{0}, 0) // just written
 	require.Empty(t, collectOrphans(t, b, nil))
+}
+
+// TestWalkOrphanShards_InFlightSlowWriteProtected proves a shard from a SLOW
+// in-flight EC write is NOT reclaimed. An EC write renames each shard_N BEFORE the
+// metadata commit, and a remote shard write retries ecShardWriteAttempts times,
+// each bounded by shardRPCTimeout — so an early-written shard can be MINUTES old
+// while the write is still in flight (a sibling remote shard still retrying), far
+// older than the legacy 60s floor. The age floor MUST exceed that bounded
+// write+commit window, else the scrubber deletes live, about-to-commit data
+// (the pre-2026-06 in-flight data-loss bug). RED on the legacy 2*proposeForwardTimeout
+// floor; GREEN once the floor covers the EC-write+commit window.
+func TestWalkOrphanShards_InFlightSlowWriteProtected(t *testing.T) {
+	b := orphanWalkerBackend(t)
+	root := b.shardSvc.DataDirs()[0]
+	// A shard whose write took two RPC timeouts: squarely inside the bounded
+	// EC-write window, and uncommitted (no obj:/quorum-meta record).
+	inFlightAge := 2 * shardRPCTimeout
+	require.Less(t, inFlightAge, minOrphanShardAge,
+		"orphan age floor must exceed the bounded EC-write+commit window so an in-flight slow write is never reclaimed")
+	writeShardLeaf(t, root, "bkt/key/v-inflight", []int{0}, inFlightAge)
+	require.Empty(t, collectOrphans(t, b, nil),
+		"a shard younger than the EC-write+commit window must be kept (may be an in-flight slow write)")
 }
 
 func TestWalkOrphanShards_InFlightTmpSkipped(t *testing.T) {

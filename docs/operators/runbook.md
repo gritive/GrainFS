@@ -815,7 +815,8 @@ judge them — see the fix notes.
 
 **Fix:**
 - Same age gate as the shard/segment sweeps (`--scrub-orphan-age`, floored to
-  `2*proposeForwardTimeout`) plus a two-cycle tombstone: a blob is deleted only
+  `minOrphanShardAge` = the bounded EC write+commit window, ~466s) plus a
+  two-cycle tombstone: a blob is deleted only
   after it has appeared orphan in two consecutive cycles. Reclamation lag of a
   few scrub intervals after a delete is expected, not a fault.
 - Authority is fail-closed: a blob is kept whenever any metadata read errors, the

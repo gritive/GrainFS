@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.674.0] - 2026-06-25
+
+### Fixed
+- **Orphan-shard scrubber no longer reclaims an in-flight write's EC shards.** The reclaim age gate
+  was floored at 60s, but a full-object write places its EC shards before committing metadata and a
+  remote shard write can retry for minutes, so a slow in-flight write's already-written shards could
+  be deleted before its commit landed (data loss). The floor is now the bounded EC write+commit
+  window (~466s). `--scrub-orphan-age` set between 60s and that window is now raised to the floor;
+  genuine-orphan reclaim is delayed accordingly (a background sweep, no correctness impact).
+- **Orphan-shard scrubber now fails closed when a metadata peer is briefly unreachable.** A reclaim
+  read that exhausted its peer fan-out was treated as "object not found" even when the only nodes
+  holding the object's K-of-N quorum-meta were merely unreachable, so a live object could be
+  reclaimed while a peer was briefly down (data loss). The reclaim path now distinguishes a proven
+  not-found (every contacted peer answered) from peer-unreachability and keeps the shard on any
+  uncertainty.
+
 ## [0.0.673.0] - 2026-06-25
 
 ### Removed
