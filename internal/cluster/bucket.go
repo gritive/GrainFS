@@ -125,18 +125,45 @@ func (b *DistributedBackend) DeleteBucket(ctx context.Context, bucket string) er
 		if len(vs) > 0 {
 			return storage.ErrBucketNotEmpty
 		}
-	} else if err := b.store.View(func(txn MetadataTxn) error {
-		// off/pending: the existing FSM obj: prefix scan, verbatim.
-		prefix := b.ks().Prefix([]byte("obj:" + bucket + "/"))
-		it := txn.NewIterator(MetaIteratorOptions{PrefetchValues: true})
-		defer it.Close()
-		it.Seek(prefix)
-		if it.ValidForPrefix(prefix) {
+	} else {
+		// NOT Enabled (never-versioned OR Suspended). Live objects can sit in TWO
+		// blob trees and the old FSM obj: scan saw NEITHER (greenfield never writes
+		// obj: records -- CmdPutObjectMeta apply is a no-op), so a non-empty bucket
+		// deleted silently (data loss). Both probes are CLUSTER-WIDE — objects are
+		// key-hash-placed across shard groups, so a node-local scan would miss
+		// objects on other nodes (the cluster coordinator always falls through to
+		// this leaf, making it the authoritative cluster-wide emptiness gate). Probe
+		// both, fail-closed:
+		//   (1) latest-only quorum-meta tree (non-versioned / Suspended NEW writes,
+		//       incl. appendable/coalesced carve-outs) via scanQuorumMetaClusterAll —
+		//       local strict scan + fan-out to all peers, matching ForceDeleteBucket's
+		//       cluster non-versioned enumerate. Filesystem walk + RPC → OUTSIDE any
+		//       store.View txn. Hard-delete tombstones (IsHardDeleted) are NOT live
+		//       objects — skip them (mirrors dropHardDeletedVersions) so a bucket whose
+		//       objects were all deleted still deletes.
+		//   (2) per-version tree (versions preserved from a prior Enabled era for a
+		//       Suspended bucket) via listObjectVersionsSoleAuth (already cluster-wide,
+		//       already tombstone-filtered, delete markers still count); empty no-op
+		//       for a never-versioned bucket.
+		if b.shardSvc != nil {
+			cmds, qerr := b.scanQuorumMetaClusterAll(bucket)
+			if qerr != nil {
+				return fmt.Errorf("delete bucket: enumerate latest-only qmeta: %w", qerr)
+			}
+			for _, c := range cmds {
+				if c.IsHardDeleted {
+					continue // hard-delete tombstone — the object is gone, not live
+				}
+				return storage.ErrBucketNotEmpty
+			}
+		}
+		vs, lerr := b.listObjectVersionsSoleAuth(bucket, "", 1)
+		if lerr != nil {
+			return lerr
+		}
+		if len(vs) > 0 {
 			return storage.ErrBucketNotEmpty
 		}
-		return nil
-	}); err != nil {
-		return err
 	}
 
 	if err := os.RemoveAll(b.bucketDir(bucket)); err != nil {
