@@ -234,7 +234,6 @@ type bootState struct {
 	forwardSender     *cluster.ForwardSender
 	forwardReceiver   *cluster.ForwardReceiver
 	metaForwardSender *cluster.MetaProposeForwardSender
-	metaReadSender    *cluster.MetaCatalogReadSender
 	clusterCoord      *cluster.ClusterCoordinator
 	seedGroups        int
 	// seedMu (Option B) serializes the leader-side deferred seed-on-quorum across

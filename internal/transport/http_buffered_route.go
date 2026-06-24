@@ -38,7 +38,6 @@ const (
 	RouteForwardProposeDataGroup = "/forward/propose/data-group"
 	RouteForwardReadIndex        = "/forward/read-index"
 	RouteRaftMetaPropose         = "/raft/meta/propose"
-	RouteRaftMetaCatalogRead     = "/raft/meta/catalog-read"
 	RouteForwardMetaReadIndex    = "/raft/meta/read-index"
 	RouteReceiptQuery            = "/receipt/query"
 	RouteProbeCapability         = "/probe/capability"
@@ -70,7 +69,6 @@ var bufferedRouteTable = []struct {
 	{RouteForwardProposeDataGroup, StreamDataGroupProposeForward},
 	{RouteForwardReadIndex, StreamReadIndex},
 	{RouteRaftMetaPropose, StreamMetaProposeForward},
-	{RouteRaftMetaCatalogRead, StreamMetaCatalogRead},
 	{RouteForwardMetaReadIndex, StreamMetaReadIndex},
 	{RouteReceiptQuery, StreamReceiptQuery},
 	{RouteProbeCapability, StreamCapabilityProbe},

@@ -454,11 +454,7 @@ enum MetaCmdType : uint8 {
   SetLoadSnapshot      = 6,   // PR-D: leader 주기적 load commit
   ProposeRebalancePlan = 7,   // PR-D: rebalancer가 plan 제안
   AbortPlan            = 8,   // PR-D: timeout / operator 취소 / 완료 마커
-  IcebergCreateNamespace = 9,
-  IcebergDeleteNamespace = 10,
-  IcebergCreateTable = 11,
-  IcebergCommitTable = 12,
-  IcebergDeleteTable = 13,
+  // 9-13 reserved (iceberg catalog commands retired; no renumber).
   RotateKeyBegin     = 14,  // 클러스터 키 회전: phase 1 → 2 (operator-distributed next.key SPKI 합의)
   RotateKeySwitch    = 15,  // 회전 phase 2 → 3 (active 인증서를 NEW로 전환)
   RotateKeyDrop      = 16,  // 회전 phase 3 → steady-on-NEW (OLD 폐기, previous.key grace 시작)
@@ -768,6 +764,7 @@ table MetaAbortPlanCmd {
   reason:AbortPlanReason;
 }
 
+// iceberg_* retained empty for snapshot slot stability (no-renumber); iceberg feature removed.
 table IcebergNamespaceEntry {
   namespace:[string];
   properties:[KeyValue];
@@ -784,41 +781,6 @@ table IcebergTableEntry {
   metadata_location:string;
   properties:[KeyValue];
   warehouse:string;   // v2 (iceberg_schema_version=2); empty = legacy "default"
-}
-
-table MetaIcebergCreateNamespaceCmd {
-  request_id:string;
-  namespace:[string];
-  properties:[KeyValue];
-  warehouse:string;
-}
-
-table MetaIcebergDeleteNamespaceCmd {
-  request_id:string;
-  namespace:[string];
-  warehouse:string;
-}
-
-table MetaIcebergCreateTableCmd {
-  request_id:string;
-  identifier:IcebergIdentifier;
-  metadata_location:string;
-  properties:[KeyValue];
-  warehouse:string;
-}
-
-table MetaIcebergCommitTableCmd {
-  request_id:string;
-  identifier:IcebergIdentifier;
-  expected_metadata_location:string;
-  new_metadata_location:string;
-  warehouse:string;
-}
-
-table MetaIcebergDeleteTableCmd {
-  request_id:string;
-  identifier:IcebergIdentifier;
-  warehouse:string;
 }
 
 // 클러스터 키 회전 — 4-phase rolling state machine.
@@ -1114,50 +1076,6 @@ table ChallengeReply {
   nonce   : [ubyte];
   status  : JoinStatus = Unknown;
   message : string;
-}
-
-// ============================================================================
-// MetaCatalogRead (iceberg catalog read RPC)
-// ============================================================================
-
-enum CatalogReadOp : byte {
-  Unknown        = 0,
-  LoadNamespace  = 1,
-  ListNamespaces = 2,
-  LoadTable      = 3,
-  ListTables     = 4,
-}
-
-table CatalogKV { k : string; v : string; }
-
-table CatalogNamespace { parts : [string]; }
-
-table CatalogIdentifier {
-  namespace : [string];
-  name      : string;
-}
-
-table CatalogTable {
-  identifier        : CatalogIdentifier;
-  metadata_location : string;
-  metadata          : [ubyte];     // Iceberg spec JSON, opaque passthrough
-  properties        : [CatalogKV];
-}
-
-table MetaCatalogReadRequest {
-  op         : CatalogReadOp = Unknown;
-  namespace  : [string];
-  identifier : CatalogIdentifier;
-  warehouse  : string;
-}
-
-table MetaCatalogReadReply {
-  error_type    : string;
-  error_message : string;
-  properties    : [CatalogKV];          // op = LoadNamespace
-  namespaces    : [CatalogNamespace];   // op = ListNamespaces
-  loaded_table  : CatalogTable;         // op = LoadTable (renamed from "table" to avoid collision with flatbuffers built-in Table() accessor)
-  tables        : [CatalogIdentifier];  // op = ListTables
 }
 
 // PolicyPut payload: upsert a named policy document.

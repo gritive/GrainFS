@@ -35,7 +35,7 @@ import (
 // Inputs:  state.cfg (many flags), state.metaRaft, state.peers, state.nodeID,
 //
 //	state.distBackend, state.db, state.backend, state.diskCollector,
-//	state.balancerProposer, state.metaForwardSender, state.metaReadSender,
+//	state.balancerProposer, state.metaForwardSender,
 //	state.clusterTransport, state.streamRouter, state.gossipReceiver,
 //	state.roleRegistry, state.recoveryReadOnly, state.shardCache,
 //	state.joinMode.

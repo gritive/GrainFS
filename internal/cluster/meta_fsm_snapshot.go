@@ -16,7 +16,6 @@ import (
 	iamjwt "github.com/gritive/GrainFS/internal/iam/jwt"
 	"github.com/gritive/GrainFS/internal/iam/policyattach"
 	"github.com/gritive/GrainFS/internal/iam/policystore"
-	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -68,32 +67,6 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	if f.activePlan != nil {
 		cp := *f.activePlan
 		activePlanCopy = &cp
-	}
-	var icebergNamespacesCount int
-	for _, m := range f.icebergNamespaces {
-		icebergNamespacesCount += len(m)
-	}
-	icebergNamespaces := make([]IcebergNamespaceEntry, 0, icebergNamespacesCount)
-	for wh, nsMap := range f.icebergNamespaces {
-		for _, entry := range nsMap {
-			icebergNamespaces = append(icebergNamespaces, IcebergNamespaceEntry{
-				Warehouse:  wh,
-				Namespace:  cloneStringSlice(entry.Namespace),
-				Properties: cloneStringMap(entry.Properties),
-			})
-		}
-	}
-	var icebergTablesCount int
-	for _, m := range f.icebergTables {
-		icebergTablesCount += len(m)
-	}
-	icebergTables := make([]IcebergTableEntry, 0, icebergTablesCount)
-	for wh, tblMap := range f.icebergTables {
-		for _, entry := range tblMap {
-			e := cloneIcebergTableEntry(entry)
-			e.Warehouse = wh
-			icebergTables = append(icebergTables, e)
-		}
 	}
 	// Snapshot dekRefCounts while holding the read lock.
 	dekRefCountsCopy := make(map[uint32]uint64, len(f.dekRefCounts))
@@ -296,8 +269,11 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 		activePlanOff = clusterpb.RebalancePlanEnd(b)
 	}
 
-	icebergNamespaceVec := buildIcebergNamespaceEntriesVector(b, icebergNamespaces)
-	icebergTableVec := buildIcebergTableEntriesVector(b, icebergTables)
+	// Iceberg namespaces/tables retained as empty vectors for snapshot slot stability.
+	clusterpb.MetaStateSnapshotStartIcebergNamespacesVector(b, 0)
+	icebergNamespaceVec := b.EndVector(0)
+	clusterpb.MetaStateSnapshotStartIcebergTablesVector(b, 0)
+	icebergTableVec := b.EndVector(0)
 	// Object index removed in Phase 4; encode empty vector for wire compatibility.
 	clusterpb.MetaStateSnapshotStartObjectIndexVector(b, 0)
 	objectIndexVec := b.EndVector(0)
@@ -405,7 +381,6 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	clusterpb.MetaStateSnapshotAddIcebergTables(b, icebergTableVec)
 	clusterpb.MetaStateSnapshotAddObjectIndex(b, objectIndexVec)
 	clusterpb.MetaStateSnapshotAddClusterConfig(b, clusterConfigVec)
-	clusterpb.MetaStateSnapshotAddIcebergSchemaVersion(b, 2)
 	clusterpb.MetaStateSnapshotAddLastRotationRequestEntries(b, lrrVec)
 	clusterpb.MetaStateSnapshotAddKekStatusEntries(b, kekStatusVec)
 	clusterpb.MetaStateSnapshotAddPeers(b, peersVec)
@@ -559,75 +534,6 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 			ToNode:    string(p.ToNode()),
 			CreatedAt: time.Unix(p.CreatedAtUnix(), 0),
 		}
-	}
-
-	// iceberg_schema_version tracks the Iceberg section format:
-	//   0 = pre-T38 / pre-Commit-3 (no warehouse field in entries); only safe when no entries present
-	//   2 = warehouse-aware (D#14 T38 Commit 3)
-	//
-	// Any other value (e.g. 1, 3, …) is unknown — fail loud so a future format
-	// change is never silently misread as version-2.
-	icebergSchemaVersion := snap.IcebergSchemaVersion()
-	hasIcebergData := snap.IcebergNamespacesLength() > 0 || snap.IcebergTablesLength() > 0
-	if icebergSchemaVersion == 0 && hasIcebergData {
-		return fmt.Errorf("meta_fsm: Restore: iceberg_schema_version=0 with %d namespaces and %d tables: "+
-			"snapshot was written by a pre-T38 node; cannot safely determine warehouse assignments — "+
-			"re-snapshot from a T38+ node before restore",
-			snap.IcebergNamespacesLength(), snap.IcebergTablesLength())
-	}
-	if icebergSchemaVersion != 0 && icebergSchemaVersion != 2 {
-		return fmt.Errorf("meta_fsm: Restore: unsupported iceberg_schema_version=%d (expected 0 for legacy or 2 for warehouse-aware)", icebergSchemaVersion)
-	}
-
-	newIcebergNamespaces := make(map[string]map[string]IcebergNamespaceEntry)
-	var nsFB clusterpb.IcebergNamespaceEntry
-	for i := 0; i < snap.IcebergNamespacesLength(); i++ {
-		if !snap.IcebergNamespaces(&nsFB, i) {
-			return fmt.Errorf("meta_fsm: Restore: iceberg namespace %d decode failed", i)
-		}
-		wh := string(nsFB.Warehouse())
-		if wh == "" {
-			wh = icebergDefaultWarehouse
-		}
-		entry := IcebergNamespaceEntry{
-			Warehouse:  wh,
-			Namespace:  readStringVector(nsFB.NamespaceLength(), nsFB.Namespace),
-			Properties: readKeyValueProperties(nsFB.PropertiesLength(), nsFB.Properties),
-		}
-		if m := newIcebergNamespaces[wh]; m == nil {
-			newIcebergNamespaces[wh] = make(map[string]IcebergNamespaceEntry)
-		}
-		newIcebergNamespaces[wh][icebergNamespaceKey(entry.Namespace)] = entry
-	}
-
-	newIcebergTables := make(map[string]map[string]IcebergTableEntry)
-	var tableFB clusterpb.IcebergTableEntry
-	for i := 0; i < snap.IcebergTablesLength(); i++ {
-		if !snap.IcebergTables(&tableFB, i) {
-			return fmt.Errorf("meta_fsm: Restore: iceberg table %d decode failed", i)
-		}
-		identFB := tableFB.Identifier(nil)
-		if identFB == nil {
-			return fmt.Errorf("meta_fsm: Restore: iceberg table %d missing identifier", i)
-		}
-		ident := icebergcatalog.Identifier{
-			Namespace: readStringVector(identFB.NamespaceLength(), identFB.Namespace),
-			Name:      string(identFB.Name()),
-		}
-		wh := string(tableFB.Warehouse())
-		if wh == "" {
-			wh = icebergDefaultWarehouse
-		}
-		entry := IcebergTableEntry{
-			Warehouse:        wh,
-			Identifier:       ident,
-			MetadataLocation: string(tableFB.MetadataLocation()),
-			Properties:       readKeyValueProperties(tableFB.PropertiesLength(), tableFB.Properties),
-		}
-		if m := newIcebergTables[wh]; m == nil {
-			newIcebergTables[wh] = make(map[string]IcebergTableEntry)
-		}
-		newIcebergTables[wh][icebergTableKey(ident)] = entry
 	}
 
 	// ClusterConfig: decode the embedded FBS blob and atomically swap into
@@ -911,8 +817,6 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 	f.bucketRecords = newBucketRecords
 	f.loadSnapshot = newLoadSnapshot
 	f.activePlan = newActivePlan
-	f.icebergNamespaces = newIcebergNamespaces
-	f.icebergTables = newIcebergTables
 	f.lastRotationRequests = newLastRotationRequests
 	f.kekStatuses = newKEKStatuses
 	f.clusterKeyDropped = droppedDecoded

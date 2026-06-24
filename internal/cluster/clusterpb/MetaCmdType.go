@@ -16,11 +16,6 @@ const (
 	MetaCmdTypeSetLoadSnapshot              MetaCmdType = 6
 	MetaCmdTypeProposeRebalancePlan         MetaCmdType = 7
 	MetaCmdTypeAbortPlan                    MetaCmdType = 8
-	MetaCmdTypeIcebergCreateNamespace       MetaCmdType = 9
-	MetaCmdTypeIcebergDeleteNamespace       MetaCmdType = 10
-	MetaCmdTypeIcebergCreateTable           MetaCmdType = 11
-	MetaCmdTypeIcebergCommitTable           MetaCmdType = 12
-	MetaCmdTypeIcebergDeleteTable           MetaCmdType = 13
 	MetaCmdTypeRotateKeyBegin               MetaCmdType = 14
 	MetaCmdTypeRotateKeySwitch              MetaCmdType = 15
 	MetaCmdTypeRotateKeyDrop                MetaCmdType = 16
@@ -107,11 +102,6 @@ var EnumNamesMetaCmdType = map[MetaCmdType]string{
 	MetaCmdTypeSetLoadSnapshot:              "SetLoadSnapshot",
 	MetaCmdTypeProposeRebalancePlan:         "ProposeRebalancePlan",
 	MetaCmdTypeAbortPlan:                    "AbortPlan",
-	MetaCmdTypeIcebergCreateNamespace:       "IcebergCreateNamespace",
-	MetaCmdTypeIcebergDeleteNamespace:       "IcebergDeleteNamespace",
-	MetaCmdTypeIcebergCreateTable:           "IcebergCreateTable",
-	MetaCmdTypeIcebergCommitTable:           "IcebergCommitTable",
-	MetaCmdTypeIcebergDeleteTable:           "IcebergDeleteTable",
 	MetaCmdTypeRotateKeyBegin:               "RotateKeyBegin",
 	MetaCmdTypeRotateKeySwitch:              "RotateKeySwitch",
 	MetaCmdTypeRotateKeyDrop:                "RotateKeyDrop",
@@ -198,11 +188,6 @@ var EnumValuesMetaCmdType = map[string]MetaCmdType{
 	"SetLoadSnapshot":              MetaCmdTypeSetLoadSnapshot,
 	"ProposeRebalancePlan":         MetaCmdTypeProposeRebalancePlan,
 	"AbortPlan":                    MetaCmdTypeAbortPlan,
-	"IcebergCreateNamespace":       MetaCmdTypeIcebergCreateNamespace,
-	"IcebergDeleteNamespace":       MetaCmdTypeIcebergDeleteNamespace,
-	"IcebergCreateTable":           MetaCmdTypeIcebergCreateTable,
-	"IcebergCommitTable":           MetaCmdTypeIcebergCommitTable,
-	"IcebergDeleteTable":           MetaCmdTypeIcebergDeleteTable,
 	"RotateKeyBegin":               MetaCmdTypeRotateKeyBegin,
 	"RotateKeySwitch":              MetaCmdTypeRotateKeySwitch,
 	"RotateKeyDrop":                MetaCmdTypeRotateKeyDrop,
