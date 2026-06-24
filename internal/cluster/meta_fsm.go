@@ -131,6 +131,15 @@ type ShardGroupEntry struct {
 	PeerIDs []string
 }
 
+// BucketRecord is the unified per-bucket record stored in MetaFSM.
+// It replaces the old bucket→groupID string map with a struct that can carry
+// versioning state and a JSON policy document.
+type BucketRecord struct {
+	GroupID    string
+	Versioning string // "Enabled", "Suspended", or "" (unset)
+	Policy     []byte // raw JSON bucket policy; nil means no policy
+}
+
 // LoadStatEntry is the plain-Go representation of per-node load statistics.
 type LoadStatEntry struct {
 	NodeID         string
@@ -231,7 +240,7 @@ type IcebergDeleteTableCmd struct {
 // It holds cluster membership state.
 //
 // Lock discipline: mu is a RWMutex shared by all three state maps (nodes,
-// shardGroups, bucketAssignments) and the callback field.
+// shardGroups, bucketRecords) and the callback field.
 // RWMutex is justified here because:
 //   - There is exactly ONE writer goroutine (runApplyLoop), so write contention
 //     is zero and write locks are never contended.
@@ -254,7 +263,7 @@ type MetaFSM struct {
 	// ascending epoch). Empty for single-generation legacy clusters; appended by
 	// AddPlacementGeneration. Consumed by OpRouter from S7-4 onward.
 	placementGenerations []placementGeneration
-	bucketAssignments    map[string]string                           // bucket → group_id (PR-D)
+	bucketRecords        map[string]BucketRecord                     // bucket → BucketRecord (PR-D; replaces bucketAssignments)
 	loadSnapshot         map[string]LoadStatEntry                    // node_id → stats (PR-D)
 	activePlan           *RebalancePlan                              // nil = no active plan (PR-D)
 	icebergNamespaces    map[string]map[string]IcebergNamespaceEntry // warehouse → nsKey → entry
@@ -651,7 +660,7 @@ func NewMetaFSM() *MetaFSM {
 	return &MetaFSM{
 		nodes:                      make(map[string]MetaNodeEntry),
 		shardGroups:                make(map[string]ShardGroupEntry),
-		bucketAssignments:          make(map[string]string),
+		bucketRecords:              make(map[string]BucketRecord),
 		loadSnapshot:               make(map[string]LoadStatEntry),
 		icebergNamespaces:          make(map[string]map[string]IcebergNamespaceEntry),
 		icebergTables:              make(map[string]map[string]IcebergTableEntry),
