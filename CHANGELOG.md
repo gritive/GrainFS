@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.667.0] - 2026-06-25
+
+### Changed
+- **Internal cleanup, no user-facing change.** Renamed the vestigial `soleAuth*` identifiers left over
+  from the removed "sole authority" machinery to `blobAuth*` (the concept is now blob-authoritative
+  read), and centralized the admin CLI `--endpoint` flag registration onto a single parametrized
+  `registerAdminEndpointFlag` helper. All `--endpoint` help text is byte-identical and the renamed
+  identifiers are internal/unexported, so there is no behavior or CLI change.
+
 ## [0.0.666.0] - 2026-06-25
 
 ### Changed
