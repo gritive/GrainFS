@@ -92,10 +92,6 @@ func newVersionID() string {
 	return id.String()
 }
 
-// OnApplyFunc is called after FSM.Apply() with the command type, bucket, and key.
-// Used for cache invalidation and metrics updates.
-type OnApplyFunc func(cmdType CommandType, bucket, key string)
-
 type raftSnapshotRequest struct {
 	ctx  context.Context
 	resp chan raftSnapshotResponse
@@ -124,14 +120,12 @@ type DistributedBackend struct {
 	lastApplied                      atomic.Uint64
 	lastAppliedTerm                  atomic.Uint64
 	snapRequests                     chan raftSnapshotRequest
-	onApply                          OnApplyFunc
 	shardSvc                         *ShardService
 	allNodes                         []string // all node addresses (including self) for shard placement
 	selfAddr                         string   // this node's raft address (matches entries in allNodes)
 	peerHealth                       *PeerHealth
 	topologySnapshot                 atomic.Pointer[backendTopology]
-	registry                         *Registry // cache invalidators (VFS instances)
-	ecConfig                         ECConfig  // Phase 18: erasure coding config (k+m shard parameters)
+	ecConfig                         ECConfig // Phase 18: erasure coding config (k+m shard parameters)
 	ecConfigSnapshot                 atomic.Pointer[ECConfig]
 	runtimeSnapshot                  atomic.Pointer[backendRuntimeSnapshot]
 	shardLocks                       keyedRWMutex              // scrubbable.go: per-(bucket,key) RWMutex for ReadShard/WriteShard (refcounted, bounded)
@@ -298,7 +292,6 @@ func NewDistributedBackend(root string, store MetadataStore, node RaftNode, keys
 		keys:         keys,
 		shared:       shared,
 		logger:       log.With().Str("component", "distributed-backend").Logger(),
-		registry:     NewRegistry(),
 		snapRequests: make(chan raftSnapshotRequest),
 		clusterCfg:   NewClusterConfig(), // default config until StartPlacementRuntime wires the live pointer
 		removeAll:    os.RemoveAll,
@@ -770,22 +763,6 @@ func (b *DistributedBackend) RaftSnapshotStatus() (raft.SnapshotStatus, error) {
 	return b.node.SnapshotStatus()
 }
 
-// RegisterCacheInvalidator adds a cache invalidator for committed object mutations.
-func (b *DistributedBackend) RegisterCacheInvalidator(id string, inv CacheInvalidator) {
-	b.registry.Register(id, inv)
-}
-
-// UnregisterCacheInvalidator removes a previously registered cache invalidator.
-func (b *DistributedBackend) UnregisterCacheInvalidator(id string) {
-	b.registry.Unregister(id)
-}
-
-// SetOnApply sets the legacy callback invoked after each FSM apply.
-// Must be called before RunApplyLoop.
-func (b *DistributedBackend) SetOnApply(fn OnApplyFunc) {
-	b.onApply = fn
-}
-
 // SetMultiGeneration arms (true) or disarms (false) the cross-generation LWW
 // read merge for quorum-meta reads (S7-6). The coordinator calls it from
 // rebuild() with generationCount() > 1 so that, once a topology generation has
@@ -822,7 +799,9 @@ func (b *DistributedBackend) RunApplyLoop(stop <-chan struct{}) {
 	a.run(b, stop)
 }
 
-// notifyOnApply extracts bucket/key from a committed command and invalidates caches.
+// notifyOnApply runs post-apply hooks for a committed command. The only live
+// hook is the CmdFSMValueResealDone reseal-done fence; all apply-driven
+// cache-invalidation paths have been retired.
 func (b *DistributedBackend) notifyOnApply(raw []byte) {
 	cmd, err := DecodeCommand(raw)
 	if err != nil {
@@ -1248,11 +1227,6 @@ func (b *DistributedBackend) Close() error {
 		return nil
 	}
 	return b.store.Close()
-}
-
-// GetRegistry returns the cache invalidator registry for registering VFS instances.
-func (b *DistributedBackend) GetRegistry() *Registry {
-	return b.registry
 }
 
 var _ storage.Backend = (*DistributedBackend)(nil)

@@ -203,16 +203,11 @@ type bootState struct {
 
 	// Services + shutdown (populated by services phases — PR 6 onwards).
 	// bootSnapshotAndApplyLoop owns: fsm (the distBackend's FSM —
-	// distBackend.FSMRef() — group-0 keyspace over the shared FSM-state DB),
-	// cachedBackend (the post-pack LRU read cache; the wrapping chain
-	// inner→outer is distBackend → packblob (optional) → cachedBackend →
-	// WAL → pullthrough, and the final two wrappers are added downstream
-	// until later phases claim them).
+	// distBackend.FSMRef() — group-0 keyspace over the shared FSM-state DB).
 	//
 	// As of M5 PR 29 the v1 raft.SnapshotManager is no longer wired —
 	// raftv2 owns snapshot lifecycle internally.
-	fsm           *cluster.FSM
-	cachedBackend *storage.CachedBackend
+	fsm *cluster.FSM
 
 	// PR-final services-extra phases. Each field's owning phase is annotated.
 

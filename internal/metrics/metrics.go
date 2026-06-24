@@ -137,12 +137,6 @@ var (
 		Help: "Current number of deleted file markers in memory.",
 	})
 
-	// RegistrySize tracks current number of registered cache invalidators.
-	RegistrySize = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "grainfs_cache_registry_size",
-		Help: "Current number of registered cache invalidators.",
-	})
-
 	// NFSv4BufferPoolGets tracks total buffer pool get operations by buffer size.
 	NFSv4BufferPoolGets = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "grainfs_nfsv4_buffer_pool_gets_total",
