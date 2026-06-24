@@ -59,7 +59,7 @@ surfaced by that removal:
   `os.RemoveAll(b.bucketDir)` removes `{root}/data/{bucket}` but NOT the
   `.quorum_meta_versions/{bucket}/` tombstone blobs, so they persist as inert residue
   (dropped from reads via `dropHardDeletedVersions`, so no resurrection). Shared with the
-  pre-existing Enabled force-delete path (`forceDeleteBucketSoleAuth`); surfaced by the
+  pre-existing Enabled force-delete path (`forceDeleteBucketBlobAuth`); surfaced by the
   code-gate codex pass. Fix: add an age-gated per-version tombstone-tree GC, or remove
   `.quorum_meta{,_versions}/{bucket}/` on bucket delete.
 
@@ -167,12 +167,12 @@ Deferred items:
   its vid is larger (T2 > T1). The intended long-term rule is ModTime-primary: the LAST COMPLETED
   write is latest. Changing it requires a coordinated migration across ALL 7 sites:
     • `deriveLatestVersion` (`quorum_meta.go`)
-    • `listObjectVersionsSoleAuth` maxVID loop (`object_version.go` ~line 551)
-    • `listSoleAuthBucketObjectsForGC` maxVID loop (`object_manifest.go` ~line 172)
-    • `localSoleAuthScrubObjects` latest-collapse (`scrubbable.go` ~line 218)
+    • `listObjectVersionsBlobAuth` maxVID loop (`object_version.go` ~line 551)
+    • `listBlobAuthBucketObjectsForGC` maxVID loop (`object_manifest.go` ~line 172)
+    • `scanObjectsBlobAuth` latest-collapse (`scrubbable.go` ~line 218)
     • `reconcileVersionIsLatest` / `sortObjectVersions` (`cluster_coordinator.go`)
     • latest-version resolution (`object_delete.go` ~line 78)
-    • `listObjectVersions` latestVID pre-scan (non-sole-auth path, `object_version.go` ~line 370)
+    • `listObjectVersions` latestVID pre-scan (non-blob-auth path, `object_version.go` ~line 370)
 
   Additional caveats before migration:
     • GET (per-version blob) and LIST (version enumeration) must use the SAME latest rule — split
@@ -220,11 +220,6 @@ Deferred items:
   tombstone blob itself is not reclaimed — confirm there is no unbounded growth path in
   long-lived buckets with high churn, or add a tombstone GC sweep (age-gated, similar to the
   per-version hard-delete tombstone GC already planned).
-
-- **[P3][naming] `soleAuthReadOn` / `forceDeleteBucketSoleAuth` are vestigial names from the
-  soleauth era** (the soleauth machinery was removed in #821–#824; the concept is now
-  "blob-authoritative read"). Rename to `blobAuthReadOn` / `forceDeleteBucketBlobAuth` for
-  clarity. No behavior change.
 
 - **[P3][pre-existing] Per-version tags/acl are latest-only.** `SetObjectTags` / `SetObjectACL`
   blob RMW reads/writes the latest-only quorum-meta blob; the `versionID` parameter is accepted
