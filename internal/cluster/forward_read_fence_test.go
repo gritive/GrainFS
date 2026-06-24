@@ -20,10 +20,10 @@ type fenceErrNode struct{ applyChCloseStubNode }
 func (n *fenceErrNode) ReadIndex(context.Context) (uint64, error) { return 0, errFenceReadIndex }
 
 // TestForwardedVersionReadsAreReadFenced proves every forwarded read handler that
-// resolves through a read1 soleauth authority branch (HeadObjectVersion,
+// resolves through a read1 blob-authority authority branch (HeadObjectVersion,
 // GetObjectVersion[+stream], GetObjectTags, ReadAt[+stream]) calls
 // waitForwardReadFence BEFORE resolving — so a lagging receiver cannot read a
-// stale local soleauth state and take the wrong authority branch. With a healthy
+// stale local blob-authority state and take the wrong authority branch. With a healthy
 // object present, WITHOUT the fence each handler resolves and returns OK; WITH the
 // fence (ReadIndex fails) they return Internal before any resolution.
 func TestForwardedVersionReadsAreReadFenced(t *testing.T) {

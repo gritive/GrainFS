@@ -33,5 +33,5 @@ func TestMultipartCompleted_NotFsmCarveout_BlobAuthoritative(t *testing.T) {
 
 	_, _, err := b.headObjectMeta(ctx, "vb", "mpu")
 	require.ErrorIs(t, err, storage.ErrObjectNotFound,
-		"multipart is blob-authoritative: an FSM-only record (no per-version blob) must not resurrect under sole authority")
+		"multipart is blob-authoritative: an FSM-only record (no per-version blob) must not resurrect under blob authority")
 }

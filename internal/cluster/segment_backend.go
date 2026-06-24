@@ -494,7 +494,7 @@ func runChunkedPutWithParts(
 			return nil, mberr
 		}
 		if len(metaBlob) > 0 {
-			// VERSIONED: the per-version quorum-meta blob is the sole authority,
+			// VERSIONED: the per-version quorum-meta blob is the blob authority,
 			// written FAIL-CLOSED. On failure nothing is committed; the segment shards
 			// are cleaned by the defer and the client retries CompleteMultipartUpload.
 			winCmd, werr := csb.writeCompletedMultipartBlob(ctx, metaBlob)

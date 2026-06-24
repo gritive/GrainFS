@@ -69,12 +69,12 @@ func TestCompleteMultipart_NoCompletePropose(t *testing.T) {
 
 	for _, ct := range rec.commandTypes() {
 		require.NotEqualf(t, CommandType(6), ct,
-			"multipart complete must NOT propose the retired CmdCompleteMultipart slot 6 (blob is sole authority)")
+			"multipart complete must NOT propose the retired CmdCompleteMultipart slot 6 (blob is blob authority)")
 	}
 }
 
 // TestCompleteMultipart_NonVersionedNoCompletePropose proves the same for a
-// non-versioned bucket: the latest-only blob is the sole authority — no propose.
+// non-versioned bucket: the latest-only blob is the blob authority — no propose.
 func TestCompleteMultipart_NonVersionedNoCompletePropose(t *testing.T) {
 	b := newSingleNode1Plus0ChunkCapable(t)
 	ctx := context.Background()
@@ -142,7 +142,7 @@ func TestCompleteMultipart_NonVersionedLatestOnlyFailClosed(t *testing.T) {
 	ctx := context.Background()
 	const bkt, key = "plainbkt", "mp.bin"
 	require.NoError(t, b.CreateBucket(ctx, bkt))
-	// Non-versioned: the latest-only blob is the sole authority.
+	// Non-versioned: the latest-only blob is the blob authority.
 
 	up, err := b.CreateMultipartUpload(ctx, bkt, key, "application/octet-stream")
 	require.NoError(t, err)

@@ -49,7 +49,7 @@ func (b *DistributedBackend) listAllObjectsForGC() ([]storage.SnapshotObject, er
 	for _, bucket := range buckets {
 		// Blob-primary GC known-set authority by bucket class:
 		//   - versioning-Enabled user bucket → the per-version blob tree
-		//     (listSoleAuthBucketObjectsForGC). soleAuthReadOn == versioning Enabled.
+		//     (listBlobAuthBucketObjectsForGC). blobAuthReadOn == versioning Enabled.
 		//   - non-versioned/Suspended user bucket → the latest-only blob tree
 		//     (listNonVersionedBucketObjectsForGC) for regular objects, UNION the FSM
 		//     obj: scan below for appendable/coalesced carve-outs (FSM-authoritative,
@@ -59,12 +59,12 @@ func (b *DistributedBackend) listAllObjectsForGC() ([]storage.SnapshotObject, er
 		//   - internal bucket → guarded: ErrInternalBucketNotObjectStore is returned
 		//     before any write reaches this path. The FSM obj: scan below retains
 		//     pre-existing internal-bucket objects for best-effort GC cleanup.
-		on, saErr := b.soleAuthReadOn(bucket)
+		on, saErr := b.blobAuthReadOn(bucket)
 		if saErr != nil {
-			return nil, fmt.Errorf("list objects soleauth %s: %w", bucket, saErr)
+			return nil, fmt.Errorf("list objects blob-authority %s: %w", bucket, saErr)
 		}
 		if on {
-			objs, oerr := b.listSoleAuthBucketObjectsForGC(bucket)
+			objs, oerr := b.listBlobAuthBucketObjectsForGC(bucket)
 			if oerr != nil {
 				return nil, oerr
 			}
@@ -147,20 +147,20 @@ func (b *DistributedBackend) listAllObjectsForGC() ([]storage.SnapshotObject, er
 	return result, nil
 }
 
-// listSoleAuthBucketObjectsForGC enumerates every per-version blob for a
-// soleauth-on bucket via the FAIL-CLOSED strict enumerator, mapping each
+// listBlobAuthBucketObjectsForGC enumerates every per-version blob for a
+// blob-authoritative bucket via the FAIL-CLOSED strict enumerator, mapping each
 // PutObjectMetaCmd to a storage.SnapshotObject with full fidelity (placement,
 // Segments, Tags, ACL). IsLatest is max-VersionID per key over all blobs
 // (markers included), matching the LWW semantics of readQuorumMetaVersions. It
-// is the soleauth-on branch of the segment-GC known-set: without it the sweep
+// is the blob-authoritative branch of the segment-GC known-set: without it the sweep
 // would orphan-delete an on-bucket's live segments.
-func (b *DistributedBackend) listSoleAuthBucketObjectsForGC(bucket string) ([]storage.SnapshotObject, error) {
+func (b *DistributedBackend) listBlobAuthBucketObjectsForGC(bucket string) ([]storage.SnapshotObject, error) {
 	if b.shardSvc == nil {
-		return nil, fmt.Errorf("list soleauth bucket %s: no shard service", bucket)
+		return nil, fmt.Errorf("list blob-authority bucket %s: no shard service", bucket)
 	}
 	cmds, err := b.shardSvc.scanQuorumMetaVersionsBucketAllStrict(bucket, "")
 	if err != nil {
-		return nil, fmt.Errorf("list soleauth bucket %s: %w", bucket, err)
+		return nil, fmt.Errorf("list blob-authority bucket %s: %w", bucket, err)
 	}
 	// Hard-delete tombstones are not live objects: exclude them from the segment-GC
 	// known-set so their now-dead segments become orphan-eligible (a live sibling
@@ -247,7 +247,7 @@ func snapshotObjectFromQuorumCmd(bucket string, cmd PutObjectMetaCmd, isLatest b
 // of a NON-VERSIONED (or Suspended) user bucket via a FAIL-CLOSED strict scan,
 // mapping each to a storage.SnapshotObject (always IsLatest — non-versioned has a
 // single latest per key). Hard-delete tombstones are excluded (dead segments).
-// Symmetric counterpart of listSoleAuthBucketObjectsForGC for the latest-only tree:
+// Symmetric counterpart of listBlobAuthBucketObjectsForGC for the latest-only tree:
 // without it the segment GC would orphan-delete a live non-versioned object's
 // segments (a non-versioned PUT writes ONLY the latest-only blob — no FSM record).
 func (b *DistributedBackend) listNonVersionedBucketObjectsForGC(bucket string) ([]storage.SnapshotObject, error) {

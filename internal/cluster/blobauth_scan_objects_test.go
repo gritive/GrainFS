@@ -22,10 +22,10 @@ func collectScanObjectRecs(t *testing.T, b *DistributedBackend, bucket string) m
 	return got
 }
 
-// TestScanObjectsSoleAuthOn covers the soleauth=on EC scrub enumeration: the
+// TestScanObjectsBlobAuthOn covers the blob-authoritative EC scrub enumeration: the
 // live latest-per-key EC objects come from the per-version blob authority (NOT
 // the stale FSM lat: walk), each reported with its OWN EC profile.
-func TestScanObjectsSoleAuthOn(t *testing.T) {
+func TestScanObjectsBlobAuthOn(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("latest-per-key EC objects from blobs, own EC profile", func(t *testing.T) {
@@ -108,16 +108,16 @@ func TestScanObjectsSoleAuthOn(t *testing.T) {
 	})
 }
 
-// TestScanObjectsSoleAuthOffUnchanged confirms the off path still uses the FSM
+// TestScanObjectsBlobAuthOffUnchanged confirms the off path still uses the FSM
 // lat: walk + quorum-meta merge.
-func TestScanObjectsSoleAuthOffUnchanged(t *testing.T) {
+func TestScanObjectsBlobAuthOffUnchanged(t *testing.T) {
 	ctx := context.Background()
 	b := newTestDistributedBackend(t)
 	require.True(t, b.ECActive())
 	require.NoError(t, b.CreateBucket(ctx, "b"))
 	// FSM lat:-indexed EC object (off-path source).
 	seedPlacementMeta(t, b, "b", "fsm.bin", "v1", []string{b.selfAddr}, 1, 0)
-	// soleauth off (default)
+	// blob-authority off (default)
 
 	got := collectScanObjectRecs(t, b, "b")
 	require.Contains(t, got, "fsm.bin", "off path still reads the FSM lat: walk")

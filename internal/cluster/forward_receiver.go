@@ -420,7 +420,7 @@ func (r *ForwardReceiver) handleReadAtRead(dg *DataGroup, args []byte) ([]byte, 
 	}
 	// Fence BEFORE returning the stream so every later ReadAt resolution
 	// (backendReadAtStream.Read → ReadAt → headObjectMeta) is past the
-	// linearizable barrier and cannot read a stale local soleauth state.
+	// linearizable barrier and cannot read a stale local blob-authority state.
 	if err := waitForwardReadFence(context.Background(), dg.Backend()); err != nil {
 		return statusReply(mapErrorToStatus(err)), nil
 	}
@@ -575,7 +575,7 @@ func (r *ForwardReceiver) handleHeadObjectVersion(dg *DataGroup, args []byte) []
 	ctx := contextWithVersioningState(context.Background(), ha.VersioningState())
 	// Read-fence (mirrors handleHeadObject): a lagging forwarded receiver must
 	// apply all committed writes before resolving — else it reads a stale local
-	// soleauth state and takes the wrong read1 authority branch.
+	// blob-authority state and takes the wrong read1 authority branch.
 	if err := waitForwardReadFence(ctx, dg.Backend()); err != nil {
 		return statusReply(mapErrorToStatus(err))
 	}

@@ -411,15 +411,15 @@ func TestMultipartComplete_WritesQuorumMeta(t *testing.T) {
 	require.Contains(t, keys, "multi.bin", "completed multipart object must be enumerable by LIST")
 }
 
-// TestMultipartComplete_NonVersionedQuorumMetaIsSoleAuthority pins the M3
+// TestMultipartComplete_NonVersionedQuorumMetaIsBlobAuthority pins the M3
 // non-versioned authority shift: a non-versioned multipart complete writes NO FSM
-// obj: record — the latest-only quorum-meta blob is the SOLE authority. HeadObject
+// obj: record — the latest-only quorum-meta blob is the BLOB authority. HeadObject
 // serves the object from that blob; deleting the blob makes the object 404 (there
 // is no BadgerDB FSM fallback for the multipart object anymore).
 //
 // Neuter test: re-introduce the FSM obj:/lat: write in applyCompleteMultipart AND a
-// propose, and the "blob is sole authority" assertion below is RED.
-func TestMultipartComplete_NonVersionedQuorumMetaIsSoleAuthority(t *testing.T) {
+// propose, and the "blob is blob authority" assertion below is RED.
+func TestMultipartComplete_NonVersionedQuorumMetaIsBlobAuthority(t *testing.T) {
 	ctx := context.Background()
 	b := newTestDistributedBackend(t)
 	require.NoError(t, b.CreateBucket(ctx, "bucket"))
@@ -436,7 +436,7 @@ func TestMultipartComplete_NonVersionedQuorumMetaIsSoleAuthority(t *testing.T) {
 	}})
 	require.NoError(t, err)
 
-	// No FSM obj: record — the latest-only blob is the sole authority.
+	// No FSM obj: record — the latest-only blob is the blob authority.
 	require.NoError(t, b.store.View(func(txn MetadataTxn) error {
 		_, gerr := txn.Get(b.ks().ObjectMetaKey("bucket", "multi.bin"))
 		require.ErrorIs(t, gerr, ErrMetaKeyNotFound, "non-versioned multipart must not write an FSM obj: record")

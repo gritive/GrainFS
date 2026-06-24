@@ -45,7 +45,7 @@ func TestReadQuorumMetaVersionsDecodeStrict(t *testing.T) {
 	})
 }
 
-// TestRead1DecodeStrictResurrection is the resurrection RED: under soleauth=on a
+// TestRead1DecodeStrictResurrection is the resurrection RED: under blob-authoritative a
 // corrupt latest (max-VID) blob over an older live version must NOT resurrect the
 // older version — the read fails closed instead.
 func TestRead1DecodeStrictResurrection(t *testing.T) {

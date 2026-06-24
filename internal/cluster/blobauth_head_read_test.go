@@ -9,11 +9,11 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-// TestHeadObjectMetaSoleAuthOn covers the soleauth=on branch at the top of
-// headObjectMeta: the per-version blob tree is the SOLE AUTHORITY for vid-bearing
+// TestHeadObjectMetaBlobAuthOn covers the blob-authoritative branch at the top of
+// headObjectMeta: the per-version blob tree is the BLOB AUTHORITY for vid-bearing
 // versioned objects, with carve-out classes (appendable/coalesced/legacy bare)
 // falling back to the FSM record. Blob absence for a versioned object = 404.
-func TestHeadObjectMetaSoleAuthOn(t *testing.T) {
+func TestHeadObjectMetaBlobAuthOn(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("live per-version blob → returns blob object", func(t *testing.T) {
@@ -39,7 +39,7 @@ func TestHeadObjectMetaSoleAuthOn(t *testing.T) {
 
 		obj, _, err := b.headObjectMeta(ctx, "bstale", "k")
 		require.ErrorIs(t, err, storage.ErrObjectNotFound)
-		require.Nil(t, obj, "stale versioned FSM record must NOT be resurrected under soleauth=on")
+		require.Nil(t, obj, "stale versioned FSM record must NOT be resurrected under blob-authoritative")
 	})
 
 	t.Run("delete-marker-only per-version blob → 404 (no fallthrough)", func(t *testing.T) {
@@ -84,7 +84,7 @@ func TestHeadObjectMetaSoleAuthOn(t *testing.T) {
 	t.Run("legacy bare-unversioned record (no lat:, no blob) → returns FSM object", func(t *testing.T) {
 		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "bleg"))
-		// Bucket need not be versioning-enabled for a legacy carve-out; flip soleauth on.
+		// Bucket need not be versioning-enabled for a legacy carve-out; flip blob-authority on.
 		seedFSMObject(t, b, "bleg", "k", "", objectMeta{Key: "k", ETag: "legacy"}, false)
 
 		obj, _, err := b.headObjectMeta(ctx, "bleg", "k")
@@ -94,7 +94,7 @@ func TestHeadObjectMetaSoleAuthOn(t *testing.T) {
 		require.Equal(t, "", obj.VersionID, "bare-legacy carries no version identity")
 	})
 
-	t.Run("soleauth read errors → error propagated (fail closed)", func(t *testing.T) {
+	t.Run("blob-authority read errors → error propagated (fail closed)", func(t *testing.T) {
 		b, db := newTestDistributedBackendWithDB(t)
 		require.NoError(t, b.CreateBucket(ctx, "berr"))
 		require.NoError(t, db.Close())
@@ -105,10 +105,10 @@ func TestHeadObjectMetaSoleAuthOn(t *testing.T) {
 	})
 }
 
-// TestHeadObjectMetaSoleAuthOffUnchanged confirms the not-on (off/pending) path
+// TestHeadObjectMetaBlobAuthOffUnchanged confirms the not-on (off/pending) path
 // is byte-identical to today's availability-first behavior: both a per-version
 // blob hit AND an FSM-fallback hit still resolve.
-func TestHeadObjectMetaSoleAuthOffUnchanged(t *testing.T) {
+func TestHeadObjectMetaBlobAuthOffUnchanged(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("off: per-version blob hit resolves (availability-first)", func(t *testing.T) {
@@ -116,7 +116,7 @@ func TestHeadObjectMetaSoleAuthOffUnchanged(t *testing.T) {
 		require.NoError(t, b.CreateBucket(ctx, "voff"))
 		setVersioningForTest(t, b, "voff", "Enabled")
 		seedVersionBlob(t, b, "voff", "k", "v1", PutObjectMetaCmd{ETag: "etag-off", Size: 7})
-		// soleauth never flipped → off
+		// blob-authority never flipped → off
 
 		obj, _, err := b.headObjectMeta(ctx, "voff", "k")
 		require.NoError(t, err)
@@ -128,7 +128,7 @@ func TestHeadObjectMetaSoleAuthOffUnchanged(t *testing.T) {
 	t.Run("off: FSM-fallback hit resolves (no blob, plain versioned FSM record)", func(t *testing.T) {
 		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "foff"))
-		// Internal/legacy path: a bare obj: FSM record, no blob, soleauth off.
+		// Internal/legacy path: a bare obj: FSM record, no blob, blob-authority off.
 		// Under off this must still resolve via the availability-first FSM fallback.
 		seedFSMObject(t, b, "foff", "k", "", objectMeta{Key: "k", ETag: "fsm-off"}, false)
 
@@ -143,7 +143,7 @@ func TestHeadObjectMetaSoleAuthOffUnchanged(t *testing.T) {
 		require.NoError(t, b.CreateBucket(ctx, "pend"))
 		setVersioningForTest(t, b, "pend", "Enabled")
 		// A vid-bearing FSM record with NO per-version blob. Under blob-primary the
-		// blob is the SOLE authority for a plain versioned object, so a stale FSM
+		// blob is the BLOB authority for a plain versioned object, so a stale FSM
 		// record must NOT resurrect it — 404. (Was the old availability-first resolve.)
 		seedFSMObject(t, b, "pend", "k", "v1", objectMeta{Key: "k", ETag: "pend-fsm"}, true)
 

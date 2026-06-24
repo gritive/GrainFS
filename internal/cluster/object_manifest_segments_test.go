@@ -119,17 +119,17 @@ func TestListAllObjectsStrictFailsClosedOnCorruptMeta(t *testing.T) {
 	require.Contains(t, err.Error(), "gc known-set")
 }
 
-// TestListAllObjectsStrict_SoleAuthOn_EnumeratesPerVersionBlobs proves the
-// segment-GC known-set covers a soleauth-on bucket's per-version quorum-meta
-// blobs (the listSoleAuthBucketObjectsForGC branch). Without this, the sweep
+// TestListAllObjectsStrict_BlobAuthOn_EnumeratesPerVersionBlobs proves the
+// segment-GC known-set covers a blob-authoritative bucket's per-version quorum-meta
+// blobs (the listBlobAuthBucketObjectsForGC branch). Without this, the sweep
 // would treat an on-bucket's live segments as orphaned and delete them.
-func TestListAllObjectsStrict_SoleAuthOn_EnumeratesPerVersionBlobs(t *testing.T) {
+func TestListAllObjectsStrict_BlobAuthOn_EnumeratesPerVersionBlobs(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	ctx := context.Background()
 	require.NoError(t, b.CreateBucket(ctx, "sa"))
 	setVersioningForTest(t, b, "sa", "Enabled")
 
-	// Seed two per-version blobs while still epoch-0 (before the soleauth flip
+	// Seed two per-version blobs while still epoch-0 (before the blob-authority flip
 	// bumps the fence epoch and would reject an epoch-0 local write).
 	seedVersionBlob(t, b, "sa", "k", "v1", PutObjectMetaCmd{ETag: "e1", Size: 10})
 	seedVersionBlob(t, b, "sa", "k", "v2", PutObjectMetaCmd{ETag: "e2", Size: 20})
@@ -156,10 +156,10 @@ func TestListAllObjectsStrict_SoleAuthOn_EnumeratesPerVersionBlobs(t *testing.T)
 
 // TestListAllObjectsStrict_VersioningEnabled_EnumeratesPerVersionBlobs proves the
 // C1 gate flip: the segment-GC known-set must cover a versioning-Enabled bucket's
-// per-version blobs WITHOUT requiring the (now-vestigial) soleauth=on flip. Under
+// per-version blobs WITHOUT requiring the (now-vestigial) blob-authoritative flip. Under
 // blob-primary the per-version blob is authoritative for every versioning-Enabled
 // bucket, so listAllObjectsForGC must take its blob branch on versioning state, not
-// on GetBucketSoleAuthority==on. Without the flip these blob-only objects fall to the
+// on GetBucketBlobAuthority==on. Without the flip these blob-only objects fall to the
 // FSM obj: scan, are absent, and the sweep would orphan-delete their live segments.
 func TestListAllObjectsStrict_VersioningEnabled_EnumeratesPerVersionBlobs(t *testing.T) {
 	b := newTestDistributedBackend(t)
@@ -167,7 +167,7 @@ func TestListAllObjectsStrict_VersioningEnabled_EnumeratesPerVersionBlobs(t *tes
 	require.NoError(t, b.CreateBucket(ctx, "ve"))
 	setVersioningForTest(t, b, "ve", "Enabled")
 
-	// Blob-only object (no FSM obj: record), soleauth left OFF.
+	// Blob-only object (no FSM obj: record), blob-authority left OFF.
 	seedVersionBlob(t, b, "ve", "k", "v1", PutObjectMetaCmd{ETag: "e1", Size: 10})
 	seedVersionBlob(t, b, "ve", "k", "v2", PutObjectMetaCmd{ETag: "e2", Size: 20})
 

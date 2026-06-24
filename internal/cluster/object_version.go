@@ -63,13 +63,13 @@ func (b *DistributedBackend) headObjectMetaV(ctx context.Context, bucket, key, v
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, PlacementMeta{}, err
 	}
-	// S4c-c-read1 T2: under soleauth=on the per-version blob is the SOLE AUTHORITY
+	// S4c-c-read1 T2: under blob authority the per-version blob is authoritative
 	// for the exact requested versionID of a vid-bearing versioned object. Unlike
 	// the availability-first path below, a blob MISS here never falls through to a
 	// stale vid-bearing FSM record — blob absence for a versioned object is a 404.
 	// Only carve-out classes (appendable/coalesced/legacy bare-unversioned) stay
 	// FSM-authoritative.
-	if on, err := b.soleAuthReadOn(bucket); err != nil {
+	if on, err := b.blobAuthReadOn(bucket); err != nil {
 		return nil, PlacementMeta{}, err // fail closed
 	} else if on {
 		// DECODE-STRICT: an undecodable blob anywhere under this key (incl. a corrupt
@@ -99,7 +99,7 @@ func (b *DistributedBackend) headObjectMetaV(ctx context.Context, bucket, key, v
 		if carve {
 			return obj, pm, nil
 		}
-		// No vid-bearing-versioned FSM resurrection under sole authority.
+		// No vid-bearing-versioned FSM resurrection under blob authority.
 		return nil, PlacementMeta{}, storage.ErrObjectNotFound
 	}
 	// S2a: per-version-authoritative specific-version read. On a versioning-enabled
@@ -336,13 +336,13 @@ func (b *DistributedBackend) ListObjectVersions(ctx context.Context, bucket, pre
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, err
 	}
-	// S4c-c T2: under soleauth=on the per-version blob tree (cluster-wide) is the
-	// SOLE AUTHORITY for versioned objects, merged with the FSM carve-out classes
+	// S4c-c T2: under blob-authoritative the per-version blob tree (cluster-wide) is the
+	// BLOB AUTHORITY for versioned objects, merged with the FSM carve-out classes
 	// (appendable/coalesced/legacy-bare) on THIS NODE's local group. Fail closed.
-	if on, serr := b.soleAuthReadOn(bucket); serr != nil {
+	if on, serr := b.blobAuthReadOn(bucket); serr != nil {
 		return nil, serr
 	} else if on {
-		return b.listObjectVersionsSoleAuth(bucket, prefix, maxKeys)
+		return b.listObjectVersionsBlobAuth(bucket, prefix, maxKeys)
 	}
 	var versions []*storage.ObjectVersion
 	// Non-versioned/Suspended regular objects are blob-only (latest-only blob, no
@@ -526,7 +526,7 @@ func (b *DistributedBackend) ListObjectVersions(ctx context.Context, bucket, pre
 	return versions, nil
 }
 
-// listObjectVersionsSoleAuth builds the on-branch (soleauth=on) version list at
+// listObjectVersionsBlobAuth builds the on-branch (blob-authoritative) version list at
 // the leaf from TWO sources merged blob-wins:
 //
 //  1. Versioned objects from the cluster-wide all-version blob enumerator
@@ -543,7 +543,7 @@ func (b *DistributedBackend) ListObjectVersions(ctx context.Context, bucket, pre
 // (sortObjectVersions) and truncated to maxKeys as passed (maxKeys<=0 == no
 // limit) — identical to the off-path's tail handling. The coordinator passes
 // maxKeys=0 under on; a single-node/direct caller passes the real maxKeys.
-func (b *DistributedBackend) listObjectVersionsSoleAuth(bucket, prefix string, maxKeys int) ([]*storage.ObjectVersion, error) {
+func (b *DistributedBackend) listObjectVersionsBlobAuth(bucket, prefix string, maxKeys int) ([]*storage.ObjectVersion, error) {
 	cmds, err := b.scanQuorumMetaVersionsClusterAll(bucket, prefix)
 	if err != nil {
 		return nil, err
@@ -589,7 +589,7 @@ func (b *DistributedBackend) listObjectVersionsSoleAuth(bucket, prefix string, m
 // prefix and returns ObjectVersions ONLY for carve-out classes
 // (appendable/coalesced/legacy-bare), per the shared isFsmCarveoutClass
 // predicate. Plain vid-bearing versioned records are dropped (blob-authoritative
-// under sole authority). A (Key,VID) already present in blobSeen is skipped
+// under blob authority). A (Key,VID) already present in blobSeen is skipped
 // (blob wins). Legacy-bare records emit VersionID="" / IsLatest=true, matching
 // the off-path leaf and fsmCarveoutObject.
 func (b *DistributedBackend) scanFsmCarveoutVersions(bucket, prefix string, blobSeen map[[2]string]bool) ([]*storage.ObjectVersion, error) {
@@ -624,7 +624,7 @@ func (b *DistributedBackend) scanFsmCarveoutVersions(bucket, prefix string, blob
 // (appendable/coalesced/legacy-bare per isFsmCarveoutClass). It resolves
 // (key, vid, bareLegacy) and whether the key has a lat: pointer the SAME way for
 // every consumer — the ListObjectVersions on-branch (scanFsmCarveoutVersions) and
-// the soleauth=on scrubber scan — so the carve-out classification cannot drift.
+// the blob-authoritative scrubber scan — so the carve-out classification cannot drift.
 // Plain vid-bearing versioned records and the slashless MIRROR of a versioned key
 // are skipped: a versioned appendable/coalesced object persists both obj:{b}/{k}
 // (mirror, vid="") and obj:{b}/{k}/{vid} with lat:{b}/{k}→vid; the mirror resolves

@@ -191,7 +191,7 @@ func (b *DistributedBackend) buildMultipartMetaBlob(ctx context.Context, cmd Put
 
 // writeCompletedMultipartBlob decodes the completed multipart object's encoded
 // PutObjectMetaCmd and durably writes its per-version quorum-meta blob, FAIL-CLOSED.
-// The per-version blob is the sole authority for the completed versioned object
+// The per-version blob is the blob authority for the completed versioned object
 // (reads/LIST/GC/DEK all derive from it). Idempotent: a dup write of the same
 // vid+bytes no-ops via the LWW guard, so the blob lands regardless of which complete
 // attempt (concurrent completer or idempotent retry) writes it. Returns the decoded

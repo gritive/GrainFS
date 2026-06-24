@@ -69,7 +69,7 @@ func (b *DistributedBackend) CollectECRewrapTargets() ([]ECRewrapTarget, error) 
 		return nil, err
 	}
 	for _, bucket := range buckets {
-		on, serr := b.soleAuthReadOn(bucket)
+		on, serr := b.blobAuthReadOn(bucket)
 		if serr != nil {
 			return nil, serr
 		}

@@ -74,7 +74,7 @@ func TestScanQuorumMetaVersionsClusterAll_AbsentBucketEmpty(t *testing.T) {
 
 // TestScanQuorumMetaVersionsClusterAll_FailsClosedOnCorruptLocalBlob proves the
 // FAIL-CLOSED property: an undecodable LOCAL per-version blob makes the cluster-wide
-// fan-in return an error instead of a silently-truncated set. Under sole authority
+// fan-in return an error instead of a silently-truncated set. Under blob authority
 // a dropped version would be silent data loss.
 func TestScanQuorumMetaVersionsClusterAll_FailsClosedOnCorruptLocalBlob(t *testing.T) {
 	b := newTestDistributedBackend(t)

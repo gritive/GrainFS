@@ -365,7 +365,7 @@ func (b *DistributedBackend) commitECObjectWriteResult(
 // commitCompleteMultipartObjectWriteResult commits the completed object's
 // quorum-meta blob, FAIL-CLOSED — M3: the multipart complete is raft-free (no
 // CmdCompleteMultipart propose). For a versioning-enabled bucket the per-version
-// blob is the sole authority; non-versioned / Suspended commits the latest-only
+// blob is the blob authority; non-versioned / Suspended commits the latest-only
 // quorum-meta blob (also fail-closed, mirroring the regular non-versioned PUT). On
 // any commit error nothing is durable, so the EC shards are eager-deleted and the
 // client can safely retry CompleteMultipartUpload (its manifest blob is intact). The
@@ -413,7 +413,7 @@ func (b *DistributedBackend) commitCompleteMultipartObjectWriteResult(
 		return nil, mberr
 	}
 	if len(metaBlob) > 0 {
-		// VERSIONED: the per-version blob is the sole authority, FAIL-CLOSED. On
+		// VERSIONED: the per-version blob is the blob authority, FAIL-CLOSED. On
 		// failure nothing is durable — eager-delete the shards and let the client retry.
 		winCmd, werr := b.writeCompletedMultipartBlob(ctx, metaBlob)
 		if werr != nil {

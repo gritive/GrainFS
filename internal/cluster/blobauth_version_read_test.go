@@ -9,12 +9,12 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-// TestHeadObjectMetaVSoleAuthOn covers the soleauth=on early-return at the top
-// of headObjectMetaV: the per-version blob is the SOLE AUTHORITY for the exact
+// TestHeadObjectMetaVBlobAuthOn covers the blob-authoritative early-return at the top
+// of headObjectMetaV: the per-version blob is the BLOB AUTHORITY for the exact
 // requested versionID of a vid-bearing versioned object. A blob MISS never
 // falls through to a stale vid-bearing FSM record — only carve-out classes
 // (appendable/coalesced) resolve from the FSM. Blob absence = 404.
-func TestHeadObjectMetaVSoleAuthOn(t *testing.T) {
+func TestHeadObjectMetaVBlobAuthOn(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("exact-version blob present → returns blob object", func(t *testing.T) {
@@ -40,7 +40,7 @@ func TestHeadObjectMetaVSoleAuthOn(t *testing.T) {
 
 		obj, _, err := b.headObjectMetaV(ctx, "bstale", "k", "v1")
 		require.ErrorIs(t, err, storage.ErrObjectNotFound)
-		require.Nil(t, obj, "stale versioned FSM record must NOT be resurrected under soleauth=on")
+		require.Nil(t, obj, "stale versioned FSM record must NOT be resurrected under blob-authoritative")
 	})
 
 	t.Run("delete-marker version blob → ErrMethodNotAllowed", func(t *testing.T) {
@@ -80,7 +80,7 @@ func TestHeadObjectMetaVSoleAuthOn(t *testing.T) {
 		require.Len(t, obj.Coalesced, 1)
 	})
 
-	t.Run("soleauth read errors → error propagated (fail closed)", func(t *testing.T) {
+	t.Run("blob-authority read errors → error propagated (fail closed)", func(t *testing.T) {
 		b, db := newTestDistributedBackendWithDB(t)
 		require.NoError(t, b.CreateBucket(ctx, "berr"))
 		require.NoError(t, db.Close())
@@ -91,10 +91,10 @@ func TestHeadObjectMetaVSoleAuthOn(t *testing.T) {
 	})
 }
 
-// TestHeadObjectMetaVSoleAuthOffUnchanged confirms the not-on (off/pending) path
+// TestHeadObjectMetaVBlobAuthOffUnchanged confirms the not-on (off/pending) path
 // is byte-identical to today's specific-version behavior: both a per-version
 // blob hit AND an FSM-fallback hit still resolve.
-func TestHeadObjectMetaVSoleAuthOffUnchanged(t *testing.T) {
+func TestHeadObjectMetaVBlobAuthOffUnchanged(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("off: per-version blob hit resolves", func(t *testing.T) {
@@ -102,7 +102,7 @@ func TestHeadObjectMetaVSoleAuthOffUnchanged(t *testing.T) {
 		require.NoError(t, b.CreateBucket(ctx, "voff"))
 		setVersioningForTest(t, b, "voff", "Enabled")
 		seedVersionBlob(t, b, "voff", "k", "v1", PutObjectMetaCmd{ETag: "etag-off", Size: 7})
-		// soleauth never flipped → off
+		// blob-authority never flipped → off
 
 		obj, _, err := b.headObjectMetaV(ctx, "voff", "k", "v1")
 		require.NoError(t, err)
@@ -116,7 +116,7 @@ func TestHeadObjectMetaVSoleAuthOffUnchanged(t *testing.T) {
 		require.NoError(t, b.CreateBucket(ctx, "foff"))
 		setVersioningForTest(t, b, "foff", "Enabled")
 		// A vid-bearing FSM record with NO per-version blob. Under blob-primary the
-		// per-version blob is the sole authority, so a specific-version read of a
+		// per-version blob is the blob authority, so a specific-version read of a
 		// blob-absent plain versioned record is 404 (was the old FSM ObjectMetaKeyV read).
 		seedFSMObject(t, b, "foff", "k", "v1", objectMeta{Key: "k", ETag: "fsm-off"}, true)
 

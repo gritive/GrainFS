@@ -25,7 +25,7 @@ func seedLatestBlob(t *testing.T, b *DistributedBackend, bucket, key string, cmd
 // a non-versioned PUT writes only the latest-only blob (no FSM obj: record), so the
 // known-set must scan those blobs — not the (empty) FSM obj: tree. Without this the
 // sweep treats every live non-versioned object's segments as orphaned and deletes
-// them (data loss). Symmetric counterpart of listSoleAuthBucketObjectsForGC.
+// them (data loss). Symmetric counterpart of listBlobAuthBucketObjectsForGC.
 func TestListAllObjectsForGC_NonVersionedScansBlob(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	ctx := context.Background()

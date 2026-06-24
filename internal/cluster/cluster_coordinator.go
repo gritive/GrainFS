@@ -658,12 +658,12 @@ func (c *ClusterCoordinator) HeadBucket(ctx context.Context, bucket string) erro
 }
 func (c *ClusterCoordinator) DeleteBucket(ctx context.Context, bucket string) error {
 	if c.router != nil && c.meta != nil {
-		// Under soleauth=on, ListObjects (latest-live-only, delete markers
+		// Under blob-authoritative, ListObjects (latest-live-only, delete markers
 		// excluded) is not the authority; use ListObjectVersions, which under `on`
 		// returns the cluster-wide per-version blobs (incl. delete markers) + every
 		// group's carve-out FSM records. len>0 (any version/marker/carve-out) =
-		// non-empty, matching the leaf. Fail-closed on the soleauth read.
-		if on, serr := c.bucketSoleAuthOn(bucket); serr != nil {
+		// non-empty, matching the leaf. Fail-closed on the blob-authority read.
+		if on, serr := c.bucketBlobAuthOn(bucket); serr != nil {
 			return serr
 		} else if on {
 			vs, err := c.ListObjectVersions(ctx, bucket, "", 1)
@@ -690,7 +690,7 @@ func (c *ClusterCoordinator) DeleteBucket(ctx context.Context, bucket string) er
 // Unlike DeleteBucket, it does not fail when the bucket is non-empty.
 //
 // Branches on bucket versioning when routing is wired:
-//   - versioned (soleauth=on): forceDeleteBucketSoleAuth enumerates per-version
+//   - versioned (blob-authoritative): forceDeleteBucketBlobAuth enumerates per-version
 //     blobs cluster-wide and purges each via DeleteObjectVersion.
 //   - non-versioned: enumerate live latest-only qmeta blobs cluster-wide via
 //     scanQuorumMetaClusterAll (NOT the local-only scanQuorumMetaBucketStrict), then
@@ -700,12 +700,12 @@ func (c *ClusterCoordinator) ForceDeleteBucket(ctx context.Context, bucket strin
 		// Routing not wired — delegate to the leaf backend which handles its own branches.
 		return c.base.ForceDeleteBucket(ctx, bucket)
 	}
-	on, serr := c.bucketSoleAuthOn(bucket)
+	on, serr := c.bucketBlobAuthOn(bucket)
 	if serr != nil {
 		return serr
 	}
 	if on {
-		return c.forceDeleteBucketSoleAuth(ctx, bucket)
+		return c.forceDeleteBucketBlobAuth(ctx, bucket)
 	}
 	// Non-versioned cluster path: enumerate cluster-wide (fail-closed fan-out to
 	// all peers) so objects placed on remote nodes are included. Then per object:
@@ -749,14 +749,14 @@ func (c *ClusterCoordinator) ForceDeleteBucket(ctx context.Context, bucket strin
 	return c.DeleteBucket(ctx, bucket)
 }
 
-// forceDeleteBucketSoleAuth is the soleauth=on (versioned) cluster force-delete:
+// forceDeleteBucketBlobAuth is the blob-authoritative (versioned) cluster force-delete:
 // enumerate per-version blobs cluster-wide via ListObjectVersions (which includes
 // scanFsmCarveoutVersions for carve-outs), delete each vid-bearing entry via
 // DeleteObjectVersion (blob-purging), then finish with the blob-aware DeleteBucket.
 //
 // The legacy hardDeleteLegacyObject raft tail has been dropped: greenfield versioned
 // buckets have no legacy-bare FSM carve-outs, and Task 4c will retire CmdDeleteObject.
-func (c *ClusterCoordinator) forceDeleteBucketSoleAuth(ctx context.Context, bucket string) error {
+func (c *ClusterCoordinator) forceDeleteBucketBlobAuth(ctx context.Context, bucket string) error {
 	if err := c.purgePerVersionBlobs(ctx, bucket); err != nil {
 		return err
 	}
@@ -1280,13 +1280,13 @@ func (c *ClusterCoordinator) ListObjectVersions(
 	if _, err := state.opRouter.RouteBucket(bucket); err != nil {
 		return nil, err
 	}
-	// S4c-c T2: under soleauth=on every leaf computes the SAME cluster-wide blob
+	// S4c-c T2: under blob-authoritative every leaf computes the SAME cluster-wide blob
 	// view (→ N× duplicated across groups) plus its own local carve-outs. Dedup
 	// by (Key,VID) keep-the-first (duplicates are byte-identical; ObjectVersion
 	// has no MetaSeq so keep-one is correct) and apply maxKeys ONCE — NOT
 	// reconcileVersionIsLatest (the blob view has no cross-group lat: split).
-	// Fail closed on the soleauth read.
-	if on, serr := c.bucketSoleAuthOn(bucket); serr != nil {
+	// Fail closed on the blob-authority read.
+	if on, serr := c.bucketBlobAuthOn(bucket); serr != nil {
 		return nil, serr
 	} else if on {
 		// maxKeys=0 (untruncated) so per-leaf truncation can't underfill the
@@ -1323,11 +1323,11 @@ func (c *ClusterCoordinator) ListObjectVersions(
 	return merged, nil
 }
 
-// bucketSoleAuthOn reports whether the bucket's soleauth state is "on",
-// FAIL-CLOSED on a read error (mirrors DistributedBackend.soleAuthReadOn).
-func (c *ClusterCoordinator) bucketSoleAuthOn(bucket string) (bool, error) {
+// bucketBlobAuthOn reports whether the bucket's blob-authority state is "on",
+// FAIL-CLOSED on a read error (mirrors DistributedBackend.blobAuthReadOn).
+func (c *ClusterCoordinator) bucketBlobAuthOn(bucket string) (bool, error) {
 	// S2 blob-primary: blob-authoritative for every versioning-enabled bucket
-	// (mirrors DistributedBackend.soleAuthReadOn).
+	// (mirrors DistributedBackend.blobAuthReadOn).
 	state, err := c.GetBucketVersioning(bucket)
 	if err != nil {
 		return false, fmt.Errorf("read versioning state for bucket %q: %w", bucket, err)
@@ -1336,7 +1336,7 @@ func (c *ClusterCoordinator) bucketSoleAuthOn(bucket string) (bool, error) {
 }
 
 // dedupVersionsKeepFirst removes (Key,VersionID) duplicates, keeping the first
-// occurrence. Under soleauth=on every leaf returns the identical cluster-wide
+// occurrence. Under blob-authoritative every leaf returns the identical cluster-wide
 // blob view, so the blob entries are byte-identical duplicates across groups;
 // ObjectVersion carries no MetaSeq tiebreak, so keep-one is correct. Carve-out
 // keys are owned by exactly one group and never duplicate.
