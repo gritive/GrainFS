@@ -19,19 +19,18 @@ import (
 	"github.com/onsi/gomega"
 )
 
-// External PDP Slice 7 PR-B — data-plane (S3 + Iceberg) enforcement matrix.
+// External PDP Slice 7 PR-B — data-plane (S3) enforcement matrix.
 //
 // The data-plane decorator (boot_phases_srvopts.go wraps the policy authorizer
 // with pdp.NewDecorator(..., "data_plane")) consults the external PDP with a
 // deny-override rule ONLY when iam.pdp.enabled && iam.pdp.data_plane.enabled.
-// Each spec drives an S3 (or Iceberg OAuth) op against a running single-node
-// server, flipping the iam.pdp config via the admin UDS between Its.
+// Each spec drives an S3 op against a running single-node server, flipping
+// the iam.pdp config via the admin UDS between Its.
 //
 // In every spec the GrainFS inner authorizer ALLOWS the op (the bootstrap SA
-// has bucket-admin / the Iceberg SA has readwrite), so the PDP is the deciding
-// layer. The mock PDP is an httptest server bound to loopback http (the only
-// scheme the SSRF egress filter permits) with a flip-able decision and a
-// request counter.
+// has bucket-admin), so the PDP is the deciding layer. The mock PDP is an
+// httptest server bound to loopback http (the only scheme the SSRF egress
+// filter permits) with a flip-able decision and a request counter.
 //
 // Cluster parity is deferred: there is no multi-node IAM harness that exposes a
 // per-node admin UDS for setPDPConfig + a shared mock PDP. The control-plane
@@ -50,7 +49,7 @@ func pdpDataPlaneConfigJSON(url, policy string) string {
 // pdpDataPlaneConfigJSONDisabled builds an iam.pdp document with the top-level
 // gate enabled but data_plane.enabled OMITTED (defaults false), so the
 // data-plane decorator is a pure pass-through and the PDP is never consulted on
-// S3/Iceberg ops.
+// S3 ops.
 func pdpDataPlaneConfigJSONDisabled(url, policy string) string {
 	return fmt.Sprintf(
 		`{"enabled":true,"endpoint":"%s","failure_policy":"%s"}`,

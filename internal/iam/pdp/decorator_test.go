@@ -1088,8 +1088,9 @@ func TestDecoratorSingleflightDoesNotCacheError(t *testing.T) {
 	require.Equal(t, int32(2), atomic.LoadInt32(&calls), "error result must not be cached")
 }
 
-// Per-waiter cancel (Iceberg passes a real ctx). A waiter whose ctx cancels DURING
-// the flight must DENY "request canceled" via the select, not adopt the shared result.
+// Per-waiter cancel (a caller passes a real ctx). A waiter whose ctx cancels
+// DURING the flight must DENY "request canceled" via the select, not adopt the
+// shared result.
 func TestDecoratorSingleflightPerWaiterCancel(t *testing.T) {
 	block := make(chan struct{})
 	url := decoHTTPPDP(t, func(w http.ResponseWriter, _ *http.Request) { <-block; _, _ = w.Write([]byte(`{"decision":"allow"}`)) })
@@ -1097,7 +1098,7 @@ func TestDecoratorSingleflightPerWaiterCancel(t *testing.T) {
 	d := NewDecorator(&spyInner{decision: policy.DecisionAllow},
 		staticCfg(pdpConfigJSONWithCacheDP(url, "open", "1m", "1m", "0")), nil, "data_plane")
 	ctx, cancel := context.WithCancel(context.Background())
-	ctxReq := policy.RequestContext{Action: "iceberg:GetTable", Resource: "arn:aws:s3:::wh/t"}
+	ctxReq := policy.RequestContext{Action: "s3:GetObject", Resource: "arn:aws:s3:::wh/t"}
 	done := make(chan policy.EvalResult, 1)
 	go func() { done <- d.AuthorizePrincipal(ctx, principal.ServiceAccount("sa"), "wh", ctxReq) }()
 	time.Sleep(30 * time.Millisecond)

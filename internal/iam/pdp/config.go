@@ -73,7 +73,7 @@ type SSRFConfig struct {
 }
 
 // DataPlaneConfig is the parsed iam.pdp.data_plane configuration. When Enabled,
-// the data_plane-scope decorator enforces PDP on S3/Iceberg object operations
+// the data_plane-scope decorator enforces PDP on S3 object operations
 // (in addition to the top-level Enabled gate). Default false (secure-by-default).
 type DataPlaneConfig struct {
 	Enabled bool

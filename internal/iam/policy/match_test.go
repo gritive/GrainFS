@@ -16,9 +16,9 @@ func TestMatchAction_ExactAndWildcard(t *testing.T) {
 		{"s3:*", "s3:GetObject", true},
 		{"s3:Get*", "s3:GetObject", true},
 		{"s3:Get*", "s3:PutObject", false},
-		{"*", "iceberg:LoadTable", true},
-		{"iceberg:*Table", "iceberg:LoadTable", true},
-		{"iceberg:*Table", "iceberg:ListTables", false},
+		{"*", "s3:GetObject", true},
+		{"s3:*Object", "s3:GetObject", true},
+		{"s3:*Object", "s3:ListBucket", false},
 	}
 	for _, c := range tests {
 		require.Equal(t, c.want, matchAction(c.pattern, c.req), "matchAction(%q, %q)", c.pattern, c.req)

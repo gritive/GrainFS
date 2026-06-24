@@ -39,9 +39,9 @@ const genericDenyMsg = "pdp_deny: denied by external policy"
 
 const schemaVersion = 1
 
-// scopeDataPlane is the scope label for the S3/Iceberg object data-plane
-// decorator. Only this scope infers Request.Protocol from the action prefix;
-// control-plane scopes (admin | protocol_credential) keep the literal "admin".
+// scopeDataPlane is the scope label for the S3 object data-plane decorator.
+// Only this scope infers Request.Protocol from the action prefix; control-plane
+// scopes (admin | protocol_credential) keep the literal "admin".
 const scopeDataPlane = "data_plane"
 
 // ConfigReader is the minimal view of the config store the decorator needs.
