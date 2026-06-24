@@ -7,9 +7,6 @@ copy-on-write publish step.
 
 ## Changes In This Audit
 
-- `internal/storage.CachedBackend` no longer has a mutex. Cache state is an
-  immutable snapshot published with `atomic.Pointer` and `CompareAndSwap`.
-  Cache reads do not acquire locks.
 - `internal/storage.Operations` no longer has a mutex. The storage decorator
   capability plan and the ACL capability plan are published with
   `atomic.Pointer` and validated against a single-source `atomic.Uint64`

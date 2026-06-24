@@ -361,10 +361,9 @@ func (b *LocalBackend) PutObjectWithRequest(ctx context.Context, req PutObjectRe
 
 func (b *LocalBackend) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *Object, error) {
 	// Backend boundary readamp: every disk-touching GetObject feeds
-	// the simulator. CachedBackend sits in front of us, so callers
-	// that hit the object cache never reach this point. The hit-rate
-	// curve at this tracker therefore answers exactly what UBC would
-	// have caught beyond the existing object cache.
+	// the simulator. Callers that hit an in-front object cache never
+	// reach this point. The hit-rate curve at this tracker therefore
+	// answers exactly what UBC would have caught beyond any object cache.
 	readamp.RecordBackendObject(bucket, key)
 	obj, err := b.HeadObject(ctx, bucket, key)
 	if err != nil {
@@ -922,8 +921,8 @@ func (b *LocalBackend) ReadAt(ctx context.Context, bucket, key string, offset in
 	if err != nil {
 		// Preserve the os.Open-style "file not found" contract that
 		// callers (and tests) rely on via os.IsNotExist. The legacy ReadAt
-		// returned *os.PathError from os.Open; emit one here so wrappers
-		// like CachedBackend continue to satisfy os.IsNotExist.
+		// returned *os.PathError from os.Open; emit one here so all
+		// wrapping backends continue to satisfy os.IsNotExist.
 		if errors.Is(err, ErrObjectNotFound) {
 			return 0, &os.PathError{Op: "open", Path: b.objectPath(bucket, key), Err: os.ErrNotExist}
 		}
