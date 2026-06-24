@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.0.661.0] - 2026-06-24
 
 ### Changed
 - **Bucket existence, policy, and versioning are now control-plane state on the cluster meta-raft,
