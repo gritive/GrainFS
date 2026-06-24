@@ -2,12 +2,9 @@ package transport
 
 import (
 	"context"
-	"encoding/base64"
-	"fmt"
 	"io"
 
 	"github.com/cloudwego/hertz/pkg/app"
-	"github.com/cloudwego/hertz/pkg/protocol"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 )
 
@@ -73,16 +70,8 @@ func (t *HTTPTransport) handleAppendSegmentRead(c context.Context, ctx *app.Requ
 		ctx.SetBodyString("append-segment read handler not ready")
 		return
 	}
-	s := string(ctx.GetHeader(hdrAppendFrame))
-	if s == "" {
-		ctx.SetStatusCode(consts.StatusBadRequest)
-		ctx.SetBodyString("missing " + hdrAppendFrame)
-		return
-	}
-	frame, err := base64.StdEncoding.DecodeString(s)
-	if err != nil || len(frame) == 0 || len(frame) > maxAppendFrameBytes {
-		ctx.SetStatusCode(consts.StatusBadRequest)
-		ctx.SetBodyString("bad " + hdrAppendFrame)
+	frame, ok := decodeFramedHeader(ctx, hdrAppendFrame, maxAppendFrameBytes)
+	if !ok {
 		return
 	}
 
@@ -97,13 +86,7 @@ func (t *HTTPTransport) handleAppendSegmentRead(c context.Context, ctx *app.Requ
 		ctx.SetBodyString(herr.Error())
 		return
 	}
-	ctx.SetStatusCode(consts.StatusOK)
-	if len(reply) > 0 {
-		ctx.Header(hdrAppendReply, base64.StdEncoding.EncodeToString(reply))
-	}
-	if rbody != nil {
-		ctx.SetBodyStream(rbody, -1) // Hertz closes the io.Closer after writing
-	}
+	writeFramedReply(ctx, hdrAppendReply, reply, rbody)
 }
 
 // AppendSegmentRead fetches one append-segment blob from addr. On success the
@@ -111,39 +94,5 @@ func (t *HTTPTransport) handleAppendSegmentRead(c context.Context, ctx *app.Requ
 // segment bytes (empty for in-band non-OK replies); the closer OWNS the pooled
 // response (Close exactly once). Mirrors ForwardRead.
 func (t *HTTPTransport) AppendSegmentRead(ctx context.Context, addr string, frame []byte) ([]byte, io.ReadCloser, error) {
-	if len(frame) == 0 || len(frame) > maxAppendFrameBytes {
-		return nil, nil, fmt.Errorf("append-segment read: frame size %d outside (0, %d]", len(frame), maxAppendFrameBytes)
-	}
-	c, err := t.httpClient()
-	if err != nil {
-		return nil, nil, err
-	}
-	hreq := protocol.AcquireRequest()
-	hresp := protocol.AcquireResponse()
-	hreq.SetMethod(consts.MethodGet)
-	hreq.SetRequestURI("https://" + addr + httpAppendSegmentReadPath)
-	hreq.Header.Set(hdrAppendFrame, base64.StdEncoding.EncodeToString(frame))
-
-	if err := c.Do(ctx, hreq, hresp); err != nil {
-		protocol.ReleaseRequest(hreq)
-		protocol.ReleaseResponse(hresp)
-		return nil, nil, fmt.Errorf("append-segment read %s: %w", addr, err)
-	}
-	protocol.ReleaseRequest(hreq)
-
-	if sc := hresp.StatusCode(); sc != consts.StatusOK {
-		msg, _ := io.ReadAll(io.LimitReader(hresp.BodyStream(), forwardErrCap))
-		protocol.ReleaseResponse(hresp)
-		return nil, nil, fmt.Errorf("append-segment read %s: status %d: %s", addr, sc, msg)
-	}
-	var reply []byte
-	if s := hresp.Header.Get(hdrAppendReply); s != "" {
-		reply, err = base64.StdEncoding.DecodeString(s)
-		if err != nil || len(reply) > maxAppendFrameBytes {
-			protocol.ReleaseResponse(hresp)
-			return nil, nil, fmt.Errorf("append-segment read %s: bad reply header", addr)
-		}
-	}
-	// Success: hresp ownership transfers to the closer (N7-1 lifecycle rule).
-	return reply, newHTTPRespBody(hresp), nil
+	return t.framedRead(ctx, appendSegReadClient, addr, frame)
 }

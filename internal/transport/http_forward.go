@@ -87,21 +87,37 @@ func (t *HTTPTransport) RegisterForwardReadHandler(h ForwardReadHandler) {
 func (t *HTTPTransport) InboundNativeForwardWrites() uint64 { return t.nativeForwardWrites.Load() }
 func (t *HTTPTransport) InboundNativeForwardReads() uint64  { return t.nativeForwardReads.Load() }
 
-// decodeForwardFrameHeader extracts and bounds the family frame.
-func decodeForwardFrameHeader(ctx *app.RequestContext) ([]byte, bool) {
-	s := string(ctx.GetHeader(hdrForwardFrame))
+// decodeFramedHeader extracts and bounds a family frame from the named header.
+// On a missing header it writes a 400 "missing <hdr>"; on a bad/oversized frame
+// a 400 "bad <hdr>". Shared by the forward-write/read and append-segment-read
+// handlers.
+func decodeFramedHeader(ctx *app.RequestContext, hdrName string, maxBytes int) ([]byte, bool) {
+	s := string(ctx.GetHeader(hdrName))
 	if s == "" {
 		ctx.SetStatusCode(consts.StatusBadRequest)
-		ctx.SetBodyString("missing " + hdrForwardFrame)
+		ctx.SetBodyString("missing " + hdrName)
 		return nil, false
 	}
 	frame, err := base64.StdEncoding.DecodeString(s)
-	if err != nil || len(frame) == 0 || len(frame) > maxForwardFrameBytes {
+	if err != nil || len(frame) == 0 || len(frame) > maxBytes {
 		ctx.SetStatusCode(consts.StatusBadRequest)
-		ctx.SetBodyString("bad " + hdrForwardFrame)
+		ctx.SetBodyString("bad " + hdrName)
 		return nil, false
 	}
 	return frame, true
+}
+
+// writeFramedReply writes the success tail shared by the streamed-response read
+// handlers: 200, the optional base64 reply-metadata header, and the optional
+// streamed body (Hertz closes the io.Closer after writing).
+func writeFramedReply(ctx *app.RequestContext, replyHdr string, reply []byte, rbody io.ReadCloser) {
+	ctx.SetStatusCode(consts.StatusOK)
+	if len(reply) > 0 {
+		ctx.Header(replyHdr, base64.StdEncoding.EncodeToString(reply))
+	}
+	if rbody != nil {
+		ctx.SetBodyStream(rbody, -1) // Hertz closes the io.Closer after writing
+	}
 }
 
 // handleForwardWrite is the Hertz handler for POST /forward/write.
@@ -112,7 +128,7 @@ func (t *HTTPTransport) handleForwardWrite(c context.Context, ctx *app.RequestCo
 		ctx.SetBodyString("forward write handler not ready")
 		return
 	}
-	frame, ok := decodeForwardFrameHeader(ctx)
+	frame, ok := decodeFramedHeader(ctx, hdrForwardFrame, maxForwardFrameBytes)
 	if !ok {
 		return
 	}
@@ -142,7 +158,7 @@ func (t *HTTPTransport) handleForwardRead(c context.Context, ctx *app.RequestCon
 		ctx.SetBodyString("forward read handler not ready")
 		return
 	}
-	frame, ok := decodeForwardFrameHeader(ctx)
+	frame, ok := decodeFramedHeader(ctx, hdrForwardFrame, maxForwardFrameBytes)
 	if !ok {
 		return
 	}
@@ -158,13 +174,7 @@ func (t *HTTPTransport) handleForwardRead(c context.Context, ctx *app.RequestCon
 		ctx.SetBodyString(herr.Error())
 		return
 	}
-	ctx.SetStatusCode(consts.StatusOK)
-	if len(reply) > 0 {
-		ctx.Header(hdrForwardReply, base64.StdEncoding.EncodeToString(reply))
-	}
-	if rbody != nil {
-		ctx.SetBodyStream(rbody, -1) // Hertz closes the io.Closer after writing
-	}
+	writeFramedReply(ctx, hdrForwardReply, reply, rbody)
 }
 
 // ForwardWrite streams one S3 write forward to addr. reply is the FB
@@ -209,39 +219,5 @@ func (t *HTTPTransport) ForwardWrite(ctx context.Context, addr string, frame []b
 // reply is the FB ForwardReply metadata and the ReadCloser streams the object
 // bytes; the closer OWNS the pooled response (Close exactly once).
 func (t *HTTPTransport) ForwardRead(ctx context.Context, addr string, frame []byte) ([]byte, io.ReadCloser, error) {
-	if len(frame) == 0 || len(frame) > maxForwardFrameBytes {
-		return nil, nil, fmt.Errorf("forward read: frame size %d outside (0, %d]", len(frame), maxForwardFrameBytes)
-	}
-	c, err := t.httpClient()
-	if err != nil {
-		return nil, nil, err
-	}
-	hreq := protocol.AcquireRequest()
-	hresp := protocol.AcquireResponse()
-	hreq.SetMethod(consts.MethodGet)
-	hreq.SetRequestURI("https://" + addr + httpForwardReadPath)
-	hreq.Header.Set(hdrForwardFrame, base64.StdEncoding.EncodeToString(frame))
-
-	if err := c.Do(ctx, hreq, hresp); err != nil {
-		protocol.ReleaseRequest(hreq)
-		protocol.ReleaseResponse(hresp)
-		return nil, nil, fmt.Errorf("forward read %s: %w", addr, err)
-	}
-	protocol.ReleaseRequest(hreq)
-
-	if sc := hresp.StatusCode(); sc != consts.StatusOK {
-		msg, _ := io.ReadAll(io.LimitReader(hresp.BodyStream(), forwardErrCap))
-		protocol.ReleaseResponse(hresp)
-		return nil, nil, fmt.Errorf("forward read %s: status %d: %s", addr, sc, msg)
-	}
-	var reply []byte
-	if s := hresp.Header.Get(hdrForwardReply); s != "" {
-		reply, err = base64.StdEncoding.DecodeString(s)
-		if err != nil || len(reply) > maxPayloadSize {
-			protocol.ReleaseResponse(hresp)
-			return nil, nil, fmt.Errorf("forward read %s: bad reply header", addr)
-		}
-	}
-	// Success: hresp ownership transfers to the closer (N7-1 lifecycle rule).
-	return reply, newHTTPRespBody(hresp), nil
+	return t.framedRead(ctx, forwardReadClient, addr, frame)
 }
