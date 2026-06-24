@@ -94,6 +94,7 @@ func planAppendObjectBlobRMW(in appendBlobRMWInput) (PutObjectMetaCmd, error) {
 			Size:             seg.Size,
 			ContentType:      "application/octet-stream",
 			ETag:             storage.CompositeETag([][]byte{seg.Checksum}),
+			AppendCallMD5s:   [][]byte{append([]byte(nil), seg.Checksum...)},
 			ModTime:          in.ModifiedUnixSec,
 			VersionID:        in.VersionID,
 			PlacementGroupID: in.PlacementGroupID,
@@ -146,18 +147,31 @@ func planAppendObjectBlobRMW(in appendBlobRMWInput) (PutObjectMetaCmd, error) {
 	}
 	next.IsAppendable = true
 
-	// Append the new segment and recompute Size + composite ETag byte-identically
-	// to the FSM path (storage.CompositeETag over per-segment checksums).
+	// Append the new segment and recompute Size.
 	segs := append(segmentMetaEntriesToRefs(base.Segments), seg)
 	next.Segments = segmentRefsToMetaEntries(segs)
 	next.Size = base.Size + seg.Size
-	callDigests := make([][]byte, 0, len(segs))
-	for _, s := range segs {
-		if len(s.Checksum) > 0 {
-			callDigests = append(callDigests, s.Checksum)
+	// Accumulate the per-call digest history. base.Segments is emptied by a coalesce,
+	// so deriving the ETag from Segments alone would drop the coalesced calls;
+	// base.AppendCallMD5s carries the full history. When the base has no history yet
+	// (first append onto a plain OR chunked PUT), SEED from the base's current segment
+	// checksums so the composite ETag stays byte-identical to the pre-fix value for
+	// that case. Then append this call's digest.
+	callMD5s := make([][]byte, 0, len(base.AppendCallMD5s)+len(base.Segments)+1)
+	if len(base.AppendCallMD5s) > 0 {
+		for _, d := range base.AppendCallMD5s {
+			callMD5s = append(callMD5s, append([]byte(nil), d...))
+		}
+	} else {
+		for _, s := range base.Segments {
+			if len(s.Checksum) > 0 {
+				callMD5s = append(callMD5s, append([]byte(nil), s.Checksum...))
+			}
 		}
 	}
-	next.ETag = storage.CompositeETag(callDigests)
+	callMD5s = append(callMD5s, append([]byte(nil), seg.Checksum...))
+	next.AppendCallMD5s = callMD5s
+	next.ETag = storage.CompositeETag(callMD5s)
 	next.ModTime = in.ModifiedUnixSec
 	next.VersionID = in.VersionID
 	next.PlacementGroupID = in.PlacementGroupID

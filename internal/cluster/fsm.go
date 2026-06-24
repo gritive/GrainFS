@@ -156,6 +156,10 @@ type PutObjectMetaCmd struct {
 	// QuarantineCause is the cause string set at quarantine time
 	// (e.g. incident.CauseCorruptShard). Empty if not quarantined.
 	QuarantineCause string
+	// AppendCallMD5s is the per-AppendObject-call digest history (one entry per
+	// append call; the call's segment Checksum). Persisted so the composite ETag
+	// survives a coalesce, which consumes Segments. Empty/nil for non-appendable.
+	AppendCallMD5s [][]byte
 }
 
 // SegmentMetaEntry records the placement of one chunked-PUT segment. The

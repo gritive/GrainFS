@@ -641,3 +641,12 @@ func TestPutObjectMetaCmd_AppendManifestRoundTrip(t *testing.T) {
 	require.Equal(t, "c1", out.Coalesced[0].CoalescedID)
 	require.Len(t, out.Segments, 2)
 }
+
+func TestPutObjectMetaCmdRoundTripsAppendCallMD5s(t *testing.T) {
+	cmd := PutObjectMetaCmd{Bucket: "b", Key: "k", IsAppendable: true, AppendCallMD5s: [][]byte{[]byte("aaaaaaaaaaaaaaaa"), []byte("bbbbbbbbbbbbbbbb")}}
+	enc, err := encodePutObjectMetaCmd(cmd)
+	require.NoError(t, err)
+	got, err := decodePutObjectMetaCmd(enc)
+	require.NoError(t, err)
+	require.Equal(t, cmd.AppendCallMD5s, got.AppendCallMD5s)
+}
