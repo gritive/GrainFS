@@ -53,7 +53,7 @@ func (b *DistributedBackend) bucketVersioningEnabled(ctx context.Context, bucket
 func (b *DistributedBackend) writeQuorumMeta(ctx context.Context, cmd PutObjectMetaCmd) error {
 	// Blob-primary (raft-free): for versioning-enabled buckets the per-version blob
 	// (written below via fanOutPerVersionBlob) is the SOLE AUTHORITY for object
-	// metadata — there is no CmdPutObjectMeta propose. Reads, LIST, the orphan GCs,
+	// metadata — there is no raft propose for object metadata. Reads, LIST, the orphan GCs,
 	// and DEK rewrap all derive from the per-version blobs; the latest-only blob is
 	// the LIST-latest fast path. The conditional-PUT (ExpectedETag) CAS that used to
 	// be enforced inside the propose is dropped for versioned objects: the only

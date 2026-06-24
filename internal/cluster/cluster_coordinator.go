@@ -1489,8 +1489,8 @@ func (c *ClusterCoordinator) CreateMultipartUpload(ctx context.Context, bucket, 
 
 // CreateMultipartUploadWithTags routes to the resolved data group, mirroring
 // CreateMultipartUpload but carrying tags. Tags materialise onto the finalised
-// object via the existing Raft-replicated CmdPutObjectMeta path on Complete
-// (clusterMultipartMeta.Tags → objectMeta.Tags). When the resolved target is
+// object via the off-raft quorum-meta blob written on Complete
+// (clusterMultipartMeta.Tags → PutObjectMetaCmd.Tags). When the resolved target is
 // remote the tags ride along in CreateMultipartUploadArgs.tags so the receiver
 // dispatches to GroupBackend.CreateMultipartUploadWithTags.
 func (c *ClusterCoordinator) CreateMultipartUploadWithTags(ctx context.Context, bucket, key, contentType string, tags []storage.Tag) (string, error) {
