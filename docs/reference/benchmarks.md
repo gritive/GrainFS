@@ -26,8 +26,6 @@ object sizes, concurrency, and cold/warm-cache rules.
 | `make bench`                                  | Single-node S3 `warp` PUT/GET workload             | `benchmarks/profiles/s3-compat-compare-*`                           |
 | `make bench-cluster`                          | 3-node S3 `warp` PUT/GET workload                  | `benchmarks/profiles/s3-compat-compare-*`, cluster logs             |
 | `make bench-s3-compat-compare`                | `GrainFS` vs native MinIO/RustFS S3 `warp` workload | `benchmarks/profiles/s3-compat-compare-*`                           |
-| `make bench-iceberg-table`                    | Single-node Iceberg REST Catalog via `warp iceberg` | `benchmarks/profiles/iceberg-table-*`                               |
-| `make bench-iceberg-table-cluster`            | Multi-node Iceberg REST Catalog via `warp iceberg`  | `benchmarks/profiles/iceberg-table-*`, cluster logs                 |
 | `make bench-nfs`                              | Single-node NFS fio profile via Colima             | `benchmarks/profiles/nfs-*/fio_output.txt`                          |
 | `make bench-nfs-cluster`                      | Multi-node NFS fio profile                         | `benchmarks/profiles/nfs-*`                                         |
 | `make bench-nfs-multi`                        | Multi-bucket NFS export profile                    | `benchmarks/profiles/nfs-multi-*`                                   |
@@ -67,7 +65,7 @@ Use this protocol before publishing `GrainFS` vs RustFS vs MinIO results.
 | Repetition    | Run at least three iterations and report median plus spread.         |
 
 For publishable local results, run benchmark scripts with `BENCH_STRICT_HOST=1`.
-The S3 and Iceberg warp scripts write `host-preflight.txt` into the raw artifact
+The S3 warp scripts write `host-preflight.txt` into the raw artifact
 directory and fail before starting benchmark backends when the host already has
 `grainfs serve` processes or the benchmark filesystem is at least 90 percent
 full. The same preflight records `load1`, `cpu_count`, `load_per_cpu`, and
@@ -104,12 +102,6 @@ multipart-listing capability evidence to propagate through gossip; set
 the capability-ready probe follow-up). k6-based S3 benchmark scripts have
 been removed; S3 performance claims should use `warp`.
 
-Iceberg catalog benchmarks also use MinIO `warp` through
-`make bench-iceberg-table` and `make bench-iceberg-table-cluster`. The default
-Iceberg profile is `catalog-mixed` with views and update operations disabled so
-the workload runs cleanly against the current table catalog surface; commit-heavy
-update benchmarking is tracked separately.
-
 ## Latest Local Result
 
 This section keeps only the latest comparable S3 results. Older benchmark runs
@@ -121,7 +113,7 @@ S3 requests, 64 KiB objects, concurrency 32, `warp`, `--host-select
 roundrobin`, and `--noclear`. Each target ran in local single-node mode. GET is
 a warm-read pass over objects kept from the preceding PUT pass. `GrainFS` ran
 with at-rest encryption and S3-only benchmark flags:
-`--audit-iceberg=false --block-cache-size=0 --shard-cache-size=0`.
+`--block-cache-size=0 --shard-cache-size=0`.
 
 | S3 op | MinIO MiB/s | MinIO obj/s | MinIO errors | MinIO RSS MiB | RustFS MiB/s | RustFS obj/s | RustFS errors | RustFS RSS MiB | GrainFS MiB/s | GrainFS obj/s | GrainFS errors | GrainFS RSS MiB | GrainFS artifact |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
@@ -144,16 +136,6 @@ S3 Express mode and cannot provide a valid append baseline without an AIStor/S3
 Express endpoint. Their raw artifact directories still contain the failed run
 output, but the throughput cells are intentionally not published as comparable
 baseline numbers. GrainFS append is reported as a best-effort 0-error result.
-
-Single-node Iceberg REST Catalog results used `make bench-iceberg-table` /
-`benchmarks/bench_iceberg_table.sh` and `warp iceberg`:
-
-| Iceberg op | Throughput | p99 latency | max latency | errors | Raw artifacts |
-| --- | ---: | ---: | ---: | ---: | --- |
-| catalog-read | 53526.85 total ops/s | 1.3 ms | 82.2 ms | 0 | `benchmarks/profiles/iceberg-single-catalog-read-after-catalog-prop-fix-20260520-170702` |
-| catalog-commits | 9563.81 ops/s | 1.8 ms | 42.1 ms | 0 | `benchmarks/profiles/iceberg-single-catalog-commits-200tables-20260520-170932` |
-| catalog-mixed | 60767.74 total ops/s | 0.9 ms | 97.0 ms | 0 | `benchmarks/profiles/iceberg-single-catalog-mixed-initial-20260520-171102` |
-| sustained | 1.00 ops/s | 11.6 ms | 17.6 ms | 0 | `benchmarks/profiles/iceberg-single-sustained-rps1-20260520-171508` |
 
 Observed S3 deltas:
 
