@@ -108,9 +108,41 @@
   own metadata anyway. Fail-closing would also reduce append availability on the common non-versioned
   bucket when versioning-read transiently faults. Decide strict-parity vs availability if it ever
   matters; not worth a behavior change now.
-- **[P3][epic, separate] group-0 control-plane demotion** — consolidate bucket existence/assignment
-  onto the true meta-raft (`bucketAssignments`) so group-0 becomes a plain data group. Larger; touches
-  bucket-lifecycle atomicity + the #838 delete cascade. Not needed for the read-linearization fix.
+### group-0 control-plane demotion follow-ups (2026-06-24, epic DONE)
+
+The demotion shipped: bucket existence/policy/versioning consolidated onto meta-raft as a unified
+`BucketRecord`; group-0 carries no bucket control-plane state; create/delete atomicity gaps closed;
+bucket writes forward to the meta leader; policy invalidation lossless; versioning barrier best-effort.
+Deferred items:
+
+- **[P3][cleanup] Remove the dead read-path BadgerDB fallback + group-0 bucket key-builders.**
+  `bucket.go` `HeadBucket`/`GetBucketPolicy`/`GetBucketVersioning` still have a "MetaBucketStore not
+  wired → read group-0 BadgerDB" fallback (reading `BucketKey`/`BucketPolicyKey`/`BucketVerKey`,
+  `keyspace.go`). Dead-in-effect: MetaBucketStore is wired unconditionally at cluster boot and group-0
+  never writes those keys now. To finish: make the reads fail-fast (drop the fallback, like the write
+  paths), update `bucket_write_test.go` `seedBucketForDelete` to seed via MetaBucketStore, then remove
+  the three key-builders. No correctness/safety risk; pure cleanup.
+- **[P3][test] No at-rest encryption integration test for the live (MetaFSM) bucket-policy path.**
+  Bucket policy now lives in the MetaFSM `BucketRecord` (snapshot-level encryption via
+  `MetaFSM.SetDEKKeeper`), not the group-0 `policy:` BadgerDB keys. The old integration test verified
+  at-rest encryption of the now-dead group-0 path; add an equivalent that exercises the live MetaFSM
+  policy at-rest path.
+- **[P3][test/CI] Run the object-write throughput bench against master.** The per-mutation versioning
+  linearizing read retargeted from the group-0 raft to meta-raft. `make bench` (warp + colima/cluster)
+  was unavailable in the dev env. In CI, compare PUT/Copy/CompleteMultipart throughput master vs this
+  change; expect neutral-to-slight-improvement. If a regression appears, the short-TTL versioning
+  edge-cache below becomes required.
+- **[P3] Short-TTL bucket-versioning edge-cache (fast-follow).** The shipped design's deferred "C2":
+  only needed if the meta-raft versioning barrier regresses object-write throughput (above).
+- **[P3] Neutralize group-0 placement special-casing.** The demotion removed group-0's *control-plane*
+  role but it remains the placement legacy-fallback (router default / `object_placement` /
+  `object_write_placement` / `append`). Removing that makes group-0 a truly plain data group.
+- **[P3] Fold lifecycle + IAM-upstream delete into the meta `DeleteBucket` apply** for full delete
+  atomicity (today they remain separate gen-CAS'd meta cascade proposes — no cross-raft gap, but a
+  coordinator crash between them can orphan lifecycle/IAM entries).
+- **[P3][minor] `CreateBucket` now unconditionally requires a non-empty groupID** (the FSM rejects
+  `""`). Safe in production (the router is always wired so placement resolves a real group), but it
+  tightens behavior for any future router-less `DistributedBackend` wiring. Note only.
 
 ### Multipart off-raft (M1-M5) follow-ups (2026-06-23)
 
