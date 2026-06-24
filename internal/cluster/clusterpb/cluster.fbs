@@ -677,9 +677,13 @@ table MetaAddPlacementGenerationCmd {
 }
 
 // PR-D: bucket→group 매핑 엔트리 1건
+// Fields 0 (bucket) and 1 (group_id) are frozen — FlatBuffers no-renumber rule.
+// Fields 2 (versioning) and 3 (policy) are additive; absent decodes as "" / nil.
 table BucketAssignmentEntry {
   bucket:string;
   group_id:string;
+  versioning:string;   // "" = unset (bucket versioning state: "Enabled","Suspended","")
+  policy:[ubyte];      // nil = unset (bucket policy JSON bytes, sealed or raw)
 }
 
 // PR-D: PutBucketAssignment 커맨드
