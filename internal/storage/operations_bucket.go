@@ -31,6 +31,13 @@ func (o *Operations) ListBuckets(ctx context.Context) ([]string, error) {
 // per-version emptiness check) and would orphan non-versioned objects' shards.
 // LocalBackend keeps its own generic walk for the non-cluster path.
 func (o *Operations) ForceDeleteBucket(ctx context.Context, bucket string) error {
+	// Upfront existence check so a missing bucket surfaces as ErrBucketNotFound
+	// (→ admin 404), matching the prior generic-walk behavior: the cluster
+	// coordinator's force path resolves versioning state before RouteBucket and
+	// would otherwise return an internal error for a never-assigned bucket.
+	if err := o.HeadBucket(ctx, bucket); err != nil {
+		return err
+	}
 	return o.backend.ForceDeleteBucket(ctx, bucket)
 }
 
