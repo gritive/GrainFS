@@ -466,6 +466,161 @@ func (b *DistributedBackend) fetchQuorumMetaFromPeers(bucket, key string) ([]byt
 	return best.data, hasBest
 }
 
+// peerReadOutcome is one peer's response to a reclaim quorum-meta read.
+type peerReadOutcome int
+
+const (
+	peerErrored  peerReadOutcome = iota // unreachable / read error → UNCERTAIN
+	peerNotFound                        // OK with empty payload → definitively absent on that peer
+	peerHasData                         // OK with the blob present
+)
+
+// reclaimCertainty decides, for a DESTRUCTIVE orphan reclaim, whether a quorum-meta
+// blob was seen (found) and whether the responding set is COMPLETE (certain). The
+// two are INDEPENDENT: a reclaim makes a NEGATIVE claim ("this object/version is
+// absent from the live metadata"), valid only against the complete authoritative
+// set, so ANY errored/unreachable peer forces certain=false even when another peer
+// returned a (possibly stale) manifest — otherwise a newer manifest on the
+// unreachable peer could be missed and live data deleted. Caller contract: reclaim
+// ONLY when certain && !found; on certain && found, judge liveness from the winning
+// blob; on !certain, KEEP.
+func reclaimCertainty(localHasData, localUncertain bool, peers []peerReadOutcome) (found, certain bool) {
+	if localUncertain {
+		return false, false // local read errored (non-NotFound) → can't judge → keep
+	}
+	found = localHasData
+	anyErr := false
+	for _, p := range peers {
+		switch p {
+		case peerHasData:
+			found = true
+		case peerErrored:
+			anyErr = true
+		}
+	}
+	// certain ⟺ complete responding set: local resolved AND every contacted peer
+	// answered (data or definitive not-found), none errored. Solo / legacy
+	// single-group (no peers contacted) is trivially complete.
+	return found, !anyErr
+}
+
+// readQuorumMetaForReclaim is the certainty-aware sibling of readQuorumMeta for the
+// DESTRUCTIVE orphan-reclaim path. Unlike readQuorumMeta (which maps an exhausted
+// peer fan-out to ErrObjectNotFound even when a metadata-holding peer was merely
+// unreachable), this distinguishes "proven absent" from "couldn't reach a peer":
+//
+//   - (obj, found=true,  certain=true)  the blob exists; obj is the LWW winner.
+//   - (nil, found=false, certain=true)  proven absent (local not-found AND every
+//     contacted peer responded a definitive not-found) → orphan-eligible.
+//   - (nil, _,           certain=false) UNCERTAIN (local read error, OR any peer
+//     unreachable/errored while the blob was absent locally) → caller MUST keep.
+//
+// The peer read RPC returns OK+empty for a definitive not-found and an error for a
+// read/transport failure, so the client can tell them apart (handleQuorumMetaRead).
+func (b *DistributedBackend) readQuorumMetaForReclaim(bucket, key string) (*storage.Object, bool, bool) {
+	if b.shardSvc == nil {
+		return nil, false, false // can't judge → keep
+	}
+	localRaw, localErr := b.shardSvc.readQuorumMetaRaw(bucket, key)
+	localHasData := localErr == nil && len(localRaw) > 0
+	localUncertain := localErr != nil && !errors.Is(localErr, storage.ErrObjectNotFound)
+
+	bestRaw, bestMod, bestVer, bestSeq, hasBest := []byte(nil), int64(0), "", uint64(0), false
+	consider := func(raw []byte) {
+		if len(raw) == 0 {
+			return
+		}
+		var mod int64
+		var ver string
+		var seq uint64
+		if cmd, derr := b.shardSvc.decodeQuorumMetaCmdBlob(raw); derr == nil {
+			mod, ver, seq = cmd.ModTime, cmd.VersionID, cmd.MetaSeq
+		}
+		if !hasBest || quorumMetaBlobWins(mod, ver, seq, bestMod, bestVer, bestSeq) {
+			bestRaw, bestMod, bestVer, bestSeq, hasBest = raw, mod, ver, seq, true
+		}
+	}
+	if localHasData {
+		consider(localRaw)
+	}
+
+	outcomes := b.collectReclaimPeerOutcomes(bucket, key, consider)
+	found, certain := reclaimCertainty(localHasData, localUncertain, outcomes)
+	if !found || !certain {
+		return nil, found, certain
+	}
+	obj, _, derr := b.shardSvc.decodeQuorumMetaBlob(bestRaw)
+	if derr != nil {
+		return nil, false, false // can't decode the live blob → uncertain → keep
+	}
+	return obj, true, true
+}
+
+// collectReclaimPeerOutcomes fans a quorum-meta read out to every unique peer
+// across all shard groups (excluding self) and returns one peerReadOutcome per
+// contacted peer, feeding any returned blob to consider() for LWW winner selection.
+// It mirrors fetchQuorumMetaFromPeers' peer enumeration but PRESERVES the
+// not-found-vs-error distinction the reclaim decision needs. A nil shardGroup is the
+// legacy single-group / solo path (no peers): it returns no outcomes, so the local
+// read is authoritative (reclaimCertainty treats an empty set as complete).
+func (b *DistributedBackend) collectReclaimPeerOutcomes(bucket, key string, consider func([]byte)) []peerReadOutcome {
+	if b.shardSvc == nil || b.shardGroup == nil {
+		return nil
+	}
+	self := b.currentSelfAddr()
+	seen := map[string]bool{self: true}
+	var peers []string
+	for _, g := range b.shardGroup.ShardGroups() {
+		for _, p := range g.PeerIDs {
+			if !seen[p] {
+				seen[p] = true
+				peers = append(peers, p)
+			}
+		}
+	}
+	if len(peers) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), quorumMetaReadTimeout)
+	defer cancel()
+	type res struct {
+		outcome peerReadOutcome
+		data    []byte
+	}
+	ch := make(chan res, len(peers))
+	var wg sync.WaitGroup
+	for _, p := range peers {
+		p := p
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			addr, err := b.shardSvc.resolvePeerAddress(p)
+			if err != nil {
+				ch <- res{outcome: peerErrored}
+				return
+			}
+			data, err := b.shardSvc.ReadQuorumMetaRaw(ctx, addr, bucket, key)
+			switch {
+			case err != nil:
+				ch <- res{outcome: peerErrored}
+			case len(data) == 0:
+				ch <- res{outcome: peerNotFound}
+			default:
+				ch <- res{outcome: peerHasData, data: data}
+			}
+		}()
+	}
+	go func() { wg.Wait(); close(ch) }()
+	outcomes := make([]peerReadOutcome, 0, len(peers))
+	for r := range ch {
+		if r.outcome == peerHasData {
+			consider(r.data)
+		}
+		outcomes = append(outcomes, r.outcome)
+	}
+	return outcomes
+}
+
 // fanOutQuorumMeta dispatches to every placement node concurrently and returns
 // as soon as K acks arrive. Returns an error only when the quorum becomes
 // unreachable (more than N-K failures or context cancellation). Errors are

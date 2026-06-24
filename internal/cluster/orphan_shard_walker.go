@@ -466,18 +466,23 @@ func (b *DistributedBackend) hasLiveShardRecord(bucket, key, versionID string) (
 		// FSM tombstone: no shards expected; fall through to quorum-meta to be sure.
 	}
 
-	obj, _, qerr := b.readQuorumMeta(bucket, key)
-	switch {
-	case qerr == nil && obj != nil:
+	// Certainty-aware reclaim read: plain readQuorumMeta maps an exhausted peer
+	// fan-out to ErrObjectNotFound even when a metadata-holding peer was merely
+	// unreachable, so reclaiming on its NotFound could delete a live object whose
+	// quorum-meta sits on a briefly-down peer (K-of-N). readQuorumMetaForReclaim
+	// fails CLOSED on any peer-uncertainty; a negative (absent / different-version)
+	// claim is honored only when the responding set is complete.
+	obj, found, certain := b.readQuorumMetaForReclaim(bucket, key)
+	if !certain {
+		return false, false // peer-uncertainty or read error → keep
+	}
+	if found && obj != nil {
 		if obj.VersionID == versionID && !obj.IsDeleteMarker {
 			return true, true // live regular-PUT (this exact version is the winner)
 		}
 		return false, true // a different/newer version won → this one is overwritten
-	case errors.Is(qerr, storage.ErrObjectNotFound):
-		return false, true // not live in FSM or quorum-meta → orphan-eligible
-	default:
-		return false, false // quorum-meta read error → UNCERTAIN → keep
 	}
+	return false, true // proven absent in FSM and quorum-meta → orphan-eligible
 }
 
 // fsmCarveoutShardLive judges shard liveness from the FSM obj: record for a
