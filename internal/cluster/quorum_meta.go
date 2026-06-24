@@ -1922,7 +1922,7 @@ func (b *DistributedBackend) readQuorumMetaCmd(bucket, key string) (PutObjectMet
 }
 
 // WriteQuorumMeta sends the quorum meta blob to a remote placement node via the
-// shard transport (mirrors WriteShadowMeta but routes to the primary handler).
+// shard transport (thin mirror of WriteShard, routed to the quorum-meta handler).
 func (s *ShardService) WriteQuorumMeta(ctx context.Context, addr, bucket, key string, data []byte) error {
 	if s.transport == nil {
 		return fmt.Errorf("quorum meta: no transport")
