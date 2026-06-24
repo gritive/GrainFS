@@ -248,6 +248,11 @@ func compilePolicy(policyJSON []byte) (*compiledPolicy, error) {
 func (cs *CompiledPolicyStore) Set(bucket string, policyJSON []byte) error {
 	cp, err := compilePolicy(policyJSON)
 	if err != nil {
+		// A malformed policy must not leave a stale cached decision behind — in
+		// particular a stale negative "no policy -> allow" entry. Drop the bucket's
+		// cache so the next Allow re-pulls from the committed replica and fail-closes
+		// the malformed policy to deny.
+		cs.Invalidate(bucket)
 		return err
 	}
 
