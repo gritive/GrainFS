@@ -132,8 +132,7 @@ var iamKeyRevokeCmd = &cobra.Command{
 }
 
 func init() {
-	iamCmd.PersistentFlags().String("endpoint", "",
-		"admin Unix socket path (overrides GRAINFS_ADMIN_SOCKET env var)")
+	registerAdminEndpointFlag(iamCmd, "admin Unix socket path (overrides GRAINFS_ADMIN_SOCKET env var)")
 	iamCmd.PersistentFlags().Bool("json", false, "output raw JSON")
 
 	iamSACreateCmd.Flags().String("description", "", "free-form SA description")

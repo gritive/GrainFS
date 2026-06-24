@@ -105,8 +105,7 @@ var bucketDeleteCmd = &cobra.Command{
 }
 
 func init() {
-	bucketCmd.PersistentFlags().String("endpoint", "",
-		"admin Unix socket path (overrides GRAINFS_ADMIN_SOCKET env var)")
+	registerAdminEndpointFlag(bucketCmd, "admin Unix socket path (overrides GRAINFS_ADMIN_SOCKET env var)")
 	bucketCmd.PersistentFlags().Bool("json", false, "output raw JSON")
 
 	bucketCreateCmd.Flags().String("attach-sa", "", "service account ID to attach an initial bucket policy to")
