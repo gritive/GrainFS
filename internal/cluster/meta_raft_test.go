@@ -841,3 +841,38 @@ func TestMetaRaftProposeWithGateFollowerUsesGatedForwarder(t *testing.T) {
 	require.Equal(t, plan, gotPlan)
 	require.Equal(t, 0, node.proposeCalls)
 }
+
+// TestMetaRaftReadIndexReturnsCommitted verifies that ReadIndex on a single-node
+// (leader) MetaRaft returns a committed index that is at least as high as the
+// index produced by a ProposeBucketAssignment, and that after WaitApplied the
+// bucket record is visible in the FSM.
+//
+// Follower-forwarding is covered by the cluster e2e (Task 13); the in-process
+// MetaTransportFake does not implement the read-index forward RPC.
+func TestMetaRaftReadIndexReturnsCommitted(t *testing.T) {
+	m := newSingleMetaRaft(t)
+	t.Cleanup(func() { _ = m.Close() })
+
+	require.NoError(t, m.Bootstrap())
+	require.NoError(t, m.Start(context.Background(), nil))
+	require.Eventually(t, func() bool {
+		return m.node.State() == raft.Leader
+	}, 2*time.Second, 20*time.Millisecond, "single node must become leader")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Propose a bucket assignment so there is at least one committed entry.
+	require.NoError(t, m.ProposeBucketAssignment(ctx, "b1", "group-0"))
+
+	// ReadIndex must succeed and return a committed index.
+	idx, err := m.ReadIndex(ctx)
+	require.NoError(t, err)
+	require.Greater(t, idx, uint64(0), "ReadIndex must return a positive committed index")
+
+	// WaitApplied must not error at that index.
+	require.NoError(t, m.WaitApplied(ctx, idx))
+
+	// The bucket record must be present in the FSM.
+	require.True(t, m.FSM().BucketRecordExists("b1"), "FSM must have the bucket record after WaitApplied")
+}

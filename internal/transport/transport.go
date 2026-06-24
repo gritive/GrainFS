@@ -35,6 +35,7 @@ const (
 	StreamKEKLeaseSnapshotProbe StreamType = 0x19 // Leader → peer in-flight KEK lease count probe (KEK prune Task 8)
 	StreamAppliedIndexProbe     StreamType = 0x1A // Leader → voter applied-index barrier probe (PR-2a §8b); req/resp magic-tagged binary
 	// 0x1B retired: was StreamIndexGroupProposeForward (zero non-test uses).
+	StreamMetaReadIndex StreamType = 0x1C // Follower → meta-Raft leader ReadIndex RPC; response: [8B commitIndex big-endian][4B errLen][errBytes]
 )
 
 type StreamClass byte
@@ -48,7 +49,7 @@ const (
 
 func ClassOf(st StreamType) StreamClass {
 	switch st {
-	case StreamMetaRaft, StreamMetaProposeForward, StreamMetaCatalogRead, StreamReadIndex:
+	case StreamMetaRaft, StreamMetaProposeForward, StreamMetaCatalogRead, StreamReadIndex, StreamMetaReadIndex:
 		return StreamClassMeta
 	case StreamData, StreamProposeForward, StreamProposeGroupForward, StreamGroupRaft, StreamDataGroupProposeForward:
 		return StreamClassData

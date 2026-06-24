@@ -124,6 +124,20 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 	// Native /raft/meta/propose buffered route. The propose outcome (index +
 	// error) is in-band via encodeMetaForwardReplyWithIndex.
 	clusterTransport.RegisterBufferedRoute(transport.RouteRaftMetaPropose, metaForwardReceiver.Handle)
+
+	// Meta read-index forward path: follower → meta leader ReadIndex RPC.
+	// The sender is wired into MetaRaft; the receiver is registered on every
+	// node (leader returns its ReadIndex; non-leader returns ErrNotLeader in-band).
+	metaReadIndexSender := cluster.NewMetaReadIndexForwardSender(
+		func(callCtx context.Context, leaderAddr string) ([]byte, error) {
+			return clusterTransport.CallBuffered(callCtx, leaderAddr, transport.RouteForwardMetaReadIndex, nil)
+		},
+	)
+	metaRaft.SetReadIndexForwarder(metaReadIndexSender.Send)
+	metaReadIndexReceiver := cluster.NewMetaReadIndexForwardReceiver(metaRaft)
+	// Native /raft/meta/read-index buffered route. The outcome (commitIndex or
+	// error text) is in-band; the HTTP handler always returns 200.
+	clusterTransport.RegisterBufferedRoute(transport.RouteForwardMetaReadIndex, metaReadIndexReceiver.Handle)
 	// Zero-CA invite-join receiver. It serves the two-phase invite flow over the
 	// dedicated join listener (HandleJoinRequest); state.handshakeVerifier (set by
 	// wireDEKKeeper) supplies the 16-byte cluster id bound into the invite

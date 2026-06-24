@@ -77,6 +77,11 @@ type MetaRaft struct {
 	forwardFnWithIndex func(ctx context.Context, data []byte) (uint64, error)
 	forwardFnWithGate  func(ctx context.Context, data []byte, plan compat.GatePlan) (uint64, error)
 
+	// readIndexForwardFn is called when ReadIndex runs on a non-leader node.
+	// It RPCs the meta leader via RouteForwardMetaReadIndex and returns its
+	// committed index. nil = single-node or not yet wired (returns ErrNotLeader).
+	readIndexForwardFn func(ctx context.Context, leaderAddr string) (uint64, error)
+
 	capabilityGate *CapabilityGate
 
 	// membershipMu serializes meta-raft voter-set changes with irreversible
@@ -224,6 +229,39 @@ func (m *MetaRaft) ClusterKeyDropped() bool { return m.fsm.ClusterKeyDropped() }
 func (m *MetaRaft) SetTransport(t MetaTransport) {
 	m.cfg.Transport = t
 	m.wireTransport(t)
+}
+
+// SetReadIndexForwarder injects the follower→leader read-index forwarding
+// closure. When ReadIndex is called on a non-leader and this is set, the call
+// is forwarded to the meta leader via RouteForwardMetaReadIndex instead of
+// returning raft.ErrNotLeader. Wire from the boot path before Start.
+func (m *MetaRaft) SetReadIndexForwarder(fn func(ctx context.Context, leaderAddr string) (uint64, error)) {
+	m.readIndexForwardFn = fn
+}
+
+// ReadIndex returns a linearizable read fence index for the meta-Raft group.
+// On the leader it confirms leadership via heartbeat quorum (same node primitive
+// as DistributedBackend.ReadIndex). On a follower it forwards to the meta leader
+// via RouteForwardMetaReadIndex if a forwarder has been wired; otherwise it
+// returns raft.ErrNotLeader so callers can degrade to a local (possibly stale)
+// read.
+func (m *MetaRaft) ReadIndex(ctx context.Context) (uint64, error) {
+	idx, err := m.node.ReadIndex(ctx)
+	if err == nil {
+		return idx, nil
+	}
+	if !errors.Is(err, raft.ErrNotLeader) {
+		return 0, err
+	}
+	// Not the leader: try forwarding to the meta leader.
+	if m.readIndexForwardFn == nil {
+		return 0, raft.ErrNotLeader
+	}
+	leaderAddr := m.node.LeaderID()
+	if leaderAddr == "" {
+		return 0, raft.ErrNotLeader
+	}
+	return m.readIndexForwardFn(ctx, leaderAddr)
 }
 
 // SetForwarder injects the follower→leader propose-forwarding closure. Wire
