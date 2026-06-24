@@ -57,13 +57,13 @@ func init() {
 	registerAdminTimeoutFlag(credentialCmd)
 
 	credentialCreateCmd.Flags().String("sa", "", "service account id")
-	credentialCreateCmd.Flags().String("protocol", "", "protocol: s3, iceberg, nfs, or 9p")
-	credentialCreateCmd.Flags().String("resource", "", "resource id: bucket/<name>, catalog/<name>, or volume/<name>")
+	credentialCreateCmd.Flags().String("protocol", "", "protocol: s3")
+	credentialCreateCmd.Flags().String("resource", "", "resource id: bucket/<name>")
 	credentialCreateCmd.Flags().String("mode", "", "access mode: ro or rw")
 	credentialCreateCmd.Flags().String("expires-at", "", "optional RFC3339 expiration time")
 	credentialListCmd.Flags().String("sa", "", "filter by service account id")
 	credentialListCmd.Flags().String("protocol", "", "filter by protocol")
-	credentialListCmd.Flags().String("resource", "", "filter by resource id: bucket/<name>, catalog/<name>, or volume/<name>")
+	credentialListCmd.Flags().String("resource", "", "filter by resource id: bucket/<name>")
 
 	credentialCmd.AddCommand(
 		credentialCreateCmd,

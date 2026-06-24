@@ -12,7 +12,6 @@ const (
 	routeFeatureBalancer
 	routeFeatureScrubber
 	routeFeatureRaftSnapshot
-	routeFeatureIceberg
 	routeFeatureLifecycle
 	routeFeatureCluster
 	routeFeatureClusterJoin
@@ -42,7 +41,6 @@ var routeAvailabilityManifest = []routeAvailabilityEntry{
 	{feature: routeFeatureBalancer, name: "balancer", unavailableMode: routeRegisteredWhenUnavailable},
 	{feature: routeFeatureScrubber, name: "scrubber", unavailableMode: routeRegisteredWhenUnavailable},
 	{feature: routeFeatureRaftSnapshot, name: "raft_snapshot", unavailableMode: routeRegisteredWhenUnavailable},
-	{feature: routeFeatureIceberg, name: "iceberg", unavailableMode: routeRegisteredWhenUnavailable},
 	{feature: routeFeatureLifecycle, name: "lifecycle", unavailableMode: routeRegisteredWhenUnavailable},
 	{feature: routeFeatureCluster, name: "cluster", unavailableMode: routeRegisteredWhenUnavailable},
 	{feature: routeFeatureClusterJoin, name: "cluster_join", unavailableMode: routeRegisteredWhenUnavailable},
@@ -78,8 +76,6 @@ func (s *Server) routeFeatureAvailable(feature routeFeature) bool {
 		return s.scrubber != nil
 	case routeFeatureRaftSnapshot:
 		return s.raftSnapshots != nil
-	case routeFeatureIceberg:
-		return s.icebergCatalog != nil
 	case routeFeatureLifecycle:
 		return s.lifecycle != nil
 	case routeFeatureCluster:

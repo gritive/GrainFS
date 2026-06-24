@@ -139,7 +139,6 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 			CriticalRatio: cfg.VlogCriticalRatio,
 		}),
 		IAM:                      state.iamAdminAPI,
-		IcebergConfig:            newIcebergConfigAdapter(state.cfg.IAMStore),
 		IAMPolicy:                iamPolicyAdminService(state),
 		IAMGroup:                 iamGroupAdminService(state),
 		BucketWithPolicyProp:     bucketWithPolicyProposer(state),

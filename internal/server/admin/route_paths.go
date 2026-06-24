@@ -52,8 +52,6 @@ const (
 	routePathAuditBySA         = "/audit/by-sa/:said"
 	routePathAuditByRequestID  = "/audit/by-request-id/:rid"
 
-	routePathIcebergConfig = "/iceberg/config"
-
 	routePathStatus = "/status"
 
 	routePathUpstreams        = "/upstreams"

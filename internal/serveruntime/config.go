@@ -123,9 +123,6 @@ type Config struct {
 	AuditIceberg        bool
 	AuditCommitInterval time.Duration
 
-	// Node services
-	EnableIceberg bool
-
 	// Resource guards (pre-resolved from cobra; Run body reads only these)
 	FDWatchEnabled        bool
 	FDOpts                resourceguard.FDOptions

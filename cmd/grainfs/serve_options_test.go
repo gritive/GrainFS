@@ -78,7 +78,6 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 		"--raft-election-timeout", "41ms",
 		"--audit-iceberg=false",
 		"--audit-commit-interval", "67s",
-		"--enable-iceberg=true",
 	}
 	require.NoError(t, cmd.ParseFlags(args))
 
@@ -106,9 +105,6 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 	require.Equal(t, 41, opts.ShardPackThreshold)
 	require.True(t, opts.MeasureReadAmp)
 	require.Equal(t, int64(134217728), opts.ShardCacheSize)
-
-	// Protocols.
-	require.True(t, opts.EnableIceberg)
 
 	// Intervals.
 	require.Equal(t, "7s", opts.ScrubInterval.String())

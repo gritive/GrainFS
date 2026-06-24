@@ -83,8 +83,6 @@ func optionsToConfig(
 	cfg.KEKProtector = opts.KEKProtector
 	cfg.KEKRecoverySecretFile = opts.KEKRecoverySecretFile
 
-	cfg.EnableIceberg = opts.EnableIceberg
-
 	cfg.FDWatchEnabled = opts.FDWatchEnabled
 	cfg.FDOpts = opts.FDOpts
 	cfg.GoroutineWatchEnabled = opts.GoroutineWatchEnabled

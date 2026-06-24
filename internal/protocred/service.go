@@ -219,8 +219,6 @@ func connectionHint(item Credential, _ string) map[string]string {
 	switch item.Protocol {
 	case ProtocolS3:
 		return map[string]string{"access_key_id": item.ID}
-	case ProtocolIceberg:
-		return map[string]string{"client_id": item.ID}
 	default:
 		return nil
 	}

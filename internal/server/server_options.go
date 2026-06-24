@@ -4,7 +4,6 @@ import (
 	"time"
 
 	"github.com/gritive/GrainFS/internal/iam"
-	iamjwt "github.com/gritive/GrainFS/internal/iam/jwt"
 	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/server/alertssvc"
@@ -60,14 +59,6 @@ func WithIAMAudit(audit *iam.AuditLogger) Option {
 func WithPolicyAuthorizer(a PolicyAuthorizer) Option {
 	return func(s *Server) {
 		s.policyAuthorizer = a
-	}
-}
-
-// WithJWTKeySet wires the JWT signing key set so the OAuth2 token endpoint
-// can mint bearer tokens.
-func WithJWTKeySet(ks *iamjwt.KeySet) Option {
-	return func(s *Server) {
-		s.jwtKeys = ks
 	}
 }
 

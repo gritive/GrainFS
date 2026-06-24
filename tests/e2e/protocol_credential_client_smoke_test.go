@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -25,10 +24,6 @@ var _ = ginkgo.Describe("Protocol credential client smoke", ginkgo.Label("protoc
 	describeProtocolCredentialS3ClientSmokeContext("S3 Cluster4Node", func() s3Target {
 		return newSharedClusterS3Target(ginkgo.GinkgoTB())
 	})
-
-	describeProtocolCredentialIcebergClientSmokeContext("Iceberg SingleNode", func(t testing.TB) *icebergTarget {
-		return newSingleNodeIcebergTarget(t)
-	})
 })
 
 func describeProtocolCredentialS3ClientSmokeContext(name string, factory func() s3Target) {
@@ -42,20 +37,6 @@ func describeProtocolCredentialS3ClientSmokeContext(name string, factory func() 
 		ginkgo.It("round-trips an object through MinIO mc using a bucket-scoped protocol credential", func(ctx context.Context) {
 			testS3ProtocolCredentialMinIOMC(ginkgo.GinkgoTB(), tgt)
 		}, ginkgo.NodeTimeout(60*time.Second))
-	})
-}
-
-func describeProtocolCredentialIcebergClientSmokeContext(name string, factory func(testing.TB) *icebergTarget) {
-	ginkgo.Context(name, func() {
-		var tgt *icebergTarget
-
-		ginkgo.BeforeEach(func() {
-			tgt = factory(ginkgo.GinkgoTB())
-		})
-
-		ginkgo.It("attaches DuckDB to the REST catalog using a catalog-scoped protocol credential", func(ctx context.Context) {
-			testIcebergProtocolCredentialDuckDB(ginkgo.GinkgoTB(), tgt)
-		}, ginkgo.NodeTimeout(2*time.Minute))
 	})
 }
 
@@ -89,21 +70,6 @@ func protocolCredentialS3Endpoint(t testing.TB, tgt s3Target) string {
 		return tgt.endpoint(currentE2EClusterLeaderIdx(t, tgt.cluster))
 	}
 	return tgt.endpoint(0)
-}
-
-func testIcebergProtocolCredentialDuckDB(t testing.TB, tgt *icebergTarget) {
-	t.Helper()
-	_, err := exec.LookPath("duckdb")
-	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "duckdb is required for protocol credential Iceberg client smoke")
-
-	warehouse := tgt.uniqueWarehouse(t, "pc-duckdb")
-	cred := createProtocolCredential(t, tgt.adminSockPath(), tgt.saID, "iceberg", "catalog/"+warehouse, "rw")
-	namespace := "ns_pc_duckdb"
-
-	runDuckDBIcebergSigV4Exec(t, tgt.endpoint(0), warehouse, cred.ID, cred.Secret, fmt.Sprintf(`
-CREATE SCHEMA grainfs_iceberg.%s;
-DROP SCHEMA grainfs_iceberg.%s;
-`, namespace, namespace))
 }
 
 func createProtocolCredential(t testing.TB, adminSock, saID, protocol, resource, mode string) credentialadmin.Credential {
@@ -142,48 +108,4 @@ func attachProtocolCredentialPolicy(t testing.TB, adminSock, saID, protocol, res
 		_ = cli.PolicyDetachFromSA(ctx, policyName, saID)
 		_ = cli.PolicyDelete(ctx, policyName)
 	})
-}
-
-func runDuckDBIcebergSigV4Exec(t testing.TB, endpoint, warehouse, accessKey, secretKey, query string) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "duckdb", "-csv", "-noheader", "-c",
-		duckDBIcebergSigV4SQL(endpoint, warehouse, accessKey, secretKey, query))
-	out, err := cmd.CombinedOutput()
-	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "duckdb protocol credential output:\n%s", out)
-}
-
-func duckDBIcebergSigV4SQL(endpoint, warehouse, accessKey, secretKey, query string) string {
-	endpointHost := strings.TrimPrefix(endpoint, "http://")
-	return fmt.Sprintf(`
-INSTALL httpfs;
-INSTALL iceberg;
-LOAD httpfs;
-LOAD iceberg;
-SET s3_region='us-east-1';
-SET s3_endpoint='%s';
-SET s3_url_style='path';
-SET s3_use_ssl=false;
-CREATE OR REPLACE SECRET grainfs_s3 (
-	TYPE s3,
-	PROVIDER config,
-	KEY_ID '%s',
-	SECRET '%s',
-	REGION 'us-east-1',
-	ENDPOINT '%s',
-	USE_SSL false,
-	URL_STYLE 'path'
-);
-ATTACH '%s' AS grainfs_iceberg (
-	TYPE iceberg,
-	ENDPOINT '%s/iceberg',
-	AUTHORIZATION_TYPE 'sigv4',
-	SIGV4_REGION 'us-east-1',
-	SIGV4_SERVICE 's3',
-	ACCESS_DELEGATION_MODE 'none',
-	SUPPORT_STAGE_CREATE false
-);
-%s
-`, endpointHost, accessKey, secretKey, endpointHost, warehouse, endpoint, query)
 }

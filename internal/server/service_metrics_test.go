@@ -38,11 +38,6 @@ func TestServiceMetricRouteClassifiesNonS3Services(t *testing.T) {
 		operation string
 	}{
 		{method: "GET", path: "/metrics", service: "metrics", operation: "Scrape"},
-		{method: "GET", path: "/iceberg/v1/config", service: "iceberg", operation: "GetCatalogConfig"},
-		{method: "POST", path: "/iceberg/v1/namespaces", service: "iceberg", operation: "CreateNamespace"},
-		{method: "POST", path: "/iceberg/v1/namespaces/ns/tables", service: "iceberg", operation: "CreateTable"},
-		{method: "POST", path: "/iceberg/v1/namespaces/ns/tables/t", service: "iceberg", operation: "CommitTable"},
-		{method: "POST", path: "/iceberg/v1/transactions/commit", service: "iceberg", operation: "CommitTransaction"},
 		{method: "GET", path: "/api/cluster/status", service: "cluster", operation: "Status"},
 		{method: "GET", path: "/api", service: "admin", operation: "API"},
 		{method: "GET", path: "/api/incidents", service: "admin", operation: "Incidents"},

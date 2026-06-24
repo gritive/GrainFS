@@ -3,9 +3,7 @@ package server
 import (
 	"context"
 	"net"
-	"net/http"
 	"strings"
-	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
@@ -13,14 +11,7 @@ import (
 	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/reservedname"
 	"github.com/gritive/GrainFS/internal/s3auth"
-	"github.com/gritive/GrainFS/internal/server/iceberg"
 )
-
-// icebergSigV4SkewWindow is the maximum allowed clock drift between a SigV4
-// X-Amz-Date and the server's wall clock for iceberg REST callers. Matches
-// AWS standard (±15 min). Header-path SigV4 in s3auth.Verify does not enforce
-// skew; the iceberg branch tightens that here for the iceberg trust boundary.
-const icebergSigV4SkewWindow = 15 * time.Minute
 
 func isBucketFormPost(c *app.RequestContext) bool {
 	return string(c.Method()) == "POST" &&
@@ -83,8 +74,6 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 			return
 		}
 
-		isIceberg := routeSurfaceForPath(path) == routeSurfaceIceberg
-
 		// Default-bucket anonymous fast path:
 		// when the caller sent no Authorization header, defer the allow/deny
 		// decision to the authorizer (s3auth.Authorizer at
@@ -99,39 +88,18 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 		// affected by either branch — SigV4 verification still runs, revoked
 		// keys still fail, presigned URLs still go through the verifier.
 		//
-		// Iceberg surface is excluded — iceberg routes have their own anon-aware
-		// per-route guards (see icebergGuarded + iceberg_authn.go), and routing
-		// anon iceberg through SigV4-bypass here would break the bearer trust
-		// boundary.
-		//
 		// Presigned URLs (X-Amz-Algorithm in query) are NOT anon — they carry
 		// SigV4 in the query string. Those must continue through
 		// authenticateSignedRequest so revoked-key checks fire. Use the
 		// canonical s3auth.HasPresignedAlgorithm helper so the predicate
 		// matches the verifier's (handles percent-encoded keys + empty values).
 		if isS3Path &&
-			!isIceberg &&
 			r.Header.Get("Authorization") == "" &&
 			!s3auth.HasPresignedAlgorithm(r) &&
 			bucket == reservedname.DefaultBucketName {
 			ctx = WithAccessKey(ctx, "")
 			c.Next(ctx)
 			return
-		}
-
-		if isIceberg {
-			// Bearer requests skip SigV4 entirely — the icebergGuarded middleware
-			// on each route performs JWT verification and policy gating.
-			if hasBearerPrefix(r.Header.Get("Authorization")) {
-				c.Next(ctx)
-				return
-			}
-			if reason := icebergSkewReject(r); reason != "" {
-				s.recordAuditAuthFailure(ctx, c, consts.StatusUnauthorized, "authn")
-				iceberg.WriteError(c, 401, "NotAuthorizedException", reason)
-				c.Abort()
-				return
-			}
 		}
 
 		if s.protocolCredAuth != nil {
@@ -152,8 +120,6 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 						} else {
 							nextCtx, failure = s.protocolCredAuth.authenticate(ctx, r, protocred.ProtocolS3, "bucket/"+bucket, s3authActionAllowsRO(req.Action))
 						}
-					case isIceberg && item.Protocol == protocred.ProtocolIceberg:
-						nextCtx, failure = s.protocolCredAuth.authenticate(ctx, r, protocred.ProtocolIceberg, icebergResourceForProtocolCredential(c, item), icebergMethodAllowsRO(method))
 					default:
 						nextCtx, failure = ctx, &authnFailure{
 							status:  consts.StatusForbidden,
@@ -164,11 +130,7 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 					}
 					if failure != nil {
 						s.recordAuditAuthFailure(ctx, c, failure.status, failure.reason)
-						if isIceberg {
-							iceberg.WriteError(c, 401, "NotAuthorizedException", failure.message)
-						} else {
-							writeXMLError(c, failure.status, failure.code, failure.message)
-						}
+						writeXMLError(c, failure.status, failure.code, failure.message)
 						c.Abort()
 						return
 					}
@@ -182,52 +144,13 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 		nextCtx, failure := s.authenticateSignedRequest(ctx, r)
 		if failure != nil {
 			s.recordAuditAuthFailure(ctx, c, failure.status, failure.reason)
-			if isIceberg {
-				// Iceberg REST clients distinguish 401 (auth required) from 403
-				// (post-authz forbidden). The S3 verifier returns 403 for every
-				// authn failure; remap to 401 + NotAuthorizedException for Iceberg
-				// callers. failure.code (S3-XML) is dropped to keep S3-specific
-				// codes out of the Iceberg JSON.
-				iceberg.WriteError(c, 401, "NotAuthorizedException", failure.message)
-			} else {
-				writeXMLError(c, failure.status, failure.code, failure.message)
-			}
+			writeXMLError(c, failure.status, failure.code, failure.message)
 			c.Abort()
 			return
 		}
 		ctx = nextCtx
 		c.Next(ctx)
 	}
-}
-
-// icebergSkewReject returns a non-empty rejection reason if the request's
-// X-Amz-Date is outside the ±15 minute skew window. Returns "" to defer to
-// the normal SigV4 verifier (including the "no auth header at all" path —
-// missing X-Amz-Date is the verifier's job to reject, not the skew gate's).
-func icebergSkewReject(r *http.Request) string {
-	amzDate := r.Header.Get("X-Amz-Date")
-	if amzDate == "" {
-		// Also covers presigned URLs where the query carries the date.
-		amzDate = r.URL.Query().Get("X-Amz-Date")
-	}
-	if amzDate == "" {
-		return ""
-	}
-	t, err := time.Parse("20060102T150405Z", amzDate)
-	if err != nil {
-		return "invalid X-Amz-Date"
-	}
-	if d := time.Since(t); d > icebergSigV4SkewWindow || d < -icebergSigV4SkewWindow {
-		return "request signature outside allowed time window"
-	}
-	return ""
-}
-
-// hasBearerPrefix reports whether s begins with a case-insensitive "bearer "
-// prefix (7 bytes). RFC 6750 requires "Bearer" but the OAuth token endpoint
-// emits token_type:"bearer" (lowercase), so clients may send either form.
-func hasBearerPrefix(s string) bool {
-	return len(s) >= 7 && strings.EqualFold(s[:7], "Bearer ")
 }
 
 func s3authActionAllowsRO(action s3auth.S3Action) bool {
@@ -256,22 +179,6 @@ func protocolCredentialCrossBucketCopy(c *app.RequestContext, dstBucket string) 
 	}
 	src, ok := parseCopySource(raw)
 	return ok && src.Bucket != dstBucket
-}
-
-func icebergMethodAllowsRO(method string) bool {
-	return method == "GET" || method == "HEAD"
-}
-
-func icebergResourceForProtocolCredential(c *app.RequestContext, item protocred.Credential) string {
-	if c != nil {
-		if wh := string(c.QueryArgs().Peek("warehouse")); wh != "" {
-			return "catalog/" + wh
-		}
-		if wh := c.Param("warehouse"); wh != "" {
-			return "catalog/" + wh
-		}
-	}
-	return item.Resource
 }
 
 // isLocalhostAddr reports whether addr (typically from c.RemoteAddr().String(),

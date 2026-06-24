@@ -32,7 +32,6 @@ func RegisterAdmin(h *server.Hertz, d *Deps) {
 	registerCredentials(g, d)
 	registerAudit(g, d)
 	registerStatus(g, d)
-	registerIceberg(g, d)
 }
 
 // RegisterUI wires a subset of admin handlers under `/ui/api/...` on the
@@ -68,13 +67,6 @@ func RegisterIAMOnly(h *server.Hertz, d *Deps) {
 
 func registerStatus(g router, d *Deps) {
 	g.GET(routePathStatus, wrapZero(d, GetStatus))
-}
-
-func registerIceberg(g router, d *Deps) {
-	if d.IcebergConfig == nil {
-		return
-	}
-	g.POST(routePathIcebergConfig, wrapBody[IcebergConfigRequest, IcebergConfigResponse](d, IcebergConfig))
 }
 
 func registerCluster(g router, d *Deps) {

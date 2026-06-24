@@ -8,12 +8,10 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/app/server"
 
-	"github.com/gritive/GrainFS/internal/audit"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/scrubber"
-	"github.com/gritive/GrainFS/internal/server/iceberg"
 	"github.com/gritive/GrainFS/internal/server/incidentsvc"
 	"github.com/gritive/GrainFS/internal/server/receiptsvc"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -63,25 +61,6 @@ func NewWithServerStorage(addr string, ss ServerStorage, policyStore *CompiledPo
 	s.wireBroadcastLogger()
 
 	h := s.newHertzEngine(addr)
-	s.iceberg = iceberg.NewHandler(iceberg.Deps{
-		Ops:                    s.ops,
-		IAMStore:               s.iamStore,
-		PolicyAuthorizer:       s.policyAuthorizer,
-		JWTKeys:                s.jwtKeys,
-		Catalog:                s.icebergCatalog,
-		AuditInternalAccessKey: s.auditInternalAccessKey,
-		AuditInternalSecretKey: s.auditInternalSecretKey,
-		AuditNodeID:            s.auditNodeID,
-		ClientIP:               s.authoritativeClientIP,
-		MutationDisabled:       s.blockIfMutationDisabled,
-		FeatureAvailable:       func() bool { return s.routeFeatureAvailable(routeFeatureIceberg) },
-		AppendAuditEvent:       func(ctx context.Context, ev audit.S3Event) { s.appendFinalizedAuditEvent(ctx, normalizeAuditEvent(ev)) },
-		AuditSinkConfigured:    s.auditSinkConfigured,
-		RequestID:              RequestIDFromContext,
-		AccessKey:              AccessKeyFromContext,
-		NewRespWriter:          func(c *app.RequestContext) http.ResponseWriter { return newResponseWriter(c) },
-	})
-	s.iceberg.ApplyDiagEnv()
 	s.receipt = receiptsvc.NewHandler(receiptsvc.Deps{
 		API:              s.receiptAPI,
 		FeatureAvailable: func() bool { return s.routeFeatureRoutesVisible(routeFeatureReceipt) },

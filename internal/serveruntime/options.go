@@ -45,9 +45,6 @@ type ServeOptions struct {
 	MeasureReadAmp     bool  // --measure-read-amp
 	ShardCacheSize     int64 // --shard-cache-size
 
-	// --- Protocols ---
-	EnableIceberg bool // --enable-iceberg
-
 	// --- Intervals ---
 	ScrubInterval             time.Duration // --scrub-interval
 	ScrubOrphanAge            time.Duration // --scrub-orphan-age

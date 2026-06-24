@@ -36,8 +36,6 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 		MeasureReadAmp:     true,
 		ShardCacheSize:     int64(1 << 27),
 
-		EnableIceberg: true,
-
 		ScrubInterval:          7 * time.Second,
 		ScrubOrphanAge:         11 * time.Minute,
 		SegmentGCRetention:     17 * time.Minute,
@@ -154,9 +152,6 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 	// Audit.
 	require.Equal(t, opts.AuditIceberg, cfg.AuditIceberg)
 	require.Equal(t, opts.AuditCommitInterval, cfg.AuditCommitInterval)
-
-	// Node services.
-	require.True(t, cfg.EnableIceberg)
 
 	// Resource guards.
 	require.Equal(t, opts.FDWatchEnabled, cfg.FDWatchEnabled)

@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1028,69 +1027,6 @@ func runMultiRaftShardingGroupLeaderFailover(t testing.TB) {
 	requireS3PutEventually503WithContext(t, readCtx, newCLI, c, writeIdx, "failover-test", "failover-key-2")
 	t.Log("group leader failover ok: committed data readable, new writes blocked while target is missing")
 }
-func runMultiRaftShardingIcebergCatalogPointerAndMetadataObjectSplit(t testing.TB) {
-
-	c := startE2ECluster(t, e2eClusterOptions{
-		Nodes: 3,
-		Mode:  ClusterModeStaticPeers,
-	})
-
-	createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, "grainfs-tables", ecS3Client(c.httpURLs[0], c.accessKey, c.secretKey))
-
-	icebergClient := newIcebergSigV4Client(t, c.accessKey, c.secretKey, "us-east-1")
-
-	nsReq, err := http.NewRequest(http.MethodPost, c.httpURLs[1]+"/iceberg/v1/namespaces", bytes.NewReader([]byte(`{"namespace":["ns"],"properties":{}}`)))
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	nsReq.Header.Set("Content-Type", "application/json")
-	resp, err := icebergClient.Do(nsReq)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	gomega.Expect(resp.StatusCode).To(gomega.BeNumerically("<", 300))
-	gomega.Expect(resp.Body.Close()).To(gomega.Succeed())
-
-	createTableBody := `{
-		"name":"t",
-		"schema":{"type":"struct","schema-id":0,"fields":[]},
-		"properties":{}
-	}`
-	tblReq, err := http.NewRequest(http.MethodPost, c.httpURLs[1]+"/iceberg/v1/namespaces/ns/tables", bytes.NewReader([]byte(createTableBody)))
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	tblReq.Header.Set("Content-Type", "application/json")
-	resp, err = icebergClient.Do(tblReq)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	gomega.Expect(resp.StatusCode).To(gomega.BeNumerically("<", 300))
-	gomega.Expect(resp.Body.Close()).To(gomega.Succeed())
-
-	loadReq, err := http.NewRequest(http.MethodGet, c.httpURLs[2]+"/iceberg/v1/namespaces/ns/tables/t", nil)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	loadResp, err := icebergClient.Do(loadReq)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	gomega.Expect(loadResp.StatusCode).To(gomega.Equal(http.StatusOK))
-	loadBody, err := io.ReadAll(loadResp.Body)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	gomega.Expect(loadResp.Body.Close()).To(gomega.Succeed())
-	gomega.Expect(string(loadBody)).To(gomega.ContainSubstring(`"metadata-location"`))
-	gomega.Expect(string(loadBody)).To(gomega.ContainSubstring(`s3://grainfs-tables/warehouse/ns/t/metadata/00000.json`))
-
-	var got []byte
-	var readErr error
-	readCtx, readCancel := context.WithTimeout(context.Background(), 60*time.Second)
-	ginkgo.DeferCleanup(readCancel)
-	deadline := time.Now().Add(60 * time.Second)
-	for time.Now().Before(deadline) {
-		for i := range c.httpURLs {
-			got, readErr = getObjectBytes(readCtx, c.S3Client(i), "grainfs-tables", "warehouse/ns/t/metadata/00000.json")
-			if readErr == nil {
-				break
-			}
-		}
-		if readErr == nil {
-			break
-		}
-		time.Sleep(time.Second)
-	}
-	gomega.Expect(readErr).NotTo(gomega.HaveOccurred())
-	gomega.Expect(string(got)).To(gomega.ContainSubstring(`"format-version"`))
-}
 
 // TestTwoNodeAvailabilityTrapE2E verifies the well-known 2-node quorum trap:
 // with 2 voters in metaRaft (and all data groups), losing one node breaks
@@ -1213,9 +1149,6 @@ var _ = ginkgo.Describe("Multi-Raft sharding", func() {
 	})
 	ginkgo.It("keeps committed data readable during group leader failover", func() {
 		runMultiRaftShardingGroupLeaderFailover(ginkgo.GinkgoTB())
-	})
-	ginkgo.It("splits Iceberg catalog pointers and metadata objects", func() {
-		runMultiRaftShardingIcebergCatalogPointerAndMetadataObjectSplit(ginkgo.GinkgoTB())
 	})
 	ginkgo.It("documents the 2-node availability trap", func() {
 		runTwoNodeAvailabilityTrap(ginkgo.GinkgoTB())
