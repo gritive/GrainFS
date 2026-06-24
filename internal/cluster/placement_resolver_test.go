@@ -90,11 +90,12 @@ func TestHeadObjectMeta_ReturnsObjectAndPlacementMeta(t *testing.T) {
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 	b := &DistributedBackend{store: badgermeta.Wrap(db), fsm: fsm}
 
-	// CmdCreateBucket is retired (Task 12 no-op); write bucket key directly to DB
-	// so HeadBucket's legacy fallback path (MetaBucketStore not wired) finds it.
-	require.NoError(t, fsm.db.Update(func(txn MetadataTxn) error {
-		return txn.Set(fsm.keys.BucketKey("bkt"), []byte("{}"))
-	}))
+	// headObjectMeta's HeadBucket existence check reads MetaBucketStore (the sole
+	// authority since Task 12). Wire the direct-FSM store and register the bucket
+	// in it directly (no filesystem side effects) so HeadBucket resolves.
+	mbs := newDirectFSMMetaBucketStore(fsm)
+	b.SetMetaBucketStore(mbs)
+	require.NoError(t, mbs.CreateBucket(context.Background(), "bkt", "local", false))
 	putCmd := PutObjectMetaCmd{
 		Bucket:      "bkt",
 		Key:         "obj",

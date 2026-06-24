@@ -95,6 +95,12 @@ func TestSharedFSM_RestartPersistence(t *testing.T) {
 
 	ctx := context.Background()
 
+	// HeadBucket reads MetaBucketStore (sole authority since Task 12). Each
+	// backend's MBS knows only its own bucket, which also proves group scoping:
+	// B has no record of bA.
+	seedBucketsInMBS(t, backendA, "bA")
+	seedBucketsInMBS(t, backendB, "bB")
+
 	// Phase 4: LIST uses quorum meta (shardSvc path). Shared-FSM backends have
 	// no shardSvc, so scoped visibility is proved via HeadObject (BadgerDB path).
 

@@ -115,18 +115,6 @@ The demotion shipped: bucket existence/policy/versioning consolidated onto meta-
 bucket writes forward to the meta leader; policy invalidation lossless; versioning barrier best-effort.
 Deferred items:
 
-- **[P3][cleanup] Remove the dead read-path BadgerDB fallback + group-0 bucket key-builders.**
-  `bucket.go` `HeadBucket`/`GetBucketPolicy`/`GetBucketVersioning` still have a "MetaBucketStore not
-  wired → read group-0 BadgerDB" fallback (reading `BucketKey`/`BucketPolicyKey`/`BucketVerKey`,
-  `keyspace.go`). Dead-in-effect: MetaBucketStore is wired unconditionally at cluster boot and group-0
-  never writes those keys now. To finish: make the reads fail-fast (drop the fallback, like the write
-  paths), update `bucket_write_test.go` `seedBucketForDelete` to seed via MetaBucketStore, then remove
-  the three key-builders. No correctness/safety risk; pure cleanup.
-- **[P3][test] No at-rest encryption integration test for the live (MetaFSM) bucket-policy path.**
-  Bucket policy now lives in the MetaFSM `BucketRecord` (snapshot-level encryption via
-  `MetaFSM.SetDEKKeeper`), not the group-0 `policy:` BadgerDB keys. The old integration test verified
-  at-rest encryption of the now-dead group-0 path; add an equivalent that exercises the live MetaFSM
-  policy at-rest path.
 - **[P3][test/CI] Run the object-write throughput bench against master.** The per-mutation versioning
   linearizing read retargeted from the group-0 raft to meta-raft. `make bench` (warp + colima/cluster)
   was unavailable in the dev env. In CI, compare PUT/Copy/CompleteMultipart throughput master vs this

@@ -117,7 +117,7 @@ func TestFSM_EncryptedValuesHideObjectMultipartAndPolicyPayloads(t *testing.T) {
 	// FSM.setValue (the same encrypted write path) to exercise policy: key encryption.
 	policy := []byte(`{"Statement":[{"Resource":"secret-policy-resource"}]}`)
 	require.NoError(t, fsm.db.Update(func(txn MetadataTxn) error {
-		return fsm.setValue(txn, fsm.keys.BucketPolicyKey("b"), policy)
+		return fsm.setValue(txn, fsm.keys.Key([]byte("policy:b")), policy)
 	}))
 
 	err = db.View(func(txn *badger.Txn) error {
@@ -126,7 +126,7 @@ func TestFSM_EncryptedValuesHideObjectMultipartAndPolicyPayloads(t *testing.T) {
 			forbidden string
 		}{
 			{fsm.keys.ObjectMetaKeyV("b", "secret-object", "v1"), "customer-private-metadata"},
-			{fsm.keys.BucketPolicyKey("b"), "secret-policy-resource"},
+			{fsm.keys.Key([]byte("policy:b")), "secret-policy-resource"},
 		} {
 			item, err := txn.Get(tc.key)
 			require.NoError(t, err)

@@ -171,6 +171,11 @@ func TestSharedFSM_PrefixIsolation_AllPaths(t *testing.T) {
 				putObjViaApply(t, fB, bucket, "obj1", "B-etag")
 				putObjViaApply(t, fA, bucket, "a-only", "A2-etag")
 
+				// HeadBucket reads MetaBucketStore (sole authority since Task 12);
+				// register the shared bucket name in each backend's own MBS.
+				seedBucketsInMBS(t, backendA, bucket)
+				seedBucketsInMBS(t, backendB, bucket)
+
 				ctx := context.Background()
 
 				// Point read: distinct values per group.
@@ -307,6 +312,11 @@ func TestSharedFSM_PrefixIsolation_AllPaths(t *testing.T) {
 				putObjViaApply(t, fA, bucket, "walk-a1", "A1")
 				putObjViaApply(t, fA, bucket, "walk-a2", "A2")
 				putObjViaApply(t, fB, bucket, "walk-b1", "B1")
+
+				// HeadBucket reads MetaBucketStore (sole authority since Task 12);
+				// register the shared bucket name in each backend's own MBS.
+				seedBucketsInMBS(t, backendA, bucket)
+				seedBucketsInMBS(t, backendB, bucket)
 
 				ctx := context.Background()
 
@@ -479,6 +489,12 @@ func TestSharedFSM_PathologicalGroupIDs_NoCollision(t *testing.T) {
 	go backendLong.RunApplyLoop(stopLong)
 	t.Cleanup(func() { close(stopLong) })
 
+	// HeadBucket reads MetaBucketStore (sole authority since Task 12); register the
+	// shared bucket name "b" in each backend's own MBS so existence resolves.
+	seedBucketsInMBS(t, backendG, "b")
+	seedBucketsInMBS(t, backendGx, "b")
+	seedBucketsInMBS(t, backendLong, "b")
+
 	ctx := context.Background()
 
 	for _, tc := range []struct {
@@ -532,14 +548,18 @@ func TestSharedFSM_GroupCloseDoesNotCloseSharedDB(t *testing.T) {
 	stopB := make(chan struct{})
 	go backendB.RunApplyLoop(stopB)
 
-	// Write data to both groups. CmdCreateBucket is retired (Task 12 no-op);
-	// write B's bucket key directly into the shared DB to keep the assertion
-	// unambiguous without wiring a full MetaBucketStore.
-
-	// Write a distinguishable key directly so the assertion is unambiguous.
+	// Write a distinguishable raw key into the shared DB. This is a DB-liveness
+	// probe (read back via db.View after A.Close), independent of bucket semantics
+	// — it proves the shared DB survives A.Close. Bucket existence for B's
+	// ListBuckets is supplied separately via B's MetaBucketStore below (the sole
+	// authority since Task 12).
 	require.NoError(t, db.Update(func(txn *badger.Txn) error {
-		return txn.Set(ksB.BucketKey("alive"), []byte("B-bucket-data"))
+		return txn.Set(ksB.Key([]byte("liveness-probe")), []byte("B-bucket-data"))
 	}))
+
+	// HeadBucket / ListBuckets read MetaBucketStore (sole authority since Task 12);
+	// register "alive" in B's MBS so backendB.ListBuckets sees it below.
+	seedBucketsInMBS(t, backendB, "alive")
 
 	// Close backend A — must NOT close the shared DB.
 	close(stopA)
@@ -547,7 +567,7 @@ func TestSharedFSM_GroupCloseDoesNotCloseSharedDB(t *testing.T) {
 
 	// Assert DB is still usable: B's data must be readable.
 	err = db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(ksB.BucketKey("alive"))
+		item, err := txn.Get(ksB.Key([]byte("liveness-probe")))
 		if err != nil {
 			return err
 		}

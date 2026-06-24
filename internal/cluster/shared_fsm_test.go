@@ -71,16 +71,13 @@ func TestSharedFSM_BackendListObjects_ScopedToGroup(t *testing.T) {
 	fA := NewFSM(badgermeta.Wrap(db), ksA)
 	fB := NewFSM(badgermeta.Wrap(db), ksB)
 
-	// Helper: write a bucket + object into a group's FSM (same bucket name,
-	// same object key — to prove there is no cross-group collision).
-	// CmdCreateBucket is retired (Task 12 no-op); write bucket key directly.
-	// CmdPutObjectMeta is a no-op in the FSM after Slice 2; write via
-	// persistPutObjectMetaUpdate directly.
+	// Helper: write an object into a group's FSM (same bucket name, same object
+	// key — to prove there is no cross-group collision). CmdPutObjectMeta is a
+	// no-op in the FSM after Slice 2; write via persistPutObjectMetaUpdate
+	// directly. Bucket existence is supplied separately via each backend's
+	// MetaBucketStore (the sole authority since Task 12).
 	putObj := func(t *testing.T, f *FSM, bucket, key, etag string) {
 		t.Helper()
-		require.NoError(t, f.db.Update(func(txn MetadataTxn) error {
-			return txn.Set(f.keys.BucketKey(bucket), []byte("{}"))
-		}))
 		cmd := PutObjectMetaCmd{
 			Bucket: bucket, Key: key, Size: int64(len(etag)), ContentType: "text/plain", ETag: etag, ModTime: 1,
 		}
@@ -114,6 +111,11 @@ func TestSharedFSM_BackendListObjects_ScopedToGroup(t *testing.T) {
 
 	ctx := context.Background()
 
+	// HeadBucket reads MetaBucketStore (sole authority since Task 12). Register the
+	// shared bucket name in each backend's own MBS so existence resolves per group.
+	seedBucketsInMBS(t, backendA, bucket)
+	seedBucketsInMBS(t, backendB, bucket)
+
 	// Phase 4: LIST uses quorum meta (shardSvc path). Shared-FSM backends
 	// have no shardSvc, so HeadObject point reads prove isolation instead.
 
@@ -132,26 +134,34 @@ func TestSharedFSM_BackendListObjects_ScopedToGroup(t *testing.T) {
 	assert.Error(t, err, "obj2-only-in-A should not be visible from group-B")
 }
 
-// putObjViaApply writes a bucket + object into a group's FSM. The bucket key
-// is written directly to BadgerDB (CmdCreateBucket is a retired no-op in Task 12;
-// this provides the fallback HeadBucket path for backends without MetaBucketStore).
-// The object meta is written via persistPutObjectMetaUpdate directly because
-// CmdPutObjectMeta is a no-op in the FSM after data-plane raft-free Slice 2.
+// putObjViaApply writes an object into a group's FSM. The object meta is written
+// via persistPutObjectMetaUpdate directly because CmdPutObjectMeta is a no-op in
+// the FSM after data-plane raft-free Slice 2. Bucket existence is no longer seeded
+// here (CmdCreateBucket is a retired no-op in Task 12; HeadBucket reads the sole
+// authority, MetaBucketStore) — callers that exercise HeadBucket must wire an MBS
+// via seedBucketsInMBS.
 func putObjViaApply(t *testing.T, f *FSM, bucket, key, etag string) {
 	t.Helper()
-	// Write bucket key directly — CmdCreateBucket is retired (Task 12: bucket
-	// control-plane moved to meta-raft). The raw bucket: key is idempotent.
-	require.NoError(t, f.db.Update(func(txn MetadataTxn) error {
-		// Idempotent write: re-running putObjViaApply overwrites {} with {}, which
-		// is a safe no-op for the bucket existence marker.
-		return txn.Set(f.keys.BucketKey(bucket), []byte("{}"))
-	}))
 	cmd := PutObjectMetaCmd{
 		Bucket: bucket, Key: key, Size: int64(len(etag)), ContentType: "text/plain", ETag: etag, ModTime: 1,
 	}
 	require.NoError(t, f.db.Update(func(txn MetadataTxn) error {
 		return f.persistPutObjectMetaUpdate(txn, cmd, buildPutObjectMeta(cmd))
 	}))
+}
+
+// seedBucketsInMBS wires a fresh direct-FSM MetaBucketStore onto the backend and
+// registers each named bucket, so HeadBucket (the sole-authority existence check
+// since Task 12) resolves. Used by shared-FSM tests that build backends directly
+// via NewDistributedBackend (which does not wire an MBS — serveruntime does that
+// in production, newTestDistributedBackend in unit tests).
+func seedBucketsInMBS(t *testing.T, b *DistributedBackend, buckets ...string) {
+	t.Helper()
+	mbs := newDirectFSMMetaBucketStore(b.fsm)
+	for _, bucket := range buckets {
+		require.NoError(t, mbs.CreateBucket(context.Background(), bucket, "local", false))
+	}
+	b.SetMetaBucketStore(mbs)
 }
 
 // fsmHasKey reports whether the group-relative key exists in f's keyspace.
