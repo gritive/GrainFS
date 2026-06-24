@@ -32,7 +32,9 @@ Module: `github.com/gritive/GrainFS`. 단일 binary `bin/grainfs`.
 - HTTP Framework: Hertz (cloudwego/hertz)
 - CLI: Cobra (spf13/cobra)
 - Transport: TCP (crypto/tls TLS 1.3, cluster-PSK SPKI pinning) — QUIC/quic-go removed in S6
-- Metadata DB: BadgerDB (dgraph-io/badger/v4)
+- Metadata 저장:
+  - 객체 메타(데이터플레인, hot): quorum-meta 파일 — FlatBuffer blob을 EC 샤드와 같은 노드에 co-locate, placement 노드에 전체복제(K-of-N 쿼럼, parity best-effort), off-raft. `internal/cluster/quorum_meta.go`
+  - 컨트롤플레인 메타(bucket config/policy/ACL/versioning/IAM/lifecycle): BadgerDB (dgraph-io/badger/v4) + meta-raft FSM 복제
 - Erasure Coding: klauspost/reedsolomon
 - Monitoring: Prometheus client_golang
 - Test: go test + testify, MinIO warp (공식 S3 비교 벤치마크)
@@ -40,7 +42,7 @@ Module: `github.com/gritive/GrainFS`. 단일 binary `bin/grainfs`.
 ### 아키텍처 원칙
 - Go 표준 레이아웃: cmd/ (진입점), internal/ (비공개 패키지)
 - 단일 바이너리: S3 + Web UI를 하나로 제공
-- 계층 분리: storage(블롭) → metadata(BadgerDB) → server(HTTP) → transport(TCP/Raft)
+- 계층 분리: storage(블롭 + 객체 메타 quorum-meta 파일) → metadata(컨트롤플레인=BadgerDB/raft) → server(HTTP) → transport(TCP/Raft)
 - internal 하위 패키지: cluster, raft, transport(TCP), storage, vfs, volume, server, server/receiptsvc, server/incidentsvc, server/snapshotsvc, s3auth, iam, encrypt, badgerrole, badgerutil, badgermeta, metastore, cache, dashboard, adminapi, clusteradmin, volumeadmin, alerts, eventstore, incident, lifecycle, metrics, migration, otel, policy, pool, receipt, resourceguard, resourcewatch, scrubber, serveruntime, snapshot, chunkref, config, nodeconfig
 - FlatBuffers: 내부 통신은 `internal/**/*.fbs` → `make fbs`로 .go 생성 (메모리: "내부 통신 JSON 미사용")
 
