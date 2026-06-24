@@ -2,6 +2,8 @@ package server
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -141,6 +143,48 @@ func TestAppendObjectGateUsesLinearizedRead(t *testing.T) {
 	require.Equal(t, http.StatusNotImplemented, c.Response.StatusCode())
 	require.Equal(t, 1, rv.linCalls, "append 501-gate must use the linearized read")
 	require.Equal(t, 0, rv.plainCalls, "append 501-gate must NOT use the plain (stale-prone) read")
+}
+
+type faultyVersioner struct {
+	storage.Backend
+}
+
+func (faultyVersioner) GetBucketVersioning(string) (string, error) {
+	return "", errors.New("versioning read fault")
+}
+
+func (faultyVersioner) GetBucketVersioningLinearized(context.Context, string) (string, error) {
+	return "", errors.New("versioning read fault")
+}
+
+func (faultyVersioner) SetBucketVersioning(string, string) error { return nil }
+
+// AppendObject delegates to the wrapped backend so the fake genuinely exposes the
+// AppendObjecter fast path. Without this, *faultyVersioner would not satisfy
+// storage.AppendObjecter (its embedded field is the storage.Backend interface,
+// which omits AppendObject) and the handler would short-circuit at the
+// "backend does not support AppendObject" 501 — masking the fail-open the test
+// is meant to catch.
+func (f *faultyVersioner) AppendObject(ctx context.Context, bucket, key string, expectedOffset int64, r io.Reader) (*storage.Object, error) {
+	return f.Backend.(storage.AppendObjecter).AppendObject(ctx, bucket, key, expectedOffset, r)
+}
+
+// A genuine versioning-read fault at the AppendObject 501 gate must NOT allow the
+// append (fail-closed). Without the fix the handler falls through to AppendObject
+// on the wrapped LocalBackend and returns 200.
+func TestAppendObjectGateFailsClosedOnVersioningReadFault(t *testing.T) {
+	real, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, real.CreateBucket(t.Context(), "b"))
+	srv := New("127.0.0.1:0", &faultyVersioner{Backend: real})
+
+	c := app.NewContext(0)
+	c.Request.Header.Set(appendOffsetHeader, "0")
+	handled := srv.appendObject(t.Context(), c, "b", "k")
+
+	require.True(t, handled)
+	require.NotEqual(t, http.StatusOK, c.Response.StatusCode(), "a genuine versioning-read fault must block the append (fail-closed), not allow it")
+	require.GreaterOrEqual(t, c.Response.StatusCode(), 500)
 }
 
 // NOTE: TestAppendableObjectOverwriteByPlainPut removed — equivalent SDK

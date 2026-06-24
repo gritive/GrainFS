@@ -56,7 +56,19 @@ func (s *Server) appendObject(ctx context.Context, c *app.RequestContext, bucket
 	// degrades to a local read during a group-0 leaderless window (no control-plane
 	// coupling) and returns ErrUnsupportedOperation on backends that don't track
 	// versioning (LocalBackend); that's treated as Unversioned.
-	if state, vErr := s.ops.GetBucketVersioningLinearized(ctx, bucket); vErr == nil && state == "Enabled" {
+	// Fail CLOSED on a genuine versioning-read fault: this is a MUTATING edge, so
+	// it must not proceed when it cannot confirm the bucket is not versioning-
+	// enabled (it would otherwise bypass the 501 gate). A backend that does not
+	// track versioning (LocalBackend -> UnsupportedOperationError) is not a fault —
+	// treat it as Unversioned and continue, exactly like ctxWithBucketVersioningStrict.
+	state, vErr := s.ops.GetBucketVersioningLinearized(ctx, bucket)
+	if vErr != nil {
+		var unsupported storage.UnsupportedOperationError
+		if !errors.As(vErr, &unsupported) {
+			mapError(c, vErr)
+			return true
+		}
+	} else if state == "Enabled" {
 		writeXMLError(c, consts.StatusNotImplemented, "NotImplemented", "AppendObject is not supported on versioning-enabled buckets")
 		return true
 	}
