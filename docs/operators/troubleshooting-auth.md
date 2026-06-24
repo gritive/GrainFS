@@ -42,9 +42,6 @@ kill -SIGHUP $(pidof grainfs)
 
 # Option B: env override
 GRAINFS_TLS_CERT=/etc/grainfs/cert.pem GRAINFS_TLS_KEY=/etc/grainfs/key.pem grainfs serve …
-
-# Option C: reverse proxy
-grainfs config set trusted-proxy.cidr 10.0.0.0/8
 ```
 
 ## "KEK not found at <data>/keys/0.key"
