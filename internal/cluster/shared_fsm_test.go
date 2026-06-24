@@ -142,12 +142,9 @@ func putObjViaApply(t *testing.T, f *FSM, bucket, key, etag string) {
 	// Write bucket key directly — CmdCreateBucket is retired (Task 12: bucket
 	// control-plane moved to meta-raft). The raw bucket: key is idempotent.
 	require.NoError(t, f.db.Update(func(txn MetadataTxn) error {
-		bk := f.keys.BucketKey(bucket)
-		// Idempotent: set only if absent to avoid overwriting existing entries.
-		if err := txn.Set(bk, []byte("{}")); err != nil {
-			return err
-		}
-		return nil
+		// Idempotent write: re-running putObjViaApply overwrites {} with {}, which
+		// is a safe no-op for the bucket existence marker.
+		return txn.Set(f.keys.BucketKey(bucket), []byte("{}"))
 	}))
 	cmd := PutObjectMetaCmd{
 		Bucket: bucket, Key: key, Size: int64(len(etag)), ContentType: "text/plain", ETag: etag, ModTime: 1,
