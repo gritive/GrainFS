@@ -306,6 +306,60 @@ surfaced the items below. None block; tracked for cleanup.
   `encrypt/keystore.go`, `iam/oidc/config.go`) not gated by `make lint`. Enable golangci `stylecheck`
   to gate them going forward, or leave as-is.
 
+### ROADMAP v2 retirement — remaining deferred / unverified items (2026-06-25)
+
+`ROADMAP.md` (the GrainFS Technical Roadmap v2) was deleted on 2026-06-25 because every shipping
+deliverable across Phases 0–9 (+ 6.5) is implemented and merged to master (current `v0.0.671.0`); the
+data-plane raft-free epic (Slice 0 #846 / Slice 1 #847 / **Slice 2 #849** — its `(NEXT)` marker was
+stale) is also complete, so per-object raft propose is 0 (`fsm.go` RETIRED SLOTS). The roadmap was a
+completed ledger; its full history lives in git + CHANGELOG. The genuinely **deferred / unverified**
+items it carried are preserved below so they are not lost.
+
+- **[P2][future-feature] Topology migration (object physical relocation + dual-read).** Phase 7
+  shipped numGroups **expansion** via generation-probe (data-movement-zero: new groups become a new
+  placement generation; reads probe newest-gen-first and fall back to older gens; existing objects are
+  never remapped). The alternative — physically relocating existing objects to match the new placement
+  with a dual-read window — was explicitly scoped out to a follow-up "consolidation phase" (decision:
+  S7-1, generation-probe chosen over migration). Needs its own spec + plan-gate. Trigger: when probe
+  fan-out cost (∝ #generations) after many expansions becomes a real operational drag.
+
+- **[P3][known-limitation] numGroups reduction (group 감소) is unsupported.** Phase 7 unlocked
+  group *addition* on a running cluster (`grainfs cluster expand-placement`); group *removal* was left
+  out of scope (nodes-in-group still shrink/heal via EC). A safe reduction needs object drain off the
+  retired group + generation retirement semantics.
+
+- **[P2][validation-gap] Multinode concurrent topology expansion under load — NOT validated.** S7-6
+  shipped the add-protocol + cross-generation LWW fence machinery but validated only correctness +
+  default-byte-identical (single-flip), not multinode concurrent expansion under load or throughput
+  parity (the GCP bench was not run — GO was an eyes-open user override). The fence is armed
+  **per-node** via the meta-FSM post-commit hook, so during a raft apply-skew window a lagging node can
+  still serve a stale read through the un-armed fast path. Validate concurrent expand-under-load on a
+  real multi-node cluster before relying on it in production.
+
+- **[P2][validation-gap, eyes-open] GET/HEAD multihost no-regress benchmark — unmeasured.** Phase 5's
+  merge-gate ② (GET/HEAD no-regress, since meta read went from one raft-read to multiple quorum-reads)
+  was discharged by read-path analysis only; the multihost A/B measurement was blocked by infra
+  (122MB-binary IAP-scp corruption + SPOT-reboot `WaitDEKReady` flake) and accepted as a residual risk
+  at the Phase 5 GO. S6-2 then made hot-node read-rerank **live** on the GET path (previously inert
+  because the hot-set was always empty), so this newly-active rerank path is also unmeasured under
+  multihost load. devel-fixed single-arm multihost numbers are known (PUT 343 / GET 676 MiB/s, HEAD
+  2080 obj/s, 0 errors). Needs stable infra (fresh/non-SPOT VMs + GCS-relay binary transfer) for the
+  cross-binary A/B.
+
+- **[P3][validation-gap, eyes-open] HTTP transport multinode performance — unmeasured.** The TCP→HTTP
+  transport flip (Phase 8 S8-5) + control-plane-over-HTTP (S8-3) shipped with macOS functional-only
+  validation (QUIC→TCP §6 eyes-open precedent). HTTP/1.1 is one-in-flight-per-conn vs the removed mux
+  corrID multiplexing, so high-concurrency multinode behavior (pooled-conn pressure, per-heartbeat
+  amplification in the non-coalesced legacy raft path) was never benchmarked. Transport was confirmed
+  to not be the PUT ceiling, so this is a simplification-bet risk, not a perf-lever regression.
+
+- **[P3][trigger-gated] Separate-repo extraction of primitives (Phase 9).** The in-repo package
+  boundary split is done (`internal/raft` already standalone; `internal/hrw`, `internal/gossip`
+  extracted with cluster coupling inverted via interfaces). All four primitives (raft / HRW / bounded /
+  gossip) were decided to **stay in-house** (no hashicorp/raft / memberlist adoption — feature loss +
+  migration cost outweigh gains). Extracting HRW/gossip to standalone repos is deferred until a second
+  external consumer appears (~1 day mechanical work when triggered).
+
 ## Superseded / historical (do not resurrect the analysis)
 
 The blob-authoritative pivot (#821–#825: greenfield raft-free data plane + soleauth-machinery removal)

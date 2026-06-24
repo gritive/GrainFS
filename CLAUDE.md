@@ -91,7 +91,6 @@ Clean Architecture를 따른다. 패키지-레이어 매핑:
 
 ### 제품 스펙
 - CONTEXT.md: 도메인 용어/현재 상태 (루트, 13KB)
-- ROADMAP.md: 개발 로드맵 및 Phase별 기능 정의
 - README.md: Quick Start 및 CLI 옵션
 - CHANGELOG.md: 버전별 변경 기록 (`VERSION` 파일과 함께 릴리스 source of truth)
 - docs/adr/: 아키텍처 결정 기록
