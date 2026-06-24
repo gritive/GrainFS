@@ -2,6 +2,21 @@
 
 ## Follow-ups
 
+### Quorum-meta blob codec decouple follow-ups (2026-06-24)
+
+- **[P3][pre-existing] Dead `CachedBackend` / apply-driven cache-invalidator wiring.**
+  `boot_phases_services.go:35-36` constructs `state.cachedBackend = NewCachedBackend(distBackend)`
+  and registers an `s3-cache` invalidator (`distBackend.RegisterCacheInvalidator` →
+  `notifyOnApply`). But the live S3 server uses `state.backend` (pullthrough→coordinator), NOT
+  `state.cachedBackend` (`boot_phases_admin.go:85` `server.New(cfg.Addr, state.backend, …)`), so the
+  read cache is never on the live path and the registered invalidator invalidated a cache nobody
+  reads. The blob-codec-decouple PR removed the (already-unreachable since data-plane raft-free Slice 2)
+  `notifyOnApply` `CmdPutObjectMeta` object-cache branch, making the dead wiring obvious. `Registry`/
+  `InvalidateAll`/`SetOnApply` now have no live object-mutation driver. Fix: either wire `cachedBackend`
+  into the live read path (and drive invalidation off the off-raft write path) or remove the unused
+  `CachedBackend` + registry wiring. Surfaced by the code-gate codex pass; pre-existing, not a
+  regression of this PR (behavior-neutral — the cache was never live).
+
 ### DeleteBucket non-Enabled emptiness follow-ups (2026-06-24)
 
 - **[P3][pre-existing] TOCTOU between the DeleteBucket emptiness scan and the

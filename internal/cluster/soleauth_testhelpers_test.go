@@ -1,10 +1,8 @@
 package cluster
 
 import (
-	"context"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -19,7 +17,7 @@ func seedVersionBlob(t *testing.T, b *DistributedBackend, bucket, key, vid strin
 	cmd.Bucket = bucket
 	cmd.Key = key
 	cmd.VersionID = vid
-	blob, err := EncodeCommand(CmdPutObjectMeta, cmd)
+	blob, err := encodeQuorumMetaBlob(cmd)
 	require.NoError(t, err)
 	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal(bucket, filepath.Join(key, vid), blob))
 }
@@ -49,17 +47,4 @@ func byVID(t *testing.T, objs []storage.SnapshotObject, vid string) storage.Snap
 		t.Fatalf("byVID: VersionID %q not found in %d objects", vid, len(objs))
 	}
 	return *found
-}
-
-// putMeta proposes a minimal object-version metadata record via Raft.
-func (b *DistributedBackend) putMeta(bucket, key, versionID, etag string, size int64, ct string) error {
-	return b.propose(context.Background(), CmdPutObjectMeta, PutObjectMetaCmd{
-		Bucket:      bucket,
-		Key:         key,
-		VersionID:   versionID,
-		ETag:        etag,
-		Size:        size,
-		ContentType: ct,
-		ModTime:     time.Now().UnixMilli(),
-	})
 }

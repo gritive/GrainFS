@@ -34,7 +34,7 @@ func TestQuorumMetaScanners_SkipInFlightTempFiles(t *testing.T) {
 			StripeBytes: 1 << 20, NodeIDs: []string{"self", "self"},
 		}},
 	}
-	blob, err := EncodeCommand(CmdPutObjectMeta, cmd)
+	blob, err := encodeQuorumMetaBlob(cmd)
 	require.NoError(t, err)
 	require.NoError(t, svc.writeQuorumMetaLocal("b", "obj", blob))
 

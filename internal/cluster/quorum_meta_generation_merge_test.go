@@ -52,7 +52,7 @@ func twoGenerationBackend(t *testing.T, selfIsB bool) (*DistributedBackend, *Sha
 
 func writeQMeta(t *testing.T, svc *ShardService, cmd PutObjectMetaCmd) {
 	t.Helper()
-	blob, err := EncodeCommand(CmdPutObjectMeta, cmd)
+	blob, err := encodeQuorumMetaBlob(cmd)
 	require.NoError(t, err)
 	require.NoError(t, svc.writeQuorumMetaLocal(cmd.Bucket, cmd.Key, blob))
 }

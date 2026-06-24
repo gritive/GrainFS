@@ -91,7 +91,7 @@ func (b *DistributedBackend) deleteObjectWithMarker(ctx context.Context, bucket,
 					NodeIDs:          placement.NodeIDs,
 					PlacementGroupID: placement.PlacementGroupID,
 				}
-				blob, eerr := EncodeCommand(CmdPutObjectMeta, marker)
+				blob, eerr := encodeQuorumMetaBlob(marker)
 				if eerr != nil {
 					return "", fmt.Errorf("encode delete marker %s/%s: %w", bucket, key, eerr)
 				}

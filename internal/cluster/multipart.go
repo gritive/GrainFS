@@ -182,7 +182,7 @@ func (b *DistributedBackend) buildMultipartMetaBlob(ctx context.Context, cmd Put
 	if cmd.VersionID == "" || !b.bucketVersioningEnabled(ctx, cmd.Bucket) {
 		return nil, nil
 	}
-	blob, err := EncodeCommand(CmdPutObjectMeta, cmd)
+	blob, err := encodeQuorumMetaBlob(cmd)
 	if err != nil {
 		return nil, fmt.Errorf("multipart complete: encode meta_blob: %w", err)
 	}
@@ -197,11 +197,7 @@ func (b *DistributedBackend) buildMultipartMetaBlob(ctx context.Context, cmd Put
 // attempt (concurrent completer or idempotent retry) writes it. Returns the decoded
 // object so callers can answer the S3 CompleteMultipartUpload response.
 func (b *DistributedBackend) writeCompletedMultipartBlob(ctx context.Context, metaBlob []byte) (PutObjectMetaCmd, error) {
-	env, err := DecodeCommand(metaBlob)
-	if err != nil {
-		return PutObjectMetaCmd{}, fmt.Errorf("multipart complete: decode meta_blob: %w", err)
-	}
-	cmd, err := decodePutObjectMetaCmd(env.Data)
+	cmd, err := decodeQuorumMetaBlob(metaBlob)
 	if err != nil {
 		return PutObjectMetaCmd{}, fmt.Errorf("multipart complete: decode meta_blob cmd: %w", err)
 	}

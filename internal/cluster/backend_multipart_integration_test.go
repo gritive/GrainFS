@@ -67,8 +67,8 @@ var _ = Describe("Backend multipart integration", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(obj).NotTo(BeNil())
 		// M3: the complete commits the latest-only quorum-meta blob FAIL-CLOSED — no
-		// CmdCompleteMultipart propose.
-		Expect(rec.commandTypes()).NotTo(ContainElement(CmdCompleteMultipart))
+		// CmdCompleteMultipart propose (retired slot 6).
+		Expect(rec.commandTypes()).NotTo(ContainElement(CommandType(6)))
 	})
 
 	It("bypasses complete spooling for single-part multipart uploads", func() {

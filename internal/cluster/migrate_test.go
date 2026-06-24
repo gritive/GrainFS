@@ -121,7 +121,10 @@ func TestMigrateLegacyMetaToCluster_Basic(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, bucketCount)
 
-	// Check objects
+	// Migration no longer re-proposes legacy object metadata (per-object FSM
+	// commands were retired in data-plane raft-free Slice 2). It must still leave
+	// the legacy source records intact (non-destructive scan), so the legacy
+	// obj: entries survive in the source BadgerDB.
 	var objCount int
 	err = db.View(func(txn *badger.Txn) error {
 		it := txn.NewIterator(badger.DefaultIteratorOptions)
@@ -133,7 +136,7 @@ func TestMigrateLegacyMetaToCluster_Basic(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
-	assert.Equal(t, 3, objCount)
+	assert.Equal(t, 3, objCount, "legacy source object records must survive migration")
 }
 
 func TestMigrateLegacyMetaToCluster_EmptyData(t *testing.T) {

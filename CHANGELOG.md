@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.0.660.0] - 2026-06-24
+
+### Changed
+- **The off-raft data plane no longer serializes quorum-meta blobs with the raft command envelope
+  (BREAKING on-disk format; greenfield only).** Object metadata, per-version blobs, delete markers,
+  hard-delete tombstones, the multipart manifest, and GC known-set entries were stored as a
+  `clusterpb.Command{Type=CmdPutObjectMeta, Data=…}` FlatBuffer — the same envelope as a raft command,
+  but never proposed — leaving the off-raft data plane coupled to the raft command codec/enum. They are
+  now serialized with a dedicated bare `PutObjectMetaCmd` codec (`encodeQuorumMetaBlob`/
+  `decodeQuorumMetaBlob`). **The on-disk quorum-meta blob wire format changes**: a cluster carrying
+  blobs written by an older binary cannot be read by this one, and mixed-version rolling upgrade across
+  this boundary is unsupported — consistent with the data-plane raft-free epic's greenfield stance. No
+  migration.
+- **Retired per-object / multipart raft command machinery removed.** With the data plane fully
+  decoupled, the no-op `CommandType` constants left reserved by earlier slices (`CmdPutObjectMeta`,
+  `CmdDeleteObject`, `CmdDeleteObjectVersion`, `CmdSetObjectACL`/`CmdSetObjectTags`,
+  `CmdPutObjectQuarantine`, `CmdAppendObject`/`CmdCoalesceSegments`, the multipart commands, and the
+  ring-derived placement pair) and their dead apply/encode/notify cases are deleted. Live control-plane
+  command wire values are unchanged (explicit enum values; retired slot numbers are recorded to prevent
+  reuse). The dead legacy object-metadata migration re-propose (a no-op since data-plane raft-free
+  Slice 2) is removed; `MigrateLegacyMetaToCluster` migrates buckets only. Hardening: a corrupt
+  quorum-meta blob now fails closed (decode returns an error) instead of panicking — the old envelope
+  had masked the inner field-accessor panic.
+
 ## [0.0.659.0] - 2026-06-24
 
 ### Fixed

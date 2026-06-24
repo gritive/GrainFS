@@ -93,20 +93,6 @@ func (f *FSM) ApplyTxn(txn MetadataTxn, raw []byte) error {
 		return f.applyCreateBucket(txn, cmd.Data)
 	case CmdDeleteBucket:
 		return f.applyDeleteBucket(txn, cmd.Data)
-	case CmdPutObjectMeta:
-		// reserved, removed in data-plane raft-free Slice 2; blob CAS-quorum is
-		// authoritative. No production proposer; greenfield — no raft-log replay of
-		// these commands. No-op on any stale entries.
-		return nil
-	case CmdDeleteObject:
-		// reserved, removed in data-plane raft-free Slice 2; force-delete is now
-		// blob-physical (quorum-meta + shards). No production proposer; greenfield —
-		// no raft-log replay of these commands. No-op on any stale entries.
-		return nil
-	case CmdCreateMultipartUpload, CmdCompleteMultipart, CmdAbortMultipart:
-		// reserved, removed in multipart-off-raft epic (M4): no production proposer,
-		// greenfield — no raft-log replay of these commands. No-op on stale entries.
-		return nil
 	case CmdSetBucketPolicy:
 		return f.applySetBucketPolicy(txn, cmd.Data)
 	case CmdDeleteBucketPolicy:
@@ -115,33 +101,10 @@ func (f *FSM) ApplyTxn(txn MetadataTxn, raw []byte) error {
 		return f.applyMigrateShard(txn, cmd.Data)
 	case CmdMigrationDone:
 		return f.applyMigrationDone(txn, cmd.Data)
-	case CmdPutShardPlacement, CmdDeleteShardPlacement:
-		// reserved, removed: ring-derived placement. No proposer; greenfield. No-op.
-		return nil
 	case CmdSetRing:
 		return f.applySetRing(txn, cmd.Data)
-	case CmdDeleteObjectVersion:
-		// reserved, removed in data-plane raft-free Slice 2; delete is now
-		// blob-tombstone/physical (per-version blob LWW + quorum-meta purge). No
-		// production proposer; greenfield — no raft-log replay of these commands.
-		// No-op on any stale entries.
-		return nil
 	case CmdSetBucketVersioning:
 		return f.applySetBucketVersioning(txn, cmd.Data)
-	case CmdSetObjectACL, CmdSetObjectTags:
-		// reserved, removed in data-plane raft-free Slice 2; blob RMW is
-		// authoritative. No production proposer; no raft-log replay of these
-		// commands in a greenfield cluster. No-op on any stale entries.
-		return nil
-	case CmdAppendObject, CmdCoalesceSegments:
-		// reserved, removed in append/coalesce-off-raft Slice 1; no production
-		// proposer; greenfield — no raft-log replay of these commands. No-op on stale entries.
-		return nil
-	case CmdPutObjectQuarantine:
-		// reserved, removed in data-plane raft-free Slice 2; quarantine is now
-		// stored in the quorum-meta blob (IsQuarantined/QuarantineCause). No
-		// production proposer; no raft-log replay in a greenfield cluster.
-		return nil
 	case CmdResealFSMValues:
 		return f.applyResealFSMValues(txn, cmd.Data)
 	case CmdFSMValueResealDone:
@@ -150,10 +113,10 @@ func (f *FSM) ApplyTxn(txn MetadataTxn, raw []byte) error {
 		// preceding CmdResealFSMValues batches in raft order. Gen is carried
 		// for logging/observability only — the re-Kick is gen-agnostic. S7-1a-2.
 		return nil
-	case CmdDeleteMultipartDone:
-		// reserved, removed in multipart-off-raft epic (M4): no-op on stale entries.
-		return nil
 	default:
+		// Unknown / retired command types (the data plane moved off-raft; the
+		// retired per-object/multipart/append/placement slots are no longer named).
+		// A greenfield cluster never proposes these; any stale replay is a no-op.
 		log.Warn().Uint8("type", uint8(cmd.Type)).Msg("fsm: unknown command type")
 		return nil
 	}

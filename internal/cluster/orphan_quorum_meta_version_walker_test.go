@@ -14,7 +14,7 @@ import (
 // back-dates its mtime so the age gate treats it as old (backdate > floor).
 func writeVersionBlob(t *testing.T, b *DistributedBackend, bucket, key, versionID string, backdate time.Duration) string {
 	t.Helper()
-	blob, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+	blob, err := encodeQuorumMetaBlob(PutObjectMetaCmd{
 		Bucket:    bucket,
 		Key:       key,
 		VersionID: versionID,
@@ -34,7 +34,7 @@ func writeVersionBlob(t *testing.T, b *DistributedBackend, bucket, key, versionI
 // the age floor.
 func writeTombstoneBlob(t *testing.T, b *DistributedBackend, bucket, key, versionID string, nodeIDs []string, backdate time.Duration) string {
 	t.Helper()
-	blob, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+	blob, err := encodeQuorumMetaBlob(PutObjectMetaCmd{
 		Bucket:        bucket,
 		Key:           key,
 		VersionID:     versionID,

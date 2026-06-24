@@ -338,7 +338,33 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	return fbFinish(b, clusterpb.PutObjectMetaCmdEnd(b)), nil
 }
 
-func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
+// encodeQuorumMetaBlob serializes an object's quorum-meta record for the off-raft
+// quorum-meta tree (and the per-version / multipart-manifest blobs that reuse it).
+// It is the bare PutObjectMetaCmd FlatBuffer — NOT wrapped in a clusterpb.Command
+// envelope — so the data plane no longer depends on the raft command codec/enum.
+// Every quorum-meta blob is a PutObjectMetaCmd, so no command-type discriminator is
+// needed. WIRE FORMAT: bare PutObjectMetaCmd FB (greenfield; see CHANGELOG).
+func encodeQuorumMetaBlob(c PutObjectMetaCmd) ([]byte, error) {
+	return encodePutObjectMetaCmd(c)
+}
+
+// decodeQuorumMetaBlob is the inverse of encodeQuorumMetaBlob.
+func decodeQuorumMetaBlob(data []byte) (PutObjectMetaCmd, error) {
+	return decodePutObjectMetaCmd(data)
+}
+
+func decodePutObjectMetaCmd(data []byte) (out PutObjectMetaCmd, err error) {
+	// A corrupt blob can pass GetRootAsPutObjectMetaCmd (which only reads the root
+	// vtable offset) yet panic later when a field accessor (e.g. NodeIdsLength)
+	// indexes past the buffer. fbSafe below covers only the root read, so the
+	// whole field-decode body must also be panic-safe to stay fail-closed: a
+	// malformed on-disk quorum-meta blob must surface as an error, never a panic.
+	defer func() {
+		if r := recover(); r != nil {
+			out = PutObjectMetaCmd{}
+			err = fmt.Errorf("invalid flatbuffer: %v", r)
+		}
+	}()
 	t, err := fbSafe(data, func(d []byte) *clusterpb.PutObjectMetaCmd {
 		return clusterpb.GetRootAsPutObjectMetaCmd(d, 0)
 	})
@@ -1087,14 +1113,6 @@ func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
 		return encodeCreateBucketCmd(payload.(CreateBucketCmd))
 	case CmdDeleteBucket:
 		return encodeDeleteBucketCmd(payload.(DeleteBucketCmd))
-	case CmdPutObjectMeta:
-		return encodePutObjectMetaCmd(payload.(PutObjectMetaCmd))
-	case CmdDeleteObject:
-		// reserved, removed in data-plane raft-free Slice 2 — no production proposer
-		return nil, fmt.Errorf("CmdDeleteObject = 4 reserved: removed in data-plane raft-free Slice 2")
-	case CmdCreateMultipartUpload, CmdCompleteMultipart, CmdAbortMultipart:
-		// reserved, removed v0.0.651+ — no production caller
-		return nil, fmt.Errorf("command type %d is reserved and removed (multipart-off-raft M4)", cmdType)
 	case CmdSetBucketPolicy:
 		return encodeSetBucketPolicyCmd(payload.(SetBucketPolicyCmd))
 	case CmdDeleteBucketPolicy:
@@ -1103,31 +1121,18 @@ func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
 		return encodeMigrateShardCmd(payload.(MigrateShardFSMCmd))
 	case CmdMigrationDone:
 		return encodeMigrationDoneCmd(payload.(MigrationDoneFSMCmd))
-	case CmdDeleteObjectVersion:
-		// reserved, removed in data-plane raft-free Slice 2 — no production proposer
-		return nil, fmt.Errorf("CmdDeleteObjectVersion = 14 reserved: removed in data-plane raft-free Slice 2")
 	case CmdSetBucketVersioning:
 		return encodeSetBucketVersioningCmd(payload.(SetBucketVersioningCmd))
-	case CmdSetObjectACL, CmdSetObjectTags:
-		// reserved, removed in data-plane raft-free Slice 2 — blob RMW is authoritative
-		return nil, fmt.Errorf("command type %d is reserved and removed (data-plane raft-free Slice 2)", cmdType)
-	case CmdAppendObject, CmdCoalesceSegments:
-		// reserved, removed in append/coalesce-off-raft Slice 1 — no production caller
-		return nil, fmt.Errorf("command type %d is reserved and removed (append/coalesce-off-raft Slice 1)", cmdType)
 	case CmdSetRing:
 		return encodeSetRingCmd(payload.(SetRingCmd))
-	case CmdPutObjectQuarantine:
-		// reserved, removed in data-plane raft-free Slice 2 — quarantine is now
-		// stored in the quorum-meta blob (IsQuarantined/QuarantineCause).
-		return nil, fmt.Errorf("CmdPutObjectQuarantine = 40 reserved: removed in data-plane raft-free Slice 2")
 	case CmdResealFSMValues:
 		return encodeResealFSMValuesCmd(payload.(ResealFSMValuesCmd))
 	case CmdFSMValueResealDone:
 		return encodeFSMValueResealDoneCmd(payload.(FSMValueResealDoneCmd))
-	case CmdDeleteMultipartDone:
-		// reserved, removed v0.0.651+ — no production caller
-		return nil, fmt.Errorf("command type %d is reserved and removed (multipart-off-raft M4)", cmdType)
 	default:
+		// Unknown / retired command type. The per-object/multipart/append/placement
+		// commands moved off-raft and have no production proposer; the quorum-meta
+		// blob is encoded via encodeQuorumMetaBlob, not through this raft payload path.
 		return nil, fmt.Errorf("unknown command type: %d", cmdType)
 	}
 }

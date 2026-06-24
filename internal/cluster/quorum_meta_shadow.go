@@ -45,7 +45,7 @@ func (b *DistributedBackend) quorumMetaShadow(ctx context.Context, cmd PutObject
 	if b.shardSvc == nil || len(cmd.NodeIDs) == 0 {
 		return
 	}
-	blob, err := EncodeCommand(CmdPutObjectMeta, cmd)
+	blob, err := encodeQuorumMetaBlob(cmd)
 	if err != nil {
 		return
 	}

@@ -687,7 +687,7 @@ func (s *ShardService) handleScanQuorumMeta(sr *shardRequest) []byte {
 	}
 	blobs := make([][]byte, 0, len(entries))
 	for i := range entries {
-		blob, eerr := EncodeCommand(CmdPutObjectMeta, entries[i])
+		blob, eerr := encodeQuorumMetaBlob(entries[i])
 		if eerr == nil {
 			blobs = append(blobs, blob)
 		}
@@ -705,7 +705,7 @@ func (s *ShardService) handleScanQuorumMetaVersions(sr *shardRequest) []byte {
 	}
 	blobs := make([][]byte, 0, len(entries))
 	for i := range entries {
-		if blob, eerr := EncodeCommand(CmdPutObjectMeta, entries[i]); eerr == nil {
+		if blob, eerr := encodeQuorumMetaBlob(entries[i]); eerr == nil {
 			blobs = append(blobs, blob)
 		}
 	}
@@ -726,7 +726,7 @@ func (s *ShardService) handleScanQuorumMetaVersionsAll(sr *shardRequest) []byte 
 	}
 	blobs := make([][]byte, 0, len(entries))
 	for i := range entries {
-		if blob, eerr := EncodeCommand(CmdPutObjectMeta, entries[i]); eerr == nil {
+		if blob, eerr := encodeQuorumMetaBlob(entries[i]); eerr == nil {
 			blobs = append(blobs, blob)
 		}
 	}
@@ -756,7 +756,7 @@ func (s *ShardService) handleQuorumMetaVersionsRead(sr *shardRequest) []byte {
 	}
 	blobs := make([][]byte, 0, len(cmds))
 	for i := range cmds {
-		if blob, eerr := EncodeCommand(CmdPutObjectMeta, cmds[i]); eerr == nil {
+		if blob, eerr := encodeQuorumMetaBlob(cmds[i]); eerr == nil {
 			blobs = append(blobs, blob)
 		}
 	}

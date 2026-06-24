@@ -1,7 +1,6 @@
 package cluster
 
 import (
-	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -149,38 +148,13 @@ func MigrateLegacyMetaToCluster(legacyStore MetadataStore, dataDir, nodeID strin
 		}
 	}
 
-	// Propose object metadata
-	for _, obj := range objects {
-		var meta struct {
-			Key          string `json:"Key"`
-			Size         int64  `json:"Size"`
-			ContentType  string `json:"ContentType"`
-			ETag         string `json:"ETag"`
-			LastModified int64  `json:"LastModified"`
-		}
-		if err := json.Unmarshal(obj.meta, &meta); err != nil {
-			logger.Warn().Str("bucket", obj.bucket).Str("key", obj.key).Err(err).Msg("skip malformed object meta")
-			continue
-		}
-		// Legacy JSON objectMeta predates the Tags field; tags genuinely don't
-		// exist on these records, so the empty Tags here is not a clobber.
-		data, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
-			Bucket:      obj.bucket,
-			Key:         meta.Key,
-			Size:        meta.Size,
-			ContentType: meta.ContentType,
-			ETag:        meta.ETag,
-			ModTime:     meta.LastModified,
-		})
-		if err != nil {
-			return fmt.Errorf("encode object cmd: %w", err)
-		}
-		if err := node.Propose(data); err != nil {
-			return fmt.Errorf("propose put object %s/%s: %w", obj.bucket, obj.key, err)
-		}
-	}
+	// Legacy object metadata is no longer re-proposed: per-object FSM commands
+	// (CmdPutObjectMeta) were retired in data-plane raft-free Slice 2 — their apply
+	// is a no-op, so re-proposing migrated nothing. Objects now live as off-raft
+	// quorum-meta blobs; greenfield clusters never reach bootAutoMigrate. The scan
+	// above still reports legacy object/multipart counts for operator visibility.
 
-	logger.Info().Int("proposed_buckets", len(buckets)).Int("proposed_objects", len(objects)).Msg("migration complete")
+	logger.Info().Int("proposed_buckets", len(buckets)).Msg("migration complete")
 
 	return nil
 }

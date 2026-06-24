@@ -106,10 +106,10 @@ func (b *DistributedBackend) relocateObjectToRedundantGroup(ctx context.Context,
 
 	// The override does the authoritative meta commit via the SAME path a normal
 	// chunked PUT uses (b.writeQuorumMeta): quorum-meta fan-out for user buckets
-	// (and the per-version FSM persist for versioning-enabled buckets). The genesis
+	// (and the per-version blob for versioning-enabled buckets). The genesis
 	// 1+0 object's authoritative metadata lives in quorum-meta — NOT the data-raft
 	// FSM, which a chunked PUT never populates for user buckets — so a raw FSM
-	// CmdPutObjectMeta propose here would CAS against an absent FSM key ("key not
+	// object-meta propose here would CAS against an absent FSM key ("key not
 	// found") and the relocation would always fail. We stamp MetaSeq = cur+1 so the
 	// re-write strictly wins the (ModTime,VersionID) LWW tie (preserved identity
 	// keeps both equal), which is the relocation ordering mechanism documented on

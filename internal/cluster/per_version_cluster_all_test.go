@@ -135,7 +135,7 @@ func TestScanQuorumMetaVersionsAll_FailsClosedOnClientDecodeError(t *testing.T) 
 	svcSelf := NewShardService(t.TempDir(), trSelf, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 	svcPeer := NewShardService(t.TempDir(), trPeer, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 
-	good, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: "019ed400-0000-7000-8000-000000000001", ETag: "ok"})
+	good, err := encodeQuorumMetaBlob(PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: "019ed400-0000-7000-8000-000000000001", ETag: "ok"})
 	require.NoError(t, err)
 	// Peer returns a well-formed OK response carrying one valid blob + one corrupt
 	// blob — exactly what a strict handler would never pack, but transit corruption

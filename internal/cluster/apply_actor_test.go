@@ -192,10 +192,14 @@ func TestApplyBatch_ErrTxnTooBigFallback(t *testing.T) {
 	bigMeta := map[string]string{"x": strings.Repeat("a", 64<<10)} // 64 KiB each
 	var cmds [][]byte
 	for i := 0; i < 32; i++ {
-		b, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+		// Retired object slot (CommandType 3, formerly CmdPutObjectMeta): the apply
+		// loop no-ops it but must still process every committed entry without dropping.
+		payload, err := encodeQuorumMetaBlob(PutObjectMetaCmd{
 			Bucket: "b1", Key: "k" + string(rune('a'+i)), Size: 1, ETag: "e",
 			UserMetadata: bigMeta,
 		})
+		require.NoError(t, err)
+		b, err := buildRawCommand(CommandType(3), payload)
 		require.NoError(t, err)
 		cmds = append(cmds, b)
 	}

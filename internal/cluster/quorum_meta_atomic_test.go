@@ -30,7 +30,7 @@ func TestWriteQuorumMetaLocal_ConcurrentWriteReadNeverTorn(t *testing.T) {
 		Bucket: "b", Key: "k", Size: 2048, ContentType: "application/octet-stream",
 		ETag: "etag", VersionID: "v1", ECData: 1, ECParity: 1, NodeIDs: []string{"self", "self"},
 	}
-	blob, err := EncodeCommand(CmdPutObjectMeta, cmd)
+	blob, err := encodeQuorumMetaBlob(cmd)
 	require.NoError(t, err)
 
 	// Seed so the file always exists; readers should only ever see a full blob.
@@ -65,9 +65,9 @@ func TestWriteQuorumMetaLocal_ConcurrentWriteReadNeverTorn(t *testing.T) {
 			t.Fatalf("read %d: quorum meta read errored (torn read): %v", i, rerr)
 		}
 		require.NotEmpty(t, raw, "read %d: observed an empty quorum-meta blob (torn O_TRUNC write)", i)
-		decoded, derr := DecodeCommand(raw)
+		decoded, derr := decodeQuorumMetaBlob(raw)
 		require.NoError(t, derr, "read %d: observed a partial quorum-meta blob (torn write)", i)
-		require.Equal(t, CmdPutObjectMeta, decoded.Type, "read %d: wrong command type", i)
+		require.Equal(t, cmd.Key, decoded.Key, "read %d: wrong decoded blob", i)
 	}
 
 	close(stop)

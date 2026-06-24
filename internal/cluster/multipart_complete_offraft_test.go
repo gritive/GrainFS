@@ -68,8 +68,8 @@ func TestCompleteMultipart_NoCompletePropose(t *testing.T) {
 	require.NotNil(t, obj)
 
 	for _, ct := range rec.commandTypes() {
-		require.NotEqualf(t, CmdCompleteMultipart, ct,
-			"multipart complete must NOT propose CmdCompleteMultipart (blob is sole authority)")
+		require.NotEqualf(t, CommandType(6), ct,
+			"multipart complete must NOT propose the retired CmdCompleteMultipart slot 6 (blob is sole authority)")
 	}
 }
 
@@ -95,8 +95,8 @@ func TestCompleteMultipart_NonVersionedNoCompletePropose(t *testing.T) {
 	require.NotNil(t, obj)
 
 	for _, ct := range rec.commandTypes() {
-		require.NotEqualf(t, CmdCompleteMultipart, ct,
-			"non-versioned multipart complete must NOT propose CmdCompleteMultipart")
+		require.NotEqualf(t, CommandType(6), ct,
+			"non-versioned multipart complete must NOT propose the retired CmdCompleteMultipart slot 6")
 	}
 }
 

@@ -127,17 +127,25 @@ func TestRegistry_GetInvalidator_ConcurrentRegister(t *testing.T) {
 	wg.Wait()
 }
 
-func TestDistributedBackend_RegisterCacheInvalidator_NotifiedOnApply(t *testing.T) {
+// notifyOnApply no longer drives object-cache invalidation: the per-object FSM
+// commands that once named an object key were retired (data-plane raft-free
+// Slice 2), and object mutations now invalidate caches directly via the
+// quorum-meta blob write path. A retired object slot (CommandType 3, formerly
+// CmdPutObjectMeta) hits the default path in notifyOnApply and must NOT call any
+// registered invalidator.
+func TestDistributedBackend_RegisterCacheInvalidator_RetiredObjectSlotNotInvalidated(t *testing.T) {
 	backend := &DistributedBackend{registry: NewRegistry()}
 	inv := &testInvalidator{}
 	backend.RegisterCacheInvalidator("s3-cache", inv)
 
-	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: "mybkt", Key: "mykey"})
+	payload, err := encodeQuorumMetaBlob(PutObjectMetaCmd{Bucket: "mybkt", Key: "mykey"})
+	require.NoError(t, err)
+	raw, err := buildRawCommand(CommandType(3), payload)
 	require.NoError(t, err)
 
 	backend.notifyOnApply(raw)
 
-	assert.Equal(t, []string{"mybkt/mykey"}, inv.calls)
+	assert.Empty(t, inv.calls, "apply path must not invalidate object cache for the retired object slot")
 }
 
 func TestDistributedBackend_UnregisterCacheInvalidator_RemovesInvalidator(t *testing.T) {
@@ -146,9 +154,13 @@ func TestDistributedBackend_UnregisterCacheInvalidator_RemovesInvalidator(t *tes
 	backend.RegisterCacheInvalidator("s3-cache", inv)
 	backend.UnregisterCacheInvalidator("s3-cache")
 
-	// CmdDeleteObject = 4 is retired (data-plane raft-free Slice 2); use
-	// CmdPutObjectMeta which still triggers cache invalidation in notifyOnApply.
-	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: "mybkt", Key: "mykey"})
+	// After Unregister the invalidator must not be called. Also note notifyOnApply
+	// no longer drives object-cache invalidation at all (the per-object FSM commands
+	// were retired in data-plane raft-free Slice 2), so a retired object slot
+	// (CommandType 3) is a no-op on the apply hook regardless of registration.
+	payload, err := encodeQuorumMetaBlob(PutObjectMetaCmd{Bucket: "mybkt", Key: "mykey"})
+	require.NoError(t, err)
+	raw, err := buildRawCommand(CommandType(3), payload)
 	require.NoError(t, err)
 
 	backend.notifyOnApply(raw)
@@ -156,7 +168,13 @@ func TestDistributedBackend_UnregisterCacheInvalidator_RemovesInvalidator(t *tes
 	assert.Empty(t, inv.calls)
 }
 
-func TestDistributedBackend_NotifyOnApply_CallsLegacyCallbackAfterRegistry(t *testing.T) {
+// notifyOnApply does NOT fan out object-cache invalidation to the registry or the
+// legacy onApply callback for a retired object slot: the per-object FSM commands
+// that once named an object key were retired (data-plane raft-free Slice 2), and
+// object mutations now invalidate caches directly via the quorum-meta blob write
+// path. A retired object slot (CommandType 3, formerly CmdPutObjectMeta) hits the
+// default no-op path, so neither callback fires.
+func TestDistributedBackend_NotifyOnApply_RetiredObjectSlotSkipsRegistryAndLegacy(t *testing.T) {
 	backend := &DistributedBackend{registry: NewRegistry()}
 	var mu sync.Mutex
 	var calls []string
@@ -171,12 +189,14 @@ func TestDistributedBackend_NotifyOnApply_CallsLegacyCallbackAfterRegistry(t *te
 		calls = append(calls, "legacy:"+bucket+"/"+key)
 	})
 
-	// CmdCompleteMultipart was removed (M4); test uses CmdPutObjectMeta instead
-	// which also triggers both registry and legacy callbacks.
-	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: "mybkt", Key: "mykey"})
+	payload, err := encodeQuorumMetaBlob(PutObjectMetaCmd{Bucket: "mybkt", Key: "mykey"})
+	require.NoError(t, err)
+	raw, err := buildRawCommand(CommandType(3), payload)
 	require.NoError(t, err)
 
 	backend.notifyOnApply(raw)
 
-	assert.Equal(t, []string{"registry:mybkt/mykey", "legacy:mybkt/mykey"}, calls)
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Empty(t, calls, "apply hook must not invoke registry or legacy callbacks for the retired object slot")
 }

@@ -301,7 +301,7 @@ func (b *DistributedBackend) DeleteObjectVersion(bucket, key, versionID string) 
 			tomb.IsHardDeleted = true
 			tomb.ModTime = time.Now().Unix()
 			tomb.MetaSeq = cmd.MetaSeq + 1
-			blob, eerr := EncodeCommand(CmdPutObjectMeta, tomb)
+			blob, eerr := encodeQuorumMetaBlob(tomb)
 			if eerr != nil {
 				return fmt.Errorf("encode hard-delete tombstone %s/%s@%s: %w", bucket, key, versionID, eerr)
 			}

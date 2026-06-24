@@ -228,13 +228,18 @@ func TestSetOnFSMValueResealDone_CallbackFiresOnMarker(t *testing.T) {
 		// correct: no callback
 	}
 
-	// Apply CmdPutObjectMeta: must NOT fire the callback.
-	rawPut, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: "b", Key: "k", Size: 1, ETag: "e"})
+	// Apply a retired object slot (CommandType 3, formerly CmdPutObjectMeta):
+	// notifyOnApply's object-cache switch was removed (object cache is no longer
+	// apply-driven), so a retired/object slot hits the default path and must NOT
+	// fire the reseal callback.
+	payload, err := encodeQuorumMetaBlob(PutObjectMetaCmd{Bucket: "b", Key: "k", Size: 1, ETag: "e"})
+	require.NoError(t, err)
+	rawPut, err := buildRawCommand(CommandType(3), payload)
 	require.NoError(t, err)
 	gb.notifyOnApply(rawPut)
 	select {
 	case <-fired:
-		t.Fatal("callback must NOT fire for CmdPutObjectMeta")
+		t.Fatal("callback must NOT fire for the retired object slot (CommandType 3)")
 	case <-time.After(50 * time.Millisecond):
 		// correct: no callback
 	}

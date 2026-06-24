@@ -31,7 +31,7 @@ func TestReadQuorumMetaVersionsLocal_ListsKeyVersions(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	// Two version blobs for one key, written via the S1 local primitive.
 	for _, vid := range []string{"v1", "v2"} {
-		blob, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: "bkt", Key: "a/b/c.txt", VersionID: vid, ETag: "e-" + vid})
+		blob, err := encodeQuorumMetaBlob(PutObjectMetaCmd{Bucket: "bkt", Key: "a/b/c.txt", VersionID: vid, ETag: "e-" + vid})
 		require.NoError(t, err)
 		require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal("bkt", filepath.Join("a/b/c.txt", vid), blob))
 	}
@@ -62,7 +62,7 @@ func TestReadQuorumMetaVersions_RPC(t *testing.T) {
 	trB.RegisterBufferedRoute(transport.RouteShardRPC, svcB.NativeRPCHandler())
 
 	for _, vid := range []string{"v1", "v2"} {
-		blob, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: vid, ETag: "e-" + vid})
+		blob, err := encodeQuorumMetaBlob(PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: vid, ETag: "e-" + vid})
 		require.NoError(t, err)
 		require.NoError(t, svcB.writeQuorumMetaVersionLocal("bkt", filepath.Join("k", vid), blob))
 	}
@@ -98,7 +98,7 @@ func TestReadQuorumMetaVersions_UnionsAcrossGroups(t *testing.T) {
 
 	write := func(svc *ShardService, vid string) {
 		t.Helper()
-		blob, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: vid, ETag: "e-" + vid})
+		blob, err := encodeQuorumMetaBlob(PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: vid, ETag: "e-" + vid})
 		require.NoError(t, err)
 		require.NoError(t, svc.writeQuorumMetaVersionLocal("bkt", filepath.Join("k", vid), blob))
 	}
@@ -157,11 +157,11 @@ func TestHeadObjectMeta_PerVersionHookOverridesLegacyLatest(t *testing.T) {
 
 	// Legacy latest-only blob says v1 (older); per-version store has v1 AND a
 	// newer v2 that the latest-only blob never saw.
-	v1Blob, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: bkt, Key: key, VersionID: "019ed400-0000-7000-8000-000000000001", ETag: "etag-v1", NodeIDs: []string{"self"}, ECData: 1})
+	v1Blob, err := encodeQuorumMetaBlob(PutObjectMetaCmd{Bucket: bkt, Key: key, VersionID: "019ed400-0000-7000-8000-000000000001", ETag: "etag-v1", NodeIDs: []string{"self"}, ECData: 1})
 	require.NoError(t, err)
 	require.NoError(t, b.shardSvc.writeQuorumMetaLocal(bkt, key, v1Blob)) // legacy latest-only = v1
 	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal(bkt, filepath.Join(key, "019ed400-0000-7000-8000-000000000001"), v1Blob))
-	v2Blob, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: bkt, Key: key, VersionID: "019ed400-0000-7000-8000-000000000002", ETag: "etag-v2", NodeIDs: []string{"self"}, ECData: 1})
+	v2Blob, err := encodeQuorumMetaBlob(PutObjectMetaCmd{Bucket: bkt, Key: key, VersionID: "019ed400-0000-7000-8000-000000000002", ETag: "etag-v2", NodeIDs: []string{"self"}, ECData: 1})
 	require.NoError(t, err)
 	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal(bkt, filepath.Join(key, "019ed400-0000-7000-8000-000000000002"), v2Blob))
 
@@ -348,13 +348,12 @@ func TestGetObjectVersion_BlobAbsentFSMOnlyIs404(t *testing.T) {
 	require.NoError(t, b.CreateBucket(ctx, bkt))
 	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
 
-	// A plain versioned version with an FSM ObjectMetaKeyV record but NO per-version
-	// blob. PreserveLatest avoids touching the latest pointer so the normal PUT wins it.
+	// An FSM-only version (an ObjectMetaKeyV record with NO per-version blob) can no
+	// longer be seeded: the per-object FSM commands were retired (data-plane raft-free
+	// Slice 2) and CmdPutObjectMeta apply is now a no-op, so no record is created. The
+	// version below therefore simply never exists — neither a blob nor an FSM record —
+	// so the blob-primary 404 contract still holds for the same reason (no blob).
 	const blobAbsentVid = "019ed400-0000-7000-8000-000000000001"
-	require.NoError(t, b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
-		Bucket: bkt, Key: key, VersionID: blobAbsentVid, ETag: "etag-noblob",
-		Size: 11, ContentType: "text/plain", PreserveLatest: true,
-	}))
 
 	// A normal versioned PUT → writes a per-version blob (the latest, blob-backed).
 	_ = putVersioned(t, b, ctx, bkt, key, "content-latest")
@@ -434,7 +433,7 @@ func TestS2a_GenerationUnion_DeriveAndDelete(t *testing.T) {
 	const vid2 = "019ed400-0000-7000-8000-000000000002"
 	write := func(svc *ShardService, vid, node string) {
 		t.Helper()
-		blob, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: bkt, Key: key, VersionID: vid, ETag: "e-" + vid, NodeIDs: []string{node}, ECData: 1})
+		blob, err := encodeQuorumMetaBlob(PutObjectMetaCmd{Bucket: bkt, Key: key, VersionID: vid, ETag: "e-" + vid, NodeIDs: []string{node}, ECData: 1})
 		require.NoError(t, err)
 		require.NoError(t, svc.writeQuorumMetaVersionLocal(bkt, filepath.Join(key, vid), blob))
 	}

@@ -18,7 +18,7 @@ func writeVerBlob(t *testing.T, svc *ShardService, bucket, key, vid string, c Pu
 	c.Bucket = bucket
 	c.Key = key
 	c.VersionID = vid
-	blob, err := EncodeCommand(CmdPutObjectMeta, c)
+	blob, err := encodeQuorumMetaBlob(c)
 	require.NoError(t, err)
 	require.NoError(t, svc.writeQuorumMetaVersionLocal(bucket, filepath.Join(key, vid), blob))
 }

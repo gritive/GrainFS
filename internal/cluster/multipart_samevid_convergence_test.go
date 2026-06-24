@@ -37,7 +37,7 @@ func TestReadQuorumMetaVersions_SameVIDHigherModTimeWins(t *testing.T) {
 	const bkt, key, vid = "bkt", "k", "019ed400-0000-7000-8000-000000000001"
 	write := func(svc *ShardService, modTime int64, etag string) {
 		t.Helper()
-		blob, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+		blob, err := encodeQuorumMetaBlob(PutObjectMetaCmd{
 			Bucket: bkt, Key: key, VersionID: vid, ETag: etag,
 			ModTime: modTime, MetaSeq: 0, NodeIDs: []string{"n"}, ECData: 1,
 		})
