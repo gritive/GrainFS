@@ -118,13 +118,11 @@ revoke now require the target service account to be allowed for
 }
 ```
 
-S3 and Iceberg accept protocol credentials as SigV4 access keys. S3 credentials
-are scoped to one bucket (`--protocol s3 --resource bucket/<bucket>`); Iceberg
-credentials are scoped to one catalog (`--protocol iceberg --resource
-catalog/<warehouse>`). Use the returned `id` as the SigV4 access key and the
-one-time `secret` as the SigV4 secret key. Read-only credentials allow read
-operations only. S3 `CopyObject` is limited to same-bucket copies for protocol
-credentials.
+S3 accepts protocol credentials as SigV4 access keys. S3 credentials are scoped
+to one bucket (`--protocol s3 --resource bucket/<bucket>`). Use the returned
+`id` as the SigV4 access key and the one-time `secret` as the SigV4 secret key.
+Read-only credentials allow read operations only. S3 `CopyObject` is limited to
+same-bucket copies for protocol credentials.
 
 List inventory can be narrowed to the same resource scope:
 

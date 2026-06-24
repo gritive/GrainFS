@@ -65,7 +65,6 @@ func (s *Server) installMiddlewares(h *server.Hertz) {
 	if s.verifier != nil {
 		h.Use(s.authMiddleware())
 	}
-	h.Use(s.auditEnvelopeMiddleware())
 	h.Use(s.s3RequestLogMiddleware())
 	h.Use(s.authzMiddleware())
 }

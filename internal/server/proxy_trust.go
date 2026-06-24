@@ -180,11 +180,12 @@ func parseForwarded(h string) (proto, forIP string) {
 // authoritativeClientIP returns the IP we attribute to a Hertz request. It
 // consults the wired ProxyTrust; when ProxyTrust is absent (test fixtures) or
 // rejects the request (e.g. trusted-source with bad headers), it falls back to
-// the raw peer host. The returned value is the SourceIP that feeds audit logs
-// and policy.RequestContext.SourceIP — only the data-plane gateway path uses
-// this. UDS / localhost / peer-cred gates intentionally keep using
-// c.RemoteAddr() because they want the actual TCP peer, not a proxy-asserted
-// client identity.
+// the raw peer host. The returned value is the SourceIP for policy.RequestContext.SourceIP
+// enrichment — only the data-plane gateway path uses this. UDS / localhost /
+// peer-cred gates intentionally keep using c.RemoteAddr() because they want
+// the actual TCP peer, not a proxy-asserted client identity.
+//
+//nolint:unused // wired via WithProxyTrust; tested in proxy_trust_integration_test.go
 func (s *Server) authoritativeClientIP(c *app.RequestContext) string {
 	remote := ""
 	if addr := c.RemoteAddr(); addr != nil {

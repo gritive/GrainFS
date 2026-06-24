@@ -119,13 +119,6 @@ type Config struct {
 	ECRedundancyUpgradeMax    int
 	ECRedundancyUpgradeMinAge time.Duration
 
-	// Audit Iceberg log lake
-	AuditIceberg        bool
-	AuditCommitInterval time.Duration
-
-	// Node services
-	EnableIceberg bool
-
 	// Resource guards (pre-resolved from cobra; Run body reads only these)
 	FDWatchEnabled        bool
 	FDOpts                resourceguard.FDOptions

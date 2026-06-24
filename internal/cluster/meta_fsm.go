@@ -22,7 +22,6 @@ import (
 	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/iam/policyattach"
 	"github.com/gritive/GrainFS/internal/iam/policystore"
-	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/migration"
@@ -35,20 +34,16 @@ import (
 type MetaCmdType = clusterpb.MetaCmdType
 
 const (
-	MetaCmdTypeNoOp                      = clusterpb.MetaCmdTypeNoOp
-	MetaCmdTypeAddNode                   = clusterpb.MetaCmdTypeAddNode
-	MetaCmdTypeRemoveNode                = clusterpb.MetaCmdTypeRemoveNode
-	MetaCmdTypePutShardGroup             = clusterpb.MetaCmdTypePutShardGroup          // PR-C
-	MetaCmdTypeAddPlacementGeneration    = clusterpb.MetaCmdTypeAddPlacementGeneration // Phase 7
-	MetaCmdTypePutBucketAssignment       = clusterpb.MetaCmdTypePutBucketAssignment    // PR-D
-	MetaCmdTypeSetLoadSnapshot           = clusterpb.MetaCmdTypeSetLoadSnapshot        // PR-D
-	MetaCmdTypeProposeRebalancePlan      = clusterpb.MetaCmdTypeProposeRebalancePlan   // PR-D
-	MetaCmdTypeAbortPlan                 = clusterpb.MetaCmdTypeAbortPlan              // PR-D
-	MetaCmdTypeIcebergCreateNamespace    = clusterpb.MetaCmdTypeIcebergCreateNamespace
-	MetaCmdTypeIcebergDeleteNamespace    = clusterpb.MetaCmdTypeIcebergDeleteNamespace
-	MetaCmdTypeIcebergCreateTable        = clusterpb.MetaCmdTypeIcebergCreateTable
-	MetaCmdTypeIcebergCommitTable        = clusterpb.MetaCmdTypeIcebergCommitTable
-	MetaCmdTypeIcebergDeleteTable        = clusterpb.MetaCmdTypeIcebergDeleteTable
+	MetaCmdTypeNoOp                   = clusterpb.MetaCmdTypeNoOp
+	MetaCmdTypeAddNode                = clusterpb.MetaCmdTypeAddNode
+	MetaCmdTypeRemoveNode             = clusterpb.MetaCmdTypeRemoveNode
+	MetaCmdTypePutShardGroup          = clusterpb.MetaCmdTypePutShardGroup          // PR-C
+	MetaCmdTypeAddPlacementGeneration = clusterpb.MetaCmdTypeAddPlacementGeneration // Phase 7
+	MetaCmdTypePutBucketAssignment    = clusterpb.MetaCmdTypePutBucketAssignment    // PR-D
+	MetaCmdTypeSetLoadSnapshot        = clusterpb.MetaCmdTypeSetLoadSnapshot        // PR-D
+	MetaCmdTypeProposeRebalancePlan   = clusterpb.MetaCmdTypeProposeRebalancePlan   // PR-D
+	MetaCmdTypeAbortPlan              = clusterpb.MetaCmdTypeAbortPlan              // PR-D
+	// 9-13 reserved — do not reuse (no renumber).
 	MetaCmdTypeRotateKeyBegin            = clusterpb.MetaCmdTypeRotateKeyBegin
 	MetaCmdTypeRotateKeySwitch           = clusterpb.MetaCmdTypeRotateKeySwitch
 	MetaCmdTypeRotateKeyDrop             = clusterpb.MetaCmdTypeRotateKeyDrop
@@ -193,54 +188,6 @@ type RebalancePlan struct {
 	CreatedAt time.Time
 }
 
-type IcebergNamespaceEntry struct {
-	Warehouse  string
-	Namespace  []string
-	Properties map[string]string
-}
-
-type IcebergTableEntry struct {
-	Warehouse        string
-	Identifier       icebergcatalog.Identifier
-	MetadataLocation string
-	Properties       map[string]string
-}
-
-type IcebergCreateNamespaceCmd struct {
-	RequestID  string
-	Warehouse  string
-	Namespace  []string
-	Properties map[string]string
-}
-
-type IcebergDeleteNamespaceCmd struct {
-	RequestID string
-	Warehouse string
-	Namespace []string
-}
-
-type IcebergCreateTableCmd struct {
-	RequestID        string
-	Warehouse        string
-	Identifier       icebergcatalog.Identifier
-	MetadataLocation string
-	Properties       map[string]string
-}
-
-type IcebergCommitTableCmd struct {
-	RequestID                string
-	Warehouse                string
-	Identifier               icebergcatalog.Identifier
-	ExpectedMetadataLocation string
-	NewMetadataLocation      string
-}
-
-type IcebergDeleteTableCmd struct {
-	RequestID  string
-	Warehouse  string
-	Identifier icebergcatalog.Identifier
-}
-
 // MetaFSM implements raft.Snapshotter for the meta-Raft group.
 // It holds cluster membership state.
 //
@@ -268,17 +215,14 @@ type MetaFSM struct {
 	// ascending epoch). Empty for single-generation legacy clusters; appended by
 	// AddPlacementGeneration. Consumed by OpRouter from S7-4 onward.
 	placementGenerations []placementGeneration
-	bucketRecords        map[string]BucketRecord                     // bucket → BucketRecord (PR-D; replaces bucketAssignments)
-	loadSnapshot         map[string]LoadStatEntry                    // node_id → stats (PR-D)
-	activePlan           *RebalancePlan                              // nil = no active plan (PR-D)
-	icebergNamespaces    map[string]map[string]IcebergNamespaceEntry // warehouse → nsKey → entry
-	icebergTables        map[string]map[string]IcebergTableEntry     // warehouse → tableKey → entry
-	onBucketAssigned     func(string, string)                        // protected by mu; set before Start() (PR-D)
-	onBucketUnassigned   func(string)                                // protected by mu; set before Start() (group0-demotion)
-	onRebalancePlan      func(*RebalancePlan)                        // must not block; set before Start() (PR-D)
-	onShardGroupAdded    func(ShardGroupEntry)                       // fired after PutShardGroup applies; protected by mu (v0.0.7.0)
-	onIcebergResult      func(string, error)                         // requestID, typed catalog result; must not block
-	onScrubTrigger       func(scrubber.ScrubTriggerEntry)            // PR4: cluster-wide scrub trigger applied; must not block
+	bucketRecords        map[string]BucketRecord          // bucket → BucketRecord (PR-D; replaces bucketAssignments)
+	loadSnapshot         map[string]LoadStatEntry         // node_id → stats (PR-D)
+	activePlan           *RebalancePlan                   // nil = no active plan (PR-D)
+	onBucketAssigned     func(string, string)             // protected by mu; set before Start() (PR-D)
+	onBucketUnassigned   func(string)                     // protected by mu; set before Start() (group0-demotion)
+	onRebalancePlan      func(*RebalancePlan)             // must not block; set before Start() (PR-D)
+	onShardGroupAdded    func(ShardGroupEntry)            // fired after PutShardGroup applies; protected by mu (v0.0.7.0)
+	onScrubTrigger       func(scrubber.ScrubTriggerEntry) // PR4: cluster-wide scrub trigger applied; must not block
 	// 클러스터 키 회전 — 결정론적 FSM은 여기, side-effect (디스크 I/O,
 	// transport identity swap)는 onRotationApplied 콜백으로 분리 (D16).
 	rotation          *RotationFSM
@@ -664,8 +608,6 @@ func NewMetaFSM() *MetaFSM {
 		shardGroups:                make(map[string]ShardGroupEntry),
 		bucketRecords:              make(map[string]BucketRecord),
 		loadSnapshot:               make(map[string]LoadStatEntry),
-		icebergNamespaces:          make(map[string]map[string]IcebergNamespaceEntry),
-		icebergTables:              make(map[string]map[string]IcebergTableEntry),
 		rotation:                   NewRotationFSM(),
 		invites:                    newInviteFSM(),
 		peers:                      newPeerRegistry(),
@@ -785,16 +727,7 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		return f.applyProposeRebalancePlan(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeAbortPlan:
 		return f.applyAbortPlan(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeIcebergCreateNamespace:
-		return f.applyIcebergCreateNamespace(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeIcebergDeleteNamespace:
-		return f.applyIcebergDeleteNamespace(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeIcebergCreateTable:
-		return f.applyIcebergCreateTable(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeIcebergCommitTable:
-		return f.applyIcebergCommitTable(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeIcebergDeleteTable:
-		return f.applyIcebergDeleteTable(cmd.DataBytes())
+	// 9-13 reserved — fall through to default (skip); no renumber.
 	case clusterpb.MetaCmdTypeRotateKeyBegin:
 		return f.applyRotateKeyBegin(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeRotateKeySwitch:
@@ -1012,17 +945,6 @@ func cloneStringMap(in map[string]string) map[string]string {
 	out := make(map[string]string, len(in))
 	for k, v := range in {
 		out[k] = v
-	}
-	return out
-}
-
-func readStringVector(n int, at func(int) []byte) []string {
-	if n == 0 {
-		return nil
-	}
-	out := make([]string, n)
-	for i := range out {
-		out[i] = string(at(i))
 	}
 	return out
 }

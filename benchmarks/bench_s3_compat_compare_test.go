@@ -202,25 +202,6 @@ func TestBenchS3CompatUsesUniqueDefaultBenchDir(t *testing.T) {
 	}
 }
 
-func TestIcebergBenchesUseHostPreflight(t *testing.T) {
-	for _, path := range []string{"bench_iceberg_table.sh", "bench_iceberg_table_cluster.sh"} {
-		body, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		script := string(body)
-		for _, want := range []string{
-			`bench_collect_host_preflight "$PROFILE_DIR"`,
-			`bench_enforce_strict_host "$PROFILE_DIR"`,
-			`host-preflight.txt`,
-		} {
-			if !strings.Contains(script, want) {
-				t.Fatalf("%s must use host preflight with %q", path, want)
-			}
-		}
-	}
-}
-
 func TestBenchS3CompatDoesNotAcceptArbitraryServeFlags(t *testing.T) {
 	body, err := os.ReadFile("bench_s3_compat_compare.sh")
 	if err != nil {
@@ -387,20 +368,3 @@ func TestBenchS3CompatWaitsForMinIOClusterSignedWriteReadiness(t *testing.T) {
 		t.Fatalf("minio signed write readiness must run after health readiness and before set_start_info")
 	}
 }
-
-func TestIcebergClusterBenchCreatesWarehouseBucketWithPolicy(t *testing.T) {
-	body, err := os.ReadFile("bench_iceberg_table_cluster.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	script := string(body)
-
-	if !strings.Contains(script, `bench_create_bucket_with_policy_admin_retry "$BINARY" "$BENCH_DIR/n$TARGET_INDEX" "$ICEBERG_BUCKET" "$SA_ID" bucket-admin`) {
-		t.Fatalf("bench_iceberg_table_cluster.sh must create the warehouse bucket with bucket-admin attached to the benchmark SA")
-	}
-}
-
-// (TestIcebergClusterBenchCopiesKEKBeforeJoinersStart removed: it asserted the dead
-// `.join-pending` + KEK-copy join model. The iceberg harness now joins via invite
-// bundles — see TestBenchIcebergClusterJoinsViaInviteBundle in
-// bench_iceberg_table_cluster_test.go.)

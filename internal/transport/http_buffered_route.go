@@ -38,14 +38,12 @@ const (
 	RouteForwardProposeDataGroup = "/forward/propose/data-group"
 	RouteForwardReadIndex        = "/forward/read-index"
 	RouteRaftMetaPropose         = "/raft/meta/propose"
-	RouteRaftMetaCatalogRead     = "/raft/meta/catalog-read"
 	RouteForwardMetaReadIndex    = "/raft/meta/read-index"
 	RouteReceiptQuery            = "/receipt/query"
 	RouteProbeCapability         = "/probe/capability"
 	RouteProbeKEKDisk            = "/probe/kek-disk"
 	RouteProbeKEKLease           = "/probe/kek-lease"
 	RouteProbeAppliedIndex       = "/probe/applied-index"
-	RouteAuditShip               = "/audit/ship"
 )
 
 // bufferedErrCap bounds how much of a non-200 response body the client reads
@@ -70,14 +68,12 @@ var bufferedRouteTable = []struct {
 	{RouteForwardProposeDataGroup, StreamDataGroupProposeForward},
 	{RouteForwardReadIndex, StreamReadIndex},
 	{RouteRaftMetaPropose, StreamMetaProposeForward},
-	{RouteRaftMetaCatalogRead, StreamMetaCatalogRead},
 	{RouteForwardMetaReadIndex, StreamMetaReadIndex},
 	{RouteReceiptQuery, StreamReceiptQuery},
 	{RouteProbeCapability, StreamCapabilityProbe},
 	{RouteProbeKEKDisk, StreamKEKDiskSpaceProbe},
 	{RouteProbeKEKLease, StreamKEKLeaseSnapshotProbe},
 	{RouteProbeAppliedIndex, StreamAppliedIndexProbe},
-	{RouteAuditShip, StreamAuditShip},
 }
 
 // BufferedRouteHandler is a consumer-registered native handler for a

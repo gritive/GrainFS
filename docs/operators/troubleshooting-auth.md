@@ -30,28 +30,6 @@ Common gotchas:
 - A `Resource:*` policy with an explicit Deny on one bucket: Deny wins.
 - Bucket policy `Principal:"*"` is ignored unless `iam.allow-anonymous-bucket-policy=true`.
 
-## "401" on Iceberg client request
-
-1. No bearer present → 401 by middleware. Mint a token:
-   ```bash
-   curl -X POST http://host:9000/iceberg/v1/oauth/tokens \
-     -d grant_type=client_credentials \
-     -d client_id=<AK> -d client_secret=<SK> \
-     -d scope=PRINCIPAL_ROLE:<warehouse>
-   ```
-2. Bearer signature mismatch → likely SA's `kid` was pruned. Re-mint after `jwt.signing-key-prune`.
-3. Expired token → re-mint (3600s TTL).
-
-JWT key state:
-
-```bash
-grainfs status --json | jq .jwt_keys
-```
-
-## "warehouse claim mismatch" 403
-
-The bearer's `warehouse` claim ≠ the warehouse you targeted via `?warehouse=` or path. One token = one warehouse. Mint a fresh token with the right `scope`.
-
 ## TLS Hardening For Authenticated Traffic
 
 For network-exposed authenticated traffic, choose one:

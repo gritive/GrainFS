@@ -96,9 +96,6 @@ type MetaRaft struct {
 	applyResultMu sync.Mutex
 	applyErrs     map[uint64]error
 
-	icebergMu      sync.Mutex
-	icebergWaiters map[string]chan error
-
 	lastSnapshotIndex uint64
 
 	// kekRotationLeader is optionally wired via SetKEKRotationLeader before
@@ -162,16 +159,14 @@ func NewMetaRaft(cfg MetaRaftConfig) (*MetaRaft, error) {
 	}
 
 	m := &MetaRaft{
-		node:           node,
-		closeDB:        closeDB,
-		fsm:            fsm,
-		cfg:            cfg,
-		done:           make(chan struct{}),
-		applyNotify:    make(chan struct{}),
-		applyErrs:      make(map[uint64]error),
-		icebergWaiters: make(map[string]chan error),
+		node:        node,
+		closeDB:     closeDB,
+		fsm:         fsm,
+		cfg:         cfg,
+		done:        make(chan struct{}),
+		applyNotify: make(chan struct{}),
+		applyErrs:   make(map[uint64]error),
 	}
-	fsm.SetOnIcebergApplyResult(m.publishIcebergResult)
 
 	if cfg.Transport != nil {
 		m.wireTransport(cfg.Transport)
@@ -674,52 +669,21 @@ func (m *MetaRaft) ProposeDEKRewrapProgress(ctx context.Context, nodeID string, 
 	return m.Propose(ctx, MetaCmdTypeDEKRewrapProgress, payload)
 }
 
-func (m *MetaRaft) ProposeIcebergMetaCommand(ctx context.Context, data []byte) error {
-	cmd := clusterpb.GetRootAsMetaCmd(data, 0)
-	requestID, err := icebergRequestID(cmd.Type(), cmd.DataBytes())
-	if err != nil {
-		return err
-	}
-	return m.proposeIcebergCommand(ctx, cmd.Type(), cmd.DataBytes(), requestID)
-}
-
-// ProposeMetaCommand proposes an already-encoded MetaCmd. Iceberg commands use
-// the request waiter path so semantic catalog errors are preserved; other meta
-// commands only need to wait until the entry is applied locally.
+// ProposeMetaCommand proposes an already-encoded MetaCmd and blocks until the
+// entry is applied locally.
 func (m *MetaRaft) ProposeMetaCommand(ctx context.Context, data []byte) error {
-	cmd := clusterpb.GetRootAsMetaCmd(data, 0)
-	switch cmd.Type() {
-	case MetaCmdTypeIcebergCreateNamespace,
-		MetaCmdTypeIcebergDeleteNamespace,
-		MetaCmdTypeIcebergCreateTable,
-		MetaCmdTypeIcebergCommitTable,
-		MetaCmdTypeIcebergDeleteTable:
-		return m.ProposeIcebergMetaCommand(ctx, data)
-	default:
-		_, err := m.ProposeMetaCommandWithIndex(ctx, data)
-		return err
-	}
+	_, err := m.ProposeMetaCommandWithIndex(ctx, data)
+	return err
 }
 
-// ProposeMetaCommandWithIndex proposes an already-encoded non-Iceberg MetaCmd
-// and returns the committed raft index. Iceberg commands use semantic request
-// waiters and do not expose a proposal index through this path.
+// ProposeMetaCommandWithIndex proposes an already-encoded MetaCmd and returns
+// the committed raft index.
 func (m *MetaRaft) ProposeMetaCommandWithIndex(ctx context.Context, data []byte) (uint64, error) {
-	cmd := clusterpb.GetRootAsMetaCmd(data, 0)
-	switch cmd.Type() {
-	case MetaCmdTypeIcebergCreateNamespace,
-		MetaCmdTypeIcebergDeleteNamespace,
-		MetaCmdTypeIcebergCreateTable,
-		MetaCmdTypeIcebergCommitTable,
-		MetaCmdTypeIcebergDeleteTable:
-		return 0, fmt.Errorf("meta_raft: iceberg commands do not expose proposal index through this path")
-	default:
-		idx, err := m.node.ProposeWait(ctx, data)
-		if err != nil {
-			return 0, fmt.Errorf("meta_raft: ProposeWait: %w", err)
-		}
-		return idx, m.waitAppliedResult(ctx, idx)
+	idx, err := m.node.ProposeWait(ctx, data)
+	if err != nil {
+		return 0, fmt.Errorf("meta_raft: ProposeWait: %w", err)
 	}
+	return idx, m.waitAppliedResult(ctx, idx)
 }
 
 func (m *MetaRaft) ProposeMetaCommandWithGate(ctx context.Context, plan compat.GatePlan, data []byte) (uint64, error) {
@@ -826,82 +790,6 @@ func (m *MetaRaft) validateGatePlanForProposal(plan compat.GatePlan) error {
 	}
 	_, err := m.capabilityGate.RequireMetaRaftCapability(plan.Capability, plan.Operation, time.Now())
 	return err
-}
-
-func icebergRequestID(typ MetaCmdType, payload []byte) (string, error) {
-	switch typ {
-	case MetaCmdTypeIcebergCreateNamespace:
-		cmd, err := decodeMetaIcebergCreateNamespaceCmd(payload)
-		return cmd.RequestID, err
-	case MetaCmdTypeIcebergDeleteNamespace:
-		cmd, err := decodeMetaIcebergDeleteNamespaceCmd(payload)
-		return cmd.RequestID, err
-	case MetaCmdTypeIcebergCreateTable:
-		cmd, err := decodeMetaIcebergCreateTableCmd(payload)
-		return cmd.RequestID, err
-	case MetaCmdTypeIcebergCommitTable:
-		cmd, err := decodeMetaIcebergCommitTableCmd(payload)
-		return cmd.RequestID, err
-	case MetaCmdTypeIcebergDeleteTable:
-		cmd, err := decodeMetaIcebergDeleteTableCmd(payload)
-		return cmd.RequestID, err
-	default:
-		return "", fmt.Errorf("meta_raft: non-iceberg command type %s", typ)
-	}
-}
-
-func (m *MetaRaft) proposeIcebergCommand(ctx context.Context, typ MetaCmdType, payload []byte, requestID string) error {
-	if requestID == "" {
-		return fmt.Errorf("meta_raft: iceberg command missing request ID")
-	}
-	waiter := m.registerIcebergWaiter(requestID)
-	defer m.unregisterIcebergWaiter(requestID)
-	data, err := encodeMetaCmd(typ, payload)
-	if err != nil {
-		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
-	}
-	idx, err := m.node.ProposeWait(ctx, data)
-	if err != nil {
-		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
-	}
-	if err := m.waitApplied(ctx, idx); err != nil {
-		return err
-	}
-	select {
-	case err := <-waiter:
-		return err
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-m.done:
-		return fmt.Errorf("meta_raft: apply loop stopped before iceberg result %q was delivered", requestID)
-	}
-}
-
-func (m *MetaRaft) registerIcebergWaiter(requestID string) chan error {
-	ch := make(chan error, 1)
-	m.icebergMu.Lock()
-	m.icebergWaiters[requestID] = ch
-	m.icebergMu.Unlock()
-	return ch
-}
-
-func (m *MetaRaft) unregisterIcebergWaiter(requestID string) {
-	m.icebergMu.Lock()
-	delete(m.icebergWaiters, requestID)
-	m.icebergMu.Unlock()
-}
-
-func (m *MetaRaft) publishIcebergResult(requestID string, err error) {
-	m.icebergMu.Lock()
-	ch := m.icebergWaiters[requestID]
-	m.icebergMu.Unlock()
-	if ch == nil {
-		return
-	}
-	select {
-	case ch <- err:
-	default:
-	}
 }
 
 // waitApplied blocks until the FSM apply loop has processed the entry at idx.

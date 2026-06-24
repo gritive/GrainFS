@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"net/http"
 	"testing"
 	"time"
@@ -174,91 +173,4 @@ func TestProtocolCredentialAuthS3RejectsStaleStrict(t *testing.T) {
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
-}
-
-func TestProtocolCredentialAuthIcebergAllowsMatchingCredential(t *testing.T) {
-	store := protocred.NewStore()
-	envelope := protocolCredentialTestEnvelope{}
-	secret, err := protocred.NewService(store, protocred.WithSecretEnvelope(envelope)).Create(protocred.CreateRequest{
-		SAID:     "sa-iceberg",
-		Protocol: protocred.ProtocolIceberg,
-		Resource: "catalog/tenant-a",
-		Mode:     protocred.ModeRO,
-	})
-	require.NoError(t, err)
-
-	base := setupTestServerWithOptions(t,
-		WithAuth([]s3auth.Credentials{{AccessKey: "legacy", SecretKey: "legacy-secret"}}),
-		WithProtocolCredentialAuth(store, envelope),
-	)
-
-	req, err := http.NewRequest(http.MethodGet, base+"/iceberg/v1/config?warehouse=tenant-a", nil)
-	require.NoError(t, err)
-	req.Host = req.URL.Host
-	s3auth.SignRequest(req, secret.ID, secret.Secret, "us-east-1")
-
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-	var got struct {
-		Defaults map[string]string `json:"defaults"`
-	}
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
-	require.Equal(t, "tenant-a", got.Defaults["warehouse"])
-}
-
-func TestProtocolCredentialAuthIcebergUsesCredentialResourceWhenWarehouseOmitted(t *testing.T) {
-	store := protocred.NewStore()
-	envelope := protocolCredentialTestEnvelope{}
-	secret, err := protocred.NewService(store, protocred.WithSecretEnvelope(envelope)).Create(protocred.CreateRequest{
-		SAID:     "sa-iceberg",
-		Protocol: protocred.ProtocolIceberg,
-		Resource: "catalog/tenant-a",
-		Mode:     protocred.ModeRO,
-	})
-	require.NoError(t, err)
-
-	base := setupTestServerWithOptions(t,
-		WithAuth([]s3auth.Credentials{{AccessKey: "legacy", SecretKey: "legacy-secret"}}),
-		WithProtocolCredentialAuth(store, envelope),
-	)
-
-	req, err := http.NewRequest(http.MethodGet, base+"/iceberg/v1/namespaces", nil)
-	require.NoError(t, err)
-	req.Host = req.URL.Host
-	s3auth.SignRequest(req, secret.ID, secret.Secret, "us-east-1")
-
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	require.NotEqual(t, http.StatusUnauthorized, resp.StatusCode)
-	require.NotEqual(t, http.StatusForbidden, resp.StatusCode)
-}
-
-func TestProtocolCredentialAuthRejectsProtocolMismatch(t *testing.T) {
-	store := protocred.NewStore()
-	envelope := protocolCredentialTestEnvelope{}
-	secret, err := protocred.NewService(store, protocred.WithSecretEnvelope(envelope)).Create(protocred.CreateRequest{
-		SAID:     "sa-s3",
-		Protocol: protocred.ProtocolS3,
-		Resource: "bucket/protocred-bucket",
-		Mode:     protocred.ModeRO,
-	})
-	require.NoError(t, err)
-
-	base := setupTestServerWithOptions(t,
-		WithAuth([]s3auth.Credentials{{AccessKey: "legacy", SecretKey: "legacy-secret"}}),
-		WithProtocolCredentialAuth(store, envelope),
-	)
-
-	req, err := http.NewRequest(http.MethodGet, base+"/iceberg/v1/config?warehouse=warehouse", nil)
-	require.NoError(t, err)
-	req.Host = req.URL.Host
-	s3auth.SignRequest(req, secret.ID, secret.Secret, "us-east-1")
-
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 }

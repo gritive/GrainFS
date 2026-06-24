@@ -56,9 +56,9 @@ operation is already part of the base `storage.Backend` contract and has no
 optional capability probing.
 
 Server construction still needs storage-shaped dependencies for non-handler
-subsystems such as snapshot management, volume management, and Iceberg catalog
-wiring. Pass those dependencies through an explicit composition type instead of
-giving handlers a raw backend escape hatch:
+subsystems such as snapshot management and volume management. Pass those
+dependencies through an explicit composition type instead of giving handlers a
+raw backend escape hatch:
 
 ```go
 type ServerStorage struct {
@@ -229,8 +229,8 @@ Focused tests should cover decorated backend stacks:
 - Policy parser, compiler, cache, and benchmarks move with the code into
   `internal/policy`; server keeps HTTP bucket-policy integration tests.
 - Server constructor tests cover `ServerStorage` wiring for volume manager,
-  snapshot availability, Iceberg catalog auto-wiring, and handler calls through
-  `Operations` instead of raw backend probing.
+  snapshot availability, and handler calls through `Operations` instead of raw
+  backend probing.
 - unsupported mutating capabilities return `ErrUnsupportedOperation`.
 
 The implementation file should include a short ASCII diagram comment mirroring

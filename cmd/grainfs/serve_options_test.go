@@ -76,9 +76,6 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 		"--pprof-port", "6060",
 		"--raft-heartbeat-interval", "37ms",
 		"--raft-election-timeout", "41ms",
-		"--audit-iceberg=false",
-		"--audit-commit-interval", "67s",
-		"--enable-iceberg=true",
 	}
 	require.NoError(t, cmd.ParseFlags(args))
 
@@ -107,9 +104,6 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 	require.True(t, opts.MeasureReadAmp)
 	require.Equal(t, int64(134217728), opts.ShardCacheSize)
 
-	// Protocols.
-	require.True(t, opts.EnableIceberg)
-
 	// Intervals.
 	require.Equal(t, "7s", opts.ScrubInterval.String())
 	require.Equal(t, "11m0s", opts.ScrubOrphanAge.String())
@@ -127,10 +121,6 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 	require.Equal(t, "53m0s", opts.HealReceiptRetention.String())
 	require.Equal(t, "59s", opts.HealReceiptGossipInterval.String())
 	require.Equal(t, 61, opts.HealReceiptWindow)
-
-	// Audit.
-	require.False(t, opts.AuditIceberg)
-	require.Equal(t, "1m7s", opts.AuditCommitInterval.String())
 
 	// Observability.
 	require.Equal(t, "localhost:4318", opts.OTelEndpoint)

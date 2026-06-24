@@ -2,6 +2,28 @@
 
 ## Follow-ups
 
+### Iceberg removal follow-ups (2026-06-24)
+
+- **[P3] ProxyTrust subsystem orphaned by the iceberg audit-lake removal.**
+  `(*Server).authoritativeClientIP` (`internal/server/proxy_trust.go`) + the whole ProxyTrust
+  wiring (`WithProxyTrust`, `config.keys` TrustedProxyCIDR, the `OnTrustedProxyCIDR` reload hook,
+  boot construction in `boot_phases_raft.go` / `boot_phases_srvopts.go`, CIDR seeding in `run.go`)
+  was built (§5 T45) to attribute the real client IP behind a proxy, and its ONLY production
+  consumer was the removed S3-event audit log lake. It is now production-dead (kept alive by a
+  `//nolint:unused` on `authoritativeClientIP`; integration tests still pass). The original intent
+  was "future SourceIP enrichment of `policy.RequestContext`". Decide later: either WIRE it to the
+  surviving PDP/policy `aws:SourceIp` condition path (and the general S3 request log, which does not
+  log client IP today), or REMOVE the whole subsystem. Left out of the iceberg-removal PR to keep
+  scope focused (ProxyTrust is a separate feature, not iceberg).
+
+- **[P3] FlatBuffers MetaStateSnapshot iceberg reserved slots.** `cluster.fbs` retains
+  `iceberg_namespaces` (slot 5), `iceberg_tables` (slot 6), `iceberg_schema_version` (slot 9) +
+  the `IcebergNamespaceEntry`/`IcebergIdentifier`/`IcebergTableEntry` table defs, written as empty
+  vectors by `meta_fsm_snapshot.go`, purely for snapshot wire-format slot stability (no-renumber).
+  At the next MetaStateSnapshot schema version bump these dead slots can be reclaimed/renamed to
+  generic `reserved_*` names (wire-safe since slots are positional) to drop the last iceberg
+  identifiers from the codebase.
+
 ### Quorum-meta blob codec decouple follow-ups (2026-06-24)
 
 - **[P3][pre-existing] Dead `CachedBackend` / apply-driven cache-invalidator wiring.**

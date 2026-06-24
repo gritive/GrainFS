@@ -56,9 +56,6 @@ func serveOptionsFromCmd(cmd *cobra.Command) (serveruntime.ServeOptions, error) 
 	opts.MeasureReadAmp, _ = cmd.Flags().GetBool("measure-read-amp")
 	opts.ShardCacheSize, _ = cmd.Flags().GetInt64("shard-cache-size")
 
-	// Protocols.
-	opts.EnableIceberg, _ = cmd.Flags().GetBool("enable-iceberg")
-
 	// Intervals.
 	opts.ScrubInterval, _ = cmd.Flags().GetDuration("scrub-interval")
 	opts.ScrubOrphanAge, _ = cmd.Flags().GetDuration("scrub-orphan-age")
@@ -83,10 +80,6 @@ func serveOptionsFromCmd(cmd *cobra.Command) (serveruntime.ServeOptions, error) 
 
 	opts.KEKProtector, _ = cmd.Flags().GetString("kek-protector")
 	opts.KEKRecoverySecretFile, _ = cmd.Flags().GetString("kek-recovery-secret-file")
-
-	// Audit.
-	opts.AuditIceberg, _ = cmd.Flags().GetBool("audit-iceberg")
-	opts.AuditCommitInterval, _ = cmd.Flags().GetDuration("audit-commit-interval")
 
 	// Observability.
 	opts.OTelEndpoint, _ = cmd.Flags().GetString("otel-endpoint")

@@ -15,7 +15,7 @@ var (
 	ErrInvalidCondition = errors.New("invalid Condition operator or key")
 )
 
-var allowedActionNamespaces = map[string]bool{"s3": true, "iceberg": true, "grainfs": true}
+var allowedActionNamespaces = map[string]bool{"s3": true, "grainfs": true}
 
 var allowedCondKeys = map[string]string{
 	"aws:SourceIp": "IpAddress|NotIpAddress",
@@ -146,7 +146,7 @@ func validProtocolCredentialResource(r string) bool {
 	parts := strings.Split(r, "/")
 	if len(parts) == 3 {
 		switch parts[1] {
-		case "s3", "iceberg", "*":
+		case "s3", "*":
 		default:
 			return false
 		}
@@ -157,14 +157,14 @@ func validProtocolCredentialResource(r string) bool {
 	}
 	if parts[1] == "*" {
 		switch parts[2] {
-		case "bucket", "catalog", "*":
+		case "bucket", "*":
 		default:
 			return false
 		}
 		return parts[3] != ""
 	}
 	switch parts[1] + "/" + parts[2] {
-	case "s3/bucket", "iceberg/catalog":
+	case "s3/bucket":
 	default:
 		return false
 	}

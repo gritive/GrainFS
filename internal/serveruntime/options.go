@@ -45,9 +45,6 @@ type ServeOptions struct {
 	MeasureReadAmp     bool  // --measure-read-amp
 	ShardCacheSize     int64 // --shard-cache-size
 
-	// --- Protocols ---
-	EnableIceberg bool // --enable-iceberg
-
 	// --- Intervals ---
 	ScrubInterval             time.Duration // --scrub-interval
 	ScrubOrphanAge            time.Duration // --scrub-orphan-age
@@ -67,10 +64,6 @@ type ServeOptions struct {
 	HealReceiptRetention      time.Duration // --heal-receipt-retention
 	HealReceiptGossipInterval time.Duration // --heal-receipt-gossip-interval
 	HealReceiptWindow         int           // --heal-receipt-window
-
-	// --- Audit ---
-	AuditIceberg        bool          // --audit-iceberg
-	AuditCommitInterval time.Duration // --audit-commit-interval
 
 	// --- At-rest KEK protection (opt-in; default plaintext) ---
 	KEKProtector          string // --kek-protector (plaintext|env)

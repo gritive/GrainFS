@@ -44,8 +44,8 @@ func describePhase0QuickstartContext(name string, factory func(testing.TB) *phas
 }
 
 // phase0Target is a minimal fixture handle used only by the Phase 0 quickstart
-// suite. It intentionally avoids the iceberg / bootstrapped target helpers
-// because Phase 0 is pre-bootstrap by definition.
+// suite. It intentionally avoids bootstrapped target helpers because Phase 0
+// is pre-bootstrap by definition.
 //
 // adminSock returns the admin UDS path appropriate for admin RPCs. For
 // single-node it's the only node's socket; for cluster it's the leader's
@@ -200,35 +200,4 @@ func runPhase0QuickstartCases(getTgt func() *phase0Target) {
 			"DELETE should remove the object; anon GET status=%d", getResp.StatusCode)
 	})
 
-	ginkgo.It("keeps Iceberg anonymous behavior separate from the S3 fast path (IcebergAnonRequestStillRequiresBearer)", func() {
-		tgt := getTgt()
-		// F#41 anon fast-path is for S3 surface only. Iceberg REST has its own
-		// bearer auth path (iceberg_authn.go). Verify a Phase 0 anon GET to the
-		// iceberg catalog config endpoint is denied (not silently allowed by
-		// crossover from the S3 anon fast-path).
-		req, err := http.NewRequestWithContext(context.Background(),
-			http.MethodGet, tgt.s3URL(0)+"/iceberg/v1/config", nil)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		// NO Authorization header.
-		resp, err := http.DefaultClient.Do(req)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		ginkgo.DeferCleanup(resp.Body.Close)
-		// Acceptable: 200 (anon-allowed by iceberg's own Phase 0 path), 401
-		// (bearer-required), or 403 (other auth failure). EXPLICITLY NOT 200
-		// via the S3 anon fast-path's authorizer — confirm by checking that
-		// the response Content-Type is iceberg JSON (or the status is denial),
-		// not a generic XML "AccessDenied" from the S3 surface.
-		if resp.StatusCode == http.StatusOK {
-			// OK because iceberg Phase 0 anon-skip activated. Verify it's not
-			// an S3 error envelope.
-			ct := resp.Header.Get("Content-Type")
-			gomega.Expect(ct).NotTo(gomega.ContainSubstring("xml"),
-				"iceberg config endpoint must not return S3 XML envelope")
-		} else {
-			// 401 or 403 — bearer-gated. That's also valid Phase 0 behavior
-			// depending on how iceberg config endpoint handles anon today.
-			gomega.Expect([]int{401, 403}).To(gomega.ContainElement(resp.StatusCode),
-				"iceberg unsigned response should be 200/401/403, not %d", resp.StatusCode)
-		}
-	})
 }

@@ -139,8 +139,8 @@ func TestProtocolCredentialSnapshotCodecDeterministicAndRoundTrips(t *testing.T)
 	b := protocred.Credential{
 		ID:          "pc_b",
 		SAID:        "sa_b",
-		Protocol:    protocred.ProtocolIceberg,
-		Resource:    "catalog/b",
+		Protocol:    protocred.ProtocolS3,
+		Resource:    "bucket/b",
 		Mode:        protocred.ModeRW,
 		SecretHash:  sha256.Sum256([]byte("b")),
 		SecretHint:  "hint-b",

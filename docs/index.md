@@ -12,10 +12,7 @@ workflows.
 | Need | Document | Type |
 | --- | --- | --- |
 | Run `GrainFS` locally and use common commands | [User guide](users/guide.md) | Tutorial / how-to |
-| Use DuckDB with the Iceberg REST Catalog | [Iceberg DuckDB guide](users/iceberg-duckdb.md) | How-to |
-| Query S3 audit data as an Iceberg table | [Audit Iceberg guide](users/audit-iceberg.md) | How-to / explanation |
 | Check S3 compatibility before choosing a client feature | [S3 compatibility](reference/s3-compatibility.md) | Reference |
-| Check Iceberg client support | [Iceberg compatibility](reference/iceberg-compatibility.md) | Reference |
 
 ## Operators
 
@@ -37,10 +34,8 @@ rules.
 | Need | Document |
 | --- | --- |
 | S3 API and client compatibility | [S3 compatibility](reference/s3-compatibility.md) |
-| Iceberg REST Catalog compatibility | [Iceberg compatibility](reference/iceberg-compatibility.md) |
 | Benchmark methodology | [Benchmarks](reference/benchmarks.md) |
 | Rolling upgrade compatibility | [Rolling upgrade compatibility](reference/rolling-upgrade-compatibility.md) |
-| Iceberg request trace | [Iceberg DuckDB request trace](reference/iceberg-duckdb-request-trace.md) |
 | Transport versioning | [Transport mux versioning](reference/transport-mux-versioning.md) |
 | Upgrade finalization design | [Upgrade finalize machinery](reference/upgrade-finalize-machinery-design.md) |
 

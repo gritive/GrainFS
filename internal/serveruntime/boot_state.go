@@ -10,7 +10,6 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/rs/zerolog/log"
 
-	"github.com/gritive/GrainFS/internal/audit"
 	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/cluster"
@@ -235,7 +234,6 @@ type bootState struct {
 	forwardSender     *cluster.ForwardSender
 	forwardReceiver   *cluster.ForwardReceiver
 	metaForwardSender *cluster.MetaProposeForwardSender
-	metaReadSender    *cluster.MetaCatalogReadSender
 	clusterCoord      *cluster.ClusterCoordinator
 	seedGroups        int
 	// seedMu (Option B) serializes the leader-side deferred seed-on-quorum across
@@ -262,28 +260,14 @@ type bootState struct {
 	diskCollector    *cluster.DiskCollector
 
 	// bootSrvOptsAndReceipt
-	srvOpts           []server.Option
-	clusterAlerts     *alertssvc.State
-	receiptWiring     *HealReceiptWiring
-	incidentRecorder  *incident.Recorder
-	lifecycleSvc      *lifecycle.Service
-	lifecycleStore    *lifecycle.Store
-	migrationSvc      *migration.Service
-	mutationGate      *server.MutationGate
-	auditSearchWarmup func(context.Context) error
-	// auditSearcher is the DuckDB-backed audit searcher. Created in
-	// boot_phases_srvopts when cfg.AuditIceberg is enabled; nil otherwise.
-	// Passed to admin.Deps so `grainfs audit` commands can query it via the
-	// admin Unix socket (§8 T64).
-	auditSearcher *audit.DuckDBSearcher
-	// auditOutbox is the per-node durable audit outbox. Created in
-	// boot_phases_srvopts when cfg.AuditIceberg is enabled; nil otherwise.
-	// Kept on bootState so the OnAuditDenyOnly reload-hook closure registered
-	// earlier (in bootMetaRaftWiring) can dereference it nil-safely at fire
-	// time — RegisterClusterKeys runs before the outbox exists, so the
-	// closure must read through state rather than capturing the pointer
-	// directly.
-	auditOutbox *audit.Outbox
+	srvOpts          []server.Option
+	clusterAlerts    *alertssvc.State
+	receiptWiring    *HealReceiptWiring
+	incidentRecorder *incident.Recorder
+	lifecycleSvc     *lifecycle.Service
+	lifecycleStore   *lifecycle.Store
+	migrationSvc     *migration.Service
+	mutationGate     *server.MutationGate
 
 	// bootMetaRaftWiring: meta policy-invalidation worker.
 	// Registered as a post-commit hook on MetaFSM before MetaRaft.Start().

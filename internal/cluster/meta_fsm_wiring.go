@@ -88,18 +88,3 @@ func (f *MetaFSM) SetMigration(store *migration.JobStore) {
 	defer f.mu.Unlock()
 	f.migrationStore = store
 }
-
-func (f *MetaFSM) SetOnIcebergApplyResult(fn func(requestID string, err error)) {
-	f.mu.Lock()
-	f.onIcebergResult = fn
-	f.mu.Unlock()
-}
-
-func (f *MetaFSM) publishIcebergResult(requestID string, err error) {
-	f.mu.RLock()
-	cb := f.onIcebergResult
-	f.mu.RUnlock()
-	if cb != nil && requestID != "" {
-		cb(requestID, err)
-	}
-}

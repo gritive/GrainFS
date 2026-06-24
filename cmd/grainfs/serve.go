@@ -32,7 +32,6 @@ func registerAllServeFlags(cmd *cobra.Command) {
 		"Max bytes any single AppendObject forward request may reserve (default 64 MiB).")
 	cmd.Flags().Int64("append-size-cap-bytes", 5*1024*1024*1024*1024,
 		"Per-object total size cap for AppendObject in bytes (default 5 TiB, S3 PutObject parity).")
-	cmd.Flags().Bool("enable-iceberg", true, "enable Iceberg REST Catalog endpoint (also required by the default-on --audit-iceberg log lake, whose search path queries this catalog)")
 	cmd.Flags().Int("pack-threshold", 65537, "pack objects below this size into blob files (0 = disabled, e.g. 65537)")
 	cmd.Flags().Int("shard-pack-threshold", 0, "DISABLED: cluster shard-packing is no longer supported (a durable pack index was never built); any value > 0 fails to boot")
 	cmd.Flags().Duration("scrub-interval", 24*time.Hour, "EC shard scrub interval (always on; 0 resets to default 24h)")
@@ -102,8 +101,6 @@ func registerAllServeFlags(cmd *cobra.Command) {
 	cmd.Flags().Int("pprof-port", 0, "expose net/http/pprof on this port (0 = disabled, for profiling e2e/load tests)")
 	cmd.Flags().Duration("raft-heartbeat-interval", 200*time.Millisecond, "per-group raft heartbeat interval. Lower = faster failure detection, higher CPU/network. Default 200ms balances detection latency with transport stream-open cost.")
 	cmd.Flags().Duration("raft-election-timeout", 1000*time.Millisecond, "per-group raft election timeout (must be >= 3 * heartbeat-interval). Higher = fewer spurious elections under load.")
-	cmd.Flags().Bool("audit-iceberg", true, "enable audit log lake: S3 ops → Iceberg table on grainfs-audit bucket")
-	cmd.Flags().Duration("audit-commit-interval", 60*time.Second, "how often the audit committer flushes the ring buffer to Iceberg")
 }
 
 func init() {

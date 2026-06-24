@@ -18,15 +18,15 @@ const (
 	StreamProposeGroupForward StreamType = 0x08 // Per-group object operation forwarding with groupID + op + args frame
 	StreamGroupRaft           StreamType = 0x09 // Per-group Raft RPCs (RequestVote, AppendEntries), payload prefixed with [4B groupIDLen][groupID][raftRPC]
 	StreamReadIndex           StreamType = 0x0A // Follower → leader ReadIndex RPC; response: [8B commitIndex big-endian][4B errLen][errBytes]
-	StreamMetaProposeForward  StreamType = 0x0B // Follower → meta-Raft leader Iceberg catalog proposal forwarding
-	StreamMetaCatalogRead     StreamType = 0x0C // Follower → meta-Raft leader Iceberg catalog linearized reads
-	StreamGroupForwardBody    StreamType = 0x0D // Per-group forwarded write metadata frame followed by raw request body bytes
+	StreamMetaProposeForward  StreamType = 0x0B // Follower → meta-Raft leader proposal forwarding
+	// 0x0C retired.
+	StreamGroupForwardBody StreamType = 0x0D // Per-group forwarded write metadata frame followed by raw request body bytes
 	// 0x0E retired: was StreamMetaJoin (legacy KEK-challenge cluster-join admin RPC).
 	StreamGroupForwardRead StreamType = 0x0F // Per-group forwarded read metadata reply followed by raw response body bytes
 	StreamShardWriteBody   StreamType = 0x10 // ShardService write metadata frame followed by raw shard bytes
 	StreamShardReadBody    StreamType = 0x11 // ShardService read metadata reply followed by raw shard bytes
 	// 0x12 retired: was StreamCapabilityExchange (mux-era protocol version handshake).
-	StreamAuditShip               StreamType = 0x13 // Follower → leader S3 audit event batch (one-way push)
+	// 0x13 retired: was StreamAuditShip (follower → leader S3 audit event push).
 	StreamDataGroupProposeForward StreamType = 0x14 // Follower → data-group leader metadata proposal forwarding
 	StreamReadAppendSegment       StreamType = 0x15 // Non-owner → owner append-segment blob read (request frame + raw segment bytes reply)
 	// 0x16 retired: was StreamMetaJoinChallenge (legacy KEK-challenge nonce request).
@@ -49,7 +49,7 @@ const (
 
 func ClassOf(st StreamType) StreamClass {
 	switch st {
-	case StreamMetaRaft, StreamMetaProposeForward, StreamMetaCatalogRead, StreamReadIndex, StreamMetaReadIndex:
+	case StreamMetaRaft, StreamMetaProposeForward, StreamReadIndex, StreamMetaReadIndex:
 		return StreamClassMeta
 	case StreamData, StreamProposeForward, StreamProposeGroupForward, StreamGroupRaft, StreamDataGroupProposeForward:
 		return StreamClassData

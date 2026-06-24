@@ -77,13 +77,8 @@ func optionsToConfig(
 	cfg.ECRedundancyUpgradeMinAge = opts.ECRedundancyUpgradeMinAge
 	cfg.DegradedInterval = opts.DegradedInterval
 
-	cfg.AuditIceberg = opts.AuditIceberg
-	cfg.AuditCommitInterval = opts.AuditCommitInterval
-
 	cfg.KEKProtector = opts.KEKProtector
 	cfg.KEKRecoverySecretFile = opts.KEKRecoverySecretFile
-
-	cfg.EnableIceberg = opts.EnableIceberg
 
 	cfg.FDWatchEnabled = opts.FDWatchEnabled
 	cfg.FDOpts = opts.FDOpts

@@ -3,10 +3,9 @@
 `GrainFS` is a single-binary distributed storage server. It runs as one local
 node or as a Raft-backed cluster.
 
-It exposes object storage and table catalog interfaces over one storage layer:
+It exposes object storage over one storage layer:
 
 - **Object storage:** S3-compatible HTTP API
-- **Table/catalog integration:** Iceberg REST Catalog for DuckDB-oriented lake workflows *(disabled by default — pass `--enable-iceberg` to enable)*
 
 ## Quick Start (2-5 minutes)
 
@@ -34,9 +33,7 @@ upload: ./file.txt to s3://default/file.txt
 
 That's it. You have a working local S3 server.
 
-> ℹ️ **Iceberg:** Iceberg REST Catalog is disabled by default. Add `--enable-iceberg` to enable it. S3 is always on.
-
-> ⚠ **Anonymous default bucket**: any client on this port can read/write `s3://default` until you install an explicit bucket policy for `default`. Create service accounts through the admin socket under the data directory (`<data-dir>/admin.sock`); the Auth + Iceberg block below shows the Quick Start command. See [`docs/operators/deploy-production-cluster.md`](docs/operators/deploy-production-cluster.md).
+> ⚠ **Anonymous default bucket**: any client on this port can read/write `s3://default` until you install an explicit bucket policy for `default`. Create service accounts through the admin socket under the data directory (`<data-dir>/admin.sock`); the Auth block below shows the Quick Start command. See [`docs/operators/deploy-production-cluster.md`](docs/operators/deploy-production-cluster.md).
 
 ### Optional: cluster / production setup
 
@@ -88,9 +85,7 @@ For production steps, verification, cutover, and revocation, see
 </details>
 
 <details>
-<summary>Auth + Iceberg</summary>
-
-> ℹ️ **Phase 1:** Iceberg REST Catalog is disabled by default. Start the server with `--enable-iceberg` to use it.
+<summary>Auth</summary>
 
 ```bash
 DATA_DIR=./tmp
@@ -98,14 +93,6 @@ DATA_DIR=./tmp
 ./bin/grainfs iam policy attach readwrite --sa <id> --endpoint "$DATA_DIR/admin.sock" --i-know
 ./bin/grainfs iam bucket create analytics --attach-sa <id> --attach-policy readwrite --endpoint "$DATA_DIR/admin.sock"
 ```
-
-For Iceberg client config (DuckDB / Trino / Spark / PyIceberg / warp):
-
-```bash
-./bin/grainfs iceberg config --warehouse analytics --sa <id> --endpoint "$DATA_DIR/admin.sock"
-```
-
-See [`docs/users/oauth2-iceberg-quickstart.md`](docs/users/oauth2-iceberg-quickstart.md).
 </details>
 
 <details>
@@ -120,7 +107,6 @@ See [`docs/operators/deploy-production-cluster.md`](docs/operators/deploy-produc
 | Area | Summary | Details |
 | --- | --- | --- |
 | S3 API | Bucket/object basics, AppendObject (S3 Express), multipart upload/listing, SigV4, presigned URL, form upload | [S3 compatibility](docs/reference/s3-compatibility.md) |
-| Iceberg | DuckDB-compatible REST Catalog *(pass `--enable-iceberg` to enable)* | [Iceberg compatibility](docs/reference/iceberg-compatibility.md) |
 | Cluster durability | Custom Raft, zero-config EC profile, shard integrity envelope | [Runbook](docs/operators/runbook.md) |
 | Operations | Object browser, metrics, balancer status, incidents, recovery drills | [Documentation](#documentation) |
 
@@ -155,9 +141,8 @@ the desired erasure-coding profile from cluster size and placement group voters.
 Temporary target loss does not silently lower durability; writes fail until the
 required targets are writable.
 
-**Same data, multiple interfaces.** S3 and Iceberg use the same storage backend
-contracts. Use the compatibility docs for protocol-specific limits. *(Iceberg is
-disabled by default — pass `--enable-iceberg` to enable.)*
+**S3 API.** All object operations route through the same distributed storage backend.
+Use the compatibility docs for protocol-specific limits.
 
 ## Common Workflows
 
@@ -203,8 +188,6 @@ Benchmark targets:
 make bench
 make bench-cluster
 make bench-s3-compat-compare
-make bench-iceberg-table
-make bench-iceberg-table-cluster
 ```
 
 Use [docs/reference/benchmarks.md](docs/reference/benchmarks.md) for benchmark

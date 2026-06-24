@@ -10,8 +10,7 @@ import (
 type Protocol string
 
 const (
-	ProtocolS3      Protocol = "s3"
-	ProtocolIceberg Protocol = "iceberg"
+	ProtocolS3 Protocol = "s3"
 )
 
 type Mode string
@@ -92,7 +91,7 @@ func ValidateCreateRequest(req CreateRequest) error {
 
 func validProtocol(p Protocol) bool {
 	switch p {
-	case ProtocolS3, ProtocolIceberg:
+	case ProtocolS3:
 		return true
 	default:
 		return false
@@ -104,7 +103,7 @@ func validMode(m Mode) bool {
 }
 
 func validResource(resource string) bool {
-	for _, prefix := range []string{"bucket/", "catalog/"} {
+	for _, prefix := range []string{"bucket/"} {
 		if strings.HasPrefix(resource, prefix) && len(resource) > len(prefix) {
 			return true
 		}

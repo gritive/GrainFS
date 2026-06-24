@@ -60,7 +60,6 @@ func TestBootServicesExtraPhases_OrderingInvariant(t *testing.T) {
 	assert.Nil(t, state.forwardSender)
 	assert.Nil(t, state.forwardReceiver)
 	assert.Nil(t, state.metaForwardSender)
-	assert.Nil(t, state.metaReadSender)
 	assert.Nil(t, state.clusterCoord)
 	assert.Equal(t, 0, state.seedGroups, "seedGroups zero before phase")
 
@@ -75,7 +74,6 @@ func TestBootServicesExtraPhases_OrderingInvariant(t *testing.T) {
 	assert.NotNil(t, state.forwardSender, "ForwardSender after phase")
 	assert.NotNil(t, state.forwardReceiver, "ForwardReceiver after phase")
 	assert.NotNil(t, state.metaForwardSender, "MetaForwardSender after phase")
-	assert.NotNil(t, state.metaReadSender, "MetaReadSender after phase")
 	assert.Nil(t, state.clusterCoord, "ClusterCoordinator waits for distBackend")
 	// seedGroups is max(clusterSize*4, 8); single-node cluster -> 8.
 	assert.GreaterOrEqual(t, state.seedGroups, 8, "seedGroups computed")

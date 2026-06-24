@@ -36,8 +36,6 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 		MeasureReadAmp:     true,
 		ShardCacheSize:     int64(1 << 27),
 
-		EnableIceberg: true,
-
 		ScrubInterval:          7 * time.Second,
 		ScrubOrphanAge:         11 * time.Minute,
 		SegmentGCRetention:     17 * time.Minute,
@@ -54,9 +52,6 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 		HealReceiptRetention:      53 * time.Minute,
 		HealReceiptGossipInterval: 59 * time.Second,
 		HealReceiptWindow:         61,
-
-		AuditIceberg:        true,
-		AuditCommitInterval: 67 * time.Second,
 
 		FDWatchEnabled: true,
 		FDOpts: resourceguard.FDOptions{
@@ -150,13 +145,6 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 	require.Equal(t, opts.ScrubOrphanAge, cfg.ScrubOrphanAge)
 	require.Equal(t, opts.SegmentGCRetention, cfg.SegmentGCRetention)
 	require.Equal(t, opts.DegradedInterval, cfg.DegradedInterval)
-
-	// Audit.
-	require.Equal(t, opts.AuditIceberg, cfg.AuditIceberg)
-	require.Equal(t, opts.AuditCommitInterval, cfg.AuditCommitInterval)
-
-	// Node services.
-	require.True(t, cfg.EnableIceberg)
 
 	// Resource guards.
 	require.Equal(t, opts.FDWatchEnabled, cfg.FDWatchEnabled)

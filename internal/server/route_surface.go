@@ -8,7 +8,6 @@ const (
 	routeSurfaceS3 routeSurface = iota
 	routeSurfaceOps
 	routeSurfaceAdmin
-	routeSurfaceIceberg
 	routeSurfaceUI
 	routeSurfaceOAuth // OAuth2 token endpoint — carries its own credentials
 )
@@ -33,11 +32,6 @@ var routeSurfaceManifest = []routeSurfaceEntry{
 	{pathExact: routePathMetrics, surface: routeSurfaceOps, authn: routeAuthnAnonymous, skipS3Authz: true},
 	{pathPrefix: routePrefixAPI, surface: routeSurfaceOps, authn: routeAuthnSigV4},
 	{pathPrefix: routePrefixUI, surface: routeSurfaceUI, authn: routeAuthnAnonymous, skipS3Authz: true},
-	// OAuth2 token endpoint — carries its own credentials, no SigV4 required.
-	{pathExact: routePrefixIceberg + routePathOAuthTokenSuffix, surface: routeSurfaceOAuth, authn: routeAuthnAnonymous, skipS3Authz: true},
-	{pathExact: routePrefixIcebergAIStor + routePathOAuthTokenSuffix, surface: routeSurfaceOAuth, authn: routeAuthnAnonymous, skipS3Authz: true},
-	{pathPrefix: routePrefixIceberg, surface: routeSurfaceIceberg, authn: routeAuthnSigV4, skipS3Authz: true},
-	{pathPrefix: routePrefixIcebergAIStor, surface: routeSurfaceIceberg, authn: routeAuthnSigV4, skipS3Authz: true},
 	{pathPrefix: routePrefixAdmin, surface: routeSurfaceAdmin, authn: routeAuthnLocalhost, skipS3Authz: true},
 	{pathExact: routePathEvents, surface: routeSurfaceOps, authn: routeAuthnAnonymous},
 	{pathExact: routePathHealEventsStream, surface: routeSurfaceOps, authn: routeAuthnAnonymous},
@@ -46,8 +40,6 @@ var routeSurfaceManifest = []routeSurfaceEntry{
 	{pathPrefix: routePrefixIncidents, surface: routeSurfaceOps, authn: routeAuthnAnonymous},
 	{pathExact: routePathClusterStatus, surface: routeSurfaceOps, authn: routeAuthnAnonymous},
 	{pathExact: routePathClusterRemovePeer, surface: routeSurfaceOps, authn: routeAuthnAnonymous},
-	{pathExact: routePathAuditHealth, surface: routeSurfaceOps, authn: routeAuthnAnonymous},
-	{pathExact: routePathAuditS3, surface: routeSurfaceOps, authn: routeAuthnAnonymous},
 	{pathExact: routePathCacheStatus, surface: routeSurfaceOps, authn: routeAuthnAnonymous},
 }
 

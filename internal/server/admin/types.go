@@ -37,8 +37,6 @@ type Deps struct {
 	ProtocolCredAuthz        CredentialAuthorizer         // required when ProtocolCredentials is configured; nil fails closed
 	AdminAuthz               CredentialAuthorizer         // optional; bearer actor authz for selected admin routes
 	ActorAuth                ActorAuthenticator           // optional; bearer actor auth for selected admin routes
-	IcebergConfig            IcebergConfigService         // optional; nil disables iceberg config endpoint
-	AuditQuery               AuditQueryService            // optional; nil disables audit admin endpoints
 	Status                   StatusService                // optional; nil disables GET /v1/status
 	Token                    *dashboard.TokenStore
 	PublicURL                string // e.g. "https://node1:9000"; empty means use localhost fallback
@@ -56,8 +54,6 @@ type CredentialListReq = adminapi.CredentialListReq
 type CredentialResp = adminapi.CredentialResp
 type CredentialListResp = adminapi.CredentialListResp
 type CredentialRevokeResp = adminapi.CredentialRevokeResp
-type IcebergConfigRequest = adminapi.IcebergConfigRequest
-type IcebergConfigResponse = adminapi.IcebergConfigResponse
 type BucketPolicyResp = adminapi.BucketPolicyResp
 type BucketPolicySetReq = adminapi.BucketPolicySetReq
 type BucketVersioningResp = adminapi.BucketVersioningResp

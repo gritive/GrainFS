@@ -34,7 +34,7 @@ import (
 //
 // Outputs: state.forwardSender, state.forwardReceiver,
 //
-//	state.metaForwardSender, state.metaReadSender, state.seedGroups.
+//	state.metaForwardSender, state.seedGroups.
 //
 // Ordering: R-FSM-α moves this BEFORE WaitDEKReady (so the keeper-population
 // catch-up runs pre-gate) and BEFORE bootShardService (handler registration
@@ -108,7 +108,7 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 
 	// MetaRaft.Propose follower→leader forwarding: when the local node is not
 	// the meta-Raft leader, forward encoded MetaCmd bytes to the current leader
-	// via StreamMetaProposeForward (the same path iceberg commits use).
+	// via StreamMetaProposeForward.
 	metaRaft.SetForwarder(func(ctx context.Context, data []byte) error {
 		return state.metaForwardSender.Send(ctx, MetaProposalTargets(metaRaft.Node().LeaderID(), peers), data)
 	})
@@ -164,12 +164,6 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 			return fmt.Errorf("start join listener: %w", err)
 		}
 	}
-	metaReadDialer := func(callCtx context.Context, peer string, payload []byte) ([]byte, error) {
-		// Native /raft/meta/catalog-read buffered route (Phase 8 N7-3).
-		return clusterTransport.CallBuffered(callCtx, peer, transport.RouteRaftMetaCatalogRead, payload)
-	}
-	state.metaReadSender = cluster.NewMetaCatalogReadSender(metaReadDialer)
-
 	coalesceCfg := cluster.DefaultCoalesceConfig()
 	coalesceCfg.SizeCapBytes = state.cfg.AppendSizeCapBytes
 	state.coalesceCfg = coalesceCfg
@@ -262,10 +256,6 @@ func bootClusterCoordinatorRouting(state *bootState) error {
 		}
 	}
 
-	metaReadReceiver := cluster.NewMetaCatalogReadReceiver(cluster.NewMetaCatalog(metaRaft, state.clusterCoord, "s3://grainfs-tables/warehouse"))
-	// Native /raft/meta/catalog-read buffered route. The read outcome (reply or
-	// error type/message) is in-band via encodeMetaLoadTableReply.
-	state.clusterTransport.RegisterBufferedRoute(transport.RouteRaftMetaCatalogRead, metaReadReceiver.Handle)
 	log.Info().Msg("v0.0.7.1 PR-D: ClusterCoordinator wired — live multi-raft routing enabled")
 	return nil
 }

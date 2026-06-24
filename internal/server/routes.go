@@ -13,7 +13,6 @@ import (
 func (s *Server) registerRoutes(h *server.Hertz) {
 	s.registerMetricsAPI(h)
 	s.registerDashboardUI(h)
-	s.iceberg.Register(h, routePrefixIceberg, routePrefixIcebergAIStor)
 	s.registerS3API(h)
 	s.registerClusterAPI(h)
 	s.registerBalancerAPI(h)
@@ -25,7 +24,6 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 	s.registerAdminAPI(h)
 	s.registerConfigAPI(h)
 	s.registerEventsAPI(h)
-	s.registerAuditAPI(h)
 	alertssvc.NewHandler(alertssvc.Deps{
 		State:            s.alerts,
 		LocalhostOnly:    localhostOnly,

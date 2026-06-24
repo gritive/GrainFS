@@ -139,7 +139,6 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 			CriticalRatio: cfg.VlogCriticalRatio,
 		}),
 		IAM:                      state.iamAdminAPI,
-		IcebergConfig:            newIcebergConfigAdapter(state.cfg.IAMStore),
 		IAMPolicy:                iamPolicyAdminService(state),
 		IAMGroup:                 iamGroupAdminService(state),
 		BucketWithPolicyProp:     bucketWithPolicyProposer(state),
@@ -154,9 +153,6 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		AdminAuthz:               adminAuthorizer(state, "admin"),
 		ActorAuth:                newOIDCActorAuthenticator(state.cfgStore),
 		PDPTokens:                ensurePDPTokenSource(state),
-	}
-	if state.auditSearcher != nil {
-		state.adminDeps.AuditQuery = state.auditSearcher
 	}
 	state.adminDeps.Status = NewStatusAdapter(
 		state.nodeID,

@@ -91,7 +91,7 @@ SingleExecutor             ClusterExecutor
 ## 경계
 
 - `Route Surface Manifest`는 요청 실행 전에 HTTP path를 S3, ops, admin,
-  Iceberg, UI surface로 분류한다.
+  UI surface로 분류한다.
 - `Route Availability Policy`는 선택적 subsystem이 없을 때 feature 기반
   route를 숨길지, 등록하되 unavailable 응답을 줄지 route 등록 시점에
   결정한다.
@@ -163,7 +163,7 @@ Running
   새 operation의 idempotency key는 `google/uuid` `NewV7()` 기반 time-ordered ID로
   만든다. 기존 Scrub의 `session_id` 형식은 호환을 위해 유지한다.
 - route-surface 분류는 actor layer 밖에 둔다. 그래야 S3, ops, admin,
-  Iceberg, UI 인증 정책이 결정적이고 테스트 가능하게 유지된다.
+  UI 인증 정책이 결정적이고 테스트 가능하게 유지된다.
 - 선택적 subsystem의 노출 여부는 handler 곳곳의 nil check가 아니라 route
   availability manifest에 둔다.
 - cluster 작업을 queue에 넣기 전에 admission control을 적용한다.

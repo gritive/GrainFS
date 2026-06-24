@@ -64,7 +64,7 @@ histogram_quantile(0.99,
 ```
 
 Use the service-level metric when the aggregate API latency SLI breaches and
-you need to isolate whether S3, Iceberg, admin, cluster, dashboard, or metrics
+you need to isolate whether S3, admin, cluster, dashboard, or metrics
 traffic is responsible. The label contract is documented in the production
 runbook.
 

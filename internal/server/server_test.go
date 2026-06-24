@@ -17,14 +17,11 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
-	badger "github.com/dgraph-io/badger/v4"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/cluster"
-	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/incident"
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/raft"
@@ -72,24 +69,8 @@ func setupTestServerWithBackend(t *testing.T, opts ...Option) (string, *storage.
 
 	port := servertest.FreePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	// Wire a default singleton Iceberg catalog so the S3-server tests exercise a
-	// live catalog without each test wiring one. This replaces the former
-	// DBProvider auto-fallback (removed); a caller-supplied WithIcebergCatalog
-	// applies later and overrides this default (last option wins).
-	defaultOpts := append([]Option{WithIcebergCatalogStore(newTestIcebergStore(t))}, opts...)
-	startTestServer(t, addr, backend, defaultOpts...)
+	startTestServer(t, addr, backend, opts...)
 	return "http://" + addr, backend
-}
-
-// newTestIcebergStore builds a singleton icebergcatalog.Store backed by an
-// in-memory badger DB wrapped as a metastore.Store, mirroring the catalog the
-// removed DBProvider fallback used to create from the backend's meta DB.
-func newTestIcebergStore(t *testing.T) *icebergcatalog.Store {
-	t.Helper()
-	db, err := badger.Open(badger.DefaultOptions("").WithInMemory(true).WithLogger(nil))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
-	return icebergcatalog.NewStore(badgermeta.Wrap(db), "s3://grainfs-tables/warehouse")
 }
 
 // mustCreateBucket creates a bucket directly on the backend, bypassing the S3

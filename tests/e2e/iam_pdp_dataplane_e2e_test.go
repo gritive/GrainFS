@@ -19,19 +19,18 @@ import (
 	"github.com/onsi/gomega"
 )
 
-// External PDP Slice 7 PR-B — data-plane (S3 + Iceberg) enforcement matrix.
+// External PDP Slice 7 PR-B — data-plane (S3) enforcement matrix.
 //
 // The data-plane decorator (boot_phases_srvopts.go wraps the policy authorizer
 // with pdp.NewDecorator(..., "data_plane")) consults the external PDP with a
 // deny-override rule ONLY when iam.pdp.enabled && iam.pdp.data_plane.enabled.
-// Each spec drives an S3 (or Iceberg OAuth) op against a running single-node
-// server, flipping the iam.pdp config via the admin UDS between Its.
+// Each spec drives an S3 op against a running single-node server, flipping
+// the iam.pdp config via the admin UDS between Its.
 //
 // In every spec the GrainFS inner authorizer ALLOWS the op (the bootstrap SA
-// has bucket-admin / the Iceberg SA has readwrite), so the PDP is the deciding
-// layer. The mock PDP is an httptest server bound to loopback http (the only
-// scheme the SSRF egress filter permits) with a flip-able decision and a
-// request counter.
+// has bucket-admin), so the PDP is the deciding layer. The mock PDP is an
+// httptest server bound to loopback http (the only scheme the SSRF egress
+// filter permits) with a flip-able decision and a request counter.
 //
 // Cluster parity is deferred: there is no multi-node IAM harness that exposes a
 // per-node admin UDS for setPDPConfig + a shared mock PDP. The control-plane
@@ -50,7 +49,7 @@ func pdpDataPlaneConfigJSON(url, policy string) string {
 // pdpDataPlaneConfigJSONDisabled builds an iam.pdp document with the top-level
 // gate enabled but data_plane.enabled OMITTED (defaults false), so the
 // data-plane decorator is a pure pass-through and the PDP is never consulted on
-// S3/Iceberg ops.
+// S3 ops.
 func pdpDataPlaneConfigJSONDisabled(url, policy string) string {
 	return fmt.Sprintf(
 		`{"enabled":true,"endpoint":"%s","failure_policy":"%s"}`,
@@ -254,65 +253,4 @@ var _ = ginkgo.Describe("External PDP data-plane (S3)", ginkgo.Ordered, func() {
 	// config-set/parse time, so setPDPConfig itself would fail rather than the op
 	// yielding a clean data-plane deny. That path is covered by unit tests in
 	// internal/iam/pdp.
-})
-
-var _ = ginkgo.Describe("External PDP data-plane (Iceberg)", ginkgo.Ordered, func() {
-	var (
-		tgt      *icebergTarget
-		adminSk  string
-		pdpURL   string
-		pdpAllow atomic.Bool
-		pdpDown  atomic.Bool
-		pdpReqs  atomic.Int64
-	)
-
-	// newWarehouseSA provisions a fresh SA with the readwrite policy attached (so
-	// the GrainFS inner authorizer allows iceberg:GetCatalogConfig and the PDP is
-	// the deciding layer on the OAuth token-mint path) plus a warehouse bucket.
-	newWarehouseSA := func(prefix string) (ak, sk, warehouse string) {
-		warehouse = tgt.uniqueWarehouse(ginkgo.GinkgoTB(), prefix)
-		saID, ak, sk := tgt.adminCreateSA(ginkgo.GinkgoTB(), prefix)
-		tgt.adminAttachPolicy(ginkgo.GinkgoTB(), saID, "readwrite")
-		return ak, sk, warehouse
-	}
-
-	ginkgo.BeforeAll(func() {
-		pdpURL = startMockPDP(&pdpAllow, &pdpDown, &pdpReqs)
-		tgt = newSingleNodeIcebergTarget(ginkgo.GinkgoTB())
-		adminSk = tgt.adminSockPath()
-	})
-
-	ginkgo.It("does NOT consult the PDP when data_plane.enabled is false", func() {
-		ak, sk, warehouse := newWarehouseSA("ice-dpoff")
-
-		pdpAllow.Store(false) // mock would DENY if consulted
-		pdpDown.Store(false)
-		setPDPConfig(ginkgo.GinkgoTB(), adminSk, pdpDataPlaneConfigJSONDisabled(pdpURL, "closed"))
-		pdpReqs.Store(0)
-
-		jwt, status := tgt.mintToken(ginkgo.GinkgoTB(), ak, sk, warehouse)
-		gomega.Expect(status).To(gomega.Equal(http.StatusOK),
-			"token mint must succeed when the data-plane decorator is disabled")
-		gomega.Expect(jwt).NotTo(gomega.BeEmpty())
-		gomega.Expect(pdpReqs.Load()).To(gomega.Equal(int64(0)),
-			"the PDP must not be consulted on the Iceberg data plane when data_plane.enabled is false")
-	})
-
-	ginkgo.It("denies token issuance when GrainFS allows but the PDP denies", func() {
-		ak, sk, warehouse := newWarehouseSA("ice-deny")
-
-		pdpAllow.Store(false)
-		pdpDown.Store(false)
-		setPDPConfig(ginkgo.GinkgoTB(), adminSk, pdpDataPlaneConfigJSON(pdpURL, "closed"))
-
-		jwt, status := tgt.mintToken(ginkgo.GinkgoTB(), ak, sk, warehouse)
-		gomega.Expect(status).To(gomega.Equal(http.StatusForbidden),
-			"a data-plane PDP deny must block OAuth token issuance with 403")
-		gomega.Expect(jwt).To(gomega.BeEmpty(), "deny response must not include a JWT")
-	})
-
-	// catalog-op enforcement (PDP gate on the per-request icebergGuarded path,
-	// e.g. CreateTable/LoadTable) is a follow-up: it needs the DuckDB/iceberg
-	// catalog client harness, whereas the OAuth token-mint path already exercises
-	// oauth.Authorizer(policyAuthorizer) — the same data-plane-decorated seam.
 })

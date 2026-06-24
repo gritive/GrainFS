@@ -8,14 +8,11 @@ import (
 	"github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/gritive/GrainFS/internal/audit"
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/iam"
-	iamjwt "github.com/gritive/GrainFS/internal/iam/jwt"
 	"github.com/gritive/GrainFS/internal/iam/policy"
-	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/incident"
 	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/raft"
@@ -23,7 +20,6 @@ import (
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/server/alertssvc"
-	"github.com/gritive/GrainFS/internal/server/iceberg"
 	"github.com/gritive/GrainFS/internal/server/incidentsvc"
 	"github.com/gritive/GrainFS/internal/server/receiptsvc"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -75,19 +71,15 @@ type ReadIndexer interface {
 	WaitApplied(ctx context.Context, index uint64) error
 }
 
-type auditSearcher interface {
-	SearchS3(ctx context.Context, f audit.SearchFilter) ([]audit.SearchRow, error)
-}
-
 type RaftSnapshotter interface {
 	TriggerRaftSnapshot(ctx context.Context) (raft.SnapshotResult, error)
 	RaftSnapshotStatus() (raft.SnapshotStatus, error)
 }
 
-// PolicyAuthorizer is the policy seam that Layer 1 (S3 iamCheck) + all Iceberg
-// authz paths funnel through. *s3auth.Authorizer satisfies it; in production it is
-// wrapped by *pdp.Decorator so the external PDP is chained with deny-override on the
-// S3/Iceberg data plane. Only Authorize is needed here (AuthorizePrincipal is a
+// PolicyAuthorizer is the policy seam that Layer 1 (S3 iamCheck) funnels
+// through. *s3auth.Authorizer satisfies it; in production it is wrapped by
+// *pdp.Decorator so the external PDP is chained with deny-override on the
+// S3 data plane. Only Authorize is needed here (AuthorizePrincipal is a
 // control-plane-only entry, not called on this field).
 type PolicyAuthorizer interface {
 	Authorize(ctx context.Context, saID, bucket string, ctxReq policy.RequestContext) policy.EvalResult
@@ -114,16 +106,7 @@ type Server struct {
 	hub         *Hub
 	policyStore *CompiledPolicyStore
 
-	lifecycle      *lifecycle.Service
-	icebergCatalog icebergcatalog.Catalog
-	auditEmitter   *audit.Emitter
-	auditOutbox    *audit.Outbox
-	auditSearcher  auditSearcher
-	auditNodeID    string
-
-	auditInternalAccessKey string
-	auditInternalSecretKey string
-	auditInternalVerifier  *s3auth.CachingVerifier
+	lifecycle *lifecycle.Service
 
 	cluster         ClusterInfo
 	membership      ClusterMembership
@@ -137,8 +120,6 @@ type Server struct {
 	mutationGate    *MutationGate
 	degradedFlag    atomic.Bool
 	shardCache      *shardcache.Cache
-	jwtKeys         *iamjwt.KeySet
-	iceberg         *iceberg.Handler
 	receipt         *receiptsvc.Handler
 	incidentH       *incidentsvc.Handler
 	proxyTrust      *ProxyTrust // §5 T45: trusted-proxy Forwarded / X-Forwarded-* validator

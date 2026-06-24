@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.663.0] - 2026-06-24
+
+### Removed
+- **The Iceberg REST Catalog has been removed.** The `/iceberg/` REST Catalog endpoint, its OAuth2
+  token endpoint, the `grainfs iceberg config` CLI command, and the `--enable-iceberg` serve flag are
+  gone. GrainFS no longer exposes an Iceberg catalog to DuckDB/Trino/Spark — it is now a pure S3
+  (plus Web UI) server.
+- **The Iceberg-backed audit "log lake" has been removed** (the `--audit-iceberg` and
+  `--audit-commit-interval` serve flags, the admin `/audit/query`, `/audit/recent-denies`,
+  `/audit/by-sa/:said`, and `/audit/by-request-id/:rid` endpoints, and the `grainfs audit` query CLI).
+  S3 access events are no longer committed to a queryable Iceberg table. The IAM authorization audit
+  log (`iam.authz` structured log lines) and the general S3 request log are unaffected and continue to
+  emit.
+- The `iceberg` protocol-credential type and the `iceberg:*` IAM policy actions have been removed.
+
 ## [0.0.662.0] - 2026-06-24
 
 ### Changed
