@@ -300,7 +300,6 @@ func NewDistributedBackend(root string, store MetadataStore, node RaftNode, keys
 	// Lifecycle is bound to Close() via coalesceCancel.
 	defCfg := DefaultCoalesceConfig()
 	b.coalesceCfg.Store(&defCfg)
-	b.fsm.SetCoalesceCfg(defCfg)
 	b.coalesceCtx, b.coalesceCancel = context.WithCancel(context.Background())
 	b.coalesce = newCoalesceWorker(256, b.processCoalesceJobB3)
 	b.coalesce.Start(b.coalesceCtx)
@@ -397,14 +396,9 @@ func (b *DistributedBackend) invalidateShardCache(bucket, shardKey string, nShar
 // PutObject/GetObject. Call before serving traffic. The configured profile must
 // fit the active write node set; invalid profiles make EC writes fail fast.
 // SetCoalesceConfig updates the coalesce thresholds at runtime.
-// Propagates to the FSM so the apply loop uses the new SizeCapBytes
-// immediately on the next committed entry.
 func (b *DistributedBackend) SetCoalesceConfig(cfg CoalesceConfig) {
 	cfgCopy := cfg
 	b.coalesceCfg.Store(&cfgCopy)
-	if b.fsm != nil {
-		b.fsm.SetCoalesceCfg(cfg)
-	}
 }
 
 func (b *DistributedBackend) SetECConfig(cfg ECConfig) {
