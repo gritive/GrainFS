@@ -243,17 +243,26 @@ Deferred items:
 
 - **[DONE] Slice 2 — retire remaining per-object FSM commands.** See Slice 2 section above.
 
-- **[P2] EC coalesced orphan shard leak.** `orphan_shard_walker.go` skips every `/coalesced/`
-  shard directory, so unpublished/unreferenced coalesced EC shards (B3 EC distribute) are
-  never reclaimed — a permanent leak. Needs reachability for coalesced EC shards (pre-existing
-  skip behavior, surfaced by Slice 1 code gate). Fix: extend the orphan shard walker to walk
-  `/coalesced/` directories and apply the same age-gate + two-cycle tombstone logic used for
-  segment orphans.
+- **[P2] EC coalesced orphan shard leak — DATA-LOSS-CRITICAL fix; design before implementing.**
+  `orphan_shard_walker.go:319` `SkipDir`s every `/coalesced/` shard dir, so unreferenced
+  coalesced EC shards (B3 distribute) are never reclaimed — a permanent leak. The skip is a
+  DELIBERATE safety measure: a wrong reclaim deletes LIVE coalesced data. Naive "just walk
+  /coalesced/" is UNSAFE — coalesced refs live in the **off-raft quorum-meta blob** (appendable
+  objects are blob-resident, not BadgerDB), which is **K-of-N**: a parity-only node holds a
+  coalesced shard without a local manifest, so a local forward-map enumeration would
+  false-orphan live data. Correct fix mirrors `hasLiveShardRecord`'s peer-fallback: per
+  `/coalesced/` candidate, parse `bucket/<key…>/coalesced/<coalescedID>` (NOT `parseFullObjectRel`
+  — different shape), do a peer-fallback `readQuorumMeta(bucket,key)`, and keep the shard iff the
+  coalescedID is still in `manifest.Coalesced[].CoalescedID`; keep on ANY read uncertainty
+  (fail-closed). Deliberately scoped OUT of the 2026-06-25 follow-up batch (data-loss risk) —
+  needs its own plan + plan-gate + heavy code-gate.
 
-- **[P2] Composite-ETag reconstruction after coalesce.** `AppendCallMD5s` is not persisted
-  (always nil); a post-coalesce append recomputes ETag from remaining segments. Pre-existing;
-  behavior-neutral in Slice 1. Wire `AppendCallMD5s` into the quorum-meta schema if exact
-  post-coalesce ETag continuity is required for S3 compatibility.
+- **[P3] Appendable/coalesced objects do not get EC redundancy upgrade.** The redundancy-upgrade
+  relocation (`relocate_object.go`) now SKIPS `IsAppendable`/`Coalesced` objects (they would be
+  corrupted by the chunked re-encode — drops IsAppendable/Coalesced/AppendCallMD5s). So an
+  appendable object written 1+0 on a single node stays 1+0 after the cluster grows (no parity).
+  A proper appendable-aware relocation that preserves the append manifest shape + digest history
+  is a separate feature. Surfaced by the 2026-06-25 AppendCallMD5s code-gate.
 
 - **[P2] off-raft append fencing-lease** *(only if the accepted failover-safety risk must
   later be closed).* A proper single-writer lease (leader-term fencing token +
