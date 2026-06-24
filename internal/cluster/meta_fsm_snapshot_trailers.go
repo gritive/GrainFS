@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	"github.com/gritive/GrainFS/internal/iam"
-	"github.com/gritive/GrainFS/internal/iam/bucketpolicy"
 	"github.com/gritive/GrainFS/internal/iam/group"
 	"github.com/gritive/GrainFS/internal/iam/policyattach"
 	"github.com/gritive/GrainFS/internal/iam/policystore"
@@ -202,7 +201,7 @@ func (f *MetaFSM) appendDEKSnapshotTrailer(out []byte, dekVersions map[uint32][]
 }
 
 func (f *MetaFSM) appendPolicyStoresSnapshotTrailer(out []byte) ([]byte, error) {
-	if f.policyStore == nil && f.groupStore == nil && f.policyAttachStore == nil && f.bucketPolicyStore == nil {
+	if f.policyStore == nil && f.groupStore == nil && f.policyAttachStore == nil {
 		return out, nil
 	}
 	var polSnap []policystore.PolicyEntry
@@ -217,11 +216,7 @@ func (f *MetaFSM) appendPolicyStoresSnapshotTrailer(out []byte) ([]byte, error) 
 	if f.policyAttachStore != nil {
 		attachSnap = f.policyAttachStore.Snapshot()
 	}
-	var bpSnap []bucketpolicy.BucketPolicyEntry
-	if f.bucketPolicyStore != nil {
-		bpSnap = f.bucketPolicyStore.Snapshot()
-	}
-	ipstPayload, err := encodeMetaIAMPolicyStoresSnapshot(polSnap, grpSnap, attachSnap, bpSnap)
+	ipstPayload, err := encodeMetaIAMPolicyStoresSnapshot(polSnap, grpSnap, attachSnap, nil)
 	if err != nil {
 		return nil, fmt.Errorf("meta_fsm: Snapshot: encode IAM policy stores: %w", err)
 	}

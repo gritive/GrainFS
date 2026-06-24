@@ -17,7 +17,6 @@ import (
 	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/iam"
-	"github.com/gritive/GrainFS/internal/iam/bucketpolicy"
 	"github.com/gritive/GrainFS/internal/iam/group"
 	iamjwt "github.com/gritive/GrainFS/internal/iam/jwt"
 	"github.com/gritive/GrainFS/internal/iam/policy"
@@ -36,59 +35,60 @@ import (
 type MetaCmdType = clusterpb.MetaCmdType
 
 const (
-	MetaCmdTypeNoOp                         = clusterpb.MetaCmdTypeNoOp
-	MetaCmdTypeAddNode                      = clusterpb.MetaCmdTypeAddNode
-	MetaCmdTypeRemoveNode                   = clusterpb.MetaCmdTypeRemoveNode
-	MetaCmdTypePutShardGroup                = clusterpb.MetaCmdTypePutShardGroup          // PR-C
-	MetaCmdTypeAddPlacementGeneration       = clusterpb.MetaCmdTypeAddPlacementGeneration // Phase 7
-	MetaCmdTypePutBucketAssignment          = clusterpb.MetaCmdTypePutBucketAssignment    // PR-D
-	MetaCmdTypeSetLoadSnapshot              = clusterpb.MetaCmdTypeSetLoadSnapshot        // PR-D
-	MetaCmdTypeProposeRebalancePlan         = clusterpb.MetaCmdTypeProposeRebalancePlan   // PR-D
-	MetaCmdTypeAbortPlan                    = clusterpb.MetaCmdTypeAbortPlan              // PR-D
-	MetaCmdTypeIcebergCreateNamespace       = clusterpb.MetaCmdTypeIcebergCreateNamespace
-	MetaCmdTypeIcebergDeleteNamespace       = clusterpb.MetaCmdTypeIcebergDeleteNamespace
-	MetaCmdTypeIcebergCreateTable           = clusterpb.MetaCmdTypeIcebergCreateTable
-	MetaCmdTypeIcebergCommitTable           = clusterpb.MetaCmdTypeIcebergCommitTable
-	MetaCmdTypeIcebergDeleteTable           = clusterpb.MetaCmdTypeIcebergDeleteTable
-	MetaCmdTypeRotateKeyBegin               = clusterpb.MetaCmdTypeRotateKeyBegin
-	MetaCmdTypeRotateKeySwitch              = clusterpb.MetaCmdTypeRotateKeySwitch
-	MetaCmdTypeRotateKeyDrop                = clusterpb.MetaCmdTypeRotateKeyDrop
-	MetaCmdTypeRotateKeyAbort               = clusterpb.MetaCmdTypeRotateKeyAbort
-	MetaCmdTypeScrubTrigger                 = clusterpb.MetaCmdTypeScrubTrigger // PR4
-	MetaCmdTypeIAMSACreate                  = clusterpb.MetaCmdTypeIAMSACreate
-	MetaCmdTypeIAMSADelete                  = clusterpb.MetaCmdTypeIAMSADelete
-	MetaCmdTypeIAMKeyCreate                 = clusterpb.MetaCmdTypeIAMKeyCreate
-	MetaCmdTypeIAMKeyCreateScoped           = clusterpb.MetaCmdTypeIAMKeyCreateScoped
-	MetaCmdTypeIAMKeyRevoke                 = clusterpb.MetaCmdTypeIAMKeyRevoke
-	MetaCmdTypeIAMGrantPut                  = clusterpb.MetaCmdTypeIAMGrantPut
-	MetaCmdTypeIAMGrantDelete               = clusterpb.MetaCmdTypeIAMGrantDelete
-	MetaCmdTypeIAMGrantWildcardPut          = clusterpb.MetaCmdTypeIAMGrantWildcardPut
-	MetaCmdTypeIAMGrantWildcardDelete       = clusterpb.MetaCmdTypeIAMGrantWildcardDelete
-	MetaCmdTypeIAMInitFirstSA               = clusterpb.MetaCmdTypeIAMInitFirstSA
-	MetaCmdTypeIAMBucketUpstreamPut         = clusterpb.MetaCmdTypeIAMBucketUpstreamPut
-	MetaCmdTypeIAMBucketUpstreamDelete      = clusterpb.MetaCmdTypeIAMBucketUpstreamDelete
-	MetaCmdTypeBucketLifecyclePut           = clusterpb.MetaCmdTypeBucketLifecyclePut
-	MetaCmdTypeBucketLifecycleDelete        = clusterpb.MetaCmdTypeBucketLifecycleDelete
-	MetaCmdTypeCapabilityActivate           = clusterpb.MetaCmdTypeCapabilityActivate
-	MetaCmdTypeMigrationCutover             = clusterpb.MetaCmdTypeMigrationCutover
-	MetaCmdTypeConfigPut                    = clusterpb.MetaCmdTypeConfigPut
-	MetaCmdTypeConfigDelete                 = clusterpb.MetaCmdTypeConfigDelete
-	MetaCmdTypeDEKRotate                    = clusterpb.MetaCmdTypeDEKRotate
-	MetaCmdTypeDEKReplicatedRotate          = clusterpb.MetaCmdTypeDEKReplicatedRotate
-	MetaCmdTypeDEKVersionPrune              = clusterpb.MetaCmdTypeDEKVersionPrune
-	MetaCmdTypeDEKRewrapProgress            = clusterpb.MetaCmdTypeDEKRewrapProgress
-	MetaCmdTypePolicyPut                    = clusterpb.MetaCmdTypePolicyPut
-	MetaCmdTypePolicyDelete                 = clusterpb.MetaCmdTypePolicyDelete
-	MetaCmdTypeGroupPut                     = clusterpb.MetaCmdTypeGroupPut
-	MetaCmdTypeGroupDelete                  = clusterpb.MetaCmdTypeGroupDelete
-	MetaCmdTypeGroupMemberPut               = clusterpb.MetaCmdTypeGroupMemberPut
-	MetaCmdTypeGroupMemberDelete            = clusterpb.MetaCmdTypeGroupMemberDelete
-	MetaCmdTypePolicyAttachToSAPut          = clusterpb.MetaCmdTypePolicyAttachToSAPut
-	MetaCmdTypePolicyAttachToSADelete       = clusterpb.MetaCmdTypePolicyAttachToSADelete
-	MetaCmdTypePolicyAttachToGroupPut       = clusterpb.MetaCmdTypePolicyAttachToGroupPut
-	MetaCmdTypePolicyAttachToGroupDelete    = clusterpb.MetaCmdTypePolicyAttachToGroupDelete
-	MetaCmdTypeBucketPolicyPut              = clusterpb.MetaCmdTypeBucketPolicyPut
-	MetaCmdTypeBucketPolicyDelete           = clusterpb.MetaCmdTypeBucketPolicyDelete
+	MetaCmdTypeNoOp                      = clusterpb.MetaCmdTypeNoOp
+	MetaCmdTypeAddNode                   = clusterpb.MetaCmdTypeAddNode
+	MetaCmdTypeRemoveNode                = clusterpb.MetaCmdTypeRemoveNode
+	MetaCmdTypePutShardGroup             = clusterpb.MetaCmdTypePutShardGroup          // PR-C
+	MetaCmdTypeAddPlacementGeneration    = clusterpb.MetaCmdTypeAddPlacementGeneration // Phase 7
+	MetaCmdTypePutBucketAssignment       = clusterpb.MetaCmdTypePutBucketAssignment    // PR-D
+	MetaCmdTypeSetLoadSnapshot           = clusterpb.MetaCmdTypeSetLoadSnapshot        // PR-D
+	MetaCmdTypeProposeRebalancePlan      = clusterpb.MetaCmdTypeProposeRebalancePlan   // PR-D
+	MetaCmdTypeAbortPlan                 = clusterpb.MetaCmdTypeAbortPlan              // PR-D
+	MetaCmdTypeIcebergCreateNamespace    = clusterpb.MetaCmdTypeIcebergCreateNamespace
+	MetaCmdTypeIcebergDeleteNamespace    = clusterpb.MetaCmdTypeIcebergDeleteNamespace
+	MetaCmdTypeIcebergCreateTable        = clusterpb.MetaCmdTypeIcebergCreateTable
+	MetaCmdTypeIcebergCommitTable        = clusterpb.MetaCmdTypeIcebergCommitTable
+	MetaCmdTypeIcebergDeleteTable        = clusterpb.MetaCmdTypeIcebergDeleteTable
+	MetaCmdTypeRotateKeyBegin            = clusterpb.MetaCmdTypeRotateKeyBegin
+	MetaCmdTypeRotateKeySwitch           = clusterpb.MetaCmdTypeRotateKeySwitch
+	MetaCmdTypeRotateKeyDrop             = clusterpb.MetaCmdTypeRotateKeyDrop
+	MetaCmdTypeRotateKeyAbort            = clusterpb.MetaCmdTypeRotateKeyAbort
+	MetaCmdTypeScrubTrigger              = clusterpb.MetaCmdTypeScrubTrigger // PR4
+	MetaCmdTypeIAMSACreate               = clusterpb.MetaCmdTypeIAMSACreate
+	MetaCmdTypeIAMSADelete               = clusterpb.MetaCmdTypeIAMSADelete
+	MetaCmdTypeIAMKeyCreate              = clusterpb.MetaCmdTypeIAMKeyCreate
+	MetaCmdTypeIAMKeyCreateScoped        = clusterpb.MetaCmdTypeIAMKeyCreateScoped
+	MetaCmdTypeIAMKeyRevoke              = clusterpb.MetaCmdTypeIAMKeyRevoke
+	MetaCmdTypeIAMGrantPut               = clusterpb.MetaCmdTypeIAMGrantPut
+	MetaCmdTypeIAMGrantDelete            = clusterpb.MetaCmdTypeIAMGrantDelete
+	MetaCmdTypeIAMGrantWildcardPut       = clusterpb.MetaCmdTypeIAMGrantWildcardPut
+	MetaCmdTypeIAMGrantWildcardDelete    = clusterpb.MetaCmdTypeIAMGrantWildcardDelete
+	MetaCmdTypeIAMInitFirstSA            = clusterpb.MetaCmdTypeIAMInitFirstSA
+	MetaCmdTypeIAMBucketUpstreamPut      = clusterpb.MetaCmdTypeIAMBucketUpstreamPut
+	MetaCmdTypeIAMBucketUpstreamDelete   = clusterpb.MetaCmdTypeIAMBucketUpstreamDelete
+	MetaCmdTypeBucketLifecyclePut        = clusterpb.MetaCmdTypeBucketLifecyclePut
+	MetaCmdTypeBucketLifecycleDelete     = clusterpb.MetaCmdTypeBucketLifecycleDelete
+	MetaCmdTypeCapabilityActivate        = clusterpb.MetaCmdTypeCapabilityActivate
+	MetaCmdTypeMigrationCutover          = clusterpb.MetaCmdTypeMigrationCutover
+	MetaCmdTypeConfigPut                 = clusterpb.MetaCmdTypeConfigPut
+	MetaCmdTypeConfigDelete              = clusterpb.MetaCmdTypeConfigDelete
+	MetaCmdTypeDEKRotate                 = clusterpb.MetaCmdTypeDEKRotate
+	MetaCmdTypeDEKReplicatedRotate       = clusterpb.MetaCmdTypeDEKReplicatedRotate
+	MetaCmdTypeDEKVersionPrune           = clusterpb.MetaCmdTypeDEKVersionPrune
+	MetaCmdTypeDEKRewrapProgress         = clusterpb.MetaCmdTypeDEKRewrapProgress
+	MetaCmdTypePolicyPut                 = clusterpb.MetaCmdTypePolicyPut
+	MetaCmdTypePolicyDelete              = clusterpb.MetaCmdTypePolicyDelete
+	MetaCmdTypeGroupPut                  = clusterpb.MetaCmdTypeGroupPut
+	MetaCmdTypeGroupDelete               = clusterpb.MetaCmdTypeGroupDelete
+	MetaCmdTypeGroupMemberPut            = clusterpb.MetaCmdTypeGroupMemberPut
+	MetaCmdTypeGroupMemberDelete         = clusterpb.MetaCmdTypeGroupMemberDelete
+	MetaCmdTypePolicyAttachToSAPut       = clusterpb.MetaCmdTypePolicyAttachToSAPut
+	MetaCmdTypePolicyAttachToSADelete    = clusterpb.MetaCmdTypePolicyAttachToSADelete
+	MetaCmdTypePolicyAttachToGroupPut    = clusterpb.MetaCmdTypePolicyAttachToGroupPut
+	MetaCmdTypePolicyAttachToGroupDelete = clusterpb.MetaCmdTypePolicyAttachToGroupDelete
+	// MetaCmdTypeBucketPolicyPut (60) and MetaCmdTypeBucketPolicyDelete (61) are
+	// retired — bucket policy now lives in BucketRecord.Policy (SetBucketPolicy /
+	// DeleteBucketPolicy commands). Enum slots reserved; do not renumber.
 	MetaCmdTypeCreateBucketWithPolicyAttach = clusterpb.MetaCmdTypeCreateBucketWithPolicyAttach
 	MetaCmdTypeJWTSigningKeyRotate          = clusterpb.MetaCmdTypeJWTSigningKeyRotate
 	MetaCmdTypeJWTSigningKeyPrune           = clusterpb.MetaCmdTypeJWTSigningKeyPrune
@@ -357,10 +357,6 @@ type MetaFSM struct {
 	// policyAttachStore is the SA/group→policy attachment store. nil until
 	// SetPolicyAttachStore is called; PolicyAttach* commands are safe no-ops when nil.
 	policyAttachStore *policyattach.InMemoryStore
-
-	// bucketPolicyStore is the per-bucket policy document store. nil until
-	// SetBucketPolicyStore is called; BucketPolicy* commands are safe no-ops when nil.
-	bucketPolicyStore *bucketpolicy.InMemoryStore
 
 	// protocolCredentialStore is the durable protocol credential snapshot store.
 	// Phase 1A snapshots/restores it; Phase 1B wires command apply semantics.
@@ -896,10 +892,8 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		return f.applyPolicyAttachToGroupPut(cmd.DataBytes())
 	case clusterpb.MetaCmdTypePolicyAttachToGroupDelete:
 		return f.applyPolicyAttachToGroupDelete(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeBucketPolicyPut:
-		return f.applyBucketPolicyPut(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeBucketPolicyDelete:
-		return f.applyBucketPolicyDelete(cmd.DataBytes())
+	// MetaCmdTypeBucketPolicyPut (60) and MetaCmdTypeBucketPolicyDelete (61) are
+	// retired — bucket policy lives in BucketRecord.Policy. Slots reserved.
 	case clusterpb.MetaCmdTypeCreateBucketWithPolicyAttach:
 		return f.applyCreateBucketWithPolicyAttach(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeKEKRotate:

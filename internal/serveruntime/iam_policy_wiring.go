@@ -59,7 +59,6 @@ func WireIAMPolicyStores(ctx context.Context, fsm *cluster.MetaFSM, resolverTTL 
 		fsm.SetPolicyStore(s.Policies)
 		fsm.SetGroupStore(s.Groups)
 		fsm.SetPolicyAttachStore(s.Attach)
-		fsm.SetBucketPolicyStore(s.BucketPols)
 		fsm.SetPolicyResolver(s.Resolver)
 	}
 

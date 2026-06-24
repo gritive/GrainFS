@@ -12,7 +12,6 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/iam"
-	"github.com/gritive/GrainFS/internal/iam/bucketpolicy"
 	"github.com/gritive/GrainFS/internal/iam/group"
 	iamjwt "github.com/gritive/GrainFS/internal/iam/jwt"
 	"github.com/gritive/GrainFS/internal/iam/policyattach"
@@ -837,18 +836,17 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		polSnap    []policystore.PolicyEntry
 		grpSnap    []group.GroupEntry
 		attachSnap policyattach.AttachSnapshot
-		bpSnap     []bucketpolicy.BucketPolicyEntry
 	}
 	var newIPST *ipstDecoded
 	if len(trailers.ipstData) > 0 {
-		if f.policyStore == nil && f.groupStore == nil && f.policyAttachStore == nil && f.bucketPolicyStore == nil {
+		if f.policyStore == nil && f.groupStore == nil && f.policyAttachStore == nil {
 			log.Warn().Int("ipst_len", len(trailers.ipstData)).Msg("meta_fsm: Restore: snapshot contains IPST section but no policy stores wired; skipping")
 		} else {
-			polSnap, grpSnap, attachSnap, bpSnap, err := decodeMetaIAMPolicyStoresSnapshot(trailers.ipstData)
+			polSnap, grpSnap, attachSnap, _, err := decodeMetaIAMPolicyStoresSnapshot(trailers.ipstData)
 			if err != nil {
 				return fmt.Errorf("meta_fsm: Restore: decode IAM policy stores: %w", err)
 			}
-			newIPST = &ipstDecoded{polSnap, grpSnap, attachSnap, bpSnap}
+			newIPST = &ipstDecoded{polSnap, grpSnap, attachSnap}
 		}
 	}
 
@@ -1011,11 +1009,6 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 			log.Warn().Int("sa_entries", len(newIPST.attachSnap.SAAttachments)).Int("group_entries", len(newIPST.attachSnap.GroupAttachments)).Msg("meta_fsm: Restore: IPST has policy-attach entries but policyAttachStore not wired; entries dropped")
 		} else {
 			f.policyAttachStore.ReplaceAll(newIPST.attachSnap)
-		}
-		if f.bucketPolicyStore == nil {
-			log.Warn().Int("entries", len(newIPST.bpSnap)).Msg("meta_fsm: Restore: IPST has bucket-policy entries but bucketPolicyStore not wired; entries dropped")
-		} else {
-			f.bucketPolicyStore.ReplaceAll(newIPST.bpSnap)
 		}
 		// Invalidate the resolver cache so stale pre-restore entries don't
 		// survive the snapshot install. Empty saIDs+buckets nukes the full cache.

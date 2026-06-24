@@ -94,9 +94,6 @@
   pull-on-miss path correctly fail-closes a malformed policy to deny. Only affects already-malformed
   stored policies (PutBucketPolicy rejects new ones); not a bypass of any valid Deny. Make the
   GET-path `Set`-failure clear the negative entry (or call `Invalidate`) for parity.
-- **[P3][cleanup] Dead IAM meta-FSM bucket-policy path** (`MetaCmdTypeBucketPolicyPut`,
-  `bucketpolicy.InMemoryStore`, `applyBucketPolicyPut/Delete`) is dead in production (no proposer).
-  Wire-or-remove it to kill the dual-store ambiguity. (Deferred from the authz-cache fix above.)
 - **[DONE] AppendObject versioned-bucket feature-gate** read the PLAIN versioning state
   (`object_append.go`), so a stale group-0 follower could read Unversioned for an Enabled bucket and
   let an append bypass the 501 gate. Fixed: the gate now resolves versioning via the linearized read
