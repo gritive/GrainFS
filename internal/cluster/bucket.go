@@ -138,21 +138,24 @@ func (b *DistributedBackend) DeleteBucket(ctx context.Context, bucket string) er
 		//       incl. appendable/coalesced carve-outs) via scanQuorumMetaClusterAll —
 		//       local strict scan + fan-out to all peers, matching ForceDeleteBucket's
 		//       cluster non-versioned enumerate. Filesystem walk + RPC → OUTSIDE any
-		//       store.View txn. Hard-delete tombstones (IsHardDeleted) are NOT live
-		//       objects — skip them (mirrors dropHardDeletedVersions) so a bucket whose
-		//       objects were all deleted still deletes.
+		//       store.View txn. Tombstones are NOT live objects — skip both kinds,
+		//       mirroring the LIST live-filter (filterAndSortEntries): IsDeleteMarker
+		//       (the non-versioned / Suspended soft-delete the latest-only tree
+		//       actually carries) and IsHardDeleted (defense-in-depth). So a bucket
+		//       whose objects were all deleted still deletes.
 		//   (2) per-version tree (versions preserved from a prior Enabled era for a
 		//       Suspended bucket) via listObjectVersionsSoleAuth (already cluster-wide,
-		//       already tombstone-filtered, delete markers still count); empty no-op
-		//       for a never-versioned bucket.
+		//       drops IsHardDeleted; a per-version delete MARKER still counts — it is a
+		//       version, matching the Enabled branch); empty no-op for a
+		//       never-versioned bucket.
 		if b.shardSvc != nil {
 			cmds, qerr := b.scanQuorumMetaClusterAll(bucket)
 			if qerr != nil {
 				return fmt.Errorf("delete bucket: enumerate latest-only qmeta: %w", qerr)
 			}
 			for _, c := range cmds {
-				if c.IsHardDeleted {
-					continue // hard-delete tombstone — the object is gone, not live
+				if c.IsDeleteMarker || c.IsHardDeleted {
+					continue // latest-only tombstone — the object is gone, not live
 				}
 				return storage.ErrBucketNotEmpty
 			}

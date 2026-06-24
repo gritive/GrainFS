@@ -106,13 +106,16 @@ func TestDeleteBucketEmptinessNonEnabled(t *testing.T) {
 		require.ErrorIs(t, b.HeadBucket(ctx, "nvempty"), storage.ErrBucketNotFound)
 	})
 
-	t.Run("never-versioned with only a hard-delete tombstone -> empty, delete succeeds", func(t *testing.T) {
-		// A non-versioned DeleteObject leaves an IsHardDeleted tombstone blob in the
-		// latest-only tree. It is NOT a live object, so a bucket holding only
-		// tombstones must still delete (no false ErrBucketNotEmpty).
+	t.Run("never-versioned with only latest-only tombstones -> empty, delete succeeds", func(t *testing.T) {
+		// A non-versioned DeleteObject overwrites the latest-only blob with an
+		// IsDeleteMarker tombstone (object_delete.go); IsHardDeleted is defense-in-
+		// depth. Neither is a live object, so a bucket holding only tombstones must
+		// still delete — the emptiness loop must skip BOTH (mirroring the LIST
+		// filterAndSortEntries), or an all-deleted bucket becomes undeleteable.
 		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "nvtomb"))
-		seedLatestBlob(t, b, "nvtomb", "k1", PutObjectMetaCmd{IsHardDeleted: true, NodeIDs: []string{"n1"}})
+		seedLatestBlob(t, b, "nvtomb", "del-marker", PutObjectMetaCmd{IsDeleteMarker: true, NodeIDs: []string{"n1"}})
+		seedLatestBlob(t, b, "nvtomb", "hard-del", PutObjectMetaCmd{IsHardDeleted: true, NodeIDs: []string{"n1"}})
 		require.NoError(t, b.DeleteBucket(ctx, "nvtomb"))
 		require.ErrorIs(t, b.HeadBucket(ctx, "nvtomb"), storage.ErrBucketNotFound)
 	})
