@@ -26,7 +26,7 @@ const (
 	StreamShardWriteBody   StreamType = 0x10 // ShardService write metadata frame followed by raw shard bytes
 	StreamShardReadBody    StreamType = 0x11 // ShardService read metadata reply followed by raw shard bytes
 	// 0x12 retired: was StreamCapabilityExchange (mux-era protocol version handshake).
-	StreamAuditShip               StreamType = 0x13 // Follower → leader S3 audit event batch (one-way push)
+	// 0x13 retired: was StreamAuditShip (follower → leader S3 audit event push).
 	StreamDataGroupProposeForward StreamType = 0x14 // Follower → data-group leader metadata proposal forwarding
 	StreamReadAppendSegment       StreamType = 0x15 // Non-owner → owner append-segment blob read (request frame + raw segment bytes reply)
 	// 0x16 retired: was StreamMetaJoinChallenge (legacy KEK-challenge nonce request).

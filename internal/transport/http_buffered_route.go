@@ -44,7 +44,6 @@ const (
 	RouteProbeKEKDisk            = "/probe/kek-disk"
 	RouteProbeKEKLease           = "/probe/kek-lease"
 	RouteProbeAppliedIndex       = "/probe/applied-index"
-	RouteAuditShip               = "/audit/ship"
 )
 
 // bufferedErrCap bounds how much of a non-200 response body the client reads
@@ -75,7 +74,6 @@ var bufferedRouteTable = []struct {
 	{RouteProbeKEKDisk, StreamKEKDiskSpaceProbe},
 	{RouteProbeKEKLease, StreamKEKLeaseSnapshotProbe},
 	{RouteProbeAppliedIndex, StreamAppliedIndexProbe},
-	{RouteAuditShip, StreamAuditShip},
 }
 
 // BufferedRouteHandler is a consumer-registered native handler for a
