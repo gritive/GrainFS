@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] — data-plane raft-free Slice 2
+## [0.0.657.0] - 2026-06-24 — data-plane raft-free Slice 2
 
 ### Changed
 - **Raft FSM is now pure control-plane — all per-object FSM commands retired (BREAKING: mixed-version
