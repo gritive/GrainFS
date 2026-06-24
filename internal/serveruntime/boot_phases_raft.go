@@ -227,11 +227,14 @@ func bootDataGroupRouter(state *bootState) error {
 	state.clusterRouter = cluster.NewRouter(state.dgMgr)
 	state.clusterRouter.SetDefault("group-0")
 
-	// SetOnBucketAssigned uses f.mu.Lock() internally; must be called
+	// SetOnBucketAssigned/SetOnBucketUnassigned use f.mu.Lock() internally; must be called
 	// before Start() (which is bootMetaRaftStart's job).
 	router := state.clusterRouter
 	state.metaRaft.FSM().SetOnBucketAssigned(func(bucket, groupID string) {
 		router.AssignBucket(bucket, groupID)
+	})
+	state.metaRaft.FSM().SetOnBucketUnassigned(func(bucket string) {
+		router.Unassign(bucket)
 	})
 	return nil
 }

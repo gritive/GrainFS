@@ -111,6 +111,44 @@ func TestRouter_AssignBucket_RuntimeUpdate(t *testing.T) {
 	assert.Equal(t, "group-0", g.ID())
 }
 
+// TestRouterUnassignRemoves verifies that Unassign removes a bucket's explicit mapping.
+func TestRouterUnassignRemoves(t *testing.T) {
+	mgr := NewDataGroupManager()
+	r := NewRouter(mgr)
+	r.AssignBucket("b1", "group-2")
+
+	gid, ok := r.ExplicitGroup("b1")
+	require.True(t, ok, "b1 must have explicit mapping before Unassign")
+	assert.Equal(t, "group-2", gid)
+
+	r.Unassign("b1")
+
+	gid, ok = r.ExplicitGroup("b1")
+	assert.False(t, ok, "b1 must have no explicit mapping after Unassign")
+	assert.Equal(t, "", gid)
+}
+
+// TestRouterSyncDropsStale verifies that Sync removes buckets absent from the
+// incoming assignments map (full reconcile, not merge-only).
+func TestRouterSyncDropsStale(t *testing.T) {
+	mgr := NewDataGroupManager()
+	r := NewRouter(mgr)
+
+	// Assign b1 and b2.
+	r.AssignBucket("b1", "group-0")
+	r.AssignBucket("b2", "group-1")
+
+	// Sync with only b1 — b2 must be removed.
+	r.Sync(map[string]string{"b1": "group-2"})
+
+	gid, ok := r.ExplicitGroup("b1")
+	require.True(t, ok, "b1 must still have explicit mapping after Sync")
+	assert.Equal(t, "group-2", gid, "b1's group must be updated by Sync")
+
+	_, ok = r.ExplicitGroup("b2")
+	assert.False(t, ok, "b2 must be absent from router after Sync dropped it")
+}
+
 func TestRouter_ConcurrentReadWrite_Race(t *testing.T) {
 	const nGroups = 10
 	mgr := NewDataGroupManager()

@@ -116,6 +116,7 @@ const (
 	MetaCmdTypeBeginPresentFlip            = clusterpb.MetaCmdTypeBeginPresentFlip     // zero-CA cutover: PR-2a §8c
 	MetaCmdTypeDropClusterKeyAccept        = clusterpb.MetaCmdTypeDropClusterKeyAccept // zero-CA cutover: PR-2b §8 H2
 	MetaCmdTypeCreateBucket                = clusterpb.MetaCmdTypeCreateBucket         // group0-demotion: atomic existence + group assignment
+	MetaCmdTypeDeleteBucket                = clusterpb.MetaCmdTypeDeleteBucket         // group0-demotion: idempotent bucket deletion + router unassign
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
@@ -270,6 +271,7 @@ type MetaFSM struct {
 	icebergNamespaces    map[string]map[string]IcebergNamespaceEntry // warehouse → nsKey → entry
 	icebergTables        map[string]map[string]IcebergTableEntry     // warehouse → tableKey → entry
 	onBucketAssigned     func(string, string)                        // protected by mu; set before Start() (PR-D)
+	onBucketUnassigned   func(string)                                // protected by mu; set before Start() (group0-demotion)
 	onRebalancePlan      func(*RebalancePlan)                        // must not block; set before Start() (PR-D)
 	onShardGroupAdded    func(ShardGroupEntry)                       // fired after PutShardGroup applies; protected by mu (v0.0.7.0)
 	onIcebergResult      func(string, error)                         // requestID, typed catalog result; must not block
@@ -934,6 +936,8 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		return f.applyDropClusterKeyAccept(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeCreateBucket:
 		return f.applyCreateBucket(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeDeleteBucket:
+		return f.applyDeleteBucket(cmd.DataBytes())
 	default:
 		metrics.UnknownMetaCmdTotal.WithLabelValues(strconv.Itoa(int(cmd.Type()))).Inc()
 		log.Warn().Stringer("type", cmd.Type()).Msg("meta_fsm: unknown command type, ignoring")

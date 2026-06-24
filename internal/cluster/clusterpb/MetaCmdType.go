@@ -91,6 +91,7 @@ const (
 	MetaCmdTypePutIndexGroup                MetaCmdType = 89
 	MetaCmdTypeAddPlacementGeneration       MetaCmdType = 90
 	MetaCmdTypeCreateBucket                 MetaCmdType = 91
+	MetaCmdTypeDeleteBucket                 MetaCmdType = 92
 )
 
 var EnumNamesMetaCmdType = map[MetaCmdType]string{
@@ -178,6 +179,7 @@ var EnumNamesMetaCmdType = map[MetaCmdType]string{
 	MetaCmdTypePutIndexGroup:                "PutIndexGroup",
 	MetaCmdTypeAddPlacementGeneration:       "AddPlacementGeneration",
 	MetaCmdTypeCreateBucket:                 "CreateBucket",
+	MetaCmdTypeDeleteBucket:                 "DeleteBucket",
 }
 
 var EnumValuesMetaCmdType = map[string]MetaCmdType{
@@ -265,6 +267,7 @@ var EnumValuesMetaCmdType = map[string]MetaCmdType{
 	"PutIndexGroup":                MetaCmdTypePutIndexGroup,
 	"AddPlacementGeneration":       MetaCmdTypeAddPlacementGeneration,
 	"CreateBucket":                 MetaCmdTypeCreateBucket,
+	"DeleteBucket":                 MetaCmdTypeDeleteBucket,
 }
 
 func (v MetaCmdType) String() string {
