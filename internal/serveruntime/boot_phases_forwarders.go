@@ -224,7 +224,14 @@ func bootClusterCoordinatorRouting(state *bootState) error {
 	// are routed through the meta-Raft FSM (Task 7). SetBucketAssigner is retired
 	// (Task 12: the assigner field was dead after the create cutover moved to
 	// MetaBucketStore; removed).
-	state.distBackend.SetMetaBucketStore(fba.MetaBucketStore())
+	mbs := fba.MetaBucketStore()
+	state.distBackend.SetMetaBucketStore(mbs)
+	// The group-0 demotion routes bucket versioning/policy through this seam, and a
+	// data-plane read (e.g. PutObject's previous-object HeadObject) can land on ANY
+	// owned data group, not just group-0. Wire the seam into every owned group
+	// backend (present + future) so such a read never sees a nil store and fails
+	// 500 "MetaBucketStore not wired".
+	state.dgMgr.SetMetaBucketStore(mbs)
 
 	state.clusterCoord = cluster.NewClusterCoordinator(
 		state.distBackend, // base for cluster-wide ops (CreateBucket, etc.)

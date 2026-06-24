@@ -23,17 +23,6 @@ surfaced by that removal:
 
 ### Discovered during the followup-cleanup PR (2026-06-25, both pre-existing, unrelated to that PR)
 
-- **[P2][pre-existing] Anonymous PUT to `s3://default` fails `500 MetaBucketStore not wired`.**
-  The Phase-0 quickstart e2e specs (`tests/e2e/phase0_quickstart_test.go` AnonPut/List/Get/Delete,
-  both SingleNode and Cluster3Node) fail: an anonymous PUT to the auto-created `default` bucket
-  returns `500 InternalError` — `read versioning state for bucket "default": get bucket versioning
-  "default": MetaBucketStore not wired`. Reproduced on `devel` (v0.0.661.0) AND `origin/master`
-  (v0.0.662.0 `b993ba40`) — NOT introduced by #853 (verified by re-running the focused probe on the
-  pre-#853 commit). The default-bucket versioning read reaches a path where `MetaBucketStore` is nil.
-  Needs `/investigate`: real single-node serve regression (default-bucket anon writes broken) vs an
-  e2e-harness wiring gap. Re-confirm on current master (v0.0.663.0, post iceberg-removal #854) since
-  serveruntime boot changed. Surfaced while verifying the HEAD-quarantine e2e.
-
 - **[P2][pre-existing][flaky-test] `internal/server` `eventWorker` teardown race.** Under full-suite
   `make test-unit` load the `internal/server` package panics `send on closed channel`
   (`badger.(*DB).sendToWriteCh` ← `eventstore.(*Store).Append` ← `eventWorker.start.func1`,

@@ -44,7 +44,12 @@ type groupSnapshot struct {
 // Writes (Add) are infrequent (rebalance events), so a CAS loop is sufficient.
 type DataGroupManager struct {
 	snap atomic.Pointer[groupSnapshot]
+	mbs  atomic.Pointer[mbsHolder]
 }
+
+// mbsHolder boxes the MetaBucketStore interface so it can live in an
+// atomic.Pointer (which needs a concrete element type).
+type mbsHolder struct{ s MetaBucketStore }
 
 func NewDataGroupManager() *DataGroupManager {
 	m := &DataGroupManager{}
@@ -52,8 +57,34 @@ func NewDataGroupManager() *DataGroupManager {
 	return m
 }
 
+// SetMetaBucketStore wires the cluster-wide bucket-metadata seam (meta-Raft FSM)
+// into every owned group backend — those already registered AND any added later.
+// The group-0 demotion moved bucket versioning/policy off the per-group FSM onto
+// this seam, so a data-plane read (e.g. PutObject's previous-object HeadObject)
+// routed to ANY owned group must resolve versioning through it, not only group-0.
+// Wiring it once on state.distBackend (group-0) left non-group-0 owned backends
+// with a nil store → 500 "MetaBucketStore not wired". Stored so Add wires future
+// groups (dynamic AddGroup / evacuation / placeholder→real swap).
+func (m *DataGroupManager) SetMetaBucketStore(s MetaBucketStore) {
+	m.mbs.Store(&mbsHolder{s: s})
+	for _, dg := range m.All() {
+		if b := dg.Backend(); b != nil {
+			b.SetMetaBucketStore(s)
+		}
+	}
+}
+
 // Add adds a DataGroup or replaces an existing group with the same ID. Thread-safe.
 func (m *DataGroupManager) Add(g *DataGroup) {
+	// Wire the meta-bucket seam into the (real) backend before it goes live, so a
+	// group instantiated after SetMetaBucketStore is never reachable with a nil
+	// store. Placeholder groups carry a nil backend and are skipped — the
+	// placeholder→real swap re-runs Add and wires the real backend.
+	if h := m.mbs.Load(); h != nil && h.s != nil {
+		if b := g.Backend(); b != nil {
+			b.SetMetaBucketStore(h.s)
+		}
+	}
 	for {
 		old := m.snap.Load()
 		newByID := make(map[string]*DataGroup, len(old.byID)+1)
