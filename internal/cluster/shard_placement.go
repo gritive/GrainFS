@@ -506,12 +506,15 @@ func (f *FSM) IterShardPlacements(fn func(bucket, key string, rec PlacementRecor
 	})
 }
 
-// LookupLatestVersion returns the most recent versionID for (bucket, key),
-// as written by applyPutObjectMeta to the `lat:` pointer. Used by
-// RepairShard to resolve the physical shard path when callers don't have a
-// versionID of their own (ShardPlacementMonitor onMissing). Returns an
-// error when the pointer is absent; callers treat that as "pre-versioned
-// legacy EC" and fall back to the bare-key layout.
+// LookupLatestVersion returns the most recent versionID for (bucket, key)
+// from the legacy `lat:` FSM pointer. That pointer was written by the
+// now-retired per-object meta raft command (data-plane raft-free Slice 2);
+// the off-raft data plane no longer writes obj:/lat: records, so for
+// blob-authoritative objects the pointer is absent. Used by RepairShard to
+// resolve the physical shard path when callers don't have a versionID of
+// their own (ShardPlacementMonitor onMissing). Returns an error when the
+// pointer is absent; callers treat that as "pre-versioned legacy EC" and
+// fall back to the bare-key layout.
 func (f *FSM) LookupLatestVersion(bucket, key string) (string, error) {
 	var versionID string
 	err := f.db.View(func(txn MetadataTxn) error {
