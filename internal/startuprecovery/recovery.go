@@ -14,7 +14,7 @@
 //   - blob.lock and similar flock-style lock files: the kernel releases
 //     flocks on process exit, so a leftover file is harmless and the next
 //     start re-acquires it cleanly.
-//   - In-memory caches (CachedBackend): no on-disk cache exists today; once
+//   - In-memory object caches: no on-disk cache exists today; once
 //     a disk-backed pull-through cache lands, this is where its quarantine
 //     logic will hook in.
 //   - BadgerDB internals: badger.Open already does WAL replay and basic

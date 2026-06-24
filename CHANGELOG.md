@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.668.0] - 2026-06-25
+
+### Removed
+- **Internal cleanup, no user-facing behavior change.** Removed the unused in-memory object read
+  cache (`storage.CachedBackend`). It was never wired into the live S3 read path, so it cached
+  nothing. A prior change already retired the dead boot wiring and the cluster cache-invalidator
+  registry; this removes the now-constructorless type and its tests, plus two leftover Prometheus
+  metrics that no longer had a producer: `grainfs_cache_invalidation_total` and
+  `grainfs_cache_invalidation_duration_seconds` (operators will no longer see these on `/metrics`).
+
 ## [0.0.667.0] - 2026-06-25
 
 ### Changed

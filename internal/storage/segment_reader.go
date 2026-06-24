@@ -6,12 +6,29 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"sync"
 )
 
 // DefaultGetWorkers is the per-request fetch concurrency for segment reads.
 const DefaultGetWorkers = 8
+
+// readExactlySizedObject reads exactly size bytes from r into a freshly
+// allocated buffer. Avoids io.ReadAll's geometric grow on known-size reads.
+func readExactlySizedObject(r io.Reader, size int64) ([]byte, error) {
+	if size < 0 {
+		return nil, fmt.Errorf("negative object size %d", size)
+	}
+	if size == 0 {
+		return nil, nil
+	}
+	buf := make([]byte, size)
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return nil, err
+	}
+	return buf, nil
+}
 
 // segmentStore abstracts the source of segment bytes (LocalBackend in single
 // node, ECStreamingReader-backed adapter in cluster).

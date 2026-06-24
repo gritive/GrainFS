@@ -63,13 +63,6 @@ surfaced by that removal:
   code-gate codex pass. Fix: add an age-gated per-version tombstone-tree GC, or remove
   `.quorum_meta{,_versions}/{bucket}/` on bucket delete.
 
-- **[P3][pre-existing] Admin force-delete does not invalidate a `CachedBackend` read
-  cache.** Moot on the current admin path (admin `Operations` wraps the pull-through
-  backend, not `state.cachedBackend`), but if an `Operations` is ever built over a
-  `CachedBackend`, `ForceDeleteBucket` now forwards to the backend and skips the
-  per-key cache invalidation the old generic walk did. Re-evaluate if the cache wrapper
-  moves into the force-delete stack. Surfaced by the code-gate codex pass.
-
 ### Bucket-delete config cascade follow-ups (PR: fix-bucket-delete-config-cascade)
 
 - **[P3][won't-fix] Mixed `--lifecycle-interval` clusters are unsupported.** The lifecycle-delete

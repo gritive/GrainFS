@@ -68,40 +68,6 @@ func TestOperationsCopyObjectWithACLUsesACLWritePath(t *testing.T) {
 	require.Equal(t, []string{"head:src/k", "head:dst/k2", "get:src/k", "putacl:dst/k2:text/plain:7:data"}, backend.calls)
 }
 
-func TestOperationsCopyObjectDoesNotBypassCachedBackendInvalidation(t *testing.T) {
-	inner, err := NewLocalBackend(t.TempDir())
-	require.NoError(t, err)
-	t.Cleanup(func() { inner.Close() })
-	require.NoError(t, inner.CreateBucket(context.Background(), "b"))
-	_, err = inner.PutObject(context.Background(), "b", "src", strings.NewReader("new"), "text/plain")
-	require.NoError(t, err)
-	_, err = inner.PutObject(context.Background(), "b", "dst", strings.NewReader("old"), "text/plain")
-	require.NoError(t, err)
-
-	cached := NewCachedBackend(inner)
-	ops := NewOperations(cached)
-
-	rc, _, err := cached.GetObject(context.Background(), "b", "dst")
-	require.NoError(t, err)
-	oldData, err := io.ReadAll(rc)
-	require.NoError(t, err)
-	require.NoError(t, rc.Close())
-	require.Equal(t, "old", string(oldData))
-
-	_, err = ops.CopyObject(context.Background(), CopyObjectRequest{
-		Source:      ObjectRef{Bucket: "b", Key: "src"},
-		Destination: ObjectRef{Bucket: "b", Key: "dst"},
-	})
-	require.NoError(t, err)
-
-	rc, _, err = cached.GetObject(context.Background(), "b", "dst")
-	require.NoError(t, err)
-	defer rc.Close()
-	newData, err := io.ReadAll(rc)
-	require.NoError(t, err)
-	require.Equal(t, "new", string(newData))
-}
-
 func TestOperationsCopyObjectHeadsSourceBeforeOpeningBodyAndAppliesReplaceContentType(t *testing.T) {
 	backend := &semanticCopyBackend{
 		head: &Object{Key: "k", ContentType: "text/plain", ETag: "src-etag", LastModified: 100},

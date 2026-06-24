@@ -56,8 +56,7 @@ losing invalidation events. Any future wrapper that needs to invalidate the
 plan must either reuse `SwappableBackend` as its mutation point or extend the
 generation tracking design before adding a new source.
 
-Result-shape wrappers (`SwappableBackend`, `CachedBackend`, `wal.Backend`,
-`pullthrough.Backend`) hold a long-lived `*Operations` over their inner
+Result-shape wrappers (`SwappableBackend`, `pullthrough.Backend`) hold a long-lived `*Operations` over their inner
 backend rather than constructing a fresh one per call. `SwappableBackend.Swap`
 resets its cached `*Operations` (in addition to bumping `Generation`) so the
 next call rebuilds against the new inner.

@@ -77,10 +77,10 @@ func parsePackedKey(s string) (packedKey, bool) {
 // consistent — acceptable for listing-style operations.
 // Audit follow-up: docs/architecture/lock-free-audit.md → "PackedBackend.mu
 // protects the packed-object index. If packed small object reads become a
-// hot-path bottleneck, convert this to the same immutable snapshot pattern
-// used by CachedBackend." PR #392 mixed-workload mutex profile attributed
-// 91.7% of remaining delay (44.81s / 48.86s) to PackedBackend.PutObject's
-// RWMutex.Unlock — the trigger condition was hit.
+// hot-path bottleneck, convert this to an immutable snapshot pattern
+// (atomic.Pointer + CompareAndSwap)." PR #392 mixed-workload mutex profile
+// attributed 91.7% of remaining delay (44.81s / 48.86s) to
+// PackedBackend.PutObject's RWMutex.Unlock — the trigger condition was hit.
 type PackedBackend struct {
 	inner     storage.Backend
 	blobStore *BlobStore

@@ -2,8 +2,8 @@
 //
 // EC shard cache (Phase 2 #3 follow-up). Multi-node E2E measurement on
 // PR #71's --measure-read-amp baseline showed large_repeat 16MB×10 hits
-// 90% at every reachable cache size — CachedBackend's 4 MB-per-object
-// cap forces every GET to bypass and re-run getObjectEC, which fans out
+// 90% at every reachable cache size — the prior 4 MB-per-object cap on
+// the object cache forced every GET to bypass and re-run getObjectEC, which fans out
 // K shard reads. The same shards come back every iteration.
 //
 // This cache sits in front of getObjectEC's per-shard fan-out. A full

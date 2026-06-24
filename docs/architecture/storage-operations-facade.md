@@ -41,7 +41,6 @@ storage.Operations
     +-- outer-first adapter lookup
     |       |
     |       +-- RecoveryWriteGate blocks writes
-    |       +-- CachedBackend invalidates cache
     |
     +-- safe fallback only through Operations
             |

@@ -7,9 +7,6 @@ copy-on-write publish step.
 
 ## Changes In This Audit
 
-- `internal/storage.CachedBackend` no longer has a mutex. Cache state is an
-  immutable snapshot published with `atomic.Pointer` and `CompareAndSwap`.
-  Cache reads do not acquire locks.
 - `internal/storage.Operations` no longer has a mutex. The storage decorator
   capability plan and the ACL capability plan are published with
   `atomic.Pointer` and validated against a single-source `atomic.Uint64`
@@ -143,7 +140,6 @@ rg -n "sync\.(Mutex|RWMutex)" internal cmd --glob '*.go' --glob '!*_test.go'
   raft apply.
 - `internal/cluster/ring_store.go` - current ring and refcounts must change
   together.
-- `internal/cluster/invalidator.go` - cache invalidator registry snapshotting.
 - `internal/cluster/peer_health.go`, `rotation_state.go`,
   `capability_gate.go`, `circuit_breaker.go`, `disk_collector.go`,
   `migration_queue.go`, `rebalance_executor.go`, `meta_join.go` - low-frequency

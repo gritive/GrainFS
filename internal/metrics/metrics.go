@@ -106,19 +106,6 @@ var (
 		Help: "Total number of events dropped because the in-flight event queue was full.",
 	})
 
-	// CacheInvalidationTotal counts cache invalidation operations.
-	CacheInvalidationTotal = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "grainfs_cache_invalidation_total",
-		Help: "Total number of cache invalidation operations.",
-	}, []string{"bucket", "protocol"}) // protocol: vfs, nfs, cached_backend
-
-	// CacheInvalidationDuration measures cache invalidation operation duration.
-	CacheInvalidationDuration = promauto.NewHistogram(prometheus.HistogramOpts{
-		Name:    "grainfs_cache_invalidation_duration_seconds",
-		Help:    "Cache invalidation operation duration in seconds.",
-		Buckets: prometheus.DefBuckets,
-	})
-
 	// CacheStatHits counts cache hits in stat cache.
 	CacheStatHits = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "grainfs_cache_stat_hits_total",

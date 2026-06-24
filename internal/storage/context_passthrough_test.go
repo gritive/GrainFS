@@ -97,17 +97,4 @@ func TestSwappableBackend_ForwardsContext(t *testing.T) {
 	}
 }
 
-func TestCachedBackend_TruncateForwardsContext(t *testing.T) {
-	rec := &contextRecorderBackend{}
-	cb := NewCachedBackend(rec)
-	ctx := context.WithValue(context.Background(), testContextKey{}, "caller")
-
-	if err := cb.Truncate(ctx, "b", "k", 3); err != nil {
-		t.Fatal(err)
-	}
-	if rec.ctx != ctx {
-		t.Fatalf("wrapped backend got %p, want %p", rec.ctx, ctx)
-	}
-}
-
 type testContextKey struct{}
