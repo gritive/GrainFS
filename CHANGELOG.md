@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.673.0] - 2026-06-25
+
+### Removed
+- **`grainfs serve --shard-pack-threshold` flag.** Cluster shard-packing was retired earlier (a
+  durable pack index was never built), leaving the flag inert except to hard-fail boot when set
+  above `0`. The flag and its config plumbing are now gone, so passing it is an unknown-flag error
+  at argument parsing. The `GRAINFS_SHARD_PACK_THRESHOLD` environment variable still refuses to boot
+  when set above `0`, so an operator who relied on the env var is not silently ignored.
+
 ## [0.0.672.0] - 2026-06-25
 
 ### Changed

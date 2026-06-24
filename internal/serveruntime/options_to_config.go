@@ -52,7 +52,6 @@ func optionsToConfig(
 	cfg.MeasureReadAmp = opts.MeasureReadAmp
 	cfg.ShardCacheSize = opts.ShardCacheSize
 	cfg.PackThreshold = opts.PackThreshold
-	cfg.ShardPackThreshold = opts.ShardPackThreshold
 
 	cfg.HealReceiptEnabled = opts.HealReceiptEnabled
 	cfg.HealReceiptPSK = opts.HealReceiptPSK

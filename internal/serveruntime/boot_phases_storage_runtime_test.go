@@ -132,11 +132,11 @@ func TestBootShardService_DoesNotOverwriteReplayedShardGroups(t *testing.T) {
 }
 
 // TestBootShardService_ShardPackThresholdIsHardError proves S3: requesting
-// shard-packing via the config threshold is refused at boot with a clear error
-// (packing is disabled — a durable pack index was never built).
+// shard-packing via the GRAINFS_SHARD_PACK_THRESHOLD env gate is refused at boot
+// with a clear error (packing is disabled — a durable pack index was never built).
 func TestBootShardService_ShardPackThresholdIsHardError(t *testing.T) {
 	ctx, state := storagePhasePrereqs(t)
-	state.cfg.ShardPackThreshold = 1024
+	t.Setenv("GRAINFS_SHARD_PACK_THRESHOLD", "1024")
 
 	err := bootShardService(ctx, state)
 	require.Error(t, err)

@@ -40,10 +40,9 @@ type ServeOptions struct {
 	AppendSizeCapBytes               int64 // --append-size-cap-bytes
 
 	// --- Storage knobs ---
-	PackThreshold      int   // --pack-threshold
-	ShardPackThreshold int   // --shard-pack-threshold
-	MeasureReadAmp     bool  // --measure-read-amp
-	ShardCacheSize     int64 // --shard-cache-size
+	PackThreshold  int   // --pack-threshold
+	MeasureReadAmp bool  // --measure-read-amp
+	ShardCacheSize int64 // --shard-cache-size
 
 	// --- Intervals ---
 	ScrubInterval             time.Duration // --scrub-interval

@@ -66,10 +66,9 @@ type Config struct {
 	RaftElectionTimeout   time.Duration
 
 	// Storage / EC
-	MeasureReadAmp     bool
-	ShardCacheSize     int64
-	PackThreshold      int
-	ShardPackThreshold int
+	MeasureReadAmp bool
+	ShardCacheSize int64
+	PackThreshold  int
 
 	// Heal receipts
 	HealReceiptEnabled        bool
