@@ -101,7 +101,7 @@ func TestScanQuorumMetaVersionsAll_RPCRoundTrip(t *testing.T) {
 		"019ed400-0000-7000-8000-000000000002",
 		"019ed400-0000-7000-8000-000000000003",
 	} {
-		blob, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: bkt, Key: key, VersionID: vid, ETag: "e-" + vid})
+		blob, err := encodeQuorumMetaBlob(PutObjectMetaCmd{Bucket: bkt, Key: key, VersionID: vid, ETag: "e-" + vid})
 		require.NoError(t, err)
 		require.NoError(t, svcPeer.writeQuorumMetaVersionLocal(bkt, filepath.Join(key, vid), blob))
 	}

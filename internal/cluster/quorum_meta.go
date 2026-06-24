@@ -63,7 +63,7 @@ func (b *DistributedBackend) writeQuorumMeta(ctx context.Context, cmd PutObjectM
 	if b.shardSvc == nil || len(cmd.NodeIDs) == 0 {
 		return fmt.Errorf("quorum meta write: no shard service or empty placement")
 	}
-	blob, err := EncodeCommand(CmdPutObjectMeta, cmd)
+	blob, err := encodeQuorumMetaBlob(cmd)
 	if err != nil {
 		return fmt.Errorf("quorum meta write encode: %w", err)
 	}
@@ -1358,16 +1358,9 @@ func (s *ShardService) readQuorumMetaRaw(bucket, key string) ([]byte, error) {
 // decodeQuorumMetaBlob decodes a raw quorum meta blob into storage.Object and
 // PlacementMeta. Used by both the local-read and peer-fallback paths.
 func (s *ShardService) decodeQuorumMetaBlob(data []byte) (*storage.Object, PlacementMeta, error) {
-	cmd, err := DecodeCommand(data)
+	putCmd, err := decodeQuorumMetaBlob(data)
 	if err != nil {
 		return nil, PlacementMeta{}, fmt.Errorf("quorum meta decode command: %w", err)
-	}
-	if cmd.Type != CmdPutObjectMeta {
-		return nil, PlacementMeta{}, fmt.Errorf("quorum meta: unexpected command type %d", cmd.Type)
-	}
-	putCmd, err := decodePutObjectMetaCmd(cmd.Data)
-	if err != nil {
-		return nil, PlacementMeta{}, fmt.Errorf("quorum meta decode put cmd: %w", err)
 	}
 	obj, placement := objectAndPlacementFromCmd(putCmd)
 	return obj, placement, nil
@@ -1871,15 +1864,13 @@ func (b *DistributedBackend) deleteShardsQuorum(ctx context.Context, bucket, sha
 }
 
 // decodeQuorumMetaCmdBlob decodes a raw quorum meta blob to a PutObjectMetaCmd.
+// The blob is a bare PutObjectMetaCmd FlatBuffer (no raft Command envelope).
 func (s *ShardService) decodeQuorumMetaCmdBlob(data []byte) (PutObjectMetaCmd, error) {
-	cmd, err := DecodeCommand(data)
+	cmd, err := decodeQuorumMetaBlob(data)
 	if err != nil {
 		return PutObjectMetaCmd{}, fmt.Errorf("quorum meta decode raw: %w", err)
 	}
-	if cmd.Type != CmdPutObjectMeta {
-		return PutObjectMetaCmd{}, fmt.Errorf("quorum meta read raw: unexpected command type %d", cmd.Type)
-	}
-	return decodePutObjectMetaCmd(cmd.Data)
+	return cmd, nil
 }
 
 // readQuorumMetaRawCmd reads and decodes the PutObjectMetaCmd from the local

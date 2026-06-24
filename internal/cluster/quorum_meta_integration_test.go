@@ -151,7 +151,7 @@ func TestScatterGatherList_LWWAndTombstone(t *testing.T) {
 
 	encodeBlob := func(cmd PutObjectMetaCmd) []byte {
 		t.Helper()
-		blob, err := EncodeCommand(CmdPutObjectMeta, cmd)
+		blob, err := encodeQuorumMetaBlob(cmd)
 		require.NoError(t, err)
 		return blob
 	}
@@ -225,7 +225,7 @@ func TestScatterGatherList_SpansAllShardGroups(t *testing.T) {
 
 	encodeBlob := func(cmd PutObjectMetaCmd) []byte {
 		t.Helper()
-		blob, err := EncodeCommand(CmdPutObjectMeta, cmd)
+		blob, err := encodeQuorumMetaBlob(cmd)
 		require.NoError(t, err)
 		return blob
 	}
@@ -279,7 +279,7 @@ func TestScanObjectMetaEntries_CarriesPlacementFields(t *testing.T) {
 
 	encodeBlob := func(cmd PutObjectMetaCmd) []byte {
 		t.Helper()
-		blob, err := EncodeCommand(CmdPutObjectMeta, cmd)
+		blob, err := encodeQuorumMetaBlob(cmd)
 		require.NoError(t, err)
 		return blob
 	}
@@ -505,7 +505,7 @@ func TestReadQuorumMeta_PeerFallback_ParityNodeMiss(t *testing.T) {
 			ETag:        "abc123",
 			NodeIDs:     []string{trData.LocalAddr(), trParity.LocalAddr()},
 		}
-		b, err := EncodeCommand(CmdPutObjectMeta, cmd)
+		b, err := encodeQuorumMetaBlob(cmd)
 		require.NoError(t, err)
 		return b
 	}()

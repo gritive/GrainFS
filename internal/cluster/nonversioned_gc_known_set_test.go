@@ -15,7 +15,7 @@ func seedLatestBlob(t *testing.T, b *DistributedBackend, bucket, key string, cmd
 	t.Helper()
 	cmd.Bucket = bucket
 	cmd.Key = key
-	blob, err := EncodeCommand(CmdPutObjectMeta, cmd)
+	blob, err := encodeQuorumMetaBlob(cmd)
 	require.NoError(t, err)
 	require.NoError(t, b.shardSvc.writeQuorumMetaLocal(bucket, key, blob))
 }

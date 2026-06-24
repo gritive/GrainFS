@@ -27,7 +27,7 @@ func TestHeadObjectVersionCtx_StampReachesGate(t *testing.T) {
 	// Deliberately do NOT enable versioning in the local store.
 
 	const vid = "019ed400-0000-7000-8000-000000000001"
-	blob, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+	blob, err := encodeQuorumMetaBlob(PutObjectMetaCmd{
 		Bucket: bkt, Key: key, VersionID: vid, ETag: "etag-v1", NodeIDs: []string{"self"}, ECData: 1,
 	})
 	require.NoError(t, err)

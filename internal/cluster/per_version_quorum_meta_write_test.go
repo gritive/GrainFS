@@ -92,7 +92,7 @@ func TestWriteQuorumMeta_AlsoWritesPerVersion(t *testing.T) {
 // tests. Reused across tasks.
 func mustEncodeMetaCmd(t *testing.T, cmd PutObjectMetaCmd) []byte {
 	t.Helper()
-	blob, err := EncodeCommand(CmdPutObjectMeta, cmd)
+	blob, err := encodeQuorumMetaBlob(cmd)
 	require.NoError(t, err)
 	return blob
 }

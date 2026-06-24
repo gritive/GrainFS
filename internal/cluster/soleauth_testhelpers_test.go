@@ -19,7 +19,7 @@ func seedVersionBlob(t *testing.T, b *DistributedBackend, bucket, key, vid strin
 	cmd.Bucket = bucket
 	cmd.Key = key
 	cmd.VersionID = vid
-	blob, err := EncodeCommand(CmdPutObjectMeta, cmd)
+	blob, err := encodeQuorumMetaBlob(cmd)
 	require.NoError(t, err)
 	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal(bucket, filepath.Join(key, vid), blob))
 }

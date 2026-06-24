@@ -353,7 +353,18 @@ func decodeQuorumMetaBlob(data []byte) (PutObjectMetaCmd, error) {
 	return decodePutObjectMetaCmd(data)
 }
 
-func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
+func decodePutObjectMetaCmd(data []byte) (out PutObjectMetaCmd, err error) {
+	// A corrupt blob can pass GetRootAsPutObjectMetaCmd (which only reads the root
+	// vtable offset) yet panic later when a field accessor (e.g. NodeIdsLength)
+	// indexes past the buffer. fbSafe below covers only the root read, so the
+	// whole field-decode body must also be panic-safe to stay fail-closed: a
+	// malformed on-disk quorum-meta blob must surface as an error, never a panic.
+	defer func() {
+		if r := recover(); r != nil {
+			out = PutObjectMetaCmd{}
+			err = fmt.Errorf("invalid flatbuffer: %v", r)
+		}
+	}()
 	t, err := fbSafe(data, func(d []byte) *clusterpb.PutObjectMetaCmd {
 		return clusterpb.GetRootAsPutObjectMetaCmd(d, 0)
 	})
