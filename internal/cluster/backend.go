@@ -202,9 +202,10 @@ type DistributedBackend struct {
 	// returns this backend (single-group, identical to pre-multi-group behavior).
 	owningGroupBackendFn func(bucket string) *DistributedBackend
 
-	assigner   BucketAssigner   // PR-D: MetaRaft proposer; nil = no-op (single-node legacy)
-	router     *Router          // PR-D: bucket→group routing; nil = no routing
-	shardGroup ShardGroupSource // v0.0.7.0: query active groups for hash assignment; nil = legacy single-group path
+	assigner        BucketAssigner   // PR-D: MetaRaft proposer; nil = no-op (single-node legacy)
+	metaBucketStore MetaBucketStore  // Task 7: cluster-wide bucket metadata seam; nil = not wired
+	router          *Router          // PR-D: bucket→group routing; nil = no routing
+	shardGroup      ShardGroupSource // v0.0.7.0: query active groups for hash assignment; nil = legacy single-group path
 
 	// multiGeneration arms the cross-generation LWW read merge (S7-6). False (the
 	// default) keeps readQuorumMeta/readQuorumMetaCmd on the local-first fast path
@@ -1291,6 +1292,15 @@ var _ storage.Backend = (*DistributedBackend)(nil)
 // SetBucketAssigner injects the MetaRaft proposer for bucket assignment persistence.
 // Must be called before CreateBucket. Nil disables persistence (single-node legacy mode).
 func (b *DistributedBackend) SetBucketAssigner(a BucketAssigner) { b.assigner = a }
+
+// SetMetaBucketStore wires the cluster-wide bucket metadata seam (Task 7).
+// When non-nil, callers can read/write bucket metadata through the meta-Raft
+// FSM via MetaBucketStore() instead of reaching the FSM directly.
+// Nil (default) means not yet wired; callers must check before use.
+func (b *DistributedBackend) SetMetaBucketStore(s MetaBucketStore) { b.metaBucketStore = s }
+
+// MetaBucketStore returns the wired MetaBucketStore, or nil if not yet wired.
+func (b *DistributedBackend) MetaBucketStore() MetaBucketStore { return b.metaBucketStore }
 
 // SetRouter wires a Router for bucket→group routing used by CreateBucket.
 func (b *DistributedBackend) SetRouter(r *Router) { b.router = r }
