@@ -85,13 +85,28 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 	srv := server.New(cfg.Addr, state.backend, state.srvOpts...)
 	state.srv = srv
 
-	// Wire the bucket-policy cache invalidator into the cluster apply path so a
-	// committed policy change/delete on any node drops this node's compiled cache
-	// entry, forcing the next authz Allow to re-pull the committed policy. The
-	// loader (pull-on-miss) is already wired mode-agnostically in storage.NewOperations.
-	if state.distBackend != nil {
-		state.distBackend.SetOnBucketPolicyApply(srv.PolicyStore().Invalidate)
+	// Task 10: wire the compiled-policy Invalidate callback into the meta
+	// post-commit worker registered pre-Start in bootMetaRaftWiring. The worker
+	// is already running; SetInvalidate makes it call PolicyStore.Invalidate for
+	// every committed SetBucketPolicy / DeleteBucketPolicy meta entry so the
+	// next authz Allow re-pulls the committed policy. Pull-on-miss ensures
+	// eventual consistency for the brief window between Start and this call.
+	if state.metaPolicyInvalidationWorker != nil {
+		state.metaPolicyInvalidationWorker.SetInvalidate(srv.PolicyStore().Invalidate)
 	}
+
+	// Legacy group-0 path: SetOnBucketPolicyApply is kept for the (currently
+	// still-live) group-0 CmdSetBucketPolicy / CmdDeleteBucketPolicy commands
+	// which fire notifyOnApply on the data-raft FSM. These will be retired once
+	// the group-0 policy commands are fully decommissioned. Left as a no-op
+	// comment until that task lands; removal would break compilation if the
+	// group-0 apply path is still active.
+	//
+	// NOTE: state.distBackend.SetOnBucketPolicyApply(srv.PolicyStore().Invalidate)
+	// is intentionally NOT called here — policy invalidation is now driven by
+	// the meta post-commit hook above. The onBucketPolicyApply atomic.Pointer
+	// in DistributedBackend remains nil, so the notifyOnApply group-0 branch
+	// is a silent no-op (harmless dead code until Task N retires it).
 
 	// --- Admin / dashboard wiring (Volume CLI Phase B) ---
 	tokenStore, err := dashboard.Open(filepath.Join(cfg.DataDir, "dashboard.token"))

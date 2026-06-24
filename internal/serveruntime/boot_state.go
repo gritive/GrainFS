@@ -285,6 +285,12 @@ type bootState struct {
 	// directly.
 	auditOutbox *audit.Outbox
 
+	// bootMetaRaftWiring: meta policy-invalidation worker.
+	// Registered as a post-commit hook on MetaFSM before MetaRaft.Start().
+	// SetInvalidate is called in bootHTTPServerAndAdmin once the server is up.
+	// Stop is registered via AddCleanup in bootMetaRaftWiring.
+	metaPolicyInvalidationWorker *cluster.MetaPolicyInvalidationWorker
+
 	// bootHTTPServerAndAdmin
 	srv                     *server.Server
 	tokenStore              *dashboard.TokenStore

@@ -182,6 +182,18 @@ func bootMetaRaftWiring(state *bootState) error {
 	})
 	metaRaft.FSM().SetConfigStore(cfgStore)
 	state.cfgStore = cfgStore
+
+	// Task 10: register meta policy-invalidation post-commit hook BEFORE Start.
+	// The worker is started here so it is ready before the apply loop fires.
+	// SetInvalidate is called later in bootHTTPServerAndAdmin once the compiled
+	// policy store (srv.PolicyStore()) is available. Events arriving before
+	// SetInvalidate are silently dropped (pull-on-miss ensures eventual consistency).
+	policyWorker := cluster.NewMetaPolicyInvalidationWorker()
+	policyWorker.Start()
+	state.AddCleanup(policyWorker.Stop)
+	metaRaft.FSM().RegisterPostCommit(policyWorker.Hook)
+	state.metaPolicyInvalidationWorker = policyWorker
+
 	return nil
 }
 
