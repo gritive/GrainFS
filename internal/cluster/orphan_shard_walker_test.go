@@ -28,11 +28,12 @@ func waitCaughtUp(t *testing.T, b *DistributedBackend) {
 
 // orphanWalkerBackend returns a single-dataDir backend wired so the orphan-shard
 // sweep is ALLOWED (gate on, empty frozen source). The age gate is floored to
-// minOrphanShardAge (60s), so "old" shards must be back-dated > that.
+// minOrphanShardAge (the EC write+commit window, ~466s), so "old" shards must be
+// back-dated > that — use oldEnough.
 func orphanWalkerBackend(t *testing.T) *DistributedBackend {
 	t.Helper()
 	b := newTestDistributedBackend(t)
-	b.SetScrubOrphanAge(time.Second) // floored to minOrphanShardAge (60s) by the walker
+	b.SetScrubOrphanAge(time.Second) // floored to minOrphanShardAge by the walker
 	b.SetOrphanShardSweepGate(func() bool { return true })
 	b.SetFrozenObjectVersionSource(func() ([]storage.SnapshotObjectRef, error) { return nil, nil })
 	waitCaughtUp(t, b)

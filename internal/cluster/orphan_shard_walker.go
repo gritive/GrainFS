@@ -285,8 +285,9 @@ func (b *DistributedBackend) WalkOrphanShards(known map[string]bool, fn func(dir
 	return nil
 }
 
-// effectiveOrphanShardAge is the configured orphan age gate, floored so the
-// in-flight commit window (≤ proposeForwardTimeout) can never reach it.
+// effectiveOrphanShardAge is the configured orphan age gate, floored to
+// minOrphanShardAge so an in-flight EC write's full write+commit window (the
+// bounded shard-RPC retries plus the quorum-meta commit) can never reach it.
 func (b *DistributedBackend) effectiveOrphanShardAge() time.Duration {
 	age := b.scrubOrphanAge
 	if age < minOrphanShardAge {
