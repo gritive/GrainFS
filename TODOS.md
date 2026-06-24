@@ -232,19 +232,33 @@ Deferred items:
 
 - **[DONE] Slice 2 — retire remaining per-object FSM commands.** See Slice 2 section above.
 
-- **[P2] EC coalesced orphan shard leak — DATA-LOSS-CRITICAL fix; design before implementing.**
+- **[P2][EPIC] EC coalesced orphan shard leak — DATA-LOSS-CRITICAL.** Decomposed into 3 slices.
   `orphan_shard_walker.go:319` `SkipDir`s every `/coalesced/` shard dir, so unreferenced
   coalesced EC shards (B3 distribute) are never reclaimed — a permanent leak. The skip is a
   DELIBERATE safety measure: a wrong reclaim deletes LIVE coalesced data. Naive "just walk
   /coalesced/" is UNSAFE — coalesced refs live in the **off-raft quorum-meta blob** (appendable
   objects are blob-resident, not BadgerDB), which is **K-of-N**: a parity-only node holds a
   coalesced shard without a local manifest, so a local forward-map enumeration would
-  false-orphan live data. Correct fix mirrors `hasLiveShardRecord`'s peer-fallback: per
-  `/coalesced/` candidate, parse `bucket/<key…>/coalesced/<coalescedID>` (NOT `parseFullObjectRel`
-  — different shape), do a peer-fallback `readQuorumMeta(bucket,key)`, and keep the shard iff the
-  coalescedID is still in `manifest.Coalesced[].CoalescedID`; keep on ANY read uncertainty
-  (fail-closed). Deliberately scoped OUT of the 2026-06-25 follow-up batch (data-loss risk) —
-  needs its own plan + plan-gate + heavy code-gate.
+  false-orphan live data.
+  - **Slice A (SHIPPED, this branch): orphan age floor.** `minOrphanShardAge` bumped from 60s to
+    the bounded EC write+commit window (~466s) — closes a PRE-EXISTING full-object in-flight
+    data-loss window (a slow write's early shard reclaimed before its commit). The marker design
+    was evaluated and ABANDONED (advisor + first-principles: a `.publishing` marker is
+    behaviorally equivalent to an age floor — its crash-safety stale-sweep is itself timing-bounded,
+    so it never escapes timing; see `docs/superpowers/specs/2026-06-25-ec-inflight-marker-design.md`).
+  - **Slice B (SHIPPED, this branch): certainty-aware reclaim read.** `readQuorumMetaForReclaim` +
+    `reclaimCertainty` — fails closed when a metadata-holding peer is unreachable, closing a
+    PRE-EXISTING K-of-N peer-fail-open data-loss bug (`readQuorumMeta` mapped an exhausted peer
+    fan-out to not-found → reclaimed a live object). Applied to `hasLiveShardRecord`.
+  - **Slice C (REMAINING): coalesced orphan reclaim.** The original item. Now rests on Slice B's
+    certainty read + Slice A's floor. Correct fix mirrors `hasLiveShardRecord`'s peer-fallback: per
+    `/coalesced/` candidate, parse `bucket/<key…>/coalesced/<coalescedID>` (NOT `parseFullObjectRel`
+    — different shape), read via `readQuorumMetaForReclaim`, keep the shard iff the coalescedID is
+    still referenced by `manifest.Coalesced[]` matched on the physical `ShardKey` (the EC reader's
+    authority) OR `CoalescedID`; gate on `blobAuthReadOn` (Enabled bucket → keep); dual-interpret
+    the path to protect a real object literally keyed `.../coalesced`; route both the walk and the
+    `DeleteOrphanDir` TOCTOU reconfirm through one shared predicate. Needs its own plan-gate +
+    heavy code-gate. Design detail preserved in the spec doc above.
 
 - **[P3] Appendable/coalesced objects do not get EC redundancy upgrade.** The redundancy-upgrade
   relocation (`relocate_object.go`) now SKIPS `IsAppendable`/`Coalesced` objects (they would be
