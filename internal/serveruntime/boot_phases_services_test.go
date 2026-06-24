@@ -22,8 +22,7 @@ func servicesPhasePrereqs(t *testing.T) *bootState {
 }
 
 // TestBootSnapshotAndApplyLoop_PopulatesState — happy path: phase wires the
-// FSM onto distBackend, builds the cachedBackend wrap chain, and registers
-// the s3-cache invalidator. The apply-loop goroutine is fired; the cleanup
+// FSM onto distBackend and fires the apply-loop goroutine. The cleanup
 // stack (state.stopApply close) is exercised via t.Cleanup -> state.Cleanup
 // which closes stopApply via the bootOwnedGroupsAndEC ownership.
 //
@@ -32,14 +31,11 @@ func servicesPhasePrereqs(t *testing.T) *bootState {
 func TestBootSnapshotAndApplyLoop_PopulatesState(t *testing.T) {
 	state := servicesPhasePrereqs(t)
 
-	// Before the phase: services-owned fields nil; effectiveEC is set by
-	// storage phase but fsm/cachedBackend belong to services.
+	// Before the phase: fsm is nil.
 	assert.Nil(t, state.fsm, "fsm nil before phase")
-	assert.Nil(t, state.cachedBackend, "cachedBackend nil before phase")
 
 	require.NoError(t, bootSnapshotAndApplyLoop(state))
 
-	// After: services fields populated.
+	// After: fsm populated.
 	assert.NotNil(t, state.fsm, "fsm populated")
-	assert.NotNil(t, state.cachedBackend, "cachedBackend populated")
 }

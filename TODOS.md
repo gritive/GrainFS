@@ -21,20 +21,28 @@ surfaced by that removal:
   Either re-use it for a future out-of-band snapshot reconcile, or remove it
   (`internal/config/config.go`) + its tests.
 
-### Quorum-meta blob codec decouple follow-ups (2026-06-24)
+### Discovered during the followup-cleanup PR (2026-06-25, both pre-existing, unrelated to that PR)
 
-- **[P3][pre-existing] Dead `CachedBackend` / apply-driven cache-invalidator wiring.**
-  `boot_phases_services.go:35-36` constructs `state.cachedBackend = NewCachedBackend(distBackend)`
-  and registers an `s3-cache` invalidator (`distBackend.RegisterCacheInvalidator` →
-  `notifyOnApply`). But the live S3 server uses `state.backend` (pullthrough→coordinator), NOT
-  `state.cachedBackend` (`boot_phases_admin.go:85` `server.New(cfg.Addr, state.backend, …)`), so the
-  read cache is never on the live path and the registered invalidator invalidated a cache nobody
-  reads. The blob-codec-decouple PR removed the (already-unreachable since data-plane raft-free Slice 2)
-  `notifyOnApply` `CmdPutObjectMeta` object-cache branch, making the dead wiring obvious. `Registry`/
-  `InvalidateAll`/`SetOnApply` now have no live object-mutation driver. Fix: either wire `cachedBackend`
-  into the live read path (and drive invalidation off the off-raft write path) or remove the unused
-  `CachedBackend` + registry wiring. Surfaced by the code-gate codex pass; pre-existing, not a
-  regression of this PR (behavior-neutral — the cache was never live).
+- **[P2][pre-existing] Anonymous PUT to `s3://default` fails `500 MetaBucketStore not wired`.**
+  The Phase-0 quickstart e2e specs (`tests/e2e/phase0_quickstart_test.go` AnonPut/List/Get/Delete,
+  both SingleNode and Cluster3Node) fail: an anonymous PUT to the auto-created `default` bucket
+  returns `500 InternalError` — `read versioning state for bucket "default": get bucket versioning
+  "default": MetaBucketStore not wired`. Reproduced on `devel` (v0.0.661.0) AND `origin/master`
+  (v0.0.662.0 `b993ba40`) — NOT introduced by #853 (verified by re-running the focused probe on the
+  pre-#853 commit). The default-bucket versioning read reaches a path where `MetaBucketStore` is nil.
+  Needs `/investigate`: real single-node serve regression (default-bucket anon writes broken) vs an
+  e2e-harness wiring gap. Re-confirm on current master (v0.0.663.0, post iceberg-removal #854) since
+  serveruntime boot changed. Surfaced while verifying the HEAD-quarantine e2e.
+
+- **[P2][pre-existing][flaky-test] `internal/server` `eventWorker` teardown race.** Under full-suite
+  `make test-unit` load the `internal/server` package panics `send on closed channel`
+  (`badger.(*DB).sendToWriteCh` ← `eventstore.(*Store).Append` ← `eventWorker.start.func1`,
+  `internal/server/events_worker.go:42`): the eventstore Badger DB is closed before the worker
+  goroutine is drained via `eventWorker.stop()`. Flaky (passes 3/3 in isolation; failed 1 of 2
+  full-suite runs). Exposed when the iceberg-removal merge landed on master mid-session; unrelated to
+  followup-cleanup (which does not touch `internal/server`). Fix: enforce stop-before-close ordering
+  on the eventWorker (call `w.stop()` before closing the eventstore `*Store`) in the server lifecycle /
+  test teardown so the worker never `Append`s after Close.
 
 ### DeleteBucket non-Enabled emptiness follow-ups (2026-06-24)
 
@@ -213,11 +221,6 @@ Deferred items:
   Fix: enumerate `scanQuorumMetaBucketStrict` / `scanQuorumMetaClusterAll` (mirror the
   ForceDeleteBucket non-versioned enumerate) and return `ErrBucketNotEmpty` on the first hit.
 
-- **[P3][pre-existing] `HeadObject` / `HeadObjectVersion` do not check quarantine status.**
-  A quarantined object is HEAD-able (200) even though GET returns `ErrObjectQuarantined`.
-  Whether this is intentional behavior or a gap depends on S3 compatibility requirements.
-  If HEAD should reflect quarantine, add an `isObjectQuarantined` check in the HEAD paths.
-
 - **[P3][design] Normal non-versioned `DeleteObject` leaves a latest-only tombstone blob
   (the `IsHardDeleted` marker in the quorum-meta blob) that persists indefinitely.** EC shards
   are reclaimed by the orphan-shard walker (which sees no live qmeta referencing them). The
@@ -261,11 +264,6 @@ Deferred items:
   (always nil); a post-coalesce append recomputes ETag from remaining segments. Pre-existing;
   behavior-neutral in Slice 1. Wire `AppendCallMD5s` into the quorum-meta schema if exact
   post-coalesce ETag continuity is required for S3 compatibility.
-
-- **[P3] `f.coalesceCfg` write-only dead field.** The FSM's copy of the coalesce config
-  (`SetCoalesceCfg` + `FSM.coalesceCfg`) is now write-only: the live config is
-  `b.coalesceCfg` (the backend `atomic.Pointer`). Remove the dead FSM copy to kill
-  the write-only state.
 
 - **[P2] off-raft append fencing-lease** *(only if the accepted failover-safety risk must
   later be closed).* A proper single-writer lease (leader-term fencing token +

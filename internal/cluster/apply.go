@@ -23,8 +23,7 @@ type FSM struct {
 	clusterID [16]byte
 	dekKeeper *encrypt.DEKKeeper
 
-	// Guards onMigrateShard, commitNotifier, and coalesceCfg against concurrent
-	// Set* calls + Apply.
+	// Guards onMigrateShard and commitNotifier against concurrent Set* calls + Apply.
 	mu sync.RWMutex
 
 	// Optional hooks for Phase 13 balancer. Nil when no peers configured/non-balancer mode.
@@ -36,11 +35,6 @@ type FSM struct {
 	balancerNotifier interface {
 		NotifyMigrationDone(bucket, key, versionID string)
 	}
-
-	// coalesceCfg is the FSM's own copy of the coalesce configuration.
-	// Protected by mu. Updated via SetCoalesceCfg (called from
-	// DistributedBackend.SetCoalesceConfig so the apply loop sees fresh caps).
-	coalesceCfg CoalesceConfig
 }
 
 // SetMigrationHooks wires the FSM to the balancer/migration subsystem.
@@ -55,14 +49,6 @@ func (f *FSM) SetMigrationHooks(ch chan<- MigrationTask, notifier interface {
 	f.onMigrateShard = ch
 	f.commitNotifier = notifier
 	f.balancerNotifier = bn
-	f.mu.Unlock()
-}
-
-// SetCoalesceCfg updates the FSM's coalesce configuration. Safe to call
-// concurrently with Apply; protected by mu.
-func (f *FSM) SetCoalesceCfg(cfg CoalesceConfig) {
-	f.mu.Lock()
-	f.coalesceCfg = cfg
 	f.mu.Unlock()
 }
 

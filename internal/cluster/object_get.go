@@ -27,10 +27,8 @@ func (b *DistributedBackend) ReadAt(ctx context.Context, bucket, key string, off
 	if err != nil {
 		return 0, err
 	}
-	if blocked, cause, qerr := b.isObjectQuarantined(bucket, key, obj.VersionID); qerr != nil {
-		return 0, fmt.Errorf("check quarantine: %w", qerr)
-	} else if blocked {
-		return 0, objectQuarantinedError(bucket, key, cause)
+	if err := b.quarantineGate(bucket, key, obj.VersionID); err != nil {
+		return 0, err
 	}
 	return b.readAtPreparedObject(ctx, bucket, key, obj, placementMeta, offset, buf)
 }
@@ -59,10 +57,8 @@ func (b *DistributedBackend) ReadAtObject(ctx context.Context, bucket, key strin
 	if !obj.IsAppendable && len(obj.Segments) == 0 && placementMeta.ECData == 0 && len(placementMeta.NodeIDs) == 0 {
 		return b.ReadAt(ctx, bucket, key, offset, buf)
 	}
-	if blocked, cause, qerr := b.isObjectQuarantined(bucket, key, obj.VersionID); qerr != nil {
-		return 0, fmt.Errorf("check quarantine: %w", qerr)
-	} else if blocked {
-		return 0, objectQuarantinedError(bucket, key, cause)
+	if err := b.quarantineGate(bucket, key, obj.VersionID); err != nil {
+		return 0, err
 	}
 	return b.readAtPreparedObject(ctx, bucket, key, obj, placementMeta, offset, buf)
 }
@@ -121,10 +117,8 @@ func (b *DistributedBackend) GetObject(ctx context.Context, bucket, key string) 
 	if err != nil {
 		return nil, nil, err
 	}
-	if blocked, cause, qerr := b.isObjectQuarantined(bucket, key, obj.VersionID); qerr != nil {
-		return nil, nil, fmt.Errorf("check quarantine: %w", qerr)
-	} else if blocked {
-		return nil, nil, objectQuarantinedError(bucket, key, cause)
+	if err := b.quarantineGate(bucket, key, obj.VersionID); err != nil {
+		return nil, nil, err
 	}
 	// HeadObject already rejects tombstones with ErrObjectNotFound, so obj here
 	// is a real version. VersionID is non-empty for versioned writes and empty
@@ -196,12 +190,34 @@ func (b *DistributedBackend) readAtViaGetObject(ctx context.Context, bucket, key
 	return io.ReadFull(rc, buf)
 }
 
+// quarantineGate returns objectQuarantinedError when (bucket,key,versionID) is
+// quarantined, a wrapped error if the quarantine lookup itself fails, or nil.
+// Callers pass their own versionID source (obj.VersionID for latest, the
+// requested versionID for versioned reads, "" for the latest-only write guard)
+// and keep their own ordering relative to other gates.
+func (b *DistributedBackend) quarantineGate(bucket, key, versionID string) error {
+	blocked, cause, err := b.isObjectQuarantined(bucket, key, versionID)
+	if err != nil {
+		return fmt.Errorf("check quarantine: %w", err)
+	}
+	if blocked {
+		return objectQuarantinedError(bucket, key, cause)
+	}
+	return nil
+}
+
 func (b *DistributedBackend) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
 	if err := guardInternalBucketObjectOp(bucket); err != nil {
 		return nil, err
 	}
 	obj, _, err := b.headObjectMeta(ctx, bucket, key)
-	return obj, err
+	if err != nil {
+		return nil, err
+	}
+	if err := b.quarantineGate(bucket, key, obj.VersionID); err != nil {
+		return nil, err
+	}
+	return obj, nil
 }
 
 func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key string) (*storage.Object, PlacementMeta, error) {

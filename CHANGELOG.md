@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.665.0] - 2026-06-25
+
+### Changed
+- **`HeadObject` / `HeadObjectVersion` now reject a quarantined object** with the same quarantine
+  error `GetObject` already returns, instead of replying `200 OK`. A corrupt/quarantined object is no
+  longer HEAD-able while GET fails on it — HEAD and GET now agree. Forwarded HEAD requests (served by a
+  non-owning node) are covered too.
+
+### Removed
+- The `grainfs_cache_registry_size` Prometheus gauge was removed along with the dead apply-driven
+  cache-invalidator registry it tracked; the registry had no live consumer after the earlier NFS/VFS
+  and group-0 control-plane removals. No other metric or S3 behavior changed.
+
 ## [0.0.664.0] - 2026-06-25
 
 ### Removed

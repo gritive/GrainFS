@@ -280,7 +280,7 @@ func TestApplyActor_SnapshotIsBatchBarrier(t *testing.T) {
 	}
 
 	fsm := NewFSM(newTestStore(t), newStateKeyspaceEmpty())
-	b := &DistributedBackend{store: fsm.db, fsm: fsm, node: snapshotBarrierFakeNode{}, registry: NewRegistry()}
+	b := &DistributedBackend{store: fsm.db, fsm: fsm, node: snapshotBarrierFakeNode{}}
 	a := &applyActor{db: fsm.db, fsm: fsm}
 
 	// Write pre-snapshot objects directly (pre1, pre2) — simulates state that
