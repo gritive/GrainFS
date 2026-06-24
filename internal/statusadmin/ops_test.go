@@ -35,7 +35,6 @@ func sampleReport() adminapi.StatusReport {
 		TLS: adminapi.TLSStatus{
 			CertPresent: true,
 		},
-		TrustedProxy: []string{"10.0.0.0/8"},
 		Audit: adminapi.AuditStatus{
 			DenyOnly: false,
 		},
@@ -79,7 +78,6 @@ func TestRunGetStatus_TableOutput(t *testing.T) {
 		"sa_count:",           // iam.sa_count label
 		"encryption_enabled:", // encryption label
 		"tls_cert_present:",   // tls label
-		"trusted_proxy:",      // trusted_proxy label
 		"audit_deny_only:",    // audit label
 		"kid-abc",             // jwt current kid
 		"kid-xyz",             // jwt previous kid
@@ -117,7 +115,7 @@ func TestRunGetStatus_JSONOut(t *testing.T) {
 		t.Fatalf("output is not valid JSON: %v\n%s", err, out.String())
 	}
 
-	topLevel := []string{"cluster", "iam", "encryption", "tls", "trusted_proxy", "audit", "jwt_keys", "banner"}
+	topLevel := []string{"cluster", "iam", "encryption", "tls", "audit", "jwt_keys", "banner"}
 	for _, key := range topLevel {
 		if _, ok := got[key]; !ok {
 			t.Errorf("JSON output missing top-level key %q", key)

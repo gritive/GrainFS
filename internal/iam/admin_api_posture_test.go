@@ -29,7 +29,7 @@ func TestAdminAPI_CreateSA_PostureCheck_EmptyStore_Rejects(t *testing.T) {
 	store := NewStore()
 	p := newFakeProposer()
 	api := NewAdminAPI(store, p, newTestEncryptor(t))
-	postureErr := errors.New("auth required + no TLS cert + no trusted proxy. Place cert at /x, OR set GRAINFS_TLS_CERT/KEY, OR `grainfs config set trusted-proxy.cidr <cidr>`")
+	postureErr := errors.New("auth required + no TLS cert. Place cert at /x, OR set GRAINFS_TLS_CERT/KEY")
 	pc := &stubPostureChecker{err: postureErr}
 	api.SetPostureChecker(pc)
 
@@ -44,8 +44,8 @@ func TestAdminAPI_CreateSA_PostureCheck_EmptyStore_Rejects(t *testing.T) {
 	if ae.Code != "precondition" {
 		t.Errorf("Code = %q, want %q", ae.Code, "precondition")
 	}
-	if !strings.Contains(ae.Message, "trusted-proxy.cidr") {
-		t.Errorf("Message = %q, want remediation hint mentioning trusted-proxy.cidr", ae.Message)
+	if !strings.Contains(ae.Message, "no TLS cert") {
+		t.Errorf("Message = %q, want remediation hint mentioning the TLS cert requirement", ae.Message)
 	}
 	if pc.called != 1 {
 		t.Errorf("PostureChecker.CheckAnonOff called %d times, want 1", pc.called)

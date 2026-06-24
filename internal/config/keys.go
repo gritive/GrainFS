@@ -14,7 +14,6 @@ import (
 // are handled by the FSM post-commit hook in Task 14, not by reload-hook closures.
 type ReloadHooks struct {
 	OnAllowAnonBucketPolicy func(context.Context, bool) error
-	OnTrustedProxyCIDR      func(context.Context, string) error
 	OnJWTSigningKeyRotate   func(context.Context) error
 	OnJWTSigningKeyPrune    func(context.Context) error
 	OnClusterReadOnlyChange func(context.Context, bool) error
@@ -62,17 +61,6 @@ func RegisterClusterKeys(s *Store, h ReloadHooks) {
 			}
 			_, err := iampdp.ParseTokenEnvelope([]byte(raw))
 			return err
-		},
-	})
-
-	s.Register("trusted-proxy.cidr", StringSpec{
-		Default: "",
-		Desc:    "CIDR range of trusted reverse proxies (e.g. 10.0.0.0/8)",
-		OnReload: func(ctx context.Context, v string) error {
-			if h.OnTrustedProxyCIDR == nil {
-				return nil
-			}
-			return h.OnTrustedProxyCIDR(ctx, v)
 		},
 	})
 

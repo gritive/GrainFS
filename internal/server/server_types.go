@@ -122,7 +122,6 @@ type Server struct {
 	shardCache      *shardcache.Cache
 	receipt         *receiptsvc.Handler
 	incidentH       *incidentsvc.Handler
-	proxyTrust      *ProxyTrust // §5 T45: trusted-proxy Forwarded / X-Forwarded-* validator
 
 	readAfterWriteRetryTimeout  time.Duration
 	readAfterWriteRetryInterval time.Duration

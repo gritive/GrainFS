@@ -151,11 +151,10 @@ func TestCLI_Status_Authenticated(t *testing.T) {
 	}
 }
 
-// TestCLI_Status_AllFieldsPresent verifies that all 9 top-level JSON keys are
+// TestCLI_Status_AllFieldsPresent verifies that all top-level JSON keys are
 // present in the output.
 func TestCLI_Status_AllFieldsPresent(t *testing.T) {
 	report := fakePhase2Report()
-	report.TrustedProxy = []string{"10.0.0.0/8", "192.168.0.0/16"}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/status", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" {
@@ -173,7 +172,7 @@ func TestCLI_Status_AllFieldsPresent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status all-fields: %v\noutput: %s", err, out)
 	}
-	requiredKeys := []string{"cluster", "iam", "encryption", "tls", "trusted_proxy", "audit", "jwt_keys", "banner"}
+	requiredKeys := []string{"cluster", "iam", "encryption", "tls", "audit", "jwt_keys", "banner"}
 	for _, key := range requiredKeys {
 		if !containsKey(out, key) {
 			t.Errorf("expected output to contain key %q, got: %s", key, out)

@@ -173,15 +173,6 @@ type bootState struct {
 	// "kek admin disabled" instead of a 5xx. Set via MetaRaft.SetKEKRotationLeader
 	// so the leadership watcher cancels in-flight propose calls on step-down.
 	kekRotationLeader *cluster.KEKRotationLeader
-	// refreshProxyCIDR re-seeds the trusted-proxy.cidr atomic snapshot used by
-	// the TLS posture reload hook. Called by bootTLSPostureGate after raft
-	// start (so any snapshot Restore has already populated cfgStore).
-	refreshProxyCIDR func(string)
-	// proxyTrust validates Forwarded / X-Forwarded-* headers when the request
-	// arrives from a trusted upstream (trusted-proxy.cidr). Built at raft-phase
-	// wire time so its SetCIDRs is also driven by OnTrustedProxyCIDR. Passed
-	// into server.New via WithProxyTrust. §5 T45.
-	proxyTrust *server.ProxyTrust
 
 	// bannerWriter is the destination for the §5 T46 default bucket anonymous
 	// access banner. Set to os.Stdout in production via newBootState; tests

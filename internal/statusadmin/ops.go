@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"strconv"
-	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -56,9 +55,6 @@ func renderStatus(w io.Writer, report adminapi.StatusReport, asJSON bool) error 
 	fmt.Fprintf(tw, "dek_gen:\t%s\n", strconv.FormatUint(uint64(report.Encryption.DEKGen), 10))
 	fmt.Fprintf(tw, "\n")
 	fmt.Fprintf(tw, "tls_cert_present:\t%v\n", report.TLS.CertPresent)
-	if len(report.TrustedProxy) > 0 {
-		fmt.Fprintf(tw, "trusted_proxy:\t%s\n", strings.Join(report.TrustedProxy, ","))
-	}
 	fmt.Fprintf(tw, "\n")
 	fmt.Fprintf(tw, "audit_deny_only:\t%v\n", report.Audit.DenyOnly)
 	fmt.Fprintf(tw, "\n")

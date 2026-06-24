@@ -65,11 +65,10 @@ func configCmd() *cobra.Command {
 
 func configSetCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "set <key> <value>",
-		Short: "Set a cluster-wide config key",
-		Example: `  grainfs config set audit.deny-only true
-  grainfs config set trusted-proxy.cidr 10.0.0.0/8`,
-		Args: cobra.ExactArgs(2),
+		Use:     "set <key> <value>",
+		Short:   "Set a cluster-wide config key",
+		Example: `  grainfs config set audit.deny-only true`,
+		Args:    cobra.ExactArgs(2),
 		RunE: func(c *cobra.Command, args []string) error {
 			sock, err := adminEndpointFromCmd(c)
 			if err != nil {

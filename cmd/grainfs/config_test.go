@@ -126,7 +126,6 @@ func TestCLI_ConfigList_AllShowsCatalog(t *testing.T) {
 		fmt.Fprint(w, `[
 			{"key":"audit.deny-only","value":"false","kind":"bool","default":"false","set":false,"description":"When true, all requests are logged but none are denied"},
 			{"key":"iam.allow-anonymous-bucket-policy","value":"false","kind":"bool","default":"false","set":false,"description":"Allow anonymous access via bucket-level IAM policies"},
-			{"key":"trusted-proxy.cidr","value":"","kind":"string","default":"","set":false,"description":"Trusted proxy CIDR range"},
 			{"key":"jwt.signing-key-rotate","value":"","kind":"trigger","default":"","set":false,"description":"Rotate the JWT signing key"}
 		]`)
 	})
@@ -146,8 +145,8 @@ func TestCLI_ConfigList_AllShowsCatalog(t *testing.T) {
 	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &items); err != nil {
 		t.Fatalf("list --all output not valid JSON: %v\noutput: %s", err, out.String())
 	}
-	if len(items) != 4 {
-		t.Errorf("len(items) = %d, want 4", len(items))
+	if len(items) != 3 {
+		t.Errorf("len(items) = %d, want 3", len(items))
 	}
 	keys := make(map[string]bool)
 	for _, item := range items {
@@ -155,7 +154,7 @@ func TestCLI_ConfigList_AllShowsCatalog(t *testing.T) {
 			keys[k] = true
 		}
 	}
-	for _, want := range []string{"audit.deny-only", "iam.allow-anonymous-bucket-policy", "trusted-proxy.cidr", "jwt.signing-key-rotate"} {
+	for _, want := range []string{"audit.deny-only", "iam.allow-anonymous-bucket-policy", "jwt.signing-key-rotate"} {
 		if !keys[want] {
 			t.Errorf("missing key %q in --all output", want)
 		}
