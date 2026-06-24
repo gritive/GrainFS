@@ -19,7 +19,7 @@ const (
 	StreamGroupRaft           StreamType = 0x09 // Per-group Raft RPCs (RequestVote, AppendEntries), payload prefixed with [4B groupIDLen][groupID][raftRPC]
 	StreamReadIndex           StreamType = 0x0A // Follower → leader ReadIndex RPC; response: [8B commitIndex big-endian][4B errLen][errBytes]
 	StreamMetaProposeForward  StreamType = 0x0B // Follower → meta-Raft leader proposal forwarding
-	// 0x0C retired: was StreamMetaCatalogRead (Iceberg catalog linearized reads).
+	// 0x0C retired.
 	StreamGroupForwardBody StreamType = 0x0D // Per-group forwarded write metadata frame followed by raw request body bytes
 	// 0x0E retired: was StreamMetaJoin (legacy KEK-challenge cluster-join admin RPC).
 	StreamGroupForwardRead StreamType = 0x0F // Per-group forwarded read metadata reply followed by raw response body bytes

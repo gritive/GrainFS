@@ -269,7 +269,7 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 		activePlanOff = clusterpb.RebalancePlanEnd(b)
 	}
 
-	// Iceberg namespaces/tables retained as empty vectors for snapshot slot stability.
+	// Slots 5,6 retained as empty vectors for snapshot slot stability (no-renumber).
 	clusterpb.MetaStateSnapshotStartIcebergNamespacesVector(b, 0)
 	icebergNamespaceVec := b.EndVector(0)
 	clusterpb.MetaStateSnapshotStartIcebergTablesVector(b, 0)

@@ -108,7 +108,7 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 
 	// MetaRaft.Propose follower→leader forwarding: when the local node is not
 	// the meta-Raft leader, forward encoded MetaCmd bytes to the current leader
-	// via StreamMetaProposeForward (the same path iceberg commits use).
+	// via StreamMetaProposeForward.
 	metaRaft.SetForwarder(func(ctx context.Context, data []byte) error {
 		return state.metaForwardSender.Send(ctx, MetaProposalTargets(metaRaft.Node().LeaderID(), peers), data)
 	})

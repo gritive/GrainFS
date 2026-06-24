@@ -152,7 +152,7 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 	// policy.Evaluate. Both iamPolicyStores and cfgStore are guaranteed non-nil
 	// by the fail-fast guards at the top of this function.
 	policyAuthz := s3auth.NewAuthorizer(state.iamPolicyStores.Resolver, state.cfgStore)
-	// Always install the PDP decorator on the S3/Iceberg data plane; it is a pure
+	// Always install the PDP decorator on the S3 data plane; it is a pure
 	// pass-through unless iam.pdp + data_plane.enabled are set (read per request
 	// from the cfg store), so hot-enable works with no dependency rebuild.
 	dataPlanePDP := pdp.NewDecorator(policyAuthz, state.cfgStore, ensurePDPTokenSource(state), "data_plane")

@@ -454,7 +454,7 @@ enum MetaCmdType : uint8 {
   SetLoadSnapshot      = 6,   // PR-D: leader 주기적 load commit
   ProposeRebalancePlan = 7,   // PR-D: rebalancer가 plan 제안
   AbortPlan            = 8,   // PR-D: timeout / operator 취소 / 완료 마커
-  // 9-13 reserved (iceberg catalog commands retired; no renumber).
+  // 9-13 reserved — do not reuse (no renumber).
   RotateKeyBegin     = 14,  // 클러스터 키 회전: phase 1 → 2 (operator-distributed next.key SPKI 합의)
   RotateKeySwitch    = 15,  // 회전 phase 2 → 3 (active 인증서를 NEW로 전환)
   RotateKeyDrop      = 16,  // 회전 phase 3 → steady-on-NEW (OLD 폐기, previous.key grace 시작)
@@ -764,7 +764,7 @@ table MetaAbortPlanCmd {
   reason:AbortPlanReason;
 }
 
-// iceberg_* retained empty for snapshot slot stability (no-renumber); iceberg feature removed.
+// Retained empty for snapshot slot stability (no-renumber).
 table IcebergNamespaceEntry {
   namespace:[string];
   properties:[KeyValue];
