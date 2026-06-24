@@ -392,15 +392,17 @@ func (b *DistributedBackend) invalidateShardCache(bucket, shardKey string, nShar
 	}
 }
 
-// SetECConfig configures erasure-coding shard parameters (k, m) for
-// PutObject/GetObject. Call before serving traffic. The configured profile must
-// fit the active write node set; invalid profiles make EC writes fail fast.
-// SetCoalesceConfig updates the coalesce thresholds at runtime.
+// SetCoalesceConfig updates the coalesce thresholds at runtime by storing
+// them in the live b.coalesceCfg atomic, which the append/coalesce path
+// reads on the next operation.
 func (b *DistributedBackend) SetCoalesceConfig(cfg CoalesceConfig) {
 	cfgCopy := cfg
 	b.coalesceCfg.Store(&cfgCopy)
 }
 
+// SetECConfig configures erasure-coding shard parameters (k, m) for
+// PutObject/GetObject. Call before serving traffic. The configured profile must
+// fit the active write node set; invalid profiles make EC writes fail fast.
 func (b *DistributedBackend) SetECConfig(cfg ECConfig) {
 	if b.ecConfigSnapshot.Load() == nil {
 		b.ecConfig = cfg

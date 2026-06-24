@@ -469,8 +469,7 @@ func (b *DistributedBackend) fetchQuorumMetaFromPeers(bucket, key string) ([]byt
 // fanOutQuorumMeta dispatches to every placement node concurrently and returns
 // as soon as K acks arrive. Returns an error only when the quorum becomes
 // unreachable (more than N-K failures or context cancellation). Errors are
-// propagated to the caller — unlike the Phase 0 shadow, failures here fail
-// the PUT.
+// propagated to the caller: a failed quorum-meta write fails the PUT.
 //
 // errQuorumMetaCASReject handling: a CAS reject is ONE replica's vote, NOT a
 // global short-circuit. With ordinary K-of-N replica skew (some replicas at

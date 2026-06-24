@@ -23,7 +23,8 @@ type FSM struct {
 	clusterID [16]byte
 	dekKeeper *encrypt.DEKKeeper
 
-	// Guards onMigrateShard and commitNotifier against concurrent Set* calls + Apply.
+	// Guards onMigrateShard, commitNotifier, and balancerNotifier against
+	// concurrent Set* calls + Apply.
 	mu sync.RWMutex
 
 	// Optional hooks for Phase 13 balancer. Nil when no peers configured/non-balancer mode.

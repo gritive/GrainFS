@@ -103,12 +103,3 @@ run the multi-node (GCP) verdict vs a local smoke test:
 RUNS=1 WARP_DURATION=10s ANCHOR=0 ./benchmarks/cross_binary_ab.sh
 # results: benchmarks/profiles/cross-binary-ab-<timestamp>/verdict.md
 ```
-
-## Phase 0 — Quorum-Meta Shadow Write (kill-only perf spike)
-
-Experimental, measurement-only developer harness for ROADMAP Phase 0 — measures
-whether a leaderless quorum-meta-write tail is egregiously slower than the
-raft-commit tail at conc32. Gated OFF by default (`GRAINFS_QUORUM_META_SHADOW`),
-not a user feature. Procedure, pre-registered decision rule, and the
-`analyze_put_trace.py` verdict tool: see
-[`phase0_quorum_meta_shadow/README.md`](phase0_quorum_meta_shadow/README.md).
