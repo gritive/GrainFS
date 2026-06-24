@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.671.0] - 2026-06-25
+
+### Fixed
+- Object PUT returned `500 InternalError` ("MetaBucketStore not wired") for any bucket placed off
+  group-0 — including the auto-created `default` bucket on a fresh single-node or cluster server, so
+  an anonymous PUT to `s3://default` failed out of the box. Bucket-versioning resolution is now wired
+  into every owned data group, not just group-0, so writes routed to any group succeed.
+
 ## [0.0.670.0] - 2026-06-25
 
 ### Changed

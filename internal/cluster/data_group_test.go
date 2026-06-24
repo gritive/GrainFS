@@ -207,3 +207,31 @@ func (n *dataGroupHealthNode) PeerMatchIndex(peer string) (uint64, bool) {
 	v, ok := n.match[peer]
 	return v, ok
 }
+
+// TestDataGroupManager_SetMetaBucketStore_WiresAllOwnedBackends is the
+// regression guard for the group-0 demotion wiring gap: the meta-bucket seam
+// (bucket versioning/policy) must reach EVERY owned data-group backend, not just
+// group-0. Without it, a data-plane read (e.g. PutObject's previous-object
+// HeadObject) routed to a non-group-0 owned group hits a nil MetaBucketStore and
+// fails 500 "MetaBucketStore not wired".
+func TestDataGroupManager_SetMetaBucketStore_WiresAllOwnedBackends(t *testing.T) {
+	mgr := NewDataGroupManager()
+	gb0 := &GroupBackend{DistributedBackend: &DistributedBackend{}}
+	mgr.Add(NewDataGroupWithBackend("group-0", nil, gb0))
+	require.Nil(t, gb0.MetaBucketStore(), "precondition: backend starts unwired")
+
+	mbs := newDirectFSMMetaBucketStore(nil)
+	mgr.SetMetaBucketStore(mbs)
+	require.NotNil(t, gb0.MetaBucketStore(), "an already-registered owned group backend must be wired")
+
+	// A group added AFTER SetMetaBucketStore (dynamic AddGroup / evacuation /
+	// placeholder→real swap) must also receive the seam.
+	gb1 := &GroupBackend{DistributedBackend: &DistributedBackend{}}
+	mgr.Add(NewDataGroupWithBackend("group-1", nil, gb1))
+	require.NotNil(t, gb1.MetaBucketStore(), "a group added after SetMetaBucketStore must be wired")
+
+	// A placeholder group (nil backend) must not panic.
+	require.NotPanics(t, func() {
+		mgr.Add(NewDataGroupWithBackend("group-2", nil, nil))
+	})
+}
