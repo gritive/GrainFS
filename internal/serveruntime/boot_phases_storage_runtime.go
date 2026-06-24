@@ -177,7 +177,7 @@ func bootShardService(ctx context.Context, state *bootState) error {
 // the Start site.)
 func bootShardRoutes(state *bootState) error {
 	// Native /shard/rpc buffered route — carries every buffered shard op
-	// (Write/Read/ReadRange/Delete/quorum-meta/shadow-meta/Ping).
+	// (Write/Read/ReadRange/Delete/quorum-meta/Ping).
 	state.clusterTransport.RegisterBufferedRoute(transport.RouteShardRPC, state.shardSvc.NativeRPCHandler())
 	// Native /shard/write route (Phase 8 N6).
 	state.clusterTransport.RegisterShardWriteHandler(state.shardSvc.NativeWriteHandler())

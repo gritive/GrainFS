@@ -469,8 +469,7 @@ func (b *DistributedBackend) fetchQuorumMetaFromPeers(bucket, key string) ([]byt
 // fanOutQuorumMeta dispatches to every placement node concurrently and returns
 // as soon as K acks arrive. Returns an error only when the quorum becomes
 // unreachable (more than N-K failures or context cancellation). Errors are
-// propagated to the caller — unlike the Phase 0 shadow, failures here fail
-// the PUT.
+// propagated to the caller: a failed quorum-meta write fails the PUT.
 //
 // errQuorumMetaCASReject handling: a CAS reject is ONE replica's vote, NOT a
 // global short-circuit. With ordinary K-of-N replica skew (some replicas at
@@ -1922,7 +1921,7 @@ func (b *DistributedBackend) readQuorumMetaCmd(bucket, key string) (PutObjectMet
 }
 
 // WriteQuorumMeta sends the quorum meta blob to a remote placement node via the
-// shard transport (mirrors WriteShadowMeta but routes to the primary handler).
+// shard transport (thin mirror of WriteShard, routed to the quorum-meta handler).
 func (s *ShardService) WriteQuorumMeta(ctx context.Context, addr, bucket, key string, data []byte) error {
 	if s.transport == nil {
 		return fmt.Errorf("quorum meta: no transport")

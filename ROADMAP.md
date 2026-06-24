@@ -48,6 +48,7 @@
 가역성은 git이 준다 — 옛 시스템=master, 신규=브랜치, **벤치 통과 전 merge 안 함**. 합의 2회는 Phase 4서 완전 제거되므로 **결정 게이트는 Phase 4 직후(Phase 5)**, perf 무관한 plane-split은 그 뒤.
 
 ### Phase 0 — Perf spike ★kill-only 필터 (삭제 0, 가역)
+> **Status:** shadow 측정 하니스/벤치마크 코드 제거됨(dead code 정리, 2026-06). 아래는 당시 측정 설계 기록.
 - 기존 시스템에 per-node quorum 메타 write를 shadow로 추가(GET/LIST/delete 불요), 이 에픽의 put_trace로 write-tail을 raft-commit과 conc32 비교.
 - **목표**: 명백한 dealbreaker만 차단(quorum-write가 비상식적으로 느리면 STOP).
 - **한계(정직)**: raft가 *여전히 도므로* stage-tail ≠ end-to-end. raft의 *부재* 효과(contention 해소+overlap 붕괴)는 측정 불가 — 64KiB서 meta_index 17→11ms인데 http_put_total flat이었던 바로 그 confound. **necessary-not-sufficient: 통과해도 green-light 아님, 진짜 confirm은 Phase 5 벤치.**
