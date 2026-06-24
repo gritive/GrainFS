@@ -26,6 +26,32 @@ func TestBucketRecord_ApplyPutBucketAssignment_ReplayCompat(t *testing.T) {
 	assert.Equal(t, map[string]string{"b1": "group-2"}, assignments)
 }
 
+// TestBucketRecord_ApplyPutBucketAssignment_PreservesVersioningPolicy is the
+// regression-lock for the replay-compat RMW at meta_fsm_placement.go:260-262.
+// A GroupID-only PutBucketAssignment must update GroupID while PRESERVING any
+// existing Versioning/Policy — it must NOT do a whole-record overwrite that
+// clobbers them back to zero. Fails if apply ever switches to a blind
+// f.bucketRecords[bucket] = BucketRecord{GroupID: groupID} overwrite.
+func TestBucketRecord_ApplyPutBucketAssignment_PreservesVersioningPolicy(t *testing.T) {
+	f := NewMetaFSM()
+	f.mu.Lock()
+	f.bucketRecords["b1"] = BucketRecord{
+		GroupID:    "group-1",
+		Versioning: "Enabled",
+		Policy:     []byte(`{"d":1}`),
+	}
+	f.mu.Unlock()
+
+	// GroupID-only command (encoder carries no versioning/policy).
+	require.NoError(t, f.applyCmd(makePutBucketAssignmentCmd(t, "b1", "group-2")))
+
+	rec, ok := f.BucketRecord("b1")
+	require.True(t, ok)
+	assert.Equal(t, "group-2", rec.GroupID, "GroupID must be updated")
+	assert.Equal(t, "Enabled", rec.Versioning, "Versioning must be preserved, not clobbered")
+	assert.Equal(t, []byte(`{"d":1}`), rec.Policy, "Policy must be preserved, not clobbered")
+}
+
 // TestBucketRecord_DeepCopy verifies that mutating the returned Policy slice
 // does NOT change FSM state.
 func TestBucketRecord_DeepCopy(t *testing.T) {
