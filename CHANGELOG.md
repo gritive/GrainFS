@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.666.0] - 2026-06-25
+
+### Changed
+- **Internal cleanup, no user-facing change.** Removed two dead internal symbols and the leftover
+  harness around one of them: the disabled "quorum-meta shadow" Phase 0 perf-spike (a
+  measurement-only, permanently-off code path, including its `WriteShadowMeta` shard RPC route, its
+  benchmark harness under `benchmarks/phase0_quorum_meta_shadow/`, and the `GRAINFS_QUORUM_META_SHADOW`
+  developer env knob); and an unused `operatorStateSource` scaffolding struct. No wire format, API,
+  CLI, or runtime behavior change — the metrics and quorum-meta paths keep their existing live code.
+
 ## [0.0.665.0] - 2026-06-25
 
 ### Changed
