@@ -31,7 +31,6 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 		"--cluster-append-forward-buffer-max-per-request", "1048576",
 		"--append-size-cap-bytes", "67108864",
 		"--pack-threshold", "31",
-		"--shard-pack-threshold", "41",
 		"--scrub-interval", "7s",
 		"--scrub-orphan-age", "11m",
 		"--ec-redundancy-upgrade=false",
@@ -100,7 +99,6 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 
 	// Storage knobs.
 	require.Equal(t, 31, opts.PackThreshold)
-	require.Equal(t, 41, opts.ShardPackThreshold)
 	require.True(t, opts.MeasureReadAmp)
 	require.Equal(t, int64(134217728), opts.ShardCacheSize)
 

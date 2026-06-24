@@ -31,10 +31,9 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 		AppendForwardBufferMaxPerRequest: int64(1 << 20),
 		AppendSizeCapBytes:               int64(1 << 26),
 
-		PackThreshold:      31,
-		ShardPackThreshold: 41,
-		MeasureReadAmp:     true,
-		ShardCacheSize:     int64(1 << 27),
+		PackThreshold:  31,
+		MeasureReadAmp: true,
+		ShardCacheSize: int64(1 << 27),
 
 		ScrubInterval:          7 * time.Second,
 		ScrubOrphanAge:         11 * time.Minute,
@@ -117,7 +116,6 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 	require.Equal(t, opts.MeasureReadAmp, cfg.MeasureReadAmp)
 	require.Equal(t, opts.ShardCacheSize, cfg.ShardCacheSize)
 	require.Equal(t, opts.PackThreshold, cfg.PackThreshold)
-	require.Equal(t, opts.ShardPackThreshold, cfg.ShardPackThreshold)
 
 	// Heal receipts.
 	require.Equal(t, opts.HealReceiptEnabled, cfg.HealReceiptEnabled)

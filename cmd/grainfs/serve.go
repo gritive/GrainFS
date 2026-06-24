@@ -33,7 +33,6 @@ func registerAllServeFlags(cmd *cobra.Command) {
 	cmd.Flags().Int64("append-size-cap-bytes", 5*1024*1024*1024*1024,
 		"Per-object total size cap for AppendObject in bytes (default 5 TiB, S3 PutObject parity).")
 	cmd.Flags().Int("pack-threshold", 65537, "pack objects below this size into blob files (0 = disabled, e.g. 65537)")
-	cmd.Flags().Int("shard-pack-threshold", 0, "DISABLED: cluster shard-packing is no longer supported (a durable pack index was never built); any value > 0 fails to boot")
 	cmd.Flags().Duration("scrub-interval", 24*time.Hour, "EC shard scrub interval (always on; 0 resets to default 24h)")
 	cmd.Flags().Duration("scrub-orphan-age", 5*time.Minute,
 		"minimum filesystem mtime age before an orphan raw segment is eligible for sweep")
