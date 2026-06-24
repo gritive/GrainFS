@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.0.659.0] - 2026-06-24
+
+### Fixed
+- **Non-force bucket delete no longer silently deletes a non-empty bucket whose versioning is not
+  `Enabled` (never-versioned or `Suspended`) — a data-loss bug.** Greenfield non-versioned (and
+  `Suspended`) objects live in the latest-only quorum-meta blob tree (and, for a `Suspended` bucket,
+  the per-version tree carries versions preserved from a prior `Enabled` era), but the emptiness
+  check scanned only the now-dead FSM `obj:` records, so it always saw the bucket as empty and
+  removed it. The check now probes both blob trees cluster-wide and fail-closed (latest-only via
+  `scanQuorumMetaClusterAll`, excluding `IsDeleteMarker`/`IsHardDeleted` tombstones so an all-deleted
+  bucket still deletes; per-version via the existing blob-authoritative reader), returning
+  `BucketNotEmpty` (HTTP 409) when any live object remains. Single-node and cluster.
+- **Admin force-delete (`grainfs bucket delete --force`) is now version-aware.** It previously ran a
+  generic latest-only object walk that soft-deleted objects without purging the per-version tree, so
+  a versioned or `Suspended` bucket could not be force-deleted (it failed the per-version emptiness
+  check) and non-versioned objects' EC shards were orphaned. Force-delete now hard-purges BOTH blob
+  trees — latest-only shards + qmeta, and per-version blobs (versioned shards are then reclaimed by
+  the orphan-shard walker) — so `--force` correctly empties and removes non-versioned, `Suspended`,
+  and versioned buckets. Force-deleting a missing bucket still returns `NoSuchBucket` (404).
+
 ## [0.0.658.0] - 2026-06-24
 
 ### Changed
