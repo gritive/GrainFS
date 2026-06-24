@@ -281,6 +281,23 @@ func buildGetObjectTagsArgs(bucket, key, versionID string) []byte {
 	return b.FinishedBytes()
 }
 
+func buildSetObjectQuarantineArgs(bucket, key, versionID, cause, reason string) []byte {
+	b := flatbuffers.NewBuilder(256)
+	bk := b.CreateString(bucket)
+	bkey := b.CreateString(key)
+	bvid := b.CreateString(versionID)
+	bcause := b.CreateString(cause)
+	breason := b.CreateString(reason)
+	raftpb.SetObjectQuarantineArgsStart(b)
+	raftpb.SetObjectQuarantineArgsAddBucket(b, bk)
+	raftpb.SetObjectQuarantineArgsAddKey(b, bkey)
+	raftpb.SetObjectQuarantineArgsAddVersionId(b, bvid)
+	raftpb.SetObjectQuarantineArgsAddCause(b, bcause)
+	raftpb.SetObjectQuarantineArgsAddReason(b, breason)
+	b.Finish(raftpb.SetObjectQuarantineArgsEnd(b))
+	return b.FinishedBytes()
+}
+
 // buildGetObjectTagsReply packs []storage.Tag into ForwardReply.tags. Empty
 // tag set is encoded as a zero-length vector via the absent tags field;
 // tagsFromReply returns nil for both, preserving the GetObjectTags contract.

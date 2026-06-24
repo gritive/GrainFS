@@ -101,8 +101,8 @@ func (b *DistributedBackend) headObjectMetaV(ctx context.Context, bucket, key, v
 	// On a MISS we fall through to the BadgerDB ObjectMetaKeyV FSM read ONLY,
 	// SKIPPING the stale latest-only readQuorumMeta block below — that step would
 	// resurrect a hard-deleted version from the latest-only blob (not maintained
-	// on hard-delete-of-latest). The FSM read is safe: applyDeleteObjectVersion
-	// deletes the ObjectMetaKeyV record, so a hard-deleted version still 404s,
+	// on hard-delete-of-latest). The FSM read is safe: the ObjectMetaKeyV record
+	// is absent for a hard-deleted version, so a hard-deleted version still 404s,
 	// while a mixed-era pre-S1 version (FSM record only, no per-version blob —
 	// S1's blob write is versioning+post-S1 gated) correctly resolves.
 	versioningEnabled := b.bucketVersioningEnabled(ctx, bucket)
@@ -229,10 +229,10 @@ func (b *DistributedBackend) getObjectVersionCtx(ctx context.Context, bucket, ke
 	if obj.IsDeleteMarker {
 		return nil, nil, storage.ErrMethodNotAllowed
 	}
-	if blocked, q, qerr := b.isObjectQuarantined(bucket, key, versionID); qerr != nil {
+	if blocked, cause, qerr := b.isObjectQuarantined(bucket, key, versionID); qerr != nil {
 		return nil, nil, fmt.Errorf("check quarantine: %w", qerr)
 	} else if blocked {
-		return nil, nil, objectQuarantinedError(bucket, key, q)
+		return nil, nil, objectQuarantinedError(bucket, key, cause)
 	}
 	if obj.IsAppendable && (len(obj.Segments) > 0 || len(obj.Coalesced) > 0) && obj.Size > 0 {
 		return b.openAppendableSegments(bucket, key, obj), obj, nil
@@ -311,30 +311,9 @@ func (b *DistributedBackend) DeleteObjectVersion(bucket, key, versionID string) 
 			return nil
 		}
 		// blob-absent: this is a carve-out (appendable/coalesced/legacy-bare) that
-		// stays FSM-authoritative, or a truly-absent version. Fall through to the
-		// legacy FSM-delete path so a carve-out's FSM record IS removed (a tombstone
-		// would be meaningless for an object with no per-version blob).
-	}
-
-	// Legacy path (non-versioned / internal buckets, and versioning-enabled carve-outs
-	// with no per-version blob): raft propose + cluster-wide per-version blob purge.
-	if err := b.propose(ctx, CmdDeleteObjectVersion, DeleteObjectVersionCmd{
-		Bucket:    bucket,
-		Key:       key,
-		VersionID: versionID,
-	}); err != nil {
-		return err
-	}
-	if b.shardSvc != nil {
-		cmd, ok, rerr := b.readQuorumMetaVersion(bucket, key, versionID)
-		if rerr != nil {
-			return fmt.Errorf("resolve per-version blob for delete %s/%s@%s: %w", bucket, key, versionID, rerr)
-		}
-		if ok {
-			if derr := b.deleteQuorumMetaVersionQuorum(ctx, bucket, key, versionID, cmd.NodeIDs); derr != nil {
-				return fmt.Errorf("delete per-version blob %s/%s@%s: %w", bucket, key, versionID, derr)
-			}
-		}
+		// has no per-version blob. In a greenfield cluster, carve-out FSM records
+		// are left in place — the FSM-delete raft path is removed in data-plane
+		// raft-free Slice 2. The scrubber/orphan walker handles eventual cleanup.
 	}
 	return nil
 }

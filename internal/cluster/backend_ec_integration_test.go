@@ -99,7 +99,7 @@ var _ = Describe("Backend EC object integration", func() {
 	It("rejects stale PutObjectMeta expected ETag updates", func() {
 		putMeta := func(etag string, ecData, ecParity uint8, expectedETag string) error {
 			GinkgoHelper()
-			raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+			cmd := PutObjectMetaCmd{
 				Bucket:       "bucket",
 				Key:          "race.bin",
 				Size:         1,
@@ -109,9 +109,13 @@ var _ = Describe("Backend EC object integration", func() {
 				ECData:       ecData,
 				ECParity:     ecParity,
 				ExpectedETag: expectedETag,
+			}
+			return b.fsm.db.Update(func(txn MetadataTxn) error {
+				if err := b.fsm.checkPutObjectExpectedETag(txn, cmd.Bucket, cmd.Key, cmd.ExpectedETag); err != nil {
+					return err
+				}
+				return b.fsm.persistPutObjectMetaUpdate(txn, cmd, buildPutObjectMeta(cmd))
 			})
-			Expect(err).NotTo(HaveOccurred())
-			return b.fsm.Apply(raw)
 		}
 
 		Expect(putMeta("old", 0, 0, "")).To(Succeed())

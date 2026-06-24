@@ -18,7 +18,7 @@ func TestEncodeDecodeCommand(t *testing.T) {
 		{"put_object_meta", CmdPutObjectMeta, PutObjectMetaCmd{
 			Bucket: "b", Key: "k", Size: 100, ContentType: "text/plain", ETag: "abc", ModTime: 12345,
 		}},
-		{"delete_object", CmdDeleteObject, DeleteObjectCmd{Bucket: "b", Key: "k"}},
+		// CmdDeleteObject = 4 reserved in data-plane raft-free Slice 2; EncodeCommand returns error.
 	}
 
 	for _, tt := range tests {
@@ -50,7 +50,7 @@ func TestEncodeDecodeCommand_AllTypes(t *testing.T) {
 		{"put_object_meta", CmdPutObjectMeta, PutObjectMetaCmd{
 			Bucket: "b", Key: "k", Size: 100, ContentType: "text/plain", ETag: "abc", ModTime: 12345,
 		}},
-		{"delete_object", CmdDeleteObject, DeleteObjectCmd{Bucket: "b", Key: "k"}},
+		// CmdDeleteObject = 4 reserved in data-plane raft-free Slice 2; EncodeCommand returns error.
 		// CmdCreateMultipartUpload/CmdCompleteMultipart/CmdAbortMultipart removed in M4.
 		{"set_bucket_policy", CmdSetBucketPolicy, SetBucketPolicyCmd{
 			Bucket: "b", PolicyJSON: []byte(`{"policy":true}`),

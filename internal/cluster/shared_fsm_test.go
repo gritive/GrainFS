@@ -73,22 +73,20 @@ func TestSharedFSM_BackendListObjects_ScopedToGroup(t *testing.T) {
 
 	// Helper: write a bucket + object into a group's FSM (same bucket name,
 	// same object key — to prove there is no cross-group collision).
+	// CmdPutObjectMeta is a no-op in the FSM after Slice 2; write via
+	// persistPutObjectMetaUpdate directly.
 	putObj := func(t *testing.T, f *FSM, bucket, key, etag string) {
 		t.Helper()
 		raw, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
 		require.NoError(t, err)
 		_ = f.Apply(raw) // idempotent: ignore ErrBucketAlreadyExists (applied twice is fine)
 
-		raw, err = EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
-			Bucket:      bucket,
-			Key:         key,
-			Size:        int64(len(etag)),
-			ContentType: "text/plain",
-			ETag:        etag,
-			ModTime:     1,
-		})
-		require.NoError(t, err)
-		require.NoError(t, f.Apply(raw))
+		cmd := PutObjectMetaCmd{
+			Bucket: bucket, Key: key, Size: int64(len(etag)), ContentType: "text/plain", ETag: etag, ModTime: 1,
+		}
+		require.NoError(t, f.db.Update(func(txn MetadataTxn) error {
+			return f.persistPutObjectMetaUpdate(txn, cmd, buildPutObjectMeta(cmd))
+		}))
 	}
 
 	const bucket = "shared-bucket"
@@ -134,17 +132,22 @@ func TestSharedFSM_BackendListObjects_ScopedToGroup(t *testing.T) {
 	assert.Error(t, err, "obj2-only-in-A should not be visible from group-B")
 }
 
-// putObjViaApply writes a bucket + object into a group's FSM via the apply path.
+// putObjViaApply writes a bucket + object into a group's FSM. The bucket is
+// created via the raft apply path; the object meta is written via
+// persistPutObjectMetaUpdate directly because CmdPutObjectMeta is a no-op in
+// the FSM after data-plane raft-free Slice 2 (the live write path is
+// writeQuorumMeta).
 func putObjViaApply(t *testing.T, f *FSM, bucket, key, etag string) {
 	t.Helper()
 	raw, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
 	require.NoError(t, err)
 	_ = f.Apply(raw) // idempotent
-	raw, err = EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+	cmd := PutObjectMetaCmd{
 		Bucket: bucket, Key: key, Size: int64(len(etag)), ContentType: "text/plain", ETag: etag, ModTime: 1,
-	})
-	require.NoError(t, err)
-	require.NoError(t, f.Apply(raw))
+	}
+	require.NoError(t, f.db.Update(func(txn MetadataTxn) error {
+		return f.persistPutObjectMetaUpdate(txn, cmd, buildPutObjectMeta(cmd))
+	}))
 }
 
 // fsmHasKey reports whether the group-relative key exists in f's keyspace.

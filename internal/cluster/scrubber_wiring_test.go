@@ -33,10 +33,12 @@ func writePlacement(t clusterTestTB, b *DistributedBackend, db *badger.DB, bucke
 }
 
 // seedPlacementMeta writes an object metadata record (including EC placement)
-// via FSM Apply, so that readPlacementMeta can resolve it.
+// directly into the FSM's DB, so that readPlacementMeta can resolve it.
+// CmdPutObjectMeta is a no-op in apply.go (raft-free Slice 2), so we persist
+// directly via persistPutObjectMetaUpdate.
 func seedPlacementMeta(t clusterTestTB, b *DistributedBackend, bucket, key, versionID string, nodes []string, ecData, ecParity uint8) {
 	t.Helper()
-	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+	cmd := PutObjectMetaCmd{
 		Bucket:      bucket,
 		Key:         key,
 		VersionID:   versionID,
@@ -47,12 +49,11 @@ func seedPlacementMeta(t clusterTestTB, b *DistributedBackend, bucket, key, vers
 		ECData:      ecData,
 		ECParity:    ecParity,
 		NodeIDs:     nodes,
-	})
-	if err != nil {
-		t.Fatalf("encode placement meta: %v", err)
 	}
-	if err := b.fsm.Apply(raw); err != nil {
-		t.Fatalf("apply placement meta: %v", err)
+	if err := b.fsm.db.Update(func(txn MetadataTxn) error {
+		return b.fsm.persistPutObjectMetaUpdate(txn, cmd, buildPutObjectMeta(cmd))
+	}); err != nil {
+		t.Fatalf("seed placement meta: %v", err)
 	}
 }
 
@@ -68,7 +69,7 @@ func TestOwnedShards_MetadataOnlyPlacement(t *testing.T) {
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 	b := &DistributedBackend{store: badgermeta.Wrap(db), fsm: fsm}
 
-	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+	cmd := PutObjectMetaCmd{
 		Bucket:      "b",
 		Key:         "obj",
 		VersionID:   "v1",
@@ -79,9 +80,10 @@ func TestOwnedShards_MetadataOnlyPlacement(t *testing.T) {
 		ECData:      2,
 		ECParity:    1,
 		NodeIDs:     []string{"test-node", "other", "test-node"},
-	})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(raw))
+	}
+	require.NoError(t, fsm.db.Update(func(txn MetadataTxn) error {
+		return fsm.persistPutObjectMetaUpdate(txn, cmd, buildPutObjectMeta(cmd))
+	}))
 
 	got := b.OwnedShards("b", "obj", "v1", "test-node")
 	assert.Equal(t, []int{0, 2}, got)

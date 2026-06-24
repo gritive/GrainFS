@@ -601,15 +601,11 @@ func (r *ForwardReceiver) handleDeleteObject(dg *DataGroup, args []byte) []byte 
 	}, bucket)
 }
 
-// handleHardDeleteObject serves the soleauth=on force-delete hard-delete of a
-// legacy-bare obj:{bucket}/{key} record (CmdDeleteObject VID="", NO tombstone) —
-// distinct from handleDeleteObject which writes a delete-marker tombstone.
-// Idempotent: a no-op when the bare record is absent on this group.
-func (r *ForwardReceiver) handleHardDeleteObject(dg *DataGroup, args []byte) []byte {
-	da := raftpb.GetRootAsDeleteObjectArgs(args, 0)
-	if err := dg.Backend().HardDeleteLegacyObject(context.Background(), string(da.Bucket()), string(da.Key())); err != nil {
-		return statusReply(mapErrorToStatus(err))
-	}
+// handleHardDeleteObject is reserved, removed in data-plane raft-free Slice 2.
+// ForwardOpHardDeleteObject = 23 is kept in the dispatch table for wire
+// compatibility (no live emitter after hardDeleteLegacyObject was deleted); any
+// stale in-flight frame is a no-op.
+func (r *ForwardReceiver) handleHardDeleteObject(_ *DataGroup, _ []byte) []byte {
 	return buildOKReply()
 }
 
@@ -651,6 +647,14 @@ func (r *ForwardReceiver) handleGetObjectTags(dg *DataGroup, args []byte) []byte
 		return statusReply(mapErrorToStatus(err))
 	}
 	return buildGetObjectTagsReply(tags)
+}
+
+func (r *ForwardReceiver) handleSetObjectQuarantine(dg *DataGroup, args []byte) []byte {
+	a := raftpb.GetRootAsSetObjectQuarantineArgs(args, 0)
+	if err := dg.Backend().QuarantineObject(context.Background(), string(a.Bucket()), string(a.Key()), string(a.VersionId()), string(a.Cause()), string(a.Reason())); err != nil {
+		return statusReply(mapErrorToStatus(err))
+	}
+	return buildOKReply()
 }
 
 func (r *ForwardReceiver) handleDeleteObjectVersion(dg *DataGroup, args []byte) []byte {

@@ -366,8 +366,28 @@ func (rcv *PutObjectMetaCmd) MutateMetaSeqCas(n bool) bool {
 	return rcv._tab.MutateBoolSlot(54, n)
 }
 
+func (rcv *PutObjectMetaCmd) IsQuarantined() bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(56))
+	if o != 0 {
+		return rcv._tab.GetBool(o + rcv._tab.Pos)
+	}
+	return false
+}
+
+func (rcv *PutObjectMetaCmd) MutateIsQuarantined(n bool) bool {
+	return rcv._tab.MutateBoolSlot(56, n)
+}
+
+func (rcv *PutObjectMetaCmd) QuarantineCause() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(58))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
 func PutObjectMetaCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(26)
+	builder.StartObject(28)
 }
 func PutObjectMetaCmdAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -464,6 +484,12 @@ func PutObjectMetaCmdAddIsAppendable(builder *flatbuffers.Builder, isAppendable 
 }
 func PutObjectMetaCmdAddMetaSeqCas(builder *flatbuffers.Builder, metaSeqCas bool) {
 	builder.PrependBoolSlot(25, metaSeqCas, false)
+}
+func PutObjectMetaCmdAddIsQuarantined(builder *flatbuffers.Builder, isQuarantined bool) {
+	builder.PrependBoolSlot(26, isQuarantined, false)
+}
+func PutObjectMetaCmdAddQuarantineCause(builder *flatbuffers.Builder, quarantineCause flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(27, flatbuffers.UOffsetT(quarantineCause), 0)
 }
 func PutObjectMetaCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

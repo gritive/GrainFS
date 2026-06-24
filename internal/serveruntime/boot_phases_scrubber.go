@@ -217,6 +217,14 @@ func bootRecoveryAndScrubber(ctx context.Context, state *bootState) error {
 			if clusterIncidentRecorder != nil {
 				gb.SetIncidentRecorder(clusterIncidentRecorder)
 			}
+			// Route the quarantine SET through the coordinator so the owning
+			// group's RMW lock serializes it: the placement monitor can run on a
+			// non-owner node (balancer floats shards), where a leaf-local blob RMW
+			// would only hold THIS node's lock and could lose the quarantine flag
+			// to a concurrent owner-side write on the MetaSeq LWW tiebreak.
+			if state.clusterCoord != nil {
+				gb.SetQuarantineRouter(state.clusterCoord)
+			}
 			placementMonitor := cluster.NewShardPlacementMonitor(gb.FSMRef(), gb, shardSvc, gb.NodeID(), cfg.ScrubInterval)
 			placementMonitor.SetOnMissing(func(target cluster.ECShardScanTarget, shardIdx int) {
 				correlationID := uuid.Must(uuid.NewV7()).String()

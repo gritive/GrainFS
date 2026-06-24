@@ -129,14 +129,15 @@ func TestDistributedBackendDEKFramedFSMValueSurvivesDBReopen(t *testing.T) {
 	t.Cleanup(func() { _ = svc.Close() })
 	backend.SetShardService(svc, []string{"self"})
 
-	cmd, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+	putCmd := PutObjectMetaCmd{
 		Bucket:       "b",
 		Key:          "k",
 		VersionID:    "v1",
 		UserMetadata: map[string]string{"x-secret": "metadata-secret"},
-	})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(cmd))
+	}
+	require.NoError(t, fsm.db.Update(func(txn MetadataTxn) error {
+		return fsm.persistPutObjectMetaUpdate(txn, putCmd, buildPutObjectMeta(putCmd))
+	}))
 
 	metaKey := keys.ObjectMetaKeyV("b", "k", "v1")
 	require.NoError(t, db.View(func(txn *badger.Txn) error {

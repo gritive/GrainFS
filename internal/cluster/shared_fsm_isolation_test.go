@@ -189,24 +189,25 @@ func TestSharedFSM_PrefixIsolation_AllPaths(t *testing.T) {
 			},
 		},
 		{
-			// DeleteObject: A deletes obj1; B's obj1 survives.
-			name: "DeleteObject_DoesNotAffectPeer",
+			// DeleteBucket: A deletes a bucket; B's same-name bucket survives.
+			// CmdDeleteObject = 4 is retired (data-plane raft-free Slice 2 no-op);
+			// bucket-level isolation via CmdDeleteBucket exercises the same keyspace
+			// partitioning.
+			name: "DeleteBucket_DoesNotAffectPeer",
 			exercise: func(t *testing.T) {
-				_, _, _, fA, fB, backendA, backendB := setupTwoGroups(t)
+				_, _, _, fA, fB := setupTwoFSMs(t)
 
-				putObjViaApply(t, fA, bucket, "obj1", "A-etag")
-				putObjViaApply(t, fB, bucket, "obj1", "B-etag")
+				applyCmd(t, fA, CmdCreateBucket, CreateBucketCmd{Bucket: "bktX"})
+				applyCmd(t, fB, CmdCreateBucket, CreateBucketCmd{Bucket: "bktX"})
 
-				// Legacy hard-delete (no VersionID).
-				applyCmd(t, fA, CmdDeleteObject, DeleteObjectCmd{Bucket: bucket, Key: "obj1"})
+				// A deletes the bucket; B's copy must survive.
+				applyCmd(t, fA, CmdDeleteBucket, DeleteBucketCmd{Bucket: "bktX"})
 
-				ctx := context.Background()
-				_, _, err := backendA.headObjectMeta(ctx, bucket, "obj1")
-				assert.Error(t, err, "A's obj1 must be gone after delete")
-
-				objB, _, err := backendB.headObjectMeta(ctx, bucket, "obj1")
-				require.NoError(t, err, "B's obj1 must survive A's delete")
-				assert.Equal(t, "B-etag", objB.ETag)
+				// fsmHasKey takes the raw (unprefixed) key — it adds the group prefix.
+				assert.False(t, fsmHasKey(t, fA, "bucket:bktX"),
+					"A's bucket key must be gone after delete")
+				assert.True(t, fsmHasKey(t, fB, "bucket:bktX"),
+					"B's bucket key must survive A's delete")
 			},
 		},
 		{
@@ -260,29 +261,28 @@ func TestSharedFSM_PrefixIsolation_AllPaths(t *testing.T) {
 			},
 		},
 		{
-			// SetObjectACL: A sets ACL on obj1; B has the same obj1 but different ACL
-			// (or none). Quarantine: A quarantines obj1; B's obj1 unaffected.
-			name: "ObjectACL_Quarantine_Isolation",
+			// Quarantine_Isolation: CmdPutObjectQuarantine is reserved/removed in
+			// data-plane raft-free Slice 2 (quarantine now lives in the quorum-meta blob
+			// via IsQuarantined/QuarantineCause). Verify the FSM never writes quarantine
+			// keys — the FSM keyspace is clean.
+			name: "Quarantine_Isolation",
 			exercise: func(t *testing.T) {
 				_, ksA, ksB, fA, fB := setupTwoFSMs(t)
 
 				putObjViaApply(t, fA, bucket, "obj1", "A-etag")
 				putObjViaApply(t, fB, bucket, "obj1", "B-etag")
 
-				// Set ACL on A's obj1.
-				applyCmd(t, fA, CmdSetObjectACL, SetObjectACLCmd{
-					Bucket: bucket, Key: "obj1", ACL: 2,
-				})
-
-				// Quarantine A's obj1.
-				applyCmd(t, fA, CmdPutObjectQuarantine, PutObjectQuarantineCmd{
-					Bucket: "b", Key: "obj1", Cause: "test", Reason: "isolation test",
-				})
-
-				qA := ksA.QuarantineKey(bucket, "obj1", "")
-				qB := ksB.QuarantineKey(bucket, "obj1", "")
+				// CmdPutObjectQuarantine is reserved/removed: quarantine now lives in
+				// the quorum-meta blob, never in the FSM. The retired QuarantineKey
+				// helper is gone (no production reader), so the legacy FSM key is
+				// inlined here purely for this negative assertion.
+				legacyQKey := func(ks *stateKeyspace) []byte {
+					return ks.Key([]byte("quarantine:" + bucket + "\x00obj1\x00"))
+				}
+				qA := legacyQKey(ksA)
+				qB := legacyQKey(ksB)
 				assert.NotEqual(t, qA, qB, "quarantine keys must be distinct")
-				assert.True(t, dbHasKey(t, fA.db, qA), "A's quarantine key must exist")
+				assert.False(t, dbHasKey(t, fA.db, qA), "A's quarantine key must NOT be written (removed Slice 2)")
 				assert.False(t, dbHasKey(t, fB.db, qB), "B must not have a quarantine key")
 			},
 		},
@@ -338,22 +338,26 @@ func TestSharedFSM_PrefixIsolation_AllPaths(t *testing.T) {
 				_, _, _, fA, fB, backendA, _ := setupTwoGroups(t)
 
 				// ListAllObjectsStrict iterates obj: versioned keys; need a VersionID.
-				raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+				// CmdPutObjectMeta is a no-op in the FSM after Slice 2; write via
+				// persistPutObjectMetaUpdate directly.
+				cmdA := PutObjectMetaCmd{
 					Bucket: bucket, Key: "snap-a", Size: 1, ContentType: "text/plain",
 					ETag: "A-snap", ModTime: 1, VersionID: "v1",
-				})
-				require.NoError(t, err)
-				require.NoError(t, fA.Apply(raw))
+				}
+				require.NoError(t, fA.db.Update(func(txn MetadataTxn) error {
+					return fA.persistPutObjectMetaUpdate(txn, cmdA, buildPutObjectMeta(cmdA))
+				}))
 
-				raw, err = EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+				cmdB := PutObjectMetaCmd{
 					Bucket: bucket, Key: "snap-b", Size: 1, ContentType: "text/plain",
 					ETag: "B-snap", ModTime: 1, VersionID: "v1",
-				})
-				require.NoError(t, err)
-				require.NoError(t, fB.Apply(raw))
+				}
+				require.NoError(t, fB.db.Update(func(txn MetadataTxn) error {
+					return fB.persistPutObjectMetaUpdate(txn, cmdB, buildPutObjectMeta(cmdB))
+				}))
 
 				// Also create the bucket in A (needed for ListAllObjectsStrict → ListBuckets).
-				raw, err = EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
+				raw, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
 				require.NoError(t, err)
 				_ = fA.Apply(raw)
 

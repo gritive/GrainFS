@@ -2,7 +2,6 @@ package cluster
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strconv"
 	"sync"
@@ -95,9 +94,15 @@ func (f *FSM) ApplyTxn(txn MetadataTxn, raw []byte) error {
 	case CmdDeleteBucket:
 		return f.applyDeleteBucket(txn, cmd.Data)
 	case CmdPutObjectMeta:
-		return f.applyPutObjectMeta(txn, cmd.Data)
+		// reserved, removed in data-plane raft-free Slice 2; blob CAS-quorum is
+		// authoritative. No production proposer; greenfield — no raft-log replay of
+		// these commands. No-op on any stale entries.
+		return nil
 	case CmdDeleteObject:
-		return f.applyDeleteObject(txn, cmd.Data)
+		// reserved, removed in data-plane raft-free Slice 2; force-delete is now
+		// blob-physical (quorum-meta + shards). No production proposer; greenfield —
+		// no raft-log replay of these commands. No-op on any stale entries.
+		return nil
 	case CmdCreateMultipartUpload, CmdCompleteMultipart, CmdAbortMultipart:
 		// reserved, removed in multipart-off-raft epic (M4): no production proposer,
 		// greenfield — no raft-log replay of these commands. No-op on stale entries.
@@ -116,19 +121,27 @@ func (f *FSM) ApplyTxn(txn MetadataTxn, raw []byte) error {
 	case CmdSetRing:
 		return f.applySetRing(txn, cmd.Data)
 	case CmdDeleteObjectVersion:
-		return f.applyDeleteObjectVersion(txn, cmd.Data)
+		// reserved, removed in data-plane raft-free Slice 2; delete is now
+		// blob-tombstone/physical (per-version blob LWW + quorum-meta purge). No
+		// production proposer; greenfield — no raft-log replay of these commands.
+		// No-op on any stale entries.
+		return nil
 	case CmdSetBucketVersioning:
 		return f.applySetBucketVersioning(txn, cmd.Data)
-	case CmdSetObjectACL:
-		return f.applySetObjectACL(txn, cmd.Data)
-	case CmdSetObjectTags:
-		return f.applySetObjectTags(txn, cmd.Data)
+	case CmdSetObjectACL, CmdSetObjectTags:
+		// reserved, removed in data-plane raft-free Slice 2; blob RMW is
+		// authoritative. No production proposer; no raft-log replay of these
+		// commands in a greenfield cluster. No-op on any stale entries.
+		return nil
 	case CmdAppendObject, CmdCoalesceSegments:
 		// reserved, removed in append/coalesce-off-raft Slice 1; no production
 		// proposer; greenfield — no raft-log replay of these commands. No-op on stale entries.
 		return nil
 	case CmdPutObjectQuarantine:
-		return f.applyPutObjectQuarantine(txn, cmd.Data)
+		// reserved, removed in data-plane raft-free Slice 2; quarantine is now
+		// stored in the quorum-meta blob (IsQuarantined/QuarantineCause). No
+		// production proposer; no raft-log replay in a greenfield cluster.
+		return nil
 	case CmdResealFSMValues:
 		return f.applyResealFSMValues(txn, cmd.Data)
 	case CmdFSMValueResealDone:
@@ -152,21 +165,6 @@ func (f *FSM) Apply(raw []byte) error {
 	return f.db.Update(func(txn MetadataTxn) error {
 		return f.ApplyTxn(txn, raw)
 	})
-}
-
-func (f *FSM) applyPutObjectQuarantine(txn MetadataTxn, data []byte) error {
-	c, err := decodePutObjectQuarantineCmd(data)
-	if err != nil {
-		return err
-	}
-	if c.Bucket == "" || c.Key == "" {
-		return errors.New("quarantine: bucket and key are required")
-	}
-	value, err := encodePutObjectQuarantineCmd(c)
-	if err != nil {
-		return err
-	}
-	return txn.Set(f.keys.QuarantineKey(c.Bucket, c.Key, c.VersionID), value)
 }
 
 // applyResealFSMValues handles CmdResealFSMValues in the serialized apply loop.
@@ -267,7 +265,7 @@ func (f *FSM) applyDeleteBucket(txn MetadataTxn, data []byte) error {
 	// Clear the per-bucket state so a recreated same-name bucket starts fresh (S3
 	// semantics — a new bucket inherits nothing from a prior incarnation): the
 	// existence record, the bucket policy, and the versioning state. Tolerate
-	// absent keys (most are unset on a plain bucket), mirroring applyDeleteObject.
+	// absent keys (most are unset on a plain bucket).
 	// (Per-bucket state in other subsystems — lifecycle config, IAM bucket-upstream
 	// — lives outside this FSM keyspace and is tracked separately; object obj:/lat:
 	// records are GC'd by the orphan scrubber and DeleteBucket requires an empty
@@ -280,156 +278,6 @@ func (f *FSM) applyDeleteBucket(txn MetadataTxn, data []byte) error {
 		if err := txn.Delete(key); err != nil && err != ErrMetaKeyNotFound {
 			return err
 		}
-	}
-	return nil
-}
-
-func (f *FSM) applyPutObjectMeta(txn MetadataTxn, data []byte) error {
-	c, err := decodePutObjectMetaCmd(data)
-	if err != nil {
-		return err
-	}
-	metaObj := buildPutObjectMeta(c)
-	if err := f.checkPutObjectExpectedETag(txn, c.Bucket, c.Key, c.ExpectedETag); err != nil {
-		return err
-	}
-	return f.persistPutObjectMetaUpdate(txn, c, metaObj)
-}
-
-func (f *FSM) applyDeleteObject(txn MetadataTxn, data []byte) error {
-	c, err := decodeDeleteObjectCmd(data)
-	if err != nil {
-		return err
-	}
-	// VersionID == "" is a legacy DeleteObjectCmd (no version ID attached by the
-	// proposer). Treat it as a hard delete of the legacy latest-only records —
-	// preserves prior semantics for pre-versioning log replay.
-	if c.VersionID == "" {
-		// Validate (decrypt) the meta before deleting; surfaces corruption errors.
-		if item, gerr := txn.Get(f.keys.ObjectMetaKey(c.Bucket, c.Key)); gerr == nil {
-			if verr := item.Value(func(raw []byte) error {
-				_, err := f.openValue(item.Key(), raw)
-				return err
-			}); verr != nil {
-				return verr
-			}
-		}
-		if err := txn.Delete(f.keys.ObjectMetaKey(c.Bucket, c.Key)); err != nil && err != ErrMetaKeyNotFound {
-			return err
-		}
-		if err := txn.Delete(f.keys.ShardPlacementKey(c.Bucket, c.Key)); err != nil && err != ErrMetaKeyNotFound {
-			return err
-		}
-		return nil
-	}
-
-	// Tombstone (soft-delete): write a delete marker as a new version and
-	// flip the latest pointer at it. Prior versions remain addressable via
-	// GetObjectVersion.
-	markerMeta, err := marshalObjectMeta(objectMeta{
-		Key:          c.Key,
-		Size:         0,
-		ContentType:  "",
-		ETag:         deleteMarkerETag,
-		LastModified: 0,
-	})
-	if err != nil {
-		return fmt.Errorf("marshal delete marker: %w", err)
-	}
-	// Read the current latest versionID before overwriting it, so we can
-	// delete the versioned placement record that was stored under
-	// shardPlacementKey(bucket, key+"/"+prevVersionID).
-	prevVersionID := ""
-	if latItem, gerr := txn.Get(f.keys.LatestKey(c.Bucket, c.Key)); gerr == nil {
-		_ = latItem.Value(func(v []byte) error { prevVersionID = string(v); return nil })
-	}
-
-	if err := f.setValue(txn, f.keys.ObjectMetaKeyV(c.Bucket, c.Key, c.VersionID), markerMeta); err != nil {
-		return err
-	}
-	if err := txn.Set(f.keys.LatestKey(c.Bucket, c.Key), []byte(c.VersionID)); err != nil {
-		return err
-	}
-	// Legacy latest-only key is removed so HeadObject returns 404 while prior
-	// versions remain queryable via GetObjectVersion.
-	if err := txn.Delete(f.keys.ObjectMetaKey(c.Bucket, c.Key)); err != nil && err != ErrMetaKeyNotFound {
-		return err
-	}
-	// Remove the versioned placement record for the previous latest version.
-	// Bare-key placement (legacy pre-versioned objects) is also cleaned up.
-	if prevVersionID != "" {
-		placementKey := f.keys.ShardPlacementKey(c.Bucket, c.Key+"/"+prevVersionID)
-		if err := txn.Delete(placementKey); err != nil && err != ErrMetaKeyNotFound {
-			return err
-		}
-	}
-	if err := txn.Delete(f.keys.ShardPlacementKey(c.Bucket, c.Key)); err != nil && err != ErrMetaKeyNotFound {
-		return err
-	}
-	return nil
-}
-
-// applyDeleteObjectVersion hard-deletes one specific version and, if it was the
-// latest, recomputes the latest pointer from the remaining versions (ULIDs sort
-// lexicographically by time, so the max-sorted key wins).
-func (f *FSM) applyDeleteObjectVersion(txn MetadataTxn, data []byte) error {
-	c, err := decodeDeleteObjectVersionCmd(data)
-	if err != nil {
-		return err
-	}
-	metaKey := f.keys.ObjectMetaKeyV(c.Bucket, c.Key, c.VersionID)
-	latKey := f.keys.LatestKey(c.Bucket, c.Key)
-
-	if _, gerr := txn.Get(metaKey); gerr == ErrMetaKeyNotFound {
-		return nil // idempotent
-	} else if gerr != nil {
-		return gerr
-	}
-	if derr := txn.Delete(metaKey); derr != nil {
-		return derr
-	}
-	// Remove the versioned placement record stored under key+"/"+versionID.
-	placementKey := f.keys.ShardPlacementKey(c.Bucket, c.Key+"/"+c.VersionID)
-	if derr := txn.Delete(placementKey); derr != nil && derr != ErrMetaKeyNotFound {
-		return derr
-	}
-
-	// If the deleted version was the latest, find the new latest by scanning
-	// remaining versioned keys and picking the max (ULID sorts by time ASC).
-	if latItem, gerr := txn.Get(latKey); gerr == nil {
-		var current string
-		_ = latItem.Value(func(v []byte) error { current = string(v); return nil })
-		if current == c.VersionID {
-			newLatest := ""
-			rawPrefix := []byte("obj:" + c.Bucket + "/" + c.Key + "/")
-			if serr := f.keys.scanGroupPrefix(txn, rawPrefix, func(raw []byte, _ MetaItem) error {
-				vid := string(raw[len(rawPrefix):])
-				if vid == "" || vid == c.VersionID {
-					return nil
-				}
-				if vid > newLatest {
-					newLatest = vid
-				}
-				return nil
-			}); serr != nil {
-				return serr
-			}
-			if newLatest == "" {
-				if derr := txn.Delete(latKey); derr != nil && derr != ErrMetaKeyNotFound {
-					return derr
-				}
-				// No versions left — drop legacy latest-only key as well.
-				if derr := txn.Delete(f.keys.ObjectMetaKey(c.Bucket, c.Key)); derr != nil && derr != ErrMetaKeyNotFound {
-					return derr
-				}
-			} else {
-				if derr := txn.Set(latKey, []byte(newLatest)); derr != nil {
-					return derr
-				}
-			}
-		}
-	} else if gerr != ErrMetaKeyNotFound {
-		return gerr
 	}
 	return nil
 }
@@ -466,144 +314,6 @@ func (f *FSM) applySetBucketVersioning(txn MetadataTxn, data []byte) error {
 		return err
 	}
 	return txn.Set(f.keys.BucketVerKey(c.Bucket), []byte(c.State))
-}
-
-func (f *FSM) applySetObjectACL(txn MetadataTxn, data []byte) error {
-	c, err := decodeSetObjectACLCmd(data)
-	if err != nil {
-		return err
-	}
-	legacyKey := f.keys.ObjectMetaKey(c.Bucket, c.Key)
-	item, err := txn.Get(legacyKey)
-	if err == ErrMetaKeyNotFound {
-		return storage.ErrObjectNotFound
-	}
-	if err != nil {
-		return err
-	}
-	return item.Value(func(raw []byte) error {
-		val, err := f.openValue(item.Key(), raw)
-		if err != nil {
-			return err
-		}
-		m, merr := unmarshalObjectMeta(val)
-		if merr != nil {
-			return merr
-		}
-		m.ACL = c.ACL
-		newVal, merr := marshalObjectMeta(m)
-		if merr != nil {
-			return merr
-		}
-		if err := f.setValue(txn, legacyKey, newVal); err != nil {
-			return err
-		}
-		// Also update the versioned record if this bucket has versioning enabled.
-		latItem, lerr := txn.Get(f.keys.LatestKey(c.Bucket, c.Key))
-		if lerr != nil {
-			return nil //nolint:nilerr // no versioned key, nothing more to do
-		}
-		var versionID string
-		_ = latItem.Value(func(v []byte) error { versionID = string(v); return nil })
-		if versionID == "" {
-			return nil
-		}
-		vKey := f.keys.ObjectMetaKeyV(c.Bucket, c.Key, versionID)
-		vItem, verr := txn.Get(vKey)
-		if verr != nil {
-			return nil //nolint:nilerr // versioned record missing, skip
-		}
-		return vItem.Value(func(raw []byte) error {
-			vval, err := f.openValue(vItem.Key(), raw)
-			if err != nil {
-				return err
-			}
-			vm, merr := unmarshalObjectMeta(vval)
-			if merr != nil {
-				return merr
-			}
-			vm.ACL = c.ACL
-			vNewVal, merr := marshalObjectMeta(vm)
-			if merr != nil {
-				return merr
-			}
-			return f.setValue(txn, vKey, vNewVal)
-		})
-	})
-}
-
-func (f *FSM) applySetObjectTags(txn MetadataTxn, data []byte) error {
-	c, err := decodeSetObjectTagsCmd(data)
-	if err != nil {
-		return err
-	}
-	if c.VersionID != "" {
-		vKey := f.keys.ObjectMetaKeyV(c.Bucket, c.Key, c.VersionID)
-		if err := mutateVersionTags(f, txn, vKey, c.Tags); err != nil {
-			return err
-		}
-		latItem, lerr := txn.Get(f.keys.LatestKey(c.Bucket, c.Key))
-		if lerr != nil {
-			return nil //nolint:nilerr // no latest marker, so no legacy-current mirror to update
-		}
-		var latest string
-		if err := latItem.Value(func(v []byte) error {
-			latest = string(v)
-			return nil
-		}); err != nil {
-			return err
-		}
-		if latest != c.VersionID {
-			return nil
-		}
-		return mutateVersionTags(f, txn, f.keys.ObjectMetaKey(c.Bucket, c.Key), c.Tags)
-	}
-	// VersionID == "" → mutate legacy (current) record, and if LatestKey
-	// exists also dual-write the latest versioned record.
-	legacyKey := f.keys.ObjectMetaKey(c.Bucket, c.Key)
-	if err := mutateVersionTags(f, txn, legacyKey, c.Tags); err != nil {
-		return err
-	}
-	// Best-effort dual-write to latest versioned record (mirrors SetObjectACL semantics).
-	latItem, lerr := txn.Get(f.keys.LatestKey(c.Bucket, c.Key))
-	if lerr != nil {
-		return nil //nolint:nilerr // no versioning, nothing more to do
-	}
-	var versionID string
-	_ = latItem.Value(func(v []byte) error { versionID = string(v); return nil })
-	if versionID == "" {
-		return nil
-	}
-	vKey := f.keys.ObjectMetaKeyV(c.Bucket, c.Key, versionID)
-	return mutateVersionTags(f, txn, vKey, c.Tags)
-}
-
-// mutateVersionTags reads the objectMeta at key, replaces .Tags, writes back.
-// Returns storage.ErrObjectNotFound if the key doesn't exist.
-func mutateVersionTags(f *FSM, txn MetadataTxn, key []byte, tags []storage.Tag) error {
-	item, err := txn.Get(key)
-	if err == ErrMetaKeyNotFound {
-		return storage.ErrObjectNotFound
-	}
-	if err != nil {
-		return err
-	}
-	return item.Value(func(raw []byte) error {
-		val, err := f.openValue(item.Key(), raw)
-		if err != nil {
-			return err
-		}
-		m, merr := unmarshalObjectMeta(val)
-		if merr != nil {
-			return merr
-		}
-		m.Tags = append([]storage.Tag(nil), tags...) // defensive copy
-		newVal, merr := marshalObjectMeta(m)
-		if merr != nil {
-			return merr
-		}
-		return f.setValue(txn, key, newVal)
-	})
 }
 
 func appendBaseCoalescedRef(key, versionID string, existing *objectMeta) CoalescedShardRef {
