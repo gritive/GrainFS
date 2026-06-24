@@ -9,13 +9,13 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-// TestGetObjectTags_SoleAuthOn_BlobDerive proves that under soleauth=on the
-// per-version blob is the SOLE AUTHORITY for tags: latest (versionID=="") and a
+// TestGetObjectTags_BlobAuthOn_BlobDerive proves that under blob-authoritative the
+// per-version blob is the BLOB AUTHORITY for tags: latest (versionID=="") and a
 // specific-version read both return the blob's Tags, a stale vid-bearing FSM
 // record is NEVER resurrected (blob-absent versioned object → 404), carve-out
 // classes (appendable/coalesced/legacy bare-unversioned) fall back to FSM Tags,
-// and a soleauth read error propagates. The off path is byte-identical FSM.
-func TestGetObjectTags_SoleAuthOn_BlobDerive(t *testing.T) {
+// and a blob-authority read error propagates. The off path is byte-identical FSM.
+func TestGetObjectTags_BlobAuthOn_BlobDerive(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("latest via versionID== blob Tags", func(t *testing.T) {
@@ -149,7 +149,7 @@ func TestGetObjectTags_SoleAuthOn_BlobDerive(t *testing.T) {
 		require.Nil(t, tags)
 	})
 
-	t.Run("soleauth read error propagates", func(t *testing.T) {
+	t.Run("blob-authority read error propagates", func(t *testing.T) {
 		b, db := newTestDistributedBackendWithDB(t)
 		require.NoError(t, b.CreateBucket(ctx, "berr"))
 		require.NoError(t, db.Close())
@@ -159,10 +159,10 @@ func TestGetObjectTags_SoleAuthOn_BlobDerive(t *testing.T) {
 	})
 }
 
-// TestGetObjectTags_SoleAuthOff_ByteIdenticalFSM proves the off (default) path
+// TestGetObjectTags_BlobAuthOff_ByteIdenticalFSM proves the off (default) path
 // is the unchanged FSM read: a plain versioned FSM record's Tags are returned,
 // and a missing record is ErrObjectNotFound.
-func TestGetObjectTags_SoleAuthOff_ByteIdenticalFSM(t *testing.T) {
+func TestGetObjectTags_BlobAuthOff_ByteIdenticalFSM(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("plain versioned FSM Tags returned (off)", func(t *testing.T) {

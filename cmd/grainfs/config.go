@@ -50,8 +50,7 @@ func configCmd() *cobra.Command {
 		Use:   "config",
 		Short: "Manage cluster-wide configuration",
 	}
-	cmd.PersistentFlags().String("endpoint", "",
-		"admin Unix socket path (overrides GRAINFS_ADMIN_SOCKET env var)")
+	registerAdminEndpointFlag(cmd, "admin Unix socket path (overrides GRAINFS_ADMIN_SOCKET env var)")
 	cmd.PersistentFlags().Bool("json", false, "output raw JSON")
 
 	cmd.AddCommand(

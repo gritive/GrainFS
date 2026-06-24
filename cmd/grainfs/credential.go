@@ -53,7 +53,7 @@ var credentialRevokeCmd = &cobra.Command{
 func init() {
 	pf := credentialCmd.PersistentFlags()
 	pf.String("format", "text", "Output format: text or json")
-	registerAdminEndpointFlag(credentialCmd)
+	registerAdminEndpointFlag(credentialCmd, "admin Unix socket path (required, e.g. ./tmp/admin.sock)")
 	registerAdminTimeoutFlag(credentialCmd)
 
 	credentialCreateCmd.Flags().String("sa", "", "service account id")

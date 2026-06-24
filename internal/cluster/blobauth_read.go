@@ -6,17 +6,16 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-// soleAuthReadOn reports whether the bucket's per-version quorum-meta blob tree
-// is the SOLE AUTHORITY for reads: true for every versioning-enabled bucket.
+// blobAuthReadOn reports whether the bucket's per-version quorum-meta blob tree
+// is the BLOB AUTHORITY for reads: true for every versioning-enabled bucket.
 // It FAILS CLOSED — on any error reading the versioning state it returns
 // (false, err) so callers surface the error rather than silently treating the
 // bucket as not-blob-authoritative.
 //
-// NOTE: the legacy soleauth tri-state flag + epoch fence it once consulted were
-// removed in the soleauth teardown; this now reads bucket versioning directly. The
-// "soleAuth" name is a vestige kept to bound that diff — a follow-up renames it
-// (e.g. blobAuthReadOn).
-func (b *DistributedBackend) soleAuthReadOn(bucket string) (bool, error) {
+// NOTE: the legacy blob-authority tri-state flag + epoch fence it once consulted
+// were removed in the blob-authority teardown; this now reads bucket versioning
+// directly (blob authority == versioning-enabled).
+func (b *DistributedBackend) blobAuthReadOn(bucket string) (bool, error) {
 	state, err := b.GetBucketVersioning(bucket)
 	if err != nil {
 		return false, fmt.Errorf("read versioning state for bucket %q: %w", bucket, err)
@@ -28,7 +27,7 @@ func (b *DistributedBackend) soleAuthReadOn(bucket string) (bool, error) {
 // availability-first FSM fallback in headObjectMeta does (lat:{bucket}/{key} →
 // obj:{bucket}/{key}/{vid}, else bare obj:{bucket}/{key}) and returns the
 // decoded object ONLY IF it belongs to a carve-out class that stays
-// FSM-authoritative even under soleauth=on:
+// FSM-authoritative even under blob-authoritative:
 //
 //  1. appendable      (meta.IsAppendable)
 //  2. coalesced       (len(meta.Coalesced) > 0)
@@ -36,7 +35,7 @@ func (b *DistributedBackend) soleAuthReadOn(bucket string) (bool, error) {
 //
 // Otherwise it returns (nil, PlacementMeta{}, false, nil) — a non-carve-out
 // record (a plain versioned obj) must NOT resurrect a blob-deleted versioned
-// object under sole authority, so the caller treats it as 404.
+// object under blob authority, so the caller treats it as 404.
 //
 // An absent FSM record returns (nil, PlacementMeta{}, false, nil) (not an
 // error). Store errors propagate.
@@ -126,7 +125,7 @@ func (b *DistributedBackend) fsmCarveoutObject(bucket, key, versionID string) (*
 }
 
 // isFsmCarveoutClass reports whether a decoded FSM objectMeta belongs to a
-// carve-out class that stays FSM-authoritative even under soleauth=on:
+// carve-out class that stays FSM-authoritative even under blob-authoritative:
 //
 //  1. appendable  (meta.IsAppendable)
 //  2. coalesced   (len(meta.Coalesced) > 0)
@@ -136,21 +135,21 @@ func (b *DistributedBackend) fsmCarveoutObject(bucket, key, versionID string) (*
 //
 // SHARED PREDICATE: fsmCarveoutObject (single-object read) and
 // DistributedBackend.ListObjectVersions's bucket-wide carve-out scan + the
-// soleauth scrubber scan ALL classify records through this one rule so the
+// blob-authority scrubber scan ALL classify records through this one rule so the
 // paths cannot drift. A plain vid-bearing versioned record (none of the three)
-// is NOT a carve-out: it is blob-authoritative under sole authority and a stale
+// is NOT a carve-out: it is blob-authoritative and a stale
 // one must never resurrect.
 //
 // Slice 1 Task 7 NOTE — the appendable/coalesced terms are now DEAD WEIGHT under
-// soleauth (kept only as a defensive, drift-proof classifier, NOT removed so the
-// LIST/scrubber consumers stay byte-identical): soleauth == versioning-enabled,
+// blob-authority (kept only as a defensive, drift-proof classifier, NOT removed so the
+// LIST/scrubber consumers stay byte-identical): blob-authority == versioning-enabled,
 // AppendObject is rejected 501 on versioning-enabled buckets
 // (internal/server/object_append.go), and coalesce only acts on appendable
 // objects — so no appendable/coalesced FSM record can EXIST in a bucket where this
-// predicate is consulted under soleauth=on. The live read carve-out reachable here
+// predicate is consulted under blob-authoritative. The live read carve-out reachable here
 // is therefore the legacy-bare class only. (A versioning-DISABLED appendable object
 // reads via readQuorumMeta -> objectAndPlacementFromCmd entirely; it never reaches
-// fsmCarveoutObject, which is gated behind soleAuthReadOn.)
+// fsmCarveoutObject, which is gated behind blobAuthReadOn.)
 //
 // Multipart is NOT a carve-out: a versioning-enabled multipart complete is
 // blob-authoritative (per-version blob written FAIL-CLOSED; CmdCompleteMultipart
@@ -162,7 +161,7 @@ func isFsmCarveoutClass(meta objectMeta, bareLegacy bool) bool {
 // objectAndPlacementFromObjectMeta builds a storage.Object and PlacementMeta
 // from a decoded FSM objectMeta, mirroring exactly the construction the
 // availability-first FSM fallback in headObjectMeta performs (decodeMeta
-// closure). Single-sourced here so the soleauth read carve-out path cannot
+// closure). Single-sourced here so the blob-authority read carve-out path cannot
 // drift from the FSM fallback's object/placement shape.
 //
 // Invoked by fsmCarveoutObject, which is wired into headObjectMeta in

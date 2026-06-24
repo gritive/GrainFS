@@ -82,11 +82,11 @@ func TestGetObjectTags_HardDeletedVersion_Returns404(t *testing.T) {
 	require.ErrorIs(t, err, storage.ErrObjectNotFound)
 }
 
-// TestListObjectVersionsSoleAuth_ExcludesHardDeleted proves ListObjectVersions
+// TestListObjectVersionsBlobAuth_ExcludesHardDeleted proves ListObjectVersions
 // omits a hard-deleted version entirely while keeping live and delete-marker
 // versions (a delete marker IS a version in S3 ListObjectVersions; a hard delete
 // is not).
-func TestListObjectVersionsSoleAuth_ExcludesHardDeleted(t *testing.T) {
+func TestListObjectVersionsBlobAuth_ExcludesHardDeleted(t *testing.T) {
 	ctx := context.Background()
 	b := newTestDistributedBackend(t)
 	require.NoError(t, b.CreateBucket(ctx, "b"))
@@ -96,7 +96,7 @@ func TestListObjectVersionsSoleAuth_ExcludesHardDeleted(t *testing.T) {
 	seedVersionBlob(t, b, "b", "k", "v2", PutObjectMetaCmd{ETag: "e2", IsHardDeleted: true})
 	seedVersionBlob(t, b, "b", "k", "v3", PutObjectMetaCmd{ETag: deleteMarkerETag, IsDeleteMarker: true})
 
-	vers, err := b.listObjectVersionsSoleAuth("b", "", 0)
+	vers, err := b.listObjectVersionsBlobAuth("b", "", 0)
 	require.NoError(t, err)
 	vids := map[string]bool{}
 	for _, v := range vers {
@@ -128,10 +128,10 @@ func TestListObjectsPerVersion_LatestHardDeleted_ShowsPredecessor(t *testing.T) 
 	require.Equal(t, "e1", out[0].ETag)
 }
 
-// TestListSoleAuthBucketObjectsForGC_ExcludesHardDeleted proves the segment-GC
+// TestListBlobAuthBucketObjectsForGC_ExcludesHardDeleted proves the segment-GC
 // known-set omits a hard-deleted version (so its now-dead segments become
 // orphan-eligible) while keeping live versions.
-func TestListSoleAuthBucketObjectsForGC_ExcludesHardDeleted(t *testing.T) {
+func TestListBlobAuthBucketObjectsForGC_ExcludesHardDeleted(t *testing.T) {
 	ctx := context.Background()
 	b := newTestDistributedBackend(t)
 	require.NoError(t, b.CreateBucket(ctx, "b"))
@@ -140,15 +140,15 @@ func TestListSoleAuthBucketObjectsForGC_ExcludesHardDeleted(t *testing.T) {
 	seedVersionBlob(t, b, "b", "k", "v1", PutObjectMetaCmd{ETag: "e1", Size: 10})
 	seedVersionBlob(t, b, "b", "k", "v2", PutObjectMetaCmd{ETag: "e2", Size: 20, IsHardDeleted: true})
 
-	objs, err := b.listSoleAuthBucketObjectsForGC("b")
+	objs, err := b.listBlobAuthBucketObjectsForGC("b")
 	require.NoError(t, err)
 	require.Len(t, objs, 1, "hard-deleted version excluded from the GC known-set")
 	require.Equal(t, "v1", objs[0].VersionID)
 }
 
-// TestScanObjectsSoleAuth_ExcludesHardDeleted proves the EC scrub set omits a
+// TestScanObjectsBlobAuth_ExcludesHardDeleted proves the EC scrub set omits a
 // hard-deleted version and collapses to the live predecessor.
-func TestScanObjectsSoleAuth_ExcludesHardDeleted(t *testing.T) {
+func TestScanObjectsBlobAuth_ExcludesHardDeleted(t *testing.T) {
 	ctx := context.Background()
 	b := newTestDistributedBackend(t)
 	require.NoError(t, b.CreateBucket(ctx, "b"))
@@ -157,7 +157,7 @@ func TestScanObjectsSoleAuth_ExcludesHardDeleted(t *testing.T) {
 	seedVersionBlob(t, b, "b", "k", "v1", PutObjectMetaCmd{ETag: "e1", ECData: 4, ECParity: 2})
 	seedVersionBlob(t, b, "b", "k", "v2", PutObjectMetaCmd{ETag: "e2", ECData: 4, ECParity: 2, IsHardDeleted: true})
 
-	recs, err := b.scanObjectsSoleAuth("b")
+	recs, err := b.scanObjectsBlobAuth("b")
 	require.NoError(t, err)
 	require.Len(t, recs, 1, "hard-deleted latest excluded; scrub set collapses to live predecessor")
 	require.Equal(t, "v1", recs[0].VersionID)

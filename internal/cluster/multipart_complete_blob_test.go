@@ -12,7 +12,7 @@ import (
 
 // TestCompleteMultipart_BlobAuthorityNoFSM proves the blob-primary multipart
 // complete (M3): for a versioning-enabled bucket, CompleteMultipartUpload's
-// per-version quorum-meta blob is the SOLE AUTHORITY — no FSM obj:/lat: record is
+// per-version quorum-meta blob is the BLOB AUTHORITY — no FSM obj:/lat: record is
 // written, no CmdCompleteMultipart propose, and the object reads back via the blob.
 func TestCompleteMultipart_BlobAuthorityNoFSM(t *testing.T) {
 	b := newSingleNode1Plus0ChunkCapable(t)
@@ -113,7 +113,7 @@ func TestCompleteMultipart_RetryShortCircuitsOnBlob(t *testing.T) {
 // TestCompleteMultipart_NonVersionedBlobAuthority proves M3's non-versioned shift:
 // a non-versioned (Suspended/unset) bucket's multipart complete writes NO FSM
 // obj:/lat: record — the latest-only quorum-meta blob (VersionID == det-vid) is the
-// sole authority, read back via HEAD/GET. No CmdCompleteMultipart propose.
+// blob authority, read back via HEAD/GET. No CmdCompleteMultipart propose.
 func TestCompleteMultipart_NonVersionedBlobAuthority(t *testing.T) {
 	b := newSingleNode1Plus0ChunkCapable(t)
 	ctx := context.Background()
@@ -133,7 +133,7 @@ func TestCompleteMultipart_NonVersionedBlobAuthority(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, detVID, obj.VersionID, "non-versioned completed object carries the det-vid")
 
-	// No FSM obj:/lat: records — the latest-only blob is the sole authority.
+	// No FSM obj:/lat: records — the latest-only blob is the blob authority.
 	require.NoError(t, b.store.View(func(txn MetadataTxn) error {
 		_, gerr := txn.Get(b.ks().ObjectMetaKey(bkt, key))
 		require.ErrorIs(t, gerr, ErrMetaKeyNotFound, "non-versioned multipart must not write an FSM obj: record")

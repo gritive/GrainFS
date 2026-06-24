@@ -54,17 +54,17 @@ func (b *DistributedBackend) ScanObjects(bucket string) (<-chan scrubber.ObjectR
 		return ch, nil
 	}
 
-	// soleauth=on: the FSM lat: walk is non-authoritative for plain versioned
+	// blob-authoritative: the FSM lat: walk is non-authoritative for plain versioned
 	// objects. Enumerate the EC scrub set from the per-version blob authority
 	// (LOCAL, latest-per-key) + local EC carve-out. The STRICT scan runs EAGERLY
 	// so a corrupt-blob error surfaces synchronously — ScanObjects returns
 	// (chan, error) before the goroutine, so a mid-stream error cannot be reported.
-	on, serr := b.soleAuthReadOn(bucket)
+	on, serr := b.blobAuthReadOn(bucket)
 	if serr != nil {
 		return nil, serr // fail closed
 	}
 	if on {
-		recs, rerr := b.scanObjectsSoleAuth(bucket)
+		recs, rerr := b.scanObjectsBlobAuth(bucket)
 		if rerr != nil {
 			return nil, rerr
 		}
@@ -192,20 +192,20 @@ func (b *DistributedBackend) quorumMetaScrubRecords(bucket string, seen map[stri
 	return recs
 }
 
-// scanObjectsSoleAuth builds the soleauth=on EC scrub record set: the live
+// scanObjectsBlobAuth builds the blob-authoritative EC scrub record set: the live
 // latest-per-key EC object from the LOCAL per-version blob authority (strict,
 // fail-closed) + local EC carve-out FSM records. Latest-version-per-key,
 // repair-only, local-node — the same model as the off-path lat: walk + quorum
 // merge, repointed to the blob authority. Reports each object's OWN EC profile
 // (a genesis 1+0 object stays 1+0) so the redundancy-upgrade sweep still sees it.
-func (b *DistributedBackend) scanObjectsSoleAuth(bucket string) ([]scrubber.ObjectRecord, error) {
+func (b *DistributedBackend) scanObjectsBlobAuth(bucket string) ([]scrubber.ObjectRecord, error) {
 	if b.shardSvc == nil {
 		return nil, nil
 	}
 	// Local all-version blobs, STRICT (a corrupt/undecodable blob fails closed).
 	cmds, err := b.shardSvc.scanQuorumMetaVersionsBucketAllStrict(bucket, "")
 	if err != nil {
-		return nil, fmt.Errorf("scan objects (soleauth): %w", err)
+		return nil, fmt.Errorf("scan objects (blob-authority): %w", err)
 	}
 	// Hard-delete tombstones have no live shards to scrub: drop them before the
 	// per-key collapse so a hard-deleted latest falls to its live predecessor.

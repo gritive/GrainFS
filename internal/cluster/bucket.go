@@ -91,16 +91,16 @@ func (b *DistributedBackend) DeleteBucket(ctx context.Context, bucket string) er
 		return err
 	}
 
-	// Emptiness. Under soleauth=on the per-version blob tree (incl. delete
-	// markers) + carve-out FSM are the SOLE AUTHORITY; a stale non-carve-out FSM
+	// Emptiness. Under blob-authoritative the per-version blob tree (incl. delete
+	// markers) + carve-out FSM are the BLOB AUTHORITY; a stale non-carve-out FSM
 	// obj: record is non-authoritative and must NOT make an authoritatively-empty
 	// bucket look non-empty (the off-path obj: scan would). The authority probe
 	// does cluster RPC and opens its OWN store.View (via the carve-out scan), so
 	// it MUST run OUTSIDE any txn — never nest it under the existence View above.
-	if on, serr := b.soleAuthReadOn(bucket); serr != nil {
+	if on, serr := b.blobAuthReadOn(bucket); serr != nil {
 		return serr // fail closed
 	} else if on {
-		vs, lerr := b.listObjectVersionsSoleAuth(bucket, "", 1)
+		vs, lerr := b.listObjectVersionsBlobAuth(bucket, "", 1)
 		if lerr != nil {
 			return lerr
 		}
@@ -126,7 +126,7 @@ func (b *DistributedBackend) DeleteBucket(ctx context.Context, bucket string) er
 		//       actually carries) and IsHardDeleted (defense-in-depth). So a bucket
 		//       whose objects were all deleted still deletes.
 		//   (2) per-version tree (versions preserved from a prior Enabled era for a
-		//       Suspended bucket) via listObjectVersionsSoleAuth (already cluster-wide,
+		//       Suspended bucket) via listObjectVersionsBlobAuth (already cluster-wide,
 		//       drops IsHardDeleted; a per-version delete MARKER still counts — it is a
 		//       version, matching the Enabled branch); empty no-op for a
 		//       never-versioned bucket.
@@ -142,7 +142,7 @@ func (b *DistributedBackend) DeleteBucket(ctx context.Context, bucket string) er
 				return storage.ErrBucketNotEmpty
 			}
 		}
-		vs, lerr := b.listObjectVersionsSoleAuth(bucket, "", 1)
+		vs, lerr := b.listObjectVersionsBlobAuth(bucket, "", 1)
 		if lerr != nil {
 			return lerr
 		}
@@ -175,8 +175,8 @@ func (b *DistributedBackend) DeleteBucket(ctx context.Context, bucket string) er
 // Unlike DeleteBucket, it does not fail when the bucket is non-empty.
 //
 // Branches on bucket versioning:
-//   - versioned (soleauth=on): enumerate per-version blobs via
-//     forceDeleteBucketSoleAuth and delete each via DeleteObjectVersion.
+//   - versioned (blob-authoritative): enumerate per-version blobs via
+//     forceDeleteBucketBlobAuth and delete each via DeleteObjectVersion.
 //   - non-versioned: enumerate live latest-only qmeta blobs via
 //     scanQuorumMetaBucketStrict, then for each object physically purge shards
 //     (fail-closed first) then the qmeta blob. ORDER IS CRITICAL (P0-1d): shards
@@ -187,15 +187,15 @@ func (b *DistributedBackend) ForceDeleteBucket(ctx context.Context, bucket strin
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return err
 	}
-	// Versioned buckets: per-version blob tree is SOLE AUTHORITY.
-	// Delegate to forceDeleteBucketSoleAuth which enumerates via
+	// Versioned buckets: per-version blob tree is BLOB AUTHORITY.
+	// Delegate to forceDeleteBucketBlobAuth which enumerates via
 	// scanQuorumMetaVersionsClusterAll + DeleteObjectVersion (purges per-version
 	// blob+shards). This is the single-DistributedBackend (single-node / direct)
 	// path; the cluster path is ClusterCoordinator.
-	if on, serr := b.soleAuthReadOn(bucket); serr != nil {
+	if on, serr := b.blobAuthReadOn(bucket); serr != nil {
 		return serr // fail closed
 	} else if on {
-		return b.forceDeleteBucketSoleAuth(ctx, bucket)
+		return b.forceDeleteBucketBlobAuth(ctx, bucket)
 	}
 
 	// Non-versioned path: enumerate live latest-only qmeta blobs (local-only for
@@ -241,7 +241,7 @@ func (b *DistributedBackend) ForceDeleteBucket(ctx context.Context, bucket strin
 	return b.DeleteBucket(ctx, bucket)
 }
 
-// forceDeleteBucketSoleAuth is the soleauth=on (versioned) leaf ForceDeleteBucket
+// forceDeleteBucketBlobAuth is the blob-authoritative (versioned) leaf ForceDeleteBucket
 // path (single-node / direct backend). It enumerates per-version blobs cluster-wide
 // (incl. delete markers, fail-closed) via scanQuorumMetaVersionsClusterAll and
 // deletes each via DeleteObjectVersion, which already purges the per-version blob +
@@ -250,7 +250,7 @@ func (b *DistributedBackend) ForceDeleteBucket(ctx context.Context, bucket strin
 // The legacy raft tail (scanFsmCarveoutVersions + HardDeleteLegacyObject) has been
 // dropped: greenfield versioned buckets have no legacy-bare FSM carve-outs, and Task
 // 4c will retire CmdDeleteObject entirely.
-func (b *DistributedBackend) forceDeleteBucketSoleAuth(ctx context.Context, bucket string) error {
+func (b *DistributedBackend) forceDeleteBucketBlobAuth(ctx context.Context, bucket string) error {
 	if err := b.purgePerVersionBlobs(ctx, bucket); err != nil {
 		return err
 	}
@@ -375,7 +375,7 @@ func (b *DistributedBackend) DeleteBucketPolicyPropose(bucket string) error {
 }
 
 // SetObjectACL satisfies storage.ACLSetter. Updates the ACL via the quorum-meta
-// blob RMW on the object's latest-only quorum-meta blob (sole authority — no
+// blob RMW on the object's latest-only quorum-meta blob (blob authority — no
 // raft path). HeadObject pre-check guarantees existence; a blob miss in the
 // propose path is a real not-found or a race.
 func (b *DistributedBackend) SetObjectACL(bucket, key string, acl uint8) error {
@@ -395,7 +395,7 @@ func (b *DistributedBackend) SetObjectACLPropose(bucket, key string, acl uint8) 
 		return err
 	}
 	ctx := context.Background()
-	// Blob RMW is the sole authority (data-plane raft-free Slice 2).
+	// Blob RMW is the blob authority (data-plane raft-free Slice 2).
 	// CmdSetObjectACL is retired; no raft fallback.
 	unlock := b.objectMetaRMWLock(bucket, key)
 	defer unlock()
@@ -445,7 +445,7 @@ func (b *DistributedBackend) SetObjectTagsPropose(bucket, key, versionID string,
 		return err
 	}
 	ctx := context.Background()
-	// Blob RMW is the sole authority (data-plane raft-free Slice 2).
+	// Blob RMW is the blob authority (data-plane raft-free Slice 2).
 	// CmdSetObjectTags is retired; no raft fallback.
 	// objectMetaRMWLock serializes the RMW on THIS node. Sufficient because
 	// ClusterCoordinator always forwards to the OWNING peer.
@@ -477,12 +477,12 @@ func (b *DistributedBackend) GetObjectTags(bucket, key, versionID string) ([]sto
 	if err := guardInternalBucketObjectOp(bucket); err != nil {
 		return nil, err
 	}
-	// S4c-c-read1 T3: under soleauth=on the per-version blob is the SOLE
+	// S4c-c-read1 T3: under blob-authoritative the per-version blob is the SOLE
 	// AUTHORITY for a vid-bearing versioned object's tags. A blob MISS never
 	// falls through to a stale vid-bearing FSM record — blob absence for a
 	// versioned object is a 404 (no tags). Only carve-out classes
 	// (appendable/coalesced/legacy bare-unversioned) stay FSM-authoritative.
-	if on, err := b.soleAuthReadOn(bucket); err != nil {
+	if on, err := b.blobAuthReadOn(bucket); err != nil {
 		return nil, err // fail closed
 	} else if on {
 		// DECODE-STRICT (mirrors the HEAD/GET on-branch): a corrupt per-version blob
@@ -527,7 +527,7 @@ func (b *DistributedBackend) GetObjectTags(bucket, key, versionID string) ([]sto
 		if carve {
 			return append([]storage.Tag(nil), obj.Tags...), nil
 		}
-		// No vid-bearing-versioned FSM resurrection under sole authority.
+		// No vid-bearing-versioned FSM resurrection under blob authority.
 		return nil, storage.ErrObjectNotFound
 	}
 

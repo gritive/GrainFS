@@ -19,7 +19,7 @@ func versionByKeyVID(vs []*storage.ObjectVersion) map[[2]string]*storage.ObjectV
 	return out
 }
 
-// k-sortable UUIDv7-shaped strings used across the soleauth list tests. They are
+// k-sortable UUIDv7-shaped strings used across the blob-authority list tests. They are
 // lexicographically ordered so the *second* string is the per-key max VID.
 const (
 	vidA1 = "019ed400-0000-7000-8000-000000000001"
@@ -28,10 +28,10 @@ const (
 	vidB2 = "019ed400-0000-7000-8000-00000000000b"
 )
 
-// TestListObjectVersionsSoleAuthOn covers the soleauth=on early-return branch at
+// TestListObjectVersionsBlobAuthOn covers the blob-authoritative early-return branch at
 // the top of DistributedBackend.ListObjectVersions: the per-version blob tree is
-// the SOLE AUTHORITY for versioned objects, merged with FSM carve-out classes.
-func TestListObjectVersionsSoleAuthOn(t *testing.T) {
+// the BLOB AUTHORITY for versioned objects, merged with FSM carve-out classes.
+func TestListObjectVersionsBlobAuthOn(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("multiple versions incl delete-marker-latest → all listed, IsLatest on max VID even if marker", func(t *testing.T) {
@@ -75,7 +75,7 @@ func TestListObjectVersionsSoleAuthOn(t *testing.T) {
 		idx := versionByKeyVID(vs)
 		require.NotNil(t, idx[[2]string{"live", vidA1}])
 		for _, v := range vs {
-			require.NotEqual(t, "ghost", v.Key, "stale versioned FSM record must NOT resurrect under soleauth=on")
+			require.NotEqual(t, "ghost", v.Key, "stale versioned FSM record must NOT resurrect under blob-authoritative")
 		}
 	})
 
@@ -193,7 +193,7 @@ func TestListObjectVersionsSoleAuthOn(t *testing.T) {
 		require.Len(t, vs, 2, "leaf truncates to maxKeys as passed")
 	})
 
-	t.Run("soleauth read error → propagated (fail closed)", func(t *testing.T) {
+	t.Run("blob-authority read error → propagated (fail closed)", func(t *testing.T) {
 		b, db := newTestDistributedBackendWithDB(t)
 		require.NoError(t, b.CreateBucket(ctx, "berr"))
 		require.NoError(t, db.Close())
@@ -204,10 +204,10 @@ func TestListObjectVersionsSoleAuthOn(t *testing.T) {
 	})
 }
 
-// TestListObjectVersionsSoleAuthOffUnchanged confirms the off (default) path is
+// TestListObjectVersionsBlobAuthOffUnchanged confirms the off (default) path is
 // byte-identical to today's FSM-backed listing for BOTH a versioned multi-key
 // listing AND a legacy-bare listing.
-func TestListObjectVersionsSoleAuthOffUnchanged(t *testing.T) {
+func TestListObjectVersionsBlobAuthOffUnchanged(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("versioned multi-key blob listing (blob-primary)", func(t *testing.T) {

@@ -84,8 +84,7 @@ No-op when no new candidate groups are present.`,
 }
 
 func init() {
-	clusterCmd.PersistentFlags().String("endpoint", "",
-		"admin Unix socket path (required, e.g. ./tmp/admin.sock)")
+	registerAdminEndpointFlag(clusterCmd, "admin Unix socket path (required, e.g. ./tmp/admin.sock)")
 	clusterCmd.PersistentFlags().String("format", "text",
 		"Output format: text or json (status/peers/events; ignored elsewhere)")
 

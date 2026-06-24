@@ -51,11 +51,14 @@ func applyAdminTimeout(ctx context.Context, cmd *cobra.Command) (context.Context
 }
 
 // registerAdminEndpointFlag adds --endpoint to cmd's PersistentFlags so every
-// admin subcommand below it inherits a single shared resolver. The value is a
-// bare UDS path (e.g. ./tmp/admin.sock); when unset, resolution fails fast.
-func registerAdminEndpointFlag(cmd *cobra.Command) {
-	cmd.PersistentFlags().String("endpoint", "",
-		"admin Unix socket path (required, e.g. ./tmp/admin.sock)")
+// admin subcommand below it inherits a single shared registration point. The
+// value is a bare UDS path (e.g. ./tmp/admin.sock); when unset, resolution
+// fails fast. usage is caller-supplied because the help text legitimately
+// varies across commands: some honor GRAINFS_ADMIN_SOCKET and some don't, and
+// rotate-key targets a different socket than admin.sock — so each call site
+// passes its own verbatim description.
+func registerAdminEndpointFlag(cmd *cobra.Command, usage string) {
+	cmd.PersistentFlags().String("endpoint", "", usage)
 }
 
 // adminClientFromCmd reads --endpoint and returns a configured admin client.

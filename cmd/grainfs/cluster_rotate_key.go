@@ -47,9 +47,8 @@ Failures roll back automatically:
   - global timeout (30 min): auto-abort`,
 	}
 	c.AddCommand(clusterRotateKeyBegin(), clusterRotateKeyStatus(), clusterRotateKeyAbort())
-	c.PersistentFlags().String("endpoint", "",
-		"rotate-key socket path (NOT admin.sock; default <data-dir>/rotate.sock); "+
-			"server logs the path on startup as \"rotate endpoint\"")
+	registerAdminEndpointFlag(c, "rotate-key socket path (NOT admin.sock; default <data-dir>/rotate.sock); "+
+		"server logs the path on startup as \"rotate endpoint\"")
 	return c
 }
 

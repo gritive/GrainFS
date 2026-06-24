@@ -30,8 +30,7 @@ func statusCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().String("endpoint", "",
-		"admin Unix socket path (overrides GRAINFS_ADMIN_SOCKET env var)")
+	registerAdminEndpointFlag(cmd, "admin Unix socket path (overrides GRAINFS_ADMIN_SOCKET env var)")
 	cmd.Flags().Bool("json", false, "output raw JSON")
 	registerAdminTimeoutFlag(cmd)
 	return cmd

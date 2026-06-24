@@ -135,7 +135,7 @@ func TestReconcileVersionIsLatest(t *testing.T) {
 	require.Equal(t, "v5", latest["b"], "non-flagged newer version must not be promoted")
 }
 
-// TestDedupVersionsKeepFirst covers the coordinator's soleauth=on dedup: every
+// TestDedupVersionsKeepFirst covers the coordinator's blob-authoritative dedup: every
 // leaf returns the identical cluster-wide blob view (→ N× duplicates), which the
 // coordinator collapses by (Key,VersionID) keeping the first; carve-out keys
 // owned by one group never duplicate and survive intact.

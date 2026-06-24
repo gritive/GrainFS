@@ -52,7 +52,7 @@ func (b *DistributedBackend) bucketVersioningEnabled(ctx context.Context, bucket
 
 func (b *DistributedBackend) writeQuorumMeta(ctx context.Context, cmd PutObjectMetaCmd) error {
 	// Blob-primary (raft-free): for versioning-enabled buckets the per-version blob
-	// (written below via fanOutPerVersionBlob) is the SOLE AUTHORITY for object
+	// (written below via fanOutPerVersionBlob) is the BLOB AUTHORITY for object
 	// metadata — there is no raft propose for object metadata. Reads, LIST, the orphan GCs,
 	// and DEK rewrap all derive from the per-version blobs; the latest-only blob is
 	// the LIST-latest fast path. The conditional-PUT (ExpectedETag) CAS that used to
@@ -800,7 +800,7 @@ func (s *ShardService) readQuorumMetaVersionsLocal(bucket, key string) ([]PutObj
 // readQuorumMetaVersionsRawLocal reads the RAW per-version blob bytes for
 // (bucket, key) WITHOUT decoding — the fail-closed input for the read1
 // decode-strict reader. Unlike readQuorumMetaVersionsLocal it returns an error on
-// an os.ReadFile failure (a present-but-unreadable blob under sole authority must
+// an os.ReadFile failure (a present-but-unreadable blob under blob authority must
 // fail closed, not be silently skipped); decoding (and its strictness) is the
 // caller's job. Absent dir → (nil, nil). Temp files + the key-escape guard are
 // handled identically to readQuorumMetaVersionsLocal.
@@ -1034,7 +1034,7 @@ func (b *DistributedBackend) listObjectsPerVersion(ctx context.Context, bucket, 
 // (single-key, dedup-by-VID) it is bucket-wide and all-version (no max-per-key
 // collapse). Unlike listObjectsPerVersion it is FAIL-CLOSED: a local strict-scan
 // error, a peer-address resolution error, or a peer RPC error is returned (NOT
-// skipped) — under sole authority a silently-truncated set is data loss. When
+// skipped) — under blob authority a silently-truncated set is data loss. When
 // shardGroup == nil (single-node) the result is the local STRICT scan.
 func (b *DistributedBackend) scanQuorumMetaVersionsClusterAll(bucket, prefix string) ([]PutObjectMetaCmd, error) {
 	if b.shardSvc == nil {
@@ -1178,7 +1178,7 @@ func (b *DistributedBackend) readQuorumMetaVersion(bucket, key, versionID string
 	return PutObjectMetaCmd{}, false, nil
 }
 
-// readQuorumMetaVersionsDecodeStrict is the read1 soleauth=on per-key reader:
+// readQuorumMetaVersionsDecodeStrict is the read1 blob-authoritative per-key reader:
 // DECODE-strict but availability-TOLERANT. A blob that fails to decode anywhere it
 // is SERVED (self, or any reachable peer) fails the whole read closed — so a
 // corrupt latest (max-VID) blob can NEVER be silently dropped and resurrect an
@@ -1189,7 +1189,7 @@ func (b *DistributedBackend) readQuorumMetaVersion(bucket, key, versionID string
 // read strict (local read failure → fail closed).
 //
 // Distinct from the tolerant readQuorumMetaVersions, which silently drops per-blob
-// decode failures and is correct for the off-path / non-sole-authority consumers.
+// decode failures and is correct for the off-path / non-blob-authority consumers.
 func (b *DistributedBackend) readQuorumMetaVersionsDecodeStrict(bucket, key string) ([]PutObjectMetaCmd, error) {
 	if b.shardSvc == nil {
 		return nil, nil
@@ -1598,7 +1598,7 @@ func (s *ShardService) ScanQuorumMetaVersionsBucketAll(bucket, prefix string) ([
 // scanQuorumMetaVersionsBucketAllStrict is the FAIL-CLOSED twin of
 // ScanQuorumMetaVersionsBucketAll: it walks every per-version blob in bucket
 // and returns an error on the first unreadable or undecodable blob instead of
-// silently skipping it. Consumed by the soleauth-on snapshot capture path
+// silently skipping it. Consumed by the blob-authoritative snapshot capture path
 // where a skipped-then-recovered blob would be captured-absent then purged.
 func (s *ShardService) scanQuorumMetaVersionsBucketAllStrict(bucket, prefix string) ([]PutObjectMetaCmd, error) {
 	if len(s.dataDirs) == 0 {
@@ -1707,9 +1707,9 @@ func (s *ShardService) ScanQuorumMetaVersionsAll(ctx context.Context, addr, buck
 		// FAIL-CLOSED end-to-end (codex code-gate [P1]): a per-entry decode
 		// failure (in-transit corruption, decode-version skew) must NOT be
 		// silently skipped — that would return a partial authoritative version
-		// list, omitting versions from a soleauth-on listing. (The per-key-max
+		// list, omitting versions from a blob-authoritative listing. (The per-key-max
 		// tolerant clients keep skipping by design; this all-version path is the
-		// sole-authority enumerator and must fail closed.)
+		// blob-authority enumerator and must fail closed.)
 		cmd, derr := s.decodeQuorumMetaCmdBlob(blob)
 		if derr != nil {
 			return nil, fmt.Errorf("decode scan quorum meta versions all response from %s: %w", addr, derr)

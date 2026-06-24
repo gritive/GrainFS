@@ -30,7 +30,7 @@ func newScrubCmd() *cobra.Command {
 	cmd.Flags().String("prefix", "", "narrow walk to keys starting with this prefix")
 	cmd.Flags().Bool("dry-run", false, "observe only, no repair")
 	cmd.Flags().Bool("detach", false, "don't follow, return immediately")
-	registerAdminEndpointFlag(cmd)
+	registerAdminEndpointFlag(cmd, "admin Unix socket path (required, e.g. ./tmp/admin.sock)")
 	registerAdminTimeoutFlag(cmd)
 	return cmd
 }

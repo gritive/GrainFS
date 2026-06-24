@@ -120,7 +120,7 @@ func (b *DistributedBackend) liveVersionedShardDirs() (map[string]bool, error) {
 		return nil, fmt.Errorf("no shard service")
 	}
 	// Phase 1 (inside the read txn): collect candidate FSM obj: records. The
-	// per-bucket versioning lookup (soleAuthReadOn) opens its OWN read txn, so it
+	// per-bucket versioning lookup (blobAuthReadOn) opens its OWN read txn, so it
 	// must run OUTSIDE this View — collect here, classify below.
 	type fsmRec struct {
 		bucket, key, versionID string
@@ -173,7 +173,7 @@ func (b *DistributedBackend) liveVersionedShardDirs() (map[string]bool, error) {
 	for _, r := range recs {
 		ver, ok := verCache[r.bucket]
 		if !ok {
-			v, err := b.soleAuthReadOn(r.bucket)
+			v, err := b.blobAuthReadOn(r.bucket)
 			if err != nil {
 				return nil, err // fail-closed
 			}
@@ -410,7 +410,7 @@ func (b *DistributedBackend) hasLiveShardRecord(bucket, key, versionID string) (
 	// (appendable/coalesced) stay FSM-authoritative. A stale plain-versioned FSM
 	// record is NON-authoritative here, so a hard-deleted version's shards become
 	// orphan-eligible even while its FSM record lingers.
-	if on, serr := b.soleAuthReadOn(bucket); serr != nil {
+	if on, serr := b.blobAuthReadOn(bucket); serr != nil {
 		return false, false // uncertain → keep
 	} else if on {
 		cmd, ok, err := b.readQuorumMetaVersionDecodeStrict(bucket, key, versionID)

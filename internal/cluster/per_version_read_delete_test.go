@@ -339,7 +339,7 @@ func TestDeleteObjectVersion_WritesTombstoneNotPurge(t *testing.T) {
 // TestGetObjectVersion_BlobAbsentFSMOnlyIs404 proves the blob-primary contract: on
 // a versioning-enabled key, a specific version that exists ONLY as a BadgerDB
 // ObjectMetaKeyV FSM record with NO per-version blob is NOT served — the per-version
-// blob is the sole authority, so a stale FSM record must not resurrect it (404). The
+// blob is the blob authority, so a stale FSM record must not resurrect it (404). The
 // key ALSO has a normal version WITH a per-version blob, which still resolves.
 func TestGetObjectVersion_BlobAbsentFSMOnlyIs404(t *testing.T) {
 	b := newSingleNode1Plus0ChunkCapable(t)

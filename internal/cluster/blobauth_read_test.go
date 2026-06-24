@@ -33,16 +33,16 @@ func seedFSMObject(t *testing.T, b *DistributedBackend, bucket, key, versionID s
 	}))
 }
 
-// TestSoleAuthReadOn covers the on→true / off,pending→false mapping and the
+// TestBlobAuthReadOn covers the on→true / off,pending→false mapping and the
 // fail-closed error contract.
-func TestSoleAuthReadOn(t *testing.T) {
+func TestBlobAuthReadOn(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("versioning-enabled bucket is blob-authoritative", func(t *testing.T) {
 		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "bon"))
 		setVersioningForTest(t, b, "bon", "Enabled")
-		on, err := b.soleAuthReadOn("bon")
+		on, err := b.blobAuthReadOn("bon")
 		require.NoError(t, err)
 		require.True(t, on)
 	})
@@ -51,7 +51,7 @@ func TestSoleAuthReadOn(t *testing.T) {
 		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "bsus"))
 		setVersioningForTest(t, b, "bsus", "Suspended")
-		on, err := b.soleAuthReadOn("bsus")
+		on, err := b.blobAuthReadOn("bsus")
 		require.NoError(t, err)
 		require.False(t, on)
 	})
@@ -60,7 +60,7 @@ func TestSoleAuthReadOn(t *testing.T) {
 		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "boff"))
 		// never enabled → unversioned
-		on, err := b.soleAuthReadOn("boff")
+		on, err := b.blobAuthReadOn("boff")
 		require.NoError(t, err)
 		require.False(t, on)
 	})
@@ -68,7 +68,7 @@ func TestSoleAuthReadOn(t *testing.T) {
 	t.Run("fails closed when MetaBucketStore is unwired", func(t *testing.T) {
 		b := newTestDistributedBackend(t)
 		b.SetMetaBucketStore(nil)
-		on, err := b.soleAuthReadOn("berr")
+		on, err := b.blobAuthReadOn("berr")
 		require.Error(t, err)
 		require.False(t, on, "must fail closed (false) on a versioning-read error")
 	})
@@ -123,7 +123,7 @@ func TestFSMCarveoutObject(t *testing.T) {
 		seedFSMObject(t, b, "bv", "k", "v1", objectMeta{Key: "k", ETag: "e"}, true)
 		obj, _, ok, err := b.fsmCarveoutObject("bv", "k", "")
 		require.NoError(t, err)
-		require.False(t, ok, "a plain versioned record must NOT be a carve-out under soleauth=on")
+		require.False(t, ok, "a plain versioned record must NOT be a carve-out under blob-authoritative")
 		require.Nil(t, obj)
 	})
 

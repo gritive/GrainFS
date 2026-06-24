@@ -9,10 +9,10 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-// TestDeleteBucketEmptinessSoleAuthOn covers the soleauth=on emptiness branch of
+// TestDeleteBucketEmptinessBlobAuthOn covers the blob-authoritative emptiness branch of
 // DistributedBackend.DeleteBucket: emptiness is derived from the per-version blob
 // tree (incl. delete markers) + carve-out FSM, NOT the stale FSM obj: prefix scan.
-func TestDeleteBucketEmptinessSoleAuthOn(t *testing.T) {
+func TestDeleteBucketEmptinessBlobAuthOn(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("live version present → ErrBucketNotEmpty", func(t *testing.T) {
@@ -46,8 +46,8 @@ func TestDeleteBucketEmptinessSoleAuthOn(t *testing.T) {
 	})
 
 	t.Run("stale vid-bearing FSM record but NO blob → bucket EMPTY, delete proceeds", func(t *testing.T) {
-		// The core soleauth=on win: a non-carve-out vid-bearing FSM obj: record is
-		// non-authoritative under sole authority, so it must NOT false-block the
+		// The core blob-authoritative win: a non-carve-out vid-bearing FSM obj: record is
+		// non-authoritative under blob authority, so it must NOT false-block the
 		// deletion of an authoritatively-empty bucket (the off-path obj: scan would).
 		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "bstale"))
@@ -67,7 +67,7 @@ func TestDeleteBucketEmptinessSoleAuthOn(t *testing.T) {
 		require.ErrorIs(t, b.HeadBucket(ctx, "bempty"), storage.ErrBucketNotFound)
 	})
 
-	t.Run("soleauth read error → propagated (fail closed)", func(t *testing.T) {
+	t.Run("blob-authority read error → propagated (fail closed)", func(t *testing.T) {
 		b, db := newTestDistributedBackendWithDB(t)
 		require.NoError(t, b.CreateBucket(ctx, "berr"))
 		require.NoError(t, db.Close())

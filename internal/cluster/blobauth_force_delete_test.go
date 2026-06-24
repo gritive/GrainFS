@@ -10,13 +10,13 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-// TestForceDeleteBucketSoleAuthOn covers the soleauth=on leaf ForceDeleteBucket
+// TestForceDeleteBucketBlobAuthOn covers the blob-authoritative leaf ForceDeleteBucket
 // path: the deletion set is enumerated from the per-version blob authority
 // (scanQuorumMetaVersionsClusterAll + DeleteObjectVersion), and the trailing
 // blob-aware DeleteBucket empties the bucket. The legacy FSM carve-out tail
 // (scanFsmCarveoutVersions + HardDeleteLegacyObject) was dropped in Task 4b:
 // greenfield versioned buckets have no FSM carve-outs.
-func TestForceDeleteBucketSoleAuthOn(t *testing.T) {
+func TestForceDeleteBucketBlobAuthOn(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("versioned blobs only → force-delete empties the bucket", func(t *testing.T) {
@@ -37,7 +37,7 @@ func TestForceDeleteBucketSoleAuthOn(t *testing.T) {
 		require.ErrorIs(t, b.HeadBucket(ctx, "b"), storage.ErrBucketNotFound)
 	})
 
-	t.Run("soleauth read error → propagated (fail closed)", func(t *testing.T) {
+	t.Run("blob-authority read error → propagated (fail closed)", func(t *testing.T) {
 		b, db := newTestDistributedBackendWithDB(t)
 		require.NoError(t, b.CreateBucket(ctx, "berr"))
 		require.NoError(t, db.Close())

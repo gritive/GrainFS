@@ -187,7 +187,7 @@ type Copier interface {
 // blobs live under <key>_segments/<blob_id>, not at the legacy objectPath, so
 // the GC known-set must include them. The placement/fidelity fields (NodeIDs,
 // ECData, ECParity, StripeBytes, PlacementGroupID, MetaSeq, UserMetadata, Parts)
-// are populated for the soleauth-on branch (per-version blob authority).
+// are populated for the blob-authoritative branch (per-version blob authority).
 type SnapshotObject struct {
 	Bucket         string       `json:"bucket"`
 	Key            string       `json:"key"`
@@ -205,7 +205,7 @@ type SnapshotObject struct {
 	// coalesced chunks; omitempty keeps the JSON compact.
 	Coalesced []CoalescedRef `json:"coalesced,omitempty"`
 	Tags      []Tag          `json:"tags,omitempty"`
-	// Populated only for the soleauth-on branch (per-version blob authority).
+	// Populated only for the blob-authoritative branch (per-version blob authority).
 	// Zero/nil for the off/pending FSM-derived branch.
 	NodeIDs          []string             `json:"node_ids,omitempty"`
 	ECData           uint8                `json:"ec_data,omitempty"`

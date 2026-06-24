@@ -244,7 +244,7 @@ func TestPutObjectMetaCmd_RetiredNoOp(t *testing.T) {
 
 // TestFSM_DeleteObject removed: CmdDeleteObject is retired (data-plane raft-free
 // Slice 2 no-op). Force-delete is now covered by TestForceDeleteBucketNonVersioned_QmetaAndShards
-// and TestForceDeleteBucketSoleAuthOn which exercise the blob-physical path.
+// and TestForceDeleteBucketBlobAuthOn which exercise the blob-physical path.
 // The no-op behavior is verified by TestCmdDeleteObject_RetiredNoOp.
 
 func TestFSM_SnapshotRestore(t *testing.T) {

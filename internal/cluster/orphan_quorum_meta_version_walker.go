@@ -13,7 +13,7 @@ import (
 
 // This file implements the per-version blob reconciliation sweep under blob-primary.
 // The per-version quorum-meta blob (.quorum_meta_versions/{bucket}/{key}/{vid}) is
-// the SOLE AUTHORITY for a versioned object; a hard delete REPLACES the data blob
+// the BLOB AUTHORITY for a versioned object; a hard delete REPLACES the data blob
 // with a TOMBSTONE (IsHardDeleted) rather than physically purging it. This sweep is
 // the eventual-consistency reconciler for those tombstones — the blob-primary
 // replacement for raft's delete propagation. It does two things, both deleting only

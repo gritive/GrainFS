@@ -30,9 +30,9 @@ package cluster
 //	uploadID create order).  Changing it requires migrating ALL 7 sites that
 //	use the max-VID rule:
 //	  • deriveLatestVersion  (quorum_meta.go)
-//	  • object_version.go  listObjectVersionsSoleAuth maxVID loop (~line 551)
-//	  • object_manifest.go  listSoleAuthBucketObjectsForGC maxVID loop (~line 172)
-//	  • scrubbable.go  localSoleAuthScrubObjects latest collapse (~line 218)
+//	  • object_version.go  listObjectVersionsBlobAuth maxVID loop (~line 551)
+//	  • object_manifest.go  listBlobAuthBucketObjectsForGC maxVID loop (~line 172)
+//	  • scrubbable.go  localBlobAuthScrubObjects latest collapse (~line 218)
 //	  • cluster_coordinator.go  reconcileVersionIsLatest / sortObjectVersions
 //	  • object_delete.go  latest-version resolution (~line 78)
 //	  • listObjectVersions (non-sole-auth path, latestVID pre-scan ~line 370)

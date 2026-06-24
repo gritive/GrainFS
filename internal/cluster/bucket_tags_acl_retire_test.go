@@ -28,7 +28,7 @@ func putTestObjectForRetire(t *testing.T, b *DistributedBackend, bucket, key str
 
 // TestSetObjectTags_BlobObject_NoRaftFallback locks the behaviour that
 // SetObjectTags on a greenfield (quorum-meta) object mutates the blob and
-// advances MetaSeq — the blob RMW is the sole authority, no raft fallback.
+// advances MetaSeq — the blob RMW is the blob authority, no raft fallback.
 func TestSetObjectTags_BlobObject_NoRaftFallback(t *testing.T) {
 	b := newTestBackendWithQuorumMeta(t)
 	ctx := context.Background()
@@ -47,7 +47,7 @@ func TestSetObjectTags_BlobObject_NoRaftFallback(t *testing.T) {
 
 // TestSetObjectACL_BlobObject_NoRaftFallback locks the behaviour that
 // SetObjectACL on a greenfield (quorum-meta) object mutates the blob and
-// advances MetaSeq — the blob RMW is the sole authority, no raft fallback.
+// advances MetaSeq — the blob RMW is the blob authority, no raft fallback.
 func TestSetObjectACL_BlobObject_NoRaftFallback(t *testing.T) {
 	b := newTestBackendWithQuorumMeta(t)
 	ctx := context.Background()
