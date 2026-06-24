@@ -168,6 +168,15 @@ func (b *DistributedBackend) DeleteBucket(ctx context.Context, bucket string) er
 	if err := b.removeAll(b.bucketDir(bucket)); err != nil {
 		return fmt.Errorf("remove bucket dir: %w", err)
 	}
+
+	// os.RemoveAll(bucketDir) clears only {root}/data/{bucket}; the off-raft
+	// quorum-meta blob trees live in a separate subtree and must be removed too,
+	// else hard-delete tombstone blobs from purgePerVersionBlobs persist as residue.
+	if b.shardSvc != nil {
+		if err := b.shardSvc.RemoveBucketMetaTrees(bucket); err != nil {
+			return fmt.Errorf("remove bucket quorum-meta trees: %w", err)
+		}
+	}
 	return nil
 }
 

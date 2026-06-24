@@ -51,17 +51,26 @@ surfaced by that removal:
   `HeadBucket`) can commit qmeta in the window after the scan. Negligible at admin-only
   scope; surfaced by the plan-gate codex pass.
 
-- **[P3][pre-existing] Versioned/Suspended force-delete leaves per-version tombstone
+- **[DONE-local][pre-existing] Versioned/Suspended force-delete left per-version tombstone
   blobs in `.quorum_meta_versions/{bucket}/`.** `purgePerVersionBlobs` deletes versions
   via `DeleteObjectVersion`, which writes an `IsHardDeleted` tombstone (the versioned
   shards then become orphan-eligible and ARE reclaimed by the orphan-shard walker;
   non-versioned shards are hard-removed inline because the walker does not GC them).
   `os.RemoveAll(b.bucketDir)` removes `{root}/data/{bucket}` but NOT the
-  `.quorum_meta_versions/{bucket}/` tombstone blobs, so they persist as inert residue
+  `.quorum_meta_versions/{bucket}/` tombstone blobs, so they persisted as inert residue
   (dropped from reads via `dropHardDeletedVersions`, so no resurrection). Shared with the
-  pre-existing Enabled force-delete path (`forceDeleteBucketBlobAuth`); surfaced by the
-  code-gate codex pass. Fix: add an age-gated per-version tombstone-tree GC, or remove
-  `.quorum_meta{,_versions}/{bucket}/` on bucket delete.
+  pre-existing Enabled force-delete path (`forceDeleteBucketBlobAuth`).
+  FIXED at the coordinator-local site: `DeleteBucket` now calls
+  `ShardService.RemoveBucketMetaTrees` to remove `.quorum_meta{,_versions}/{bucket}` after
+  `os.RemoveAll(bucketDir)`. Multi-node peer fan-out remains open (next item).
+
+- **[P3][pre-existing] Bucket-delete physical cleanup is coordinator-local in a cluster.**
+  `DistributedBackend.DeleteBucket` removes `bucketDir` AND (new) the
+  `.quorum_meta{,_versions}/{bucket}` trees only on the node that runs the call; the
+  meta-Raft DeleteBucket apply removes only the bucket record + `onBucketUnassigned`, with
+  no per-node physical-cleanup fan-out. So peer nodes leak `bucketDir` + the meta trees
+  (inert residue). Fix: a data-plane per-node bucket physical-cleanup fan-out (covers
+  bucketDir + meta trees together). Surfaced by the code-gate codex pass.
 
 ### Bucket-delete config cascade follow-ups (PR: fix-bucket-delete-config-cascade)
 
