@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.662.0] - 2026-06-24
+
+### Changed
+- **Internal cleanup, no user-facing change.** Removed the now-dead "group-0 BadgerDB" read fallback
+  from the bucket existence/policy/versioning read paths left over from the meta-raft control-plane
+  demotion in 0.0.661.0. Those reads now fail fast when the meta-raft bucket store is unwired, which is
+  unreachable in production (it is wired unconditionally at boot before any bucket read), matching the
+  write paths. The three retired group-0 bucket key-builders were deleted. S3 client behavior is
+  unchanged.
+- Added an at-rest-encryption regression test proving the live meta-raft bucket policy is sealed inside
+  the snapshot envelope, restoring coverage the demotion removed.
+
 ## [0.0.661.0] - 2026-06-24
 
 ### Changed
