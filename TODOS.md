@@ -2,6 +2,32 @@
 
 ## Follow-ups
 
+### DeleteBucket non-Enabled emptiness follow-ups (2026-06-24)
+
+- **[P3][pre-existing] TOCTOU between the DeleteBucket emptiness scan and the
+  `propose(CmdDeleteBucket)` + `os.RemoveAll(bucketDir)`.** A concurrent PUT (needs only
+  `HeadBucket`) can commit qmeta in the window after the scan. Negligible at admin-only
+  scope; surfaced by the plan-gate codex pass.
+
+- **[P3][pre-existing] Versioned/Suspended force-delete leaves per-version tombstone
+  blobs in `.quorum_meta_versions/{bucket}/`.** `purgePerVersionBlobs` deletes versions
+  via `DeleteObjectVersion`, which writes an `IsHardDeleted` tombstone (the versioned
+  shards then become orphan-eligible and ARE reclaimed by the orphan-shard walker;
+  non-versioned shards are hard-removed inline because the walker does not GC them).
+  `os.RemoveAll(b.bucketDir)` removes `{root}/data/{bucket}` but NOT the
+  `.quorum_meta_versions/{bucket}/` tombstone blobs, so they persist as inert residue
+  (dropped from reads via `dropHardDeletedVersions`, so no resurrection). Shared with the
+  pre-existing Enabled force-delete path (`forceDeleteBucketSoleAuth`); surfaced by the
+  code-gate codex pass. Fix: add an age-gated per-version tombstone-tree GC, or remove
+  `.quorum_meta{,_versions}/{bucket}/` on bucket delete.
+
+- **[P3][pre-existing] Admin force-delete does not invalidate a `CachedBackend` read
+  cache.** Moot on the current admin path (admin `Operations` wraps the pull-through
+  backend, not `state.cachedBackend`), but if an `Operations` is ever built over a
+  `CachedBackend`, `ForceDeleteBucket` now forwards to the backend and skips the
+  per-key cache invalidation the old generic walk did. Re-evaluate if the cache wrapper
+  moves into the force-delete stack. Surfaced by the code-gate codex pass.
+
 ### Bucket-delete config cascade follow-ups (PR: fix-bucket-delete-config-cascade)
 
 - **[P3][won't-fix] Mixed `--lifecycle-interval` clusters are unsupported.** The lifecycle-delete

@@ -125,18 +125,48 @@ func (b *DistributedBackend) DeleteBucket(ctx context.Context, bucket string) er
 		if len(vs) > 0 {
 			return storage.ErrBucketNotEmpty
 		}
-	} else if err := b.store.View(func(txn MetadataTxn) error {
-		// off/pending: the existing FSM obj: prefix scan, verbatim.
-		prefix := b.ks().Prefix([]byte("obj:" + bucket + "/"))
-		it := txn.NewIterator(MetaIteratorOptions{PrefetchValues: true})
-		defer it.Close()
-		it.Seek(prefix)
-		if it.ValidForPrefix(prefix) {
+	} else {
+		// NOT Enabled (never-versioned OR Suspended). Live objects can sit in TWO
+		// blob trees and the old FSM obj: scan saw NEITHER (greenfield never writes
+		// obj: records -- CmdPutObjectMeta apply is a no-op), so a non-empty bucket
+		// deleted silently (data loss). Both probes are CLUSTER-WIDE — objects are
+		// key-hash-placed across shard groups, so a node-local scan would miss
+		// objects on other nodes (the cluster coordinator always falls through to
+		// this leaf, making it the authoritative cluster-wide emptiness gate). Probe
+		// both, fail-closed:
+		//   (1) latest-only quorum-meta tree (non-versioned / Suspended NEW writes,
+		//       incl. appendable/coalesced carve-outs) via scanQuorumMetaClusterAll —
+		//       local strict scan + fan-out to all peers, matching ForceDeleteBucket's
+		//       cluster non-versioned enumerate. Filesystem walk + RPC → OUTSIDE any
+		//       store.View txn. Tombstones are NOT live objects — skip both kinds,
+		//       mirroring the LIST live-filter (filterAndSortEntries): IsDeleteMarker
+		//       (the non-versioned / Suspended soft-delete the latest-only tree
+		//       actually carries) and IsHardDeleted (defense-in-depth). So a bucket
+		//       whose objects were all deleted still deletes.
+		//   (2) per-version tree (versions preserved from a prior Enabled era for a
+		//       Suspended bucket) via listObjectVersionsSoleAuth (already cluster-wide,
+		//       drops IsHardDeleted; a per-version delete MARKER still counts — it is a
+		//       version, matching the Enabled branch); empty no-op for a
+		//       never-versioned bucket.
+		if b.shardSvc != nil {
+			cmds, qerr := b.scanQuorumMetaClusterAll(bucket)
+			if qerr != nil {
+				return fmt.Errorf("delete bucket: enumerate latest-only qmeta: %w", qerr)
+			}
+			for _, c := range cmds {
+				if c.IsDeleteMarker || c.IsHardDeleted {
+					continue // latest-only tombstone — the object is gone, not live
+				}
+				return storage.ErrBucketNotEmpty
+			}
+		}
+		vs, lerr := b.listObjectVersionsSoleAuth(bucket, "", 1)
+		if lerr != nil {
+			return lerr
+		}
+		if len(vs) > 0 {
 			return storage.ErrBucketNotEmpty
 		}
-		return nil
-	}); err != nil {
-		return err
 	}
 
 	if err := os.RemoveAll(b.bucketDir(bucket)); err != nil {
@@ -207,6 +237,12 @@ func (b *DistributedBackend) ForceDeleteBucket(ctx context.Context, bucket strin
 			return fmt.Errorf("force delete: delete qmeta for %q: %w", cmd.Key, qerr)
 		}
 	}
+	// A Suspended bucket also keeps versions preserved from a prior Enabled era in
+	// the per-version tree; purge them too (no-op for a never-versioned bucket) so
+	// the final DeleteBucket's per-version emptiness check passes.
+	if err := b.purgePerVersionBlobs(ctx, bucket); err != nil {
+		return err
+	}
 	return b.DeleteBucket(ctx, bucket)
 }
 
@@ -220,20 +256,33 @@ func (b *DistributedBackend) ForceDeleteBucket(ctx context.Context, bucket strin
 // dropped: greenfield versioned buckets have no legacy-bare FSM carve-outs, and Task
 // 4c will retire CmdDeleteObject entirely.
 func (b *DistributedBackend) forceDeleteBucketSoleAuth(ctx context.Context, bucket string) error {
-	// Versioned blobs (every version, incl. delete markers), fail-closed.
+	if err := b.purgePerVersionBlobs(ctx, bucket); err != nil {
+		return err
+	}
+	return b.DeleteBucket(ctx, bucket)
+}
+
+// purgePerVersionBlobs deletes every per-version blob (every version, incl. delete
+// markers) in the bucket via DeleteObjectVersion (which purges the blob + its
+// shards), fail-closed. No-op for a bucket whose per-version tree is empty
+// (never-versioned). Shared by the Enabled force path and the non-versioned /
+// Suspended force path so a Suspended bucket's versions preserved from a prior
+// Enabled era are purged, not orphaned (otherwise the final DeleteBucket's
+// per-version emptiness check would reject the force-delete).
+func (b *DistributedBackend) purgePerVersionBlobs(ctx context.Context, bucket string) error {
 	cmds, err := b.scanQuorumMetaVersionsClusterAll(bucket, "")
 	if err != nil {
-		return fmt.Errorf("force delete (soleauth): enumerate blobs: %w", err)
+		return fmt.Errorf("force delete: enumerate per-version blobs: %w", err)
 	}
 	for _, c := range cmds {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		if derr := b.DeleteObjectVersion(bucket, c.Key, c.VersionID); derr != nil {
-			return fmt.Errorf("force delete (soleauth): delete %q@%s: %w", c.Key, c.VersionID, derr)
+			return fmt.Errorf("force delete: delete %q@%s: %w", c.Key, c.VersionID, derr)
 		}
 	}
-	return b.DeleteBucket(ctx, bucket)
+	return nil
 }
 
 // SetBucketVersioning satisfies server.BucketVersioner. Replicates the

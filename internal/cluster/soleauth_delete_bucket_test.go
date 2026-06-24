@@ -78,9 +78,76 @@ func TestDeleteBucketEmptinessSoleAuthOn(t *testing.T) {
 	})
 }
 
-// TestDeleteBucketEmptinessOffUnchanged confirms the off/pending path is
-// byte-identical to today's FSM obj: prefix scan.
-func TestDeleteBucketEmptinessOffUnchanged(t *testing.T) {
+// TestDeleteBucketEmptinessNonEnabled covers the non-Enabled emptiness branch
+// (never-versioned AND Suspended). Objects live in TWO blob trees; DeleteBucket
+// must consult both or it silently deletes a non-empty bucket (data loss).
+func TestDeleteBucketEmptinessNonEnabled(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("never-versioned latest-only blob present -> ErrBucketNotEmpty", func(t *testing.T) {
+		b := newTestDistributedBackend(t)
+		require.NoError(t, b.CreateBucket(ctx, "nvb"))
+		seedLatestBlob(t, b, "nvb", "k1", PutObjectMetaCmd{ETag: "e1", Size: 4, NodeIDs: []string{"n1"}})
+		require.ErrorIs(t, b.DeleteBucket(ctx, "nvb"), storage.ErrBucketNotEmpty)
+	})
+
+	t.Run("suspended bucket with a preserved per-version blob -> ErrBucketNotEmpty", func(t *testing.T) {
+		b := newTestDistributedBackend(t)
+		require.NoError(t, b.CreateBucket(ctx, "susp"))
+		seedVersionBlob(t, b, "susp", "k1", vidA1, PutObjectMetaCmd{ETag: "v1"})
+		setVersioningForTest(t, b, "susp", "Suspended")
+		require.ErrorIs(t, b.DeleteBucket(ctx, "susp"), storage.ErrBucketNotEmpty)
+	})
+
+	t.Run("truly empty never-versioned -> delete succeeds", func(t *testing.T) {
+		b := newTestDistributedBackend(t)
+		require.NoError(t, b.CreateBucket(ctx, "nvempty"))
+		require.NoError(t, b.DeleteBucket(ctx, "nvempty"))
+		require.ErrorIs(t, b.HeadBucket(ctx, "nvempty"), storage.ErrBucketNotFound)
+	})
+
+	t.Run("never-versioned with only latest-only tombstones -> empty, delete succeeds", func(t *testing.T) {
+		// A non-versioned DeleteObject overwrites the latest-only blob with an
+		// IsDeleteMarker tombstone (object_delete.go); IsHardDeleted is defense-in-
+		// depth. Neither is a live object, so a bucket holding only tombstones must
+		// still delete — the emptiness loop must skip BOTH (mirroring the LIST
+		// filterAndSortEntries), or an all-deleted bucket becomes undeleteable.
+		b := newTestDistributedBackend(t)
+		require.NoError(t, b.CreateBucket(ctx, "nvtomb"))
+		seedLatestBlob(t, b, "nvtomb", "del-marker", PutObjectMetaCmd{IsDeleteMarker: true, NodeIDs: []string{"n1"}})
+		seedLatestBlob(t, b, "nvtomb", "hard-del", PutObjectMetaCmd{IsHardDeleted: true, NodeIDs: []string{"n1"}})
+		require.NoError(t, b.DeleteBucket(ctx, "nvtomb"))
+		require.ErrorIs(t, b.HeadBucket(ctx, "nvtomb"), storage.ErrBucketNotFound)
+	})
+}
+
+// TestForceDeleteBucketSuspendedPurgesPerVersion proves --force purges a Suspended
+// bucket's preserved per-version blobs (from a prior Enabled era), not just the
+// latest-only tree, so the bucket actually deletes instead of tripping the
+// per-version emptiness recheck in the final DeleteBucket.
+func TestForceDeleteBucketSuspendedPurgesPerVersion(t *testing.T) {
+	// Enable → write (→ real per-version blob + shards) → Suspend leaves the
+	// version preserved in the per-version tree. ForceDeleteBucket on the Suspended
+	// bucket must purge it (not just the empty latest-only tree).
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "suspf"))
+	require.NoError(t, b.SetBucketVersioning("suspf", "Enabled"))
+	putTestObjectForRetire(t, b, "suspf", "k1", []byte("a"))
+	require.NoError(t, b.SetBucketVersioning("suspf", "Suspended"))
+
+	require.NoError(t, b.ForceDeleteBucket(ctx, "suspf"))
+	require.ErrorIs(t, b.HeadBucket(ctx, "suspf"), storage.ErrBucketNotFound)
+}
+
+// TestDeleteBucketEmptinessNonEnabledControl confirms blob-primary emptiness for
+// the cases adjacent to the non-Enabled fix. The non-Enabled emptiness path no
+// longer scans the FSM obj: tree (dead in greenfield — CmdPutObjectMeta apply is
+// a no-op); it probes the latest-only + per-version blob trees instead. The
+// subtests below cover (1) the Enabled (ON) branch where a stale plain-versioned
+// FSM record with no per-version blob is authoritatively empty, and (2) a truly
+// empty never-versioned bucket that takes the new blob-tree probe and deletes.
+func TestDeleteBucketEmptinessNonEnabledControl(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("a stale plain-versioned FSM record does NOT block deletion (blob-primary)", func(t *testing.T) {

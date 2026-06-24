@@ -740,6 +740,12 @@ func (c *ClusterCoordinator) ForceDeleteBucket(ctx context.Context, bucket strin
 			return fmt.Errorf("force delete cluster: delete qmeta for %q: %w", cmd.Key, qerr)
 		}
 	}
+	// A Suspended bucket also keeps versions preserved from a prior Enabled era in
+	// the per-version tree; purge them too (no-op for a never-versioned bucket) so
+	// the final DeleteBucket's per-version emptiness check passes.
+	if err := c.purgePerVersionBlobs(ctx, bucket); err != nil {
+		return err
+	}
 	return c.DeleteBucket(ctx, bucket)
 }
 
@@ -751,26 +757,59 @@ func (c *ClusterCoordinator) ForceDeleteBucket(ctx context.Context, bucket strin
 // The legacy hardDeleteLegacyObject raft tail has been dropped: greenfield versioned
 // buckets have no legacy-bare FSM carve-outs, and Task 4c will retire CmdDeleteObject.
 func (c *ClusterCoordinator) forceDeleteBucketSoleAuth(ctx context.Context, bucket string) error {
-	versions, err := c.ListObjectVersions(ctx, bucket, "", 0)
-	if err != nil {
-		return fmt.Errorf("force delete (soleauth): enumerate: %w", err)
+	if err := c.purgePerVersionBlobs(ctx, bucket); err != nil {
+		return err
 	}
-	for _, v := range versions {
-		if v == nil {
+	return c.DeleteBucket(ctx, bucket)
+}
+
+// purgePerVersionBlobs deletes every per-version blob (cluster-wide, incl. delete
+// markers) via DeleteObjectVersion (routed blob + shard purging), fail-closed. No-op
+// for a bucket whose per-version tree is empty (never-versioned). Shared by the
+// Enabled force path and the non-versioned / Suspended force path so a Suspended
+// bucket's versions preserved from a prior Enabled era are purged, not orphaned.
+//
+// Enumeration uses the RAW per-version blob scan (scanQuorumMetaVersionsClusterAll),
+// the SAME source DeleteBucket's emptiness check reads — NOT ListObjectVersions,
+// which is versioning-state-gated and returns nothing for a Suspended bucket, so
+// purge and recheck must agree or a Suspended bucket would survive the purge.
+func (c *ClusterCoordinator) purgePerVersionBlobs(ctx context.Context, bucket string) error {
+	b, ok := c.base.(*DistributedBackend)
+	if !ok || b == nil {
+		// Non-DistributedBackend base: fall back to the version-listing enumeration.
+		versions, lerr := c.ListObjectVersions(ctx, bucket, "", 0)
+		if lerr != nil {
+			return fmt.Errorf("force delete: enumerate per-version blobs: %w", lerr)
+		}
+		for _, v := range versions {
+			if v == nil || v.VersionID == "" {
+				continue
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if derr := c.DeleteObjectVersion(bucket, v.Key, v.VersionID); derr != nil {
+				return fmt.Errorf("force delete: delete %q@%s: %w", v.Key, v.VersionID, derr)
+			}
+		}
+		return nil
+	}
+	cmds, err := b.scanQuorumMetaVersionsClusterAll(bucket, "")
+	if err != nil {
+		return fmt.Errorf("force delete: enumerate per-version blobs: %w", err)
+	}
+	for _, cmd := range cmds {
+		if cmd.VersionID == "" {
 			continue
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if v.VersionID == "" {
-			// Legacy-bare records have no version blob to purge; skip in greenfield.
-			continue
-		}
-		if derr := c.DeleteObjectVersion(bucket, v.Key, v.VersionID); derr != nil {
-			return fmt.Errorf("force delete (soleauth): delete %q@%s: %w", v.Key, v.VersionID, derr)
+		if derr := c.DeleteObjectVersion(bucket, cmd.Key, cmd.VersionID); derr != nil {
+			return fmt.Errorf("force delete: delete %q@%s: %w", cmd.Key, cmd.VersionID, derr)
 		}
 	}
-	return c.DeleteBucket(ctx, bucket)
+	return nil
 }
 
 func (c *ClusterCoordinator) ListBuckets(ctx context.Context) ([]string, error) {
