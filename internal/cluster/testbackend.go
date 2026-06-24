@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"time"
 
@@ -15,6 +16,103 @@ type singletonBackendTestTB interface {
 	Cleanup(func())
 	TempDir() string
 	Fatalf(format string, args ...interface{})
+}
+
+// directFSMMetaBucketStore is a MetaBucketStore implementation for tests and
+// single-node tooling. It applies bucket-mutation commands directly to a local
+// MetaFSM (the meta-raft layer). Record / RecordLinearized / AllRecords read
+// from the MetaFSM so HeadBucket, GetBucketVersioning, GetBucketPolicy, and
+// ListBuckets all see consistent state.
+//
+// Task 12: the group-0 dual-write path is removed. Bucket control-plane is now
+// entirely in meta-raft; all group-0 bucket applies are no-ops.
+type directFSMMetaBucketStore struct {
+	meta *MetaFSM
+}
+
+// newDirectFSMMetaBucketStore returns a MetaBucketStore that applies mutations
+// directly to a fresh MetaFSM. Safe for tests and single-node server starts
+// where no meta-Raft quorum is available.
+func newDirectFSMMetaBucketStore(_ *FSM) MetaBucketStore {
+	return &directFSMMetaBucketStore{meta: NewMetaFSM()}
+}
+
+func (s *directFSMMetaBucketStore) CreateBucket(_ context.Context, bucket, groupID string, bypassReserved bool) error {
+	// MetaFSM.applyCreateBucket requires non-empty groupID; use "local" when
+	// unset (tests / single-node paths that don't assign a data group).
+	if groupID == "" {
+		groupID = "local"
+	}
+	metaRaw, err := encodeMetaCreateBucketCmd(bucket, groupID, bypassReserved)
+	if err != nil {
+		return err
+	}
+	cmd, err := encodeMetaCmd(MetaCmdTypeCreateBucket, metaRaw)
+	if err != nil {
+		return err
+	}
+	return s.meta.applyCmd(cmd)
+}
+
+func (s *directFSMMetaBucketStore) DeleteBucket(_ context.Context, bucket string) error {
+	metaRaw, err := encodeMetaDeleteBucketCmd(bucket)
+	if err != nil {
+		return err
+	}
+	cmd, err := encodeMetaCmd(MetaCmdTypeDeleteBucket, metaRaw)
+	if err != nil {
+		return err
+	}
+	return s.meta.applyCmd(cmd)
+}
+
+func (s *directFSMMetaBucketStore) SetVersioning(_ context.Context, bucket, state string) error {
+	metaRaw, err := encodeMetaSetBucketVersioningCmd(bucket, state)
+	if err != nil {
+		return err
+	}
+	cmd, err := encodeMetaCmd(MetaCmdTypeSetBucketVersioning, metaRaw)
+	if err != nil {
+		return err
+	}
+	return s.meta.applyCmd(cmd)
+}
+
+func (s *directFSMMetaBucketStore) SetPolicy(_ context.Context, bucket string, policy []byte) error {
+	metaRaw, err := encodeMetaSetBucketPolicyCmd(bucket, append([]byte(nil), policy...))
+	if err != nil {
+		return err
+	}
+	cmd, err := encodeMetaCmd(MetaCmdTypeSetBucketPolicy, metaRaw)
+	if err != nil {
+		return err
+	}
+	return s.meta.applyCmd(cmd)
+}
+
+func (s *directFSMMetaBucketStore) DeletePolicy(_ context.Context, bucket string) error {
+	metaRaw, err := encodeMetaDeleteBucketPolicyCmd(bucket)
+	if err != nil {
+		return err
+	}
+	cmd, err := encodeMetaCmd(MetaCmdTypeDeleteBucketPolicy, metaRaw)
+	if err != nil {
+		return err
+	}
+	return s.meta.applyCmd(cmd)
+}
+
+func (s *directFSMMetaBucketStore) Record(bucket string) (BucketRecord, bool) {
+	return s.meta.BucketRecord(bucket)
+}
+
+func (s *directFSMMetaBucketStore) RecordLinearized(_ context.Context, bucket string) (BucketRecord, bool, error) {
+	rec, ok := s.meta.BucketRecord(bucket)
+	return rec, ok, nil
+}
+
+func (s *directFSMMetaBucketStore) AllRecords() map[string]BucketRecord {
+	return s.meta.AllBucketRecords()
 }
 
 // NewSingletonBackendForTest spins up a DistributedBackend as a one-node
@@ -78,6 +176,10 @@ func NewSingletonBackendForTest(t singletonBackendTestTB) *DistributedBackend {
 	}
 	svc := NewShardService(backend.root, nil, WithShardDEKKeeper(keeper, clusterID))
 	backend.SetShardService(svc, []string{backend.selfAddr})
+	// Wire the direct-FSM MetaBucketStore so all bucket-write paths work without
+	// a real meta-Raft cluster. Bucket mutations are applied directly to the
+	// local group-0 FSM, keeping read paths (HeadBucket, etc.) consistent.
+	backend.SetMetaBucketStore(newDirectFSMMetaBucketStore(backend.fsm))
 
 	stopApply := make(chan struct{})
 	go backend.RunApplyLoop(stopApply)

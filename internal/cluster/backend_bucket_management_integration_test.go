@@ -12,12 +12,36 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-type mockBucketAssigner struct {
-	fn func(ctx context.Context, bucket, groupID string) error
+// recordingMetaBucketStore is a MetaBucketStore that delegates Create to a
+// callback and applies other mutations directly to a directFSMMetaBucketStore.
+// Used by tests that need to observe the groupID passed to CreateBucket without
+// a real MetaBucketStore.
+type recordingMetaBucketStore struct {
+	onCreate func(bucket, groupID string, bypass bool)
 }
 
-func (m *mockBucketAssigner) ProposeBucketAssignment(ctx context.Context, bucket, groupID string) error {
-	return m.fn(ctx, bucket, groupID)
+func (r *recordingMetaBucketStore) CreateBucket(_ context.Context, bucket, groupID string, bypassReserved bool) error {
+	if r.onCreate != nil {
+		r.onCreate(bucket, groupID, bypassReserved)
+	}
+	return nil
+}
+func (r *recordingMetaBucketStore) DeleteBucket(_ context.Context, bucket string) error { return nil }
+func (r *recordingMetaBucketStore) SetVersioning(_ context.Context, bucket, state string) error {
+	return nil
+}
+func (r *recordingMetaBucketStore) SetPolicy(_ context.Context, bucket string, policy []byte) error {
+	return nil
+}
+func (r *recordingMetaBucketStore) DeletePolicy(_ context.Context, bucket string) error { return nil }
+func (r *recordingMetaBucketStore) Record(bucket string) (BucketRecord, bool) {
+	return BucketRecord{}, false
+}
+func (r *recordingMetaBucketStore) RecordLinearized(_ context.Context, bucket string) (BucketRecord, bool, error) {
+	return BucketRecord{}, false, nil
+}
+func (r *recordingMetaBucketStore) AllRecords() map[string]BucketRecord {
+	return nil
 }
 
 var _ = Describe("Backend bucket management integration", func() {
@@ -31,65 +55,47 @@ var _ = Describe("Backend bucket management integration", func() {
 		ctx = context.Background()
 	})
 
-	It("accepts a nil bucket assigner", func() {
-		b.SetBucketAssigner(nil)
-		Expect(b.CreateBucket(ctx, "photos")).To(Succeed())
-	})
+	// Task 12: SetBucketAssigner removed (dead after create cutover to MetaBucketStore).
+	// CreateBucket routes through MetaBucketStore; groupID comes from resolveCreateGroupID.
 
-	It("returns an error when the assigner has no router", func() {
-		b.SetBucketAssigner(&mockBucketAssigner{fn: func(ctx context.Context, bucket, groupID string) error {
-			return nil
-		}})
-		err := b.CreateBucket(ctx, "photos")
-		Expect(err).To(HaveOccurred())
-		Expect(err).To(MatchError(ContainSubstring("router not configured")))
-	})
-
-	It("calls the bucket assigner", func() {
+	It("passes groupID from router default to MetaBucketStore", func() {
 		mgr := NewDataGroupManager()
 		mgr.Add(NewDataGroup("group-0", []string{"node-0"}))
 		r := NewRouter(mgr)
 		r.SetDefault("group-0")
 		b.SetRouter(r)
 
-		var calledBucket, calledGroup string
-		b.SetBucketAssigner(&mockBucketAssigner{fn: func(ctx context.Context, bucket, groupID string) error {
-			calledBucket = bucket
-			calledGroup = groupID
-			return nil
-		}})
+		var capturedGroup string
+		b.SetMetaBucketStore(&recordingMetaBucketStore{
+			onCreate: func(bucket, groupID string, bypass bool) {
+				capturedGroup = groupID
+			},
+		})
 
 		Expect(b.CreateBucket(ctx, "photos")).To(Succeed())
-		Expect(calledBucket).To(Equal("photos"))
-		Expect(calledGroup).To(Equal("group-0"))
+		Expect(capturedGroup).To(Equal("group-0"))
 	})
 
-	It("assigns buckets before strict routing", func() {
+	It("selects groupID via shardGroup for bucket placement", func() {
 		mgr := NewDataGroupManager()
 		mgr.Add(NewDataGroup("group-0", []string{"node-0"}))
 		r := NewRouter(mgr)
 		r.SetDefault("group-0")
 		r.SetRequireExplicitAssignments(true)
-
 		b.SetRouter(r)
 		b.SetShardGroupSource(&fakeShardGroupSource{groups: map[string]ShardGroupEntry{
 			"group-0": {ID: "group-0", PeerIDs: []string{"node-0"}},
 		}})
-		var assignedBucket, assignedGroup string
-		b.SetBucketAssigner(&mockBucketAssigner{fn: func(ctx context.Context, bucket, groupID string) error {
-			assignedBucket = bucket
-			assignedGroup = groupID
-			return nil
-		}})
+
+		var capturedGroup string
+		b.SetMetaBucketStore(&recordingMetaBucketStore{
+			onCreate: func(bucket, groupID string, bypass bool) {
+				capturedGroup = groupID
+			},
+		})
 
 		Expect(b.CreateBucket(ctx, "photos")).To(Succeed())
-		Expect(assignedBucket).To(Equal("photos"))
-		Expect(assignedGroup).To(Equal("group-0"))
-		r.AssignBucket(assignedBucket, assignedGroup)
-
-		g, err := r.RouteKey("photos", "image.jpg")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(g.ID()).To(Equal("group-0"))
+		Expect(capturedGroup).To(Equal("group-0"))
 	})
 
 	It("assigns internal buckets to the widest EC group", func() {
@@ -99,32 +105,21 @@ var _ = Describe("Backend bucket management integration", func() {
 		r := NewRouter(mgr)
 		r.SetDefault("group-1")
 		r.SetRequireExplicitAssignments(true)
-
 		b.SetRouter(r)
 		b.SetShardGroupSource(&fakeShardGroupSource{groups: map[string]ShardGroupEntry{
 			"group-1": {ID: "group-1", PeerIDs: []string{"node-0"}},
 			"group-8": {ID: "group-8", PeerIDs: []string{"node-0", "node-1", "node-2"}},
 		}})
-		var assignedGroup string
-		b.SetBucketAssigner(&mockBucketAssigner{fn: func(ctx context.Context, bucket, groupID string) error {
-			assignedGroup = groupID
-			return nil
-		}})
+
+		var capturedGroup string
+		b.SetMetaBucketStore(&recordingMetaBucketStore{
+			onCreate: func(bucket, groupID string, bypass bool) {
+				capturedGroup = groupID
+			},
+		})
 
 		Expect(b.CreateBucket(ctx, "__grainfs_volumes")).To(Succeed())
-		Expect(assignedGroup).To(Equal("group-8"))
-	})
-
-	It("propagates router errors during bucket creation", func() {
-		mgr := NewDataGroupManager()
-		r := NewRouter(mgr)
-		b.SetRouter(r)
-		b.SetBucketAssigner(&mockBucketAssigner{fn: func(ctx context.Context, bucket, groupID string) error {
-			return nil
-		}})
-
-		err := b.CreateBucket(ctx, "photos")
-		Expect(err).To(HaveOccurred())
+		Expect(capturedGroup).To(Equal("group-8"))
 	})
 
 	It("force deletes objects and the bucket", func() {

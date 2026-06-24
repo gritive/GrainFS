@@ -10,8 +10,6 @@ import (
 
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/raft"
-	"github.com/gritive/GrainFS/internal/reservedname"
-	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // restoreCrashAfterDrop, set only by tests, fires inside FSM.Restore right after DropPrefix
@@ -89,14 +87,11 @@ func (f *FSM) ApplyTxn(txn MetadataTxn, raw []byte) error {
 	switch cmd.Type {
 	case CmdNoOp:
 		return nil
-	case CmdCreateBucket:
-		return f.applyCreateBucket(txn, cmd.Data)
-	case CmdDeleteBucket:
-		return f.applyDeleteBucket(txn, cmd.Data)
-	case CmdSetBucketPolicy:
-		return f.applySetBucketPolicy(txn, cmd.Data)
-	case CmdDeleteBucketPolicy:
-		return f.applyDeleteBucketPolicy(txn, cmd.Data)
+	case CmdCreateBucket, CmdDeleteBucket, CmdSetBucketPolicy, CmdDeleteBucketPolicy:
+		// Bucket control-plane moved to meta-raft (MetaBucketStore). These group-0
+		// slots are retired: a greenfield cluster never proposes them; old-log replay
+		// is a harmless no-op. Enum values kept reserved so wire format is stable.
+		return nil
 	case CmdMigrateShard:
 		return f.applyMigrateShard(txn, cmd.Data)
 	case CmdMigrationDone:
@@ -104,7 +99,9 @@ func (f *FSM) ApplyTxn(txn MetadataTxn, raw []byte) error {
 	case CmdSetRing:
 		return f.applySetRing(txn, cmd.Data)
 	case CmdSetBucketVersioning:
-		return f.applySetBucketVersioning(txn, cmd.Data)
+		// Bucket versioning moved to meta-raft (MetaBucketStore). Retired no-op;
+		// enum value kept reserved so old-log replay is safe.
+		return nil
 	case CmdResealFSMValues:
 		return f.applyResealFSMValues(txn, cmd.Data)
 	case CmdFSMValueResealDone:
@@ -205,79 +202,6 @@ func (f *FSM) applyResealFSMValues(txn MetadataTxn, data []byte) error {
 // deleteMarkerETag is the sentinel ETag we store on a tombstone (soft-delete).
 // Used by callers to distinguish a real object version from a delete marker.
 const deleteMarkerETag = "DEL"
-
-func (f *FSM) applyCreateBucket(txn MetadataTxn, data []byte) error {
-	c, err := decodeCreateBucketCmd(data)
-	if err != nil {
-		return err
-	}
-	if !c.BypassReserved && reservedname.IsReservedBucketName(c.Bucket) {
-		return fmt.Errorf("bucket name %q is reserved and cannot be created via public API", c.Bucket)
-	}
-	return txn.Set(f.keys.BucketKey(c.Bucket), []byte(`{}`))
-}
-
-func (f *FSM) applyDeleteBucket(txn MetadataTxn, data []byte) error {
-	c, err := decodeDeleteBucketCmd(data)
-	if err != nil {
-		return err
-	}
-	if reservedname.IsReservedBucketName(c.Bucket) {
-		return fmt.Errorf("bucket name %q is reserved and cannot be deleted via public API", c.Bucket)
-	}
-	// Clear the per-bucket state so a recreated same-name bucket starts fresh (S3
-	// semantics — a new bucket inherits nothing from a prior incarnation): the
-	// existence record, the bucket policy, and the versioning state. Tolerate
-	// absent keys (most are unset on a plain bucket).
-	// (Per-bucket state in other subsystems — lifecycle config, IAM bucket-upstream
-	// — lives outside this FSM keyspace and is tracked separately; object obj:/lat:
-	// records are GC'd by the orphan scrubber and DeleteBucket requires an empty
-	// bucket.)
-	for _, key := range [][]byte{
-		f.keys.BucketKey(c.Bucket),
-		f.keys.BucketPolicyKey(c.Bucket),
-		f.keys.BucketVerKey(c.Bucket),
-	} {
-		if err := txn.Delete(key); err != nil && err != ErrMetaKeyNotFound {
-			return err
-		}
-	}
-	return nil
-}
-
-func (f *FSM) applySetBucketPolicy(txn MetadataTxn, data []byte) error {
-	c, err := decodeSetBucketPolicyCmd(data)
-	if err != nil {
-		return err
-	}
-	policyJSON := append([]byte(nil), c.PolicyJSON...)
-	return f.setValue(txn, f.keys.BucketPolicyKey(c.Bucket), policyJSON)
-}
-
-func (f *FSM) applyDeleteBucketPolicy(txn MetadataTxn, data []byte) error {
-	c, err := decodeDeleteBucketPolicyCmd(data)
-	if err != nil {
-		return err
-	}
-	err = txn.Delete(f.keys.BucketPolicyKey(c.Bucket))
-	if err == ErrMetaKeyNotFound {
-		return nil
-	}
-	return err
-}
-
-func (f *FSM) applySetBucketVersioning(txn MetadataTxn, data []byte) error {
-	c, err := decodeSetBucketVersioningCmd(data)
-	if err != nil {
-		return err
-	}
-	if _, err := txn.Get(f.keys.BucketKey(c.Bucket)); err == ErrMetaKeyNotFound {
-		return storage.ErrBucketNotFound
-	} else if err != nil {
-		return err
-	}
-	return txn.Set(f.keys.BucketVerKey(c.Bucket), []byte(c.State))
-}
 
 func appendBaseCoalescedRef(key, versionID string, existing *objectMeta) CoalescedShardRef {
 	coalescedID := "base"

@@ -530,6 +530,11 @@ enum MetaCmdType : uint8 {
   DEKRewrapProgress            = 88, // S6a: per-node DEK-generation rewrap completion ledger
   PutIndexGroup                = 89, // sharded object index → Raft 그룹 매핑 (data-group과 별개 레지스트리)
   AddPlacementGeneration       = 90, // Phase 7: placement generation append (topology 증설 epoch 레지스트리)
+  CreateBucket                 = 91, // meta CreateBucket: atomic existence + group assignment (group0-demotion epic)
+  DeleteBucket                 = 92, // meta DeleteBucket: remove bucket record + unassign router (group0-demotion epic)
+  SetBucketVersioning          = 93, // meta SetBucketVersioning: RMW versioning state on existing bucket record
+  SetBucketPolicy              = 94, // meta SetBucketPolicy: RMW policy blob on existing bucket record
+  DeleteBucketPolicy           = 95, // meta DeleteBucketPolicy: idempotent nil-out of bucket record policy
 }
 
 table MetaNodeEntry {
@@ -677,9 +682,13 @@ table MetaAddPlacementGenerationCmd {
 }
 
 // PR-D: bucket→group 매핑 엔트리 1건
+// Fields 0 (bucket) and 1 (group_id) are frozen — FlatBuffers no-renumber rule.
+// Fields 2 (versioning) and 3 (policy) are additive; absent decodes as "" / nil.
 table BucketAssignmentEntry {
   bucket:string;
   group_id:string;
+  versioning:string;   // "" = unset (bucket versioning state: "Enabled","Suspended","")
+  policy:[ubyte];      // nil = unset (bucket policy JSON bytes, sealed or raw)
 }
 
 // PR-D: PutBucketAssignment 커맨드
@@ -1467,3 +1476,17 @@ table DropClusterKeyAcceptCmd {
 
 // MultipartDone and DeleteMultipartDoneCmd are removed in the multipart-off-raft
 // epic (M4). CommandType slot 43 is reserved; see fsm.go.
+
+// MetaCreateBucketCmd (cmd 91): atomic bucket creation — stores existence record
+// and group assignment in a single meta-raft apply.
+table MetaCreateBucketCmd {
+  bucket:string;
+  group_id:string;
+  bypass_reserved:bool;
+}
+
+// MetaDeleteBucketCmd (cmd 92): idempotent bucket deletion — removes existence
+// record and fires onBucketUnassigned callback so every node's router drops it.
+table MetaDeleteBucketCmd {
+  bucket:string;
+}

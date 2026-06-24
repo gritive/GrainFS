@@ -3,6 +3,7 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"sort"
@@ -1096,4 +1097,91 @@ func decodeMetaLoadTableReply(data []byte) (reply *metaLoadTableReply, err error
 		}
 	}
 	return r, nil
+}
+
+// ── Meta read-index forward path ─────────────────────────────────────────────
+//
+// Wire format mirrors the data-group ReadIndex forward (DistributedBackend):
+//   request:  empty (nil payload)
+//   response: [8B commitIndex big-endian][4B errLen big-endian][errBytes...]
+//
+// The handler (MetaReadIndexForwardReceiver.Handle) is registered on
+// RouteForwardMetaReadIndex ("/raft/meta/read-index").
+// The sender (MetaReadIndexForwardSender) dials that route on the leader.
+
+// MetaReadIndexDialer dials the meta leader's read-index route.
+type MetaReadIndexDialer func(ctx context.Context, leaderAddr string) ([]byte, error)
+
+// MetaReadIndexForwardSender is the follower-side client for the meta
+// read-index forward route. Wire via MetaRaft.SetReadIndexForwarder.
+type MetaReadIndexForwardSender struct {
+	dialer MetaReadIndexDialer
+}
+
+// NewMetaReadIndexForwardSender creates a sender backed by dialer.
+func NewMetaReadIndexForwardSender(d MetaReadIndexDialer) *MetaReadIndexForwardSender {
+	return &MetaReadIndexForwardSender{dialer: d}
+}
+
+// Send dials the meta leader's RouteForwardMetaReadIndex and returns the
+// committed index. Returns raft.ErrNotLeader if the remote is not the leader.
+func (s *MetaReadIndexForwardSender) Send(ctx context.Context, leaderAddr string) (uint64, error) {
+	reply, err := s.dialer(ctx, leaderAddr)
+	if err != nil {
+		return 0, fmt.Errorf("meta read-index forward: %w", err)
+	}
+	return decodeMetaReadIndexReply(reply)
+}
+
+// MetaReadIndexForwardReceiver is the leader-side handler for
+// RouteForwardMetaReadIndex. Register Handle via transport.RegisterBufferedRoute.
+type MetaReadIndexForwardReceiver struct {
+	meta *MetaRaft
+}
+
+// NewMetaReadIndexForwardReceiver creates a receiver backed by meta.
+func NewMetaReadIndexForwardReceiver(meta *MetaRaft) *MetaReadIndexForwardReceiver {
+	return &MetaReadIndexForwardReceiver{meta: meta}
+}
+
+// Handle serves one RouteForwardMetaReadIndex request. The outcome
+// (commitIndex or error text) is in-band in the reply; the returned error is
+// always nil so the HTTP layer returns 200 (application-level error in body).
+func (r *MetaReadIndexForwardReceiver) Handle(_ []byte) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	idx, err := r.meta.node.ReadIndex(ctx)
+	return encodeMetaReadIndexReply(idx, err), nil
+}
+
+// encodeMetaReadIndexReply packs (idx, err) into the wire frame:
+//
+//	[8B idx BE][4B errLen BE][errBytes...]
+func encodeMetaReadIndexReply(idx uint64, err error) []byte {
+	var errBytes []byte
+	if err != nil {
+		errBytes = []byte(err.Error())
+	}
+	buf := make([]byte, 12+len(errBytes))
+	binary.BigEndian.PutUint64(buf[0:8], idx)
+	binary.BigEndian.PutUint32(buf[8:12], uint32(len(errBytes)))
+	copy(buf[12:], errBytes)
+	return buf
+}
+
+// decodeMetaReadIndexReply unpacks the wire frame produced by encodeMetaReadIndexReply.
+func decodeMetaReadIndexReply(reply []byte) (uint64, error) {
+	if len(reply) < 12 {
+		return 0, fmt.Errorf("meta read-index forward: short response: %d bytes", len(reply))
+	}
+	idx := binary.BigEndian.Uint64(reply[0:8])
+	errLen := binary.BigEndian.Uint32(reply[8:12])
+	if errLen > 0 && len(reply) >= 12+int(errLen) {
+		msg := string(reply[12 : 12+int(errLen)])
+		if msg == raft.ErrNotLeader.Error() {
+			return 0, raft.ErrNotLeader
+		}
+		return 0, fmt.Errorf("meta read-index forward: leader: %s", msg)
+	}
+	return idx, nil
 }

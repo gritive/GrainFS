@@ -84,6 +84,9 @@ var _ = Describe("Backend control integration", func() {
 
 	It("waits for backend apply progress", func() {
 		Expect(b.CreateBucket(ctx, "bucket")).To(Succeed())
+		// CreateBucket now goes through MetaBucketStore (direct FSM), not raft.
+		// Propose a raft entry explicitly to get a committed log index.
+		Expect(b.propose(ctx, CmdCreateBucket, CreateBucketCmd{Bucket: "raft-fence"})).To(Succeed())
 		applied := b.lastApplied.Load()
 		Expect(applied).NotTo(BeZero())
 		b.lastApplied.Store(0)

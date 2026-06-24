@@ -126,15 +126,7 @@ func encodeCreateBucketCmdBypass(bucket string) ([]byte, error) {
 	return encodeCreateBucketCmd(CreateBucketCmd{Bucket: bucket, BypassReserved: true})
 }
 
-func decodeCreateBucketCmd(data []byte) (CreateBucketCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.CreateBucketCmd {
-		return clusterpb.GetRootAsCreateBucketCmd(d, 0)
-	})
-	if err != nil {
-		return CreateBucketCmd{}, err
-	}
-	return CreateBucketCmd{Bucket: string(t.Bucket()), BypassReserved: t.BypassReserved()}, nil
-}
+// decodeCreateBucketCmd is test-only (see codec_bucket_retired_test.go).
 
 func encodeDeleteBucketCmd(c DeleteBucketCmd) ([]byte, error) {
 	b := clusterBuilderPool.Get()
@@ -144,15 +136,7 @@ func encodeDeleteBucketCmd(c DeleteBucketCmd) ([]byte, error) {
 	return fbFinish(b, clusterpb.DeleteBucketCmdEnd(b)), nil
 }
 
-func decodeDeleteBucketCmd(data []byte) (DeleteBucketCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.DeleteBucketCmd {
-		return clusterpb.GetRootAsDeleteBucketCmd(d, 0)
-	})
-	if err != nil {
-		return DeleteBucketCmd{}, err
-	}
-	return DeleteBucketCmd{Bucket: string(t.Bucket())}, nil
-}
+// decodeDeleteBucketCmd is test-only (see codec_bucket_retired_test.go).
 
 func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	b := clusterBuilderPool.Get()
@@ -501,15 +485,7 @@ func encodeSetBucketPolicyCmd(c SetBucketPolicyCmd) ([]byte, error) {
 	return fbFinish(b, clusterpb.SetBucketPolicyCmdEnd(b)), nil
 }
 
-func decodeSetBucketPolicyCmd(data []byte) (SetBucketPolicyCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.SetBucketPolicyCmd {
-		return clusterpb.GetRootAsSetBucketPolicyCmd(d, 0)
-	})
-	if err != nil {
-		return SetBucketPolicyCmd{}, err
-	}
-	return SetBucketPolicyCmd{Bucket: string(t.Bucket()), PolicyJSON: t.PolicyJsonBytes()}, nil
-}
+// decodeSetBucketPolicyCmd is test-only (see codec_bucket_retired_test.go).
 
 func encodeDeleteBucketPolicyCmd(c DeleteBucketPolicyCmd) ([]byte, error) {
 	b := clusterBuilderPool.Get()
@@ -519,15 +495,7 @@ func encodeDeleteBucketPolicyCmd(c DeleteBucketPolicyCmd) ([]byte, error) {
 	return fbFinish(b, clusterpb.DeleteBucketPolicyCmdEnd(b)), nil
 }
 
-func decodeDeleteBucketPolicyCmd(data []byte) (DeleteBucketPolicyCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.DeleteBucketPolicyCmd {
-		return clusterpb.GetRootAsDeleteBucketPolicyCmd(d, 0)
-	})
-	if err != nil {
-		return DeleteBucketPolicyCmd{}, err
-	}
-	return DeleteBucketPolicyCmd{Bucket: string(t.Bucket())}, nil
-}
+// decodeDeleteBucketPolicyCmd is test-only (see codec_bucket_retired_test.go).
 
 // buildTagsVector encodes []storage.Tag as a FlatBuffers Tag vector using the
 // provided parent-table startVector func (e.g.
@@ -1066,18 +1034,7 @@ func encodeSetBucketVersioningCmd(c SetBucketVersioningCmd) ([]byte, error) {
 	return fbFinish(b, clusterpb.SetBucketVersioningCmdEnd(b)), nil
 }
 
-func decodeSetBucketVersioningCmd(data []byte) (SetBucketVersioningCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.SetBucketVersioningCmd {
-		return clusterpb.GetRootAsSetBucketVersioningCmd(d, 0)
-	})
-	if err != nil {
-		return SetBucketVersioningCmd{}, err
-	}
-	return SetBucketVersioningCmd{
-		Bucket: string(t.Bucket()),
-		State:  string(t.State()),
-	}, nil
-}
+// decodeSetBucketVersioningCmd is test-only (see codec_bucket_retired_test.go).
 
 // encodeSetRingCmd serializes a SetRingCmd for Raft proposal.
 func encodeSetRingCmd(c SetRingCmd) ([]byte, error) {

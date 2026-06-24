@@ -9,7 +9,6 @@ import (
 	"github.com/gritive/GrainFS/internal/iam"
 	iambuiltin "github.com/gritive/GrainFS/internal/iam/builtin"
 	"github.com/gritive/GrainFS/internal/protocred"
-	"github.com/gritive/GrainFS/internal/reservedname"
 )
 
 // applyIAM dispatches an IAM command to the configured iam.Applier. Returns
@@ -320,48 +319,6 @@ func (f *MetaFSM) applyPolicyAttachToGroupDelete(payload []byte) error {
 		// them cheaply from this apply path. For now a nuclear invalidate is safe
 		// and cache rebuild is cheap.
 		f.policyResolver.Invalidate(nil, nil)
-	}
-	return nil
-}
-
-func (f *MetaFSM) applyBucketPolicyPut(payload []byte) error {
-	if f.bucketPolicyStore == nil {
-		return nil // safe no-op until wired
-	}
-	bucket, docJSON, err := DecodeBucketPolicyPutPayload(payload)
-	if err != nil {
-		return fmt.Errorf("meta_fsm: BucketPolicyPut: %w", err)
-	}
-	if reservedname.IsInternalBucket(bucket) {
-		return fmt.Errorf("meta_fsm: BucketPolicyPut: bucket %q is internal and cannot receive policy mutations via public API", bucket)
-	}
-	if err := f.bucketPolicyStore.Put(context.Background(), bucket, docJSON); err != nil {
-		return fmt.Errorf("meta_fsm: BucketPolicyPut store: %w", err)
-	}
-	if f.policyResolver != nil {
-		// Only cache entries for this bucket are stale.
-		f.policyResolver.Invalidate(nil, []string{bucket})
-	}
-	return nil
-}
-
-func (f *MetaFSM) applyBucketPolicyDelete(payload []byte) error {
-	if f.bucketPolicyStore == nil {
-		return nil // safe no-op until wired
-	}
-	bucket, err := DecodeBucketPolicyDeletePayload(payload)
-	if err != nil {
-		return fmt.Errorf("meta_fsm: BucketPolicyDelete: %w", err)
-	}
-	if reservedname.IsInternalBucket(bucket) {
-		return fmt.Errorf("meta_fsm: BucketPolicyDelete: bucket %q is internal and cannot receive policy mutations via public API", bucket)
-	}
-	if err := f.bucketPolicyStore.Delete(context.Background(), bucket); err != nil {
-		return fmt.Errorf("meta_fsm: BucketPolicyDelete store: %w", err)
-	}
-	if f.policyResolver != nil {
-		// Only cache entries for this bucket are stale.
-		f.policyResolver.Invalidate(nil, []string{bucket})
 	}
 	return nil
 }

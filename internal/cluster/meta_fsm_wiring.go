@@ -3,7 +3,6 @@ package cluster
 import (
 	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/iam"
-	"github.com/gritive/GrainFS/internal/iam/bucketpolicy"
 	"github.com/gritive/GrainFS/internal/iam/group"
 	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/iam/policyattach"
@@ -72,15 +71,6 @@ func (f *MetaFSM) SetPolicyAttachStore(s *policyattach.InMemoryStore) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.policyAttachStore = s
-}
-
-// SetBucketPolicyStore wires the per-bucket policy document store into the
-// MetaFSM. Must be called before the raft log starts replaying. nil means
-// BucketPolicy* commands are safe no-ops.
-func (f *MetaFSM) SetBucketPolicyStore(s *bucketpolicy.InMemoryStore) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.bucketPolicyStore = s
 }
 
 // SetProtocolCredentialStore wires the protocol credential store into MetaFSM

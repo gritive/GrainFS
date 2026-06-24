@@ -67,20 +67,25 @@ func buildRawCommand(cmdType CommandType, data []byte) ([]byte, error) {
 	return out, nil
 }
 
-func TestFSM_CreateBucket(t *testing.T) {
+// TestFSM_CreateBucket_RetiredNoOp verifies that a stale raft-log entry
+// carrying the retired CmdCreateBucket slot is a replay-safe no-op: Apply
+// returns nil and NO bucket: key is written to BadgerDB (bucket control-plane
+// is now meta-raft exclusively).
+func TestFSM_CreateBucket_RetiredNoOp(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	data, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "test-bucket"})
 	require.NoError(t, err)
+	// Must succeed (no-op, not an error).
 	require.NoError(t, fsm.Apply(data))
 
-	// Verify bucket exists in DB
+	// Must NOT write a bucket: key — the apply is a no-op.
 	err = db.View(func(txn *badger.Txn) error {
 		_, err := txn.Get(bucketKey("test-bucket"))
 		return err
 	})
-	assert.NoError(t, err)
+	assert.ErrorIs(t, err, badger.ErrKeyNotFound, "retired CmdCreateBucket must not write a bucket key")
 }
 
 func TestFSM_EncryptedValuesHideObjectMultipartAndPolicyPayloads(t *testing.T) {
@@ -107,11 +112,13 @@ func TestFSM_EncryptedValuesHideObjectMultipartAndPolicyPayloads(t *testing.T) {
 	}))
 
 	// CmdCreateMultipartUpload removed in M4; mpu: key encryption is no longer
-	// exercised here (no production writer). Remaining: obj: and policy: are checked.
+	// exercised here (no production writer). CmdSetBucketPolicy is retired (Task 12:
+	// bucket control-plane moved to meta-raft). Write the policy key directly via
+	// FSM.setValue (the same encrypted write path) to exercise policy: key encryption.
 	policy := []byte(`{"Statement":[{"Resource":"secret-policy-resource"}]}`)
-	policyData, err := EncodeCommand(CmdSetBucketPolicy, SetBucketPolicyCmd{Bucket: "b", PolicyJSON: policy})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(policyData))
+	require.NoError(t, fsm.db.Update(func(txn MetadataTxn) error {
+		return fsm.setValue(txn, fsm.keys.BucketPolicyKey("b"), policy)
+	}))
 
 	err = db.View(func(txn *badger.Txn) error {
 		for _, tc := range []struct {
@@ -177,22 +184,26 @@ func TestCmdDeleteObject_RetiredNoOp(t *testing.T) {
 	}), "retired CmdDeleteObject slot must be a no-op — key must still exist after apply")
 }
 
-func TestFSM_DeleteBucket(t *testing.T) {
+// TestFSM_DeleteBucket_RetiredNoOp verifies that stale raft-log entries carrying
+// the retired CmdCreateBucket and CmdDeleteBucket slots are replay-safe no-ops:
+// Apply returns nil and the bucket: key in BadgerDB is never touched.
+func TestFSM_DeleteBucket_RetiredNoOp(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
-	// Create then delete
+	// Both applies must succeed (no-ops) and leave no keys in BadgerDB.
 	data, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "to-delete"})
 	require.NoError(t, fsm.Apply(data))
 
 	data, _ = EncodeCommand(CmdDeleteBucket, DeleteBucketCmd{Bucket: "to-delete"})
 	require.NoError(t, fsm.Apply(data))
 
+	// Neither key must have been written.
 	err := db.View(func(txn *badger.Txn) error {
 		_, err := txn.Get(bucketKey("to-delete"))
 		return err
 	})
-	assert.ErrorIs(t, err, badger.ErrKeyNotFound)
+	assert.ErrorIs(t, err, badger.ErrKeyNotFound, "retired CmdDeleteBucket slot must not touch bucket keys")
 }
 
 // retiredPutObjectMetaSlot is the retired CommandType byte that once named
@@ -240,10 +251,11 @@ func TestFSM_SnapshotRestore(t *testing.T) {
 	db1 := newTestDB(t)
 	fsm1 := NewFSM(badgermeta.Wrap(db1), newStateKeyspaceEmpty())
 
-	// Apply some commands. CmdPutObjectMeta is a no-op in Slice 2; seed via
-	// persistPutObjectMetaUpdate directly.
-	data, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "snap-bucket"})
-	require.NoError(t, fsm1.Apply(data))
+	// CmdCreateBucket is retired (Task 12 no-op); seed the bucket key directly.
+	// CmdPutObjectMeta is a no-op in Slice 2; seed via persistPutObjectMetaUpdate.
+	require.NoError(t, fsm1.db.Update(func(txn MetadataTxn) error {
+		return txn.Set(bucketKey("snap-bucket"), []byte("{}"))
+	}))
 	seedCmd := PutObjectMetaCmd{Bucket: "snap-bucket", Key: "file.txt", Size: 10, ContentType: "text/plain", ETag: "e", ModTime: 1}
 	require.NoError(t, fsm1.db.Update(func(txn MetadataTxn) error {
 		return fsm1.persistPutObjectMetaUpdate(txn, seedCmd, buildPutObjectMeta(seedCmd))
@@ -258,7 +270,7 @@ func TestFSM_SnapshotRestore(t *testing.T) {
 	fsm2 := NewFSM(badgermeta.Wrap(db2), newStateKeyspaceEmpty())
 	require.NoError(t, fsm2.Restore(raft.SnapshotMeta{FormatVersion: raft.FSMSnapshotFormatVersion}, snap))
 
-	// Verify state
+	// Verify state: both bucket key and object meta key must survive the snapshot/restore.
 	err = db2.View(func(txn *badger.Txn) error {
 		_, err := txn.Get(bucketKey("snap-bucket"))
 		if err != nil {
@@ -307,49 +319,43 @@ func TestMultipartComplete_RejectsUploadMismatch(t *testing.T) {
 // TestFSM_CreateMultipartUploadPersistsListingMetadata, TestFSM_AbortMultipart
 // removed in M4: applyCreateMultipartUpload and applyAbortMultipart are deleted.
 
-func TestFSM_SetBucketPolicy(t *testing.T) {
+// TestFSM_SetBucketPolicy_RetiredNoOp verifies that a stale raft-log entry carrying
+// CmdSetBucketPolicy is a replay-safe no-op: Apply returns nil and no policy: key
+// is written to BadgerDB (policy now lives in MetaBucketStore / BucketRecord).
+func TestFSM_SetBucketPolicy_RetiredNoOp(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-
-	policyJSON := []byte(`{"Version":"2012-10-17","Statement":[]}`)
 
 	data, err := EncodeCommand(CmdSetBucketPolicy, SetBucketPolicyCmd{
 		Bucket:     "policy-bucket",
-		PolicyJSON: policyJSON,
+		PolicyJSON: []byte(`{"Version":"2012-10-17","Statement":[]}`),
 	})
 	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(data))
+	require.NoError(t, fsm.Apply(data), "retired CmdSetBucketPolicy must not error")
 
-	// Verify policy is stored in DB
+	// Must NOT write a policy: key.
 	err = db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(bucketPolicyKey("policy-bucket"))
-		if err != nil {
-			return err
-		}
-		return item.Value(func(val []byte) error {
-			assert.Equal(t, policyJSON, val)
-			return nil
-		})
+		_, err := txn.Get(bucketPolicyKey("policy-bucket"))
+		return err
 	})
-	assert.NoError(t, err)
+	assert.ErrorIs(t, err, badger.ErrKeyNotFound, "retired CmdSetBucketPolicy must not write policy key")
 }
 
-func TestFSM_DeleteBucketPolicy(t *testing.T) {
+// TestFSM_DeleteBucketPolicy_RetiredNoOp verifies that stale CmdSetBucketPolicy
+// and CmdDeleteBucketPolicy entries are replay-safe no-ops.
+func TestFSM_DeleteBucketPolicy_RetiredNoOp(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
-	// Set a policy first
-	policyJSON := []byte(`{"Version":"2012-10-17"}`)
 	data, _ := EncodeCommand(CmdSetBucketPolicy, SetBucketPolicyCmd{
-		Bucket: "bp", PolicyJSON: policyJSON,
+		Bucket: "bp", PolicyJSON: []byte(`{"Version":"2012-10-17"}`),
 	})
 	require.NoError(t, fsm.Apply(data))
 
-	// Delete the policy
 	data, _ = EncodeCommand(CmdDeleteBucketPolicy, DeleteBucketPolicyCmd{Bucket: "bp"})
-	require.NoError(t, fsm.Apply(data))
+	require.NoError(t, fsm.Apply(data), "retired CmdDeleteBucketPolicy must not error")
 
-	// Verify policy is removed
+	// No key was ever written; absence is the correct state.
 	err := db.View(func(txn *badger.Txn) error {
 		_, err := txn.Get(bucketPolicyKey("bp"))
 		return err
@@ -357,14 +363,15 @@ func TestFSM_DeleteBucketPolicy(t *testing.T) {
 	assert.ErrorIs(t, err, badger.ErrKeyNotFound)
 }
 
-func TestFSM_DeleteBucketPolicy_NotExist(t *testing.T) {
+// TestFSM_DeleteBucketPolicy_NotExist_RetiredNoOp: deleting a policy for a
+// nonexistent bucket must also be a no-op with retired commands.
+func TestFSM_DeleteBucketPolicy_NotExist_RetiredNoOp(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
-	// Deleting a non-existent policy should not error (ErrKeyNotFound → nil)
 	data, _ := EncodeCommand(CmdDeleteBucketPolicy, DeleteBucketPolicyCmd{Bucket: "no-policy"})
 	err := fsm.Apply(data)
-	assert.NoError(t, err)
+	assert.NoError(t, err, "retired CmdDeleteBucketPolicy must be a no-op even for absent bucket")
 }
 
 // TestFSM_AbortMultipart_NotExist removed in M4: applyAbortMultipart is deleted.
@@ -390,12 +397,14 @@ func TestFSM_Restore_CorruptData(t *testing.T) {
 }
 
 func TestFSM_SnapshotRestore_WithExistingData(t *testing.T) {
-	// Test Restore overwrites existing data in the target DB
+	// Test Restore overwrites existing data in the target DB.
+	// CmdCreateBucket is retired (Task 12 no-op); seed bucket keys directly.
 	db1 := newTestDB(t)
 	fsm1 := NewFSM(badgermeta.Wrap(db1), newStateKeyspaceEmpty())
 
-	data, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "src-bucket"})
-	require.NoError(t, fsm1.Apply(data))
+	require.NoError(t, fsm1.db.Update(func(txn MetadataTxn) error {
+		return txn.Set(bucketKey("src-bucket"), []byte("{}"))
+	}))
 
 	snap, err := fsm1.Snapshot()
 	require.NoError(t, err)
@@ -403,8 +412,9 @@ func TestFSM_SnapshotRestore_WithExistingData(t *testing.T) {
 	// Create a second DB with different data
 	db2 := newTestDB(t)
 	fsm2 := NewFSM(badgermeta.Wrap(db2), newStateKeyspaceEmpty())
-	data, _ = EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "old-bucket"})
-	require.NoError(t, fsm2.Apply(data))
+	require.NoError(t, fsm2.db.Update(func(txn MetadataTxn) error {
+		return txn.Set(bucketKey("old-bucket"), []byte("{}"))
+	}))
 
 	// Restore overwrites db2
 	require.NoError(t, fsm2.Restore(raft.SnapshotMeta{FormatVersion: raft.FSMSnapshotFormatVersion}, snap))
@@ -566,36 +576,38 @@ func TestFSM_RecoverPending_EmptyDB_NoOp(t *testing.T) {
 	assert.Empty(t, ch)
 }
 
-func TestFSM_SetBucketVersioning(t *testing.T) {
+// TestFSM_SetBucketVersioning_RetiredNoOp verifies that stale CmdSetBucketVersioning
+// raft-log entries are replay-safe no-ops: Apply returns nil and no versioning key
+// is written to BadgerDB (versioning now lives in MetaBucketStore / BucketRecord).
+func TestFSM_SetBucketVersioning_RetiredNoOp(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
-	// Bucket must exist first.
+	// CmdCreateBucket is also retired; both must be no-ops.
 	data, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "vbucket"})
 	require.NoError(t, fsm.Apply(data))
 
 	data, err := EncodeCommand(CmdSetBucketVersioning, SetBucketVersioningCmd{Bucket: "vbucket", State: "Enabled"})
 	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(data))
+	require.NoError(t, fsm.Apply(data), "retired CmdSetBucketVersioning must not error")
 
-	var state string
-	require.NoError(t, db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(bucketVerKey("vbucket"))
-		if err != nil {
-			return err
-		}
-		return item.Value(func(v []byte) error { state = string(v); return nil })
-	}))
-	assert.Equal(t, "Enabled", state)
+	// No versioning key must have been written.
+	err = db.View(func(txn *badger.Txn) error {
+		_, err := txn.Get(bucketVerKey("vbucket"))
+		return err
+	})
+	assert.ErrorIs(t, err, badger.ErrKeyNotFound, "retired CmdSetBucketVersioning must not write versioning key")
 }
 
-func TestFSM_SetBucketVersioning_NoBucket(t *testing.T) {
+// TestFSM_SetBucketVersioning_NoBucket_RetiredNoOp: retired CmdSetBucketVersioning
+// must be a no-op even when the bucket does not exist (old error no longer fires).
+func TestFSM_SetBucketVersioning_NoBucket_RetiredNoOp(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	data, _ := EncodeCommand(CmdSetBucketVersioning, SetBucketVersioningCmd{Bucket: "ghost", State: "Enabled"})
 	err := fsm.Apply(data)
-	assert.Error(t, err, "should fail when bucket does not exist")
+	assert.NoError(t, err, "retired CmdSetBucketVersioning must be a no-op regardless of bucket existence")
 }
 
 // TestFSM_SetObjectACL and TestFSM_SetObjectTags and their subtests were removed
@@ -605,18 +617,22 @@ func TestFSM_SetBucketVersioning_NoBucket(t *testing.T) {
 //   TestSetObjectACL_BlobObject_NoRaftFallback
 //   TestSetObjectTags_BlobObject_NoRaftFallback
 
-func TestFSM_ApplyCreateBucket_KeyLayoutUnchanged(t *testing.T) {
+// TestFSM_ApplyCreateBucket_KeyLayout_RetiredNoOp verifies that the retired
+// CmdCreateBucket slot is a replay-safe no-op: Apply returns nil and the
+// raw bucket:b1 key is NOT written (bucket control-plane moved to meta-raft).
+// The key layout itself (bucket: prefix) is still exercised by the BucketKey
+// helper unit tests; this test merely confirms the retired apply does nothing.
+func TestFSM_ApplyCreateBucket_KeyLayout_RetiredNoOp(t *testing.T) {
 	db := newTestDB(t)
 	f := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 	data, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "b1"})
 	require.NoError(t, err)
-	require.NoError(t, f.Apply(data))
-	if err := db.View(func(txn *badger.Txn) error {
-		_, e := txn.Get([]byte("bucket:b1")) // empty keyspace => raw layout preserved
+	require.NoError(t, f.Apply(data), "retired CmdCreateBucket must not error")
+	err = db.View(func(txn *badger.Txn) error {
+		_, e := txn.Get([]byte("bucket:b1")) // empty keyspace => raw layout if written
 		return e
-	}); err != nil {
-		t.Fatalf("expected bucket:b1 present with raw layout, got %v", err)
-	}
+	})
+	require.ErrorIs(t, err, badger.ErrKeyNotFound, "retired CmdCreateBucket must not write a bucket key")
 }
 
 // TestFSM_CreateMultipartUpload_PersistsTags removed in M4: applyCreateMultipartUpload deleted.

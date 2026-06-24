@@ -12,7 +12,6 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/iam"
-	"github.com/gritive/GrainFS/internal/iam/bucketpolicy"
 	"github.com/gritive/GrainFS/internal/iam/group"
 	iamjwt "github.com/gritive/GrainFS/internal/iam/jwt"
 	"github.com/gritive/GrainFS/internal/iam/policyattach"
@@ -46,10 +45,20 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 		copy(ids, g.groupIDs)
 		placementGenerations[i] = placementGeneration{epoch: g.epoch, groupIDs: ids}
 	}
-	type bucketKV struct{ bucket, groupID string }
-	buckets := make([]bucketKV, 0, len(f.bucketAssignments))
-	for bucket, groupID := range f.bucketAssignments {
-		buckets = append(buckets, bucketKV{bucket, groupID})
+	type bucketKV struct {
+		bucket     string
+		groupID    string
+		versioning string
+		policy     []byte
+	}
+	buckets := make([]bucketKV, 0, len(f.bucketRecords))
+	for bucket, rec := range f.bucketRecords {
+		buckets = append(buckets, bucketKV{
+			bucket:     bucket,
+			groupID:    rec.GroupID,
+			versioning: rec.Versioning,
+			policy:     append([]byte(nil), rec.Policy...),
+		})
 	}
 	lsEntries := make([]LoadStatEntry, 0, len(f.loadSnapshot))
 	for _, v := range f.loadSnapshot {
@@ -223,15 +232,27 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	}
 	nodesVec := b.EndVector(len(nodeOffs))
 
-	// Build BucketAssignmentEntry offsets
+	// Build BucketAssignmentEntry offsets. versioning and policy are additive
+	// fields (Task 1); older readers that don't know them will simply ignore them.
+	// All nested objects (strings, byte vectors) must be created before
+	// BucketAssignmentEntryStart (FlatBuffers A1 rule).
 	baOffs := make([]flatbuffers.UOffsetT, len(buckets))
 	for i := len(buckets) - 1; i >= 0; i-- {
 		bkt := buckets[i]
 		bucketOff := b.CreateString(bkt.bucket)
 		groupIDOff := b.CreateString(bkt.groupID)
+		versioningOff := b.CreateString(bkt.versioning)
+		var policyVec flatbuffers.UOffsetT
+		if len(bkt.policy) > 0 {
+			policyVec = b.CreateByteVector(bkt.policy)
+		}
 		clusterpb.BucketAssignmentEntryStart(b)
 		clusterpb.BucketAssignmentEntryAddBucket(b, bucketOff)
 		clusterpb.BucketAssignmentEntryAddGroupId(b, groupIDOff)
+		clusterpb.BucketAssignmentEntryAddVersioning(b, versioningOff)
+		if len(bkt.policy) > 0 {
+			clusterpb.BucketAssignmentEntryAddPolicy(b, policyVec)
+		}
 		baOffs[i] = clusterpb.BucketAssignmentEntryEnd(b)
 	}
 	clusterpb.MetaStateSnapshotStartBucketAssignmentsVector(b, len(baOffs))
@@ -494,14 +515,22 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		}
 	}
 
-	newBucketAssignments := make(map[string]string, snap.BucketAssignmentsLength())
+	newBucketRecords := make(map[string]BucketRecord, snap.BucketAssignmentsLength())
 	var baEntry clusterpb.BucketAssignmentEntry
 	for i := 0; i < snap.BucketAssignmentsLength(); i++ {
 		if !snap.BucketAssignments(&baEntry, i) {
 			return fmt.Errorf("meta_fsm: Restore: bucket assignment %d decode failed", i)
 		}
 		bucket := string(baEntry.Bucket())
-		newBucketAssignments[bucket] = string(baEntry.GroupId())
+		var policy []byte
+		if pb := baEntry.PolicyBytes(); len(pb) > 0 {
+			policy = append([]byte(nil), pb...)
+		}
+		newBucketRecords[bucket] = BucketRecord{
+			GroupID:    string(baEntry.GroupId()),
+			Versioning: string(baEntry.Versioning()),
+			Policy:     policy,
+		}
 	}
 
 	newLoadSnapshot := make(map[string]LoadStatEntry, snap.LoadSnapshotLength())
@@ -807,18 +836,17 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		polSnap    []policystore.PolicyEntry
 		grpSnap    []group.GroupEntry
 		attachSnap policyattach.AttachSnapshot
-		bpSnap     []bucketpolicy.BucketPolicyEntry
 	}
 	var newIPST *ipstDecoded
 	if len(trailers.ipstData) > 0 {
-		if f.policyStore == nil && f.groupStore == nil && f.policyAttachStore == nil && f.bucketPolicyStore == nil {
+		if f.policyStore == nil && f.groupStore == nil && f.policyAttachStore == nil {
 			log.Warn().Int("ipst_len", len(trailers.ipstData)).Msg("meta_fsm: Restore: snapshot contains IPST section but no policy stores wired; skipping")
 		} else {
-			polSnap, grpSnap, attachSnap, bpSnap, err := decodeMetaIAMPolicyStoresSnapshot(trailers.ipstData)
+			polSnap, grpSnap, attachSnap, _, err := decodeMetaIAMPolicyStoresSnapshot(trailers.ipstData)
 			if err != nil {
 				return fmt.Errorf("meta_fsm: Restore: decode IAM policy stores: %w", err)
 			}
-			newIPST = &ipstDecoded{polSnap, grpSnap, attachSnap, bpSnap}
+			newIPST = &ipstDecoded{polSnap, grpSnap, attachSnap}
 		}
 	}
 
@@ -880,7 +908,7 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 	f.nodes = newNodes
 	f.shardGroups = newShardGroups
 	f.placementGenerations = newPlacementGenerations
-	f.bucketAssignments = newBucketAssignments
+	f.bucketRecords = newBucketRecords
 	f.loadSnapshot = newLoadSnapshot
 	f.activePlan = newActivePlan
 	f.icebergNamespaces = newIcebergNamespaces
@@ -940,8 +968,8 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 		f.clusterCfg.ReplaceSnap(newClusterCfgSnap)
 	}
 	if cb != nil {
-		for bucket, groupID := range newBucketAssignments {
-			cb(bucket, groupID)
+		for bucket, rec := range newBucketRecords {
+			cb(bucket, rec.GroupID)
 		}
 	}
 	// onRebalancePlan is intentionally NOT called here.
@@ -981,11 +1009,6 @@ func (f *MetaFSM) Restore(_ raft.SnapshotMeta, data []byte) error {
 			log.Warn().Int("sa_entries", len(newIPST.attachSnap.SAAttachments)).Int("group_entries", len(newIPST.attachSnap.GroupAttachments)).Msg("meta_fsm: Restore: IPST has policy-attach entries but policyAttachStore not wired; entries dropped")
 		} else {
 			f.policyAttachStore.ReplaceAll(newIPST.attachSnap)
-		}
-		if f.bucketPolicyStore == nil {
-			log.Warn().Int("entries", len(newIPST.bpSnap)).Msg("meta_fsm: Restore: IPST has bucket-policy entries but bucketPolicyStore not wired; entries dropped")
-		} else {
-			f.bucketPolicyStore.ReplaceAll(newIPST.bpSnap)
 		}
 		// Invalidate the resolver cache so stale pre-restore entries don't
 		// survive the snapshot install. Empty saIDs+buckets nukes the full cache.

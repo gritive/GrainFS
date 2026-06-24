@@ -85,13 +85,20 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 	srv := server.New(cfg.Addr, state.backend, state.srvOpts...)
 	state.srv = srv
 
-	// Wire the bucket-policy cache invalidator into the cluster apply path so a
-	// committed policy change/delete on any node drops this node's compiled cache
-	// entry, forcing the next authz Allow to re-pull the committed policy. The
-	// loader (pull-on-miss) is already wired mode-agnostically in storage.NewOperations.
-	if state.distBackend != nil {
-		state.distBackend.SetOnBucketPolicyApply(srv.PolicyStore().Invalidate)
+	// Task 10: wire the compiled-policy Invalidate callback into the meta
+	// post-commit worker registered pre-Start in bootMetaRaftWiring. The worker
+	// is already running; SetInvalidate makes it call PolicyStore.Invalidate for
+	// every committed SetBucketPolicy / DeleteBucketPolicy meta entry so the
+	// next authz Allow re-pulls the committed policy. Pull-on-miss ensures
+	// eventual consistency for the brief window between Start and this call.
+	if state.metaPolicyInvalidationWorker != nil {
+		state.metaPolicyInvalidationWorker.SetInvalidate(srv.PolicyStore().Invalidate)
 	}
+
+	// Task 12: SetOnBucketPolicyApply and the onBucketPolicyApply field on
+	// DistributedBackend are retired (group-0 bucket policy commands moved to
+	// meta-raft). Policy invalidation is driven solely by the meta post-commit
+	// hook (metaPolicyInvalidationWorker.SetInvalidate) wired above.
 
 	// --- Admin / dashboard wiring (Volume CLI Phase B) ---
 	tokenStore, err := dashboard.Open(filepath.Join(cfg.DataDir, "dashboard.token"))

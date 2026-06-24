@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.0.661.0] - 2026-06-24
+
+### Changed
+- **Bucket existence, policy, and versioning are now control-plane state on the cluster meta-raft,
+  not the group-0 data-group raft.** A bucket's record (its assigned data group, versioning state,
+  and policy) was split across two raft layers — the assignment on meta-raft, but existence/policy/
+  versioning in the group-0 FSM — so group-0 doubled as a control-plane carrier. They are now one
+  unified `BucketRecord` on meta-raft, and group-0 carries no bucket control-plane state. Consensus is
+  preserved (these are mutable compare-and-swap cells that need it); only the raft layer changed.
+  Bucket create/delete/versioning/policy behave the same for S3 clients. Bucket writes now forward to
+  the meta-raft leader from any node.
+- **Two bucket-lifecycle atomicity gaps closed.** Create is now a single meta-raft commit (existence +
+  assignment atomically), removing the observable half-state the old two-phase propose could leave on
+  failure. Delete now removes the meta-raft assignment and unassigns the in-memory router in the same
+  committed step (previously the assignment leaked permanently and a deleted bucket could still resolve
+  via stale routing), and the physical data directory is removed only after the delete commits.
+- **On-disk meta-snapshot format extended additively (greenfield).** The bucket-assignment snapshot
+  entry gains versioning and policy fields. On an in-place binary upgrade, existing buckets keep their
+  existence and data-group routing; their versioning and policy reset to defaults (that state lived in
+  the now-retired group-0 path). Fresh installs are unaffected. No migration command.
+
+### Fixed
+- **Bucket policy authz-cache invalidation is lossless and never blocks consensus.** Policy changes now
+  invalidate the compiled-policy cache via a non-blocking hand-off off the meta-raft apply loop; if the
+  hand-off queue ever overflows it escalates to a full cache flush rather than dropping an invalidation,
+  so a committed policy change can never leave a stale authorization decision cached.
+- **The per-mutation bucket-versioning linearizing read degrades to a local read on any meta-raft
+  barrier failure** (leaderless window, leader unreachable, or stale leader hint), so object writes are
+  never failed because the control-plane barrier is transiently unavailable (availability over strict
+  consistency, matching the documented contract).
+
 ## [0.0.660.0] - 2026-06-24
 
 ### Changed

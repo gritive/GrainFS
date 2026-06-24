@@ -39,6 +39,7 @@ const (
 	RouteForwardReadIndex        = "/forward/read-index"
 	RouteRaftMetaPropose         = "/raft/meta/propose"
 	RouteRaftMetaCatalogRead     = "/raft/meta/catalog-read"
+	RouteForwardMetaReadIndex    = "/raft/meta/read-index"
 	RouteReceiptQuery            = "/receipt/query"
 	RouteProbeCapability         = "/probe/capability"
 	RouteProbeKEKDisk            = "/probe/kek-disk"
@@ -70,6 +71,7 @@ var bufferedRouteTable = []struct {
 	{RouteForwardReadIndex, StreamReadIndex},
 	{RouteRaftMetaPropose, StreamMetaProposeForward},
 	{RouteRaftMetaCatalogRead, StreamMetaCatalogRead},
+	{RouteForwardMetaReadIndex, StreamMetaReadIndex},
 	{RouteReceiptQuery, StreamReceiptQuery},
 	{RouteProbeCapability, StreamCapabilityProbe},
 	{RouteProbeKEKDisk, StreamKEKDiskSpaceProbe},

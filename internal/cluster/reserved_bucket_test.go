@@ -1,51 +1,49 @@
 package cluster
 
+// reserved_bucket_test.go — Task 12: CmdCreateBucket and CmdDeleteBucket are
+// retired no-ops in the group-0 FSM (bucket control-plane moved to meta-raft).
+// The reserved-name guard that used to live in the apply handlers is now
+// enforced by MetaBucketStore (meta-raft CreateBucket/DeleteBucket commands).
+//
+// These tests verify that the RETIRED FSM apply slots are replay-safe no-ops
+// for ALL bucket names — including reserved ones. The reserved-name enforcement
+// is covered by the MetaBucketStore tests (testbackend_metabucket_test.go and
+// bucket_write_test.go).
+
 import (
-	"strings"
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/badgermeta"
-	"github.com/gritive/GrainFS/internal/iam/bucketpolicy"
 )
 
-func TestApplyCreateBucket_RefusesReserved(t *testing.T) {
-	for _, c := range []struct {
-		name    string
-		wantErr bool
-	}{
-		{"_grainfs", true},
-		{"_grainfs-audit", true},
-		{"default", true},
-		{"analytics", false},
-		{"my-bucket", false},
-	} {
-		t.Run(c.name, func(t *testing.T) {
+// TestApplyCreateBucket_RefusesReserved — renamed: retired group-0 slot is now
+// a replay-safe no-op for all names including reserved ones.
+func TestApplyCreateBucket_RetiredSlot_IsNoOpForAllNames(t *testing.T) {
+	for _, name := range []string{"_grainfs", "_grainfs-audit", "default", "analytics", "my-bucket"} {
+		name := name
+		t.Run(name, func(t *testing.T) {
 			db := newTestDB(t)
 			fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
-			data, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: c.name})
+			data, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: name})
 			if err != nil {
 				t.Fatalf("EncodeCommand: %v", err)
 			}
-			err = fsm.Apply(data)
-			if c.wantErr {
-				if err == nil {
-					t.Fatalf("Apply(CreateBucket %q): got nil, want error", c.name)
-				}
-				if !strings.Contains(err.Error(), "reserved") {
-					t.Errorf("Apply(CreateBucket %q): error %q does not mention 'reserved'", c.name, err)
-				}
-			} else {
-				if err != nil {
-					t.Fatalf("Apply(CreateBucket %q): got %v, want nil", c.name, err)
-				}
+			// All names must be no-ops — including reserved ones. The reserved guard
+			// moved to MetaBucketStore; the group-0 FSM slot is unconditionally retired.
+			if err := fsm.Apply(data); err != nil {
+				t.Fatalf("retired Apply(CreateBucket %q): got %v, want nil (no-op)", name, err)
 			}
 		})
 	}
 }
 
-func TestApplyCreateBucket_BypassReserved_AllowsReserved(t *testing.T) {
+// TestApplyCreateBucket_BypassReserved_AllowsReserved — updated: BypassReserved
+// flag is still accepted by EncodeCommand (wire format stable); the retired FSM
+// slot ignores it and is a no-op for all names.
+func TestApplyCreateBucket_BypassReserved_RetiredNoOp(t *testing.T) {
 	for _, name := range []string{"_grainfs", "default", "_grainfs-audit"} {
+		name := name
 		t.Run(name, func(t *testing.T) {
 			db := newTestDB(t)
 			fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
@@ -55,111 +53,28 @@ func TestApplyCreateBucket_BypassReserved_AllowsReserved(t *testing.T) {
 				t.Fatalf("EncodeCommand: %v", err)
 			}
 			if err := fsm.Apply(data); err != nil {
-				t.Fatalf("bypass=true should allow reserved name %q, got %v", name, err)
+				t.Fatalf("retired bypass=true Apply(CreateBucket %q): got %v, want nil", name, err)
 			}
 		})
 	}
 }
 
-func TestApplyDeleteBucket_RefusesReserved(t *testing.T) {
-	for _, c := range []struct {
-		name    string
-		wantErr bool
-	}{
-		{"_grainfs", true},
-		{"_grainfs-audit", true},
-		{"default", true},
-		{"analytics", false},
-	} {
-		t.Run(c.name, func(t *testing.T) {
+// TestApplyDeleteBucket_RefusesReserved — updated: retired group-0 slot is now
+// a replay-safe no-op for all names including reserved ones.
+func TestApplyDeleteBucket_RetiredSlot_IsNoOpForAllNames(t *testing.T) {
+	for _, name := range []string{"_grainfs", "_grainfs-audit", "default", "analytics"} {
+		name := name
+		t.Run(name, func(t *testing.T) {
 			db := newTestDB(t)
 			fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
-			data, err := EncodeCommand(CmdDeleteBucket, DeleteBucketCmd{Bucket: c.name})
+			data, err := EncodeCommand(CmdDeleteBucket, DeleteBucketCmd{Bucket: name})
 			if err != nil {
 				t.Fatalf("EncodeCommand: %v", err)
 			}
-			err = fsm.Apply(data)
-			if c.wantErr {
-				if err == nil {
-					t.Fatalf("Apply(DeleteBucket %q): got nil, want error", c.name)
-				}
-				if !strings.Contains(err.Error(), "reserved") {
-					t.Errorf("Apply(DeleteBucket %q): error %q does not mention 'reserved'", c.name, err)
-				}
-			} else {
-				// non-reserved bucket: delete may return ErrNotFound but not a "reserved" error
-				if err != nil && strings.Contains(err.Error(), "reserved") {
-					t.Fatalf("Apply(DeleteBucket %q): unexpected 'reserved' error: %v", c.name, err)
-				}
-			}
-		})
-	}
-}
-
-func TestApplyBucketPolicyPut_RefusesInternalBucketOnly(t *testing.T) {
-	for _, c := range []struct {
-		name    string
-		wantErr bool
-	}{
-		{"_grainfs", true},
-		{"_grainfs-audit", true},
-		// "default" bucket SHOULD allow policy operations (operators override implicit-anon)
-		{"default", false},
-		{"analytics", false},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			store := bucketpolicy.NewInMemoryStore()
-			f := NewMetaFSM()
-			f.SetBucketPolicyStore(store)
-
-			raw := []byte(`{"Statement":[]}`)
-			err := f.applyCmd(buildBucketPolicyPutCmd(t, c.name, raw))
-			if c.wantErr {
-				if err == nil {
-					t.Fatalf("BucketPolicyPut %q: got nil, want error", c.name)
-				}
-				if !strings.Contains(err.Error(), "internal") {
-					t.Errorf("BucketPolicyPut %q: error %q does not mention 'internal'", c.name, err)
-				}
-			} else {
-				if err != nil {
-					t.Fatalf("BucketPolicyPut %q: got %v, want nil", c.name, err)
-				}
-			}
-		})
-	}
-}
-
-func TestApplyBucketPolicyDelete_RefusesInternalBucketOnly(t *testing.T) {
-	for _, c := range []struct {
-		name        string
-		refuseGuard bool // guard fires with "internal" message
-	}{
-		{"_grainfs", true},
-		{"_grainfs-audit", true},
-		// "default" and regular buckets: guard does NOT fire (operator may delete policy)
-		{"default", false},
-		{"analytics", false},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			store := bucketpolicy.NewInMemoryStore()
-			f := NewMetaFSM()
-			f.SetBucketPolicyStore(store)
-
-			err := f.applyCmd(buildBucketPolicyDeleteCmd(t, c.name))
-			if c.refuseGuard {
-				if err == nil {
-					t.Fatalf("BucketPolicyDelete %q: got nil, want guard error", c.name)
-				}
-				if !strings.Contains(err.Error(), "internal") {
-					t.Errorf("BucketPolicyDelete %q: error %q does not mention 'internal'", c.name, err)
-				}
-			} else {
-				// Guard must not fire: if there's an error it should be a store error, not a guard error.
-				if err != nil && strings.Contains(err.Error(), "internal") {
-					t.Fatalf("BucketPolicyDelete %q: guard fired unexpectedly: %v", c.name, err)
-				}
+			// Retired slot must be a no-op for all names — reserved guard moved to MetaBucketStore.
+			if err := fsm.Apply(data); err != nil {
+				t.Fatalf("retired Apply(DeleteBucket %q): got %v, want nil (no-op)", name, err)
 			}
 		})
 	}

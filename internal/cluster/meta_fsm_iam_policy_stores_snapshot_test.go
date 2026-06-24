@@ -11,24 +11,22 @@ import (
 
 	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/encrypt"
-	"github.com/gritive/GrainFS/internal/iam/bucketpolicy"
 	"github.com/gritive/GrainFS/internal/iam/group"
 	"github.com/gritive/GrainFS/internal/iam/policyattach"
 	"github.com/gritive/GrainFS/internal/iam/policystore"
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
-// wireIPSTStores wires all 4 policy stores into the MetaFSM.
-func wireIPSTStores(f *MetaFSM) (*policystore.InMemoryStore, *group.InMemoryStore, *policyattach.InMemoryStore, *bucketpolicy.InMemoryStore) {
+// wireIPSTStores wires all 3 live policy stores into the MetaFSM.
+// (bucketPolicyStore was retired — bucket policy now lives in BucketRecord.Policy)
+func wireIPSTStores(f *MetaFSM) (*policystore.InMemoryStore, *group.InMemoryStore, *policyattach.InMemoryStore) {
 	ps := policystore.NewInMemoryStore()
 	gs := group.NewInMemoryStore()
 	as := policyattach.NewInMemoryStore()
-	bp := bucketpolicy.NewInMemoryStore()
 	f.SetPolicyStore(ps)
 	f.SetGroupStore(gs)
 	f.SetPolicyAttachStore(as)
-	f.SetBucketPolicyStore(bp)
-	return ps, gs, as, bp
+	return ps, gs, as
 }
 
 // seedIPSTState applies a representative set of PolicyPut, GroupPut, GroupMemberPut,
@@ -69,11 +67,6 @@ func seedIPSTState(t *testing.T, f *MetaFSM) {
 	if err := f.applyCmd(buildPolicyAttachToGroupPutCmd(t, "admins", "readonly")); err != nil {
 		t.Fatalf("applyCmd PolicyAttachToGroupPut admins: %v", err)
 	}
-
-	// Bucket policy
-	if err := f.applyCmd(buildBucketPolicyPutCmd(t, "my-bucket", []byte(`{"Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::my-bucket/*"}]}`))); err != nil {
-		t.Fatalf("applyCmd BucketPolicyPut my-bucket: %v", err)
-	}
 }
 
 // TestMetaFSM_IPSTSnapshot_RoundTrip verifies that all 4 §2 IAM policy stores
@@ -106,7 +99,7 @@ func TestMetaFSM_IPSTSnapshot_RoundTrip(t *testing.T) {
 	// Restore into a fresh FSM with fresh stores.
 	dst := NewMetaFSM()
 	wireTestKEK(t, dst)
-	ps2, gs2, as2, bp2 := wireIPSTStores(dst)
+	ps2, gs2, as2 := wireIPSTStores(dst)
 
 	if err := dst.Restore(raft.SnapshotMeta{}, snap); err != nil {
 		t.Fatalf("Restore: %v", err)
@@ -181,15 +174,6 @@ func TestMetaFSM_IPSTSnapshot_RoundTrip(t *testing.T) {
 	if len(grpPols) != 1 || grpPols[0] != "readonly" {
 		t.Fatalf("admins group policies = %v, want [readonly]", grpPols)
 	}
-
-	// BucketPolicyStore assertions
-	bpDoc, err := bp2.Get(ctx, "my-bucket")
-	if err != nil {
-		t.Fatalf("Get my-bucket: %v", err)
-	}
-	if len(bpDoc) == 0 {
-		t.Fatal("my-bucket policy doc is empty after restore")
-	}
 }
 
 // TestMetaFSM_IPSTSnapshot_LegacySnapshot_NoIPST verifies that a snapshot without
@@ -220,7 +204,7 @@ func TestMetaFSM_IPSTSnapshot_LegacySnapshot_NoIPST(t *testing.T) {
 	// Restore into a fresh FSM that HAS stores wired.
 	dst := NewMetaFSM()
 	wireTestKEK(t, dst)
-	ps2, gs2, as2, bp2 := wireIPSTStores(dst)
+	ps2, gs2, as2 := wireIPSTStores(dst)
 
 	if err := dst.Restore(raft.SnapshotMeta{}, snap); err != nil {
 		t.Fatalf("Restore legacy snapshot: %v", err)
@@ -232,7 +216,6 @@ func TestMetaFSM_IPSTSnapshot_LegacySnapshot_NoIPST(t *testing.T) {
 	}
 	_ = gs2
 	_ = as2
-	_ = bp2
 }
 
 // TestMetaFSM_IPSTSnapshot_NilStores_WarnOnly verifies that restoring a snapshot
@@ -311,7 +294,7 @@ func TestMetaFSM_IPSTSnapshot_WithAllTrailers(t *testing.T) {
 	// Restore into a fresh FSM with the SAME shape of stores wired.
 	dst := NewMetaFSM()
 	wireTestKEK(t, dst)
-	dstPs, _, _, _ := wireIPSTStores(dst)
+	dstPs, _, _ := wireIPSTStores(dst)
 	dstCfg := config.NewStore()
 	config.RegisterClusterKeys(dstCfg, config.ReloadHooks{})
 	dst.SetConfigStore(dstCfg)
@@ -366,7 +349,7 @@ func TestMetaFSM_IPSTSnapshot_EmptyStores(t *testing.T) {
 
 	dst := NewMetaFSM()
 	wireTestKEK(t, dst)
-	ps2, _, _, _ := wireIPSTStores(dst)
+	ps2, _, _ := wireIPSTStores(dst)
 	if err := dst.Restore(raft.SnapshotMeta{}, snap); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}

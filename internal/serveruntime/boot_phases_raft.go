@@ -182,6 +182,18 @@ func bootMetaRaftWiring(state *bootState) error {
 	})
 	metaRaft.FSM().SetConfigStore(cfgStore)
 	state.cfgStore = cfgStore
+
+	// Task 10: register meta policy-invalidation post-commit hook BEFORE Start.
+	// The worker is started here so it is ready before the apply loop fires.
+	// SetInvalidate is called later in bootHTTPServerAndAdmin once the compiled
+	// policy store (srv.PolicyStore()) is available. Events arriving before
+	// SetInvalidate are silently dropped (pull-on-miss ensures eventual consistency).
+	policyWorker := cluster.NewMetaPolicyInvalidationWorker()
+	policyWorker.Start()
+	state.AddCleanup(policyWorker.Stop)
+	metaRaft.FSM().RegisterPostCommit(policyWorker.Hook)
+	state.metaPolicyInvalidationWorker = policyWorker
+
 	return nil
 }
 
@@ -227,11 +239,14 @@ func bootDataGroupRouter(state *bootState) error {
 	state.clusterRouter = cluster.NewRouter(state.dgMgr)
 	state.clusterRouter.SetDefault("group-0")
 
-	// SetOnBucketAssigned uses f.mu.Lock() internally; must be called
+	// SetOnBucketAssigned/SetOnBucketUnassigned use f.mu.Lock() internally; must be called
 	// before Start() (which is bootMetaRaftStart's job).
 	router := state.clusterRouter
 	state.metaRaft.FSM().SetOnBucketAssigned(func(bucket, groupID string) {
 		router.AssignBucket(bucket, groupID)
+	})
+	state.metaRaft.FSM().SetOnBucketUnassigned(func(bucket string) {
+		router.Unassign(bucket)
 	})
 	return nil
 }

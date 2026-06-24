@@ -854,11 +854,10 @@ func (c *ClusterCoordinator) SetBucketVersioning(bucket, state string) error {
 	type bucketVersioner interface {
 		SetBucketVersioning(bucket, state string) error
 	}
-	// Cluster-aware pre-check: on a freshly bootstrapped cluster the follower
-	// may have the bucket assignment from meta-Raft but not yet have applied
-	// the CmdCreateBucket data-Raft entry locally. The base layer's
-	// local-only pre-check would reject the request with NoSuchBucket and
-	// warp's `versioned` workload would fail at PutBucketVersioning.
+	// Cluster-aware pre-check: the base layer's local-only pre-check would
+	// reject the request with NoSuchBucket on a lagging follower where the
+	// meta-Raft bucket record exists but the local FSM has not yet applied it.
+	// The cluster-aware HeadBucket consults the meta-Raft directly.
 	if err := c.HeadBucket(context.Background(), bucket); err != nil {
 		return err
 	}

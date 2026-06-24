@@ -1,14 +1,12 @@
 package cluster
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"strings"
 
 	"github.com/dgraph-io/badger/v4"
 
-	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/storage"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -45,37 +43,36 @@ var _ = Describe("Backend bucket integration", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(got).To(Equal(policy))
 
+		// After delete, GetBucketPolicy returns ErrBucketNotFound — matching the
+		// old BadgerDB semantics where the policy key was absent from the store.
+		// The CompiledPolicyStore loader maps this to "no enforceable policy"
+		// (allow-all) and the S3 handler maps it to 404 "NoSuchBucketPolicy".
 		Expect(b.DeleteBucketPolicy("policy-bucket")).To(Succeed())
-		_, err = b.GetBucketPolicy("policy-bucket")
-		Expect(errors.Is(err, storage.ErrBucketNotFound)).To(BeTrue())
+		got, err = b.GetBucketPolicy("policy-bucket")
+		Expect(errors.Is(err, storage.ErrBucketNotFound)).To(BeTrue(), "no-policy bucket must return ErrBucketNotFound")
+		Expect(got).To(BeNil())
 	})
 
-	It("decrypts encrypted bucket policy FSM values", func() {
-		policy := []byte(`{"Version":"2012-10-17","Statement":[{"Resource":"secret-policy-resource"}]}`)
-		clusterID := bytes.Repeat([]byte{0x48}, 16)
-		keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x48}, encrypt.KEKSize), clusterID)
-		Expect(err).NotTo(HaveOccurred())
-		b.fsm.SetDEKKeeper(keeper, clusterID)
+	It("stores and retrieves bucket policy via MetaBucketStore", func() {
+		// Task 12: bucket policy moved from group-0 BadgerDB (FSM CmdSetBucketPolicy)
+		// to MetaBucketStore (meta-raft BucketRecord). The policy is stored in the
+		// MetaFSM in-memory map (no group-0 BadgerDB key), so the encryption test
+		// for the old policy: BadgerDB key is retired. This test verifies the live
+		// round-trip: SetBucketPolicy→MetaBucketStore; GetBucketPolicy reads back.
+		policy := []byte(`{"Version":"2012-10-17","Statement":[{"Resource":"resource"}]}`)
 
 		Expect(b.CreateBucket(ctx, "policy-bucket")).To(Succeed())
 		Expect(b.SetBucketPolicy("policy-bucket", policy)).To(Succeed())
 
-		Expect(db.View(func(txn *badger.Txn) error {
-			item, err := txn.Get(b.ks().BucketPolicyKey("policy-bucket"))
-			if err != nil {
-				return err
-			}
-			raw, err := item.ValueCopy(nil)
-			if err != nil {
-				return err
-			}
-			_, _, ok, err := decodeFSMValueFrameV2(raw)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(ok).To(BeTrue())
-			Expect(string(raw)).NotTo(ContainSubstring("secret-policy-resource"))
-			return nil
-		})).To(Succeed())
+		// Policy must NOT be in BadgerDB (it lives in MetaFSM now).
+		err := db.View(func(txn *badger.Txn) error {
+			_, err := txn.Get(b.ks().BucketPolicyKey("policy-bucket"))
+			return err
+		})
+		Expect(errors.Is(err, badger.ErrKeyNotFound)).To(BeTrue(),
+			"policy must not be written to group-0 BadgerDB (lives in MetaBucketStore)")
 
+		// GetBucketPolicy must read back from MetaBucketStore.
 		got, err := b.GetBucketPolicy("policy-bucket")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(got).To(Equal(policy))

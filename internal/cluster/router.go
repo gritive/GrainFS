@@ -98,18 +98,42 @@ func (r *Router) AssignBucket(bucket, groupID string) {
 	}
 }
 
-// Sync merges assignments from a MetaFSM snapshot into the routing table (bootstrap-only).
-// Must be called once after MetaRaft start/restore. Existing entries (e.g., those added
-// by the OnBucketAssigned callback during concurrent log replay) are preserved; snapshot
-// entries take precedence over any conflicting prior value.
-// Runtime additions must use AssignBucket to avoid overwriting concurrent updates.
+// Unassign removes a bucket's explicit mapping from the routing table.
+// Idempotent — unassigning a bucket that has no explicit mapping is a no-op.
+// Used by the onBucketUnassigned callback so a committed meta DeleteBucket
+// drops stale routing state on every node.
+func (r *Router) Unassign(bucket string) {
+	for {
+		old := r.snap.Load()
+		if _, ok := old.bucketMap[bucket]; !ok {
+			return // already absent — nothing to do
+		}
+		newMap := make(map[string]string, len(old.bucketMap))
+		for k, v := range old.bucketMap {
+			if k != bucket {
+				newMap[k] = v
+			}
+		}
+		newSnap := &routerSnap{
+			bucketMap:       newMap,
+			defaultGroupID:  old.defaultGroupID,
+			requireExplicit: old.requireExplicit,
+		}
+		if r.snap.CompareAndSwap(old, newSnap) {
+			return
+		}
+	}
+}
+
+// Sync replaces the routing table with the given assignments (full reconcile).
+// Buckets absent from assignments are removed; entries present in assignments
+// are upserted. Must be called once after MetaRaft start/restore; subsequent
+// runtime updates must use AssignBucket/Unassign to avoid overwriting concurrent
+// changes.
 func (r *Router) Sync(assignments map[string]string) {
 	for {
 		old := r.snap.Load()
-		newMap := make(map[string]string, len(old.bucketMap)+len(assignments))
-		for k, v := range old.bucketMap {
-			newMap[k] = v
-		}
+		newMap := make(map[string]string, len(assignments))
 		for k, v := range assignments {
 			newMap[k] = v
 		}

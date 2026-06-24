@@ -167,7 +167,9 @@ func (f *MetaFSM) applyPutBucketAssignment(data []byte) error {
 	}
 
 	f.mu.Lock()
-	f.bucketAssignments[bucket] = groupID
+	rec := f.bucketRecords[bucket]
+	rec.GroupID = groupID
+	f.bucketRecords[bucket] = rec
 	cb := f.onBucketAssigned
 	f.mu.Unlock()
 
@@ -178,11 +180,51 @@ func (f *MetaFSM) applyPutBucketAssignment(data []byte) error {
 }
 
 // BucketAssignments returns a copy of the current bucket→group_id map.
+// Derived from bucketRecords for backward compatibility with existing callers.
 func (f *MetaFSM) BucketAssignments() map[string]string {
 	f.mu.RLock()
-	out := make(map[string]string, len(f.bucketAssignments))
-	for k, v := range f.bucketAssignments {
-		out[k] = v
+	out := make(map[string]string, len(f.bucketRecords))
+	for k, v := range f.bucketRecords {
+		out[k] = v.GroupID
+	}
+	f.mu.RUnlock()
+	return out
+}
+
+// BucketRecord returns the unified record for bucket and true, or zero-value
+// and false if not found. Policy is deep-copied to prevent aliasing of FSM state.
+func (f *MetaFSM) BucketRecord(bucket string) (BucketRecord, bool) {
+	f.mu.RLock()
+	rec, ok := f.bucketRecords[bucket]
+	f.mu.RUnlock()
+	if !ok {
+		return BucketRecord{}, false
+	}
+	return BucketRecord{
+		GroupID:    rec.GroupID,
+		Versioning: rec.Versioning,
+		Policy:     append([]byte(nil), rec.Policy...),
+	}, true
+}
+
+// BucketRecordExists reports whether a BucketRecord exists for bucket.
+func (f *MetaFSM) BucketRecordExists(bucket string) bool {
+	f.mu.RLock()
+	_, ok := f.bucketRecords[bucket]
+	f.mu.RUnlock()
+	return ok
+}
+
+// AllBucketRecords returns a deep-copied snapshot of all bucket records.
+func (f *MetaFSM) AllBucketRecords() map[string]BucketRecord {
+	f.mu.RLock()
+	out := make(map[string]BucketRecord, len(f.bucketRecords))
+	for k, v := range f.bucketRecords {
+		out[k] = BucketRecord{
+			GroupID:    v.GroupID,
+			Versioning: v.Versioning,
+			Policy:     append([]byte(nil), v.Policy...),
+		}
 	}
 	f.mu.RUnlock()
 	return out
@@ -192,7 +234,7 @@ func (f *MetaFSM) BucketAssignments() map[string]string {
 // Used by the join handler to guard against accidental data loss.
 func (f *MetaFSM) HasUserData() bool {
 	f.mu.RLock()
-	has := len(f.bucketAssignments) > 0
+	has := len(f.bucketRecords) > 0
 	f.mu.RUnlock()
 	return has
 }

@@ -65,10 +65,13 @@ func TestSoleAuthReadOn(t *testing.T) {
 		require.False(t, on)
 	})
 
-	t.Run("store error propagates fail-closed", func(t *testing.T) {
+	t.Run("store error propagates fail-closed (no MetaBucketStore)", func(t *testing.T) {
 		b, db := newTestDistributedBackendWithDB(t)
 		require.NoError(t, b.CreateBucket(ctx, "berr"))
-		// Close the underlying store to force GetBucketVersioning into error.
+		// Remove the MetaBucketStore so GetBucketVersioning falls back to BadgerDB,
+		// then close the store to force an error. This validates the fail-closed
+		// contract on the legacy BadgerDB fallback path.
+		b.SetMetaBucketStore(nil)
 		require.NoError(t, db.Close())
 		on, err := b.soleAuthReadOn("berr")
 		require.Error(t, err)

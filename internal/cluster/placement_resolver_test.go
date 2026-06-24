@@ -90,9 +90,11 @@ func TestHeadObjectMeta_ReturnsObjectAndPlacementMeta(t *testing.T) {
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 	b := &DistributedBackend{store: badgermeta.Wrap(db), fsm: fsm}
 
-	raw, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "bkt"})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(raw))
+	// CmdCreateBucket is retired (Task 12 no-op); write bucket key directly to DB
+	// so HeadBucket's legacy fallback path (MetaBucketStore not wired) finds it.
+	require.NoError(t, fsm.db.Update(func(txn MetadataTxn) error {
+		return txn.Set(fsm.keys.BucketKey("bkt"), []byte("{}"))
+	}))
 	putCmd := PutObjectMetaCmd{
 		Bucket:      "bkt",
 		Key:         "obj",
