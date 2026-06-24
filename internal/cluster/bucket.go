@@ -237,6 +237,12 @@ func (b *DistributedBackend) ForceDeleteBucket(ctx context.Context, bucket strin
 			return fmt.Errorf("force delete: delete qmeta for %q: %w", cmd.Key, qerr)
 		}
 	}
+	// A Suspended bucket also keeps versions preserved from a prior Enabled era in
+	// the per-version tree; purge them too (no-op for a never-versioned bucket) so
+	// the final DeleteBucket's per-version emptiness check passes.
+	if err := b.purgePerVersionBlobs(ctx, bucket); err != nil {
+		return err
+	}
 	return b.DeleteBucket(ctx, bucket)
 }
 
@@ -250,20 +256,33 @@ func (b *DistributedBackend) ForceDeleteBucket(ctx context.Context, bucket strin
 // dropped: greenfield versioned buckets have no legacy-bare FSM carve-outs, and Task
 // 4c will retire CmdDeleteObject entirely.
 func (b *DistributedBackend) forceDeleteBucketSoleAuth(ctx context.Context, bucket string) error {
-	// Versioned blobs (every version, incl. delete markers), fail-closed.
+	if err := b.purgePerVersionBlobs(ctx, bucket); err != nil {
+		return err
+	}
+	return b.DeleteBucket(ctx, bucket)
+}
+
+// purgePerVersionBlobs deletes every per-version blob (every version, incl. delete
+// markers) in the bucket via DeleteObjectVersion (which purges the blob + its
+// shards), fail-closed. No-op for a bucket whose per-version tree is empty
+// (never-versioned). Shared by the Enabled force path and the non-versioned /
+// Suspended force path so a Suspended bucket's versions preserved from a prior
+// Enabled era are purged, not orphaned (otherwise the final DeleteBucket's
+// per-version emptiness check would reject the force-delete).
+func (b *DistributedBackend) purgePerVersionBlobs(ctx context.Context, bucket string) error {
 	cmds, err := b.scanQuorumMetaVersionsClusterAll(bucket, "")
 	if err != nil {
-		return fmt.Errorf("force delete (soleauth): enumerate blobs: %w", err)
+		return fmt.Errorf("force delete: enumerate per-version blobs: %w", err)
 	}
 	for _, c := range cmds {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		if derr := b.DeleteObjectVersion(bucket, c.Key, c.VersionID); derr != nil {
-			return fmt.Errorf("force delete (soleauth): delete %q@%s: %w", c.Key, c.VersionID, derr)
+			return fmt.Errorf("force delete: delete %q@%s: %w", c.Key, c.VersionID, derr)
 		}
 	}
-	return b.DeleteBucket(ctx, bucket)
+	return nil
 }
 
 // SetBucketVersioning satisfies server.BucketVersioner. Replicates the

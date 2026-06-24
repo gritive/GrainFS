@@ -45,12 +45,9 @@ var _ = ginkgo.Describe("Bucket delete non-Enabled emptiness", ginkgo.Label("buc
 				_, herr := tgt.pickNode(0).HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(name)})
 				gomega.Expect(herr).NotTo(gomega.HaveOccurred(), "bucket must survive a rejected non-force delete")
 
-				// Best-effort cleanup: delete the object (leaves a hard-delete
-				// tombstone, which the emptiness check excludes), then the non-force
-				// delete succeeds. Avoids --force, whose cluster purge-vs-recheck
-				// completeness is a captured follow-up.
-				_, _ = tgt.pickNode(0).DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(name), Key: aws.String("file.txt")})
-				_, _ = runCLI(tb, "", "bucket", "delete", name, "--endpoint", tgt.adminSockPath())
+				// --force hard-purges the object's shards + qmeta and deletes the bucket.
+				fout, fcode := runCLI(tb, "", "bucket", "delete", name, "--force", "--endpoint", tgt.adminSockPath())
+				gomega.Expect(fcode).To(gomega.Equal(0), "force delete of a non-empty never-versioned bucket should succeed:\n"+fout)
 			})
 
 			ginkgo.It("rejects non-force delete of a Suspended bucket holding a preserved version", func() {
@@ -78,15 +75,9 @@ var _ = ginkgo.Describe("Bucket delete non-Enabled emptiness", ginkgo.Label("buc
 				gomega.Expect(code).NotTo(gomega.Equal(0), "Suspended bucket with a preserved version must reject non-force delete:\n"+out)
 				gomega.Expect(strings.ToLower(out)).To(gomega.ContainSubstring("not empty"))
 
-				// Best-effort cleanup: empty the per-version tree via S3, then delete.
-				// `--force` does NOT purge a Suspended bucket's preserved per-version
-				// blobs yet (captured TODOS follow-up), so empty it explicitly here.
-				if lv, lerr := client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{Bucket: aws.String(name)}); lerr == nil {
-					for _, v := range lv.Versions {
-						_, _ = client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(name), Key: v.Key, VersionId: v.VersionId})
-					}
-				}
-				_, _ = runCLI(tb, "", "bucket", "delete", name, "--endpoint", tgt.adminSockPath())
+				// --force purges the preserved per-version blobs and deletes the bucket.
+				fout, fcode := runCLI(tb, "", "bucket", "delete", name, "--force", "--endpoint", tgt.adminSockPath())
+				gomega.Expect(fcode).To(gomega.Equal(0), "force delete of a Suspended bucket should succeed:\n"+fout)
 			})
 		})
 	}

@@ -4,23 +4,6 @@
 
 ### DeleteBucket non-Enabled emptiness follow-ups (2026-06-24)
 
-- **[P2][follow-up] `ForceDeleteBucket` cluster purge vs. the now-accurate emptiness
-  recheck.** `ForceDeleteBucket` purges objects, then calls `DeleteBucket`, which now
-  runs a cluster-wide emptiness check (latest-only `scanQuorumMetaClusterAll` +
-  per-version `listObjectVersionsSoleAuth`). In cluster mode this can return
-  `ErrBucketNotEmpty` after a `--force` because (a) a Suspended bucket's preserved
-  per-version blobs are never purged by the non-Enabled force path
-  (`bucket.go` ForceDeleteBucket / `cluster_coordinator.go` ForceDeleteBucket only
-  enumerate the latest-only tree), and (b) the immediate post-purge cluster-wide scan
-  can still observe a not-yet-propagated K-of-N qmeta replica. Before this fix the
-  recheck was FSM-only (always empty) so `--force` always "succeeded" — possibly
-  orphaning residue. Now it fails closed (safer) but `--force` may need a retry or a
-  stronger purge. Fix: (1) purge the per-version tree for Suspended buckets in
-  ForceDeleteBucket, and (2) have ForceDeleteBucket finalize via a raw bucket removal
-  (no emptiness recheck) once its purge is confirmed complete. The non-force
-  DeleteBucket emptiness fix does not depend on this. (e2e cleanup is best-effort via
-  S3 object delete + non-force delete to sidestep it.)
-
 - **[P3][pre-existing] TOCTOU between the DeleteBucket emptiness scan and the
   `propose(CmdDeleteBucket)` + `os.RemoveAll(bucketDir)`.** A concurrent PUT (needs only
   `HeadBucket`) can commit qmeta in the window after the scan. Negligible at admin-only

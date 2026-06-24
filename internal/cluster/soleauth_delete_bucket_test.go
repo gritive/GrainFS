@@ -121,6 +121,25 @@ func TestDeleteBucketEmptinessNonEnabled(t *testing.T) {
 	})
 }
 
+// TestForceDeleteBucketSuspendedPurgesPerVersion proves --force purges a Suspended
+// bucket's preserved per-version blobs (from a prior Enabled era), not just the
+// latest-only tree, so the bucket actually deletes instead of tripping the
+// per-version emptiness recheck in the final DeleteBucket.
+func TestForceDeleteBucketSuspendedPurgesPerVersion(t *testing.T) {
+	// Enable → write (→ real per-version blob + shards) → Suspend leaves the
+	// version preserved in the per-version tree. ForceDeleteBucket on the Suspended
+	// bucket must purge it (not just the empty latest-only tree).
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "suspf"))
+	require.NoError(t, b.SetBucketVersioning("suspf", "Enabled"))
+	putTestObjectForRetire(t, b, "suspf", "k1", []byte("a"))
+	require.NoError(t, b.SetBucketVersioning("suspf", "Suspended"))
+
+	require.NoError(t, b.ForceDeleteBucket(ctx, "suspf"))
+	require.ErrorIs(t, b.HeadBucket(ctx, "suspf"), storage.ErrBucketNotFound)
+}
+
 // TestDeleteBucketEmptinessNonEnabledControl confirms blob-primary emptiness for
 // the cases adjacent to the non-Enabled fix. The non-Enabled emptiness path no
 // longer scans the FSM obj: tree (dead in greenfield — CmdPutObjectMeta apply is
