@@ -68,6 +68,24 @@ func TestRelocationStillEligible(t *testing.T) {
 			clusterRedundant: true,
 			wantErr:          true,
 		},
+		{
+			// Relocation re-encodes via runChunkedPut, which produces a plain chunked
+			// manifest with no IsAppendable/Coalesced/AppendCallMD5s — relocating an
+			// appendable object would drop the append-call digest history (resetting the
+			// composite ETag) and the coalesced refs. Skip them; they stay 1+0.
+			name:             "appendable object not relocatable",
+			cur:              PutObjectMetaCmd{ECData: 1, ECParity: 0, ETag: etag, VersionID: ver, IsAppendable: true},
+			in:               base,
+			clusterRedundant: true,
+			wantErr:          true,
+		},
+		{
+			name:             "coalesced object not relocatable",
+			cur:              PutObjectMetaCmd{ECData: 1, ECParity: 0, ETag: etag, VersionID: ver, Coalesced: []CoalescedShardRef{{CoalescedID: "x"}}},
+			in:               base,
+			clusterRedundant: true,
+			wantErr:          true,
+		},
 	}
 
 	for _, tt := range tests {
