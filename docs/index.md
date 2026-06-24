@@ -51,5 +51,4 @@ Use these when you need the design rationale behind the system.
 | Single/cluster request execution | [Request execution actor flow](architecture/request-single-cluster-flow.md) |
 | Durability and object placement | [Durability and placement](architecture/durability-and-placement.md) |
 | Storage operation boundaries | [Storage operations facade](architecture/storage-operations-facade.md) |
-| Cache invalidation | [Cache invalidation flow](architecture/cache-invalidation-flow.md) |
 | Raft RPC stream multiplexing | [Stream multiplexing + heartbeat coalescing](architecture/quic-stream-multiplex.md) |
