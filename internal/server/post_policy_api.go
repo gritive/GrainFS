@@ -25,7 +25,6 @@ func (s *Server) handleFormUpload(ctx context.Context, c *app.RequestContext, bu
 		return
 	}
 	key := keys[0]
-	c.Set(auditObjectKeyKey, key)
 
 	if !s.validateFormUploadPolicyIfConfigured(c, form.Value, bucket, key) {
 		return

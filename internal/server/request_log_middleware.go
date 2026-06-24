@@ -23,10 +23,6 @@ const auditErrReasonKey = "audit.err_reason"
 // before the body is drained, so the log middleware reads the true value).
 const auditBytesOutKey = "audit.bytes_out"
 
-// auditObjectKeyKey is a Hertz context key that carries the resolved object key
-// for form-post uploads (the key is not in the URL but in the multipart body).
-const auditObjectKeyKey = "audit.object_key"
-
 func (s *Server) s3RequestLogMiddleware() app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		bucket := c.Param("bucket")

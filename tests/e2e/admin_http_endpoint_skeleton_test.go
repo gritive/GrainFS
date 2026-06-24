@@ -46,14 +46,4 @@ func runAdminHTTPEndpointSkeletonCases(getTgt func() s3Target) {
 		// Lifecycle worker phases — verify expected phase rotation under
 		// idle (paused / scanning / sleeping) and that the returned ts is fresh.
 	})
-
-	ginkgo.PIt("[TODO:e2e] GET /api/audit/health reports the audit subsystem health", func() {
-		// Distinct from /v1/audit/query — a health probe for dashboards.
-		// Verify the JSON shape (ok flag, lag metrics, last-write ts).
-	})
-
-	ginkgo.PIt("[TODO:e2e] GET /api/audit/s3 searches the audit log via S3 admin filter", func() {
-		// Query string variants: ?request_id=, ?sa_id=. Verify each filter
-		// narrows results and that unknown filters are rejected as 400.
-	})
 }
