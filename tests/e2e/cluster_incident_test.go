@@ -193,5 +193,10 @@ var _ = ginkgo.Describe("Cluster incidents", func() {
 
 		_, err = client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bucketName), Key: aws.String("good")})
 		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "unrelated object in same bucket must keep working")
+
+		// HeadObject on the quarantined object must fail (non-2xx / quarantine error),
+		// matching GET parity: a quarantined object must not be HEAD-able (200).
+		_, err = client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(bucketName), Key: aws.String("bad")})
+		gomega.Expect(err).To(gomega.HaveOccurred(), "HeadObject on a quarantined object must fail")
 	})
 })

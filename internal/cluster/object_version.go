@@ -41,7 +41,13 @@ func (b *DistributedBackend) headObjectVersionCtx(ctx context.Context, bucket, k
 		return nil, err
 	}
 	obj, _, err := b.headObjectMetaV(ctx, bucket, key, versionID)
-	return obj, err
+	if err != nil {
+		return nil, err
+	}
+	if err := b.quarantineGate(bucket, key, versionID); err != nil {
+		return nil, err
+	}
+	return obj, nil
 }
 
 // headObjectMetaV reads a specific version's metadata and its EC placement
@@ -229,10 +235,8 @@ func (b *DistributedBackend) getObjectVersionCtx(ctx context.Context, bucket, ke
 	if obj.IsDeleteMarker {
 		return nil, nil, storage.ErrMethodNotAllowed
 	}
-	if blocked, cause, qerr := b.isObjectQuarantined(bucket, key, versionID); qerr != nil {
-		return nil, nil, fmt.Errorf("check quarantine: %w", qerr)
-	} else if blocked {
-		return nil, nil, objectQuarantinedError(bucket, key, cause)
+	if err := b.quarantineGate(bucket, key, versionID); err != nil {
+		return nil, nil, err
 	}
 	if obj.IsAppendable && (len(obj.Segments) > 0 || len(obj.Coalesced) > 0) && obj.Size > 0 {
 		return b.openAppendableSegments(bucket, key, obj), obj, nil
