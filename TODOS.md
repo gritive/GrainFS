@@ -2,27 +2,24 @@
 
 ## Follow-ups
 
-### Iceberg removal follow-ups (2026-06-24)
+### ProxyTrust removal follow-ups (2026-06-25)
 
-- **[P3] ProxyTrust subsystem orphaned by the iceberg audit-lake removal.**
-  `(*Server).authoritativeClientIP` (`internal/server/proxy_trust.go`) + the whole ProxyTrust
-  wiring (`WithProxyTrust`, `config.keys` TrustedProxyCIDR, the `OnTrustedProxyCIDR` reload hook,
-  boot construction in `boot_phases_raft.go` / `boot_phases_srvopts.go`, CIDR seeding in `run.go`)
-  was built (§5 T45) to attribute the real client IP behind a proxy, and its ONLY production
-  consumer was the removed S3-event audit log lake. It is now production-dead (kept alive by a
-  `//nolint:unused` on `authoritativeClientIP`; integration tests still pass). The original intent
-  was "future SourceIP enrichment of `policy.RequestContext`". Decide later: either WIRE it to the
-  surviving PDP/policy `aws:SourceIp` condition path (and the general S3 request log, which does not
-  log client IP today), or REMOVE the whole subsystem. Left out of the iceberg-removal PR to keep
-  scope focused (ProxyTrust is a separate feature, not iceberg).
+The orphaned ProxyTrust subsystem (`authoritativeClientIP` + `trusted-proxy.cidr` config +
+`OnTrustedProxyCIDR` hook + admin status `trusted_proxy` field + CLI example) was fully REMOVED, and
+the dead iceberg `MetaStateSnapshot` FBS slots (5/6/9 + the three `Iceberg*` table defs) were
+reserved/deleted (the last iceberg identifiers are now gone from the codebase). Residual dead code
+surfaced by that removal:
 
-- **[P3] FlatBuffers MetaStateSnapshot iceberg reserved slots.** `cluster.fbs` retains
-  `iceberg_namespaces` (slot 5), `iceberg_tables` (slot 6), `iceberg_schema_version` (slot 9) +
-  the `IcebergNamespaceEntry`/`IcebergIdentifier`/`IcebergTableEntry` table defs, written as empty
-  vectors by `meta_fsm_snapshot.go`, purely for snapshot wire-format slot stability (no-renumber).
-  At the next MetaStateSnapshot schema version bump these dead slots can be reclaimed/renamed to
-  generic `reserved_*` names (wire-safe since slots are positional) to drop the last iceberg
-  identifiers from the codebase.
+- **[P3] `tls_posture.go` anon-switch no-op shims.** `enforceTLSPosture` / `bootTLSPostureGate` /
+  `iamPostureChecker` / `CheckAnonOff` remain as no-op compatibility shims orphaned by the
+  *anon-switch* removal (not iceberg). They are wired into the boot-phase list and AdminAPI, so
+  removing them is a separate dead-code cleanup touching boot sequencing + AdminAPI wiring.
+
+- **[P3] `config.Store.SetPostRestore` now has zero production callers.** Its only caller was the
+  proxy-CIDR snapshot reconcile, removed with ProxyTrust. The method + its registry remain a
+  supported config-store capability (with unit tests) but are currently dead on the production path.
+  Either re-use it for a future out-of-band snapshot reconcile, or remove it
+  (`internal/config/config.go`) + its tests.
 
 ### Quorum-meta blob codec decouple follow-ups (2026-06-24)
 
