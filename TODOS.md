@@ -160,18 +160,14 @@
   per-version write. Verified pre-existing (the blob path ignored versionID before Slice 2 too);
   not a Slice 2 regression.
 
-- **[P2] `deleteShardsQuorum` empty-placement guard missing.** If `placement` is empty
-  (zero-node placement record, e.g. from an incomplete or corrupt write), `deleteShardsQuorum`
-  succeeds trivially — but if the shards actually exist on unknown nodes, they are stranded
-  permanently. Add an early `if len(placement) == 0 { return error }` guard so the caller
-  can decide how to handle the ambiguity rather than silently completing. Closes the
-  shard-stranding class for force-delete on objects with corrupt placement metadata.
+- **[DONE] `deleteShardsQuorum` empty-placement guard.** Fixed in the Slice 2 code-gate: both
+  `ForceDeleteBucket` non-versioned loops now fail closed with a descriptive error when
+  `len(cmd.NodeIDs) == 0` (corrupt/incomplete qmeta blob) instead of silently stranding shards and
+  the qmeta blob. Closes the shard-stranding class for force-delete on objects with corrupt placement.
 
-- **[P3][cleanup] Three stale comments referencing removed functions remain in the codebase:**
-  (a) `apply.go` ~line 268: references a deleted apply helper; (b) `object_version.go`
-  ~lines 104–107: cross-ref to the removed `DeleteObjectVersion` raft carve-out; (c)
-  `cluster_coordinator.go` ~lines 1159–1162: references `hardDeleteLegacyObject` (removed
-  in Slice 2). All are cosmetic; fix in a standalone cleanup PR.
+- **[DONE] Stale comments referencing removed functions.** Fixed in the Slice 2 code-gate:
+  the three comments (`apply.go`, `object_version.go`, `cluster_coordinator.go`) referencing
+  deleted apply helpers were reworded to describe behavior without the removed symbols.
 
 ### Append/coalesce off-raft follow-ups (Slice 1, 2026-06-24)
 
