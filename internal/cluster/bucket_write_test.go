@@ -129,18 +129,11 @@ func TestBucketWrite_CreateBypassReserved_PassesTrueFlag(t *testing.T) {
 // --- Delete tests ---
 
 // seedBucketForDelete seeds the bucket so that DeleteBucket's HeadBucket check
-// passes. Task 12: CmdCreateBucket is a retired no-op; seed via MetaBucketStore
-// if wired, or directly into BadgerDB via the keyspace BucketKey (legacy fallback).
+// passes. Task 12: CmdCreateBucket is a retired no-op; existence lives in
+// MetaBucketStore (the sole authority), so seed via the wired MBS.
 func seedBucketForDelete(t *testing.T, b *DistributedBackend, bucket string) {
 	t.Helper()
-	if mbs := b.MetaBucketStore(); mbs != nil {
-		require.NoError(t, mbs.CreateBucket(context.Background(), bucket, "local", false))
-		return
-	}
-	// No MetaBucketStore: write BucketKey directly to the store (legacy HeadBucket fallback).
-	require.NoError(t, b.store.Update(func(txn MetadataTxn) error {
-		return txn.Set(b.ks().BucketKey(bucket), []byte("{}"))
-	}))
+	require.NoError(t, b.MetaBucketStore().CreateBucket(context.Background(), bucket, "local", false))
 }
 
 // TestBucketWrite_Delete_ConsensusBeforeRemoveAll verifies the ordering contract:

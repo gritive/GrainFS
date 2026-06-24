@@ -66,7 +66,7 @@ var _ = Describe("Backend bucket integration", func() {
 
 		// Policy must NOT be in BadgerDB (it lives in MetaFSM now).
 		err := db.View(func(txn *badger.Txn) error {
-			_, err := txn.Get(b.ks().BucketPolicyKey("policy-bucket"))
+			_, err := txn.Get(b.ks().Key([]byte("policy:policy-bucket")))
 			return err
 		})
 		Expect(errors.Is(err, badger.ErrKeyNotFound)).To(BeTrue(),

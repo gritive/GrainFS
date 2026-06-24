@@ -37,7 +37,7 @@ func TestCollectStaleFSMValueKeys_PolicyAndObjOnly(t *testing.T) {
 	require.NotNil(t, keeper)
 
 	// At gen 0: seal stale policy: key.
-	polKey := ks.BucketPolicyKey("b1")
+	polKey := ks.Key([]byte("policy:b1"))
 	polRaw, err := gb.fsm.sealValue(polKey, []byte(`{}`))
 	require.NoError(t, err)
 	dbSet(t, gbDB, polKey, polRaw)
@@ -74,7 +74,7 @@ func TestCollectStaleFSMValueKeys_RespectsMaxBatch(t *testing.T) {
 
 	// Seed 5 stale policy: keys at gen 0.
 	for i := 0; i < 5; i++ {
-		key := ks.BucketPolicyKey(fmt.Sprintf("b%d", i))
+		key := ks.Key([]byte("policy:" + fmt.Sprintf("b%d", i)))
 		raw, err := gb.fsm.sealValue(key, []byte(`{}`))
 		require.NoError(t, err)
 		dbSet(t, gbDB, key, raw)
@@ -96,7 +96,7 @@ func TestCollectStaleFSMValueKeys_RespectsMaxBytes(t *testing.T) {
 	// Seed 5 policy: keys with ~200-byte values.
 	largeVal := bytes.Repeat([]byte("x"), 200)
 	for i := 0; i < 5; i++ {
-		key := ks.BucketPolicyKey(fmt.Sprintf("big%d", i))
+		key := ks.Key([]byte("policy:" + fmt.Sprintf("big%d", i)))
 		raw, err := gb.fsm.sealValue(key, largeVal)
 		require.NoError(t, err)
 		dbSet(t, gbDB, key, raw)
@@ -120,7 +120,7 @@ func TestDrainFSMValueRewrap_DrainsGroupToActive(t *testing.T) {
 
 	// Seed 7 stale policy: keys at gen 0.
 	for i := 0; i < 7; i++ {
-		key := ks.BucketPolicyKey(fmt.Sprintf("b%d", i))
+		key := ks.Key([]byte("policy:" + fmt.Sprintf("b%d", i)))
 		raw, err := gb.fsm.sealValue(key, []byte(`{}`))
 		require.NoError(t, err)
 		dbSet(t, gbDB, key, raw)
@@ -148,7 +148,7 @@ func TestDrainFSMValueRewrap_IdempotentWhenClean(t *testing.T) {
 	require.NoError(t, keeper.Rotate())
 
 	// Seal a value at gen 1 (active).
-	key := ks.BucketPolicyKey("b1")
+	key := ks.Key([]byte("policy:b1"))
 	raw, err := gb.fsm.sealValue(key, []byte(`{}`))
 	require.NoError(t, err)
 	dbSet(t, gbDB, key, raw)
@@ -188,7 +188,7 @@ func TestDrainFSMValueRewrap_RotationMidDrainTerminatesAndConverges(t *testing.T
 	// Seed 6 stale policy: keys at gen 0, then rotate to gen 1 (initial active).
 	const n = 6
 	for i := 0; i < n; i++ {
-		key := ks.BucketPolicyKey(fmt.Sprintf("b%d", i))
+		key := ks.Key([]byte("policy:" + fmt.Sprintf("b%d", i)))
 		raw, err := gb.fsm.sealValue(key, []byte(`{}`))
 		require.NoError(t, err)
 		dbSet(t, gbDB, key, raw)
@@ -227,7 +227,7 @@ func TestDrainFSMValueRewrap_RotationMidDrainTerminatesAndConverges(t *testing.T
 	require.NoError(t, err)
 	require.Empty(t, left, "all values must be resealed onto keeper-current gen 2")
 	for i := 0; i < n; i++ {
-		key := ks.BucketPolicyKey(fmt.Sprintf("b%d", i))
+		key := ks.Key([]byte("policy:" + fmt.Sprintf("b%d", i)))
 		require.Equal(t, uint32(2), gbFrameGenOf(t, gb, key), "value must end at keeper-current gen 2")
 	}
 

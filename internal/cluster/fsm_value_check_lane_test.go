@@ -23,7 +23,7 @@ func TestFSMValueCheckLane_ErrorsWhenStaleCleanWhenDrained(t *testing.T) {
 	ks := gb.ks()
 
 	// Seal a policy: value at gen 0 (initial active gen).
-	polKey := ks.BucketPolicyKey("b1")
+	polKey := ks.Key([]byte("policy:b1"))
 	polRaw, err := gb.fsm.sealValue(polKey, []byte(`{}`))
 	require.NoError(t, err)
 	dbSet(t, gbDB, polKey, polRaw)
