@@ -17,7 +17,7 @@ each other while preserving the same external MetaFSM interface.
 
 Examples include cluster placement/object-index commands, IAM policy-store
 commands, cluster config commands, DEK/KEK/JWT key material commands,
-lifecycle commands, migration commands, and Iceberg catalog commands.
+lifecycle commands, and migration commands.
 
 ### Storage Operations Facade
 
@@ -617,12 +617,12 @@ Auth uses two layers. SigV4 verification (`s3auth.Verifier` +
 matches, the auth middleware calls `iam.ResolveSA` to attach the
 principal sa_id to the request context. The authz middleware then
 serially evaluates IAM grants and bucket policies — both must allow.
-Protocol credentials are a second SigV4 source for S3 and Iceberg:
+Protocol credentials are a second SigV4 source for S3:
 `internal/server/protocol_credential_auth.go` opens the encrypted
 protocol-credential secret envelope, verifies the SigV4 request without the
 normal cache, then validates the credential strictly against the requested
-`bucket/<bucket>` or `catalog/<warehouse>` resource before attaching the
-credential's SAID to the request context.
+`bucket/<bucket>` resource before attaching the credential's SAID to the
+request context.
 
 Bootstrap path: a fresh cluster starts with an empty IAM store and
 authzMiddleware always-on, so all S3 traffic returns 401 until an
@@ -696,24 +696,6 @@ empty access keys; ACL `public-read-write` additionally allows write actions;
 ACL `private` requires a non-empty access key. Multi-tenant ownership
 (`OwnerKey`) is out of scope until Phase 14+; until then all authenticated
 callers are treated as owners of `private` objects.
-
-### Iceberg REST Auth
-
-Iceberg REST Catalog (`/iceberg/v1/*` and `/_iceberg/v1/*`) shares the S3
-SigV4 trust boundary. `internal/server/authMiddleware` routes Iceberg
-requests through `authenticateSignedRequest` and emits
-`401 NotAuthorizedException` JSON (Iceberg REST ErrorModel) on failure,
-while S3 requests continue to receive `403 + XML`.
-
-Iceberg protocol credentials reuse the SigV4 path but bind the request to a
-single `catalog/<warehouse>` resource. Requests that omit `warehouse` after
-the config call use the credential's catalog as the warehouse context.
-
-Per-action authorization (`iceberg:CreateTable`, etc.) is a separate
-follow-up. This layer establishes identity; authz is still bypassed via
-`skipS3Authz: true` on the iceberg `route_surface` entries.
-
-Reference: `docs/superpowers/specs/2026-05-19-iceberg-rest-auth-design.md`.
 
 ### Volume Block I/O
 

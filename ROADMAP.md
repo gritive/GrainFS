@@ -54,10 +54,10 @@
 - **검증**: quorum-write 꼬리가 raft-commit 꼬리 대비 비상식적으로 크지 않음. 크면 STOP·재평가.
 
 ### Phase 1 — Strip-down (disable, 삭제 아님) ✅ DONE
-- 비-S3 프로토콜(NFS/NBD/Iceberg)을 seam 뒤로 **비활성화**, request actor 모델 → API 단일 라인. (NFS·NBD·9P는 이후 영구 제거됨.)
+- 비-S3 프로토콜(NFS/NBD/Iceberg)을 seam 뒤로 **비활성화**, request actor 모델 → API 단일 라인. (NFS·NBD·9P·Iceberg는 이후 영구 제거됨.)
 - **목표**: S3-only 최소 코어·단일 경로로 data-plane 수술 전 surface 축소.
 - **검증**: S3 PUT/GET/LIST/DELETE green, 단일 경로.
-- **결과**: `--enable-iceberg` 플래그 추가, executioncluster+execution 패키지 삭제, 비-S3 e2e/colima 테스트 skip/제거 처리.
+- **결과**: `--enable-iceberg` 플래그 추가(이후 제거), executioncluster+execution 패키지 삭제, 비-S3 e2e/colima 테스트 skip/제거 처리.
 
 ### Phase 2 — 결정론 placement ✅ DONE
 - placement 선택을 결정론으로 교체: group = `hash % numGroups` 동결, HRW static-weighted 노드 선택, Bounded Load → soft 격하.
@@ -227,15 +227,15 @@ Phase 5는 구현 단계가 아니라 **terminal 결정 게이트**다 (S4-0와 
   - **gossip**: gossip.go/receipt_gossip.go/nodestats.go → `internal/gossip`. cluster 결합은 인터페이스 역전으로 절단: `EvidenceReporter`(CapabilityGate가 만족, ReportEvidence만), `AddressResolver` func 타입(`cluster.NodeAddressBookResolver` 어댑터). gossip은 cluster를 import하지 않음(clusterpb 생성 패키지만). `BroadcastOnce` 공개(동기 flush). gate 통합 테스트는 `internal/cluster/gossip_capability_test.go`로 분리 유지.
   - **bounded**: 단일 primitive 아님 — pool/resourceguard는 이미 독립 패키지, putpipeline은 EC 도메인 로직(분리 대상 아님). 추가 작업 없음 확인.
 
-### Phase 10 — Iceberg 정식 통합
-- Iceberg는 강일관 catalog commit → control-plane raft 의존(설계상 자연 정합). NFS·NBD는 영구 제거됨.
+### Phase 10 — Iceberg 정식 통합 *(제거됨)*
+- Iceberg REST Catalog는 코드베이스에서 완전 제거됨(v0.0.661+). NFS·NBD는 이미 영구 제거됨.
 
 ---
 
 ## 에픽: 데이터 플레인 raft-free 완성 (S4c-g, 3-slice)
 
 > 목표: 남은 per-object FSM 커맨드를 모두 quorum-meta blob 경로로 이전하여 데이터 플레인에서
-> raft propose를 완전 제거. 컨트롤 플레인(membership/bucket/IAM/lifecycle/migration/Iceberg)은
+> raft propose를 완전 제거. 컨트롤 플레인(membership/bucket/IAM/lifecycle/migration)은
 > 유지.
 
 **Slice 0 ✅ MERGED #846 (v0.0.655.0, −3388 LOC)** — 내부버킷 객체 capability 제거

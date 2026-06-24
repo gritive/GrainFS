@@ -138,7 +138,7 @@ rg -n "sync\.(Mutex|RWMutex)" internal cmd --glob '*.go' --glob '!*_test.go'
 - `internal/cluster/meta_fsm.go` - one raft apply writer, many readers, atomic
   snapshot/restore boundaries.
 - `internal/cluster/meta_raft.go` - apply notification channel swaps, per-index
-  apply errors, and Iceberg waiters.
+  apply errors.
 - `internal/cluster/apply.go` - migration and commit hook registration against
   raft apply.
 - `internal/cluster/ring_store.go` - current ring and refcounts must change

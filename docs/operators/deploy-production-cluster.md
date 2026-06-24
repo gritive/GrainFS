@@ -28,7 +28,7 @@ install -d -m 0700 "$DATA_DIR"
 - `<data>/keys.d/raft-store.key.enc` is generated on each node and seals that node's local raft v2 Badger encryption key under the cluster KEK
 - A fixed/externally-managed transport key is supplied by writing `<data>/keys.d/current.key` before first boot (a file, never an argv literal)
 - `default` bucket is auto-created with anonymous read/write access
-- `_grainfs` reserved bucket + `_grainfs/audit/evaluations` Iceberg table seeded
+- `_grainfs` reserved bucket seeded
 
 Joining nodes need the same `<data>/keys/0.key` bytes and the same
 `<data>/cluster.id` bytes as the first node.

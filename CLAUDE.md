@@ -12,8 +12,6 @@ make test-nbd-colima     # NBD 테스트 (colima VM)
 make test-fuse-s3-colima # FUSE/S3 테스트 (colima VM)
 make lint                # golangci-lint
 make fbs                 # FlatBuffers (.fbs → .go) 재생성
-make bench-iceberg-table # Iceberg table API benchmark (single-node)
-make bench-iceberg-table-cluster # Iceberg table API benchmark (cluster)
 ```
 
 Module: `github.com/gritive/GrainFS`. 단일 binary `bin/grainfs`.
@@ -32,9 +30,9 @@ Module: `github.com/gritive/GrainFS`. 단일 binary `bin/grainfs`.
 
 ### 아키텍처 원칙
 - Go 표준 레이아웃: cmd/ (진입점), internal/ (비공개 패키지)
-- 단일 바이너리: S3 + Iceberg + Web UI를 하나로 제공
+- 단일 바이너리: S3 + Web UI를 하나로 제공
 - 계층 분리: storage(블롭) → metadata(BadgerDB) → server(HTTP) → transport(TCP/Raft)
-- internal 하위 패키지: cluster, raft, transport(TCP), storage, vfs, volume, server, server/iceberg, server/receiptsvc, server/incidentsvc, server/snapshotsvc, s3auth, iam, encrypt, badgerrole, badgerutil, badgermeta, metastore, cache, dashboard, adminapi, clusteradmin, volumeadmin, alerts, eventstore, icebergcatalog, incident, lifecycle, metrics, migration, otel, policy, pool, receipt, resourceguard, resourcewatch, scrubber, serveruntime, snapshot, chunkref, config, nodeconfig
+- internal 하위 패키지: cluster, raft, transport(TCP), storage, vfs, volume, server, server/receiptsvc, server/incidentsvc, server/snapshotsvc, s3auth, iam, encrypt, badgerrole, badgerutil, badgermeta, metastore, cache, dashboard, adminapi, clusteradmin, volumeadmin, alerts, eventstore, incident, lifecycle, metrics, migration, otel, policy, pool, receipt, resourceguard, resourcewatch, scrubber, serveruntime, snapshot, chunkref, config, nodeconfig
 - FlatBuffers: 내부 통신은 `internal/**/*.fbs` → `make fbs`로 .go 생성 (메모리: "내부 통신 JSON 미사용")
 
 ### cmd 경계 계약 (cmd thin-runner)
@@ -68,7 +66,7 @@ Clean Architecture를 따른다. 패키지-레이어 매핑:
 ### 성능 규칙
 - Erasure Coding: Reed-Solomon 4+2 기본, 가변 설정 가능
 - TCP 멀티플렉싱(mux carrier)으로 클러스터 통신
-- 벤치마크: `make bench`/`make bench-cluster`/`make bench-s3-compat-compare`로 MinIO warp 기반 S3 PUT/GET/DELETE 측정, `make bench-iceberg-table`/`make bench-iceberg-table-cluster`로 `warp iceberg` 기반 Iceberg REST Catalog 측정
+- 벤치마크: `make bench`/`make bench-cluster`/`make bench-s3-compat-compare`로 MinIO warp 기반 S3 PUT/GET/DELETE 측정
 
 ## Persona Test
 
@@ -78,7 +76,6 @@ Clean Architecture를 따른다. 패키지-레이어 매핑:
 | CLI        | `./bin/grainfs serve --data ./tmp --port 9000` | Cobra, `--help`           |
 | S3 API     | `http://localhost:9000`                        | `aws --endpoint-url` 호환 |
 | Web UI     | `http://localhost:9000/ui/`                    | 브라우저 Object Browser   |
-| Iceberg    | `http://localhost:9000/iceberg/`               | DuckDB/Trino/Spark        |
 
 ### 테스트 계정
 - S3 인증: admin UDS 통해 부트스트랩한 SA의 access_key/secret_key (`grainfs iam sa create admin --endpoint <data>/admin.sock`)

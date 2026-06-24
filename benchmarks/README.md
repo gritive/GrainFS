@@ -104,30 +104,6 @@ RUNS=1 WARP_DURATION=10s ANCHOR=0 ./benchmarks/cross_binary_ab.sh
 # results: benchmarks/profiles/cross-binary-ab-<timestamp>/verdict.md
 ```
 
-## Iceberg Table API
-
-`make bench-iceberg-table` and `make bench-iceberg-table-cluster` run MinIO
-`warp iceberg` against GrainFS. The shell scripts start GrainFS, bootstrap IAM
-credentials, optionally collect pprof profiles, and write raw `warp` artifacts
-under `benchmarks/profiles/iceberg-table-*`.
-
-The default workload is `ICEBERG_WARP_COMMAND=catalog-mixed` with views and
-update operations disabled (`ICEBERG_VIEWS_PER_NS=0`,
-`ICEBERG_TABLE_UPDATE_DISTRIB=0`) so the benchmark targets read/list/head
-table-catalog behavior first. Use `ICEBERG_WARP_COMMAND=catalog-read` or
-`catalog-commits` to focus the workload, and opt into update distribution after
-commit-conflict behavior has been tuned.
-
-Tune the workload with:
-
-```bash
-VUS=16 DURATION=1m make bench-iceberg-table
-VUS=16 DURATION=1m make bench-iceberg-table-cluster
-```
-
-Iceberg benchmark scripts use the same host preflight and `BENCH_STRICT_HOST=1`
-fail-fast behavior as the S3 comparison script.
-
 ## Phase 0 — Quorum-Meta Shadow Write (kill-only perf spike)
 
 Experimental, measurement-only developer harness for ROADMAP Phase 0 — measures
