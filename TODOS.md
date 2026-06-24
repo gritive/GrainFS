@@ -214,13 +214,6 @@ Deferred items:
   `CmdSetObjectACL`, `CmdPutObjectMeta` apply, `CmdPutObjectQuarantine`, `CmdDeleteObject`,
   `CmdDeleteObjectVersion` all retired. FSM is pure control-plane. See CHANGELOG Unreleased entry.
 
-- **[P2][pre-existing] Non-versioned `DeleteBucket` (non-force) emptiness check is FSM-blind
-  (`bucket.go` ~line 129–136 scans `obj:` FSM records; greenfield non-versioned objects are
-  stored in `.quorum_meta` blobs only, so the check always sees an empty bucket).** A
-  non-empty non-versioned bucket may be deleted without error by the non-force path.
-  Fix: enumerate `scanQuorumMetaBucketStrict` / `scanQuorumMetaClusterAll` (mirror the
-  ForceDeleteBucket non-versioned enumerate) and return `ErrBucketNotEmpty` on the first hit.
-
 - **[P3][design] Normal non-versioned `DeleteObject` leaves a latest-only tombstone blob
   (the `IsHardDeleted` marker in the quorum-meta blob) that persists indefinitely.** EC shards
   are reclaimed by the orphan-shard walker (which sees no live qmeta referencing them). The
