@@ -115,6 +115,7 @@ const (
 	MetaCmdTypePreparePresentFlip          = clusterpb.MetaCmdTypePreparePresentFlip   // zero-CA cutover: PR-2a §8c
 	MetaCmdTypeBeginPresentFlip            = clusterpb.MetaCmdTypeBeginPresentFlip     // zero-CA cutover: PR-2a §8c
 	MetaCmdTypeDropClusterKeyAccept        = clusterpb.MetaCmdTypeDropClusterKeyAccept // zero-CA cutover: PR-2b §8 H2
+	MetaCmdTypeCreateBucket                = clusterpb.MetaCmdTypeCreateBucket         // group0-demotion: atomic existence + group assignment
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
@@ -931,6 +932,8 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		return nil
 	case clusterpb.MetaCmdTypeDropClusterKeyAccept:
 		return f.applyDropClusterKeyAccept(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeCreateBucket:
+		return f.applyCreateBucket(cmd.DataBytes())
 	default:
 		metrics.UnknownMetaCmdTotal.WithLabelValues(strconv.Itoa(int(cmd.Type()))).Inc()
 		log.Warn().Stringer("type", cmd.Type()).Msg("meta_fsm: unknown command type, ignoring")

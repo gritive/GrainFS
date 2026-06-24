@@ -90,6 +90,7 @@ const (
 	MetaCmdTypeDEKRewrapProgress            MetaCmdType = 88
 	MetaCmdTypePutIndexGroup                MetaCmdType = 89
 	MetaCmdTypeAddPlacementGeneration       MetaCmdType = 90
+	MetaCmdTypeCreateBucket                 MetaCmdType = 91
 )
 
 var EnumNamesMetaCmdType = map[MetaCmdType]string{
@@ -176,6 +177,7 @@ var EnumNamesMetaCmdType = map[MetaCmdType]string{
 	MetaCmdTypeDEKRewrapProgress:            "DEKRewrapProgress",
 	MetaCmdTypePutIndexGroup:                "PutIndexGroup",
 	MetaCmdTypeAddPlacementGeneration:       "AddPlacementGeneration",
+	MetaCmdTypeCreateBucket:                 "CreateBucket",
 }
 
 var EnumValuesMetaCmdType = map[string]MetaCmdType{
@@ -262,6 +264,7 @@ var EnumValuesMetaCmdType = map[string]MetaCmdType{
 	"DEKRewrapProgress":            MetaCmdTypeDEKRewrapProgress,
 	"PutIndexGroup":                MetaCmdTypePutIndexGroup,
 	"AddPlacementGeneration":       MetaCmdTypeAddPlacementGeneration,
+	"CreateBucket":                 MetaCmdTypeCreateBucket,
 }
 
 func (v MetaCmdType) String() string {

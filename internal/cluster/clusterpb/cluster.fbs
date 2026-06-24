@@ -530,6 +530,7 @@ enum MetaCmdType : uint8 {
   DEKRewrapProgress            = 88, // S6a: per-node DEK-generation rewrap completion ledger
   PutIndexGroup                = 89, // sharded object index → Raft 그룹 매핑 (data-group과 별개 레지스트리)
   AddPlacementGeneration       = 90, // Phase 7: placement generation append (topology 증설 epoch 레지스트리)
+  CreateBucket                 = 91, // meta CreateBucket: atomic existence + group assignment (group0-demotion epic)
 }
 
 table MetaNodeEntry {
@@ -1471,3 +1472,11 @@ table DropClusterKeyAcceptCmd {
 
 // MultipartDone and DeleteMultipartDoneCmd are removed in the multipart-off-raft
 // epic (M4). CommandType slot 43 is reserved; see fsm.go.
+
+// MetaCreateBucketCmd (cmd 91): atomic bucket creation — stores existence record
+// and group assignment in a single meta-raft apply.
+table MetaCreateBucketCmd {
+  bucket:string;
+  group_id:string;
+  bypass_reserved:bool;
+}
