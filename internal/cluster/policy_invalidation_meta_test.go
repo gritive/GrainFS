@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -142,4 +143,66 @@ func TestMetaPolicyInvalidationPostCommit_LateBindCallback(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout: late-bound callback not fired")
 	}
+}
+
+// TestMetaPolicyInvalidationWorker_OverflowTriggersFullFlush verifies that when
+// the invalidation queue overflows (more enqueues than the channel can buffer),
+// the worker eventually calls the invalidate callback with "" (full-cache flush)
+// rather than permanently losing the invalidation (P1a fix).
+//
+// Strategy: block the drain goroutine via the callback mutex while filling the
+// queue past capacity, then release and assert a full flush ("") is delivered.
+func TestMetaPolicyInvalidationWorker_OverflowTriggersFullFlush(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		got     []string
+		blocked = make(chan struct{})
+		release = make(chan struct{})
+	)
+
+	w := NewMetaPolicyInvalidationWorker()
+	// Block the first callback call until we've filled the queue.
+	first := true
+	w.SetInvalidate(func(bucket string) {
+		mu.Lock()
+		if first {
+			first = false
+			mu.Unlock()
+			close(blocked) // signal that the goroutine is inside the callback
+			<-release      // wait for the test to fill the queue and release
+			mu.Lock()
+		}
+		got = append(got, bucket)
+		mu.Unlock()
+	})
+	w.Start()
+	defer w.Stop()
+
+	fsm := NewMetaFSM()
+	require.NoError(t, fsm.applyCmd(makeCreateBucketCmd(t, "flow-b", "group-1", false)))
+	fsm.RegisterPostCommit(w.Hook)
+
+	// Send one event to get the drain goroutine into the blocking callback.
+	require.NoError(t, fsm.applyCmd(makeSetBucketPolicyCmd(t, "flow-b", []byte(`{"v":0}`))))
+	<-blocked // drain goroutine is now blocked inside the callback
+
+	// Fill the queue to capacity and then overflow it (causes needsFullFlush).
+	for i := 0; i < metaPolicyInvalidationQueueDepth+5; i++ {
+		require.NoError(t, fsm.applyCmd(makeSetBucketPolicyCmd(t, "flow-b", []byte(`{"v":1}`))))
+	}
+
+	// Release the drain goroutine; it will now observe needsFullFlush.
+	close(release)
+
+	// Wait for the full-flush ("") to be delivered.
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, b := range got {
+			if b == "" {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 20*time.Millisecond, "overflow must eventually trigger a full-cache flush (Invalidate(\"\"))")
 }

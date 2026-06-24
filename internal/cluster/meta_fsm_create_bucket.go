@@ -91,9 +91,6 @@ func (m *MetaRaft) ProposeCreateBucket(ctx context.Context, bucket, groupID stri
 	if err != nil {
 		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
 	}
-	idx, err := m.node.ProposeWait(ctx, data)
-	if err != nil {
-		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
-	}
-	return m.waitAppliedResult(ctx, idx)
+	_, err = m.proposeOrForwardWithIndex(ctx, m.node, data)
+	return err
 }

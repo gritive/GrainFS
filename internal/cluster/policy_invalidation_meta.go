@@ -28,9 +28,10 @@ const metaPolicyInvalidationQueueDepth = 64
 // closes the channel and waits for the goroutine to drain and exit — no goroutine
 // leak). Start/Stop are not concurrency-safe; call each exactly once.
 type MetaPolicyInvalidationWorker struct {
-	invalidate atomic.Pointer[func(bucket string)]
-	ch         chan string
-	done       chan struct{}
+	invalidate     atomic.Pointer[func(bucket string)]
+	needsFullFlush atomic.Bool
+	ch             chan string
+	done           chan struct{}
 }
 
 // NewMetaPolicyInvalidationWorker constructs a worker with no invalidation
@@ -71,7 +72,26 @@ func (w *MetaPolicyInvalidationWorker) run() {
 			// Callback not yet wired; drop silently — pull-on-miss recovers.
 			continue
 		}
+		// If an overflow was recorded while the queue was full, flush the
+		// entire cache instead of the individual bucket — this covers all
+		// dropped invalidations with a single Invalidate("") call.
+		if w.needsFullFlush.Swap(false) {
+			// Drain any remaining per-bucket entries from the channel;
+			// they are all subsumed by the full flush below.
+			for len(w.ch) > 0 {
+				<-w.ch
+			}
+			(*fn)("") // Invalidate("") flushes the whole compiled-policy cache.
+			continue
+		}
 		(*fn)(bucket)
+	}
+	// Channel closed (Stop called): fire any outstanding full-flush that may
+	// have been set concurrently with the last drain iteration.
+	if w.needsFullFlush.Swap(false) {
+		if fn := w.invalidate.Load(); fn != nil {
+			(*fn)("")
+		}
 	}
 }
 
@@ -103,6 +123,10 @@ func (w *MetaPolicyInvalidationWorker) enqueue(bucket string) {
 	select {
 	case w.ch <- bucket:
 	default:
-		log.Warn().Str("bucket", bucket).Msg("policy_invalidation_meta: invalidation queue full; dropping bucket invalidation (pull-on-miss will recover)")
+		// Queue full: record that a full cache flush is needed so no
+		// invalidation is permanently lost. The drain goroutine will call
+		// Invalidate("") on the next iteration, covering all dropped entries.
+		w.needsFullFlush.Store(true)
+		log.Warn().Str("bucket", bucket).Msg("policy_invalidation_meta: invalidation queue full; scheduling full cache flush")
 	}
 }

@@ -79,11 +79,8 @@ func (m *MetaRaft) ProposeSetBucketVersioning(ctx context.Context, bucket, state
 	if err != nil {
 		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
 	}
-	idx, err := m.node.ProposeWait(ctx, data)
-	if err != nil {
-		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
-	}
-	return m.waitAppliedResult(ctx, idx)
+	_, err = m.proposeOrForwardWithIndex(ctx, m.node, data)
+	return err
 }
 
 // --- SetBucketPolicy ---
@@ -161,11 +158,8 @@ func (m *MetaRaft) ProposeSetBucketPolicy(ctx context.Context, bucket string, po
 	if err != nil {
 		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
 	}
-	idx, err := m.node.ProposeWait(ctx, data)
-	if err != nil {
-		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
-	}
-	return m.waitAppliedResult(ctx, idx)
+	_, err = m.proposeOrForwardWithIndex(ctx, m.node, data)
+	return err
 }
 
 // --- DeleteBucketPolicy ---
@@ -238,9 +232,6 @@ func (m *MetaRaft) ProposeDeleteBucketPolicy(ctx context.Context, bucket string)
 	if err != nil {
 		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
 	}
-	idx, err := m.node.ProposeWait(ctx, data)
-	if err != nil {
-		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
-	}
-	return m.waitAppliedResult(ctx, idx)
+	_, err = m.proposeOrForwardWithIndex(ctx, m.node, data)
+	return err
 }

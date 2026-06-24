@@ -876,3 +876,95 @@ func TestMetaRaftReadIndexReturnsCommitted(t *testing.T) {
 	// The bucket record must be present in the FSM.
 	require.True(t, m.FSM().BucketRecordExists("b1"), "FSM must have the bucket record after WaitApplied")
 }
+
+// followerRaftNode is a RaftNode stub that always reports IsLeader=false and
+// records ProposeWait calls. All other RaftNode methods panic (should not be
+// called on the follower Propose path).
+type followerRaftNode struct {
+	RaftNode     // embed interface so unimplemented methods panic, not compile-error
+	mu           sync.Mutex
+	proposeCalls int
+}
+
+func (f *followerRaftNode) IsLeader() bool { return false }
+func (f *followerRaftNode) ProposeWait(_ context.Context, _ []byte) (uint64, error) {
+	f.mu.Lock()
+	f.proposeCalls++
+	f.mu.Unlock()
+	return 0, nil
+}
+
+func (f *followerRaftNode) getProposeCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.proposeCalls
+}
+
+// TestMetaRaftBucketProposeFollowerForwards verifies that all 5 bucket Propose*
+// methods on a follower MetaRaft invoke the forwardFnWithIndex seam rather than
+// erroring ErrNotLeader (P0 fix — bucket writes must forward on a follower).
+//
+// Strategy: construct a MetaRaft with a follower RaftNode stub and inject
+// forwardFnWithIndex, then assert each Propose* call invokes the forwarder
+// and does NOT call ProposeWait on the underlying node.
+func TestMetaRaftBucketProposeFollowerForwards(t *testing.T) {
+	type tc struct {
+		name string
+		do   func(ctx context.Context, m *MetaRaft) error
+	}
+	cases := []tc{
+		{
+			name: "ProposeCreateBucket",
+			do: func(ctx context.Context, m *MetaRaft) error {
+				return m.ProposeCreateBucket(ctx, "bkt", "grp-1", false)
+			},
+		},
+		{
+			name: "ProposeDeleteBucket",
+			do: func(ctx context.Context, m *MetaRaft) error {
+				return m.ProposeDeleteBucket(ctx, "bkt")
+			},
+		},
+		{
+			name: "ProposeSetBucketVersioning",
+			do: func(ctx context.Context, m *MetaRaft) error {
+				return m.ProposeSetBucketVersioning(ctx, "bkt", "Enabled")
+			},
+		},
+		{
+			name: "ProposeSetBucketPolicy",
+			do: func(ctx context.Context, m *MetaRaft) error {
+				return m.ProposeSetBucketPolicy(ctx, "bkt", []byte(`{}`))
+			},
+		},
+		{
+			name: "ProposeDeleteBucketPolicy",
+			do: func(ctx context.Context, m *MetaRaft) error {
+				return m.ProposeDeleteBucketPolicy(ctx, "bkt")
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			node := &followerRaftNode{}
+			m := &MetaRaft{
+				applyNotify: make(chan struct{}),
+				node:        node,
+			}
+
+			var forwardCalled bool
+			// forwardFnWithIndex returns idx=0 (valid: caller skips waitForwardedApplied).
+			m.forwardFnWithIndex = func(_ context.Context, _ []byte) (uint64, error) {
+				forwardCalled = true
+				return 0, nil
+			}
+
+			err := tc.do(context.Background(), m)
+			require.NoError(t, err, "%s: follower with forwarder must succeed", tc.name)
+			assert.True(t, forwardCalled, "%s: forwardFnWithIndex must be called on follower", tc.name)
+			assert.Equal(t, 0, node.getProposeCalls(),
+				"%s: ProposeWait must NOT be called on follower", tc.name)
+		})
+	}
+}

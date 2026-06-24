@@ -167,14 +167,23 @@ func TestMetaBucketStore_RecordLinearized_DegradesToLocalOnLeaderless(t *testing
 	assert.Equal(t, "g-0", rec.GroupID)
 }
 
-// TestMetaBucketStore_RecordLinearized_PropagatesNonLeaderErrors verifies that
-// non-ErrNotLeader errors from ReadIndex are returned as errors.
-func TestMetaBucketStore_RecordLinearized_PropagatesNonLeaderErrors(t *testing.T) {
+// TestMetaBucketStore_RecordLinearized_DegradesToLocalOnTransportError verifies
+// that a non-ErrNotLeader error from ReadIndex (e.g. a transport failure or a
+// stale-leader-hint wrap) also degrades to the local snapshot and returns nil
+// error. The linearizing barrier is best-effort — it must never fail a write
+// because the barrier is temporarily unavailable (P1b fix).
+func TestMetaBucketStore_RecordLinearized_DegradesToLocalOnTransportError(t *testing.T) {
 	fake := newFakeMetaForBucketStore()
-	fake.readIndexErr = errors.New("i/o timeout")
+	fake.readIndexErr = errors.New("meta read-index forward: i/o timeout")
 	store := newMetaBucketStoreFromIface(fake)
 	ctx := t.Context()
 
-	_, _, err := store.RecordLinearized(ctx, "b1")
-	require.Error(t, err, "genuine ReadIndex errors must propagate")
+	require.NoError(t, store.CreateBucket(ctx, "b1", "g-0", false))
+
+	// Deliberately bypass the fake's Propose methods to pre-seed FSM directly,
+	// so RecordLinearized has a local record to return when it degrades.
+	rec, ok, err := store.RecordLinearized(ctx, "b1")
+	require.NoError(t, err, "transport-error ReadIndex must degrade to local (nil error)")
+	require.True(t, ok)
+	assert.Equal(t, "g-0", rec.GroupID)
 }

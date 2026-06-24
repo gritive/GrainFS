@@ -45,6 +45,49 @@ var _ = ginkgo.Describe("Bucket control-plane demotion", ginkgo.Label("bucket"),
 	describeBucketDemotionContext("Cluster4Node", func() s3Target {
 		return newSharedClusterS3Target(ginkgo.GinkgoTB())
 	})
+
+	// P0 follower-forward guard: bucket mutations sent to every cluster node
+	// (not just the meta leader) must succeed. This guards against regressions
+	// where Propose* called ProposeWait directly (leader-only) instead of
+	// routing through proposeOrForwardWithIndex.
+	ginkgo.Context("Cluster4Node/FollowerForward", ginkgo.Ordered, func() {
+		var tgt s3Target
+		ginkgo.BeforeAll(func() {
+			tgt = newSharedClusterS3Target(ginkgo.GinkgoTB())
+		})
+
+		ginkgo.It("bucket mutations succeed when sent to every node (follower-forward)", func() {
+			ctx := context.Background()
+			bkt := tgt.uniqueBucket(ginkgo.GinkgoTB(), "fwdfwd")
+
+			// Send PutBucketVersioning to EVERY node in turn. At least one of
+			// them will be a follower in the meta-raft group, exercising the
+			// forward path. The test passes only if ALL nodes accept the mutation.
+			for i := 0; i < tgt.nodes; i++ {
+				client := tgt.pickNode(i)
+				_, err := client.PutBucketVersioning(ctx, &s3.PutBucketVersioningInput{
+					Bucket: aws.String(bkt),
+					VersioningConfiguration: &types.VersioningConfiguration{
+						Status: types.BucketVersioningStatusEnabled,
+					},
+				})
+				gomega.Expect(err).NotTo(gomega.HaveOccurred(),
+					"PutBucketVersioning on node %d must succeed (follower must forward)", i)
+			}
+
+			// Confirm the versioning state is visible cluster-wide.
+			gomega.Eventually(func(g gomega.Gomega) {
+				for i := 0; i < tgt.nodes; i++ {
+					out, err := tgt.pickNode(i).GetBucketVersioning(ctx,
+						&s3.GetBucketVersioningInput{Bucket: aws.String(bkt)})
+					g.Expect(err).NotTo(gomega.HaveOccurred())
+					g.Expect(out.Status).To(gomega.Equal(types.BucketVersioningStatusEnabled),
+						"node %d must reflect Enabled versioning", i)
+				}
+			}, 15*time.Second, 200*time.Millisecond).Should(gomega.Succeed(),
+				"all nodes must reflect Enabled versioning after multi-node PutBucketVersioning")
+		})
+	})
 })
 
 func describeBucketDemotionContext(name string, factory func() s3Target) {

@@ -2,9 +2,6 @@ package cluster
 
 import (
 	"context"
-	"errors"
-
-	"github.com/gritive/GrainFS/internal/raft"
 )
 
 // MetaBucketStore is the cluster-wide bucket metadata seam: it provides
@@ -31,10 +28,10 @@ type MetaBucketStore interface {
 	Record(bucket string) (BucketRecord, bool)
 
 	// RecordLinearized returns the bucket record after fencing against the
-	// meta-Raft committed index, ensuring a linearizable read on a leader.
-	// If the meta-Raft has no leader (raft.ErrNotLeader from ReadIndex), it
-	// degrades to the local snapshot and returns nil error (availability over
-	// strict consistency). Other ReadIndex errors are returned verbatim.
+	// meta-Raft committed index. The linearizing barrier is best-effort:
+	// any ReadIndex or WaitApplied failure (leaderless, transport error,
+	// stale-hint) degrades to the local FSM snapshot and returns nil error
+	// (availability over strict consistency — never fails a write).
 	RecordLinearized(ctx context.Context, bucket string) (BucketRecord, bool, error)
 
 	// AllRecords returns a snapshot of all bucket records. Used by ListBuckets
@@ -100,17 +97,18 @@ func (s *metaBucketStoreImpl) AllRecords() map[string]BucketRecord {
 }
 
 func (s *metaBucketStoreImpl) RecordLinearized(ctx context.Context, bucket string) (BucketRecord, bool, error) {
+	// The linearizing barrier is best-effort: any failure (leaderless,
+	// transport error, stale-hint) degrades to the local FSM snapshot and
+	// returns nil error. The hot-path caller (ctxWithBucketVersioning) must
+	// never fail a write because the barrier is temporarily unavailable.
 	idx, err := s.meta.ReadIndex(ctx)
 	if err != nil {
-		if errors.Is(err, raft.ErrNotLeader) {
-			// Leaderless: degrade to local snapshot, return nil error for availability.
-			rec, ok := s.meta.FSM().BucketRecord(bucket)
-			return rec, ok, nil
-		}
-		return BucketRecord{}, false, err
+		rec, ok := s.meta.FSM().BucketRecord(bucket)
+		return rec, ok, nil
 	}
 	if err := s.meta.WaitApplied(ctx, idx); err != nil {
-		return BucketRecord{}, false, err
+		rec, ok := s.meta.FSM().BucketRecord(bucket)
+		return rec, ok, nil
 	}
 	rec, ok := s.meta.FSM().BucketRecord(bucket)
 	return rec, ok, nil
