@@ -129,6 +129,21 @@ func TestOperationsRefreshesPlanAfterSwappableBackendSwap(t *testing.T) {
 	require.Equal(t, []string{"setacl:b/k:7"}, backend.calls)
 }
 
+func TestOperationsRefreshesPlanAfterNestedSwappableBackendSwap(t *testing.T) {
+	swappable := NewSwappableBackend(&basicBackend{})
+	outer := &putSideEffectWrapper{Backend: swappable}
+	ops := NewOperations(outer)
+
+	err := ops.SetObjectACL("b", "k", 7)
+	requireUnsupportedOp(t, err, "SetObjectACL", UnsupportedReasonNoAdapter)
+
+	backend := &dynamicACLBackend{}
+	swappable.Swap(backend)
+
+	require.NoError(t, ops.SetObjectACL("b", "k", 7))
+	require.Equal(t, []string{"setacl:b/k:7"}, backend.calls)
+}
+
 func TestOperationsPutObjectDelegatesToBackend(t *testing.T) {
 	backend := &recordingPutBackend{}
 	ops := NewOperations(backend)

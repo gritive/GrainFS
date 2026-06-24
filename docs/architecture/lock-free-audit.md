@@ -143,7 +143,6 @@ rg -n "sync\.(Mutex|RWMutex)" internal cmd --glob '*.go' --glob '!*_test.go'
   raft apply.
 - `internal/cluster/ring_store.go` - current ring and refcounts must change
   together.
-- `internal/cluster/invalidator.go` - cache invalidator registry snapshotting.
 - `internal/cluster/peer_health.go`, `rotation_state.go`,
   `capability_gate.go`, `circuit_breaker.go`, `disk_collector.go`,
   `migration_queue.go`, `rebalance_executor.go`, `meta_join.go` - low-frequency
