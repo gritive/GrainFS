@@ -45,6 +45,7 @@ func TestDistributedBackend_TriggerRaftSnapshot_V2(t *testing.T) {
 
 	backend, err := NewDistributedBackend(dir, badgermeta.Wrap(db), node, nil, false)
 	require.NoError(t, err)
+	backend.SetMetaBucketStore(newDirectFSMMetaBucketStore(backend.fsm))
 
 	// Deliberately do NOT call SetSnapshotManager — that's the v2 path:
 	// bootSnapshotAndApplyLoop skips it for raftv2 nodes.
@@ -53,6 +54,10 @@ func TestDistributedBackend_TriggerRaftSnapshot_V2(t *testing.T) {
 	t.Cleanup(func() { close(stopApply) })
 
 	require.NoError(t, backend.CreateBucket(context.Background(), "v2-trigger"))
+	// Trigger a raft-committed entry to ensure lastApplied > 0. CreateBucket now
+	// goes through MetaBucketStore (direct FSM apply), not the raft proposal path.
+	// Use a no-op-like command to get a raft log entry committed and applied.
+	require.NoError(t, backend.propose(context.Background(), CmdCreateBucket, CreateBucketCmd{Bucket: "v2-raft-fence"}))
 	require.Eventually(t, func() bool {
 		return backend.lastApplied.Load() > 0
 	}, 3*time.Second, 10*time.Millisecond, "FSM must apply at least one entry")

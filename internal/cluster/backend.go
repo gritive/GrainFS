@@ -261,6 +261,11 @@ type DistributedBackend struct {
 	// so an upper-layer compiled policy cache can invalidate and re-pull. Atomic
 	// because the apply loop reads it before boot finishes wiring it.
 	onBucketPolicyApply atomic.Pointer[func(bucket string)]
+
+	// removeAll is the function used to physically remove a bucket directory.
+	// Defaults to os.RemoveAll; tests inject a spy to verify ordering relative
+	// to MetaBucketStore.DeleteBucket (consensus must precede physical remove).
+	removeAll func(string) error
 }
 
 type backendTopology struct {
@@ -309,6 +314,7 @@ func NewDistributedBackend(root string, store MetadataStore, node RaftNode, keys
 		registry:     NewRegistry(),
 		snapRequests: make(chan raftSnapshotRequest),
 		clusterCfg:   NewClusterConfig(), // default config until StartPlacementRuntime wires the live pointer
+		removeAll:    os.RemoveAll,
 	}
 	// Phase B2: wire the in-process coalesce worker + periodic backstop scan.
 	// Lifecycle is bound to Close() via coalesceCancel.

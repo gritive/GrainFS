@@ -98,6 +98,10 @@ func newTestDistributedBackendWithDB(t clusterTestTB) (*DistributedBackend, *bad
 	keeper, clusterID := testDEKKeeper(t)
 	svc := NewShardService(backend.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
 	backend.SetShardService(svc, []string{backend.selfAddr})
+	// Wire the direct-FSM MetaBucketStore so bucket-write paths work without a
+	// real meta-Raft cluster. Bucket mutations are applied directly to the local
+	// FSM, keeping the local read paths (HeadBucket, etc.) consistent.
+	backend.SetMetaBucketStore(newDirectFSMMetaBucketStore(backend.fsm))
 
 	stopApply := make(chan struct{})
 	go backend.RunApplyLoop(stopApply)

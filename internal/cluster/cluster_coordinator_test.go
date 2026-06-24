@@ -555,6 +555,8 @@ func newTestFollowerGroupBackend(t testing.TB, groupID, nodeID string) (*GroupBa
 		EC:       ECConfig{DataShards: 1, ParityShards: 0},
 	})
 	require.NoError(t, err)
+	// Wire the direct-FSM MetaBucketStore so CreateBucket works in tests.
+	gb.SetMetaBucketStore(newDirectFSMMetaBucketStore(gb.fsm))
 	t.Cleanup(func() {
 		require.NoError(t, gb.Close())
 		if closeRaft != nil {

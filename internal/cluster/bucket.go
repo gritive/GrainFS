@@ -38,50 +38,42 @@ func (b *DistributedBackend) createBucketInternal(ctx context.Context, bucket st
 		return fmt.Errorf("create bucket dir: %w", err)
 	}
 
-	// PR-D: persist bucket→group assignment in meta-Raft before data-Raft create.
-	// assigner nil means single-node or not-yet-wired (legacy skip).
-	// If ProposeBucketAssignment succeeds but b.propose(CmdCreateBucket) below fails,
-	// the assignment is durable but the bucket key won't exist yet. A retry will
-	// re-propose (idempotent overwrite) and re-create — safe by design.
-	if b.assigner != nil {
-		if b.router == nil {
-			return fmt.Errorf("create bucket %q: router not configured", bucket)
-		}
-		// Determine target group:
-		//   1. If meta-FSM has an explicit assignment (e.g., from rebalance), preserve it.
-		//   2. Else, hash-assign across active groups (if shardGroup wired).
-		//   3. Else, fall back to the router's default group (single-group / test deployments).
-		groupID := ""
-		if gid, ok := b.router.ExplicitGroup(bucket); ok {
-			groupID = gid
-		}
-		if groupID == "" && b.shardGroup != nil {
-			entries := b.shardGroup.ShardGroups()
-			if group, selErr := SelectObjectPlacementGroup(bucket, "", entries, b.currentECConfig()); selErr == nil {
-				groupID = group.ID
-			} else {
-				ids := make([]string, 0, len(entries))
-				for _, e := range entries {
-					ids = append(ids, e.ID)
-				}
-				sort.Strings(ids) // deterministic legacy fallback
-				groupID = HashAssign(bucket, ids)
-			}
-		}
-		if groupID == "" {
-			if dg, routeErr := b.router.RouteKey(bucket, ""); routeErr == nil {
-				groupID = dg.ID()
-			}
-		}
-		if groupID == "" {
-			return fmt.Errorf("create bucket %q: no active groups for assignment", bucket)
-		}
-		if propErr := b.assigner.ProposeBucketAssignment(ctx, bucket, groupID); propErr != nil {
-			return fmt.Errorf("propose bucket assignment: %w", propErr)
-		}
+	// All bucket-write proposals now go through the meta-Raft via MetaBucketStore.
+	// MetaBucketStore must be wired before any bucket-create call; it is set by
+	// the composition root (serveruntime) at boot, and by tests via SetMetaBucketStore.
+	mbs := b.MetaBucketStore()
+	if mbs == nil {
+		return fmt.Errorf("create bucket %q: MetaBucketStore not wired", bucket)
 	}
+	groupID := b.resolveCreateGroupID(ctx, bucket)
+	return mbs.CreateBucket(ctx, bucket, groupID, bypassReserved)
+}
 
-	return b.propose(ctx, CmdCreateBucket, CreateBucketCmd{Bucket: bucket, BypassReserved: bypassReserved})
+// resolveCreateGroupID determines the placement group ID for a new bucket.
+// Returns "" when no routing is configured (single-group / test deployments).
+func (b *DistributedBackend) resolveCreateGroupID(ctx context.Context, bucket string) string {
+	if b.router == nil {
+		return ""
+	}
+	if gid, ok := b.router.ExplicitGroup(bucket); ok {
+		return gid
+	}
+	if b.shardGroup != nil {
+		entries := b.shardGroup.ShardGroups()
+		if group, selErr := SelectObjectPlacementGroup(bucket, "", entries, b.currentECConfig()); selErr == nil {
+			return group.ID
+		}
+		ids := make([]string, 0, len(entries))
+		for _, e := range entries {
+			ids = append(ids, e.ID)
+		}
+		sort.Strings(ids)
+		return HashAssign(bucket, ids)
+	}
+	if dg, routeErr := b.router.RouteKey(bucket, ""); routeErr == nil {
+		return dg.ID()
+	}
+	return ""
 }
 
 func (b *DistributedBackend) HeadBucket(ctx context.Context, bucket string) error {
@@ -169,11 +161,26 @@ func (b *DistributedBackend) DeleteBucket(ctx context.Context, bucket string) er
 		}
 	}
 
-	if err := os.RemoveAll(b.bucketDir(bucket)); err != nil {
-		return fmt.Errorf("remove bucket dir: %w", err)
+	// Consensus FIRST (via meta-Raft): commit the delete before physical
+	// removal. If consensus fails we abort without touching the filesystem so
+	// the bucket remains consistent and the caller can retry.
+	mbs := b.MetaBucketStore()
+	if mbs == nil {
+		return fmt.Errorf("delete bucket %q: MetaBucketStore not wired", bucket)
+	}
+	if err := mbs.DeleteBucket(ctx, bucket); err != nil {
+		return err
 	}
 
-	return b.propose(ctx, CmdDeleteBucket, DeleteBucketCmd{Bucket: bucket})
+	// Physical remove only after consensus has committed.
+	removeAll := b.removeAll
+	if removeAll == nil {
+		removeAll = os.RemoveAll
+	}
+	if err := removeAll(b.bucketDir(bucket)); err != nil {
+		return fmt.Errorf("remove bucket dir: %w", err)
+	}
+	return nil
 }
 
 // ForceDeleteBucket deletes all objects in the bucket and then removes it.
@@ -303,15 +310,15 @@ func (b *DistributedBackend) SetBucketVersioning(bucket, state string) error {
 
 // SetBucketVersioningPropose is the coordinator-facing entrypoint: it skips
 // the local bucket-existence pre-check because the coordinator has already
-// run a cluster-aware HeadBucket. On a freshly bootstrapped cluster a
-// follower may have the meta-Raft bucket assignment without having applied
-// the data-Raft CmdCreateBucket entry locally; calling SetBucketVersioning
-// from that follower would falsely reject the request with NoSuchBucket.
+// run a cluster-aware HeadBucket. All bucket-write proposals flow through
+// the meta-Raft via MetaBucketStore.
 func (b *DistributedBackend) SetBucketVersioningPropose(bucket, state string) error {
-	return b.propose(context.Background(), CmdSetBucketVersioning, SetBucketVersioningCmd{
-		Bucket: bucket,
-		State:  state,
-	})
+	ctx := context.Background()
+	mbs := b.MetaBucketStore()
+	if mbs == nil {
+		return fmt.Errorf("set bucket versioning %q: MetaBucketStore not wired", bucket)
+	}
+	return mbs.SetVersioning(ctx, bucket, state)
 }
 
 // SetBucketPolicy satisfies storage.PolicyBackend. The policy document is
@@ -329,10 +336,11 @@ func (b *DistributedBackend) SetBucketPolicy(bucket string, policyJSON []byte) e
 // cluster-aware HeadBucket.
 func (b *DistributedBackend) SetBucketPolicyPropose(bucket string, policyJSON []byte) error {
 	ctx := context.Background()
-	return b.propose(ctx, CmdSetBucketPolicy, SetBucketPolicyCmd{
-		Bucket:     bucket,
-		PolicyJSON: append([]byte(nil), policyJSON...),
-	})
+	mbs := b.MetaBucketStore()
+	if mbs == nil {
+		return fmt.Errorf("set bucket policy %q: MetaBucketStore not wired", bucket)
+	}
+	return mbs.SetPolicy(ctx, bucket, policyJSON)
 }
 
 // GetBucketPolicy satisfies storage.PolicyBackend. Reads use the local
@@ -365,7 +373,11 @@ func (b *DistributedBackend) DeleteBucketPolicy(bucket string) error {
 // DeleteBucketPolicyPropose is the coordinator-facing entrypoint.
 func (b *DistributedBackend) DeleteBucketPolicyPropose(bucket string) error {
 	ctx := context.Background()
-	return b.propose(ctx, CmdDeleteBucketPolicy, DeleteBucketPolicyCmd{Bucket: bucket})
+	mbs := b.MetaBucketStore()
+	if mbs == nil {
+		return fmt.Errorf("delete bucket policy %q: MetaBucketStore not wired", bucket)
+	}
+	return mbs.DeletePolicy(ctx, bucket)
 }
 
 // SetObjectACL satisfies storage.ACLSetter. Updates the ACL via the quorum-meta

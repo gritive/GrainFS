@@ -75,6 +75,10 @@ func newTestGroupBackendWithDB(t clusterTestTB, groupID string) (*GroupBackend, 
 	stopApply := make(chan struct{})
 	go gb.RunApplyLoop(stopApply)
 
+	// Wire the direct-FSM MetaBucketStore so CreateBucket works in tests
+	// without a real meta-Raft cluster.
+	gb.SetMetaBucketStore(newDirectFSMMetaBucketStore(gb.fsm))
+
 	t.Cleanup(func() {
 		close(stopApply)
 		_ = gb.Close()

@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"time"
 
@@ -15,6 +16,73 @@ type singletonBackendTestTB interface {
 	Cleanup(func())
 	TempDir() string
 	Fatalf(format string, args ...interface{})
+}
+
+// directFSMMetaBucketStore is a MetaBucketStore implementation for tests and
+// single-node tooling: it applies bucket-mutation commands directly to an FSM
+// instead of going through a real meta-Raft cluster. This keeps the local read
+// paths (HeadBucket, GetBucketVersioning, GetBucketPolicy, …) consistent after
+// the Task 8 write-path cutover.
+type directFSMMetaBucketStore struct {
+	fsm *FSM
+}
+
+// newDirectFSMMetaBucketStore returns a MetaBucketStore that applies mutations
+// directly to the supplied FSM. Safe for tests and single-node server starts
+// where no meta-Raft quorum is available.
+func newDirectFSMMetaBucketStore(fsm *FSM) MetaBucketStore {
+	return &directFSMMetaBucketStore{fsm: fsm}
+}
+
+func (s *directFSMMetaBucketStore) CreateBucket(_ context.Context, bucket, _ string, bypassReserved bool) error {
+	raw, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: bucket, BypassReserved: bypassReserved})
+	if err != nil {
+		return err
+	}
+	return s.fsm.Apply(raw)
+}
+
+func (s *directFSMMetaBucketStore) DeleteBucket(_ context.Context, bucket string) error {
+	raw, err := EncodeCommand(CmdDeleteBucket, DeleteBucketCmd{Bucket: bucket})
+	if err != nil {
+		return err
+	}
+	return s.fsm.Apply(raw)
+}
+
+func (s *directFSMMetaBucketStore) SetVersioning(_ context.Context, bucket, state string) error {
+	raw, err := EncodeCommand(CmdSetBucketVersioning, SetBucketVersioningCmd{Bucket: bucket, State: state})
+	if err != nil {
+		return err
+	}
+	return s.fsm.Apply(raw)
+}
+
+func (s *directFSMMetaBucketStore) SetPolicy(_ context.Context, bucket string, policy []byte) error {
+	raw, err := EncodeCommand(CmdSetBucketPolicy, SetBucketPolicyCmd{
+		Bucket:     bucket,
+		PolicyJSON: append([]byte(nil), policy...),
+	})
+	if err != nil {
+		return err
+	}
+	return s.fsm.Apply(raw)
+}
+
+func (s *directFSMMetaBucketStore) DeletePolicy(_ context.Context, bucket string) error {
+	raw, err := EncodeCommand(CmdDeleteBucketPolicy, DeleteBucketPolicyCmd{Bucket: bucket})
+	if err != nil {
+		return err
+	}
+	return s.fsm.Apply(raw)
+}
+
+func (s *directFSMMetaBucketStore) Record(bucket string) (BucketRecord, bool) {
+	return BucketRecord{}, false // read paths handled by data-group FSM for now
+}
+
+func (s *directFSMMetaBucketStore) RecordLinearized(_ context.Context, bucket string) (BucketRecord, bool, error) {
+	return BucketRecord{}, false, nil
 }
 
 // NewSingletonBackendForTest spins up a DistributedBackend as a one-node
@@ -78,6 +146,10 @@ func NewSingletonBackendForTest(t singletonBackendTestTB) *DistributedBackend {
 	}
 	svc := NewShardService(backend.root, nil, WithShardDEKKeeper(keeper, clusterID))
 	backend.SetShardService(svc, []string{backend.selfAddr})
+	// Wire the direct-FSM MetaBucketStore so all bucket-write paths work without
+	// a real meta-Raft cluster. Bucket mutations are applied directly to the
+	// local group-0 FSM, keeping read paths (HeadBucket, etc.) consistent.
+	backend.SetMetaBucketStore(newDirectFSMMetaBucketStore(backend.fsm))
 
 	stopApply := make(chan struct{})
 	go backend.RunApplyLoop(stopApply)
