@@ -348,13 +348,12 @@ func TestGetObjectVersion_BlobAbsentFSMOnlyIs404(t *testing.T) {
 	require.NoError(t, b.CreateBucket(ctx, bkt))
 	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
 
-	// A plain versioned version with an FSM ObjectMetaKeyV record but NO per-version
-	// blob. PreserveLatest avoids touching the latest pointer so the normal PUT wins it.
+	// An FSM-only version (an ObjectMetaKeyV record with NO per-version blob) can no
+	// longer be seeded: the per-object FSM commands were retired (data-plane raft-free
+	// Slice 2) and CmdPutObjectMeta apply is now a no-op, so no record is created. The
+	// version below therefore simply never exists — neither a blob nor an FSM record —
+	// so the blob-primary 404 contract still holds for the same reason (no blob).
 	const blobAbsentVid = "019ed400-0000-7000-8000-000000000001"
-	require.NoError(t, b.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
-		Bucket: bkt, Key: key, VersionID: blobAbsentVid, ETag: "etag-noblob",
-		Size: 11, ContentType: "text/plain", PreserveLatest: true,
-	}))
 
 	// A normal versioned PUT → writes a per-version blob (the latest, blob-backed).
 	_ = putVersioned(t, b, ctx, bkt, key, "content-latest")

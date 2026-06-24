@@ -33,7 +33,9 @@ func benchmarkApplyBatched(b *testing.B, batchSize int) {
 
 	cmds := make([][]byte, b.N)
 	for i := range cmds {
-		raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+		// Retired object slot (CommandType 3, formerly CmdPutObjectMeta): valid raft
+		// Command bytes the apply loop no-ops; exercises the apply-actor batch path.
+		payload, err := encodeQuorumMetaBlob(PutObjectMetaCmd{
 			Bucket:      "bench",
 			Key:         fmt.Sprintf("obj-%d", i),
 			Size:        1024,
@@ -41,6 +43,10 @@ func benchmarkApplyBatched(b *testing.B, batchSize int) {
 			ETag:        "abc123",
 			ModTime:     1,
 		})
+		if err != nil {
+			b.Fatal(err)
+		}
+		raw, err := buildRawCommand(CommandType(3), payload)
 		if err != nil {
 			b.Fatal(err)
 		}

@@ -15,9 +15,8 @@ func TestEncodeDecodeCommand(t *testing.T) {
 	}{
 		{"create_bucket", CmdCreateBucket, CreateBucketCmd{Bucket: "test"}},
 		{"delete_bucket", CmdDeleteBucket, DeleteBucketCmd{Bucket: "test"}},
-		{"put_object_meta", CmdPutObjectMeta, PutObjectMetaCmd{
-			Bucket: "b", Key: "k", Size: 100, ContentType: "text/plain", ETag: "abc", ModTime: 12345,
-		}},
+		// CmdPutObjectMeta retired in data-plane raft-free Slice 2 — no longer a valid
+		// encodePayload case; the off-raft blob codec round-trip is covered in codec_test.go.
 		// CmdDeleteObject = 4 reserved in data-plane raft-free Slice 2; EncodeCommand returns error.
 	}
 
@@ -47,9 +46,7 @@ func TestEncodeDecodeCommand_AllTypes(t *testing.T) {
 	}{
 		{"create_bucket", CmdCreateBucket, CreateBucketCmd{Bucket: "test"}},
 		{"delete_bucket", CmdDeleteBucket, DeleteBucketCmd{Bucket: "test"}},
-		{"put_object_meta", CmdPutObjectMeta, PutObjectMetaCmd{
-			Bucket: "b", Key: "k", Size: 100, ContentType: "text/plain", ETag: "abc", ModTime: 12345,
-		}},
+		// CmdPutObjectMeta retired in data-plane raft-free Slice 2 — no longer a valid encodePayload case.
 		// CmdDeleteObject = 4 reserved in data-plane raft-free Slice 2; EncodeCommand returns error.
 		// CmdCreateMultipartUpload/CmdCompleteMultipart/CmdAbortMultipart removed in M4.
 		{"set_bucket_policy", CmdSetBucketPolicy, SetBucketPolicyCmd{

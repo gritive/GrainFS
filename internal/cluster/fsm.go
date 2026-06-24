@@ -17,47 +17,15 @@ const (
 	// The FSM ignores it; it exists only to advance advanceCommitIndex.
 	CmdNoOp CommandType = 0
 
-	CmdCreateBucket  CommandType = 1
-	CmdDeleteBucket  CommandType = 2
-	CmdPutObjectMeta CommandType = 3
-	// CmdDeleteObject is reserved, removed in data-plane raft-free Slice 2.
-	// Force-delete is now blob-physical (quorum-meta + shards). No production
-	// proposer; slot MUST NOT be renumbered.
-	CmdDeleteObject CommandType = 4 // reserved, removed data-plane raft-free Slice 2
-	// CmdCreateMultipartUpload/CmdCompleteMultipart/CmdAbortMultipart are reserved,
-	// removed in the multipart-off-raft epic (M4). No production proposer; no
-	// raft-log replay (greenfield). Slots MUST NOT be renumbered.
-	CmdCreateMultipartUpload CommandType = 5 // reserved, removed v0.0.651+
-	CmdCompleteMultipart     CommandType = 6 // reserved, removed v0.0.651+
-	CmdAbortMultipart        CommandType = 7 // reserved, removed v0.0.651+
-	CmdSetBucketPolicy       CommandType = 8
-	CmdDeleteBucketPolicy    CommandType = 9
-	CmdMigrateShard          CommandType = 10
-	CmdMigrationDone         CommandType = 11
-	CmdPutShardPlacement     CommandType = 12 // reserved, removed (ring-derived placement)
-	CmdDeleteShardPlacement  CommandType = 13 // reserved, removed (ring-derived placement)
-	// CmdDeleteObjectVersion is reserved, removed in data-plane raft-free Slice 2.
-	// Delete is now blob-tombstone/physical (per-version blob LWW + quorum-meta
-	// purge). No production proposer; slot MUST NOT be renumbered.
-	CmdDeleteObjectVersion CommandType = 14 // reserved, removed data-plane raft-free Slice 2
-	// Phase 18 v0.0.4.0 follow-up: Raft-serialized bucket versioning + object ACL.
+	CmdCreateBucket       CommandType = 1
+	CmdDeleteBucket       CommandType = 2
+	CmdSetBucketPolicy    CommandType = 8
+	CmdDeleteBucketPolicy CommandType = 9
+	CmdMigrateShard       CommandType = 10
+	CmdMigrationDone      CommandType = 11
+	// Phase 18 v0.0.4.0 follow-up: Raft-serialized bucket versioning.
 	CmdSetBucketVersioning CommandType = 15
-	// CmdSetObjectACL is reserved, removed in data-plane raft-free Slice 2.
-	// Blob RMW (SetObjectACLPropose) is the sole authority. Slot MUST NOT be renumbered.
-	CmdSetObjectACL CommandType = 16 // reserved, removed data-plane raft-free Slice 2
-	CmdSetRing      CommandType = 17
-	// CmdAppendObject/CmdCoalesceSegments are reserved, removed in the
-	// append/coalesce-off-raft Slice 1. No production proposer; no raft-log
-	// replay (greenfield). Slots MUST NOT be renumbered.
-	CmdAppendObject     CommandType = 18 // reserved, removed append-off-raft Slice 1
-	CmdCoalesceSegments CommandType = 19 // reserved, removed append-off-raft Slice 1
-	// CmdSetObjectTags is reserved, removed in data-plane raft-free Slice 2.
-	// Blob RMW (SetObjectTagsPropose) is the sole authority. Slot MUST NOT be renumbered.
-	CmdSetObjectTags CommandType = 20 // reserved, removed data-plane raft-free Slice 2
-	// CmdPutObjectQuarantine is reserved, removed in data-plane raft-free Slice 2.
-	// Quarantine is now folded into the quorum-meta blob (IsQuarantined/QuarantineCause).
-	// Slot MUST NOT be renumbered.
-	CmdPutObjectQuarantine CommandType = 40 // reserved, removed data-plane raft-free Slice 2
+	CmdSetRing             CommandType = 17
 	// CmdResealFSMValues re-seals a batch of data-group FSM state values
 	// (policy:, obj:) from a retired DEK generation onto the active generation.
 	// Applied in the serialized apply loop for race-freedom. S7-1a.
@@ -68,12 +36,29 @@ const (
 	// so the per-node post-apply hook fires with the node's store already
 	// clean. Gen is a log hint only — the re-Kick is gen-agnostic. S7-1a-2.
 	CmdFSMValueResealDone CommandType = 42
-	// CmdDeleteMultipartDone is reserved, removed in the multipart-off-raft epic (M4).
-	// No production proposer; slot MUST NOT be renumbered.
-	CmdDeleteMultipartDone CommandType = 43 // reserved, removed v0.0.651+
-	// NOTE: CommandType 44 was CmdSetBucketSoleAuthority (per-bucket sole-authority
-	// tri-state flag) — removed in the soleauth teardown (blob-primary epic).
-	// The slot is retired; do NOT reuse 44 for a new command.
+
+	// RETIRED SLOTS — these CommandType values once named per-object, multipart,
+	// append/coalesce, and ring-derived placement commands. The data plane moved
+	// off-raft (Slices 0-2 + multipart/append-off-raft epics), so these commands
+	// have no production proposer and their applies were no-ops. The named
+	// constants are removed; the explicit numeric values above are unchanged so
+	// the LIVE control-plane commands keep their byte-stable wire contract.
+	// Retired slot numbers — DO NOT REUSE for a new command:
+	//   3  CmdPutObjectMeta        (off-raft quorum-meta blob; see encodeQuorumMetaBlob)
+	//   4  CmdDeleteObject         (blob-physical force-delete)
+	//   5  CmdCreateMultipartUpload
+	//   6  CmdCompleteMultipart
+	//   7  CmdAbortMultipart
+	//   12 CmdPutShardPlacement    (ring-derived placement)
+	//   13 CmdDeleteShardPlacement (ring-derived placement)
+	//   14 CmdDeleteObjectVersion  (per-version blob tombstone)
+	//   16 CmdSetObjectACL         (blob RMW SetObjectACLPropose)
+	//   18 CmdAppendObject         (append-off-raft Slice 1)
+	//   19 CmdCoalesceSegments     (append-off-raft Slice 1)
+	//   20 CmdSetObjectTags        (blob RMW SetObjectTagsPropose)
+	//   40 CmdPutObjectQuarantine  (folded into quorum-meta blob)
+	//   43 CmdDeleteMultipartDone
+	//   44 CmdSetBucketSoleAuthority (soleauth teardown, blob-primary epic)
 )
 
 // Command is a serializable FSM command for Raft log entries.

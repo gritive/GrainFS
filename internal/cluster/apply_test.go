@@ -139,41 +139,32 @@ func TestFSM_EncryptedValuesHideObjectMultipartAndPolicyPayloads(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestCmdDeleteObject_RetiredNoOp verifies that CmdDeleteObject is a replay-safe
-// no-op in the FSM after data-plane raft-free Slice 2: FSM.Apply must return nil
-// and must not delete any object-meta key. Force-delete is now blob-physical
-// (quorum-meta + shards). EncodeCommand returns a reserved error, so we build
-// the raw command byte buffer directly to simulate a stale raft-log entry.
+// retiredDeleteObjectSlot is the retired CommandType byte that once named
+// CmdDeleteObject (= 4). The named constant was removed when the per-object FSM
+// commands moved off-raft; a stale raft-log entry carrying this byte must still
+// replay as a no-op via the apply default path.
+const retiredDeleteObjectSlot = CommandType(4)
+
+// TestCmdDeleteObject_RetiredNoOp verifies that a stale raft-log entry carrying
+// the retired CmdDeleteObject slot (4) is a replay-safe no-op in the FSM after
+// data-plane raft-free Slice 2: FSM.Apply must return nil and must not delete any
+// object-meta key. Force-delete is now blob-physical (quorum-meta + shards). The
+// named constant is gone, so we build the raw command byte buffer directly with
+// the numeric slot to simulate a stale raft-log entry.
 func TestCmdDeleteObject_RetiredNoOp(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
-	// Seed an FSM obj: record directly (CmdPutObjectMeta is also a no-op in Slice 2).
+	// Seed an FSM obj: record directly (the retired per-object commands no-op).
 	seedCmd := PutObjectMetaCmd{Bucket: "b", Key: "obj.txt", ETag: "e1"}
 	require.NoError(t, fsm.db.Update(func(txn MetadataTxn) error {
 		return fsm.persistPutObjectMetaUpdate(txn, seedCmd, buildPutObjectMeta(seedCmd))
 	}))
 
-	// Build a raw CmdDeleteObject entry bypassing the reserved encodePayload.
-	// Mirrors what EncodeCommand does: encodePayload → wrap in clusterpb.Command.
-	fb := clusterBuilderPool.Get()
-	bucketOff := fb.CreateString("b")
-	keyOff := fb.CreateString("obj.txt")
-	vidOff := fb.CreateString("")
-	clusterpb.DeleteObjectCmdStart(fb)
-	clusterpb.DeleteObjectCmdAddBucket(fb, bucketOff)
-	clusterpb.DeleteObjectCmdAddKey(fb, keyOff)
-	clusterpb.DeleteObjectCmdAddVersionId(fb, vidOff)
-	payload := fbFinish(fb, clusterpb.DeleteObjectCmdEnd(fb))
-
-	fb2 := flatbuffers.NewBuilder(len(payload) + 16)
-	dataOff := fb2.CreateByteVector(payload)
-	clusterpb.CommandStart(fb2)
-	clusterpb.CommandAddType(fb2, uint32(CmdDeleteObject))
-	clusterpb.CommandAddData(fb2, dataOff)
-	root := clusterpb.CommandEnd(fb2)
-	fb2.Finish(root)
-	raw := append([]byte(nil), fb2.FinishedBytes()...)
+	// Build a raw command entry with the retired slot byte and an empty payload —
+	// the apply default path must not inspect the payload for a retired type.
+	raw, err := buildNoDataCommand(retiredDeleteObjectSlot)
+	require.NoError(t, err)
 
 	// Apply must succeed (no-op, not an error).
 	require.NoError(t, fsm.Apply(raw))
@@ -183,7 +174,7 @@ func TestCmdDeleteObject_RetiredNoOp(t *testing.T) {
 	require.NoError(t, db.View(func(txn *badger.Txn) error {
 		_, err := txn.Get(metaKey)
 		return err
-	}), "CmdDeleteObject must be a no-op — key must still exist after apply")
+	}), "retired CmdDeleteObject slot must be a no-op — key must still exist after apply")
 }
 
 func TestFSM_DeleteBucket(t *testing.T) {
@@ -204,17 +195,29 @@ func TestFSM_DeleteBucket(t *testing.T) {
 	assert.ErrorIs(t, err, badger.ErrKeyNotFound)
 }
 
-// TestPutObjectMetaCmd_RetiredNoOp verifies that CmdPutObjectMeta is a replay-safe
-// no-op in the FSM after data-plane raft-free Slice 2: FSM.Apply must return nil
-// and must not write any object-meta key. The live write path is writeQuorumMeta.
+// retiredPutObjectMetaSlot is the retired CommandType byte that once named
+// CmdPutObjectMeta (= 3). The named constant was removed when the off-raft
+// quorum-meta blob codec (encodeQuorumMetaBlob) replaced the raft Command
+// envelope for object metadata; a stale raft-log entry carrying this byte must
+// still replay as a no-op via the apply default path.
+const retiredPutObjectMetaSlot = CommandType(3)
+
+// TestPutObjectMetaCmd_RetiredNoOp verifies that a stale raft-log entry carrying
+// the retired CmdPutObjectMeta slot (3) is a replay-safe no-op in the FSM after
+// data-plane raft-free Slice 2: FSM.Apply must return nil and must not write any
+// object-meta key. The live write path is writeQuorumMeta (off-raft blob).
 func TestPutObjectMetaCmd_RetiredNoOp(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
-	// EncodeCommand still works (codec/struct/constant kept for quorum-meta blob use).
-	data, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+	// A stale raft-log entry carrying the retired slot: a bare quorum-meta blob
+	// wrapped in a raft Command envelope with the retired type byte. The apply
+	// default path must drop it without touching the object-meta keyspace.
+	payload, err := encodeQuorumMetaBlob(PutObjectMetaCmd{
 		Bucket: "b", Key: "hello.txt", Size: 42, ETag: "abc123",
 	})
+	require.NoError(t, err)
+	data, err := buildRawCommand(retiredPutObjectMetaSlot, payload)
 	require.NoError(t, err)
 
 	// Apply must succeed (no-op, not an error).
@@ -225,7 +228,7 @@ func TestPutObjectMetaCmd_RetiredNoOp(t *testing.T) {
 		_, err := txn.Get(objectMetaKey("b", "hello.txt"))
 		return err
 	})
-	require.ErrorIs(t, err, badger.ErrKeyNotFound, "CmdPutObjectMeta must be a no-op — key must not exist")
+	require.ErrorIs(t, err, badger.ErrKeyNotFound, "retired CmdPutObjectMeta slot must be a no-op — key must not exist")
 }
 
 // TestFSM_DeleteObject removed: CmdDeleteObject is retired (data-plane raft-free
@@ -648,28 +651,36 @@ func TestPersistPutObjectMetaUpdate_MaterialisesTags(t *testing.T) {
 	}))
 }
 
-// TestAppendCoalesceCommands_Retired verifies that CmdAppendObject and
-// CmdCoalesceSegments are retired in the append/coalesce-off-raft Slice 1:
-//   - EncodeCommand returns an error (no production proposer must call these)
+// Retired CommandType slot bytes that once named the append/coalesce-off-raft
+// Slice 1 commands. The named constants were removed; the slots must stay
+// reserved (never renumbered) and replay-safe.
+const (
+	retiredAppendObjectSlot     = CommandType(18)
+	retiredCoalesceSegmentsSlot = CommandType(19)
+)
+
+// TestAppendCoalesceCommands_Retired verifies that the retired append/coalesce
+// slots (18, 19) stay safe after the named constants were removed:
+//   - encodePayload rejects an unknown/retired type (the default error branch)
 //   - FSM.Apply treats a stale raft-log entry as a no-op (returns nil)
 func TestAppendCoalesceCommands_Retired(t *testing.T) {
-	// EncodeCommand must reject both retired types.
-	_, err := EncodeCommand(CmdAppendObject, PutObjectMetaCmd{})
-	require.Error(t, err, "CmdAppendObject must return error from EncodeCommand")
-	_, err = EncodeCommand(CmdCoalesceSegments, PutObjectMetaCmd{})
-	require.Error(t, err, "CmdCoalesceSegments must return error from EncodeCommand")
+	// EncodeCommand must reject both retired type bytes (no encodePayload case).
+	_, err := EncodeCommand(retiredAppendObjectSlot, PutObjectMetaCmd{})
+	require.Error(t, err, "retired append slot must return error from EncodeCommand")
+	_, err = EncodeCommand(retiredCoalesceSegmentsSlot, PutObjectMetaCmd{})
+	require.Error(t, err, "retired coalesce slot must return error from EncodeCommand")
 
-	// Build a raw Command FlatBuffer for each type manually (bypasses encodePayload
-	// so we can simulate a stale raft-log replay without a live proposer).
-	rawAppend, err := buildNoDataCommand(CmdAppendObject)
+	// Build a raw Command FlatBuffer for each retired slot manually (bypasses
+	// encodePayload so we can simulate a stale raft-log replay without a proposer).
+	rawAppend, err := buildNoDataCommand(retiredAppendObjectSlot)
 	require.NoError(t, err)
-	rawCoalesce, err := buildNoDataCommand(CmdCoalesceSegments)
+	rawCoalesce, err := buildNoDataCommand(retiredCoalesceSegmentsSlot)
 	require.NoError(t, err)
 
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
-	// Both must be no-ops on apply.
-	require.NoError(t, fsm.Apply(rawAppend), "CmdAppendObject apply must be a no-op")
-	require.NoError(t, fsm.Apply(rawCoalesce), "CmdCoalesceSegments apply must be a no-op")
+	// Both must be no-ops on apply (default path).
+	require.NoError(t, fsm.Apply(rawAppend), "retired append slot apply must be a no-op")
+	require.NoError(t, fsm.Apply(rawCoalesce), "retired coalesce slot apply must be a no-op")
 }

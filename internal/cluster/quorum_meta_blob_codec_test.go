@@ -20,9 +20,25 @@ func TestQuorumMetaBlobCodec_RoundTripBareFB(t *testing.T) {
 	require.Equal(t, in.NodeIDs, got.NodeIDs)
 
 	// Decoupling proof: the blob is NOT a clusterpb.Command-wrapped CmdPutObjectMeta.
-	// A bare PutObjectMetaCmd FB decoded as a Command must not yield a CmdPutObjectMeta
-	// envelope carrying a re-decodable payload.
+	// A bare PutObjectMetaCmd FB decoded as a Command must not yield the retired
+	// object slot 3 (formerly CmdPutObjectMeta) carrying a re-decodable payload.
 	if env, derr := DecodeCommand(blob); derr == nil {
-		require.NotEqual(t, CmdPutObjectMeta, env.Type, "blob must not be a CmdPutObjectMeta-tagged Command envelope")
+		require.NotEqual(t, CommandType(3), env.Type, "blob must not be a retired-object-slot-tagged Command envelope")
 	}
+}
+
+func TestCommandTypeWireValuesStable(t *testing.T) {
+	// Live control-plane commands persist in the raft log; their values are a
+	// wire contract and must never shift when retired slots are removed.
+	require.Equal(t, CommandType(0), CmdNoOp)
+	require.Equal(t, CommandType(1), CmdCreateBucket)
+	require.Equal(t, CommandType(2), CmdDeleteBucket)
+	require.Equal(t, CommandType(8), CmdSetBucketPolicy)
+	require.Equal(t, CommandType(9), CmdDeleteBucketPolicy)
+	require.Equal(t, CommandType(10), CmdMigrateShard)
+	require.Equal(t, CommandType(11), CmdMigrationDone)
+	require.Equal(t, CommandType(15), CmdSetBucketVersioning)
+	require.Equal(t, CommandType(17), CmdSetRing)
+	require.Equal(t, CommandType(41), CmdResealFSMValues)
+	require.Equal(t, CommandType(42), CmdFSMValueResealDone)
 }

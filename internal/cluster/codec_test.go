@@ -67,14 +67,10 @@ func TestEncodeDecodeCommand_PutObjectMeta(t *testing.T) {
 		SSEAlgorithm:     "AES256",
 	}
 
-	encoded, err := EncodeCommand(CmdPutObjectMeta, orig)
+	blob, err := encodeQuorumMetaBlob(orig)
 	require.NoError(t, err)
 
-	cmd, err := DecodeCommand(encoded)
-	require.NoError(t, err)
-	assert.Equal(t, CmdPutObjectMeta, cmd.Type)
-
-	decoded, err := decodePutObjectMetaCmd(cmd.Data)
+	decoded, err := decodeQuorumMetaBlob(blob)
 	require.NoError(t, err)
 	assert.Equal(t, "test-bucket", decoded.Bucket)
 	assert.Equal(t, "photos/sunset.jpg", decoded.Key)
@@ -128,11 +124,9 @@ func TestPutObjectMetaCmd_SegmentsRoundTrip(t *testing.T) {
 		},
 	}
 
-	encoded, err := EncodeCommand(CmdPutObjectMeta, orig)
+	blob, err := encodeQuorumMetaBlob(orig)
 	require.NoError(t, err)
-	cmd, err := DecodeCommand(encoded)
-	require.NoError(t, err)
-	decoded, err := decodePutObjectMetaCmd(cmd.Data)
+	decoded, err := decodeQuorumMetaBlob(blob)
 	require.NoError(t, err)
 
 	require.Len(t, decoded.Segments, 2)
@@ -160,11 +154,9 @@ func TestPutObjectMetaCmd_EmptySegmentsLegacyCompatible(t *testing.T) {
 		ModTime:          1700000000,
 		PlacementGroupID: "group-0",
 	}
-	encoded, err := EncodeCommand(CmdPutObjectMeta, orig)
+	blob, err := encodeQuorumMetaBlob(orig)
 	require.NoError(t, err)
-	cmd, err := DecodeCommand(encoded)
-	require.NoError(t, err)
-	decoded, err := decodePutObjectMetaCmd(cmd.Data)
+	decoded, err := decodeQuorumMetaBlob(blob)
 	require.NoError(t, err)
 	assert.Empty(t, decoded.Segments)
 	assert.Equal(t, "test-bucket", decoded.Bucket)
@@ -638,11 +630,9 @@ func TestPutObjectMetaCmd_AppendManifestRoundTrip(t *testing.T) {
 		Coalesced:    []CoalescedShardRef{{CoalescedID: "c1", Size: 30, ETag: "etag", ShardKey: "k/coalesced/c1"}},
 		IsAppendable: true, MetaSeq: 7, MetaSeqCAS: true,
 	}
-	blob, err := EncodeCommand(CmdPutObjectMeta, in)
+	blob, err := encodeQuorumMetaBlob(in)
 	require.NoError(t, err)
-	cmd, err := DecodeCommand(blob)
-	require.NoError(t, err)
-	out, err := decodePutObjectMetaCmd(cmd.Data)
+	out, err := decodeQuorumMetaBlob(blob)
 	require.NoError(t, err)
 	require.True(t, out.IsAppendable)
 	require.True(t, out.MetaSeqCAS)

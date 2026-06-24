@@ -872,31 +872,12 @@ func (b *DistributedBackend) notifyOnApply(raw []byte) {
 		return
 	}
 
-	var bucket, key string
-	switch cmd.Type {
-	case CmdPutObjectMeta:
-		c, err := decodePutObjectMetaCmd(cmd.Data)
-		if err == nil {
-			bucket, key = c.Bucket, c.Key
-		}
-	case CmdDeleteObject:
-		// reserved, removed in data-plane raft-free Slice 2 — no cache invalidation needed
-	case CmdCompleteMultipart:
-		// reserved, removed v0.0.651+ — no cache invalidation needed
-	default:
-		// Other commands don't affect object cache
-		bucket = ""
-	}
-
-	if bucket != "" {
-		// Invalidate all registered caches (VFS, NFS, etc.)
-		b.registry.InvalidateAll(bucket, key)
-
-		// Call legacy callback for CachedBackend
-		if b.onApply != nil {
-			b.onApply(cmd.Type, bucket, key)
-		}
-	}
+	// No further apply-driven cache invalidation: the per-object/multipart commands
+	// that once carried an object key (CmdPutObjectMeta/CmdDeleteObject/
+	// CmdCompleteMultipart) were retired when the data plane moved off-raft. Object
+	// mutations now flow through the quorum-meta blob path, which invalidates caches
+	// directly. No remaining live control-plane command names an object, so the apply
+	// hook does nothing past the policy/reseal early-returns above.
 }
 
 // forwardPropose는 팔로워에서 리더로 propose 요청을 cluster-transport RPC로 전달한다.
