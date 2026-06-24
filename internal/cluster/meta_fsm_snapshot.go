@@ -269,11 +269,6 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 		activePlanOff = clusterpb.RebalancePlanEnd(b)
 	}
 
-	// Slots 5,6 retained as empty vectors for snapshot slot stability (no-renumber).
-	clusterpb.MetaStateSnapshotStartIcebergNamespacesVector(b, 0)
-	icebergNamespaceVec := b.EndVector(0)
-	clusterpb.MetaStateSnapshotStartIcebergTablesVector(b, 0)
-	icebergTableVec := b.EndVector(0)
 	// Object index removed in Phase 4; encode empty vector for wire compatibility.
 	clusterpb.MetaStateSnapshotStartObjectIndexVector(b, 0)
 	objectIndexVec := b.EndVector(0)
@@ -377,8 +372,6 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	if activePlanCopy != nil {
 		clusterpb.MetaStateSnapshotAddActivePlan(b, activePlanOff)
 	}
-	clusterpb.MetaStateSnapshotAddIcebergNamespaces(b, icebergNamespaceVec)
-	clusterpb.MetaStateSnapshotAddIcebergTables(b, icebergTableVec)
 	clusterpb.MetaStateSnapshotAddObjectIndex(b, objectIndexVec)
 	clusterpb.MetaStateSnapshotAddClusterConfig(b, clusterConfigVec)
 	clusterpb.MetaStateSnapshotAddLastRotationRequestEntries(b, lrrVec)

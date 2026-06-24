@@ -764,25 +764,6 @@ table MetaAbortPlanCmd {
   reason:AbortPlanReason;
 }
 
-// Retained empty for snapshot slot stability (no-renumber).
-table IcebergNamespaceEntry {
-  namespace:[string];
-  properties:[KeyValue];
-  warehouse:string;   // v2 (iceberg_schema_version=2); empty = legacy "default"
-}
-
-table IcebergIdentifier {
-  namespace:[string];
-  name:string;
-}
-
-table IcebergTableEntry {
-  identifier:IcebergIdentifier;
-  metadata_location:string;
-  properties:[KeyValue];
-  warehouse:string;   // v2 (iceberg_schema_version=2); empty = legacy "default"
-}
-
 // 클러스터 키 회전 — 4-phase rolling state machine.
 // PSK는 raft 로그에 절대 기록하지 않는다. 페이로드는 SPKI 해시(공개) 및 식별자만 운반.
 table MetaRotateKeyBeginCmd {
@@ -889,11 +870,11 @@ table MetaStateSnapshot {
   bucket_assignments:[BucketAssignmentEntry]; // PR-D
   load_snapshot:[LoadStatEntry];              // PR-D
   active_plan:RebalancePlan;                  // PR-D; nil = no active plan
-  iceberg_namespaces:[IcebergNamespaceEntry];
-  iceberg_tables:[IcebergTableEntry];
+  reserved_5:[ubyte] (deprecated);            // dead slot (was the removed Iceberg namespaces vector); retained for wire stability (no-renumber)
+  reserved_6:[ubyte] (deprecated);            // dead slot (was the removed Iceberg tables vector); retained for wire stability (no-renumber)
   object_index:[MetaObjectIndexEntry];
   cluster_config:[ubyte];                     // serialized ClusterConfig FBS buffer; empty/missing = no explicit config (legacy)
-  iceberg_schema_version:int = 0;             // 0 = legacy (no warehouse field); 2 = warehouse-aware (D#14 T38)
+  reserved_9:int = 0 (deprecated);            // dead slot (was the removed Iceberg schema-version field); retained for wire stability (no-renumber)
   last_rotation_request_entries:[LastRotationRequestEntry]; // Phase B Task 2: slot 11
   kek_status_entries:[KEKStatusEntry];                      // Phase B Task 2: slot 12
   peers:[PeerEntry];                                        // zero-CA peer registry: slot 13 (Task 5, codex P1)
