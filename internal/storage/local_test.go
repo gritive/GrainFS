@@ -644,41 +644,6 @@ func TestLocalBackend_WriteAt_NewFile(t *testing.T) {
 	assert.Equal(t, []byte("DATA"), got[4:])
 }
 
-func TestCachedBackend_WriteAt(t *testing.T) {
-	b := setupTestBackend(t)
-	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
-	cached := NewCachedBackend(b)
-
-	// Seed via WriteAt to stay on the legacy single-file path that
-	// CachedBackend.WriteAt patches in place.
-	_, err := cached.WriteAt(context.Background(), "bkt", "key", 0, []byte("hello world"))
-	require.NoError(t, err)
-
-	// Warm the cache.
-	rc, _, err := cached.GetObject(context.Background(), "bkt", "key")
-	require.NoError(t, err)
-	rc.Close()
-
-	// WriteAt should invalidate cache and update content.
-	obj, err := cached.WriteAt(context.Background(), "bkt", "key", 6, []byte("Go!"))
-	require.NoError(t, err)
-	assert.Equal(t, int64(11), obj.Size)
-
-	rc, _, err = cached.GetObject(context.Background(), "bkt", "key")
-	require.NoError(t, err)
-	defer rc.Close()
-	got, _ := io.ReadAll(rc)
-	assert.Equal(t, []byte("hello Go!ld"), got)
-}
-
-func TestCachedBackend_CloseAndUnwrap(t *testing.T) {
-	b := setupTestBackend(t)
-	cached := NewCachedBackend(b)
-
-	assert.Equal(t, b, cached.Unwrap())
-	require.NoError(t, cached.Close())
-}
-
 func TestLocalBackend_ReadAt(t *testing.T) {
 	b := setupTestBackend(t)
 	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
@@ -718,77 +683,6 @@ func TestLocalBackend_ReadAt_NotExist(t *testing.T) {
 	buf := make([]byte, 4)
 	_, err := b.ReadAt(context.Background(), "bkt", "missing", 0, buf)
 	assert.True(t, os.IsNotExist(err))
-}
-
-func TestCachedBackend_ReadAt_CacheHit(t *testing.T) {
-	cb, _ := newTestCachedBackend(t, WithMaxObjectCacheBytes(1024*1024))
-	require.NoError(t, cb.CreateBucket(context.Background(), "bkt"))
-
-	data := []byte("cached content")
-	_, err := cb.PutObject(context.Background(), "bkt", "obj", bytes.NewReader(data), "application/octet-stream")
-	require.NoError(t, err)
-
-	// Warm the cache.
-	rc, _, err := cb.GetObject(context.Background(), "bkt", "obj")
-	require.NoError(t, err)
-	rc.Close()
-
-	buf := make([]byte, 6)
-	n, err := cb.ReadAt(context.Background(), "bkt", "obj", 7, buf)
-	require.NoError(t, err)
-	assert.Equal(t, 6, n)
-	assert.Equal(t, []byte("conten"), buf[:n])
-}
-
-func TestCachedBackend_ReadAt_CacheMiss(t *testing.T) {
-	cb, _ := newTestCachedBackend(t)
-	require.NoError(t, cb.CreateBucket(context.Background(), "bkt"))
-
-	data := []byte("uncached data")
-	// Seed via WriteAt so ReadAt's pread hits the legacy single-file path.
-	_, err := cb.WriteAt(context.Background(), "bkt", "obj", 0, data)
-	require.NoError(t, err)
-
-	buf := make([]byte, 8)
-	n, err := cb.ReadAt(context.Background(), "bkt", "obj", 0, buf)
-	require.NoError(t, err)
-	assert.Equal(t, 8, n)
-	assert.Equal(t, []byte("uncached"), buf[:n])
-}
-
-type recordingPreparedReadAtBackend struct {
-	Backend
-	calls int
-	obj   *Object
-}
-
-func (b *recordingPreparedReadAtBackend) ReadAtObject(ctx context.Context, bucket, key string, obj *Object, offset int64, buf []byte) (int, error) {
-	b.calls++
-	b.obj = obj
-	return copy(buf, "prepared"), nil
-}
-
-func TestCachedBackend_ReadAtObject_DelegatesPreparedObject(t *testing.T) {
-	inner, err := NewLocalBackend(t.TempDir())
-	require.NoError(t, err)
-	t.Cleanup(func() { inner.Close() })
-
-	rec := &recordingPreparedReadAtBackend{Backend: inner}
-	cb := NewCachedBackend(rec)
-
-	reader, ok := any(cb).(interface {
-		ReadAtObject(context.Context, string, string, *Object, int64, []byte) (int, error)
-	})
-	require.True(t, ok, "CachedBackend must expose prepared ReadAtObject through the wrapper")
-
-	obj := &Object{Key: "k", Size: 8, ETag: "etag"}
-	buf := make([]byte, 8)
-	n, err := reader.ReadAtObject(context.Background(), "b", "k", obj, 0, buf)
-	require.NoError(t, err)
-	require.Equal(t, 8, n)
-	require.Equal(t, []byte("prepared"), buf)
-	require.Equal(t, 1, rec.calls)
-	require.Same(t, obj, rec.obj)
 }
 
 func TestForceDeleteBucket(t *testing.T) {

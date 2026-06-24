@@ -173,9 +173,6 @@ func buildOperationsPlan(backend Backend) operationsPlan {
 				copyMustUseOuterFallback = true
 			}
 		}
-		if _, ok := b.(*CachedBackend); ok {
-			copyMustUseOuterFallback = true
-		}
 		if next != nil {
 			copyMustUseOuterFallback = true
 		}
