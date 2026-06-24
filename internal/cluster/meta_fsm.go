@@ -34,15 +34,15 @@ import (
 type MetaCmdType = clusterpb.MetaCmdType
 
 const (
-	MetaCmdTypeNoOp                      = clusterpb.MetaCmdTypeNoOp
-	MetaCmdTypeAddNode                   = clusterpb.MetaCmdTypeAddNode
-	MetaCmdTypeRemoveNode                = clusterpb.MetaCmdTypeRemoveNode
-	MetaCmdTypePutShardGroup             = clusterpb.MetaCmdTypePutShardGroup          // PR-C
-	MetaCmdTypeAddPlacementGeneration    = clusterpb.MetaCmdTypeAddPlacementGeneration // Phase 7
-	MetaCmdTypePutBucketAssignment       = clusterpb.MetaCmdTypePutBucketAssignment    // PR-D
-	MetaCmdTypeSetLoadSnapshot           = clusterpb.MetaCmdTypeSetLoadSnapshot        // PR-D
-	MetaCmdTypeProposeRebalancePlan      = clusterpb.MetaCmdTypeProposeRebalancePlan   // PR-D
-	MetaCmdTypeAbortPlan                 = clusterpb.MetaCmdTypeAbortPlan              // PR-D
+	MetaCmdTypeNoOp                   = clusterpb.MetaCmdTypeNoOp
+	MetaCmdTypeAddNode                = clusterpb.MetaCmdTypeAddNode
+	MetaCmdTypeRemoveNode             = clusterpb.MetaCmdTypeRemoveNode
+	MetaCmdTypePutShardGroup          = clusterpb.MetaCmdTypePutShardGroup          // PR-C
+	MetaCmdTypeAddPlacementGeneration = clusterpb.MetaCmdTypeAddPlacementGeneration // Phase 7
+	MetaCmdTypePutBucketAssignment    = clusterpb.MetaCmdTypePutBucketAssignment    // PR-D
+	MetaCmdTypeSetLoadSnapshot        = clusterpb.MetaCmdTypeSetLoadSnapshot        // PR-D
+	MetaCmdTypeProposeRebalancePlan   = clusterpb.MetaCmdTypeProposeRebalancePlan   // PR-D
+	MetaCmdTypeAbortPlan              = clusterpb.MetaCmdTypeAbortPlan              // PR-D
 	// 9-13 reserved — do not reuse (no renumber).
 	MetaCmdTypeRotateKeyBegin            = clusterpb.MetaCmdTypeRotateKeyBegin
 	MetaCmdTypeRotateKeySwitch           = clusterpb.MetaCmdTypeRotateKeySwitch
@@ -215,14 +215,14 @@ type MetaFSM struct {
 	// ascending epoch). Empty for single-generation legacy clusters; appended by
 	// AddPlacementGeneration. Consumed by OpRouter from S7-4 onward.
 	placementGenerations []placementGeneration
-	bucketRecords        map[string]BucketRecord                     // bucket → BucketRecord (PR-D; replaces bucketAssignments)
-	loadSnapshot         map[string]LoadStatEntry                    // node_id → stats (PR-D)
-	activePlan           *RebalancePlan                              // nil = no active plan (PR-D)
-	onBucketAssigned     func(string, string)                        // protected by mu; set before Start() (PR-D)
-	onBucketUnassigned   func(string)                                // protected by mu; set before Start() (group0-demotion)
-	onRebalancePlan      func(*RebalancePlan)                        // must not block; set before Start() (PR-D)
-	onShardGroupAdded    func(ShardGroupEntry)             // fired after PutShardGroup applies; protected by mu (v0.0.7.0)
-	onScrubTrigger       func(scrubber.ScrubTriggerEntry)            // PR4: cluster-wide scrub trigger applied; must not block
+	bucketRecords        map[string]BucketRecord          // bucket → BucketRecord (PR-D; replaces bucketAssignments)
+	loadSnapshot         map[string]LoadStatEntry         // node_id → stats (PR-D)
+	activePlan           *RebalancePlan                   // nil = no active plan (PR-D)
+	onBucketAssigned     func(string, string)             // protected by mu; set before Start() (PR-D)
+	onBucketUnassigned   func(string)                     // protected by mu; set before Start() (group0-demotion)
+	onRebalancePlan      func(*RebalancePlan)             // must not block; set before Start() (PR-D)
+	onShardGroupAdded    func(ShardGroupEntry)            // fired after PutShardGroup applies; protected by mu (v0.0.7.0)
+	onScrubTrigger       func(scrubber.ScrubTriggerEntry) // PR4: cluster-wide scrub trigger applied; must not block
 	// 클러스터 키 회전 — 결정론적 FSM은 여기, side-effect (디스크 I/O,
 	// transport identity swap)는 onRotationApplied 콜백으로 분리 (D16).
 	rotation          *RotationFSM
@@ -945,17 +945,6 @@ func cloneStringMap(in map[string]string) map[string]string {
 	out := make(map[string]string, len(in))
 	for k, v := range in {
 		out[k] = v
-	}
-	return out
-}
-
-func readStringVector(n int, at func(int) []byte) []string {
-	if n == 0 {
-		return nil
-	}
-	out := make([]string, n)
-	for i := range out {
-		out[i] = string(at(i))
 	}
 	return out
 }
