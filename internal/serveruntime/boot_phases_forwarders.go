@@ -226,10 +226,10 @@ func bootClusterCoordinatorRouting(state *bootState) error {
 	fba := cluster.NewForwardingBucketAssigner(metaRaft, func(ctx context.Context, command []byte) error {
 		return state.metaForwardSender.Send(ctx, MetaProposalTargets(metaRaft.Node().LeaderID(), peers), command)
 	})
-	state.distBackend.SetBucketAssigner(fba)
-	// Task 7: wire the MetaBucketStore seam so cluster-wide bucket metadata
-	// reads/writes can be routed through the meta-Raft FSM without callers
-	// needing a direct *MetaRaft reference.
+	// Wire the MetaBucketStore seam so cluster-wide bucket metadata reads/writes
+	// are routed through the meta-Raft FSM (Task 7). SetBucketAssigner is retired
+	// (Task 12: the assigner field was dead after the create cutover moved to
+	// MetaBucketStore; removed).
 	state.distBackend.SetMetaBucketStore(fba.MetaBucketStore())
 
 	state.clusterCoord = cluster.NewClusterCoordinator(

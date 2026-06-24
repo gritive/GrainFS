@@ -22,29 +22,23 @@ func (b *DistributedBackend) CreateBucketBypassReserved(ctx context.Context, buc
 }
 
 func (b *DistributedBackend) createBucketInternal(ctx context.Context, bucket string, bypassReserved bool) error {
-	// Check if already exists (read local)
-	err := b.store.View(func(txn MetadataTxn) error {
-		_, err := txn.Get(b.ks().BucketKey(bucket))
-		return err
-	})
-	if err == nil {
-		return storage.ErrBucketAlreadyExists
-	}
-	if err != ErrMetaKeyNotFound {
-		return err
-	}
-
-	if err := os.MkdirAll(b.bucketDir(bucket), 0o755); err != nil {
-		return fmt.Errorf("create bucket dir: %w", err)
-	}
-
-	// All bucket-write proposals now go through the meta-Raft via MetaBucketStore.
+	// All bucket-write proposals go through the meta-Raft via MetaBucketStore.
 	// MetaBucketStore must be wired before any bucket-create call; it is set by
 	// the composition root (serveruntime) at boot, and by tests via SetMetaBucketStore.
 	mbs := b.MetaBucketStore()
 	if mbs == nil {
 		return fmt.Errorf("create bucket %q: MetaBucketStore not wired", bucket)
 	}
+	// Existence check via MetaBucketStore (authoritative): group-0 BucketKey
+	// is no longer written (Task 12: CmdCreateBucket retired).
+	if _, ok := mbs.Record(bucket); ok {
+		return storage.ErrBucketAlreadyExists
+	}
+
+	if err := os.MkdirAll(b.bucketDir(bucket), 0o755); err != nil {
+		return fmt.Errorf("create bucket dir: %w", err)
+	}
+
 	groupID := b.resolveCreateGroupID(ctx, bucket)
 	return mbs.CreateBucket(ctx, bucket, groupID, bypassReserved)
 }
@@ -98,14 +92,11 @@ func (b *DistributedBackend) HeadBucket(ctx context.Context, bucket string) erro
 }
 
 func (b *DistributedBackend) DeleteBucket(ctx context.Context, bucket string) error {
-	// Existence check (always).
-	if err := b.store.View(func(txn MetadataTxn) error {
-		_, err := txn.Get(b.ks().BucketKey(bucket))
-		if err == ErrMetaKeyNotFound {
-			return storage.ErrBucketNotFound
-		}
-		return err
-	}); err != nil {
+	// Existence check via HeadBucket (which reads from MetaBucketStore when wired,
+	// falling back to group-0 BadgerDB). Task 12: the old inline BucketKey read
+	// is replaced here since CmdCreateBucket is retired and BucketKey is never
+	// written by the new meta path.
+	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return err
 	}
 
@@ -181,11 +172,9 @@ func (b *DistributedBackend) DeleteBucket(ctx context.Context, bucket string) er
 	}
 
 	// Physical remove only after consensus has committed.
-	removeAll := b.removeAll
-	if removeAll == nil {
-		removeAll = os.RemoveAll
-	}
-	if err := removeAll(b.bucketDir(bucket)); err != nil {
+	// b.removeAll is always set in NewDistributedBackend (to os.RemoveAll by
+	// default; tests may inject a spy). The nil guard was removed in Task 12.
+	if err := b.removeAll(b.bucketDir(bucket)); err != nil {
 		return fmt.Errorf("remove bucket dir: %w", err)
 	}
 	return nil

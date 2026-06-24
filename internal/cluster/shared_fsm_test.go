@@ -73,14 +73,14 @@ func TestSharedFSM_BackendListObjects_ScopedToGroup(t *testing.T) {
 
 	// Helper: write a bucket + object into a group's FSM (same bucket name,
 	// same object key — to prove there is no cross-group collision).
+	// CmdCreateBucket is retired (Task 12 no-op); write bucket key directly.
 	// CmdPutObjectMeta is a no-op in the FSM after Slice 2; write via
 	// persistPutObjectMetaUpdate directly.
 	putObj := func(t *testing.T, f *FSM, bucket, key, etag string) {
 		t.Helper()
-		raw, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
-		require.NoError(t, err)
-		_ = f.Apply(raw) // idempotent: ignore ErrBucketAlreadyExists (applied twice is fine)
-
+		require.NoError(t, f.db.Update(func(txn MetadataTxn) error {
+			return txn.Set(f.keys.BucketKey(bucket), []byte("{}"))
+		}))
 		cmd := PutObjectMetaCmd{
 			Bucket: bucket, Key: key, Size: int64(len(etag)), ContentType: "text/plain", ETag: etag, ModTime: 1,
 		}
@@ -132,16 +132,23 @@ func TestSharedFSM_BackendListObjects_ScopedToGroup(t *testing.T) {
 	assert.Error(t, err, "obj2-only-in-A should not be visible from group-B")
 }
 
-// putObjViaApply writes a bucket + object into a group's FSM. The bucket is
-// created via the raft apply path; the object meta is written via
-// persistPutObjectMetaUpdate directly because CmdPutObjectMeta is a no-op in
-// the FSM after data-plane raft-free Slice 2 (the live write path is
-// writeQuorumMeta).
+// putObjViaApply writes a bucket + object into a group's FSM. The bucket key
+// is written directly to BadgerDB (CmdCreateBucket is a retired no-op in Task 12;
+// this provides the fallback HeadBucket path for backends without MetaBucketStore).
+// The object meta is written via persistPutObjectMetaUpdate directly because
+// CmdPutObjectMeta is a no-op in the FSM after data-plane raft-free Slice 2.
 func putObjViaApply(t *testing.T, f *FSM, bucket, key, etag string) {
 	t.Helper()
-	raw, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
-	require.NoError(t, err)
-	_ = f.Apply(raw) // idempotent
+	// Write bucket key directly — CmdCreateBucket is retired (Task 12: bucket
+	// control-plane moved to meta-raft). The raw bucket: key is idempotent.
+	require.NoError(t, f.db.Update(func(txn MetadataTxn) error {
+		bk := f.keys.BucketKey(bucket)
+		// Idempotent: set only if absent to avoid overwriting existing entries.
+		if err := txn.Set(bk, []byte("{}")); err != nil {
+			return err
+		}
+		return nil
+	}))
 	cmd := PutObjectMetaCmd{
 		Bucket: bucket, Key: key, Size: int64(len(etag)), ContentType: "text/plain", ETag: etag, ModTime: 1,
 	}

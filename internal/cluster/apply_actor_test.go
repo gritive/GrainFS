@@ -54,11 +54,15 @@ func dumpFSMState(t *testing.T, fsm *FSM) map[string]string {
 	return out
 }
 
-// determinismCmdSequence builds a fixed sequence exercising read-modify-write
-// handlers. CmdPutObjectMeta / CmdDeleteObjectVersion / CmdDeleteObject are
-// retired no-ops in data-plane raft-free Slice 2; the sequence exercises live
-// commands (bucket create/versioning, bucket policy) to verify batch-apply
-// determinism across different transaction groupings.
+// determinismCmdSequence builds a fixed sequence of retired-slot commands to
+// verify batch-apply determinism across different transaction groupings.
+//
+// Task 12: CmdCreateBucket/CmdDeleteBucket/CmdSetBucketVersioning/
+// CmdSetBucketPolicy/CmdDeleteBucketPolicy are all retired (group-0 bucket
+// control-plane moved to meta-raft). Their applies are no-ops; the sequence
+// exercises the batch-actor infrastructure (not the applies themselves) by
+// confirming the same final DB state is produced regardless of how commands
+// are grouped into transactions.
 func determinismCmdSequence(t *testing.T) [][]byte {
 	t.Helper()
 	enc := func(ct CommandType, p any) []byte {
@@ -151,17 +155,26 @@ func TestApplyBatch_CommitFailureFallback(t *testing.T) {
 }
 
 func TestApplyBatch_BusinessErrorDoesNotAbortBatch(t *testing.T) {
-	enc := func(ct CommandType, p any) []byte {
-		b, err := EncodeCommand(ct, p)
-		require.NoError(t, err)
-		return b
-	}
+	// Build a batch where entry 2 (index 2) has a corrupt payload for a
+	// live command (CmdResealFSMValues decode will fail on garbage bytes).
+	// Entries before and after must be applied successfully.
+	//
+	// Note: the bucket commands (CmdCreateBucket, CmdDeleteBucket) were retired
+	// in Task 12 (group-0 bucket control-plane → meta-raft); their applies are
+	// no-ops that cannot produce a business error. We use CmdResealFSMValues
+	// with a garbage payload to get a decode error at entry 2.
+	goodNoOp, err := buildRawCommand(CmdNoOp, nil)
+	require.NoError(t, err)
+	// Empty payload triggers "empty data" error in fbSafe, which is a reliable
+	// decode error independent of FlatBuffers internals.
+	badReseal, err := buildRawCommand(CmdResealFSMValues, nil)
+	require.NoError(t, err)
+
 	cmds := [][]byte{
-		enc(CmdCreateBucket, CreateBucketCmd{Bucket: "b1"}),
-		enc(CmdCreateBucket, CreateBucketCmd{Bucket: "b2"}),
-		// Delete a reserved bucket name → business error, no write.
-		enc(CmdDeleteBucket, DeleteBucketCmd{Bucket: "_grainfs-reserved"}),
-		enc(CmdCreateBucket, CreateBucketCmd{Bucket: "b3"}),
+		goodNoOp,  // entry 0: no-op → nil
+		goodNoOp,  // entry 1: no-op → nil
+		badReseal, // entry 2: decode error → error
+		goodNoOp,  // entry 3: no-op → nil (must not be aborted)
 	}
 	batch := make([]raft.LogEntry, len(cmds))
 	for i, c := range cmds {
@@ -174,15 +187,8 @@ func TestApplyBatch_BusinessErrorDoesNotAbortBatch(t *testing.T) {
 
 	require.NoError(t, results[0])
 	require.NoError(t, results[1])
-	require.Error(t, results[2], "reserved bucket delete must be reported as error")
-	require.NoError(t, results[3])
-
-	// Entry 3 (b3) committed despite entry 2's error.
-	err := fsm.db.View(func(txn MetadataTxn) error {
-		_, e := txn.Get(fsm.keys.BucketKey("b3"))
-		return e
-	})
-	require.NoError(t, err, "entries after a business error must still commit")
+	require.Error(t, results[2], "corrupt CmdResealFSMValues payload must be reported as error")
+	require.NoError(t, results[3], "entries after a business error must still be applied")
 }
 
 func TestApplyBatch_ErrTxnTooBigFallback(t *testing.T) {
@@ -242,26 +248,49 @@ func TestApplyActor_SnapshotIsBatchBarrier(t *testing.T) {
 	applyBatchEntriesCap = maxApplyBatchEntries
 	defer func() { applyBatchEntriesCap = origCap }()
 
-	enc := func(ct CommandType, p any) []byte {
-		out, err := EncodeCommand(ct, p)
-		require.NoError(t, err)
-		return out
+	// Task 12: CmdCreateBucket is retired (group-0 bucket control-plane moved to
+	// meta-raft); its apply is a no-op and writes no keys. Use
+	// persistPutObjectMetaUpdate to write real state into the source FSM so the
+	// snapshot has actual content to restore, and use ObjectMetaKey for assertions.
+	writeObj := func(f *FSM, bucket, key, etag string) {
+		t.Helper()
+		cmd := PutObjectMetaCmd{
+			Bucket: bucket, Key: key, Size: 1, ContentType: "text/plain", ETag: etag, ModTime: 1,
+		}
+		require.NoError(t, f.db.Update(func(txn MetadataTxn) error {
+			return f.persistPutObjectMetaUpdate(txn, cmd, buildPutObjectMeta(cmd))
+		}))
 	}
 
-	// Source FSM with one bucket -> snapshot bytes.
+	// Source FSM with one object → snapshot bytes.
 	src := NewFSM(newTestStore(t), newStateKeyspaceEmpty())
-	require.NoError(t, src.Apply(enc(CmdCreateBucket, CreateBucketCmd{Bucket: "from-snap"})))
+	writeObj(src, "snap-bkt", "from-snap", "snap-etag")
 	snapBytes, err := src.Snapshot()
 	require.NoError(t, err)
 
-	// Target FSM + backend. Feed: command, command, snapshot, command.
+	// Target FSM + backend. Pre-snapshot object keys are written via direct DB
+	// update (simulating entries already applied before the snapshot arrives).
+	// Feed: command(pre1), command(pre2), snapshot, command(post).
+	// Commands use retired CmdNoOp (wire-stable) since the batch actor must handle
+	// all committed log entries, including no-ops and retired slots.
+	noOp := func() []byte {
+		raw, nerr := buildRawCommand(CmdNoOp, nil)
+		require.NoError(t, nerr)
+		return raw
+	}
+
 	fsm := NewFSM(newTestStore(t), newStateKeyspaceEmpty())
 	b := &DistributedBackend{store: fsm.db, fsm: fsm, node: snapshotBarrierFakeNode{}, registry: NewRegistry()}
 	a := &applyActor{db: fsm.db, fsm: fsm}
 
-	c1 := enc(CmdCreateBucket, CreateBucketCmd{Bucket: "pre1"})
-	c2 := enc(CmdCreateBucket, CreateBucketCmd{Bucket: "pre2"})
-	c3 := enc(CmdCreateBucket, CreateBucketCmd{Bucket: "post"})
+	// Write pre-snapshot objects directly (pre1, pre2) — simulates state that
+	// the snapshot should wipe.
+	writeObj(fsm, "snap-bkt", "pre1", "pre-etag")
+	writeObj(fsm, "snap-bkt", "pre2", "pre-etag")
+
+	c1 := noOp()
+	c2 := noOp()
+	c3 := noOp()
 
 	ch := make(chan raft.LogEntry, 8)
 	ch <- raft.LogEntry{Index: 2, Term: 1, Type: raft.LogEntryCommand, Command: c2}
@@ -276,14 +305,12 @@ func TestApplyActor_SnapshotIsBatchBarrier(t *testing.T) {
 	require.True(t, a.collect(b, e4, ch))
 
 	state := dumpFSMState(t, fsm)
-	require.Contains(t, state, string(fsm.keys.BucketKey("from-snap")),
-		"snapshot must restore from-snap bucket")
-	require.NotContains(t, state, string(fsm.keys.BucketKey("pre1")),
+	require.Contains(t, state, string(fsm.keys.ObjectMetaKey("snap-bkt", "from-snap")),
+		"snapshot must restore from-snap object")
+	require.NotContains(t, state, string(fsm.keys.ObjectMetaKey("snap-bkt", "pre1")),
 		"pre-snapshot state must be wiped by Restore")
-	require.NotContains(t, state, string(fsm.keys.BucketKey("pre2")),
+	require.NotContains(t, state, string(fsm.keys.ObjectMetaKey("snap-bkt", "pre2")),
 		"pre-snapshot state must be wiped by Restore")
-	require.Contains(t, state, string(fsm.keys.BucketKey("post")),
-		"post-snapshot command must be applied")
 	require.Equal(t, uint64(4), b.lastApplied.Load())
 }
 

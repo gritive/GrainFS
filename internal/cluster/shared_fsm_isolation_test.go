@@ -130,24 +130,31 @@ func TestSharedFSM_PrefixIsolation_AllPaths(t *testing.T) {
 	}{
 		{
 			// CreateBucket / DeleteBucket: two groups with the same bucket name
-			// produce two distinct keys; deleting one does not affect the other.
+			// produce distinct MetaFSM entries; deleting one does not affect the other.
+			// (Task 12: bucket control-plane moved to meta-raft; assertions now via
+			// MetaBucketStore / MetaFSM rather than group-0 BadgerDB keys.)
 			name: "CreateBucket_DeleteBucket",
 			exercise: func(t *testing.T) {
-				_, ksA, ksB, fA, fB := setupTwoFSMs(t)
+				ctx := context.Background()
+				// Each group gets its own MetaBucketStore (separate MetaFSM).
+				mbsA := newTestMetaBucketStore(t)
+				mbsB := newTestMetaBucketStore(t)
 
-				applyCmd(t, fA, CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
-				applyCmd(t, fB, CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
+				require.NoError(t, mbsA.CreateBucket(ctx, bucket, "gA", false))
+				require.NoError(t, mbsB.CreateBucket(ctx, bucket, "gB", false))
 
-				assert.True(t, dbHasKey(t, fA.db, ksA.BucketKey(bucket)), "A's bucket key must exist")
-				assert.True(t, dbHasKey(t, fB.db, ksB.BucketKey(bucket)), "B's bucket key must exist")
-				// The two keys must be distinct encoded byte sequences.
-				assert.NotEqual(t, ksA.BucketKey(bucket), ksB.BucketKey(bucket))
+				_, okA := mbsA.Record(bucket)
+				_, okB := mbsB.Record(bucket)
+				assert.True(t, okA, "A's bucket must exist in MetaFSM")
+				assert.True(t, okB, "B's bucket must exist in MetaFSM")
 
 				// Delete A's bucket.
-				applyCmd(t, fA, CmdDeleteBucket, DeleteBucketCmd{Bucket: bucket})
+				require.NoError(t, mbsA.DeleteBucket(ctx, bucket))
 
-				assert.False(t, dbHasKey(t, fA.db, ksA.BucketKey(bucket)), "A's bucket key must be gone")
-				assert.True(t, dbHasKey(t, fB.db, ksB.BucketKey(bucket)), "B's bucket key must survive A's delete")
+				_, okA = mbsA.Record(bucket)
+				_, okB = mbsB.Record(bucket)
+				assert.False(t, okA, "A's bucket must be gone from MetaFSM")
+				assert.True(t, okB, "B's bucket must survive A's delete")
 			},
 		},
 		{
@@ -190,74 +197,75 @@ func TestSharedFSM_PrefixIsolation_AllPaths(t *testing.T) {
 		},
 		{
 			// DeleteBucket: A deletes a bucket; B's same-name bucket survives.
-			// CmdDeleteObject = 4 is retired (data-plane raft-free Slice 2 no-op);
-			// bucket-level isolation via CmdDeleteBucket exercises the same keyspace
-			// partitioning.
+			// (Task 12: bucket control-plane moved to meta-raft; assertions via
+			// MetaBucketStore rather than group-0 BadgerDB keys.)
 			name: "DeleteBucket_DoesNotAffectPeer",
 			exercise: func(t *testing.T) {
-				_, _, _, fA, fB := setupTwoFSMs(t)
+				ctx := context.Background()
+				mbsA := newTestMetaBucketStore(t)
+				mbsB := newTestMetaBucketStore(t)
 
-				applyCmd(t, fA, CmdCreateBucket, CreateBucketCmd{Bucket: "bktX"})
-				applyCmd(t, fB, CmdCreateBucket, CreateBucketCmd{Bucket: "bktX"})
+				require.NoError(t, mbsA.CreateBucket(ctx, "bktX", "gA", false))
+				require.NoError(t, mbsB.CreateBucket(ctx, "bktX", "gB", false))
 
 				// A deletes the bucket; B's copy must survive.
-				applyCmd(t, fA, CmdDeleteBucket, DeleteBucketCmd{Bucket: "bktX"})
+				require.NoError(t, mbsA.DeleteBucket(ctx, "bktX"))
 
-				// fsmHasKey takes the raw (unprefixed) key — it adds the group prefix.
-				assert.False(t, fsmHasKey(t, fA, "bucket:bktX"),
-					"A's bucket key must be gone after delete")
-				assert.True(t, fsmHasKey(t, fB, "bucket:bktX"),
-					"B's bucket key must survive A's delete")
+				_, okA := mbsA.Record("bktX")
+				_, okB := mbsB.Record("bktX")
+				assert.False(t, okA, "A's bucket must be gone after delete")
+				assert.True(t, okB, "B's bucket must survive A's delete")
 			},
 		},
 		{
-			// SetBucketPolicy / DeleteBucketPolicy: distinct policy keys per group.
+			// SetBucketPolicy / DeleteBucketPolicy: distinct MetaFSM entries per group.
+			// (Task 12: bucket control-plane moved to meta-raft.)
 			name: "BucketPolicy_Isolation",
 			exercise: func(t *testing.T) {
-				_, ksA, ksB, fA, fB := setupTwoFSMs(t)
+				ctx := context.Background()
+				mbsA := newTestMetaBucketStore(t)
+				mbsB := newTestMetaBucketStore(t)
 
-				applyCmd(t, fA, CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
-				applyCmd(t, fB, CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
+				require.NoError(t, mbsA.CreateBucket(ctx, bucket, "gA", false))
+				require.NoError(t, mbsB.CreateBucket(ctx, bucket, "gB", false))
 
-				applyCmd(t, fA, CmdSetBucketPolicy, SetBucketPolicyCmd{
-					Bucket: bucket, PolicyJSON: []byte(`{"Effect":"Allow"}`),
-				})
-				applyCmd(t, fB, CmdSetBucketPolicy, SetBucketPolicyCmd{
-					Bucket: bucket, PolicyJSON: []byte(`{"Effect":"Deny"}`),
-				})
+				require.NoError(t, mbsA.SetPolicy(ctx, bucket, []byte(`{"Effect":"Allow"}`)))
+				require.NoError(t, mbsB.SetPolicy(ctx, bucket, []byte(`{"Effect":"Deny"}`)))
 
-				pA := ksA.BucketPolicyKey(bucket)
-				pB := ksB.BucketPolicyKey(bucket)
-				assert.NotEqual(t, pA, pB, "policy keys must be distinct")
-				assert.True(t, dbHasKey(t, fA.db, pA), "A's policy key must exist")
-				assert.True(t, dbHasKey(t, fB.db, pB), "B's policy key must exist")
+				recA, _ := mbsA.Record(bucket)
+				recB, _ := mbsB.Record(bucket)
+				assert.Equal(t, `{"Effect":"Allow"}`, string(recA.Policy), "A's policy must be Allow")
+				assert.Equal(t, `{"Effect":"Deny"}`, string(recB.Policy), "B's policy must be Deny")
+				assert.NotEqual(t, recA.Policy, recB.Policy, "policies must be distinct per group")
 
 				// Delete A's policy.
-				applyCmd(t, fA, CmdDeleteBucketPolicy, DeleteBucketPolicyCmd{Bucket: bucket})
+				require.NoError(t, mbsA.DeletePolicy(ctx, bucket))
 
-				assert.False(t, dbHasKey(t, fA.db, pA), "A's policy must be gone")
-				assert.True(t, dbHasKey(t, fB.db, pB), "B's policy must survive A's delete")
+				recA, _ = mbsA.Record(bucket)
+				recB, _ = mbsB.Record(bucket)
+				assert.Empty(t, recA.Policy, "A's policy must be gone")
+				assert.NotEmpty(t, recB.Policy, "B's policy must survive A's delete")
 			},
 		},
 		{
-			// SetBucketVersioning: A enables versioning, B does not. Keys distinct.
+			// SetBucketVersioning: A enables versioning, B does not. Distinct MetaFSM state.
+			// (Task 12: bucket control-plane moved to meta-raft.)
 			name: "BucketVersioning_Isolation",
 			exercise: func(t *testing.T) {
-				_, ksA, ksB, fA, fB := setupTwoFSMs(t)
+				ctx := context.Background()
+				mbsA := newTestMetaBucketStore(t)
+				mbsB := newTestMetaBucketStore(t)
 
-				applyCmd(t, fA, CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
-				applyCmd(t, fB, CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
+				require.NoError(t, mbsA.CreateBucket(ctx, bucket, "gA", false))
+				require.NoError(t, mbsB.CreateBucket(ctx, bucket, "gB", false))
 
-				applyCmd(t, fA, CmdSetBucketVersioning, SetBucketVersioningCmd{
-					Bucket: bucket, State: "Enabled",
-				})
+				require.NoError(t, mbsA.SetVersioning(ctx, bucket, "Enabled"))
 				// B does not set versioning.
 
-				vA := ksA.BucketVerKey(bucket)
-				vB := ksB.BucketVerKey(bucket)
-				assert.NotEqual(t, vA, vB, "versioning keys must be distinct")
-				assert.True(t, dbHasKey(t, fA.db, vA), "A's versioning key must exist")
-				assert.False(t, dbHasKey(t, fB.db, vB), "B must not have a versioning key")
+				recA, _ := mbsA.Record(bucket)
+				recB, _ := mbsB.Record(bucket)
+				assert.Equal(t, "Enabled", recA.Versioning, "A's versioning must be Enabled")
+				assert.Equal(t, "", recB.Versioning, "B must not have versioning set")
 			},
 		},
 		{
@@ -356,10 +364,12 @@ func TestSharedFSM_PrefixIsolation_AllPaths(t *testing.T) {
 					return fB.persistPutObjectMetaUpdate(txn, cmdB, buildPutObjectMeta(cmdB))
 				}))
 
-				// Also create the bucket in A (needed for ListAllObjectsStrict → ListBuckets).
-				raw, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
-				require.NoError(t, err)
-				_ = fA.Apply(raw)
+				// Wire a MetaBucketStore on backendA so ListBuckets (called by
+				// ListAllObjectsStrict → listAllObjectsForGC) sees the bucket.
+				// (Task 12: CmdCreateBucket is retired; bucket existence comes from MetaFSM.)
+				mbsA := newTestMetaBucketStore(t)
+				require.NoError(t, mbsA.CreateBucket(context.Background(), bucket, "gA", false))
+				backendA.SetMetaBucketStore(mbsA)
 
 				objs, err := backendA.ListAllObjectsStrict()
 				require.NoError(t, err)
@@ -522,11 +532,9 @@ func TestSharedFSM_GroupCloseDoesNotCloseSharedDB(t *testing.T) {
 	stopB := make(chan struct{})
 	go backendB.RunApplyLoop(stopB)
 
-	// Write data to both groups.
-	fA := backendA.fsm
-	fB := backendB.fsm
-	applyCmd(t, fA, CmdCreateBucket, CreateBucketCmd{Bucket: "alive"})
-	applyCmd(t, fB, CmdCreateBucket, CreateBucketCmd{Bucket: "alive"})
+	// Write data to both groups. CmdCreateBucket is retired (Task 12 no-op);
+	// write B's bucket key directly into the shared DB to keep the assertion
+	// unambiguous without wiring a full MetaBucketStore.
 
 	// Write a distinguishable key directly so the assertion is unambiguous.
 	require.NoError(t, db.Update(func(txn *badger.Txn) error {

@@ -17,13 +17,19 @@ const (
 	// The FSM ignores it; it exists only to advance advanceCommitIndex.
 	CmdNoOp CommandType = 0
 
+	// RETIRED: bucket control-plane moved to meta-raft (MetaBucketStore).
+	// Enum slots kept reserved so old-log replay is safe (apply is a no-op).
+	// DO NOT reuse these numbers for new commands.
 	CmdCreateBucket       CommandType = 1
 	CmdDeleteBucket       CommandType = 2
 	CmdSetBucketPolicy    CommandType = 8
 	CmdDeleteBucketPolicy CommandType = 9
-	CmdMigrateShard       CommandType = 10
-	CmdMigrationDone      CommandType = 11
-	// Phase 18 v0.0.4.0 follow-up: Raft-serialized bucket versioning.
+	// CmdSetBucketVersioning (15) is also retired — kept below for wire stability.
+
+	CmdMigrateShard  CommandType = 10
+	CmdMigrationDone CommandType = 11
+
+	// RETIRED: bucket versioning moved to meta-raft. Slot kept reserved.
 	CmdSetBucketVersioning CommandType = 15
 	CmdSetRing             CommandType = 17
 	// CmdResealFSMValues re-seals a batch of data-group FSM state values

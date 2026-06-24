@@ -2,13 +2,9 @@ package cluster
 
 import (
 	"fmt"
-	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/rs/zerolog/log"
-
-	"github.com/gritive/GrainFS/internal/raft"
 )
 
 // MigrateLegacyMetaToCluster converts a legacy data directory to cluster
@@ -75,86 +71,13 @@ func MigrateLegacyMetaToCluster(legacyStore MetadataStore, dataDir, nodeID strin
 		return fmt.Errorf("scan metadata: %w", err)
 	}
 
-	logger.Info().Int("buckets", len(buckets)).Int("objects", len(objects)).Int("multiparts", len(multiparts)).Msg("metadata scan complete")
-
-	raftDir := filepath.Join(dataDir, "raft")
-	cfg := raft.DefaultConfig(nodeID, nil) // no peers = legacy bootstrap
-	node, closeRaft, err := NewRaftV2NodeForServeruntime(cfg, raftDir)
-	if err != nil {
-		return fmt.Errorf("create raft node: %w", err)
-	}
-	defer func() {
-		if closeRaft != nil {
-			_ = closeRaft()
-		}
-	}()
-
-	// For a legacy node, set transport stubs (no peers to communicate with)
-	node.SetTransport(
-		func(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
-			return nil, fmt.Errorf("no peers during migration")
-		},
-		func(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error) {
-			return nil, fmt.Errorf("no peers during migration")
-		},
-	)
-
-	// Start the node — it will become leader since it's the only voter
-	node.Start()
-	defer node.Close()
-
-	// Wait for leadership (legacy node should become leader within a few election timeouts)
-	for range 200 {
-		if node.State() == raft.Leader {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if node.State() != raft.Leader {
-		return fmt.Errorf("node did not become leader during migration")
-	}
-
-	// Start FSM apply loop to keep metadata in sync
-	fsm := NewFSM(store, newStateKeyspaceEmpty())
-	stopApply := make(chan struct{})
-	go func() {
-		for {
-			select {
-			case <-stopApply:
-				return
-			case entry, ok := <-node.ApplyCh():
-				if !ok {
-					// ApplyCh closed (node stopped); exit cleanly to avoid
-					// busy-looping on zero-value reads.
-					logger.Debug().Msg("migration apply loop: ApplyCh closed; exiting")
-					return
-				}
-				if err := fsm.Apply(entry.Command); err != nil {
-					logger.Error().Uint64("index", entry.Index).Err(err).Msg("fsm apply error during migration")
-				}
-			}
-		}
-	}()
-	defer close(stopApply)
-
-	// Propose bucket creations
-	for _, bucket := range buckets {
-		data, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
-		if err != nil {
-			return fmt.Errorf("encode bucket cmd: %w", err)
-		}
-		if err := node.Propose(data); err != nil {
-			return fmt.Errorf("propose create bucket %s: %w", bucket, err)
-		}
-	}
-
-	// Legacy object metadata is no longer re-proposed: per-object FSM commands
-	// (CmdPutObjectMeta) were retired in data-plane raft-free Slice 2 — their apply
-	// is a no-op, so re-proposing migrated nothing. Objects now live as off-raft
-	// quorum-meta blobs; greenfield clusters never reach bootAutoMigrate. The scan
-	// above still reports legacy object/multipart counts for operator visibility.
-
-	logger.Info().Int("proposed_buckets", len(buckets)).Msg("migration complete")
+	// CmdCreateBucket is retired (bucket control-plane moved to meta-raft): there
+	// is nothing to propose. Per-object FSM commands (CmdPutObjectMeta) were
+	// retired earlier (data-plane raft-free Slice 2). The raft node setup +
+	// proposal loop that used to live here is removed; the metadata scan above
+	// still logs counts for operator visibility. Greenfield clusters never reach
+	// bootAutoMigrate.
+	logger.Info().Int("buckets", len(buckets)).Int("objects", len(objects)).Int("multiparts", len(multiparts)).Msg("migration: legacy metadata scan complete (no proposals needed)")
 
 	return nil
 }

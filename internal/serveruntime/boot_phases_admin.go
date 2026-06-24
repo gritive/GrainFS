@@ -95,18 +95,10 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		state.metaPolicyInvalidationWorker.SetInvalidate(srv.PolicyStore().Invalidate)
 	}
 
-	// Legacy group-0 path: SetOnBucketPolicyApply is kept for the (currently
-	// still-live) group-0 CmdSetBucketPolicy / CmdDeleteBucketPolicy commands
-	// which fire notifyOnApply on the data-raft FSM. These will be retired once
-	// the group-0 policy commands are fully decommissioned. Left as a no-op
-	// comment until that task lands; removal would break compilation if the
-	// group-0 apply path is still active.
-	//
-	// NOTE: state.distBackend.SetOnBucketPolicyApply(srv.PolicyStore().Invalidate)
-	// is intentionally NOT called here — policy invalidation is now driven by
-	// the meta post-commit hook above. The onBucketPolicyApply atomic.Pointer
-	// in DistributedBackend remains nil, so the notifyOnApply group-0 branch
-	// is a silent no-op (harmless dead code until Task N retires it).
+	// Task 12: SetOnBucketPolicyApply and the onBucketPolicyApply field on
+	// DistributedBackend are retired (group-0 bucket policy commands moved to
+	// meta-raft). Policy invalidation is driven solely by the meta post-commit
+	// hook (metaPolicyInvalidationWorker.SetInvalidate) wired above.
 
 	// --- Admin / dashboard wiring (Volume CLI Phase B) ---
 	tokenStore, err := dashboard.Open(filepath.Join(cfg.DataDir, "dashboard.token"))

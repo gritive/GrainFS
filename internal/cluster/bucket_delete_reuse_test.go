@@ -1,60 +1,82 @@
 package cluster
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
-func newTestFSMForBucketReuse(t *testing.T) *FSM {
+// newTestMetaBucketStore returns a directFSMMetaBucketStore backed by a fresh
+// MetaFSM — the meta path for all bucket-lifecycle operations post Task 12.
+func newTestMetaBucketStore(t *testing.T) *directFSMMetaBucketStore {
 	t.Helper()
-	return NewFSM(newTestStore(t), newStateKeyspaceEmpty())
-}
-
-func applyCmdErr(t *testing.T, fsm *FSM, cmdType CommandType, payload interface{}) error {
-	t.Helper()
-	data, err := EncodeCommand(cmdType, payload)
-	require.NoError(t, err)
-	return fsm.Apply(data)
+	return newDirectFSMMetaBucketStore(nil).(*directFSMMetaBucketStore)
 }
 
 // TestDeleteBucket_ClearsVersioning proves a recreated same-name bucket does not
 // inherit the prior incarnation's versioning state (live S3-correctness: a new
-// bucket is unversioned).
+// bucket is unversioned). Verified via MetaBucketStore (meta-FSM path).
 func TestDeleteBucket_ClearsVersioning(t *testing.T) {
-	fsm := newTestFSMForBucketReuse(t)
+	ctx := context.Background()
+	mbs := newTestMetaBucketStore(t)
 	const b = "b"
-	applyCmd(t, fsm, CmdCreateBucket, CreateBucketCmd{Bucket: b})
-	applyCmd(t, fsm, CmdSetBucketVersioning, SetBucketVersioningCmd{Bucket: b, State: "Enabled"})
-	require.True(t, dbHasKey(t, fsm.db, fsm.keys.BucketVerKey(b)))
 
-	applyCmd(t, fsm, CmdDeleteBucket, DeleteBucketCmd{Bucket: b})
-	require.False(t, dbHasKey(t, fsm.db, fsm.keys.BucketVerKey(b)),
-		"versioning state must be cleared on delete (recreated bucket is unversioned)")
+	require.NoError(t, mbs.CreateBucket(ctx, b, "local", false))
+	require.NoError(t, mbs.SetVersioning(ctx, b, "Enabled"))
+
+	rec, ok := mbs.Record(b)
+	require.True(t, ok, "bucket must exist after create")
+	require.Equal(t, "Enabled", rec.Versioning, "versioning must be set")
+
+	require.NoError(t, mbs.DeleteBucket(ctx, b))
+
+	_, ok = mbs.Record(b)
+	require.False(t, ok, "bucket must not exist after delete")
+
+	// Recreate: versioning must start fresh (unversioned).
+	require.NoError(t, mbs.CreateBucket(ctx, b, "local", false))
+	rec, ok = mbs.Record(b)
+	require.True(t, ok)
+	require.Equal(t, "", rec.Versioning, "recreated bucket must be unversioned")
 }
 
 // TestDeleteBucket_ClearsPolicy proves a recreated same-name bucket does not
-// inherit the prior incarnation's bucket policy.
+// inherit the prior incarnation's bucket policy. Verified via MetaBucketStore.
 func TestDeleteBucket_ClearsPolicy(t *testing.T) {
-	fsm := newTestFSMForBucketReuse(t)
+	ctx := context.Background()
+	mbs := newTestMetaBucketStore(t)
 	const b = "b"
-	applyCmd(t, fsm, CmdCreateBucket, CreateBucketCmd{Bucket: b})
-	applyCmd(t, fsm, CmdSetBucketPolicy, SetBucketPolicyCmd{Bucket: b, PolicyJSON: []byte(`{"Version":"2012-10-17"}`)})
-	require.True(t, dbHasKey(t, fsm.db, fsm.keys.BucketPolicyKey(b)))
 
-	applyCmd(t, fsm, CmdDeleteBucket, DeleteBucketCmd{Bucket: b})
-	require.False(t, dbHasKey(t, fsm.db, fsm.keys.BucketPolicyKey(b)),
-		"bucket policy must be cleared on delete")
+	require.NoError(t, mbs.CreateBucket(ctx, b, "local", false))
+	require.NoError(t, mbs.SetPolicy(ctx, b, []byte(`{"Version":"2012-10-17"}`)))
+
+	rec, ok := mbs.Record(b)
+	require.True(t, ok)
+	require.NotEmpty(t, rec.Policy, "policy must be set")
+
+	require.NoError(t, mbs.DeleteBucket(ctx, b))
+
+	_, ok = mbs.Record(b)
+	require.False(t, ok, "bucket must not exist after delete")
+
+	// Recreate: policy must start fresh (empty).
+	require.NoError(t, mbs.CreateBucket(ctx, b, "local", false))
+	rec, ok = mbs.Record(b)
+	require.True(t, ok)
+	require.Empty(t, rec.Policy, "recreated bucket must have no policy")
 }
 
-// TestDeleteBucket_AbsentStateKeys_NoError proves the extra state-key deletes
-// tolerate absent keys: a plain bucket (no policy/versioning ever set) deletes
-// cleanly.
+// TestDeleteBucket_AbsentStateKeys_NoError proves deleting a plain bucket (no
+// policy/versioning ever set) succeeds without error. Verified via MetaBucketStore.
 func TestDeleteBucket_AbsentStateKeys_NoError(t *testing.T) {
-	fsm := newTestFSMForBucketReuse(t)
+	ctx := context.Background()
+	mbs := newTestMetaBucketStore(t)
 	const b = "b"
-	applyCmd(t, fsm, CmdCreateBucket, CreateBucketCmd{Bucket: b})
-	require.NoError(t, applyCmdErr(t, fsm, CmdDeleteBucket, DeleteBucketCmd{Bucket: b}),
-		"delete must tolerate absent per-bucket state keys")
-	require.False(t, dbHasKey(t, fsm.db, fsm.keys.BucketKey(b)))
+
+	require.NoError(t, mbs.CreateBucket(ctx, b, "local", false))
+	require.NoError(t, mbs.DeleteBucket(ctx, b), "delete must tolerate absent per-bucket state keys")
+
+	_, ok := mbs.Record(b)
+	require.False(t, ok, "bucket must be gone after delete")
 }

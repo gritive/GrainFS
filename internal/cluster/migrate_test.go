@@ -95,10 +95,9 @@ func TestMigrateLegacyMetaToCluster_Basic(t *testing.T) {
 	err := migrateLegacyDir(t, dir, "node-1")
 	require.NoError(t, err)
 
-	// Verify Raft log was created
-	raftDir := filepath.Join(dir, "raft")
-	_, err = os.Stat(raftDir)
-	require.NoError(t, err, "raft directory should exist after migration")
+	// Task 12: CmdCreateBucket is retired (bucket control-plane moved to meta-raft).
+	// MigrateLegacyMetaToCluster no longer spins up a raft node or writes a raft log;
+	// it only scans the legacy store for operator visibility. No raft/ directory expected.
 
 	// Verify metadata is still intact by re-opening BadgerDB
 	metaDir := filepath.Join(dir, "meta")

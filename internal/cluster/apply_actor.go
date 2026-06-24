@@ -216,7 +216,7 @@ func (a *applyActor) restore(b *DistributedBackend, entry raft.LogEntry) {
 	}
 	b.lastApplied.Store(entry.Index)
 	b.lastAppliedTerm.Store(entry.Term)
-	if fn := b.onBucketPolicyApply.Load(); fn != nil {
-		(*fn)("") // snapshot replaced local state wholesale → flush the policy cache
-	}
+	// Policy-cache invalidation on snapshot install was driven by the retired
+	// onBucketPolicyApply hook (Task 12). Policy invalidation is now handled by
+	// the meta post-commit invalidation worker; no hook needed here.
 }

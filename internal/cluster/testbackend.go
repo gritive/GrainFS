@@ -19,34 +19,25 @@ type singletonBackendTestTB interface {
 }
 
 // directFSMMetaBucketStore is a MetaBucketStore implementation for tests and
-// single-node tooling: it applies bucket-mutation commands to both the group-0
-// BadgerDB FSM (for backward-compat write callers) and a local MetaFSM (for
-// read cutover). Record / RecordLinearized / AllRecords read from the MetaFSM
-// so HeadBucket, GetBucketVersioning, GetBucketPolicy, and ListBuckets all see
-// consistent state after Task 9 read-path cutover.
+// single-node tooling. It applies bucket-mutation commands directly to a local
+// MetaFSM (the meta-raft layer). Record / RecordLinearized / AllRecords read
+// from the MetaFSM so HeadBucket, GetBucketVersioning, GetBucketPolicy, and
+// ListBuckets all see consistent state.
+//
+// Task 12: the group-0 dual-write path is removed. Bucket control-plane is now
+// entirely in meta-raft; all group-0 bucket applies are no-ops.
 type directFSMMetaBucketStore struct {
-	fsm  *FSM
 	meta *MetaFSM
 }
 
 // newDirectFSMMetaBucketStore returns a MetaBucketStore that applies mutations
-// directly to the supplied group-0 FSM and a fresh MetaFSM. Safe for tests and
-// single-node server starts where no meta-Raft quorum is available.
-func newDirectFSMMetaBucketStore(fsm *FSM) MetaBucketStore {
-	return &directFSMMetaBucketStore{fsm: fsm, meta: NewMetaFSM()}
+// directly to a fresh MetaFSM. Safe for tests and single-node server starts
+// where no meta-Raft quorum is available.
+func newDirectFSMMetaBucketStore(_ *FSM) MetaBucketStore {
+	return &directFSMMetaBucketStore{meta: NewMetaFSM()}
 }
 
 func (s *directFSMMetaBucketStore) CreateBucket(_ context.Context, bucket, groupID string, bypassReserved bool) error {
-	// group-0 FSM write (BadgerDB bucket existence key — kept for DeleteBucket
-	// inline existence check until that is also cut over to MetaBucketStore).
-	raw, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: bucket, BypassReserved: bypassReserved})
-	if err != nil {
-		return err
-	}
-	if err := s.fsm.Apply(raw); err != nil {
-		return err
-	}
-	// MetaFSM write: provides bucket record for read-path cutover (Task 9).
 	// MetaFSM.applyCreateBucket requires non-empty groupID; use "local" when
 	// unset (tests / single-node paths that don't assign a data group).
 	if groupID == "" {
@@ -64,13 +55,6 @@ func (s *directFSMMetaBucketStore) CreateBucket(_ context.Context, bucket, group
 }
 
 func (s *directFSMMetaBucketStore) DeleteBucket(_ context.Context, bucket string) error {
-	raw, err := EncodeCommand(CmdDeleteBucket, DeleteBucketCmd{Bucket: bucket})
-	if err != nil {
-		return err
-	}
-	if err := s.fsm.Apply(raw); err != nil {
-		return err
-	}
 	metaRaw, err := encodeMetaDeleteBucketCmd(bucket)
 	if err != nil {
 		return err
@@ -83,13 +67,6 @@ func (s *directFSMMetaBucketStore) DeleteBucket(_ context.Context, bucket string
 }
 
 func (s *directFSMMetaBucketStore) SetVersioning(_ context.Context, bucket, state string) error {
-	raw, err := EncodeCommand(CmdSetBucketVersioning, SetBucketVersioningCmd{Bucket: bucket, State: state})
-	if err != nil {
-		return err
-	}
-	if err := s.fsm.Apply(raw); err != nil {
-		return err
-	}
 	metaRaw, err := encodeMetaSetBucketVersioningCmd(bucket, state)
 	if err != nil {
 		return err
@@ -102,16 +79,6 @@ func (s *directFSMMetaBucketStore) SetVersioning(_ context.Context, bucket, stat
 }
 
 func (s *directFSMMetaBucketStore) SetPolicy(_ context.Context, bucket string, policy []byte) error {
-	raw, err := EncodeCommand(CmdSetBucketPolicy, SetBucketPolicyCmd{
-		Bucket:     bucket,
-		PolicyJSON: append([]byte(nil), policy...),
-	})
-	if err != nil {
-		return err
-	}
-	if err := s.fsm.Apply(raw); err != nil {
-		return err
-	}
 	metaRaw, err := encodeMetaSetBucketPolicyCmd(bucket, append([]byte(nil), policy...))
 	if err != nil {
 		return err
@@ -124,13 +91,6 @@ func (s *directFSMMetaBucketStore) SetPolicy(_ context.Context, bucket string, p
 }
 
 func (s *directFSMMetaBucketStore) DeletePolicy(_ context.Context, bucket string) error {
-	raw, err := EncodeCommand(CmdDeleteBucketPolicy, DeleteBucketPolicyCmd{Bucket: bucket})
-	if err != nil {
-		return err
-	}
-	if err := s.fsm.Apply(raw); err != nil {
-		return err
-	}
 	metaRaw, err := encodeMetaDeleteBucketPolicyCmd(bucket)
 	if err != nil {
 		return err

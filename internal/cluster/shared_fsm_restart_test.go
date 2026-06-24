@@ -51,12 +51,11 @@ func TestSharedFSM_RestartPersistence(t *testing.T) {
 	require.NoError(t, err)
 	defer db2.Close()
 
-	// All keys must still exist after reopen.
+	// Object meta keys must still exist after reopen. (Group-0 bucket keys are no
+	// longer written: bucket control-plane moved to meta-raft in Task 12.)
 	assert.True(t, dbHasKey(t, badgermeta.Wrap(db2), ksA.ObjectMetaKey("bA", "obj1")), "A obj1 must survive restart")
 	assert.True(t, dbHasKey(t, badgermeta.Wrap(db2), ksA.ObjectMetaKey("bA", "obj2")), "A obj2 must survive restart")
-	assert.True(t, dbHasKey(t, badgermeta.Wrap(db2), ksA.BucketKey("bA")), "A bucket must survive restart")
 	assert.True(t, dbHasKey(t, badgermeta.Wrap(db2), ksB.ObjectMetaKey("bB", "obj1")), "B obj1 must survive restart")
-	assert.True(t, dbHasKey(t, badgermeta.Wrap(db2), ksB.BucketKey("bB")), "B bucket must survive restart")
 
 	// Values must be distinct — A and B had different payloads for obj1.
 	var valA, valB []byte

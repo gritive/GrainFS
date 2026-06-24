@@ -55,14 +55,8 @@ var _ = Describe("Backend bucket management integration", func() {
 		ctx = context.Background()
 	})
 
-	It("accepts a nil bucket assigner", func() {
-		b.SetBucketAssigner(nil)
-		Expect(b.CreateBucket(ctx, "photos")).To(Succeed())
-	})
-
-	// Task 8 cutover: CreateBucket now routes through MetaBucketStore, not the
-	// legacy assigner. The following tests verify groupID selection via
-	// resolveCreateGroupID, which is passed to MetaBucketStore.CreateBucket.
+	// Task 12: SetBucketAssigner removed (dead after create cutover to MetaBucketStore).
+	// CreateBucket routes through MetaBucketStore; groupID comes from resolveCreateGroupID.
 
 	It("passes groupID from router default to MetaBucketStore", func() {
 		mgr := NewDataGroupManager()

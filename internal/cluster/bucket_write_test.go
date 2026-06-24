@@ -25,6 +25,9 @@ type fakeMetaBucketStore struct {
 
 	// call order tracking for delete ordering test
 	callOrder []string
+
+	// knownBuckets: populated by CreateBucket; Record() returns true for these.
+	knownBuckets map[string]struct{}
 }
 
 type fakeCreateCall struct {
@@ -45,6 +48,10 @@ type fakeSetPolicyCall struct {
 
 func (f *fakeMetaBucketStore) CreateBucket(_ context.Context, bucket, groupID string, bypassReserved bool) error {
 	f.createCalls = append(f.createCalls, fakeCreateCall{bucket: bucket, groupID: groupID, bypassReserved: bypassReserved})
+	if f.knownBuckets == nil {
+		f.knownBuckets = make(map[string]struct{})
+	}
+	f.knownBuckets[bucket] = struct{}{}
 	return nil
 }
 
@@ -70,6 +77,10 @@ func (f *fakeMetaBucketStore) DeletePolicy(_ context.Context, bucket string) err
 }
 
 func (f *fakeMetaBucketStore) Record(bucket string) (BucketRecord, bool) {
+	if f.knownBuckets != nil {
+		_, ok := f.knownBuckets[bucket]
+		return BucketRecord{}, ok
+	}
 	return BucketRecord{}, false
 }
 
@@ -117,15 +128,19 @@ func TestBucketWrite_CreateBypassReserved_PassesTrueFlag(t *testing.T) {
 
 // --- Delete tests ---
 
-// seedBucketInFSM seeds the bucket key directly into the DistributedBackend's FSM
-// by applying a group-0 CmdCreateBucket command. This is test-only setup so the
-// subsequent DeleteBucket's local-store existence check passes without going through
-// the propose path.
-func seedBucketInFSM(t *testing.T, b *DistributedBackend, bucket string) {
+// seedBucketForDelete seeds the bucket so that DeleteBucket's HeadBucket check
+// passes. Task 12: CmdCreateBucket is a retired no-op; seed via MetaBucketStore
+// if wired, or directly into BadgerDB via the keyspace BucketKey (legacy fallback).
+func seedBucketForDelete(t *testing.T, b *DistributedBackend, bucket string) {
 	t.Helper()
-	raw, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
-	require.NoError(t, err)
-	require.NoError(t, b.fsm.Apply(raw))
+	if mbs := b.MetaBucketStore(); mbs != nil {
+		require.NoError(t, mbs.CreateBucket(context.Background(), bucket, "local", false))
+		return
+	}
+	// No MetaBucketStore: write BucketKey directly to the store (legacy HeadBucket fallback).
+	require.NoError(t, b.store.Update(func(txn MetadataTxn) error {
+		return txn.Set(b.ks().BucketKey(bucket), []byte("{}"))
+	}))
 }
 
 // TestBucketWrite_Delete_ConsensusBeforeRemoveAll verifies the ordering contract:
@@ -137,7 +152,7 @@ func TestBucketWrite_Delete_ConsensusBeforeRemoveAll(t *testing.T) {
 
 	ctx := context.Background()
 	// Seed the bucket in the FSM without going through MetaBucketStore.
-	seedBucketInFSM(t, b, "del-bucket")
+	seedBucketForDelete(t, b, "del-bucket")
 
 	b.removeAll = func(path string) error {
 		fake.callOrder = append(fake.callOrder, "remove")
@@ -163,7 +178,7 @@ func TestBucketWrite_Delete_MetaErrorAbortsRemoveAll(t *testing.T) {
 
 	ctx := context.Background()
 	// Seed the bucket in the FSM without going through MetaBucketStore.
-	seedBucketInFSM(t, b, "del-bucket")
+	seedBucketForDelete(t, b, "del-bucket")
 
 	removeAllCalled := false
 	b.removeAll = func(path string) error {

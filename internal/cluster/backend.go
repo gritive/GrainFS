@@ -106,12 +106,6 @@ type raftSnapshotResponse struct {
 	err    error
 }
 
-// BucketAssigner proposes a bucket→group assignment to the meta-Raft cluster.
-// Implemented by *MetaRaft; nil = no persistence (single-node legacy mode).
-type BucketAssigner interface {
-	ProposeBucketAssignment(ctx context.Context, bucket, groupID string) error
-}
-
 // DistributedBackend implements storage.Backend with Raft-replicated metadata
 // and local file storage for data. Metadata mutations go through Raft;
 // reads are served from the local BadgerDB (kept in sync by the FSM).
@@ -202,7 +196,6 @@ type DistributedBackend struct {
 	// returns this backend (single-group, identical to pre-multi-group behavior).
 	owningGroupBackendFn func(bucket string) *DistributedBackend
 
-	assigner        BucketAssigner   // PR-D: MetaRaft proposer; nil = no-op (single-node legacy)
 	metaBucketStore MetaBucketStore  // Task 7: cluster-wide bucket metadata seam; nil = not wired
 	router          *Router          // PR-D: bucket→group routing; nil = no routing
 	shardGroup      ShardGroupSource // v0.0.7.0: query active groups for hash assignment; nil = legacy single-group path
@@ -255,12 +248,6 @@ type DistributedBackend struct {
 	// apply-actor goroutine, so the callback MUST dispatch a goroutine for any
 	// proposal/Kick. Wired by the serveruntime to re-Kick the RewrapController.
 	onFSMValueResealDone func()
-
-	// onBucketPolicyApply, if set, fires after a committed CmdSetBucketPolicy /
-	// CmdDeleteBucketPolicy with the affected bucket (or "" on snapshot install)
-	// so an upper-layer compiled policy cache can invalidate and re-pull. Atomic
-	// because the apply loop reads it before boot finishes wiring it.
-	onBucketPolicyApply atomic.Pointer[func(bucket string)]
 
 	// removeAll is the function used to physically remove a bucket directory.
 	// Defaults to os.RemoveAll; tests inject a spy to verify ordering relative
@@ -799,13 +786,6 @@ func (b *DistributedBackend) SetOnApply(fn OnApplyFunc) {
 	b.onApply = fn
 }
 
-// SetOnBucketPolicyApply wires the per-node bucket-policy cache invalidator,
-// fired after a committed policy apply (or "" on snapshot install). Safe to call
-// after RunApplyLoop has started (the field is atomic).
-func (b *DistributedBackend) SetOnBucketPolicyApply(fn func(bucket string)) {
-	b.onBucketPolicyApply.Store(&fn)
-}
-
 // SetMultiGeneration arms (true) or disarms (false) the cross-generation LWW
 // read merge for quorum-meta reads (S7-6). The coordinator calls it from
 // rebuild() with generationCount() > 1 so that, once a topology generation has
@@ -859,32 +839,14 @@ func (b *DistributedBackend) notifyOnApply(raw []byte) {
 		return
 	}
 
-	// Bucket-policy commands invalidate the upper-layer compiled policy cache so
-	// the next authz Allow re-pulls the now-committed policy. Early-return before
-	// the object-cache block (which these commands never affect).
-	switch cmd.Type {
-	case CmdSetBucketPolicy:
-		if c, derr := decodeSetBucketPolicyCmd(cmd.Data); derr == nil {
-			if fn := b.onBucketPolicyApply.Load(); fn != nil {
-				(*fn)(c.Bucket)
-			}
-		}
-		return
-	case CmdDeleteBucketPolicy:
-		if c, derr := decodeDeleteBucketPolicyCmd(cmd.Data); derr == nil {
-			if fn := b.onBucketPolicyApply.Load(); fn != nil {
-				(*fn)(c.Bucket)
-			}
-		}
-		return
-	}
-
-	// No further apply-driven cache invalidation: the per-object/multipart commands
-	// that once carried an object key (CmdPutObjectMeta/CmdDeleteObject/
-	// CmdCompleteMultipart) were retired when the data plane moved off-raft. Object
-	// mutations now flow through the quorum-meta blob path, which invalidates caches
-	// directly. No remaining live control-plane command names an object, so the apply
-	// hook does nothing past the policy/reseal early-returns above.
+	// No apply-driven cache invalidation beyond the reseal-done early-return above.
+	// The group-0 bucket-policy commands (CmdSetBucketPolicy/CmdDeleteBucketPolicy)
+	// are retired (Task 12: bucket control-plane moved to meta-raft); policy
+	// invalidation is now driven by the meta post-commit hook (metaPolicyInvalidation
+	// worker). Per-object/multipart commands were retired earlier (data-plane raft-free
+	// Slices 0-2); object mutations flow through the quorum-meta blob path, which
+	// invalidates caches directly. No remaining live control-plane command names an
+	// object or policy, so this hook is a no-op for everything except reseal-done.
 }
 
 // forwardPropose는 팔로워에서 리더로 propose 요청을 cluster-transport RPC로 전달한다.
@@ -1294,10 +1256,6 @@ func (b *DistributedBackend) GetRegistry() *Registry {
 }
 
 var _ storage.Backend = (*DistributedBackend)(nil)
-
-// SetBucketAssigner injects the MetaRaft proposer for bucket assignment persistence.
-// Must be called before CreateBucket. Nil disables persistence (single-node legacy mode).
-func (b *DistributedBackend) SetBucketAssigner(a BucketAssigner) { b.assigner = a }
 
 // SetMetaBucketStore wires the cluster-wide bucket metadata seam (Task 7).
 // When non-nil, callers can read/write bucket metadata through the meta-Raft
