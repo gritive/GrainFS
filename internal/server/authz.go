@@ -42,20 +42,6 @@ func (s *Server) authzMiddleware() app.HandlerFunc {
 			return
 		}
 
-		// Internal audit artifacts are read-only through S3 so Iceberg/DuckDB can
-		// fetch metadata and data files returned by the REST catalog. Mutations,
-		// bucket-level reads, and listing remain blocked.
-		switch s.authorizeAuditInternalBucket(ctx, c, req.Bucket, req.Key, req.Method, req.Action) {
-		case auditInternalBucketAllowed:
-			c.Next(ctx)
-			return
-		case auditInternalBucketDenied:
-			return
-		case auditInternalBucketContinueSigned:
-			// Signed callers still pass through the normal IAM/policy/ACL checks
-			// below so ad hoc DuckDB analysis can read Iceberg files.
-		}
-
 		if !s.authorizeAccessKeyScope(ctx, c, req.Bucket, req.Key, req.Action) {
 			return
 		}
@@ -87,9 +73,6 @@ func (s *Server) mustAuthorize(ctx context.Context, c *app.RequestContext, bucke
 // loading the object's metadata; the same request was already pre-load gated
 // by authzMiddleware (or, for cross-bucket reads, by mustAuthorize).
 func (s *Server) mustAuthorizePostLoad(ctx context.Context, c *app.RequestContext, bucket, key string, action s3auth.S3Action, aclByte uint8) (denied bool) {
-	if auditInternalObjectReadAllowed(bucket, key, string(c.Method()), c.RemoteAddr().String(), AccessKeyFromContext(ctx), s.auditInternalAccessKey) {
-		return false
-	}
 	if s.authorizePostLoad(ctx, c, bucket, key, action, aclByte) {
 		return false
 	}

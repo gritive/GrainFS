@@ -15,7 +15,6 @@ func (s *Server) authorizePreLoad(ctx context.Context, c *app.RequestContext, bu
 
 func (s *Server) authorizePreLoadWithDenyMessage(ctx context.Context, c *app.RequestContext, bucket, key string, action s3auth.S3Action, denyMessage string) bool {
 	decision := s.authz.Decide(ctx, authzInput(ctx, bucket, key, action, 0), s3auth.PhasePreLoad)
-	rememberAuthzDecision(c, decision)
 	if decision.Allow {
 		return true
 	}
@@ -28,22 +27,7 @@ func (s *Server) authorizePreLoadWithDenyMessage(ctx context.Context, c *app.Req
 
 func (s *Server) authorizePostLoad(ctx context.Context, c *app.RequestContext, bucket, key string, action s3auth.S3Action, aclByte uint8) bool {
 	decision := s.authz.Decide(ctx, authzInput(ctx, bucket, key, action, aclByte), s3auth.PhasePostLoad)
-	rememberAuthzDecision(c, decision)
 	return decision.Allow
-}
-
-// rememberAuthzDecision stashes the Layer 1 decision metadata onto the request
-// context so the audit envelope finalizer can populate matched_policy_id /
-// matched_sid / authz_latency_us / condition_context_json on the audit.s3
-// row without re-evaluating the policy. T51' §6.
-func rememberAuthzDecision(c *app.RequestContext, decision s3auth.Decision) {
-	if c == nil {
-		return
-	}
-	c.Set(auditAuthzDecisionKey, decision)
-	if decision.Allow && decision.Detail.AnonAllow {
-		c.Set(auditAuthzAnonAllowKey, true)
-	}
 }
 
 func authzInput(ctx context.Context, bucket, key string, action s3auth.S3Action, aclByte uint8) s3auth.PermCheckInput {

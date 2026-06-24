@@ -154,9 +154,6 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		ActorAuth:                newOIDCActorAuthenticator(state.cfgStore),
 		PDPTokens:                ensurePDPTokenSource(state),
 	}
-	if state.auditSearcher != nil {
-		state.adminDeps.AuditQuery = state.auditSearcher
-	}
 	state.adminDeps.Status = NewStatusAdapter(
 		state.nodeID,
 		cfg.DataDir,

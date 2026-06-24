@@ -53,9 +53,6 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 		HealReceiptGossipInterval: 59 * time.Second,
 		HealReceiptWindow:         61,
 
-		AuditIceberg:        true,
-		AuditCommitInterval: 67 * time.Second,
-
 		FDWatchEnabled: true,
 		FDOpts: resourceguard.FDOptions{
 			PollInterval:      71 * time.Second,
@@ -148,10 +145,6 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 	require.Equal(t, opts.ScrubOrphanAge, cfg.ScrubOrphanAge)
 	require.Equal(t, opts.SegmentGCRetention, cfg.SegmentGCRetention)
 	require.Equal(t, opts.DegradedInterval, cfg.DegradedInterval)
-
-	// Audit.
-	require.Equal(t, opts.AuditIceberg, cfg.AuditIceberg)
-	require.Equal(t, opts.AuditCommitInterval, cfg.AuditCommitInterval)
 
 	// Resource guards.
 	require.Equal(t, opts.FDWatchEnabled, cfg.FDWatchEnabled)

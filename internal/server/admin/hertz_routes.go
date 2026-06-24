@@ -30,7 +30,6 @@ func RegisterAdmin(h *server.Hertz, d *Deps) {
 	registerIAMPDP(g, d)
 	registerBucket(g, d)
 	registerCredentials(g, d)
-	registerAudit(g, d)
 	registerStatus(g, d)
 }
 

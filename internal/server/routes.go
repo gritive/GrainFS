@@ -24,7 +24,6 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 	s.registerAdminAPI(h)
 	s.registerConfigAPI(h)
 	s.registerEventsAPI(h)
-	s.registerAuditAPI(h)
 	alertssvc.NewHandler(alertssvc.Deps{
 		State:            s.alerts,
 		LocalhostOnly:    localhostOnly,

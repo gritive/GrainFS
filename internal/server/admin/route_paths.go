@@ -47,11 +47,6 @@ const (
 	routePathIAMPDPToken  = "/iam/pdp/token"
 	routePathIAMPDPStatus = "/iam/pdp/status"
 
-	routePathAuditQuery        = "/audit/query"
-	routePathAuditRecentDenies = "/audit/recent-denies"
-	routePathAuditBySA         = "/audit/by-sa/:said"
-	routePathAuditByRequestID  = "/audit/by-request-id/:rid"
-
 	routePathStatus = "/status"
 
 	routePathUpstreams        = "/upstreams"

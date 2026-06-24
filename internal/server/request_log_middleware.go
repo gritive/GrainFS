@@ -13,6 +13,20 @@ import (
 	"github.com/gritive/GrainFS/internal/iam"
 )
 
+// auditErrReasonKey is a Hertz context key that carries a short machine-readable
+// reason string for the request error (e.g. "key_scope_mismatch"). Set by
+// authz middleware so the request log middleware can include it in the log line.
+const auditErrReasonKey = "audit.err_reason"
+
+// auditBytesOutKey is a Hertz context key that carries the exact response body
+// byte count for streaming responses (set by object body / range handlers
+// before the body is drained, so the log middleware reads the true value).
+const auditBytesOutKey = "audit.bytes_out"
+
+// auditObjectKeyKey is a Hertz context key that carries the resolved object key
+// for form-post uploads (the key is not in the URL but in the multipart body).
+const auditObjectKeyKey = "audit.object_key"
+
 func (s *Server) s3RequestLogMiddleware() app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		bucket := c.Param("bucket")

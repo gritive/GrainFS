@@ -29,10 +29,6 @@ func (s *Server) resolveAccessKeyPrincipal(ctx context.Context, accessKey string
 	return ctx, nil
 }
 
-func (s *Server) signedAuditObjectRead(ctx context.Context, bucket, key, method string) bool {
-	return s.iamConfigured() && auditObjectReadRequest(bucket, key, method) && AccessKeyFromContext(ctx) != ""
-}
-
 func (s *Server) accessKeyScopeEnforced() bool {
 	return s.iamConfigured()
 }

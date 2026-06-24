@@ -62,11 +62,6 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 		if bucket == "" {
 			bucket, key = s3PathBucketKey(path)
 		}
-		if nextCtx, ok := s.authenticateAuditInternalRequest(ctx, c, r, bucket, key, method); ok {
-			ctx = nextCtx
-			c.Next(ctx)
-			return
-		}
 		isObjectRead := (method == "GET" || method == "HEAD") && key != "" && r.URL.RawQuery == ""
 		if isS3Path && isObjectRead && r.Header.Get("Authorization") == "" {
 			ctx = WithAccessKey(ctx, "")
@@ -129,7 +124,6 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 						}
 					}
 					if failure != nil {
-						s.recordAuditAuthFailure(ctx, c, failure.status, failure.reason)
 						writeXMLError(c, failure.status, failure.code, failure.message)
 						c.Abort()
 						return
@@ -143,7 +137,6 @@ func (s *Server) authMiddleware() app.HandlerFunc {
 
 		nextCtx, failure := s.authenticateSignedRequest(ctx, r)
 		if failure != nil {
-			s.recordAuditAuthFailure(ctx, c, failure.status, failure.reason)
 			writeXMLError(c, failure.status, failure.code, failure.message)
 			c.Abort()
 			return

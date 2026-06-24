@@ -6,8 +6,6 @@ const (
 	routeFeatureAlerts routeFeature = iota
 	routeFeatureIncident
 	routeFeatureReceipt
-	routeFeatureAuditHealth
-	routeFeatureAuditSearchS3
 	routeFeatureEventLog
 	routeFeatureBalancer
 	routeFeatureScrubber
@@ -35,8 +33,6 @@ var routeAvailabilityManifest = []routeAvailabilityEntry{
 	{feature: routeFeatureAlerts, name: "alerts", unavailableMode: routeHiddenWhenUnavailable},
 	{feature: routeFeatureIncident, name: "incident", unavailableMode: routeHiddenWhenUnavailable},
 	{feature: routeFeatureReceipt, name: "receipt", unavailableMode: routeHiddenWhenUnavailable},
-	{feature: routeFeatureAuditHealth, name: "audit_health", unavailableMode: routeRegisteredWhenUnavailable},
-	{feature: routeFeatureAuditSearchS3, name: "audit_search_s3", unavailableMode: routeRegisteredWhenUnavailable},
 	{feature: routeFeatureEventLog, name: "eventlog", unavailableMode: routeRegisteredWhenUnavailable},
 	{feature: routeFeatureBalancer, name: "balancer", unavailableMode: routeRegisteredWhenUnavailable},
 	{feature: routeFeatureScrubber, name: "scrubber", unavailableMode: routeRegisteredWhenUnavailable},
@@ -64,10 +60,6 @@ func (s *Server) routeFeatureAvailable(feature routeFeature) bool {
 		return s.incidentStore != nil
 	case routeFeatureReceipt:
 		return s.receiptAPI != nil
-	case routeFeatureAuditHealth:
-		return s.auditOutbox != nil
-	case routeFeatureAuditSearchS3:
-		return s.auditSearcher != nil
 	case routeFeatureEventLog:
 		return s.evStore != nil
 	case routeFeatureBalancer:

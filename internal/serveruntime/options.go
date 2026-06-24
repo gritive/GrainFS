@@ -65,10 +65,6 @@ type ServeOptions struct {
 	HealReceiptGossipInterval time.Duration // --heal-receipt-gossip-interval
 	HealReceiptWindow         int           // --heal-receipt-window
 
-	// --- Audit ---
-	AuditIceberg        bool          // --audit-iceberg
-	AuditCommitInterval time.Duration // --audit-commit-interval
-
 	// --- At-rest KEK protection (opt-in; default plaintext) ---
 	KEKProtector          string // --kek-protector (plaintext|env)
 	KEKRecoverySecretFile string // --kek-recovery-secret-file (env protector)

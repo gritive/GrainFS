@@ -3,7 +3,6 @@ package server
 import (
 	"testing"
 
-	"github.com/gritive/GrainFS/internal/audit"
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/receipt"
 	"github.com/gritive/GrainFS/internal/server/alertssvc"
@@ -37,8 +36,6 @@ func TestRouteAvailabilityManifestDocumentsRegisteredOptionalFeatures(t *testing
 		feature routeFeature
 		name    string
 	}{
-		{feature: routeFeatureAuditHealth, name: "audit_health"},
-		{feature: routeFeatureAuditSearchS3, name: "audit_search_s3"},
 		{feature: routeFeatureEventLog, name: "eventlog"},
 		{feature: routeFeatureBalancer, name: "balancer"},
 		{feature: routeFeatureScrubber, name: "scrubber"},
@@ -73,12 +70,6 @@ func TestRouteFeatureRoutesVisibleRequiresDependencyForHiddenFeatures(t *testing
 	if s.routeFeatureRoutesVisible(routeFeatureReceipt) {
 		t.Fatal("receipt routes should be hidden without receipt API")
 	}
-	if !s.routeFeatureRoutesVisible(routeFeatureAuditHealth) {
-		t.Fatal("audit health route should remain visible without audit outbox")
-	}
-	if !s.routeFeatureRoutesVisible(routeFeatureAuditSearchS3) {
-		t.Fatal("audit search route should remain visible without searcher")
-	}
 	if !s.routeFeatureRoutesVisible(routeFeatureEventLog) {
 		t.Fatal("eventlog route should remain visible without event store")
 	}
@@ -110,8 +101,6 @@ func TestRouteFeatureRoutesVisibleWhenDependencyExists(t *testing.T) {
 		alerts:        &alertssvc.State{},
 		incidentStore: &incidentStoreStub{},
 		receiptAPI:    receipt.NewAPI(nil, nil, nil, 0),
-		auditOutbox:   &audit.Outbox{},
-		auditSearcher: &fakeAuditSearcher{},
 		evStore:       &eventstore.Store{},
 	}
 
@@ -123,12 +112,6 @@ func TestRouteFeatureRoutesVisibleWhenDependencyExists(t *testing.T) {
 	}
 	if !s.routeFeatureRoutesVisible(routeFeatureReceipt) {
 		t.Fatal("receipt routes should be visible with receipt API")
-	}
-	if !s.routeFeatureAvailable(routeFeatureAuditHealth) {
-		t.Fatal("audit health should be available with audit outbox")
-	}
-	if !s.routeFeatureAvailable(routeFeatureAuditSearchS3) {
-		t.Fatal("audit search should be available with searcher")
 	}
 	if !s.routeFeatureAvailable(routeFeatureEventLog) {
 		t.Fatal("eventlog should be available with event store")

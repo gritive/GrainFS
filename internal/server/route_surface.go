@@ -40,8 +40,6 @@ var routeSurfaceManifest = []routeSurfaceEntry{
 	{pathPrefix: routePrefixIncidents, surface: routeSurfaceOps, authn: routeAuthnAnonymous},
 	{pathExact: routePathClusterStatus, surface: routeSurfaceOps, authn: routeAuthnAnonymous},
 	{pathExact: routePathClusterRemovePeer, surface: routeSurfaceOps, authn: routeAuthnAnonymous},
-	{pathExact: routePathAuditHealth, surface: routeSurfaceOps, authn: routeAuthnAnonymous},
-	{pathExact: routePathAuditS3, surface: routeSurfaceOps, authn: routeAuthnAnonymous},
 	{pathExact: routePathCacheStatus, surface: routeSurfaceOps, authn: routeAuthnAnonymous},
 }
 

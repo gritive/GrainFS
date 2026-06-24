@@ -8,7 +8,6 @@ import (
 	"github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/gritive/GrainFS/internal/audit"
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/eventstore"
@@ -72,10 +71,6 @@ type ReadIndexer interface {
 	WaitApplied(ctx context.Context, index uint64) error
 }
 
-type auditSearcher interface {
-	SearchS3(ctx context.Context, f audit.SearchFilter) ([]audit.SearchRow, error)
-}
-
 type RaftSnapshotter interface {
 	TriggerRaftSnapshot(ctx context.Context) (raft.SnapshotResult, error)
 	RaftSnapshotStatus() (raft.SnapshotStatus, error)
@@ -111,15 +106,7 @@ type Server struct {
 	hub         *Hub
 	policyStore *CompiledPolicyStore
 
-	lifecycle     *lifecycle.Service
-	auditEmitter  *audit.Emitter
-	auditOutbox   *audit.Outbox
-	auditSearcher auditSearcher
-	auditNodeID   string
-
-	auditInternalAccessKey string
-	auditInternalSecretKey string
-	auditInternalVerifier  *s3auth.CachingVerifier
+	lifecycle *lifecycle.Service
 
 	cluster         ClusterInfo
 	membership      ClusterMembership

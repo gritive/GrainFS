@@ -17,8 +17,6 @@ func TestRouteAuthnPolicyForPath_DocumentsCurrentBypassSurface(t *testing.T) {
 		{path: "/api/incidents/open", want: routeAuthnAnonymous},
 		{path: "/api/cluster/status", want: routeAuthnAnonymous},
 		{path: "/api/cluster/remove-peer", want: routeAuthnAnonymous},
-		{path: "/api/audit/health", want: routeAuthnAnonymous},
-		{path: "/api/audit/s3", want: routeAuthnAnonymous},
 		{path: "/api/cache/status", want: routeAuthnAnonymous},
 		{path: "/admin/health/raft", want: routeAuthnLocalhost},
 		{path: "/bucket", want: routeAuthnSigV4},

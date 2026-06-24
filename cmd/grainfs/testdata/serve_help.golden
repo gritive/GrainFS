@@ -21,8 +21,6 @@ Flags:
       --admin-group string                                  OS group name for admin socket chown (default: caller's primary group)
       --admin-socket string                                 admin Unix socket path (default <data>/admin.sock)
       --append-size-cap-bytes int                           Per-object total size cap for AppendObject in bytes (default 5 TiB, S3 PutObject parity). (default 5497558138880)
-      --audit-commit-interval duration                      how often the audit committer flushes the ring buffer to Iceberg (default 1m0s)
-      --audit-iceberg                                       enable audit log lake: S3 ops → Iceberg table on grainfs-audit bucket (default true)
       --badger-gc-disable                                   disable BadgerDB vlog GC ticker (debug only)
       --badger-gc-fail-threshold int32                      consecutive RunValueLogGC failures before incident (default 3)
       --badger-gc-interval duration                         BadgerDB vlog GC ticker cadence (default 5m0s)

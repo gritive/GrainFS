@@ -37,7 +37,6 @@ type Deps struct {
 	ProtocolCredAuthz        CredentialAuthorizer         // required when ProtocolCredentials is configured; nil fails closed
 	AdminAuthz               CredentialAuthorizer         // optional; bearer actor authz for selected admin routes
 	ActorAuth                ActorAuthenticator           // optional; bearer actor auth for selected admin routes
-	AuditQuery               AuditQueryService            // optional; nil disables audit admin endpoints
 	Status                   StatusService                // optional; nil disables GET /v1/status
 	Token                    *dashboard.TokenStore
 	PublicURL                string // e.g. "https://node1:9000"; empty means use localhost fallback

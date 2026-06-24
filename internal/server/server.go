@@ -17,6 +17,11 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
+// Compile-time guard: *iam.AuditLogger MUST satisfy s3auth.AuditEmitterDetailed
+// so RequestAuthorizer.Decide's runtime type assertion succeeds. Both methods take
+// s3auth.AuditAllowDetails (with iam.AuditDetails as a Go type alias).
+var _ s3auth.AuditEmitterDetailed = (*iam.AuditLogger)(nil)
+
 func NewServerStorage(backend storage.Backend, policyStore *CompiledPolicyStore) ServerStorage {
 	return ServerStorage{
 		Ops:     storage.NewOperations(backend, storage.WithPolicyStore(policyStore)),
@@ -199,9 +204,6 @@ func (s *Server) PolicyStore() *CompiledPolicyStore { return s.policyStore }
 func (s *Server) Shutdown(ctx context.Context) error {
 	err := s.hertz.Shutdown(ctx)
 	s.stopEventWorker()
-	if closer, ok := s.auditSearcher.(interface{ Close() error }); ok {
-		_ = closer.Close()
-	}
 	if s.alerts != nil {
 		s.alerts.Close()
 	}

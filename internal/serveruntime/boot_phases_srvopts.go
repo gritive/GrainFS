@@ -3,17 +3,11 @@ package serveruntime
 import (
 	"context"
 	"fmt"
-	"net"
-	"path/filepath"
-	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/alerts"
-	"github.com/gritive/GrainFS/internal/audit"
-	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
@@ -21,7 +15,6 @@ import (
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/iam/pdp"
-	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/incident"
 	"github.com/gritive/GrainFS/internal/incident/badgerstore"
 	"github.com/gritive/GrainFS/internal/lifecycle"
@@ -32,7 +25,6 @@ import (
 	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/server/alertssvc"
 	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/gritive/GrainFS/internal/transport"
 )
 
 // bootSrvOptsAndReceipt assembles the slice of server.Option that will be
@@ -142,22 +134,6 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 		server.WithEventStore(eventstore.New(state.db)),
 		server.WithAlerts(clusterAlerts),
 		server.WithDataDir(dataDir),
-	}
-	var metaCatalog *cluster.MetaCatalog
-	if len(peers) == 0 && !cfg.RaftAddrExplicit && !state.inviteJoinMode {
-		legacyStore := icebergcatalog.NewStore(badgermeta.Wrap(state.db), "s3://grainfs-tables/warehouse")
-		metaCatalog = cluster.NewMetaCatalog(metaRaft, state.backend, "s3://grainfs-tables/warehouse")
-		if err := MigrateLegacySingletonIcebergCatalog(ctx, legacyStore, metaCatalog, state.backend); err != nil {
-			return fmt.Errorf("migrate singleton Iceberg catalog: %w", err)
-		}
-	} else {
-		metaForward := func(ctx context.Context, command []byte) error {
-			return state.metaForwardSender.Send(ctx, MetaProposalTargets(metaRaft.Node().LeaderID(), peers), command)
-		}
-		metaReadTargets := func() []string {
-			return MetaProposalTargets(metaRaft.Node().LeaderID(), peers)
-		}
-		metaCatalog = cluster.NewMetaCatalogWithForwarders(metaRaft, state.backend, "s3://grainfs-tables/warehouse", metaForward, state.metaReadSender, metaReadTargets)
 	}
 	// §5 T45: ProxyTrust is constructed in bootMetaRaftWiring and its CIDRs are
 	// driven by the OnTrustedProxyCIDR reload hook. Pass it to the Server so
@@ -333,116 +309,6 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 	}
 	srvOpts = append(srvOpts, server.WithMutationGate(state.mutationGate))
 
-	if cfg.AuditIceberg {
-		auditOutbox, err := audit.OpenOutbox(filepath.Join(cfg.DataDir, "audit-outbox"))
-		if err != nil {
-			return fmt.Errorf("audit outbox: %w", err)
-		}
-		state.AddCleanup(func() { _ = auditOutbox.Close() })
-		// Seed and publish: SetDenyOnly runs against the local var BEFORE the
-		// outbox pointer becomes visible on state.auditOutbox, so a concurrent
-		// reload hook from Raft Apply either (a) fires before publication and
-		// silently no-ops on the still-nil pointer, leaving state.auditOutbox
-		// at the boot-time snapshot value when publication completes, or (b)
-		// fires after publication and wins. Case (a) is a narrow lost-update
-		// window during boot (a fresh true that arrived via Raft replay between
-		// GetBool and the publish would be clobbered by the boot snapshot),
-		// but at boot phase Raft Apply has not yet replayed config writes —
-		// the hook subscription was just registered in bootMetaRaftWiring.
-		// If this assumption breaks (e.g. boot ordering changes), wrap the
-		// publish + seed in an atomic.Pointer-based handle that the hook can
-		// CAS against.
-		if v, ok := state.cfgStore.GetBool("audit.deny-only"); ok {
-			auditOutbox.SetDenyOnly(v)
-		}
-		state.auditOutbox = auditOutbox
-		auditAccessKey := "AKGFAUDIT" + strings.ReplaceAll(uuid.NewString(), "-", "")
-		auditSecretKey := uuid.NewString() + uuid.NewString()
-		srvOpts = append(srvOpts,
-			server.WithAuditOutbox(auditOutbox),
-			server.WithAuditNodeID(nodeID),
-			server.WithAuditInternalCredentials(auditAccessKey, auditSecretKey),
-		)
-		if endpoint := auditSearchEndpoint(cfg.Addr); endpoint != "" {
-			searcher := audit.NewDuckDBSearcher(audit.DuckDBSearchConfig{
-				Endpoint:  endpoint,
-				AccessKey: auditAccessKey,
-				SecretKey: auditSecretKey,
-			})
-			srvOpts = append(srvOpts, server.WithAuditSearcher(searcher))
-			state.auditSearchWarmup = searcher.Warmup
-			state.auditSearcher = searcher
-		} else {
-			log.Warn().Str("addr", cfg.Addr).Msg("audit search disabled: HTTP address does not resolve to a stable local endpoint")
-		}
-		// Best-effort eager bootstrap; lazy bootstrap in commit() handles the rest.
-		if err := audit.Bootstrap(ctx, metaCatalog, state.backend); err != nil {
-			log.Warn().Err(err).Msg("audit bootstrap deferred to first commit cycle")
-		}
-		interval := cfg.AuditCommitInterval
-		if interval == 0 {
-			interval = 60 * time.Second
-		}
-		shipFn := func(ctx context.Context, events []audit.S3Event) error {
-			payload, err := audit.EncodeS3Batch(events)
-			if err != nil {
-				return err
-			}
-			targets := MetaProposalTargets(metaRaft.Node().LeaderID(), peers)
-			if len(targets) == 0 {
-				return fmt.Errorf("audit ship: no leader elected")
-			}
-			// Native /audit/ship buffered route (Phase 8 N7-3). This family is
-			// BUFFERED, not gossip: the tunnel Send rode doRPC and surfaced the
-			// handler's StatusError (decode/append failure) as an error — a
-			// fire-and-forget route would silently drop audit failures. The
-			// success reply is empty; only the error matters.
-			_, err = state.clusterTransport.CallBuffered(ctx, targets[0], transport.RouteAuditShip, payload)
-			return err
-		}
-		committer := audit.NewCommitter(audit.CommitterConfig{
-			Outbox:       auditOutbox,
-			Catalog:      metaCatalog,
-			Backend:      state.backend,
-			IsLeader:     func() bool { return metaRaft.IsLeader() },
-			ShipToLeader: shipFn,
-			NodeID:       nodeID,
-			Interval:     interval,
-		})
-		// Native /audit/ship buffered route. Decode/append failures map to a
-		// 500 → sender error, preserving the tunnel's StatusError surfacing.
-		auditShipHandler := func(payload []byte) ([]byte, error) {
-			events, err := audit.DecodeS3Batch(payload)
-			if err != nil {
-				return nil, err
-			}
-			if err := committer.AppendFromFollower(context.Background(), events); err != nil {
-				return nil, err
-			}
-			return nil, nil
-		}
-		state.clusterTransport.RegisterBufferedRoute(transport.RouteAuditShip, auditShipHandler)
-		commitCtx, commitCancel := context.WithCancel(ctx)
-		state.AddCleanup(commitCancel)
-		go committer.Run(commitCtx)
-		log.Info().
-			Str("table", audit.Namespace+"."+audit.TableS3).
-			Str("commit_interval", interval.String()).
-			Msg("audit subsystem enabled")
-	}
-
 	state.srvOpts = srvOpts
 	return nil
-}
-
-func auditSearchEndpoint(addr string) string {
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil || port == "" || port == "0" {
-		return ""
-	}
-	switch strings.Trim(host, "[]") {
-	case "", "0.0.0.0", "::":
-		host = "127.0.0.1"
-	}
-	return "http://" + net.JoinHostPort(host, port)
 }

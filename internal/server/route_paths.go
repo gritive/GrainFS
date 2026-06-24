@@ -30,8 +30,6 @@ const (
 	// SigV4-authenticated like the rest of /api/. Documented in TODOS.
 	routePathLifecycleTestRunCycle = "/api/cluster/lifecycle/test/run-cycle"
 	routePathLifecycleTestSetNow   = "/api/cluster/lifecycle/test/set-now"
-	routePathAuditHealth           = "/api/audit/health"
-	routePathAuditS3               = "/api/audit/s3"
 	routePathCacheStatus           = "/api/cache/status"
 	routePathConfig                = "/api/admin/config"
 	routePathAlertsStatus          = "/api/admin/alerts/status"

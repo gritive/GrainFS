@@ -74,41 +74,7 @@ func bootDegradedAndServices(ctx context.Context, state *bootState) error {
 			}
 		}
 	}()
-	if state.auditSearchWarmup != nil {
-		go func() {
-			if err := warmupAuditSearch(ctx, state.auditSearchWarmup, 15*time.Second, 500*time.Millisecond, 5*time.Second); err != nil {
-				log.Warn().Err(err).Msg("audit search warmup failed")
-				return
-			}
-			log.Info().Msg("audit search warmup completed")
-		}()
-	}
 	return nil
-}
-
-func warmupAuditSearch(ctx context.Context, warmup func(context.Context) error, totalTimeout, retryInterval, attemptTimeout time.Duration) error {
-	if warmup == nil {
-		return nil
-	}
-	warmupCtx, cancel := context.WithTimeout(ctx, totalTimeout)
-	defer cancel()
-
-	for {
-		attemptCtx, attemptCancel := context.WithTimeout(warmupCtx, attemptTimeout)
-		err := warmup(attemptCtx)
-		attemptCancel()
-		if err == nil {
-			return nil
-		}
-
-		timer := time.NewTimer(retryInterval)
-		select {
-		case <-warmupCtx.Done():
-			timer.Stop()
-			return err
-		case <-timer.C:
-		}
-	}
 }
 
 // bootShutdownDrain waits for the context to be cancelled then performs a
