@@ -257,7 +257,7 @@ func TestMetaFSM_IPSTSnapshot_WithAllTrailers(t *testing.T) {
 	srcCfg := config.NewStore()
 	config.RegisterClusterKeys(srcCfg, config.ReloadHooks{})
 	src.SetConfigStore(srcCfg)
-	require.NoError(t, srcCfg.Set(context.Background(), "trusted-proxy.cidr", "10.0.0.0/8"))
+	require.NoError(t, srcCfg.Set(context.Background(), "iam.pdp", `{"enabled":false,"timeout":"5s"}`))
 
 	// DKVS: DEK keeper with a rotation so at least one extra generation exists.
 	kek := make([]byte, encrypt.KEKSize)
@@ -311,9 +311,9 @@ func TestMetaFSM_IPSTSnapshot_WithAllTrailers(t *testing.T) {
 	require.NotEmpty(t, doc)
 
 	// GCFG: the config key must be restored into the cfgStore.
-	got, ok := dstCfg.GetString("trusted-proxy.cidr")
-	require.True(t, ok, "GCFG trailer: trusted-proxy.cidr key must be restored")
-	require.Equal(t, "10.0.0.0/8", got, "GCFG trailer: trusted-proxy.cidr value must be restored")
+	got, ok := dstCfg.GetString("iam.pdp")
+	require.True(t, ok, "GCFG trailer: iam.pdp key must be restored")
+	require.Equal(t, `{"enabled":false,"timeout":"5s"}`, got, "GCFG trailer: iam.pdp value must be restored")
 
 	// DKVS: the meta_fsm.Restore path stores DEK versions into pendingDEKVersions
 	// (the runtime then constructs a new keeper via encrypt.LoadFromFSM). The

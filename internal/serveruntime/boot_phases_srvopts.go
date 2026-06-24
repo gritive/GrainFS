@@ -135,12 +135,6 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 		server.WithAlerts(clusterAlerts),
 		server.WithDataDir(dataDir),
 	}
-	// §5 T45: ProxyTrust is constructed in bootMetaRaftWiring and its CIDRs are
-	// driven by the OnTrustedProxyCIDR reload hook. Pass it to the Server so
-	// authoritativeClientIP can validate Forwarded / X-Forwarded-*.
-	if state.proxyTrust != nil {
-		srvOpts = append(srvOpts, server.WithProxyTrust(state.proxyTrust))
-	}
 	srvOpts = append(srvOpts, cfg.AuthOpts...)
 	if ensureProtocolCredentialStore(state) != nil {
 		srvOpts = append(srvOpts, server.WithProtocolCredentialAuth(

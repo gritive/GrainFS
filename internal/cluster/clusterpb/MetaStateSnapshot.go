@@ -134,46 +134,6 @@ func (rcv *MetaStateSnapshot) ActivePlan(obj *RebalancePlan) *RebalancePlan {
 	return nil
 }
 
-func (rcv *MetaStateSnapshot) IcebergNamespaces(obj *IcebergNamespaceEntry, j int) bool {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
-	if o != 0 {
-		x := rcv._tab.Vector(o)
-		x += flatbuffers.UOffsetT(j) * 4
-		x = rcv._tab.Indirect(x)
-		obj.Init(rcv._tab.Bytes, x)
-		return true
-	}
-	return false
-}
-
-func (rcv *MetaStateSnapshot) IcebergNamespacesLength() int {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
-	if o != 0 {
-		return rcv._tab.VectorLen(o)
-	}
-	return 0
-}
-
-func (rcv *MetaStateSnapshot) IcebergTables(obj *IcebergTableEntry, j int) bool {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
-	if o != 0 {
-		x := rcv._tab.Vector(o)
-		x += flatbuffers.UOffsetT(j) * 4
-		x = rcv._tab.Indirect(x)
-		obj.Init(rcv._tab.Bytes, x)
-		return true
-	}
-	return false
-}
-
-func (rcv *MetaStateSnapshot) IcebergTablesLength() int {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
-	if o != 0 {
-		return rcv._tab.VectorLen(o)
-	}
-	return 0
-}
-
 func (rcv *MetaStateSnapshot) ObjectIndex(obj *MetaObjectIndexEntry, j int) bool {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
 	if o != 0 {
@@ -226,18 +186,6 @@ func (rcv *MetaStateSnapshot) MutateClusterConfig(j int, n byte) bool {
 		return rcv._tab.MutateByte(a+flatbuffers.UOffsetT(j*1), n)
 	}
 	return false
-}
-
-func (rcv *MetaStateSnapshot) IcebergSchemaVersion() int32 {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
-	if o != 0 {
-		return rcv._tab.GetInt32(o + rcv._tab.Pos)
-	}
-	return 0
-}
-
-func (rcv *MetaStateSnapshot) MutateIcebergSchemaVersion(n int32) bool {
-	return rcv._tab.MutateInt32Slot(22, n)
 }
 
 func (rcv *MetaStateSnapshot) LastRotationRequestEntries(obj *LastRotationRequestEntry, j int) bool {
@@ -431,18 +379,6 @@ func MetaStateSnapshotStartLoadSnapshotVector(builder *flatbuffers.Builder, numE
 func MetaStateSnapshotAddActivePlan(builder *flatbuffers.Builder, activePlan flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(4, flatbuffers.UOffsetT(activePlan), 0)
 }
-func MetaStateSnapshotAddIcebergNamespaces(builder *flatbuffers.Builder, icebergNamespaces flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(5, flatbuffers.UOffsetT(icebergNamespaces), 0)
-}
-func MetaStateSnapshotStartIcebergNamespacesVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
-	return builder.StartVector(4, numElems, 4)
-}
-func MetaStateSnapshotAddIcebergTables(builder *flatbuffers.Builder, icebergTables flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(6, flatbuffers.UOffsetT(icebergTables), 0)
-}
-func MetaStateSnapshotStartIcebergTablesVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
-	return builder.StartVector(4, numElems, 4)
-}
 func MetaStateSnapshotAddObjectIndex(builder *flatbuffers.Builder, objectIndex flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(7, flatbuffers.UOffsetT(objectIndex), 0)
 }
@@ -454,9 +390,6 @@ func MetaStateSnapshotAddClusterConfig(builder *flatbuffers.Builder, clusterConf
 }
 func MetaStateSnapshotStartClusterConfigVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(1, numElems, 1)
-}
-func MetaStateSnapshotAddIcebergSchemaVersion(builder *flatbuffers.Builder, icebergSchemaVersion int32) {
-	builder.PrependInt32Slot(9, icebergSchemaVersion, 0)
 }
 func MetaStateSnapshotAddLastRotationRequestEntries(builder *flatbuffers.Builder, lastRotationRequestEntries flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(10, flatbuffers.UOffsetT(lastRotationRequestEntries), 0)

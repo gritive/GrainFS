@@ -46,8 +46,6 @@ func bootstrapAdminViaUDS(t testing.TB, dataDir string) (accessKey, secretKey st
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	// FU#3 / F#26-tls-posture: see tryBootstrapAdminViaUDSResult for rationale.
-	gomega.Expect(seedBootstrapTrustedProxyCIDR(sock)).To(gomega.Succeed(), "seed trusted-proxy.cidr")
 	client := iamUDSClient(sock)
 	body := strings.NewReader(`{"name":"admin","description":"e2e bootstrap"}`)
 	req, err := http.NewRequestWithContext(context.Background(), "POST",
@@ -185,10 +183,6 @@ func runIAMHelpersTryBootstrapAdminViaUDSResultPreservesSAID(t testing.TB) {
 
 	srv := &http.Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/v1/config/trusted-proxy.cidr" {
-				w.WriteHeader(http.StatusNoContent)
-				return
-			}
 			gomega.Expect(r.URL.Path).To(gomega.Equal("/v1/iam/sa"))
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{
@@ -232,8 +226,6 @@ func runIAMHelpersBootstrapAdminViaUDSAnyWithBucketGrants(t testing.TB) {
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			switch {
-			case r.URL.Path == "/v1/config/trusted-proxy.cidr":
-				w.WriteHeader(http.StatusNoContent)
 			case r.URL.Path == "/v1/iam/sa":
 				gomega.Expect(r.Method).To(gomega.Equal(http.MethodPost))
 				_, _ = io.WriteString(w, `{
@@ -293,12 +285,6 @@ func tryBootstrapAdminViaUDS(sock string) (string, string, error) {
 }
 
 func tryBootstrapAdminViaUDSResult(sock string) (iamSAResult, error) {
-	// E2E fixtures run on loopback without TLS, so seed a benign
-	// trusted-proxy.cidr before the first SA POST. Idempotent — the second path
-	// through this for cluster retries leaves the value in place.
-	if err := seedBootstrapTrustedProxyCIDR(sock); err != nil {
-		return iamSAResult{}, err
-	}
 	client := iamUDSClient(sock)
 	body := strings.NewReader(`{"name":"admin","description":"e2e bootstrap"}`)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -325,45 +311,6 @@ func tryBootstrapAdminViaUDSResult(sock string) (iamSAResult, error) {
 		return iamSAResult{}, fmt.Errorf("bootstrap %s: empty creds in response", sock)
 	}
 	return out, nil
-}
-
-// seedBootstrapTrustedProxyCIDR PUTs trusted-proxy.cidr=127.0.0.1/32 on the
-// admin UDS. Production deployments should set one of: TLS cert on disk,
-// GRAINFS_TLS_CERT/KEY env vars, or trusted-proxy.cidr — e2e picks the third.
-// Idempotent: re-running with the same value is a no-op at the FSM level.
-func seedBootstrapTrustedProxyCIDR(sock string) error {
-	return setConfigViaUDS(sock, "trusted-proxy.cidr", "127.0.0.1/32")
-}
-
-// setConfigViaUDS PUTs key=value on the admin UDS /v1/config/<key>. Used by
-// e2e fixtures that need to flip operator-path config knobs.
-func setConfigViaUDS(sock, key, value string) error {
-	client := iamUDSClient(sock)
-	payload, err := json.Marshal(struct {
-		Value string `json:"value"`
-	}{Value: value})
-	if err != nil {
-		return fmt.Errorf("encode %s value: %w", key, err)
-	}
-	body := bytes.NewReader(payload)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut,
-		"http://unix/v1/config/"+key, body)
-	if err != nil {
-		return fmt.Errorf("build %s PUT: %w", key, err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("PUT %s: %w", key, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		buf, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("PUT %s on %s -> %d: %s", key, sock, resp.StatusCode, string(buf))
-	}
-	return nil
 }
 
 // iamSAResult is the deserialized response from POST /v1/iam/sa.

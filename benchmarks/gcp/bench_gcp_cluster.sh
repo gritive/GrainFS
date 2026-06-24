@@ -282,8 +282,6 @@ boot_cluster() {
   # bootstrap IAM SA on node-0 (admin.sock is root-owned)
   local saj
   saj="$(ssh_node "$(node_name 0)" "
-    sudo curl -sf --unix-socket $DATA_DIR/admin.sock -X PUT -H 'Content-Type: application/json' \
-      -d '{\"value\":\"10.0.0.0/8\"}' http://unix/v1/config/trusted-proxy.cidr >/dev/null
     sudo $bin iam --json sa create phase5 --endpoint $DATA_DIR/admin.sock
   ")"
   if [ -z "$saj" ] || ! echo "$saj" | python3 -c 'import json,sys;json.load(sys.stdin)["access_key"]' 2>/dev/null; then

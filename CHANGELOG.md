@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.664.0] - 2026-06-25
+
+### Removed
+- **The orphaned `trusted-proxy.cidr` reverse-proxy feature has been removed.** The `trusted-proxy.cidr`
+  cluster config key, the `grainfs config set trusted-proxy.cidr` path, and the `trusted_proxy` field in
+  the admin status report (`grainfs status` / `GET /v1/status`) are gone. The underlying ProxyTrust
+  client-IP attribution machinery was built only for the Iceberg-backed S3 audit log lake, which was
+  removed in 0.0.663.0; it had no other consumer. For network-exposed authenticated traffic, use TLS (a
+  cert on disk or `GRAINFS_TLS_CERT/KEY`) instead of a trusted reverse proxy.
+
+### Changed
+- **Internal cleanup, no user-facing change.** Reserved the three dead Iceberg slots in the internal
+  `MetaStateSnapshot` FlatBuffers schema (renamed to `(deprecated)` placeholders) and deleted the
+  leftover `Iceberg*` table definitions, dropping the last Iceberg identifiers from the codebase. The
+  meta-snapshot wire format is unchanged — slot positions are preserved, so existing cluster snapshots
+  restore identically.
+
 ## [0.0.663.0] - 2026-06-24
 
 ### Removed

@@ -157,14 +157,6 @@ Convention path: `<data>/tls/cert.pem` + `<data>/tls/key.pem` (or `GRAINFS_TLS_C
 
 TLS is strongly recommended for any network-exposed authenticated deployment.
 
-### Reverse-proxy mode
-
-```bash
-grainfs config set trusted-proxy.cidr 10.0.0.0/8,172.16.0.0/12
-```
-
-Accepts plaintext token endpoint behind a validated proxy (`Forwarded` or `X-Forwarded-Proto: https`).
-
 ### Operator-managed KEK source
 
 > **Phase A:** The legacy `GRAINFS_KEK_SOURCE` env var is no longer supported and

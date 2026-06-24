@@ -212,19 +212,6 @@ func Run(ctx context.Context, cfg Config) error {
 	// and packedBackend (bootBackendWrap) exist. wireDEKKeeper ran too early (before
 	// the backends) to register them; it stored the controller on state for this.
 	wireRewrapLanes(state)
-	// §5 T45: reconcile the trusted-proxy.cidr atomic snapshot once after raft
-	// start. Snapshot Restore does NOT fire reload hooks, so if the node booted
-	// from a restored snapshot the ProxyTrust view is seeded here.
-	if state.refreshProxyCIDR != nil && state.cfgStore != nil {
-		v, _ := state.cfgStore.GetString("trusted-proxy.cidr")
-		state.refreshProxyCIDR(v)
-		// §5 T45: same snapshot-Restore-doesn't-fire-hooks problem — seed the
-		// ProxyTrust CIDR set from the restored cfgStore so authoritativeClientIP
-		// is correct from the first request post-Restore.
-		if state.proxyTrust != nil {
-			state.proxyTrust.SetCIDRs(splitTrustedProxyCIDRSpec(v))
-		}
-	}
 
 	// R-FSM-α: register data-shard RPC handlers now that shardSvc exists. Until
 	// this point, the forwarder routes answer 503 not-ready, so any racing

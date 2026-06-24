@@ -219,23 +219,6 @@ func TestBenchS3CompatDoesNotAcceptArbitraryServeFlags(t *testing.T) {
 	}
 }
 
-func TestBenchBootstrapIAMSeedsTrustedProxyCIDR(t *testing.T) {
-	body, err := os.ReadFile("lib/common.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	script := string(body)
-	for _, want := range []string{
-		`/v1/config/trusted-proxy.cidr`,
-		`{"value":"127.0.0.1/32"}`,
-		`curl -sf --unix-socket "$admin_sock"`,
-	} {
-		if !strings.Contains(script, want) {
-			t.Fatalf("bench_bootstrap_iam_credentials must seed trusted proxy CIDR with %q", want)
-		}
-	}
-}
-
 func TestBenchS3CompatClusterJoinsViaInviteBundle(t *testing.T) {
 	body, err := os.ReadFile("bench_s3_compat_compare.sh")
 	if err != nil {

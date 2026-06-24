@@ -14,7 +14,7 @@ func TestSnapshot_GCFGTrailerByteDeterminism(t *testing.T) {
 	// Encode the same config map 16 times; every output must be identical.
 	entries := map[string]string{
 		"audit.deny-only":                   "true",
-		"trusted-proxy.cidr":                "10.0.0.0/8,192.168.0.0/16",
+		"iam.pdp":                           `{"enabled":false,"timeout":"5s"}`,
 		"cluster.read-only":                 "false",
 		"iam.allow-anonymous-bucket-policy": "true",
 	}
