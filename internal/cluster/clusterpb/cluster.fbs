@@ -532,6 +532,9 @@ enum MetaCmdType : uint8 {
   AddPlacementGeneration       = 90, // Phase 7: placement generation append (topology 증설 epoch 레지스트리)
   CreateBucket                 = 91, // meta CreateBucket: atomic existence + group assignment (group0-demotion epic)
   DeleteBucket                 = 92, // meta DeleteBucket: remove bucket record + unassign router (group0-demotion epic)
+  SetBucketVersioning          = 93, // meta SetBucketVersioning: RMW versioning state on existing bucket record
+  SetBucketPolicy              = 94, // meta SetBucketPolicy: RMW policy blob on existing bucket record
+  DeleteBucketPolicy           = 95, // meta DeleteBucketPolicy: idempotent nil-out of bucket record policy
 }
 
 table MetaNodeEntry {

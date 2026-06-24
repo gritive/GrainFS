@@ -117,6 +117,9 @@ const (
 	MetaCmdTypeDropClusterKeyAccept        = clusterpb.MetaCmdTypeDropClusterKeyAccept // zero-CA cutover: PR-2b §8 H2
 	MetaCmdTypeCreateBucket                = clusterpb.MetaCmdTypeCreateBucket         // group0-demotion: atomic existence + group assignment
 	MetaCmdTypeDeleteBucket                = clusterpb.MetaCmdTypeDeleteBucket         // group0-demotion: idempotent bucket deletion + router unassign
+	MetaCmdTypeSetBucketVersioning         = clusterpb.MetaCmdTypeSetBucketVersioning  // group0-demotion: RMW versioning state on existing bucket record
+	MetaCmdTypeSetBucketPolicy             = clusterpb.MetaCmdTypeSetBucketPolicy      // group0-demotion: RMW policy blob on existing bucket record
+	MetaCmdTypeDeleteBucketPolicy          = clusterpb.MetaCmdTypeDeleteBucketPolicy   // group0-demotion: idempotent nil-out of bucket record policy
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
@@ -938,6 +941,12 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		return f.applyCreateBucket(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeDeleteBucket:
 		return f.applyDeleteBucket(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeSetBucketVersioning:
+		return f.applySetBucketVersioning(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeSetBucketPolicy:
+		return f.applySetBucketPolicy(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeDeleteBucketPolicy:
+		return f.applyDeleteBucketPolicy(cmd.DataBytes())
 	default:
 		metrics.UnknownMetaCmdTotal.WithLabelValues(strconv.Itoa(int(cmd.Type()))).Inc()
 		log.Warn().Stringer("type", cmd.Type()).Msg("meta_fsm: unknown command type, ignoring")

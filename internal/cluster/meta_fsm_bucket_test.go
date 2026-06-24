@@ -96,6 +96,105 @@ func makeDeleteBucketCmd(t *testing.T, bucket string) []byte {
 	return cmd
 }
 
+// makeSetBucketVersioningCmd is a test helper that encodes a SetBucketVersioningCmd
+// wrapped in a MetaCmd envelope.
+func makeSetBucketVersioningCmd(t *testing.T, bucket, state string) []byte {
+	t.Helper()
+	data, err := encodeMetaSetBucketVersioningCmd(bucket, state)
+	require.NoError(t, err)
+	cmd, err := encodeMetaCmd(MetaCmdTypeSetBucketVersioning, data)
+	require.NoError(t, err)
+	return cmd
+}
+
+// makeSetBucketPolicyCmd is a test helper that encodes a SetBucketPolicyCmd
+// wrapped in a MetaCmd envelope.
+func makeSetBucketPolicyCmd(t *testing.T, bucket string, policy []byte) []byte {
+	t.Helper()
+	data, err := encodeMetaSetBucketPolicyCmd(bucket, policy)
+	require.NoError(t, err)
+	cmd, err := encodeMetaCmd(MetaCmdTypeSetBucketPolicy, data)
+	require.NoError(t, err)
+	return cmd
+}
+
+// makeDeleteBucketPolicyCmd is a test helper that encodes a DeleteBucketPolicyCmd
+// wrapped in a MetaCmd envelope.
+func makeDeleteBucketPolicyCmd(t *testing.T, bucket string) []byte {
+	t.Helper()
+	data, err := encodeMetaDeleteBucketPolicyCmd(bucket)
+	require.NoError(t, err)
+	cmd, err := encodeMetaCmd(MetaCmdTypeDeleteBucketPolicy, data)
+	require.NoError(t, err)
+	return cmd
+}
+
+// TestApplySetBucketVersioningGuardsExistence verifies that applySetBucketVersioning:
+//   - returns ErrBucketNotFound when the bucket does not exist
+//   - sets Versioning on an existing record when the bucket exists
+func TestApplySetBucketVersioningGuardsExistence(t *testing.T) {
+	f := NewMetaFSM()
+
+	// Set versioning on a missing bucket must return ErrBucketNotFound.
+	err := f.applyCmd(makeSetBucketVersioningCmd(t, "nosuchbucket", "Enabled"))
+	require.ErrorIs(t, err, storage.ErrBucketNotFound)
+
+	// Create a bucket, then set versioning — must succeed.
+	require.NoError(t, f.applyCmd(makeCreateBucketCmd(t, "b1", "group-1", false)))
+	require.NoError(t, f.applyCmd(makeSetBucketVersioningCmd(t, "b1", "Enabled")))
+
+	rec, ok := f.BucketRecord("b1")
+	require.True(t, ok)
+	assert.Equal(t, "Enabled", rec.Versioning)
+}
+
+// TestApplySetAndDeleteBucketPolicy verifies that applySetBucketPolicy and
+// applyDeleteBucketPolicy:
+//   - set policy bytes on an existing record
+//   - delete policy (set to nil) on an existing record
+//   - double-delete is idempotent (no error when Policy already nil)
+func TestApplySetAndDeleteBucketPolicy(t *testing.T) {
+	f := NewMetaFSM()
+
+	// Seed a bucket record.
+	require.NoError(t, f.applyCmd(makeCreateBucketCmd(t, "b1", "group-1", false)))
+
+	// Set policy.
+	policy := []byte(`{"d":1}`)
+	require.NoError(t, f.applyCmd(makeSetBucketPolicyCmd(t, "b1", policy)))
+
+	rec, ok := f.BucketRecord("b1")
+	require.True(t, ok)
+	assert.Equal(t, []byte(`{"d":1}`), rec.Policy)
+
+	// Delete policy.
+	require.NoError(t, f.applyCmd(makeDeleteBucketPolicyCmd(t, "b1")))
+	rec, ok = f.BucketRecord("b1")
+	require.True(t, ok)
+	assert.Nil(t, rec.Policy)
+
+	// Delete again — idempotent (no error).
+	require.NoError(t, f.applyCmd(makeDeleteBucketPolicyCmd(t, "b1")))
+}
+
+// TestApplySetBucketPolicyDeepCopies verifies that the policy bytes stored in
+// the FSM are not aliased to the caller's original slice.
+func TestApplySetBucketPolicyDeepCopies(t *testing.T) {
+	f := NewMetaFSM()
+	require.NoError(t, f.applyCmd(makeCreateBucketCmd(t, "b1", "group-1", false)))
+
+	original := []byte(`{"x":1}`)
+	require.NoError(t, f.applyCmd(makeSetBucketPolicyCmd(t, "b1", original)))
+
+	// Mutate the caller's original slice.
+	original[0] = 'Z'
+
+	// FSM record must still hold the original content.
+	rec, ok := f.BucketRecord("b1")
+	require.True(t, ok)
+	assert.Equal(t, []byte(`{"x":1}`), rec.Policy, "FSM policy must not alias caller's slice")
+}
+
 // TestApplyDeleteBucketRemovesRecordIdempotent verifies that applyDeleteBucket:
 //   - removes the BucketRecord on first call
 //   - fires onBucketUnassigned callback with the bucket name
