@@ -77,6 +77,10 @@ func (f *fakeMetaBucketStore) RecordLinearized(_ context.Context, bucket string)
 	return BucketRecord{}, false, nil
 }
 
+func (f *fakeMetaBucketStore) AllRecords() map[string]BucketRecord {
+	return nil
+}
+
 // --- Create tests ---
 
 // TestBucketWrite_Create_GoesToMetaBucketStore verifies that createBucketInternal

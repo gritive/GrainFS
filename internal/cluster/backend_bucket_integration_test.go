@@ -45,9 +45,14 @@ var _ = Describe("Backend bucket integration", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(got).To(Equal(policy))
 
+		// After delete, GetBucketPolicy returns ErrBucketNotFound — matching the
+		// old BadgerDB semantics where the policy key was absent from the store.
+		// The CompiledPolicyStore loader maps this to "no enforceable policy"
+		// (allow-all) and the S3 handler maps it to 404 "NoSuchBucketPolicy".
 		Expect(b.DeleteBucketPolicy("policy-bucket")).To(Succeed())
-		_, err = b.GetBucketPolicy("policy-bucket")
-		Expect(errors.Is(err, storage.ErrBucketNotFound)).To(BeTrue())
+		got, err = b.GetBucketPolicy("policy-bucket")
+		Expect(errors.Is(err, storage.ErrBucketNotFound)).To(BeTrue(), "no-policy bucket must return ErrBucketNotFound")
+		Expect(got).To(BeNil())
 	})
 
 	It("decrypts encrypted bucket policy FSM values", func() {

@@ -36,6 +36,11 @@ type MetaBucketStore interface {
 	// degrades to the local snapshot and returns nil error (availability over
 	// strict consistency). Other ReadIndex errors are returned verbatim.
 	RecordLinearized(ctx context.Context, bucket string) (BucketRecord, bool, error)
+
+	// AllRecords returns a snapshot of all bucket records. Used by ListBuckets
+	// to enumerate buckets from the meta record store. The returned map is a
+	// deep copy; callers may mutate it freely.
+	AllRecords() map[string]BucketRecord
 }
 
 // metaRaftBucketBackend is the set of MetaRaft methods used by the
@@ -88,6 +93,10 @@ func (s *metaBucketStoreImpl) DeletePolicy(ctx context.Context, bucket string) e
 
 func (s *metaBucketStoreImpl) Record(bucket string) (BucketRecord, bool) {
 	return s.meta.FSM().BucketRecord(bucket)
+}
+
+func (s *metaBucketStoreImpl) AllRecords() map[string]BucketRecord {
+	return s.meta.FSM().AllBucketRecords()
 }
 
 func (s *metaBucketStoreImpl) RecordLinearized(ctx context.Context, bucket string) (BucketRecord, bool, error) {

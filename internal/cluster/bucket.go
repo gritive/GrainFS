@@ -80,6 +80,14 @@ func (b *DistributedBackend) HeadBucket(ctx context.Context, bucket string) erro
 	if b.bypassBucketCheck {
 		return nil
 	}
+	mbs := b.MetaBucketStore()
+	if mbs != nil {
+		if _, ok := mbs.Record(bucket); ok {
+			return nil
+		}
+		return storage.ErrBucketNotFound
+	}
+	// Fallback: MetaBucketStore not wired — read from BadgerDB (legacy path).
 	return b.store.View(func(txn MetadataTxn) error {
 		_, err := txn.Get(b.ks().BucketKey(bucket))
 		if err == ErrMetaKeyNotFound {
@@ -344,8 +352,27 @@ func (b *DistributedBackend) SetBucketPolicyPropose(bucket string, policyJSON []
 }
 
 // GetBucketPolicy satisfies storage.PolicyBackend. Reads use the local
-// FSM-consistent view; writes flow through Raft.
+// meta-record snapshot; writes flow through meta-Raft via MetaBucketStore.
 func (b *DistributedBackend) GetBucketPolicy(bucket string) ([]byte, error) {
+	mbs := b.MetaBucketStore()
+	if mbs != nil {
+		rec, ok := mbs.Record(bucket)
+		if !ok {
+			return nil, storage.ErrBucketNotFound
+		}
+		if len(rec.Policy) == 0 {
+			// No policy set. Return ErrBucketNotFound to match the old BadgerDB
+			// semantics: the policy key was absent → ErrBucketNotFound. The
+			// CompiledPolicyStore loader (loadCommittedBucketPolicy) treats this
+			// as "no enforceable policy" and caches a negative entry (allow-all).
+			// The server's getBucketPolicy handler maps any error to 404
+			// "NoSuchBucketPolicy", which is the correct S3 response.
+			return nil, storage.ErrBucketNotFound
+		}
+		// Deep-copy already done by MetaFSM.BucketRecord.
+		return rec.Policy, nil
+	}
+	// Fallback: MetaBucketStore not wired — read from BadgerDB (legacy path).
 	var data []byte
 	err := b.store.View(func(txn MetadataTxn) error {
 		item, err := txn.Get(b.ks().BucketPolicyKey(bucket))
@@ -576,6 +603,15 @@ func (b *DistributedBackend) GetObjectTags(bucket, key, versionID string) ([]sto
 // GetBucketVersioningLinearized instead: a stale read there silently mis-versions
 // the written object.
 func (b *DistributedBackend) GetBucketVersioning(bucket string) (string, error) {
+	mbs := b.MetaBucketStore()
+	if mbs != nil {
+		rec, _ := mbs.Record(bucket)
+		if rec.Versioning == "" {
+			return "Unversioned", nil
+		}
+		return rec.Versioning, nil
+	}
+	// Fallback: MetaBucketStore not wired — read from BadgerDB (legacy path).
 	var state string
 	err := b.store.View(func(txn MetadataTxn) error {
 		item, err := txn.Get(b.ks().BucketVerKey(bucket))
@@ -612,6 +648,18 @@ func (b *DistributedBackend) GetBucketVersioning(bucket string) (string, error) 
 // occurs while group-0 DOES have a leader, where the barrier succeeds. Non-raft
 // backends (nil node) read locally.
 func (b *DistributedBackend) GetBucketVersioningLinearized(ctx context.Context, bucket string) (string, error) {
+	mbs := b.MetaBucketStore()
+	if mbs != nil {
+		rec, _, err := mbs.RecordLinearized(ctx, bucket)
+		if err != nil {
+			return "", err
+		}
+		if rec.Versioning == "" {
+			return "Unversioned", nil
+		}
+		return rec.Versioning, nil
+	}
+	// Fallback: MetaBucketStore not wired — use group-0 raft read barrier then local read.
 	if b.node != nil {
 		readCtx, cancel := context.WithTimeout(ctx, localExecFollowerReadDeadline)
 		idx, err := b.ReadIndex(readCtx)
@@ -628,6 +676,17 @@ func (b *DistributedBackend) GetBucketVersioningLinearized(ctx context.Context, 
 }
 
 func (b *DistributedBackend) ListBuckets(ctx context.Context) ([]string, error) {
+	mbs := b.MetaBucketStore()
+	if mbs != nil {
+		all := mbs.AllRecords()
+		buckets := make([]string, 0, len(all))
+		for name := range all {
+			buckets = append(buckets, name)
+		}
+		sort.Strings(buckets)
+		return buckets, nil
+	}
+	// Fallback: MetaBucketStore not wired — enumerate BadgerDB bucket keys (legacy path).
 	var buckets []string
 	err := b.store.View(func(txn MetadataTxn) error {
 		return b.ks().scanGroupPrefix(txn, []byte("bucket:"), func(rawKey []byte, item MetaItem) error {

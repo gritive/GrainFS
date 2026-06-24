@@ -40,6 +40,9 @@ func (r *recordingMetaBucketStore) Record(bucket string) (BucketRecord, bool) {
 func (r *recordingMetaBucketStore) RecordLinearized(_ context.Context, bucket string) (BucketRecord, bool, error) {
 	return BucketRecord{}, false, nil
 }
+func (r *recordingMetaBucketStore) AllRecords() map[string]BucketRecord {
+	return nil
+}
 
 var _ = Describe("Backend bucket management integration", func() {
 	var (
