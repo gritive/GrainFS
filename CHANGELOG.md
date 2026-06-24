@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.670.0] - 2026-06-25
+
+### Changed
+- **Internal refactor, no user-facing behavior change.** Deduplicated the two streamed-response
+  framed-read transport clients (`ForwardRead` and `AppendSegmentRead`) behind a shared
+  `framedRead` helper with a per-family knob struct, and extracted the matching server-side
+  `decodeFramedHeader` / `writeFramedReply` handler logic. Per-family reply-size bounds (64 MiB for
+  Forward, 256 KiB for append-segment) and the streamed-response ownership contract are preserved
+  unchanged.
+
 ## [0.0.669.0] - 2026-06-25
 
 ### Fixed
