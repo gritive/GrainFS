@@ -280,6 +280,43 @@ Deferred items:
   that blocked the earlier attempt). The guard logic is unit-covered (`readDoneMarkerFn` seam);
   add the deterministic e2e if an apply-timing seam is introduced.
 
+### Code-health audit findings (2026-06-25, via /health)
+
+Composite 8.1/10 (TC 10, Lint 10, Test 9, Dead 4, Shell 4, GBrain 7). `make lint` + `go build ./...`
+are clean and there are **no real test failures** — the `make test-unit` non-zero exit was a stale
+build-cache artifact: `go vet` referenced the deleted `internal/cluster/quorum_meta_shadow_test.go`
+(removed in #857 / v0.0.666.0). `go clean -testcache` (or any rebuild touching `internal/cluster`)
+clears it; 67/68 testable packages pass, 0 real failures. Standalone `staticcheck ./...` (broader than
+golangci's `make lint` subset, and it analyzes test files that golangci skips via `tests: false`)
+surfaced the items below. None block; tracked for cleanup.
+
+- **[P3] `internal/transport/transport_shared.go:224-225` uses Go-deprecated raw EC crypto (SA1019).**
+  The deterministic-key derivation sets `priv.D` / `priv.PublicKey.X` / `priv.PublicKey.Y` via
+  `curve.ScalarBaseMult(k.Bytes())` to turn the cluster-PSK HKDF stream into a deterministic ECDSA
+  key. `priv.D`/`X`/`Y` are deprecated since Go 1.25/1.26 and `ScalarBaseMult` since Go 1.21. Migrate
+  to `crypto/ecdh` (`ecdh.Curve.NewPrivateKey(scalar)`). Security-sensitive (PSK-derived transport
+  identity) — preserve the exact scalar derivation + retry-on-zero-scalar loop and add a regression
+  vector pinning the derived key bytes. NOT caught by `make lint` (golangci's staticcheck subset
+  excludes SA1019 here), so it will not regress the lint gate.
+
+- **[P4] 54 unused test-helper symbols (staticcheck U1000) across `_test.go` files** (e2e 25,
+  cluster 15, raft 6, scrubber 4, server 2, storage/lifecycle 2). golangci `unused` skips them
+  (`tests: false`) so `make lint` stays green. Batch-removable dead test scaffolding; low risk.
+  Enumerate with `staticcheck ./... | grep U1000`.
+
+- **[P4][note, not a defect] staticcheck also flags 3 PRODUCTION U1000 that are INTENTIONAL
+  `//nolint:unused` scaffolding** — `(*MetaFSM).incDEKRef` / `decDEKRef` (`meta_fsm_rotation.go`, kept
+  wired for the S7 DEK-prune-safety predicate) and `metrics.bucketStates` (`operator_state.go`,
+  operator-state scaffolding v0.0.388-389). Standalone staticcheck does not honor golangci's `//nolint`
+  directive, so it reports them; `make lint` correctly skips them. If standalone staticcheck is ever
+  wired into CI, switch these to `//lint:ignore U1000 <reason>` for parity, or accept the noise. No
+  code change otherwise — recorded so the next /health run does not misread these as a regression.
+
+- **[P4][optional] ~18 ST1005 error-string style nits** (capitalized / trailing-punctuation error
+  strings in `kek_rotation_leader.go`, `rotation_state.go`, `preflight_errors.go`, `dek_keeper_*.go`,
+  `encrypt/keystore.go`, `iam/oidc/config.go`) not gated by `make lint`. Enable golangci `stylecheck`
+  to gate them going forward, or leave as-is.
+
 ## Superseded / historical (do not resurrect the analysis)
 
 The blob-authoritative pivot (#821–#825: greenfield raft-free data plane + soleauth-machinery removal)

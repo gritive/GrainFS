@@ -16,6 +16,15 @@ make fbs                 # FlatBuffers (.fbs → .go) 재생성
 
 Module: `github.com/gritive/GrainFS`. 단일 binary `bin/grainfs`.
 
+## Health Stack
+
+- typecheck: go build ./...
+- lint: make lint
+- test: make test-unit
+- deadcode: staticcheck ./...
+- shell: shellcheck (benchmarks/ scripts/ tests/)
+- gbrain: gbrain doctor --json
+
 ## Codebase Review
 
 ### 기술 스택
