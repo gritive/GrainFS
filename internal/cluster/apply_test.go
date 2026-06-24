@@ -91,7 +91,9 @@ func TestFSM_EncryptedValuesHideObjectMultipartAndPolicyPayloads(t *testing.T) {
 	require.NoError(t, err)
 	fsm.SetDEKKeeper(keeper, clusterID)
 
-	putData, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+	// CmdPutObjectMeta is a no-op on apply (data-plane raft-free Slice 2); seed via
+	// persistPutObjectMetaUpdate directly to exercise FSM encryption.
+	cmd := PutObjectMetaCmd{
 		Bucket:      "b",
 		Key:         "secret-object",
 		ContentType: "text/secret",
@@ -99,9 +101,10 @@ func TestFSM_EncryptedValuesHideObjectMultipartAndPolicyPayloads(t *testing.T) {
 			"x-amz-meta-secret": "customer-private-metadata",
 		},
 		VersionID: "v1",
-	})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(putData))
+	}
+	require.NoError(t, fsm.db.Update(func(txn MetadataTxn) error {
+		return fsm.persistPutObjectMetaUpdate(txn, cmd, buildPutObjectMeta(cmd))
+	}))
 
 	// CmdCreateMultipartUpload removed in M4; mpu: key encryption is no longer
 	// exercised here (no production writer). Remaining: obj: and policy: are checked.
@@ -136,47 +139,51 @@ func TestFSM_EncryptedValuesHideObjectMultipartAndPolicyPayloads(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestFSM_DeleteObjectRejectsCorruptEncryptedMeta(t *testing.T) {
+// TestCmdDeleteObject_RetiredNoOp verifies that CmdDeleteObject is a replay-safe
+// no-op in the FSM after data-plane raft-free Slice 2: FSM.Apply must return nil
+// and must not delete any object-meta key. Force-delete is now blob-physical
+// (quorum-meta + shards). EncodeCommand returns a reserved error, so we build
+// the raw command byte buffer directly to simulate a stale raft-log entry.
+func TestCmdDeleteObject_RetiredNoOp(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-	clusterID := bytes.Repeat([]byte{0x47}, 16)
-	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x47}, encrypt.KEKSize), clusterID)
-	require.NoError(t, err)
-	fsm.SetDEKKeeper(keeper, clusterID)
 
-	putData, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
-		Bucket: "b",
-		Key:    "tampered",
-		ETag:   "etag",
-	})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(putData))
-
-	metaKey := fsm.keys.ObjectMetaKey("b", "tampered")
-	require.NoError(t, db.Update(func(txn *badger.Txn) error {
-		item, err := txn.Get(metaKey)
-		if err != nil {
-			return err
-		}
-		raw, err := item.ValueCopy(nil)
-		if err != nil {
-			return err
-		}
-		_, _, ok, err := decodeFSMValueFrameV2(raw)
-		require.NoError(t, err)
-		require.True(t, ok)
-		raw[len(raw)-1] ^= 0x01
-		return txn.Set(metaKey, raw)
+	// Seed an FSM obj: record directly (CmdPutObjectMeta is also a no-op in Slice 2).
+	seedCmd := PutObjectMetaCmd{Bucket: "b", Key: "obj.txt", ETag: "e1"}
+	require.NoError(t, fsm.db.Update(func(txn MetadataTxn) error {
+		return fsm.persistPutObjectMetaUpdate(txn, seedCmd, buildPutObjectMeta(seedCmd))
 	}))
 
-	deleteData, err := EncodeCommand(CmdDeleteObject, DeleteObjectCmd{Bucket: "b", Key: "tampered"})
-	require.NoError(t, err)
-	require.Error(t, fsm.Apply(deleteData))
+	// Build a raw CmdDeleteObject entry bypassing the reserved encodePayload.
+	// Mirrors what EncodeCommand does: encodePayload → wrap in clusterpb.Command.
+	fb := clusterBuilderPool.Get()
+	bucketOff := fb.CreateString("b")
+	keyOff := fb.CreateString("obj.txt")
+	vidOff := fb.CreateString("")
+	clusterpb.DeleteObjectCmdStart(fb)
+	clusterpb.DeleteObjectCmdAddBucket(fb, bucketOff)
+	clusterpb.DeleteObjectCmdAddKey(fb, keyOff)
+	clusterpb.DeleteObjectCmdAddVersionId(fb, vidOff)
+	payload := fbFinish(fb, clusterpb.DeleteObjectCmdEnd(fb))
 
+	fb2 := flatbuffers.NewBuilder(len(payload) + 16)
+	dataOff := fb2.CreateByteVector(payload)
+	clusterpb.CommandStart(fb2)
+	clusterpb.CommandAddType(fb2, uint32(CmdDeleteObject))
+	clusterpb.CommandAddData(fb2, dataOff)
+	root := clusterpb.CommandEnd(fb2)
+	fb2.Finish(root)
+	raw := append([]byte(nil), fb2.FinishedBytes()...)
+
+	// Apply must succeed (no-op, not an error).
+	require.NoError(t, fsm.Apply(raw))
+
+	// Key must still exist — the retired no-op must not delete FSM records.
+	metaKey := fsm.keys.ObjectMetaKey("b", "obj.txt")
 	require.NoError(t, db.View(func(txn *badger.Txn) error {
 		_, err := txn.Get(metaKey)
 		return err
-	}))
+	}), "CmdDeleteObject must be a no-op — key must still exist after apply")
 }
 
 func TestFSM_DeleteBucket(t *testing.T) {
@@ -197,72 +204,47 @@ func TestFSM_DeleteBucket(t *testing.T) {
 	assert.ErrorIs(t, err, badger.ErrKeyNotFound)
 }
 
-func TestFSM_PutObjectMeta(t *testing.T) {
+// TestPutObjectMetaCmd_RetiredNoOp verifies that CmdPutObjectMeta is a replay-safe
+// no-op in the FSM after data-plane raft-free Slice 2: FSM.Apply must return nil
+// and must not write any object-meta key. The live write path is writeQuorumMeta.
+func TestPutObjectMetaCmd_RetiredNoOp(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
-	data, _ := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
-		Bucket:      "b",
-		Key:         "hello.txt",
-		Size:        42,
-		ContentType: "text/plain",
-		ETag:        "abc123",
-		ModTime:     1000,
-	})
-	require.NoError(t, fsm.Apply(data))
-
-	// Verify
-	var meta objectMeta
-	err := db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(objectMetaKey("b", "hello.txt"))
-		if err != nil {
-			return err
-		}
-		return item.Value(func(val []byte) error {
-			m, err := unmarshalObjectMeta(val)
-			if err != nil {
-				return err
-			}
-			meta = m
-			return nil
-		})
+	// EncodeCommand still works (codec/struct/constant kept for quorum-meta blob use).
+	data, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+		Bucket: "b", Key: "hello.txt", Size: 42, ETag: "abc123",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "hello.txt", meta.Key)
-	assert.Equal(t, int64(42), meta.Size)
-}
 
-func TestFSM_DeleteObject(t *testing.T) {
-	db := newTestDB(t)
-	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-
-	// Put then delete
-	data, _ := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
-		Bucket: "b", Key: "del.txt", Size: 1, ContentType: "text/plain", ETag: "e", ModTime: 1,
-	})
+	// Apply must succeed (no-op, not an error).
 	require.NoError(t, fsm.Apply(data))
 
-	data, _ = EncodeCommand(CmdDeleteObject, DeleteObjectCmd{Bucket: "b", Key: "del.txt"})
-	require.NoError(t, fsm.Apply(data))
-
-	err := db.View(func(txn *badger.Txn) error {
-		_, err := txn.Get(objectMetaKey("b", "del.txt"))
+	// Must not have written any object-meta key.
+	err = db.View(func(txn *badger.Txn) error {
+		_, err := txn.Get(objectMetaKey("b", "hello.txt"))
 		return err
 	})
-	assert.ErrorIs(t, err, badger.ErrKeyNotFound)
+	require.ErrorIs(t, err, badger.ErrKeyNotFound, "CmdPutObjectMeta must be a no-op — key must not exist")
 }
+
+// TestFSM_DeleteObject removed: CmdDeleteObject is retired (data-plane raft-free
+// Slice 2 no-op). Force-delete is now covered by TestForceDeleteBucketNonVersioned_QmetaAndShards
+// and TestForceDeleteBucketSoleAuthOn which exercise the blob-physical path.
+// The no-op behavior is verified by TestCmdDeleteObject_RetiredNoOp.
 
 func TestFSM_SnapshotRestore(t *testing.T) {
 	db1 := newTestDB(t)
 	fsm1 := NewFSM(badgermeta.Wrap(db1), newStateKeyspaceEmpty())
 
-	// Apply some commands
+	// Apply some commands. CmdPutObjectMeta is a no-op in Slice 2; seed via
+	// persistPutObjectMetaUpdate directly.
 	data, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "snap-bucket"})
 	require.NoError(t, fsm1.Apply(data))
-	data, _ = EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
-		Bucket: "snap-bucket", Key: "file.txt", Size: 10, ContentType: "text/plain", ETag: "e", ModTime: 1,
-	})
-	require.NoError(t, fsm1.Apply(data))
+	seedCmd := PutObjectMetaCmd{Bucket: "snap-bucket", Key: "file.txt", Size: 10, ContentType: "text/plain", ETag: "e", ModTime: 1}
+	require.NoError(t, fsm1.db.Update(func(txn MetadataTxn) error {
+		return fsm1.persistPutObjectMetaUpdate(txn, seedCmd, buildPutObjectMeta(seedCmd))
+	}))
 
 	// Take snapshot
 	snap, err := fsm1.Snapshot()
@@ -384,15 +366,9 @@ func TestFSM_DeleteBucketPolicy_NotExist(t *testing.T) {
 
 // TestFSM_AbortMultipart_NotExist removed in M4: applyAbortMultipart is deleted.
 
-func TestFSM_DeleteObject_NotExist(t *testing.T) {
-	db := newTestDB(t)
-	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-
-	// Deleting a non-existent object should not error (ErrKeyNotFound → nil)
-	data, _ := EncodeCommand(CmdDeleteObject, DeleteObjectCmd{Bucket: "b", Key: "nope.txt"})
-	err := fsm.Apply(data)
-	assert.NoError(t, err)
-}
+// TestFSM_DeleteObject_NotExist removed: CmdDeleteObject is retired (data-plane
+// raft-free Slice 2 no-op). The no-op behavior on non-existent keys is covered
+// by TestCmdDeleteObject_RetiredNoOp (Apply returns nil regardless of FSM state).
 
 func TestFSM_Apply_CorruptData(t *testing.T) {
 	db := newTestDB(t)
@@ -619,277 +595,12 @@ func TestFSM_SetBucketVersioning_NoBucket(t *testing.T) {
 	assert.Error(t, err, "should fail when bucket does not exist")
 }
 
-func TestFSM_SetObjectACL(t *testing.T) {
-	db := newTestDB(t)
-	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-
-	// Write object meta first.
-	data, _ := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
-		Bucket: "b", Key: "file.txt", Size: 10, ETag: "etag1", ModTime: 1000,
-	})
-	require.NoError(t, fsm.Apply(data))
-
-	const aclPublicRead uint8 = 2
-	data, err := EncodeCommand(CmdSetObjectACL, SetObjectACLCmd{Bucket: "b", Key: "file.txt", ACL: aclPublicRead})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(data))
-
-	var m objectMeta
-	require.NoError(t, db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(objectMetaKey("b", "file.txt"))
-		if err != nil {
-			return err
-		}
-		return item.Value(func(val []byte) error {
-			m, err = unmarshalObjectMeta(val)
-			return err
-		})
-	}))
-	assert.Equal(t, aclPublicRead, m.ACL)
-}
-
-func TestFSM_SetObjectACL_NotFound(t *testing.T) {
-	db := newTestDB(t)
-	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-
-	data, _ := EncodeCommand(CmdSetObjectACL, SetObjectACLCmd{Bucket: "b", Key: "ghost.txt", ACL: 2})
-	err := fsm.Apply(data)
-	assert.Error(t, err, "should fail when object does not exist")
-}
-
-func TestFSM_SetObjectACL_VersionedBucket(t *testing.T) {
-	db := newTestDB(t)
-	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-
-	// Create bucket first.
-	data, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "b"})
-	require.NoError(t, fsm.Apply(data))
-
-	// Enable versioning on the bucket.
-	data, _ = EncodeCommand(CmdSetBucketVersioning, SetBucketVersioningCmd{Bucket: "b", State: "Enabled"})
-	require.NoError(t, fsm.Apply(data))
-
-	const vid = "v1"
-	const aclPublicRead uint8 = 2
-
-	// Write versioned object meta (dual-write: legacy + versioned key).
-	data, _ = EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
-		Bucket: "b", Key: "file.txt", Size: 5, ETag: "etag-v", ModTime: 2000, VersionID: vid,
-	})
-	require.NoError(t, fsm.Apply(data))
-
-	// Set ACL — should update both legacy and versioned key.
-	data, err := EncodeCommand(CmdSetObjectACL, SetObjectACLCmd{Bucket: "b", Key: "file.txt", ACL: aclPublicRead})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(data))
-
-	var legacyACL, versionedACL uint8
-	require.NoError(t, db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(objectMetaKey("b", "file.txt"))
-		if err != nil {
-			return err
-		}
-		if err := item.Value(func(val []byte) error {
-			m, merr := unmarshalObjectMeta(val)
-			if merr != nil {
-				return merr
-			}
-			legacyACL = m.ACL
-			return nil
-		}); err != nil {
-			return err
-		}
-
-		vItem, err := txn.Get(objectMetaKeyV("b", "file.txt", vid))
-		if err != nil {
-			return err
-		}
-		return vItem.Value(func(val []byte) error {
-			m, merr := unmarshalObjectMeta(val)
-			if merr != nil {
-				return merr
-			}
-			versionedACL = m.ACL
-			return nil
-		})
-	}))
-	assert.Equal(t, aclPublicRead, legacyACL, "legacy key ACL")
-	assert.Equal(t, aclPublicRead, versionedACL, "versioned key ACL")
-}
-
-func TestFSM_SetObjectTags(t *testing.T) {
-	db := newTestDB(t)
-	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-
-	// Seed an object.
-	data, _ := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
-		Bucket: "b", Key: "file.txt", Size: 10, ETag: "etag1", ModTime: 1000,
-	})
-	require.NoError(t, fsm.Apply(data))
-
-	tags := []storage.Tag{{Key: "env", Value: "prod"}, {Key: "owner", Value: "alice"}}
-	data, err := EncodeCommand(CmdSetObjectTags, SetObjectTagsCmd{Bucket: "b", Key: "file.txt", Tags: tags})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(data))
-
-	var m objectMeta
-	require.NoError(t, db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(objectMetaKey("b", "file.txt"))
-		if err != nil {
-			return err
-		}
-		return item.Value(func(val []byte) error {
-			m, err = unmarshalObjectMeta(val)
-			return err
-		})
-	}))
-	assert.Equal(t, tags, m.Tags, "tags should be updated")
-	assert.Equal(t, "etag1", m.ETag, "ETag must be unchanged")
-	assert.Equal(t, int64(10), m.Size, "Size must be unchanged")
-}
-
-func TestFSM_SetObjectTags_NotFound(t *testing.T) {
-	db := newTestDB(t)
-	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-
-	data, _ := EncodeCommand(CmdSetObjectTags, SetObjectTagsCmd{Bucket: "b", Key: "ghost.txt", Tags: nil})
-	err := fsm.Apply(data)
-	assert.Error(t, err, "should fail when object does not exist")
-}
-
-func TestFSM_SetObjectTags_VersionedBucket(t *testing.T) {
-	db := newTestDB(t)
-	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-
-	// Create bucket and enable versioning.
-	data, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "b"})
-	require.NoError(t, fsm.Apply(data))
-	data, _ = EncodeCommand(CmdSetBucketVersioning, SetBucketVersioningCmd{Bucket: "b", State: "Enabled"})
-	require.NoError(t, fsm.Apply(data))
-
-	const vid = "v1"
-	data, _ = EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
-		Bucket: "b", Key: "file.txt", Size: 5, ETag: "etag-v", ModTime: 2000, VersionID: vid,
-	})
-	require.NoError(t, fsm.Apply(data))
-
-	tags := []storage.Tag{{Key: "env", Value: "staging"}}
-	data, err := EncodeCommand(CmdSetObjectTags, SetObjectTagsCmd{Bucket: "b", Key: "file.txt", Tags: tags})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(data))
-
-	// Both legacy and versioned records should have the tags.
-	var legacyTags, versionedTags []storage.Tag
-	require.NoError(t, db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(objectMetaKey("b", "file.txt"))
-		if err != nil {
-			return err
-		}
-		if err := item.Value(func(val []byte) error {
-			m, merr := unmarshalObjectMeta(val)
-			if merr != nil {
-				return merr
-			}
-			legacyTags = m.Tags
-			return nil
-		}); err != nil {
-			return err
-		}
-		vItem, err := txn.Get(objectMetaKeyV("b", "file.txt", vid))
-		if err != nil {
-			return err
-		}
-		return vItem.Value(func(val []byte) error {
-			m, merr := unmarshalObjectMeta(val)
-			if merr != nil {
-				return merr
-			}
-			versionedTags = m.Tags
-			return nil
-		})
-	}))
-	assert.Equal(t, tags, legacyTags, "legacy key tags")
-	assert.Equal(t, tags, versionedTags, "versioned key tags")
-}
-
-func TestFSM_SetObjectTags_SpecificVersion(t *testing.T) {
-	db := newTestDB(t)
-	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-
-	// Create bucket and enable versioning.
-	data, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "b"})
-	require.NoError(t, fsm.Apply(data))
-	data, _ = EncodeCommand(CmdSetBucketVersioning, SetBucketVersioningCmd{Bucket: "b", State: "Enabled"})
-	require.NoError(t, fsm.Apply(data))
-
-	const vid = "v1"
-	data, _ = EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
-		Bucket: "b", Key: "file.txt", Size: 5, ETag: "etag-v", ModTime: 2000, VersionID: vid,
-	})
-	require.NoError(t, fsm.Apply(data))
-
-	tags := []storage.Tag{{Key: "tier", Value: "archive"}}
-	// Target the specific version only.
-	data, err := EncodeCommand(CmdSetObjectTags, SetObjectTagsCmd{
-		Bucket: "b", Key: "file.txt", VersionID: vid, Tags: tags,
-	})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(data))
-
-	// Only versioned record should have tags; legacy may or may not — but versioned must.
-	require.NoError(t, db.View(func(txn *badger.Txn) error {
-		vItem, err := txn.Get(objectMetaKeyV("b", "file.txt", vid))
-		if err != nil {
-			return err
-		}
-		return vItem.Value(func(val []byte) error {
-			m, merr := unmarshalObjectMeta(val)
-			if merr != nil {
-				return merr
-			}
-			assert.Equal(t, tags, m.Tags, "versioned key tags when VersionID specified")
-			return nil
-		})
-	}))
-}
-
-func TestFSM_SetObjectTags_SpecificLatestVersionMirrorsLegacyCurrent(t *testing.T) {
-	db := newTestDB(t)
-	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-
-	data, _ := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "b"})
-	require.NoError(t, fsm.Apply(data))
-	data, _ = EncodeCommand(CmdSetBucketVersioning, SetBucketVersioningCmd{Bucket: "b", State: "Enabled"})
-	require.NoError(t, fsm.Apply(data))
-	data, _ = EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
-		Bucket: "b", Key: "file.txt", Size: 5, ETag: "etag-v1", ModTime: 1000, VersionID: "v1",
-	})
-	require.NoError(t, fsm.Apply(data))
-	data, _ = EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
-		Bucket: "b", Key: "file.txt", Size: 6, ETag: "etag-v2", ModTime: 2000, VersionID: "v2",
-	})
-	require.NoError(t, fsm.Apply(data))
-
-	tags := []storage.Tag{{Key: "env", Value: "prod"}}
-	data, err := EncodeCommand(CmdSetObjectTags, SetObjectTagsCmd{
-		Bucket: "b", Key: "file.txt", VersionID: "v2", Tags: tags,
-	})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(data))
-
-	require.NoError(t, db.View(func(txn *badger.Txn) error {
-		legacyItem, err := txn.Get(objectMetaKey("b", "file.txt"))
-		if err != nil {
-			return err
-		}
-		return legacyItem.Value(func(val []byte) error {
-			m, merr := unmarshalObjectMeta(val)
-			require.NoError(t, merr)
-			require.Equal(t, tags, m.Tags, "versionId-less current reads must see latest version tags")
-			return nil
-		})
-	}))
-}
+// TestFSM_SetObjectACL and TestFSM_SetObjectTags and their subtests were removed
+// in data-plane raft-free Slice 2: CmdSetObjectACL and CmdSetObjectTags are
+// retired (no-op apply, codec returns reserved error). Public-API coverage via
+// blob RMW is in bucket_tags_acl_retire_test.go:
+//   TestSetObjectACL_BlobObject_NoRaftFallback
+//   TestSetObjectTags_BlobObject_NoRaftFallback
 
 func TestFSM_ApplyCreateBucket_KeyLayoutUnchanged(t *testing.T) {
 	db := newTestDB(t)
@@ -907,25 +618,23 @@ func TestFSM_ApplyCreateBucket_KeyLayoutUnchanged(t *testing.T) {
 
 // TestFSM_CreateMultipartUpload_PersistsTags removed in M4: applyCreateMultipartUpload deleted.
 
-// TestFSM_CompleteMultipartUpload_MaterialisesTags verifies that the
-// finalisation command (CmdPutObjectMeta — what production proposes from
-// CompleteMultipartUpload) writes Tags onto objectMeta. The Raft path for
-// completion goes through commitECObjectWriteResult → CmdPutObjectMeta.
-// CmdCreateMultipartUpload is a reserved no-op in M4; the FSM row is omitted.
-func TestFSM_CompleteMultipartUpload_MaterialisesTags(t *testing.T) {
+// TestPersistPutObjectMetaUpdate_MaterialisesTags verifies that
+// persistPutObjectMetaUpdate (the live write path via writeQuorumMeta, not FSM
+// apply) correctly materialises Tags onto objectMeta. Previously exercised
+// via CmdPutObjectMeta FSM apply; Slice 2 retires that raft path.
+func TestPersistPutObjectMetaUpdate_MaterialisesTags(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
-	// Finalise via the production cmd that materialises object meta on
-	// CompleteMultipartUpload (CmdPutObjectMeta with Parts + Tags).
-	data, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+	cmd := PutObjectMetaCmd{
 		Bucket: "b", Key: "k", Size: 1024, ContentType: "text/plain",
 		ETag: "final-etag", ModTime: 200,
 		Parts: []storage.MultipartPartEntry{{PartNumber: 1, Size: 1024, ETag: "p1"}},
 		Tags:  []storage.Tag{{Key: "env", Value: "prod"}, {Key: "owner", Value: "alice"}},
-	})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(data))
+	}
+	require.NoError(t, fsm.db.Update(func(txn MetadataTxn) error {
+		return fsm.persistPutObjectMetaUpdate(txn, cmd, buildPutObjectMeta(cmd))
+	}))
 
 	require.NoError(t, db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get(objectMetaKey("b", "k"))

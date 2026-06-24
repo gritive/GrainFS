@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.657.0] - 2026-06-24
+## [0.0.658.0] - 2026-06-24
 
 ### Changed
 - **Unified EC shard local/remote dispatch behind a single shard-target endpoint (behavior-neutral
@@ -18,6 +18,63 @@
   stays in the reader. The previously split write-only (`ecObjectShardStore`) and read-only
   (`ecObjectShardFetcher`) interfaces are consolidated into one `ecShardStore` interface satisfied
   by `*ShardService`.
+
+## [0.0.657.0] - 2026-06-24 — data-plane raft-free Slice 2
+
+### Changed
+- **Raft FSM is now pure control-plane — all per-object FSM commands retired (BREAKING: mixed-version
+  rolling upgrade across this boundary is unsupported; greenfield deployments only).** The remaining
+  per-object raft commands (`CmdSetObjectTags`, `CmdSetObjectACL`, `CmdPutObjectMeta` apply path,
+  `CmdPutObjectQuarantine`, `CmdDeleteObject`, `CmdDeleteObjectVersion`) are retired. Their
+  `CommandType` slots are reserved (no enum renumber); apply returns nil (no-op) for replay safety.
+  After this change the FSM carries only control-plane state: bucket create/delete, bucket policy,
+  bucket versioning, ring membership, shard migration, FSM-value reseal, and the multipart/append/
+  coalesce no-ops already retired in earlier slices.
+- **Object quarantine status is now stored in the quorum-meta blob (set-once, blob-resident),
+  not as a separate `quarantine:` FSM key.** Quarantine is a flag+cause pair written via an
+  owner-serialized blob RMW (`IsQuarantined`/`QuarantineCause` in `PutObjectMetaCmd`). In a cluster
+  the quarantine-set call is owner-routed via a new `ForwardOpSetObjectQuarantine=24` forward op
+  (four-file extension to the forward-RPC layer). Semantics: set-once/monotonic; a PUT to a quarantined
+  key is rejected with `ErrObjectQuarantined` — re-upload cannot clear the flag. Recovery requires a
+  direct operator repair (quorum-meta blob rewrite clearing `IsQuarantined`). The scrubber/verifier inject a
+  narrow `QuarantineRouter` interface so only the quarantine call is owner-routed; the `Scrubbable`
+  leaf backend for shard ops is unchanged.
+- **`ForceDeleteBucket` now physically purges non-versioned (latest-only) blobs and EC shards,
+  fixing a pre-existing greenfield leak.** Previously `os.RemoveAll(bucketDir)` reached neither
+  `.quorum_meta/<bucket>/` blobs nor `shards/<bucket>/` EC shards. Non-versioned force-delete now
+  enumerates live objects via `scanQuorumMetaBucketStrict` (single-node) or `scanQuorumMetaClusterAll`
+  (cluster, fail-closed fan-out), then for each object deletes shards first (fail-closed synchronous
+  `deleteShardsQuorum`) and then the quorum-meta blob (`deleteQuorumMetaQuorum`). Shards-before-qmeta
+  ordering prevents shard-stranding if a crash occurs mid-purge. Versioned force-delete already
+  purged per-version blobs and shards; this change closes the equivalent gap for non-versioned buckets.
+- **New physical-purge RPC and local primitive for latest-only quorum-meta blobs.** Added
+  `deleteQuorumMetaLocal`, `DeleteQuorumMeta` RPC client, `handleQuorumMetaDelete` receiver, and
+  `deleteQuorumMetaQuorum` fail-closed fan-out (mirroring the existing per-version equivalents) so the
+  non-versioned purge path fans out to all peer nodes. Added `deleteShardsQuorum` fail-closed
+  synchronous shard delete (vs the best-effort `deleteShardsAsync` used for normal PUT GC).
+
+### Known limitation
+- **Mixed-version rolling upgrade across the Slice 2 retirement boundary is explicitly unsupported.**
+  Nodes running the old code proposing any of the retired per-object commands against a cluster
+  that has applied this change will find the apply side is a no-op. This is safe for greenfield
+  deployments (no live proposers existed before this change); it is not safe for a mixed-version
+  rolling upgrade where old nodes were actively proposing these commands.
+- **Object quarantine is now K-of-N eventually consistent (previously raft-strong / all-node).**
+  Folding quarantine into the quorum-meta blob makes it follow the same consistency model as all
+  other object metadata (tags, ACL, delete markers): the set is a K-of-N blob write and reads are
+  local-first. A node that was outside the write quorum (e.g. briefly unreachable during the
+  quarantine write) can serve a GET of a quarantined object until its replica converges. This is a
+  deliberate consequence of the data-plane-raft-free model and matches the consistency of every
+  other per-object mutation; the prior raft-replicated quarantine was the only per-object state with
+  all-node-strong consistency. Operators relying on instant cluster-wide quarantine should account
+  for this convergence window.
+- **`ForceDeleteBucket` racing a concurrent PUT can leave the racing object's blob/shards.**
+  Force-delete enumerates the live objects, purges each, then deletes the bucket. A PUT that commits
+  its quorum-meta blob + shards after the enumeration (but around bucket deletion) is not seen by the
+  purge and its bytes can remain under `.quorum_meta/<bucket>/` or `shards/<bucket>/` (outside the
+  `os.RemoveAll(bucketDir)` reach). This is a narrow TOCTOU window; deleting a bucket concurrently
+  with writes to it is undefined under S3 semantics. Stranded bytes are reclaimable by the orphan/
+  segment scrubber.
 
 ## [0.0.656.0] - 2026-06-24
 

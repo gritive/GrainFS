@@ -181,6 +181,13 @@ var bucketForwardOpSpecs = map[raftpb.ForwardOp]bucketForwardOpSpec{
 		mutates:    true,
 		handleBody: (*ForwardReceiver).handleAppendObjectStream,
 	},
+	raftpb.ForwardOpSetObjectQuarantine: {
+		op:          raftpb.ForwardOpSetObjectQuarantine,
+		name:        raftpb.ForwardOpSetObjectQuarantine.String(),
+		transport:   forwardFrameOnly,
+		mutates:     true,
+		handleFrame: (*ForwardReceiver).handleSetObjectQuarantine,
+	},
 }
 
 func lookupBucketForwardOpSpec(op raftpb.ForwardOp) (bucketForwardOpSpec, bool) {

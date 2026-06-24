@@ -62,10 +62,10 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 	observePutStage("distributed", "head_bucket", stageStart)
 
 	stageStart = time.Now()
-	if blocked, q, qerr := b.isObjectQuarantined(bucket, key, ""); qerr != nil {
+	if blocked, cause, qerr := b.isObjectQuarantined(bucket, key, ""); qerr != nil {
 		return nil, fmt.Errorf("check quarantine: %w", qerr)
 	} else if blocked {
-		return nil, objectQuarantinedError(bucket, key, q)
+		return nil, objectQuarantinedError(bucket, key, cause)
 	}
 	observePutStage("distributed", "quarantine_check", stageStart)
 

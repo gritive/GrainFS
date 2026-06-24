@@ -455,27 +455,4 @@ func TestS2a_GenerationUnion_DeriveAndDelete(t *testing.T) {
 	latest, live := deriveLatestVersion(cmds)
 	require.True(t, live)
 	require.Equal(t, vid2, latest.VersionID, "union across generations derives v2 (not probeRead short-circuit)")
-
-	// Hard-delete v2 on its placement node (group g2) via the fan-out, then re-derive.
-	v2cmd, ok, _ := backendA.readQuorumMetaVersion(bkt, key, vid2)
-	require.True(t, ok)
-	require.NoError(t, backendA.deleteQuorumMetaVersionQuorum(ctx, bkt, key, vid2, v2cmd.NodeIDs))
-
-	cmds, err = backendA.readQuorumMetaVersions(bkt, key)
-	require.NoError(t, err)
-	latest, live = deriveLatestVersion(cmds)
-	require.True(t, live)
-	require.Equal(t, vid1, latest.VersionID, "after deleting v2, union re-derives v1")
-}
-
-// TestDeleteQuorumMetaVersionQuorum_FailClosed proves the fan-out is fail-closed:
-// a placement node whose delete fails (unreachable transport) surfaces an error,
-// unlike the swallow-all deleteQuorumMetaQuorum.
-func TestDeleteQuorumMetaVersionQuorum_FailClosed(t *testing.T) {
-	b := newSingleNode1Plus0ChunkCapable(t)
-	ctx := context.Background()
-	// "deadnode" is non-self; the single-node shardSvc has a nil transport, so the
-	// DeleteQuorumMetaVersion RPC to it fails → the fan-out must return that error.
-	err := b.deleteQuorumMetaVersionQuorum(ctx, "bkt", "k", "v1", []string{"deadnode"})
-	require.Error(t, err, "fail-closed: an unreachable placement node must surface an error")
 }

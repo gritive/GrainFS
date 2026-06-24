@@ -2,7 +2,6 @@ package cluster
 
 import (
 	"errors"
-	"fmt"
 )
 
 // ErrPutObjectMetaCAS is returned (wrapped) when a PutObjectMeta command carries
@@ -37,27 +36,4 @@ func buildPutObjectMeta(cmd PutObjectMetaCmd) objectMeta {
 		ACL:              cmd.ACL,
 		MetaSeq:          cmd.MetaSeq,
 	}
-}
-
-func (f *FSM) checkPutObjectExpectedETag(txn MetadataTxn, bucket, key, expectedETag string) error {
-	if expectedETag == "" {
-		return nil
-	}
-	item, err := txn.Get(f.keys.ObjectMetaKey(bucket, key))
-	if err != nil {
-		return fmt.Errorf("put object meta CAS: read current meta: %w", err)
-	}
-	val, err := f.itemValueCopy(item)
-	if err != nil {
-		return fmt.Errorf("put object meta CAS: read current meta value: %w", err)
-	}
-	current, err := unmarshalObjectMeta(val)
-	if err != nil {
-		return fmt.Errorf("put object meta CAS: decode current meta: %w", err)
-	}
-	if current.ETag != expectedETag {
-		return fmt.Errorf("put object meta CAS: etag changed for %s/%s: got %q, want %q: %w",
-			bucket, key, current.ETag, expectedETag, ErrPutObjectMetaCAS)
-	}
-	return nil
 }

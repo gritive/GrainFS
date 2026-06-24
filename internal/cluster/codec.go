@@ -170,6 +170,11 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	if c.ExpectedETag != "" {
 		expectedETagOff = b.CreateString(c.ExpectedETag)
 	}
+	// Slice 2: quarantine cause string — must be created before PutObjectMetaCmdStart.
+	var quarantineCauseOff flatbuffers.UOffsetT
+	if c.QuarantineCause != "" {
+		quarantineCauseOff = b.CreateString(c.QuarantineCause)
+	}
 	var nodeIDsOff flatbuffers.UOffsetT
 	if len(c.NodeIDs) > 0 {
 		nodeIDsOff = buildStringVector(b, c.NodeIDs, clusterpb.PutObjectMetaCmdStartNodeIdsVector)
@@ -324,6 +329,12 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	if c.MetaSeqCAS {
 		clusterpb.PutObjectMetaCmdAddMetaSeqCas(b, true)
 	}
+	if c.IsQuarantined {
+		clusterpb.PutObjectMetaCmdAddIsQuarantined(b, true)
+	}
+	if quarantineCauseOff != 0 {
+		clusterpb.PutObjectMetaCmdAddQuarantineCause(b, quarantineCauseOff)
+	}
 	return fbFinish(b, clusterpb.PutObjectMetaCmdEnd(b)), nil
 }
 
@@ -444,58 +455,8 @@ func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
 		Coalesced:        coalesced,
 		IsAppendable:     t.IsAppendable(),
 		MetaSeqCAS:       t.MetaSeqCas(),
-	}, nil
-}
-
-func encodeDeleteObjectCmd(c DeleteObjectCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	keyOff := b.CreateString(c.Key)
-	vidOff := b.CreateString(c.VersionID)
-	clusterpb.DeleteObjectCmdStart(b)
-	clusterpb.DeleteObjectCmdAddBucket(b, bucketOff)
-	clusterpb.DeleteObjectCmdAddKey(b, keyOff)
-	clusterpb.DeleteObjectCmdAddVersionId(b, vidOff)
-	return fbFinish(b, clusterpb.DeleteObjectCmdEnd(b)), nil
-}
-
-func decodeDeleteObjectCmd(data []byte) (DeleteObjectCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.DeleteObjectCmd {
-		return clusterpb.GetRootAsDeleteObjectCmd(d, 0)
-	})
-	if err != nil {
-		return DeleteObjectCmd{}, err
-	}
-	return DeleteObjectCmd{
-		Bucket:    string(t.Bucket()),
-		Key:       string(t.Key()),
-		VersionID: string(t.VersionId()),
-	}, nil
-}
-
-func encodeDeleteObjectVersionCmd(c DeleteObjectVersionCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	keyOff := b.CreateString(c.Key)
-	vidOff := b.CreateString(c.VersionID)
-	clusterpb.DeleteObjectVersionCmdStart(b)
-	clusterpb.DeleteObjectVersionCmdAddBucket(b, bucketOff)
-	clusterpb.DeleteObjectVersionCmdAddKey(b, keyOff)
-	clusterpb.DeleteObjectVersionCmdAddVersionId(b, vidOff)
-	return fbFinish(b, clusterpb.DeleteObjectVersionCmdEnd(b)), nil
-}
-
-func decodeDeleteObjectVersionCmd(data []byte) (DeleteObjectVersionCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.DeleteObjectVersionCmd {
-		return clusterpb.GetRootAsDeleteObjectVersionCmd(d, 0)
-	})
-	if err != nil {
-		return DeleteObjectVersionCmd{}, err
-	}
-	return DeleteObjectVersionCmd{
-		Bucket:    string(t.Bucket()),
-		Key:       string(t.Key()),
-		VersionID: string(t.VersionId()),
+		IsQuarantined:    t.IsQuarantined(),
+		QuarantineCause:  string(t.QuarantineCause()),
 	}, nil
 }
 
@@ -600,7 +561,7 @@ func buildStringVector(b *flatbuffers.Builder, ss []string, startVec func(*flatb
 
 // --- ObjectMeta codec ---
 
-func marshalObjectMeta(m objectMeta) ([]byte, error) {
+func marshalObjectMeta(m objectMeta) ([]byte, error) { //nolint:unused // referenced by codec_test.go and multiple *_test.go helpers
 	b := clusterBuilderPool.Get()
 	keyOff := b.CreateString(m.Key)
 	ctOff := b.CreateString(m.ContentType)
@@ -1092,89 +1053,6 @@ func decodeSetBucketVersioningCmd(data []byte) (SetBucketVersioningCmd, error) {
 	}, nil
 }
 
-func encodeSetObjectACLCmd(c SetObjectACLCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	keyOff := b.CreateString(c.Key)
-	clusterpb.SetObjectACLCmdStart(b)
-	clusterpb.SetObjectACLCmdAddBucket(b, bucketOff)
-	clusterpb.SetObjectACLCmdAddKey(b, keyOff)
-	clusterpb.SetObjectACLCmdAddAcl(b, c.ACL)
-	return fbFinish(b, clusterpb.SetObjectACLCmdEnd(b)), nil
-}
-
-func decodeSetObjectACLCmd(data []byte) (SetObjectACLCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.SetObjectACLCmd {
-		return clusterpb.GetRootAsSetObjectACLCmd(d, 0)
-	})
-	if err != nil {
-		return SetObjectACLCmd{}, err
-	}
-	return SetObjectACLCmd{
-		Bucket: string(t.Bucket()),
-		Key:    string(t.Key()),
-		ACL:    t.Acl(),
-	}, nil
-}
-
-func encodeSetObjectTagsCmd(c SetObjectTagsCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	keyOff := b.CreateString(c.Key)
-	verOff := b.CreateString(c.VersionID)
-
-	var tagsVec flatbuffers.UOffsetT
-	if len(c.Tags) > 0 {
-		tagOffs := make([]flatbuffers.UOffsetT, len(c.Tags))
-		for i, t := range c.Tags {
-			kOff := b.CreateString(t.Key)
-			vOff := b.CreateString(t.Value)
-			clusterpb.TagStart(b)
-			clusterpb.TagAddKey(b, kOff)
-			clusterpb.TagAddValue(b, vOff)
-			tagOffs[i] = clusterpb.TagEnd(b)
-		}
-		clusterpb.SetObjectTagsCmdStartTagsVector(b, len(tagOffs))
-		for i := len(tagOffs) - 1; i >= 0; i-- {
-			b.PrependUOffsetT(tagOffs[i])
-		}
-		tagsVec = b.EndVector(len(tagOffs))
-	}
-
-	clusterpb.SetObjectTagsCmdStart(b)
-	clusterpb.SetObjectTagsCmdAddBucket(b, bucketOff)
-	clusterpb.SetObjectTagsCmdAddKey(b, keyOff)
-	clusterpb.SetObjectTagsCmdAddVersionId(b, verOff)
-	if tagsVec != 0 {
-		clusterpb.SetObjectTagsCmdAddTags(b, tagsVec)
-	}
-	return fbFinish(b, clusterpb.SetObjectTagsCmdEnd(b)), nil
-}
-
-func decodeSetObjectTagsCmd(data []byte) (SetObjectTagsCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.SetObjectTagsCmd {
-		return clusterpb.GetRootAsSetObjectTagsCmd(d, 0)
-	})
-	if err != nil {
-		return SetObjectTagsCmd{}, err
-	}
-	out := SetObjectTagsCmd{
-		Bucket:    string(t.Bucket()),
-		Key:       string(t.Key()),
-		VersionID: string(t.VersionId()),
-	}
-	if n := t.TagsLength(); n > 0 {
-		out.Tags = make([]storage.Tag, n)
-		for i := 0; i < n; i++ {
-			var tg clusterpb.Tag
-			if t.Tags(&tg, i) {
-				out.Tags[i] = storage.Tag{Key: string(tg.Key()), Value: string(tg.Value())}
-			}
-		}
-	}
-	return out, nil
-}
-
 // encodeSetRingCmd serializes a SetRingCmd for Raft proposal.
 func encodeSetRingCmd(c SetRingCmd) ([]byte, error) {
 	b := clusterBuilderPool.Get()
@@ -1212,7 +1090,8 @@ func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
 	case CmdPutObjectMeta:
 		return encodePutObjectMetaCmd(payload.(PutObjectMetaCmd))
 	case CmdDeleteObject:
-		return encodeDeleteObjectCmd(payload.(DeleteObjectCmd))
+		// reserved, removed in data-plane raft-free Slice 2 — no production proposer
+		return nil, fmt.Errorf("CmdDeleteObject = 4 reserved: removed in data-plane raft-free Slice 2")
 	case CmdCreateMultipartUpload, CmdCompleteMultipart, CmdAbortMultipart:
 		// reserved, removed v0.0.651+ — no production caller
 		return nil, fmt.Errorf("command type %d is reserved and removed (multipart-off-raft M4)", cmdType)
@@ -1225,20 +1104,22 @@ func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
 	case CmdMigrationDone:
 		return encodeMigrationDoneCmd(payload.(MigrationDoneFSMCmd))
 	case CmdDeleteObjectVersion:
-		return encodeDeleteObjectVersionCmd(payload.(DeleteObjectVersionCmd))
+		// reserved, removed in data-plane raft-free Slice 2 — no production proposer
+		return nil, fmt.Errorf("CmdDeleteObjectVersion = 14 reserved: removed in data-plane raft-free Slice 2")
 	case CmdSetBucketVersioning:
 		return encodeSetBucketVersioningCmd(payload.(SetBucketVersioningCmd))
-	case CmdSetObjectACL:
-		return encodeSetObjectACLCmd(payload.(SetObjectACLCmd))
-	case CmdSetObjectTags:
-		return encodeSetObjectTagsCmd(payload.(SetObjectTagsCmd))
+	case CmdSetObjectACL, CmdSetObjectTags:
+		// reserved, removed in data-plane raft-free Slice 2 — blob RMW is authoritative
+		return nil, fmt.Errorf("command type %d is reserved and removed (data-plane raft-free Slice 2)", cmdType)
 	case CmdAppendObject, CmdCoalesceSegments:
 		// reserved, removed in append/coalesce-off-raft Slice 1 — no production caller
 		return nil, fmt.Errorf("command type %d is reserved and removed (append/coalesce-off-raft Slice 1)", cmdType)
 	case CmdSetRing:
 		return encodeSetRingCmd(payload.(SetRingCmd))
 	case CmdPutObjectQuarantine:
-		return encodePutObjectQuarantineCmd(payload.(PutObjectQuarantineCmd))
+		// reserved, removed in data-plane raft-free Slice 2 — quarantine is now
+		// stored in the quorum-meta blob (IsQuarantined/QuarantineCause).
+		return nil, fmt.Errorf("CmdPutObjectQuarantine = 40 reserved: removed in data-plane raft-free Slice 2")
 	case CmdResealFSMValues:
 		return encodeResealFSMValuesCmd(payload.(ResealFSMValuesCmd))
 	case CmdFSMValueResealDone:
@@ -1249,62 +1130,6 @@ func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
 	default:
 		return nil, fmt.Errorf("unknown command type: %d", cmdType)
 	}
-}
-
-func encodePutObjectQuarantineCmd(c PutObjectQuarantineCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	keyOff := b.CreateString(c.Key)
-	vidOff := b.CreateString(c.VersionID)
-	causeOff := b.CreateString(c.Cause)
-	reasonOff := b.CreateString(c.Reason)
-	clusterpb.PutObjectQuarantineCmdStart(b)
-	clusterpb.PutObjectQuarantineCmdAddBucket(b, bucketOff)
-	clusterpb.PutObjectQuarantineCmdAddKey(b, keyOff)
-	clusterpb.PutObjectQuarantineCmdAddVersionId(b, vidOff)
-	clusterpb.PutObjectQuarantineCmdAddCause(b, causeOff)
-	clusterpb.PutObjectQuarantineCmdAddReason(b, reasonOff)
-	return fbFinish(b, clusterpb.PutObjectQuarantineCmdEnd(b)), nil
-}
-
-func decodePutObjectQuarantineCmd(data []byte) (PutObjectQuarantineCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.PutObjectQuarantineCmd {
-		return clusterpb.GetRootAsPutObjectQuarantineCmd(d, 0)
-	})
-	if err != nil {
-		return PutObjectQuarantineCmd{}, err
-	}
-	return PutObjectQuarantineCmd{
-		Bucket:    string(t.Bucket()),
-		Key:       string(t.Key()),
-		VersionID: string(t.VersionId()),
-		Cause:     string(t.Cause()),
-		Reason:    string(t.Reason()),
-	}, nil
-}
-
-// decodePutObjectQuarantineCmdStorage is the storage-safe variant of
-// decodePutObjectQuarantineCmd. Unlike the RPC version, it wraps BOTH
-// GetRootAs AND all field access in defer-recover so a malformed FB blob
-// produces a typed error instead of panicking through callers. (Existing
-// fbSafe only wraps the GetRootAs call.)
-//
-// Used by FSM apply paths that read raft-derived badger values.
-func decodePutObjectQuarantineCmdStorage(data []byte) (cmd PutObjectQuarantineCmd, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("decode quarantine storage: malformed FB: %v", r)
-		}
-	}()
-	t := clusterpb.GetRootAsPutObjectQuarantineCmd(data, 0)
-	cmd = PutObjectQuarantineCmd{
-		Bucket:    string(t.Bucket()),
-		Key:       string(t.Key()),
-		VersionID: string(t.VersionId()),
-		Cause:     string(t.Cause()),
-		Reason:    string(t.Reason()),
-	}
-	return cmd, nil
 }
 
 func encodeResealFSMValuesCmd(c ResealFSMValuesCmd) ([]byte, error) {

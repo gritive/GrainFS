@@ -146,7 +146,9 @@ func TestDistributedBackend_UnregisterCacheInvalidator_RemovesInvalidator(t *tes
 	backend.RegisterCacheInvalidator("s3-cache", inv)
 	backend.UnregisterCacheInvalidator("s3-cache")
 
-	raw, err := EncodeCommand(CmdDeleteObject, DeleteObjectCmd{Bucket: "mybkt", Key: "mykey"})
+	// CmdDeleteObject = 4 is retired (data-plane raft-free Slice 2); use
+	// CmdPutObjectMeta which still triggers cache invalidation in notifyOnApply.
+	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: "mybkt", Key: "mykey"})
 	require.NoError(t, err)
 
 	backend.notifyOnApply(raw)

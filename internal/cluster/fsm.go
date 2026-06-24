@@ -20,7 +20,10 @@ const (
 	CmdCreateBucket  CommandType = 1
 	CmdDeleteBucket  CommandType = 2
 	CmdPutObjectMeta CommandType = 3
-	CmdDeleteObject  CommandType = 4
+	// CmdDeleteObject is reserved, removed in data-plane raft-free Slice 2.
+	// Force-delete is now blob-physical (quorum-meta + shards). No production
+	// proposer; slot MUST NOT be renumbered.
+	CmdDeleteObject CommandType = 4 // reserved, removed data-plane raft-free Slice 2
 	// CmdCreateMultipartUpload/CmdCompleteMultipart/CmdAbortMultipart are reserved,
 	// removed in the multipart-off-raft epic (M4). No production proposer; no
 	// raft-log replay (greenfield). Slots MUST NOT be renumbered.
@@ -33,24 +36,28 @@ const (
 	CmdMigrationDone         CommandType = 11
 	CmdPutShardPlacement     CommandType = 12 // reserved, removed (ring-derived placement)
 	CmdDeleteShardPlacement  CommandType = 13 // reserved, removed (ring-derived placement)
-	// Versioning — Slice 1 of the unify-storage-paths refactor.
-	// CmdDeleteObjectVersion hard-deletes a specific version (no tombstone);
-	// used by lifecycle/scrubber. Plain CmdDeleteObject creates a tombstone marker.
-	CmdDeleteObjectVersion CommandType = 14
+	// CmdDeleteObjectVersion is reserved, removed in data-plane raft-free Slice 2.
+	// Delete is now blob-tombstone/physical (per-version blob LWW + quorum-meta
+	// purge). No production proposer; slot MUST NOT be renumbered.
+	CmdDeleteObjectVersion CommandType = 14 // reserved, removed data-plane raft-free Slice 2
 	// Phase 18 v0.0.4.0 follow-up: Raft-serialized bucket versioning + object ACL.
 	CmdSetBucketVersioning CommandType = 15
-	CmdSetObjectACL        CommandType = 16
-	CmdSetRing             CommandType = 17
+	// CmdSetObjectACL is reserved, removed in data-plane raft-free Slice 2.
+	// Blob RMW (SetObjectACLPropose) is the sole authority. Slot MUST NOT be renumbered.
+	CmdSetObjectACL CommandType = 16 // reserved, removed data-plane raft-free Slice 2
+	CmdSetRing      CommandType = 17
 	// CmdAppendObject/CmdCoalesceSegments are reserved, removed in the
 	// append/coalesce-off-raft Slice 1. No production proposer; no raft-log
 	// replay (greenfield). Slots MUST NOT be renumbered.
 	CmdAppendObject     CommandType = 18 // reserved, removed append-off-raft Slice 1
 	CmdCoalesceSegments CommandType = 19 // reserved, removed append-off-raft Slice 1
-	// CmdSetObjectTags replaces the tag set on an object version.
-	// VersionID="" targets the current (legacy + latest) records;
-	// VersionID!="" targets a specific versioned record only.
-	CmdSetObjectTags       CommandType = 20
-	CmdPutObjectQuarantine CommandType = 40
+	// CmdSetObjectTags is reserved, removed in data-plane raft-free Slice 2.
+	// Blob RMW (SetObjectTagsPropose) is the sole authority. Slot MUST NOT be renumbered.
+	CmdSetObjectTags CommandType = 20 // reserved, removed data-plane raft-free Slice 2
+	// CmdPutObjectQuarantine is reserved, removed in data-plane raft-free Slice 2.
+	// Quarantine is now folded into the quorum-meta blob (IsQuarantined/QuarantineCause).
+	// Slot MUST NOT be renumbered.
+	CmdPutObjectQuarantine CommandType = 40 // reserved, removed data-plane raft-free Slice 2
 	// CmdResealFSMValues re-seals a batch of data-group FSM state values
 	// (policy:, obj:) from a retired DEK generation onto the active generation.
 	// Applied in the serialized apply loop for race-freedom. S7-1a.
@@ -151,6 +158,13 @@ type PutObjectMetaCmd struct {
 	// quorum-meta write-time guard requires existing.MetaSeq+1 == cand.MetaSeq
 	// (mutable-accumulating RMW: append/coalesce). When false → LWW.
 	MetaSeqCAS bool
+	// IsQuarantined marks this object version as quarantined (corrupt shard or
+	// other issue). Stored in the quorum-meta blob; replaces the legacy FSM
+	// quarantine: key (Slice 2). Default false = not quarantined.
+	IsQuarantined bool
+	// QuarantineCause is the cause string set at quarantine time
+	// (e.g. incident.CauseCorruptShard). Empty if not quarantined.
+	QuarantineCause string
 }
 
 // SegmentMetaEntry records the placement of one chunked-PUT segment. The
@@ -182,19 +196,6 @@ type SetRingCmd struct {
 	Version  uint64
 	VNodes   []virtualNode
 	VPerNode int
-}
-
-type DeleteObjectCmd struct {
-	Bucket    string
-	Key       string
-	VersionID string // version id of the tombstone marker created by this delete (may be empty for legacy replay)
-}
-
-// DeleteObjectVersionCmd hard-deletes a specific version by id.
-type DeleteObjectVersionCmd struct {
-	Bucket    string
-	Key       string
-	VersionID string
 }
 
 type PutObjectQuarantineCmd struct {
@@ -257,23 +258,6 @@ type MigrationDoneFSMCmd struct {
 type SetBucketVersioningCmd struct {
 	Bucket string
 	State  string // "Enabled" | "Suspended"
-}
-
-// SetObjectACLCmd updates the ACL bitmask for an existing object.
-type SetObjectACLCmd struct {
-	Bucket string
-	Key    string
-	ACL    uint8
-}
-
-// SetObjectTagsCmd replaces the tag set on an object version.
-// VersionID="" targets the current (legacy + latest) records;
-// VersionID!="" targets a specific versioned record only.
-type SetObjectTagsCmd struct {
-	Bucket    string
-	Key       string
-	VersionID string
-	Tags      []storage.Tag
 }
 
 // AppendObjectCmd records one appended segment. Only PlacementGroupID is

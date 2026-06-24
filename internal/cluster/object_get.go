@@ -27,10 +27,10 @@ func (b *DistributedBackend) ReadAt(ctx context.Context, bucket, key string, off
 	if err != nil {
 		return 0, err
 	}
-	if blocked, q, qerr := b.isObjectQuarantined(bucket, key, obj.VersionID); qerr != nil {
+	if blocked, cause, qerr := b.isObjectQuarantined(bucket, key, obj.VersionID); qerr != nil {
 		return 0, fmt.Errorf("check quarantine: %w", qerr)
 	} else if blocked {
-		return 0, objectQuarantinedError(bucket, key, q)
+		return 0, objectQuarantinedError(bucket, key, cause)
 	}
 	return b.readAtPreparedObject(ctx, bucket, key, obj, placementMeta, offset, buf)
 }
@@ -59,10 +59,10 @@ func (b *DistributedBackend) ReadAtObject(ctx context.Context, bucket, key strin
 	if !obj.IsAppendable && len(obj.Segments) == 0 && placementMeta.ECData == 0 && len(placementMeta.NodeIDs) == 0 {
 		return b.ReadAt(ctx, bucket, key, offset, buf)
 	}
-	if blocked, q, qerr := b.isObjectQuarantined(bucket, key, obj.VersionID); qerr != nil {
+	if blocked, cause, qerr := b.isObjectQuarantined(bucket, key, obj.VersionID); qerr != nil {
 		return 0, fmt.Errorf("check quarantine: %w", qerr)
 	} else if blocked {
-		return 0, objectQuarantinedError(bucket, key, q)
+		return 0, objectQuarantinedError(bucket, key, cause)
 	}
 	return b.readAtPreparedObject(ctx, bucket, key, obj, placementMeta, offset, buf)
 }
@@ -121,10 +121,10 @@ func (b *DistributedBackend) GetObject(ctx context.Context, bucket, key string) 
 	if err != nil {
 		return nil, nil, err
 	}
-	if blocked, q, qerr := b.isObjectQuarantined(bucket, key, obj.VersionID); qerr != nil {
+	if blocked, cause, qerr := b.isObjectQuarantined(bucket, key, obj.VersionID); qerr != nil {
 		return nil, nil, fmt.Errorf("check quarantine: %w", qerr)
 	} else if blocked {
-		return nil, nil, objectQuarantinedError(bucket, key, q)
+		return nil, nil, objectQuarantinedError(bucket, key, cause)
 	}
 	// HeadObject already rejects tombstones with ErrObjectNotFound, so obj here
 	// is a real version. VersionID is non-empty for versioned writes and empty

@@ -55,11 +55,10 @@ func dumpFSMState(t *testing.T, fsm *FSM) map[string]string {
 }
 
 // determinismCmdSequence builds a fixed sequence exercising read-modify-write
-// handlers. The PutObjectMeta(v1) -> PutObjectMeta(v2) -> DeleteObjectVersion(v2)
-// triplet on the same object exercises the iterator read-your-writes path:
-// when v2 (the latest) is deleted, applyDeleteObjectVersion's scanGroupPrefix
-// must see v1 — pending in the same shared transaction when these three land
-// in one batch.
+// handlers. CmdPutObjectMeta / CmdDeleteObjectVersion / CmdDeleteObject are
+// retired no-ops in data-plane raft-free Slice 2; the sequence exercises live
+// commands (bucket create/versioning, bucket policy) to verify batch-apply
+// determinism across different transaction groupings.
 func determinismCmdSequence(t *testing.T) [][]byte {
 	t.Helper()
 	enc := func(ct CommandType, p any) []byte {
@@ -69,13 +68,13 @@ func determinismCmdSequence(t *testing.T) [][]byte {
 	}
 	return [][]byte{
 		enc(CmdCreateBucket, CreateBucketCmd{Bucket: "b1"}),
-		enc(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: "b1", Key: "k1", Size: 10, ETag: "e1", VersionID: "v1"}),
-		enc(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: "b1", Key: "k1", Size: 20, ETag: "e2", VersionID: "v2"}),
-		enc(CmdDeleteObjectVersion, DeleteObjectVersionCmd{Bucket: "b1", Key: "k1", VersionID: "v2"}),
+		enc(CmdSetBucketVersioning, SetBucketVersioningCmd{Bucket: "b1", State: "Enabled"}),
+		enc(CmdSetBucketPolicy, SetBucketPolicyCmd{Bucket: "b1", PolicyJSON: []byte(`{"v":1}`)}),
+		enc(CmdDeleteBucketPolicy, DeleteBucketPolicyCmd{Bucket: "b1"}),
 		enc(CmdCreateBucket, CreateBucketCmd{Bucket: "b2"}),
 		enc(CmdSetBucketVersioning, SetBucketVersioningCmd{Bucket: "b2", State: "Enabled"}),
-		enc(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: "b2", Key: "k2", Size: 5, ETag: "e3", VersionID: "v3"}),
-		enc(CmdDeleteObject, DeleteObjectCmd{Bucket: "b2", Key: "k2", VersionID: "v4"}),
+		enc(CmdSetBucketPolicy, SetBucketPolicyCmd{Bucket: "b2", PolicyJSON: []byte(`{"v":2}`)}),
+		enc(CmdDeleteBucket, DeleteBucketCmd{Bucket: "b2"}),
 	}
 }
 
@@ -159,10 +158,10 @@ func TestApplyBatch_BusinessErrorDoesNotAbortBatch(t *testing.T) {
 	}
 	cmds := [][]byte{
 		enc(CmdCreateBucket, CreateBucketCmd{Bucket: "b1"}),
-		enc(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: "b1", Key: "k1", Size: 1, ETag: "e1"}),
-		// CAS against a wrong ETag -> business error, no write.
-		enc(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: "b1", Key: "k1", Size: 2, ETag: "e2", ExpectedETag: "WRONG"}),
-		enc(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: "b1", Key: "k3", Size: 3, ETag: "e3"}),
+		enc(CmdCreateBucket, CreateBucketCmd{Bucket: "b2"}),
+		// Delete a reserved bucket name → business error, no write.
+		enc(CmdDeleteBucket, DeleteBucketCmd{Bucket: "_grainfs-reserved"}),
+		enc(CmdCreateBucket, CreateBucketCmd{Bucket: "b3"}),
 	}
 	batch := make([]raft.LogEntry, len(cmds))
 	for i, c := range cmds {
@@ -175,12 +174,12 @@ func TestApplyBatch_BusinessErrorDoesNotAbortBatch(t *testing.T) {
 
 	require.NoError(t, results[0])
 	require.NoError(t, results[1])
-	require.Error(t, results[2], "CAS mismatch must be reported")
+	require.Error(t, results[2], "reserved bucket delete must be reported as error")
 	require.NoError(t, results[3])
 
-	// Entry 3 (k3) committed despite entry 2's error.
+	// Entry 3 (b3) committed despite entry 2's error.
 	err := fsm.db.View(func(txn MetadataTxn) error {
-		_, e := txn.Get(fsm.keys.ObjectMetaKey("b1", "k3"))
+		_, e := txn.Get(fsm.keys.BucketKey("b3"))
 		return e
 	})
 	require.NoError(t, err, "entries after a business error must still commit")

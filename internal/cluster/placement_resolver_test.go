@@ -56,7 +56,7 @@ func TestResolvePlacement_ReturnsErrPlacementCorruptForBadMetadata(t *testing.T)
 func TestIterObjectMetas_YieldsVersionIDAndNodeIDs(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+	cmd := PutObjectMetaCmd{
 		Bucket:      "bkt",
 		Key:         "obj/with/slash",
 		VersionID:   "v1",
@@ -67,9 +67,10 @@ func TestIterObjectMetas_YieldsVersionIDAndNodeIDs(t *testing.T) {
 		ECData:      2,
 		ECParity:    1,
 		NodeIDs:     []string{"n0", "n1", "n2"},
-	})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(raw))
+	}
+	require.NoError(t, fsm.db.Update(func(txn MetadataTxn) error {
+		return fsm.persistPutObjectMetaUpdate(txn, cmd, buildPutObjectMeta(cmd))
+	}))
 
 	var refs []ObjectMetaRef
 	require.NoError(t, fsm.IterObjectMetas(func(ref ObjectMetaRef) error {
@@ -92,7 +93,7 @@ func TestHeadObjectMeta_ReturnsObjectAndPlacementMeta(t *testing.T) {
 	raw, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "bkt"})
 	require.NoError(t, err)
 	require.NoError(t, fsm.Apply(raw))
-	raw, err = EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+	putCmd := PutObjectMetaCmd{
 		Bucket:      "bkt",
 		Key:         "obj",
 		VersionID:   "v1",
@@ -103,9 +104,10 @@ func TestHeadObjectMeta_ReturnsObjectAndPlacementMeta(t *testing.T) {
 		ECData:      2,
 		ECParity:    1,
 		NodeIDs:     []string{"n0", "n1", "n2"},
-	})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(raw))
+	}
+	require.NoError(t, fsm.db.Update(func(txn MetadataTxn) error {
+		return fsm.persistPutObjectMetaUpdate(txn, putCmd, buildPutObjectMeta(putCmd))
+	}))
 
 	obj, meta, err := b.headObjectMeta(context.Background(), "bkt", "obj")
 	require.NoError(t, err)

@@ -2,8 +2,48 @@ package cluster
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 )
+
+// persistPutObjectMetaUpdate is the canonical FSM write path for object metadata.
+// It was extracted from the retired applyPutObjectMeta (data-plane raft-free Slice 2)
+// and lives here as a test helper so tests can seed FSM state without going through
+// the retired raft apply path.
+func (f *FSM) persistPutObjectMetaUpdate(txn MetadataTxn, cmd PutObjectMetaCmd, meta objectMeta) error {
+	out, err := marshalObjectMeta(meta)
+	if err != nil {
+		return fmt.Errorf("marshal object meta: %w", err)
+	}
+	if cmd.VersionID != "" {
+		if err := f.setValue(txn, f.keys.ObjectMetaKeyV(cmd.Bucket, cmd.Key, cmd.VersionID), out); err != nil {
+			return err
+		}
+		if cmd.PreserveLatest {
+			return nil
+		}
+	}
+	if cmd.IsDeleteMarker {
+		if cmd.VersionID != "" {
+			if err := txn.Set(f.keys.LatestKey(cmd.Bucket, cmd.Key), []byte(cmd.VersionID)); err != nil {
+				return err
+			}
+		}
+		if err := txn.Delete(f.keys.ObjectMetaKey(cmd.Bucket, cmd.Key)); err != nil && err != ErrMetaKeyNotFound {
+			return err
+		}
+		return nil
+	}
+	if err := f.setValue(txn, f.keys.ObjectMetaKey(cmd.Bucket, cmd.Key), out); err != nil {
+		return err
+	}
+	if cmd.VersionID != "" {
+		if err := txn.Set(f.keys.LatestKey(cmd.Bucket, cmd.Key), []byte(cmd.VersionID)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 func TestPersistPutObjectMetaUpdatePublishesVersionedObject(t *testing.T) {
 	f := newCoalesceTestFSM(t)

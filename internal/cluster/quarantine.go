@@ -4,24 +4,57 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/incident"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 var ErrObjectQuarantined = errors.New("object quarantined")
 
 func (b *DistributedBackend) QuarantineObject(ctx context.Context, bucket, key, versionID, cause, reason string) error {
-	return b.propose(ctx, CmdPutObjectQuarantine, PutObjectQuarantineCmd{
-		Bucket:    bucket,
-		Key:       key,
-		VersionID: versionID,
-		Cause:     cause,
-		Reason:    reason,
-	})
+	unlock := b.objectMetaRMWLock(bucket, key)
+	defer unlock()
+
+	var cmd PutObjectMetaCmd
+	var err error
+	if versionID != "" {
+		var found bool
+		cmd, found, err = b.readQuorumMetaVersion(bucket, key, versionID)
+		if err != nil {
+			return fmt.Errorf("read quorum meta version: %w", err)
+		}
+		if !found {
+			// Fall back to the latest-only blob when versionID matches.
+			cmd, err = b.readQuorumMetaCmd(bucket, key)
+			if err != nil && !errors.Is(err, storage.ErrObjectNotFound) {
+				return fmt.Errorf("read quorum meta: %w", err)
+			}
+			if err == nil && cmd.VersionID == versionID {
+				found = true
+			}
+		}
+		if !found {
+			return fmt.Errorf("object not found: %s/%s@%s", bucket, key, versionID)
+		}
+	} else {
+		cmd, err = b.readQuorumMetaCmd(bucket, key)
+		if errors.Is(err, storage.ErrObjectNotFound) {
+			return fmt.Errorf("object not found: %s/%s", bucket, key)
+		}
+		if err != nil {
+			return fmt.Errorf("read quorum meta: %w", err)
+		}
+		if cmd.Key == "" {
+			return fmt.Errorf("object not found: %s/%s", bucket, key)
+		}
+	}
+	cmd.IsQuarantined = true
+	cmd.QuarantineCause = cause
+	cmd.MetaSeq++
+	return b.writeQuorumMeta(ctx, cmd)
 }
 
 func (b *DistributedBackend) QuarantineCorruptShardLocal(bucket, key, versionID string, shardIdx int, reason string) error {
@@ -39,7 +72,9 @@ func (b *DistributedBackend) QuarantineCorruptShardLocal(bucket, key, versionID 
 		{CorrelationID: cid, Type: incident.FactObserved, Cause: incident.CauseCorruptShard, Scope: scope, At: now},
 		{CorrelationID: cid, Type: incident.FactActionStarted, Action: incident.ActionIsolateObject, At: now.Add(time.Millisecond)},
 	}
-	if err := b.QuarantineObject(context.Background(), bucket, key, versionID, string(incident.CauseCorruptShard), reason); err != nil {
+	// The placement monitor may run on a NON-OWNER node; route the SET to the
+	// owner so its RMW lock serializes it (incident recording stays local).
+	if err := b.quarantineSet(context.Background(), bucket, key, versionID, string(incident.CauseCorruptShard), reason); err != nil {
 		facts = append(facts, incident.Fact{CorrelationID: cid, Type: incident.FactActionFailed, Action: incident.ActionIsolateObject, ErrorCode: "quarantine_failed", At: time.Now().UTC()})
 		_ = recordIncident(context.Background(), b.incidentRecorder, facts)
 		return err
@@ -80,7 +115,9 @@ func (b *DistributedBackend) QuarantineCorruptShardLocalAtShardKey(t ECShardScan
 		{CorrelationID: cid, Type: incident.FactObserved, Cause: incident.CauseCorruptShard, Scope: scope, Message: "shard_key=" + t.ShardKey, At: now},
 		{CorrelationID: cid, Type: incident.FactActionStarted, Action: incident.ActionIsolateObject, At: now.Add(time.Millisecond)},
 	}
-	if err := b.QuarantineObject(context.Background(), t.Bucket, t.ObjectKey, t.VersionID, string(incident.CauseCorruptShard), reason); err != nil {
+	// The placement monitor may run on a NON-OWNER node; route the SET to the
+	// owner so its RMW lock serializes it (re-verification + incident stay local).
+	if err := b.quarantineSet(context.Background(), t.Bucket, t.ObjectKey, t.VersionID, string(incident.CauseCorruptShard), reason); err != nil {
 		facts = append(facts, incident.Fact{CorrelationID: cid, Type: incident.FactActionFailed, Action: incident.ActionIsolateObject, ErrorCode: "quarantine_failed", At: time.Now().UTC()})
 		_ = recordIncident(context.Background(), b.incidentRecorder, facts)
 		return err
@@ -197,35 +234,50 @@ func (b *DistributedBackend) readShardTargetMeta(t ECShardScanTarget) (objectMet
 	return objectMeta{}, false, nil
 }
 
-func (b *DistributedBackend) isObjectQuarantined(bucket, key, versionID string) (bool, PutObjectQuarantineCmd, error) {
-	var out PutObjectQuarantineCmd
-	err := b.store.View(func(txn MetadataTxn) error {
-		for _, candidate := range []string{versionID, ""} {
-			item, err := txn.Get(b.ks().QuarantineKey(bucket, key, candidate))
-			if err == ErrMetaKeyNotFound {
-				continue
+func (b *DistributedBackend) isObjectQuarantined(bucket, key, versionID string) (bool, string, error) {
+	var cmd PutObjectMetaCmd
+	var err error
+	if versionID != "" {
+		// Prefer the per-version blob (versioned bucket); fall back to the
+		// latest-only blob when the version matches (non-versioned bucket: the
+		// quarantine RMW writes to the latest-only blob since there is only one
+		// live version at a time).
+		var found bool
+		cmd, found, err = b.readQuorumMetaVersion(bucket, key, versionID)
+		if err != nil {
+			return false, "", fmt.Errorf("isObjectQuarantined: %w", err)
+		}
+		if !found {
+			// Fall back to latest-only blob — valid for non-versioned buckets
+			// where QuarantineObject writes to the latest-only blob.
+			cmd, err = b.readQuorumMetaCmd(bucket, key)
+			if errors.Is(err, storage.ErrObjectNotFound) {
+				// Object has no quorum-meta blob yet; not quarantined.
+				return false, "", nil
 			}
 			if err != nil {
-				return err
+				return false, "", fmt.Errorf("isObjectQuarantined: %w", err)
 			}
-			return item.Value(func(v []byte) error {
-				var decErr error
-				out, decErr = decodePutObjectQuarantineCmdStorage(v)
-				return decErr
-			})
+			// Only honour the latest-only blob's quarantine flag when it
+			// matches the queried version (prevents stale reads after a
+			// re-upload that cleared the quarantine flag).
+			if cmd.VersionID != versionID {
+				return false, "", nil
+			}
 		}
-		return nil
-	})
-	if err != nil {
-		return false, out, err
+	} else {
+		cmd, err = b.readQuorumMetaCmd(bucket, key)
+		if errors.Is(err, storage.ErrObjectNotFound) {
+			// Object has no quorum-meta blob yet; not quarantined.
+			return false, "", nil
+		}
+		if err != nil {
+			return false, "", fmt.Errorf("isObjectQuarantined: %w", err)
+		}
 	}
-	return out.Bucket != "", out, nil
+	return cmd.IsQuarantined, cmd.QuarantineCause, nil
 }
 
-func objectQuarantinedError(bucket, key string, q PutObjectQuarantineCmd) error {
-	scope := bucket + "/" + key
-	if q.VersionID != "" {
-		scope += "@" + q.VersionID
-	}
-	return fmt.Errorf("%w: %s cause=%s reason=%s", ErrObjectQuarantined, scope, q.Cause, strings.TrimSpace(q.Reason))
+func objectQuarantinedError(bucket, key, cause string) error {
+	return fmt.Errorf("%w: %s cause=%s", ErrObjectQuarantined, bucket+"/"+key, cause)
 }
