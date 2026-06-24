@@ -338,6 +338,21 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	return fbFinish(b, clusterpb.PutObjectMetaCmdEnd(b)), nil
 }
 
+// encodeQuorumMetaBlob serializes an object's quorum-meta record for the off-raft
+// quorum-meta tree (and the per-version / multipart-manifest blobs that reuse it).
+// It is the bare PutObjectMetaCmd FlatBuffer — NOT wrapped in a clusterpb.Command
+// envelope — so the data plane no longer depends on the raft command codec/enum.
+// Every quorum-meta blob is a PutObjectMetaCmd, so no command-type discriminator is
+// needed. WIRE FORMAT: bare PutObjectMetaCmd FB (greenfield; see CHANGELOG).
+func encodeQuorumMetaBlob(c PutObjectMetaCmd) ([]byte, error) {
+	return encodePutObjectMetaCmd(c)
+}
+
+// decodeQuorumMetaBlob is the inverse of encodeQuorumMetaBlob.
+func decodeQuorumMetaBlob(data []byte) (PutObjectMetaCmd, error) {
+	return decodePutObjectMetaCmd(data)
+}
+
 func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
 	t, err := fbSafe(data, func(d []byte) *clusterpb.PutObjectMetaCmd {
 		return clusterpb.GetRootAsPutObjectMetaCmd(d, 0)
