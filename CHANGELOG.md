@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.672.0] - 2026-06-25
+
+### Changed
+- **Internal refactor, no user-facing behavior change.** Decomposed the meta-Raft snapshot
+  `(*MetaFSM).Restore` (the codebase's highest-complexity function) into a package-private carrier
+  struct plus a sequence of phase sub-functions (parse, per-section decode, core/satellite commit,
+  peer-registry commit + side-effect callbacks). The snapshot wire format, restore semantics, lock
+  ordering, the DEK-before-IAM two-pass decode, and the side-effect callback firing order are all
+  preserved unchanged.
+
 ## [0.0.671.0] - 2026-06-25
 
 ### Fixed
