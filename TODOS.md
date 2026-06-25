@@ -211,11 +211,47 @@ Deferred items:
 
 - **[DONE] Slice 2 — retire remaining per-object FSM commands.** See Slice 2 section above.
 
-- **[P3] Segment (raw append) orphan EC shards still leak.** The orphan walker now reclaims
-  coalesced shards but still wholesale-`SkipDir`s `/segments/` (there is no `parseSegmentRel`, and a
-  real segment shard falling through to `parseFullObjectRel` would be reclaimed as a fake full-object
-  orphan = data loss on live append data). Raw appended-segment shards left by an interrupted append
-  are not reclaimed. Needs its own design (segment lifecycle / ref model differs from coalesced).
+- **[P3][needs-dedicated-epic, DEFERRED 2026-06-25 after 2-round codex plan-gate] EC-sharded chunked
+  segment orphan shards leak.** The orphan-SHARD walker wholesale-`SkipDir`s `/segments/`, so EC shards
+  of chunked segments (`<bucket>/<key>/segments/<blobID>/shard_N`) left by an interrupted chunked PUT /
+  chunked multipart-complete (process crash) leak on disk forever. Current wholesale-skip is **SAFE**
+  (disk leak only, no data loss) — not urgent.
+  - **Premise correction:** the old "raw append" label was WRONG — raw-append SINGLE-blob segments
+    (`<key>_segments/<blobID>`, ECData=0) are ALREADY reclaimed by `orphan_segment_walker.go`
+    (known-set from `ListAllObjectsStrict`). The real leak is the EC-SHARDED chunked segments
+    (`<key>/segments/<blobID>`, slash; producers: `object_put.go`→`runChunkedPut`,
+    `multipart.go`→`runChunkedPutWithParts`, relocation rewrite).
+  - **Why a verified-pattern (mirror-coalesced) clone does NOT work** — coalesced's safe premises break
+    on all THREE axes (each attempted shortcut = data loss):
+    1. **Cross-node placement.** A segment's per-segment EC placement (`ec_object_writer.go`) is
+       SEPARATE from its qmeta-blob placement (`segment_backend.go`): a node can host a live segment
+       shard whose qmeta lives on a peer. A node-LOCAL known-set (`ListAllObjectsStrict`) misses it →
+       reclaim = data loss. (Coalesced is owner-local, so this never bites it.) Needs a cluster-wide
+       peer-fallback liveness read (`readQuorumMetaForReclaim`-style).
+    2. **Suspended per-version.** Chunked PUT is NOT 501-gated on versioning (unlike append→coalesce,
+       which is Enabled-501-gated), so Suspended buckets hold per-version segment refs. A latest-only
+       read misses a non-latest version's segment → reclaim = data loss. The versioning gate must be
+       3-way (Enabled OR Suspended → keep; only truly-never-versioned → eligible) AND authoritative:
+       `GetBucketVersioning` is local/best-effort/stale (a lagging node reads "Unversioned" for an
+       actually-versioned bucket), and `GetBucketVersioningLinearized` degrades to a local read during a
+       group-0 leaderless window, so it must fail-closed (keep) when a never-versioned proof is missing.
+    3. **Never-versioned blob (no FSM backstop).** A never-versioned chunked object is a quorum-meta
+       blob, NOT an FSM `obj:` record, so the cleanable-key forward-map (`liveVersionedShardDirs`,
+       which protects full-object cleanable keys like `a/../b`) does NOT cover it. `parseSegmentRel` on
+       the cleaned on-disk path reverse-parses the wrong key → `readQuorumMetaForReclaim` miss →
+       reclaim = data loss. Needs a cluster-wide forward-map of live segments, not reverse-parse.
+  - **A safe design (dedicated epic) requires:** a cluster-wide + all-version + certainty-aware live
+    segment oracle (or a version-fenced never-versioned proof) + a cleanable-key forward-map + the
+    in-flight guard (below) + re-running the predicate at `DeleteOrphanDir`/`orphanShardSweepReconfirm`
+    (currently only coalesced is reconfirmed). All four codex plan-gate findings are captured here.
+
+- **[P3][in-flight, part of the segment epic above] Chunked-PUT in-flight window.** Even with a safe
+  oracle, a LIVE in-progress multi-segment chunked PUT longer than `minOrphanShardAge` (~466s) + 2
+  tombstone cycles could have an early-written segment shard reclaimed before the manifest commits →
+  the commit then references a deleted segment = committed-but-corrupt. Segment shards are written
+  before the qmeta commit (`segment_backend.go`); the walker only guards via `.tmp` + age. Needs an
+  in-flight guard (e.g. an in-memory in-progress-segment-blobID registry unioned into the liveness set,
+  auto-cleared on crash). Committed objects unaffected; this is a live-upload exposure.
 - **[P3][known-tradeoff] Coalesced orphans in a bucket switched to versioning-Enabled are not
   reclaimed.** `hasLiveCoalescedRef` gates on `blobAuthReadOn` and fails closed (keep) for Enabled
   buckets, so coalesced orphans created during a bucket's prior Unversioned/Suspended life leak after
