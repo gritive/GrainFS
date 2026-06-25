@@ -129,6 +129,7 @@ type DistributedBackend struct {
 	runtimeSnapshot                  atomic.Pointer[backendRuntimeSnapshot]
 	shardLocks                       keyedRWMutex              // scrubbable.go: per-(bucket,key) RWMutex for ReadShard/WriteShard (refcounted, bounded)
 	objectMetaRMWLocks               keyedRWMutex              // per-(bucket,key) serialization for append/tag/ACL/coalesce/relocation quorum-meta RMW (refcounted, bounded)
+	objectWriteBucketLocks           keyedRWMutex              // per-bucket admission fence for object writes vs DeleteBucket emptiness/delete
 	multipartLocks                   sync.Map                  // map[uploadID]*sync.RWMutex; serializes part writes against complete/abort cleanup
 	incidentRecorder                 IncidentRecorder          // nil disables zero-ops incident recording
 	quarantineRouter                 QuarantineRouter          // nil → leaf-local quarantine SET; set on group backends to route the SET to the owner

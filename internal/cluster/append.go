@@ -63,6 +63,11 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 	if b.shardSvc == nil {
 		return nil, fmt.Errorf("append object: quorum-meta store unavailable")
 	}
+	unlockBucketWrite, err := b.enterBucketObjectWrite(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	defer unlockBucketWrite()
 
 	unlock := b.objectMetaRMWLock(bucket, key)
 	defer unlock()

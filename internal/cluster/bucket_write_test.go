@@ -1,9 +1,12 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -13,6 +16,8 @@ import (
 
 // fakeMetaBucketStore is a test double for MetaBucketStore that records all calls.
 type fakeMetaBucketStore struct {
+	mu sync.Mutex
+
 	// recorded calls
 	createCalls []fakeCreateCall
 	deleteCalls []string
@@ -21,7 +26,8 @@ type fakeMetaBucketStore struct {
 	delPolicies []string
 
 	// configurable errors
-	deleteErr error
+	deleteErr  error
+	deleteHook func()
 
 	// call order tracking for delete ordering test
 	callOrder []string
@@ -47,6 +53,8 @@ type fakeSetPolicyCall struct {
 }
 
 func (f *fakeMetaBucketStore) CreateBucket(_ context.Context, bucket, groupID string, bypassReserved bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.createCalls = append(f.createCalls, fakeCreateCall{bucket: bucket, groupID: groupID, bypassReserved: bypassReserved})
 	if f.knownBuckets == nil {
 		f.knownBuckets = make(map[string]struct{})
@@ -56,27 +64,47 @@ func (f *fakeMetaBucketStore) CreateBucket(_ context.Context, bucket, groupID st
 }
 
 func (f *fakeMetaBucketStore) DeleteBucket(_ context.Context, bucket string) error {
+	f.mu.Lock()
 	f.deleteCalls = append(f.deleteCalls, bucket)
 	f.callOrder = append(f.callOrder, "meta-delete")
-	return f.deleteErr
+	hook := f.deleteHook
+	err := f.deleteErr
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	f.mu.Lock()
+	if f.knownBuckets != nil && err == nil {
+		delete(f.knownBuckets, bucket)
+	}
+	f.mu.Unlock()
+	return err
 }
 
 func (f *fakeMetaBucketStore) SetVersioning(_ context.Context, bucket, state string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.setCalls = append(f.setCalls, fakeSetVersioningCall{bucket: bucket, state: state})
 	return nil
 }
 
 func (f *fakeMetaBucketStore) SetPolicy(_ context.Context, bucket string, policy []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.setPolicies = append(f.setPolicies, fakeSetPolicyCall{bucket: bucket, policy: append([]byte(nil), policy...)})
 	return nil
 }
 
 func (f *fakeMetaBucketStore) DeletePolicy(_ context.Context, bucket string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.delPolicies = append(f.delPolicies, bucket)
 	return nil
 }
 
 func (f *fakeMetaBucketStore) Record(bucket string) (BucketRecord, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.knownBuckets != nil {
 		_, ok := f.knownBuckets[bucket]
 		return BucketRecord{}, ok
@@ -89,6 +117,8 @@ func (f *fakeMetaBucketStore) RecordLinearized(_ context.Context, bucket string)
 }
 
 func (f *fakeMetaBucketStore) AllRecords() map[string]BucketRecord {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return nil
 }
 
@@ -206,6 +236,46 @@ func TestBucketWrite_Delete_PhysicalCleanupErrorIsBestEffort(t *testing.T) {
 	// must be swallowed as best-effort residue, not returned as a delete failure.
 	require.NoError(t, b.DeleteBucket(ctx, "del-bucket"),
 		"a post-commit physical-cleanup error must not fail the already-committed delete")
+}
+
+// TestBucketWrite_Delete_FencesPutAfterEmptyScan proves DeleteBucket closes the
+// TOCTOU window after its emptiness scan: a PUT that starts while the meta delete
+// is in progress must not publish quorum-meta into a bucket that is being deleted.
+func TestBucketWrite_Delete_FencesPutAfterEmptyScan(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	fake := &fakeMetaBucketStore{}
+	b.SetMetaBucketStore(fake)
+
+	ctx := context.Background()
+	seedBucketForDelete(t, b, "del-bucket")
+
+	putDone := make(chan error, 1)
+	putStarted := make(chan struct{})
+	var earlyErr error
+	completedDuringDelete := false
+	fake.deleteHook = func() {
+		go func() {
+			close(putStarted)
+			_, err := b.PutObject(ctx, "del-bucket", "late", bytes.NewReader([]byte("late")), "text/plain")
+			putDone <- err
+		}()
+		<-putStarted
+		select {
+		case earlyErr = <-putDone:
+			completedDuringDelete = true
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+
+	require.NoError(t, b.DeleteBucket(ctx, "del-bucket"))
+	require.False(t, completedDuringDelete, "PUT completed inside the delete window: %v", earlyErr)
+
+	select {
+	case err := <-putDone:
+		require.ErrorIs(t, err, storage.ErrBucketNotFound)
+	case <-time.After(time.Second):
+		t.Fatal("PUT remained blocked after DeleteBucket released the bucket fence")
+	}
 }
 
 // --- SetBucketVersioningPropose tests ---

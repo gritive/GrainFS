@@ -56,9 +56,11 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 	sseAlgorithm := req.SystemMetadata.SSEAlgorithm
 	acl := derefACL(req.ACL)
 	stageStart := time.Now()
-	if err := b.HeadBucket(ctx, bucket); err != nil {
+	unlockBucketWrite, err := b.enterBucketObjectWrite(ctx, bucket)
+	if err != nil {
 		return nil, err
 	}
+	defer unlockBucketWrite()
 	observePutStage("distributed", "head_bucket", stageStart)
 
 	stageStart = time.Now()
@@ -101,9 +103,11 @@ func (b *DistributedBackend) PutObjectAsync(ctx context.Context, bucket, key str
 	if err := guardInternalBucketObjectOp(bucket); err != nil {
 		return nil, nil, err
 	}
-	if err := b.HeadBucket(ctx, bucket); err != nil {
+	unlockBucketWrite, err := b.enterBucketObjectWrite(ctx, bucket)
+	if err != nil {
 		return nil, nil, err
 	}
+	defer unlockBucketWrite()
 	sp, err := b.spoolPutObject(ctx, bucket, r)
 	if err != nil {
 		return nil, nil, err
