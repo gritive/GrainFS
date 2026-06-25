@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.699.0] - 2026-06-25
+
+### Changed
+- **Internal refactor, no user-facing behavior change.** Split the 2,519-line
+  `internal/cluster/cluster_coordinator.go` god-file into five themed same-package files
+  (`_bucket.go`, `_object_io.go`, `_multipart.go`, `_scan.go`, `_placement.go`) while keeping the
+  `ClusterCoordinator` struct, constructor, builder methods, and small shared core in
+  `cluster_coordinator.go`. This is a move-only change: methods were relocated verbatim with no
+  signature, logic, or ordering changes, following the same behavior-neutral themed-file-split
+  playbook used on `backend.go` (PR #713). Behavior-neutrality is proven by a sorted-line-diff that
+  is empty between the original single file and the concatenation of the new files (modulo
+  per-file package/import boundaries); the god-object and method counts are unchanged by design —
+  the win is navigability.
+
 ## [0.0.698.0] - 2026-06-25
 
 ### Changed
@@ -156,7 +170,6 @@
   output is byte-identical to before — builder operation order is load-bearing, so the extraction
   preserves the exact sequence and is guarded by a new byte-identity golden test
   (`TestByteIdentity_MetaFSMSnapshot`) that freezes the deterministic snapshot root.
-
 ## [0.0.687.0] - 2026-06-25
 
 ### Changed
