@@ -25,7 +25,7 @@ func TestShardWriteRequiresFsync_NoRedundancyForcesFsyncForLargeShard(t *testing
 		WithNoRedundancy(func() bool { return true }),
 	)
 
-	require.True(t, svc.shardWriteRequiresFsync(len(largeShardPayload())),
+	require.True(t, svc.local.shardWriteRequiresFsync(len(largeShardPayload())),
 		"no-redundancy large shard must fsync the shard file directly")
 }
 
@@ -39,7 +39,7 @@ func TestShardWriteRequiresFsync_NoRedundancySmallFsynced(t *testing.T) {
 		WithNoRedundancy(func() bool { return true }),
 	)
 
-	require.True(t, svc.shardWriteRequiresFsync(len([]byte("small"))),
+	require.True(t, svc.local.shardWriteRequiresFsync(len([]byte("small"))),
 		"small shard is fsynced directly after S2 (no WAL)")
 }
 
@@ -54,7 +54,7 @@ func TestShardWriteRequiresFsync_RedundantLargeNoFsync(t *testing.T) {
 		WithNoRedundancy(func() bool { return false }),
 	)
 
-	require.False(t, svc.shardWriteRequiresFsync(len(largeShardPayload())),
+	require.False(t, svc.local.shardWriteRequiresFsync(len(largeShardPayload())),
 		"with parity, large shard relies on EC reconstruction; no fsync")
 }
 
@@ -64,6 +64,6 @@ func TestShardWriteRequiresFsync_NilNoRedundancyLargeNoFsync(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 	svc := NewShardService(t.TempDir(), nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID)) // no WithNoRedundancy
 
-	require.False(t, svc.shardWriteRequiresFsync(len(largeShardPayload())),
+	require.False(t, svc.local.shardWriteRequiresFsync(len(largeShardPayload())),
 		"nil noRedundancy counts as redundant; large → no fsync")
 }

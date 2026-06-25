@@ -47,13 +47,13 @@ func TestShardWriteRequiresFsync_Classes(t *testing.T) {
 	small := largeShardFsyncThreshold - 1
 	large := largeShardFsyncThreshold + 1
 
-	redundant := &ShardService{noRedundancy: func() bool { return false }}
+	redundant := &LocalShardStore{noRedundancy: func() bool { return false }}
 	require.True(t, redundant.shardWriteRequiresFsync(small), "small shard always fsyncs")
 	require.False(t, redundant.shardWriteRequiresFsync(large), "large redundant: EC, no fsync")
 
-	noRed := &ShardService{noRedundancy: func() bool { return true }}
+	noRed := &LocalShardStore{noRedundancy: func() bool { return true }}
 	require.True(t, noRed.shardWriteRequiresFsync(large), "large no-redundancy: fsync")
 
-	nilRed := &ShardService{} // nil provider => redundant
+	nilRed := &LocalShardStore{} // nil provider => redundant
 	require.False(t, nilRed.shardWriteRequiresFsync(large), "nil provider counts as redundant")
 }

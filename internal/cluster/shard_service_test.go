@@ -51,7 +51,7 @@ func TestShardServiceAcceptsDEKKeeperWithoutStaticEncryptor(t *testing.T) {
 
 	svc := NewShardService(t.TempDir(), nil, WithShardDEKKeeper(keeper, clusterID))
 	require.NotNil(t, svc)
-	require.NotNil(t, svc.segEnc)
+	require.NotNil(t, svc.local.segEnc)
 	require.NotNil(t, svc.DEKKeeper())
 	require.Equal(t, keeper, svc.DEKKeeper())
 }
@@ -71,7 +71,7 @@ func TestEncodeEncryptedShardBufferRoundTripsViaDEK(t *testing.T) {
 
 	// Round-trips through the normal read decoder.
 	var out bytes.Buffer
-	require.NoError(t, eccodec.DecodeEncryptedShard(&out, bytes.NewReader(enc), svc.segEnc, ShardAADFields("bucket", "key", 2)))
+	require.NoError(t, eccodec.DecodeEncryptedShard(&out, bytes.NewReader(enc), svc.local.segEnc, ShardAADFields("bucket", "key", 2)))
 	require.Equal(t, plain, out.Bytes())
 }
 
@@ -136,7 +136,7 @@ func TestShardService_WriteLocalSealedShardVerbatim(t *testing.T) {
 	require.True(t, eccodec.IsEncryptedShard(sealed))
 
 	// Receiver stores the sealed bytes verbatim — no re-encode.
-	require.NoError(t, svc.writeLocalSealedShard(context.Background(), "bkt", "obj", 0, sealed))
+	require.NoError(t, svc.local.writeLocalSealedShard(context.Background(), "bkt", "obj", 0, sealed))
 
 	// On-disk bytes must equal the sealed bytes exactly (verbatim, not re-sealed).
 	rawPath := filepath.Join(dir, "shards", "bkt", "obj", "shard_0")
@@ -655,14 +655,14 @@ func TestWithShardDEKKeeper_SetsSegEncAndClusterID(t *testing.T) {
 	}
 	cid := bytes.Repeat([]byte{0x44}, 16)
 	s := NewShardService(t.TempDir(), nil, WithShardDEKKeeper(keeper, cid))
-	if !bytes.Equal(s.clusterID[:], cid) {
-		t.Fatalf("clusterID not threaded: %x", s.clusterID)
+	if !bytes.Equal(s.local.clusterID[:], cid) {
+		t.Fatalf("clusterID not threaded: %x", s.local.clusterID)
 	}
-	ct, gen, err := s.segEnc.Seal(encrypt.DomainShard, []encrypt.AADField{encrypt.FieldString("x")}, []byte("hi"))
+	ct, gen, err := s.local.segEnc.Seal(encrypt.DomainShard, []encrypt.AADField{encrypt.FieldString("x")}, []byte("hi"))
 	if err != nil {
 		t.Fatalf("seal: %v", err)
 	}
-	pt, err := s.segEnc.Open(encrypt.DomainShard, []encrypt.AADField{encrypt.FieldString("x")}, gen, ct)
+	pt, err := s.local.segEnc.Open(encrypt.DomainShard, []encrypt.AADField{encrypt.FieldString("x")}, gen, ct)
 	if err != nil || string(pt) != "hi" {
 		t.Fatalf("open: pt=%q err=%v", pt, err)
 	}
@@ -671,7 +671,7 @@ func TestWithShardDEKKeeper_SetsSegEncAndClusterID(t *testing.T) {
 func TestWithShardDEKKeeper_NilOrBadClusterIDIsNoOp(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 	s := NewShardService(t.TempDir(), nil, WithShardDEKKeeper(keeper, clusterID), WithShardDEKKeeper(nil, nil))
-	if s.segEnc == nil {
+	if s.local.segEnc == nil {
 		t.Fatal("nil keeper must leave the valid DEK-keeper segEnc intact")
 	}
 }

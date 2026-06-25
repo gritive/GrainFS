@@ -42,16 +42,17 @@ func (r *dirSyncPathRec) reset() {
 	r.mu.Unlock()
 }
 
-// newDedupSvc builds a ShardService usable for syncDirChain unit tests.
-// NewShardService PANICS without a sealer ("at-rest sealer is mandatory"), so we
-// MUST pass WithShardDEKKeeper exactly like the other cluster tests (cf.
-// newS1ShardSvc / testDEKKeeper). Once the service constructs, the syncDirHook
+// newDedupSvc builds a LocalShardStore usable for syncDirChain unit tests — the
+// durability state machine now lives there, so the test drives it directly (no
+// transport, no facade). NewLocalShardStore PANICS without a sealer ("at-rest
+// sealer is mandatory"), so we MUST pass WithLocalShardDEKKeeper exactly like the
+// other cluster tests (cf. testDEKKeeper). Once it constructs, the syncDirHook
 // seam short-circuits all disk I/O in syncDirChain, so the unit tests still drive
 // it with arbitrary path strings.
-func newDedupSvc(t *testing.T, rec *dirSyncPathRec) *ShardService {
+func newDedupSvc(t *testing.T, rec *dirSyncPathRec) *LocalShardStore {
 	t.Helper()
 	keeper, clusterID := testDEKKeeper(t)
-	svc := NewShardService(t.TempDir(), nil, WithShardDEKKeeper(keeper, clusterID))
+	svc := NewLocalShardStore([]string{t.TempDir()}, WithLocalShardDEKKeeper(keeper, clusterID))
 	svc.syncDirHook = rec.hook
 	return svc
 }

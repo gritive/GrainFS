@@ -19,7 +19,7 @@ func TestFSMValueCheckLane_ImplementsRewrapLane(t *testing.T) {
 //   - lane.RewrapByGen returns nil once the store is drained (all at keeper-current).
 func TestFSMValueCheckLane_ErrorsWhenStaleCleanWhenDrained(t *testing.T) {
 	gb, gbDB := newTestGroupBackendWithDB(t, "check-lane-group")
-	keeper := gb.shardSvc.dekKeeper
+	keeper := gb.shardSvc.DEKKeeper()
 	ks := gb.ks()
 
 	// Seal a policy: value at gen 0 (initial active gen).

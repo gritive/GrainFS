@@ -170,7 +170,7 @@ func TestPromoteLocalStagedShards_NothingStaged_Fails(t *testing.T) {
 func TestPromoteLocalStagedShards_DstAlreadyPresent_StillFsyncs(t *testing.T) {
 	svc, root := newTestShardService(t)
 	var synced []string
-	svc.syncDirHook = func(dir string) error { synced = append(synced, dir); return nil }
+	svc.local.syncDirHook = func(dir string) error { synced = append(synced, dir); return nil }
 
 	const bucket = "b"
 	const finalKey = "obj/segments/blobP"
@@ -216,7 +216,7 @@ func TestWriteLocalShardStaged_AADIsFinalKey_PromoteReadable(t *testing.T) {
 	data := []byte("segment-shard-payload-0123456789")
 
 	// Write to the STAGING physical path, but with the FINAL key as the encryption AAD.
-	require.NoError(t, svc.writeLocalShardStaged(ctx, bucket, stagingKey, finalKey, 0, data))
+	require.NoError(t, svc.local.writeLocalShardStaged(ctx, bucket, stagingKey, finalKey, 0, data))
 
 	// Promote: local rename of the staging shard dir(s) to the final path.
 	require.NoError(t, svc.PromoteLocalStagedShards(bucket, stagingKey, finalKey))

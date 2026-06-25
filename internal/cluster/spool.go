@@ -215,9 +215,9 @@ func (s *spooledObject) Cleanup() {
 }
 
 func (b *DistributedBackend) spoolPutObject(ctx context.Context, bucket string, r io.Reader) (*spooledObject, error) {
-	if b.shardSvc != nil && b.shardSvc.segEnc != nil {
+	if b.shardSvc != nil && b.shardSvc.segEnc() != nil {
 		domain := fmt.Sprintf("cluster-spool:%d", spoolDomainSeq.Add(1))
-		return spoolObjectEncrypted(ctx, b.spoolDir(), r, bucket, b.shardSvc.segEnc, domain)
+		return spoolObjectEncrypted(ctx, b.spoolDir(), r, bucket, b.shardSvc.segEnc(), domain)
 	}
 	return spoolObject(ctx, b.spoolDir(), r, bucket)
 }

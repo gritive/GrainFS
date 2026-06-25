@@ -1,7 +1,6 @@
 package cluster
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -10,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
@@ -21,7 +19,6 @@ import (
 	pb "github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/datawal"
-	"github.com/gritive/GrainFS/internal/storage/directio"
 	"github.com/gritive/GrainFS/internal/storage/eccodec"
 	"github.com/gritive/GrainFS/internal/transport"
 )
@@ -40,32 +37,19 @@ func getShardBuilder(minSize int) *flatbuffers.Builder {
 
 // ShardService handles remote shard storage via the cluster transport Data Streams.
 // Each node runs a ShardService that stores/retrieves shard data locally.
+//
+// It is a facade (spine): the local-shard concern (blob I/O, seal,
+// syncDirChain durability, staging/promote-local) lives in `local
+// *LocalShardStore`, to which the exported and RPC-handler methods delegate. The
+// remote peer-RPC half (WriteShard/ReadShard/...), the quorum-meta + manifest
+// stores, and the generic raft buffered-route transport stay here. dataDirs is
+// shared config — the same resolved roots LocalShardStore holds — used by the
+// quorum-meta/manifest methods.
 type ShardService struct {
 	dataDirs  []string
 	transport shardTransport
-	segEnc    storage.DataEncryptor // chunked EC-shard data-at-rest seam
-	dekKeeper *encrypt.DEKKeeper
-	clusterID [16]byte // zero sentinel in D-seg-ec-struct; real ID in slice C
+	local     *LocalShardStore // local-shard concern (delegation target)
 	addrBook  NodeAddressBook
-	dirCache  sync.Map
-	// dirDurable records, per directory path, that the dir's entry in its PARENT
-	// has been persisted by a COMPLETED fsync (Stored post-fsync, never before).
-	// syncDirChain consults it to skip re-fsyncing ancestor shard directories
-	// whose child link a prior completed write already made durable. Same
-	// process-local coherence model as dirCache (no external-delete invalidation;
-	// shard leaf paths are version/UUID-keyed and never reborn — see syncDirChain).
-	dirDurable sync.Map
-	// syncFileHook / syncDirHook are nil-default test seams. Production leaves
-	// them nil → fsyncFile/fsyncDir call directio.Sync / syncDir directly. Tests
-	// set them to assert the durability fsync call ORDER (DBV / locked-order).
-	syncFileHook func(*os.File) error
-	syncDirHook  func(string) error
-	// noRedundancy, when set, reports whether the deployment has no EC parity
-	// and no peers (single-node 1+0). In that case a large metadata-only WAL
-	// record cannot be recovered via EC reconstruction, so the shard file must
-	// be fsynced directly. Read live so a later EC reconfig is reflected. Nil
-	// (legacy callers / tests) never forces a direct fsync.
-	noRedundancy func() bool
 	// quorumMetaTargetLocks serializes the (LWW guard-read + os.Rename) critical
 	// section in writeQuorumMetaLocal and writeQuorumMetaVersionLocal on a
 	// per-target-path basis. Without this lock two concurrent writers to the same
@@ -83,15 +67,11 @@ type ShardServiceOption func(*ShardService)
 // EC-shard data-at-rest seam. clusterID MUST be 16 bytes and MUST equal the
 // value the put pipeline binds (divergence fails every GET). nil keeper or
 // non-16-byte clusterID is a no-op so callers can append the option before the
-// keeper is available in narrowly-scoped tests.
+// keeper is available in narrowly-scoped tests. The DEK setup lives on the
+// LocalShardStore, so this forwards to its WithLocalShardDEKKeeper option.
 func WithShardDEKKeeper(keeper *encrypt.DEKKeeper, clusterID []byte) ShardServiceOption {
 	return func(s *ShardService) {
-		if keeper == nil || len(clusterID) != 16 {
-			return
-		}
-		copy(s.clusterID[:], clusterID)
-		s.dekKeeper = keeper
-		s.segEnc = storage.NewDEKKeeperAdapter(keeper, s.clusterID[:])
+		WithLocalShardDEKKeeper(keeper, clusterID)(s.local)
 	}
 }
 
@@ -105,18 +85,20 @@ func WithNodeAddressBook(book NodeAddressBook) ShardServiceOption {
 // redundancy (ParityShards==0, single-node 1+0). When it returns true, a large
 // metadata-only shard write is fsynced directly because EC reconstruction
 // cannot rebuild a page-cache-lost shard with no parity and no peers. The
-// provider is read live, so a later EC reconfig is honored.
+// provider is read live, so a later EC reconfig is honored. Forwards to the
+// LocalShardStore (which owns the no-redundancy decision).
 func WithNoRedundancy(fn func() bool) ShardServiceOption {
-	return func(s *ShardService) { s.noRedundancy = fn }
+	return func(s *ShardService) { WithLocalNoRedundancy(fn)(s.local) }
 }
 
-func (s *ShardService) DEKKeeper() *encrypt.DEKKeeper { return s.dekKeeper }
+func (s *ShardService) DEKKeeper() *encrypt.DEKKeeper { return s.local.DEKKeeper() }
 
-func (s *ShardService) ClusterID() []byte {
-	out := make([]byte, len(s.clusterID))
-	copy(out, s.clusterID[:])
-	return out
-}
+func (s *ShardService) ClusterID() []byte { return s.local.ClusterID() }
+
+// segEnc exposes the at-rest data sealer (owned by LocalShardStore) read-only to
+// the in-package spool / multipart / object-get sites that previously read the
+// raw field. Set once at construction; never mutated after.
+func (s *ShardService) segEnc() storage.DataEncryptor { return s.local.segEnc }
 
 // Close releases resources owned by the ShardService. Currently a no-op.
 func (s *ShardService) Close() error {
@@ -141,15 +123,17 @@ func NewMultiRootShardService(dataDirs []string, tr shardTransport, opts ...Shar
 	s := &ShardService{
 		dataDirs:  resolvedDirs,
 		transport: tr,
+		// Construct the LocalShardStore bare (sharing the resolved dataDirs) BEFORE
+		// applying options: the DEK/no-redundancy options write into s.local.
+		local: &LocalShardStore{dataDirs: resolvedDirs},
 	}
 	for _, opt := range opts {
 		opt(s)
 	}
-	// segEnc is the chunked-EC data-at-rest seam. Production sets it from the
-	// generation-aware DEK keeper.
-	if s.segEnc == nil {
-		panic("cluster.NewShardService: at-rest sealer is mandatory; use WithShardDEKKeeper")
-	}
+	// segEnc is the chunked-EC data-at-rest seam (owned by LocalShardStore).
+	// Production sets it from the generation-aware DEK keeper; absent it panics
+	// with the historical message (single owner: requireAtRestSealer).
+	s.local.requireAtRestSealer()
 	return s
 }
 
@@ -167,52 +151,21 @@ func (s *ShardService) quorumMetaTargetLock(target string) func() {
 	return s.quorumMetaTargetLocks.lockWrite(target)
 }
 
-// getShardDir resolves the on-disk directory for an object's shard and rejects
-// any key whose ".." segments would escape the {dataDir}/{bucket} root. This is
-// the single containment chokepoint for every shard path consumer (S3 writes,
-// peer shard RPC, record-driven mover/repair, reads) — see ShardPathUnderDataDir.
+// getShardDir delegates to the LocalShardStore; it stays on the facade because
+// production callers reach it via b.shardSvc.getShardDir (orphan walker, etc.).
 func (s *ShardService) getShardDir(bucket, key string, shardIdx int) (string, error) {
-	targetDir := s.dataDirs[shardIdx%len(s.dataDirs)]
-	dir := filepath.Join(targetDir, bucket, key)
-	if !s.ShardPathUnderDataDir(bucket, shardIdx, dir) {
-		return "", fmt.Errorf("shard path for object key %q escapes the shard root", key)
-	}
-	return dir, nil
+	return s.local.getShardDir(bucket, key, shardIdx)
 }
 
+// getShardPath delegates to the LocalShardStore; it stays on the facade because
+// production callers reach it via b.shardSvc.getShardPath (scrubber, rewrap).
 func (s *ShardService) getShardPath(bucket, key string, shardIdx int) (string, error) {
-	dir, err := s.getShardDir(bucket, key, shardIdx)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, fmt.Sprintf("shard_%d", shardIdx)), nil
+	return s.local.getShardPath(bucket, key, shardIdx)
 }
 
-// ShardPathUnderDataDir reports whether p resolves inside the {dataDir}/{bucket}
-// subtree for the given shard index — i.e. no "../" traversal escapes the shard
-// root. The scrubber repair read/write paths derive the on-disk location from an
-// object key via getShardPath; a key containing enough ".." would otherwise let
-// that path resolve outside the shard root. Callers MUST reject when this returns
-// false (containment guard previously provided by shardServiceKeyFromPath).
+// ShardPathUnderDataDir delegates to the LocalShardStore (containment chokepoint).
 func (s *ShardService) ShardPathUnderDataDir(bucket string, shardIdx int, p string) bool {
-	if len(s.dataDirs) == 0 {
-		return false
-	}
-	// The candidate path AND the containment root are both derived from bucket,
-	// so a bucket of ".." (or one carrying a separator) would move both up
-	// together and slip past the per-bucket Rel check while physically escaping
-	// the shard data dir. Require bucket to be a single clean path segment. S3
-	// ingress already rejects these (ValidBucketName); this guards the trusted
-	// peer shard-RPC / mover paths that reach the chokepoint directly.
-	if !isSafePathSegment(bucket) {
-		return false
-	}
-	root := filepath.Join(s.dataDirs[shardIdx%len(s.dataDirs)], bucket)
-	rel, err := filepath.Rel(root, filepath.Clean(p))
-	if err != nil {
-		return false
-	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	return s.local.ShardPathUnderDataDir(bucket, shardIdx, p)
 }
 
 // isSafePathSegment reports whether name is a single, non-traversal path
@@ -918,7 +871,7 @@ func (s *ShardService) handleWrite(sr *shardRequest) []byte {
 		SizeClass:   putTraceSizeClass(int64(len(sr.Data)), ecShardBufferedLimit),
 		ForwardMode: PutTraceForwardNone,
 	})
-	if err := s.writeLocalShard(ctx, sr.Bucket, sr.Key, int(sr.ShardIdx), sr.Data); err != nil {
+	if err := s.local.writeLocalShard(ctx, sr.Bucket, sr.Key, int(sr.ShardIdx), sr.Data); err != nil {
 		return s.errorResponse(err.Error())
 	}
 	return s.okResponse(nil)
@@ -973,7 +926,7 @@ func (s *ShardService) NativeWriteHandler() transport.ShardWriteHandler {
 			if terr != nil {
 				return terr
 			}
-			if werr := s.writeLocalSealedShard(context.Background(), req.Bucket, req.Key, req.ShardIdx, sealed); werr != nil {
+			if werr := s.local.writeLocalSealedShard(context.Background(), req.Bucket, req.Key, req.ShardIdx, sealed); werr != nil {
 				return werr
 			}
 			observePutStage("shard_stream_server", "write_local_sealed", stageStart)
@@ -1009,172 +962,84 @@ func (s *ShardService) NativeReadHandler() transport.ShardReadHandler {
 	}
 }
 
+// --- LocalShardStore facade delegates -------------------------------------
+//
+// A named field does NOT promote methods, so the facade re-exposes every local
+// method callers and interfaces depend on (the localShardStore interface, the
+// ecObjectSizedShardStore type assertion, and the production b.shardSvc.<X>
+// callers) by delegating to s.local. Behavior is unchanged.
+
 // WriteLocalShard stores a shard on the local node's disk without involving
 // the cluster transport. Used by PutObject when this node is the destination for
 // one of an object's shards (self-placement); avoids a loopback RPC.
-// The shard is sealed via the DEK keeper (GFSENC3) before writing.
-// Writes are crash-safe via tmp + rename for atomic visibility. Durability is
-// established at write time (no WAL since S4): small / no-redundancy shards
-// fsync the file + parent-dir chain; large redundant shards rely on EC
-// reconstruction + the background scrubber.
-// New encrypted writes use eccodec's chunked AEAD envelope. Plain writes keep
-// the CRC envelope while that compatibility path remains available.
 func (s *ShardService) WriteLocalShard(bucket, key string, shardIdx int, data []byte) error {
-	return s.writeLocalShard(context.Background(), bucket, key, shardIdx, data)
+	return s.local.WriteLocalShard(bucket, key, shardIdx, data)
 }
 
 func (s *ShardService) WriteLocalShardContext(ctx context.Context, bucket, key string, shardIdx int, data []byte) error {
-	return s.writeLocalShard(ctx, bucket, key, shardIdx, data)
+	return s.local.WriteLocalShardContext(ctx, bucket, key, shardIdx, data)
 }
 
-// EncodeEncryptedShardBuffer seals data as a GFSENC3 chunked shard using the
-// DEK seam, identical to the normal writeLocalShard format. Used by the
-// scrubber/EC-repair path (DistributedBackend.WriteShard) so repaired shards
-// are DEK-encrypted at rest like normally-written shards. The at-rest sealer
-// (segEnc) is mandatory (NewShardService panics if absent), so there is no
-// plaintext branch.
+// WriteLocalShardStream stores a shard from body without buffering plaintext.
+func (s *ShardService) WriteLocalShardStream(bucket, key string, shardIdx int, body io.Reader) error {
+	return s.local.WriteLocalShardStream(bucket, key, shardIdx, body)
+}
+
+func (s *ShardService) WriteLocalShardStreamContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader) error {
+	return s.local.WriteLocalShardStreamContext(ctx, bucket, key, shardIdx, body)
+}
+
+// WriteLocalShardStreamSizedContext stays on the facade: localShardEndpoint
+// type-asserts *ShardService to ecObjectSizedShardStore to take the sized-write
+// path (perf). Losing it silently changes that path.
+func (s *ShardService) WriteLocalShardStreamSizedContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader, streamSize int64) error {
+	return s.local.WriteLocalShardStreamSizedContext(ctx, bucket, key, shardIdx, body, streamSize)
+}
+
+// WriteLocalShardStreamStagedContext writes a shard to the staging physical path
+// while sealing with the final logical key as AAD (PR1 segment staging).
+func (s *ShardService) WriteLocalShardStreamStagedContext(ctx context.Context, bucket, stagingKey, finalKey string, shardIdx int, body io.Reader) error {
+	return s.local.WriteLocalShardStreamStagedContext(ctx, bucket, stagingKey, finalKey, shardIdx, body)
+}
+
+// EncodeEncryptedShardBuffer seals data as a GFSENC3 chunked shard using the DEK
+// seam (scrubber/EC-repair path).
 func (s *ShardService) EncodeEncryptedShardBuffer(bucket, key string, shardIdx int, data []byte) ([]byte, error) {
-	payload, err := eccodec.EncodeEncryptedShardToBuffer(data, s.segEnc, ShardAADFields(bucket, key, shardIdx), eccodec.DefaultEncryptedChunkSize)
-	if err != nil {
-		return nil, fmt.Errorf("encode encrypted shard: %w", err)
-	}
-	return payload, nil
+	return s.local.EncodeEncryptedShardBuffer(bucket, key, shardIdx, data)
 }
 
-// writeLocalShard writes shard shardIdx of (bucket,key) to its final on-disk path,
-// encrypted with (bucket,key,shardIdx) as AAD.
-func (s *ShardService) writeLocalShard(ctx context.Context, bucket, key string, shardIdx int, data []byte) error {
-	return s.writeLocalShardAAD(ctx, bucket, key, key, shardIdx, data)
+// ReadLocalShard fetches a shard from the local node's disk and decrypts it.
+func (s *ShardService) ReadLocalShard(bucket, key string, shardIdx int) ([]byte, error) {
+	return s.local.ReadLocalShard(bucket, key, shardIdx)
 }
 
-// writeLocalShardStaged writes shard shardIdx to the STAGING physical path stagingKey but encrypts it
-// with the FINAL logical shard key (finalKey) as AAD, so a post-promote read of finalKey — which
-// decrypts with the final-key AAD — succeeds. PR1 segment staging: in-flight segment shards land in a
-// per-dataDir staging dir and are promoted (renamed) to finalKey only at commit. stagingKey MUST place
-// the shard on the SAME dataDir as finalKey (shardIdx%len(dataDirs)) so the promote rename is atomic.
-func (s *ShardService) writeLocalShardStaged(ctx context.Context, bucket, stagingKey, finalKey string, shardIdx int, data []byte) error {
-	return s.writeLocalShardAAD(ctx, bucket, stagingKey, finalKey, shardIdx, data)
+// ReadLocalShardAt reads len(buf) bytes at offset within the local shard.
+func (s *ShardService) ReadLocalShardAt(bucket, key string, shardIdx int, offset int64, buf []byte) (int, error) {
+	return s.local.ReadLocalShardAt(bucket, key, shardIdx, offset, buf)
 }
 
-// writeLocalShardAAD is the shared core: the shard FILE is written under pathKey's shard dir, but the
-// encryption AAD is derived from aadKey. The two are equal for a normal write and differ for a staged
-// write (pathKey = staging path, aadKey = final logical key).
-func (s *ShardService) writeLocalShardAAD(ctx context.Context, bucket, key, aadKey string, shardIdx int, data []byte) error {
-	return s.writeLocalShardAADStream(ctx, bucket, key, aadKey, shardIdx, bytes.NewReader(data), int64(len(data)))
+// OpenLocalShard opens a local shard as a plaintext stream.
+func (s *ShardService) OpenLocalShard(bucket, key string, shardIdx int) (io.ReadCloser, error) {
+	return s.local.OpenLocalShard(bucket, key, shardIdx)
 }
 
-// shardCountingReader counts plaintext bytes consumed by the encoder so a short
-// body (a truncated shard) is detected and rejected instead of silently writing a
-// short shard. It restores the io.ReadFull guard the buffered readShardPayload
-// path gave us before the encode was switched to streaming.
-type shardCountingReader struct {
-	r io.Reader
-	n int64
+// OpenLocalShardRange opens a bounded byte range of a local shard as a stream.
+func (s *ShardService) OpenLocalShardRange(bucket, key string, shardIdx int, offset int64, length int64) (io.ReadCloser, error) {
+	return s.local.OpenLocalShardRange(bucket, key, shardIdx, offset, length)
 }
 
-func (c *shardCountingReader) Read(p []byte) (int, error) {
-	n, err := c.r.Read(p)
-	c.n += int64(n)
-	return n, err
+// DeleteLocalShards removes every shard for key on the local node (all indices).
+func (s *ShardService) DeleteLocalShards(bucket, key string) error {
+	return s.local.DeleteLocalShards(bucket, key)
 }
 
-// writeLocalShardAADStream is the streaming core of writeLocalShardAAD: it encodes
-// the shard straight from body without first materializing the plaintext as a
-// []byte, which the sized streaming shard-write path uses to drop one whole-shard
-// buffer. The []byte entrypoint wraps its slice in a bytes.Reader so both paths
-// share this code and produce byte-equivalent output. When sizeHint >= 0 the body
-// is bounded to sizeHint and the consumed count is verified, so a short or
-// oversized body fails loudly (data-loss guard) — the same protection the
-// buffered io.ReadFull path provided. The ciphertext payload is still
-// materialized for writeEncryptedShardFile's []byte contract.
-func (s *ShardService) writeLocalShardAADStream(ctx context.Context, bucket, key, aadKey string, shardIdx int, body io.Reader, sizeHint int64) error {
-	dir, err := s.getShardDir(bucket, key, shardIdx)
-	if err != nil {
-		return err
-	}
-	mkdirStart := time.Now()
-	if err := s.ensureShardDir(dir); err != nil {
-		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalMkdir, mkdirStart, PutTraceStageFields{
-			Bytes:            sizeHint,
-			ShardIndex:       shardIdx,
-			ShardTargetClass: "local",
-			Error:            err.Error(),
-		})
-		return fmt.Errorf("create shard dir: %w", err)
-	}
-	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalMkdir, mkdirStart, PutTraceStageFields{
-		Bytes:            sizeHint,
-		ShardIndex:       shardIdx,
-		ShardTargetClass: "local",
-	})
-	path := filepath.Join(dir, fmt.Sprintf("shard_%d", shardIdx))
-	encodeStart := time.Now()
-	cr := &shardCountingReader{r: body}
-	if sizeHint >= 0 {
-		cr.r = io.LimitReader(body, sizeHint)
-	}
-	payload, err := eccodec.EncodeEncryptedShardStreamToBuffer(cr, sizeHint, s.segEnc, ShardAADFields(bucket, aadKey, shardIdx), eccodec.DefaultEncryptedChunkSize)
-	if err == nil && sizeHint >= 0 && cr.n != sizeHint {
-		err = fmt.Errorf("shard %d short read: encoded %d plaintext bytes, expected %d", shardIdx, cr.n, sizeHint)
-	}
-	if err != nil {
-		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncode, encodeStart, PutTraceStageFields{
-			Bytes:            sizeHint,
-			ShardIndex:       shardIdx,
-			ShardTargetClass: "local",
-			Error:            err.Error(),
-		})
-		return err
-	}
-	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncode, encodeStart, PutTraceStageFields{
-		Bytes:            sizeHint,
-		ShardIndex:       shardIdx,
-		ShardTargetClass: "local",
-	})
-	requireFsync := s.shardWriteRequiresFsync(len(payload))
-	fileStart := time.Now()
-	if err := s.writeEncryptedShardFile(ctx, dir, path, payload, shardIdx, requireFsync); err != nil {
-		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalFile, fileStart, PutTraceStageFields{
-			Bytes:            int64(len(payload)),
-			ShardIndex:       shardIdx,
-			ShardTargetClass: "local",
-			Error:            err.Error(),
-		})
-		return err
-	}
-	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalFile, fileStart, PutTraceStageFields{
-		Bytes:            int64(len(payload)),
-		ShardIndex:       shardIdx,
-		ShardTargetClass: "local",
-	})
-	// Directory durability (the DirSync trace stage) now runs inside
-	// writeEncryptedShardFile, where requireFsync is known and the real
-	// syncDirChain fsync happens for the fsync classes (S2).
-	return nil
+// PromoteLocalStagedShards renames a segment's staged shard dirs to their final
+// path (PR1 segment staging).
+func (s *ShardService) PromoteLocalStagedShards(bucket, stagingKey, finalKey string) error {
+	return s.local.PromoteLocalStagedShards(bucket, stagingKey, finalKey)
 }
 
-// writeLocalSealedShard stores an ALREADY-SEALED shard payload verbatim — no
-// re-encryption at the destination. Used by the S2 streaming path: the
-// coordinator's CPUPool seals the shard at the source (seal-at-source), so the
-// bytes on the wire and on disk are identical GFSENC3 ciphertext. This mirrors
-// writeLocalShard's tail (mkdir → tmp+rename → fsync/EC durability) MINUS the
-// encode step. Packing is intentionally bypassed: the
-// streaming path is the large-object band (shard ≫ pack threshold), so a
-// sealed-stream shard always materializes as a shard_N file. `sealed` must be
-// EncodeEncryptedShard output for ShardAADFields(bucket,key,shardIdx) (the same
-// identity this node will use on read), or the read-side AEAD/AAD check fails.
-func (s *ShardService) writeLocalSealedShard(ctx context.Context, bucket, key string, shardIdx int, sealed []byte) error {
-	dir, err := s.getShardDir(bucket, key, shardIdx)
-	if err != nil {
-		return err
-	}
-	if err := s.ensureShardDir(dir); err != nil {
-		return fmt.Errorf("create shard dir: %w", err)
-	}
-	path := filepath.Join(dir, fmt.Sprintf("shard_%d", shardIdx))
-	requireFsync := s.shardWriteRequiresFsync(len(sealed))
-	return s.writeEncryptedShardFile(ctx, dir, path, sealed, shardIdx, requireFsync)
-}
+// --- end facade delegates -------------------------------------------------
 
 // syncDir fsyncs a directory so a create/rename inside it is durably linked
 // into the namespace. A general durability primitive (also used by replica
@@ -1186,229 +1051,6 @@ func syncDir(dir string) error {
 	}
 	defer d.Close()
 	return d.Sync()
-}
-
-// fsyncFile fsyncs an open shard tmp file (or the test seam when set).
-func (s *ShardService) fsyncFile(f *os.File) error {
-	if s.syncFileHook != nil {
-		return s.syncFileHook(f)
-	}
-	return directio.Sync(f)
-}
-
-// fsyncDir fsyncs one directory so a rename (the durable link of a shard file
-// into the namespace) survives a crash (or the test seam).
-func (s *ShardService) fsyncDir(dir string) error {
-	if s.syncDirHook != nil {
-		return s.syncDirHook(dir)
-	}
-	return syncDir(dir)
-}
-
-// syncDirChain durably LINKS a freshly written shard into the namespace: it
-// fsyncs the leaf (its new shard-file entry) and persists each ancestor's entry
-// in its parent up to (exclusive) stop. getShardDir builds dir = dataDir/bucket/key
-// (version-keyed key dir created per PUT), so fsyncing only the leaf would leave
-// the leaf's own entry in its parent non-durable (a crash could lose the whole
-// shard dir after the quorum-meta commit). stop is the shard's data dir; the
-// bucket dir's own entry in dataDir is out of scope (a pre-existing gap — see
-// below — that this function never closed and CreateBucket does not either).
-//
-// Dedup: the leaf is fsynced every write (a new shard FILE lands there). An
-// ancestor only needs fsyncing the first time its child entry is created+
-// persisted; once a COMPLETED prior write made that link durable, the chain stays
-// durable across later writes (which only add shard FILES to leaves, never
-// restructure ancestors). dirDurable(d) records that d's entry in its parent was
-// persisted; the mark is Stored only AFTER the persisting fsync(parent(d))
-// returns, so any skip is backed by durable on-disk data (race-free under the
-// concurrent same-leaf shard writes the errgroup data-shard path issues). A
-// newly-created dir is absent from the map (== not durable) → its parent IS
-// fsynced, persisting the new entry; so a new sibling is never skipped.
-//
-// Coherence: dirDurable is process-local with no external-delete invalidation —
-// the same model as dirCache. Every shard-leaf path is version/UUID-keyed and the
-// delete paths (DeleteLocalShards, orphan RemoveAll) operate on those unique
-// leaves, never reborn, so a stale mark is never consulted again.
-func (s *ShardService) syncDirChain(leaf, stop string) error {
-	stop = filepath.Clean(stop)
-	leaf = filepath.Clean(leaf)
-	if leaf == stop {
-		// Degenerate (unreachable for real shards: dir = dataDir/bucket/key is
-		// always strictly below stop = dataDir). Preserve the pre-dedup contract,
-		// whose `for d := leaf; d != stop` loop fsynced nothing here.
-		return nil
-	}
-	// The leaf always receives a fresh shard-file entry on this write → fsync its
-	// CONTENTS every time, independent of whether its own dir entry is durable.
-	if err := s.fsyncDir(leaf); err != nil {
-		return err
-	}
-	for d := leaf; ; {
-		if _, durable := s.dirDurable.Load(d); durable {
-			return nil // d's entry — and the whole chain above it — already durable
-		}
-		parent := filepath.Dir(d)
-		if parent == stop {
-			// d is the shard-tree bucket dir; stop is the data dir. Match the
-			// pre-dedup contract exactly: never fsync stop (its bucket-dir entry is
-			// a pre-existing, out-of-scope durability gap). Record d so future
-			// writes can stop here too.
-			s.dirDurable.Store(d, struct{}{})
-			return nil
-		}
-		if parent == d { // reached filesystem root WITHOUT hitting stop
-			// stop must be an ancestor of leaf; if not, the caller passed a wrong
-			// data-dir root and we'd otherwise silently report success (masking a
-			// placement/path bug) — fail loudly instead.
-			return fmt.Errorf("syncDirChain: stop %q is not an ancestor of %q", stop, leaf)
-		}
-		if err := s.fsyncDir(parent); err != nil {
-			return err // d NOT marked durable: its entry isn't persisted yet
-		}
-		s.dirDurable.Store(d, struct{}{})
-		d = parent
-	}
-}
-
-// writeEncryptedShardFile materializes pre-encoded (chunked AEAD) shard bytes
-// to disk using the atomic tmp + rename recipe. Encoding happens in the
-// caller so the encrypted payload is computed before any shard file mutation;
-// this function only handles the on-disk I/O.
-//
-// Post-S2 durability is established at WRITE TIME for the fsync classes (small /
-// no-redundancy): when requireFsync the EncSync stage fsyncs the shard file and
-// the DirSync stage fsyncs the shard's directory CHAIN (leaf shard dir + each
-// newly-created ancestor up to the data dir) so a crash cannot lose the file or
-// its namespace link. Large redundant shards (requireFsync=false) skip both —
-// EC reconstruction + the scrubber own their durability (S1). Trace stages:
-//   - PutTraceStageShardWriteLocalEncWrite: file write of the encoded payload.
-//   - PutTraceStageShardWriteLocalEncSync: shard-file fsync (requireFsync only).
-//   - PutTraceStageShardWriteLocalDirSync: directory-chain fsync (requireFsync only).
-func (s *ShardService) writeEncryptedShardFile(ctx context.Context, dir, path string, payload []byte, shardIdx int, requireFsync bool) error {
-	tmp := fmt.Sprintf("%s.%d.%d.tmp", path, os.Getpid(), time.Now().UnixNano())
-	openStart := time.Now()
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncOpen, openStart, PutTraceStageFields{
-			Bytes:            int64(len(payload)),
-			ShardIndex:       shardIdx,
-			ShardTargetClass: "local",
-			Error:            err.Error(),
-		})
-		return fmt.Errorf("create tmp shard: %w", err)
-	}
-	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncOpen, openStart, PutTraceStageFields{
-		Bytes:            int64(len(payload)),
-		ShardIndex:       shardIdx,
-		ShardTargetClass: "local",
-	})
-	cleanup := func() {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-	}
-
-	writeStart := time.Now()
-	if _, err := f.Write(payload); err != nil {
-		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncWrite, writeStart, PutTraceStageFields{
-			Bytes:            int64(len(payload)),
-			ShardIndex:       shardIdx,
-			ShardTargetClass: "local",
-			Error:            err.Error(),
-		})
-		cleanup()
-		return fmt.Errorf("write tmp shard: %w", err)
-	}
-	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncWrite, writeStart, PutTraceStageFields{
-		Bytes:            int64(len(payload)),
-		ShardIndex:       shardIdx,
-		ShardTargetClass: "local",
-	})
-
-	// EncSync fsyncs the shard file only when requireFsync is set: for small
-	// shards and for large no-redundancy shards (no parity to reconstruct from).
-	// It is skipped for large redundant shards, which rely on EC reconstruction
-	// + the scrubber
-	// (S1 — no WAL record, no fsync).
-	encSyncStart := time.Now()
-	if requireFsync {
-		if err := s.fsyncFile(f); err != nil {
-			ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncSync, encSyncStart, PutTraceStageFields{
-				Bytes:            int64(len(payload)),
-				ShardIndex:       shardIdx,
-				ShardTargetClass: "local",
-				Error:            err.Error(),
-			})
-			cleanup()
-			return fmt.Errorf("fsync tmp shard: %w", err)
-		}
-	}
-	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncSync, encSyncStart, PutTraceStageFields{
-		Bytes:            int64(len(payload)),
-		ShardIndex:       shardIdx,
-		ShardTargetClass: "local",
-	})
-
-	closeStart := time.Now()
-	if err := f.Close(); err != nil {
-		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncClose, closeStart, PutTraceStageFields{
-			Bytes:            int64(len(payload)),
-			ShardIndex:       shardIdx,
-			ShardTargetClass: "local",
-			Error:            err.Error(),
-		})
-		_ = os.Remove(tmp)
-		return fmt.Errorf("close tmp shard: %w", err)
-	}
-	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncClose, closeStart, PutTraceStageFields{
-		Bytes:            int64(len(payload)),
-		ShardIndex:       shardIdx,
-		ShardTargetClass: "local",
-	})
-
-	renameStart := time.Now()
-	if err := os.Rename(tmp, path); err != nil {
-		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncRename, renameStart, PutTraceStageFields{
-			Bytes:            int64(len(payload)),
-			ShardIndex:       shardIdx,
-			ShardTargetClass: "local",
-			Error:            err.Error(),
-		})
-		_ = os.Remove(tmp)
-		return fmt.Errorf("rename shard: %w", err)
-	}
-	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncRename, renameStart, PutTraceStageFields{
-		Bytes:            int64(len(payload)),
-		ShardIndex:       shardIdx,
-		ShardTargetClass: "local",
-	})
-
-	// D2 (DBV): after the rename, fsync the shard's directory CHAIN (leaf shard
-	// dir + each newly-created ancestor up to the data dir) so the durable link
-	// of the shard file into the namespace cannot be lost on crash. Gated on
-	// requireFsync — large redundant shards (S1) own durability via EC
-	// reconstruction and skip both the file and dir fsync (a vanished dir there
-	// is just a "missing shard" rebuilt lazily). Locked order:
-	// write(tmp) → Sync(tmp) → rename → syncDirChain(dir) → return.
-	if requireFsync {
-		dirSyncStart := time.Now()
-		stop := s.dataDirs[shardIdx%len(s.dataDirs)]
-		if err := s.syncDirChain(dir, stop); err != nil {
-			ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalDirSync, dirSyncStart, PutTraceStageFields{
-				Bytes:            int64(len(payload)),
-				ShardIndex:       shardIdx,
-				ShardTargetClass: "local",
-				Error:            err.Error(),
-			})
-			return fmt.Errorf("fsync shard dir chain: %w", err)
-		}
-		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalDirSync, dirSyncStart, PutTraceStageFields{
-			Bytes:            int64(len(payload)),
-			ShardIndex:       shardIdx,
-			ShardTargetClass: "local",
-		})
-	}
-
-	return nil
 }
 
 // encryptedShardEnvelopeOverhead is a conservative upper bound on the bytes
@@ -1474,240 +1116,6 @@ func readShardPayload(body io.Reader, rawCap, streamSize int64, encrypted bool) 
 // direct fsync (no-redundancy).
 const largeShardFsyncThreshold = 1 << 20
 
-// shardWriteRequiresFsync reports whether a freshly written shard file (and its
-// parent directory chain) must be fsynced for durability, by shard class.
-// Post-S2 the data WAL is no longer written on the shard PUT path — durability
-// is established at write time:
-//
-//   - Small (< largeShardFsyncThreshold) OR large with NO EC redundancy
-//     (ParityShards==0, i.e. noRedundancy()): fsync the shard file + parent dir
-//     chain (there is no parity to reconstruct from, or the shard is too small
-//     to be worth an EC stripe) → returns true.
-//   - Large WITH EC redundancy (ParityShards>0, i.e. !noRedundancy): EC
-//     reconstruction + the background scrubber (S0/S1) own durability; the file
-//     is NOT fsynced → returns false. A nil noRedundancy provider counts as
-//     redundant (matches production wiring; nil only occurs in tests).
-//
-// S4 removed the data WAL entirely, so there is no replay path to special-case.
-func (s *ShardService) shardWriteRequiresFsync(payloadLen int) bool {
-	large := payloadLen >= largeShardFsyncThreshold
-	if large && (s.noRedundancy == nil || !s.noRedundancy()) {
-		return false // large + redundant: EC durability, no fsync (S1)
-	}
-	return true // small, or large + no-redundancy: write-time fsync
-}
-
-// WriteLocalShardStream stores a shard from body without buffering plaintext.
-func (s *ShardService) WriteLocalShardStream(bucket, key string, shardIdx int, body io.Reader) error {
-	return s.WriteLocalShardStreamContext(context.Background(), bucket, key, shardIdx, body)
-}
-
-func (s *ShardService) WriteLocalShardStreamContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader) error {
-	return s.writeLocalShardStreamContext(ctx, bucket, key, shardIdx, body, -1)
-}
-
-func (s *ShardService) WriteLocalShardStreamSizedContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader, streamSize int64) error {
-	return s.writeLocalShardStreamContext(ctx, bucket, key, shardIdx, body, streamSize)
-}
-
-// WriteLocalShardStreamStagedContext is the streaming counterpart of
-// writeLocalShardStaged: it buffers the shard body (bounded) and writes it to the
-// STAGING physical path stagingKey while sealing with the FINAL logical key
-// (finalKey) as AAD. PR1 segment staging; used by the local endpoint and the
-// native shard-write receiver when a staging redirect is present.
-func (s *ShardService) WriteLocalShardStreamStagedContext(ctx context.Context, bucket, stagingKey, finalKey string, shardIdx int, body io.Reader) error {
-	rawCap := maxRawShardPayload(false)
-	data, err := readShardPayload(body, rawCap, -1, false)
-	if err != nil {
-		return err
-	}
-	return s.writeLocalShardStaged(ctx, bucket, stagingKey, finalKey, shardIdx, data)
-}
-
-func (s *ShardService) writeLocalShardStreamContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader, streamSize int64) error {
-	rawCap := maxRawShardPayload(false)
-	// Sized path: the shard length is known, so stream the body straight into the
-	// encoder (writeLocalShardAADStream, which bounds + count-verifies it against
-	// streamSize) instead of buffering the whole plaintext shard as a []byte. This
-	// drops one whole-shard buffer on every sized EC shard write (large PUT,
-	// multipart, COPY). writeLocalShard == writeLocalShardAAD(key, key).
-	if streamSize >= 0 {
-		if streamSize > rawCap {
-			return fmt.Errorf("shard payload too large: %d", streamSize)
-		}
-		return s.writeLocalShardAADStream(ctx, bucket, key, key, shardIdx, body, streamSize)
-	}
-	// Unsized path: the length is unknown, so buffer the body bounded by a 64 MiB
-	// memory cap (the overflow check needs the full byte count) and route through
-	// writeLocalShard. Durability no longer involves a WAL (S4): writeLocalShard
-	// fsyncs small / no-redundancy shards directly and relies on EC for large
-	// redundant shards.
-	data, err := readShardPayload(body, rawCap, streamSize, false)
-	if err != nil {
-		return err
-	}
-	return s.writeLocalShard(ctx, bucket, key, shardIdx, data)
-}
-
-// PromoteLocalStagedShards renames a segment's staged shard dirs (written under stagingKey by
-// writeLocalShardStaged) to their final path (finalKey), one intra-dataDir atomic dir-rename per
-// dataDir. stagingKey and finalKey map to the SAME dataDir per shard index (both via getShardDir), so
-// each rename stays within one device. Idempotent: a missing staging dir (already promoted / none on
-// this dataDir) is skipped, and a pre-existing destination (concurrent completer / retry) is treated as
-// done. The shard files keep their final-key AAD (set at staged-write time), so post-promote reads
-// decrypt correctly. PR1 segment staging.
-func (s *ShardService) PromoteLocalStagedShards(bucket, stagingKey, finalKey string) error {
-	// promotedAny guards against committing a manifest that references absent
-	// shards: every node in a segment's placement holds at least one shard, so a
-	// promote that renames nothing AND finds nothing already at the final path
-	// means the shards are gone (never written / over-eager cleanup race) — fail
-	// rather than silently report success.
-	promotedAny := false
-	// promote accepts dst as durable: it persists the final-path dir entries up to
-	// the dataDir BEFORE the manifest commit (data-before-meta), so a post-commit
-	// crash cannot lose the rename and strand an acknowledged object with no final
-	// shards. Called on EVERY promoted path — including when dst was already present
-	// (rename race / idempotent retry / concurrent completer): an earlier mover may
-	// have created dst but crashed/failed before ITS fsync, so this caller must not
-	// proceed to commit until it has personally made the link durable. fsync is
-	// idempotent (syncDirChain dedups once this process persisted it), so re-syncing
-	// an already-durable dst is cheap.
-	promote := func(dst string, d int) error {
-		if err := s.syncDirChain(dst, s.dataDirs[d]); err != nil {
-			return fmt.Errorf("promote staged segment fsync %s: %w", dst, err)
-		}
-		promotedAny = true
-		return nil
-	}
-	for d := 0; d < len(s.dataDirs); d++ {
-		src, err := s.getShardDir(bucket, stagingKey, d)
-		if err != nil {
-			return err
-		}
-		dst, err := s.getShardDir(bucket, finalKey, d)
-		if err != nil {
-			return err
-		}
-		if _, statErr := os.Stat(src); statErr != nil {
-			if os.IsNotExist(statErr) {
-				// No staged dir on this dataDir: either it never held a shard for this
-				// blob, or a prior promote already moved it. A present destination means
-				// the latter (idempotent retry / concurrent completer) — accept it, but
-				// still fsync the final chain before counting it as promoted.
-				if _, derr := os.Stat(dst); derr == nil {
-					if err := promote(dst, d); err != nil {
-						return err
-					}
-				}
-				continue
-			}
-			return statErr
-		}
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-			return fmt.Errorf("promote staged segment: mkdir final parent: %w", err)
-		}
-		if err := os.Rename(src, dst); err != nil {
-			if _, derr := os.Stat(dst); derr == nil {
-				// destination already present (idempotent retry / concurrent completer)
-				if err := promote(dst, d); err != nil {
-					return err
-				}
-				continue
-			}
-			return fmt.Errorf("promote staged segment rename %s -> %s: %w", src, dst, err)
-		}
-		if err := promote(dst, d); err != nil {
-			return err
-		}
-	}
-	if !promotedAny {
-		return fmt.Errorf("promote staged segment: no staged or promoted shards for %q -> %q", stagingKey, finalKey)
-	}
-	return nil
-}
-
-func (s *ShardService) ensureShardDir(dir string) error {
-	if _, ok := s.dirCache.Load(dir); ok {
-		return nil
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		s.dirCache.Delete(dir)
-		s.dirDurable.Delete(dir)
-		return err
-	}
-	s.dirCache.Store(dir, struct{}{})
-	return nil
-}
-
-// ReadLocalShard fetches a shard from the local node's disk and decrypts it via
-// the DEK keeper. Returns an error if the shard appears encrypted but at-rest
-// encryption is disabled (downgrade guard).
-func (s *ShardService) ReadLocalShard(bucket, key string, shardIdx int) ([]byte, error) {
-	path, err := s.getShardPath(bucket, key, shardIdx)
-	if err != nil {
-		return nil, err
-	}
-
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	var prefix [8]byte
-	_, peekErr := io.ReadFull(f, prefix[:])
-	if peekErr == nil && eccodec.IsEncryptedShard(prefix[:]) {
-		if s.segEnc == nil {
-			_ = f.Close()
-			return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start with DEK-backed at-rest encryption enabled")
-		}
-		info, statErr := f.Stat()
-		if statErr != nil {
-			_ = f.Close()
-			return nil, statErr
-		}
-		if _, err := f.Seek(0, io.SeekStart); err != nil {
-			_ = f.Close()
-			return nil, err
-		}
-		var decoded bytes.Buffer
-		if size := info.Size(); size > 0 {
-			maxInt := int(^uint(0) >> 1)
-			if size <= int64(maxInt) {
-				decoded.Grow(int(size))
-			}
-		}
-		if err := eccodec.DecodeEncryptedShard(&decoded, f, s.segEnc, ShardAADFields(bucket, key, shardIdx)); err != nil {
-			_ = f.Close()
-			return nil, fmt.Errorf("decrypt shard: %w", err)
-		}
-		if err := f.Close(); err != nil {
-			return nil, err
-		}
-		return decoded.Bytes(), nil
-	}
-	_ = f.Close()
-
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	data := raw
-	if eccodec.IsEncodedShard(raw) {
-		data, err = eccodec.DecodeShard(raw)
-		if err != nil {
-			return nil, err
-		}
-	}
-	if encrypt.IsEncryptedBlob(data) {
-		return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start with DEK-backed at-rest encryption enabled")
-	}
-	if encrypt.IsLegacyEncryptedBlob(data) {
-		return nil, fmt.Errorf("shard carries an unsupported/old encrypted-blob format (pre-XAES); in-place upgrade unsupported")
-	}
-	// DEK-only service: every shard is GFSENC3-sealed (handled above). A payload
-	// that reaches here carries no envelope — reject plaintext fail-closed.
-	return nil, fmt.Errorf("%w: shard carries no GFSENC3 envelope and at-rest encryption is DEK-only (plaintext rejected)", eccodec.ErrShardCorrupt)
-}
-
 // crcShardMagicLen is the length of the eccodec CRC envelope magic
 // ("GFSCRC1\x00"); the inner payload (and thus any inner blob magic) begins at
 // this byte offset within a GFSCRC1-encoded shard file.
@@ -1729,182 +1137,6 @@ func rejectLegacyEncodedShardBlob(r io.ReaderAt) error {
 		return fmt.Errorf("shard carries an unsupported/old encrypted-blob format (pre-XAES); in-place upgrade unsupported")
 	}
 	return nil
-}
-
-// OpenLocalShard opens a local shard as plaintext. New chunked encrypted shards
-// are decrypted chunk-by-chunk; compatibility formats fall back to ReadLocalShard.
-func (s *ShardService) OpenLocalShard(bucket, key string, shardIdx int) (io.ReadCloser, error) {
-	path, err := s.getShardPath(bucket, key, shardIdx)
-	if err != nil {
-		return nil, err
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	var prefix [8]byte
-	_, peekErr := io.ReadFull(f, prefix[:])
-	if peekErr == nil && eccodec.IsEncryptedShard(prefix[:]) {
-		if s.segEnc == nil {
-			_ = f.Close()
-			return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start with DEK-backed at-rest encryption enabled")
-		}
-		if _, err := f.Seek(0, io.SeekStart); err != nil {
-			_ = f.Close()
-			return nil, err
-		}
-		r, err := eccodec.NewEncryptedShardReader(f, s.segEnc, ShardAADFields(bucket, key, shardIdx))
-		if err != nil {
-			_ = f.Close()
-			return nil, fmt.Errorf("decrypt shard: %w", err)
-		}
-		return &multiReadCloser{Reader: r, close: func() error {
-			var closeErr error
-			if closer, ok := r.(io.Closer); ok {
-				closeErr = closer.Close()
-			}
-			if err := f.Close(); closeErr == nil {
-				closeErr = err
-			}
-			return closeErr
-		}}, nil
-	}
-	if peekErr == nil && eccodec.IsEncodedShard(prefix[:]) {
-		if err := rejectLegacyEncodedShardBlob(f); err != nil {
-			_ = f.Close()
-			return nil, err
-		}
-		// GFSCRC1-wrapped shard: may be an encrypted single-blob (XAES) that
-		// cannot be streamed without decrypting. Delegate to ReadLocalShard to
-		// buffer-decrypt; reject plain shards as corruption.
-		_ = f.Close()
-		data, err := s.ReadLocalShard(bucket, key, shardIdx)
-		if err != nil {
-			return nil, err
-		}
-		return io.NopCloser(bytes.NewReader(data)), nil
-	}
-	_ = f.Close()
-	data, err := s.ReadLocalShard(bucket, key, shardIdx)
-	if err != nil {
-		return nil, err
-	}
-	return io.NopCloser(bytes.NewReader(data)), nil
-}
-
-func (s *ShardService) ReadLocalShardAt(bucket, key string, shardIdx int, offset int64, buf []byte) (int, error) {
-	if offset < 0 {
-		return 0, fmt.Errorf("negative shard offset %d", offset)
-	}
-	if len(buf) == 0 {
-		return 0, nil
-	}
-	path, err := s.getShardPath(bucket, key, shardIdx)
-	if err != nil {
-		return 0, err
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return 0, err
-	}
-	defer f.Close()
-
-	var prefix [8]byte
-	_, peekErr := io.ReadFull(f, prefix[:])
-	if peekErr == nil && eccodec.IsEncryptedShard(prefix[:]) {
-		if s.segEnc == nil {
-			return 0, fmt.Errorf("shard is encrypted but encryption is disabled; start with DEK-backed at-rest encryption enabled")
-		}
-		n, err := eccodec.ReadEncryptedShardRangeAt(f, s.segEnc, ShardAADFields(bucket, key, shardIdx), offset, buf)
-		if err != nil {
-			return n, fmt.Errorf("decrypt shard range: %w", err)
-		}
-		return n, nil
-	}
-	if peekErr == nil && eccodec.IsEncodedShard(prefix[:]) {
-		if err := rejectLegacyEncodedShardBlob(f); err != nil {
-			_ = f.Close()
-			return 0, err
-		}
-		// GFSCRC1-wrapped shard: may be an encrypted single-blob (XAES) that
-		// cannot be range-read without decrypting. Fall through to OpenLocalShard.
-		_ = f.Close()
-	} else {
-		_ = f.Close()
-	}
-	r, err := s.OpenLocalShard(bucket, key, shardIdx)
-	if err != nil {
-		return 0, err
-	}
-	defer r.Close()
-	if offset > 0 {
-		if _, err := io.CopyN(io.Discard, r, offset); err != nil {
-			return 0, err
-		}
-	}
-	return io.ReadFull(r, buf)
-}
-
-func (s *ShardService) OpenLocalShardRange(bucket, key string, shardIdx int, offset int64, length int64) (io.ReadCloser, error) {
-	if offset < 0 {
-		return nil, fmt.Errorf("negative shard offset %d", offset)
-	}
-	if length < 0 {
-		return nil, fmt.Errorf("negative shard length %d", length)
-	}
-	path, err := s.getShardPath(bucket, key, shardIdx)
-	if err != nil {
-		return nil, err
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-
-	var prefix [8]byte
-	_, peekErr := io.ReadFull(f, prefix[:])
-	if peekErr == nil && eccodec.IsEncryptedShard(prefix[:]) {
-		if s.segEnc == nil {
-			_ = f.Close()
-			return nil, fmt.Errorf("shard is encrypted but encryption is disabled; start with DEK-backed at-rest encryption enabled")
-		}
-		r, err := eccodec.NewEncryptedShardRangeReader(f, s.segEnc, ShardAADFields(bucket, key, shardIdx), offset, length)
-		if err != nil {
-			_ = f.Close()
-			return nil, fmt.Errorf("decrypt shard range: %w", err)
-		}
-		closeFn := f.Close
-		if closer, ok := r.(io.Closer); ok {
-			closeFn = func() error {
-				rerr := closer.Close()
-				ferr := f.Close()
-				if rerr != nil {
-					return rerr
-				}
-				return ferr
-			}
-		}
-		return &multiReadCloser{Reader: r, close: closeFn}, nil
-	}
-	if peekErr == nil && eccodec.IsEncodedShard(prefix[:]) {
-		// DEK-only service: every shard is GFSENC3-sealed, so a GFSCRC1 shard here
-		// is plaintext (or legacy). Reject fail-closed rather than leak it.
-		_ = f.Close()
-		return nil, fmt.Errorf("%w: shard carries no GFSENC3 envelope and at-rest encryption is DEK-only (plaintext rejected)", eccodec.ErrShardCorrupt)
-	}
-	// A plain/short shard: route through OpenLocalShard for proper decode (rejects
-	// plaintext) rather than streaming the raw payload — keeps OpenLocalShardRange
-	// consistent with ReadLocalShard/ReadLocalShardAt.
-	_ = f.Close()
-
-	r, err := s.OpenLocalShard(bucket, key, shardIdx)
-	if err != nil {
-		return nil, err
-	}
-	if offset == 0 {
-		return &multiReadCloser{Reader: io.LimitReader(r, length), close: r.Close}, nil
-	}
-	return &multiReadCloser{Reader: &skipThenLimitReader{r: r, skip: offset, limit: length}, close: r.Close}, nil
 }
 
 type skipThenLimitReader struct {
@@ -1930,26 +1162,6 @@ func (r *skipThenLimitReader) Read(p []byte) (int, error) {
 	n, err := r.r.Read(p)
 	r.limit -= int64(n)
 	return n, err
-}
-
-// DeleteLocalShards removes every shard for key on the local node (all indices).
-// Each candidate directory is validated against its per-dataDir containment root
-// before removal — a key containing ".." segments that would escape {dataDir}/{bucket}
-// is rejected (same guard as deleteQuorumMetaLocal). This prevents a malformed key
-// from a decoded qmeta blob or trusted RPC from targeting paths outside the shard root.
-func (s *ShardService) DeleteLocalShards(bucket, key string) error {
-	for i, dataDir := range s.dataDirs {
-		dir := filepath.Join(dataDir, bucket, key)
-		// Containment check: mirror the ShardPathUnderDataDir guard used by
-		// getShardDir. Use i as a representative shard index for this dataDir.
-		if !s.ShardPathUnderDataDir(bucket, i, dir) {
-			return fmt.Errorf("delete local shards: key %q escapes shard root", key)
-		}
-		if err := os.RemoveAll(dir); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (s *ShardService) handleRead(sr *shardRequest) []byte {

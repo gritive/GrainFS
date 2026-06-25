@@ -114,7 +114,7 @@ func TestDEKReadAPIsRejectPlaintext(t *testing.T) {
 	svc, _ := dekShardSvc(t, root)
 	bucket, key, shardIdx := "bkt", "obj", 0
 	dir := mustShardDir(svc, bucket, key, shardIdx)
-	if err := svc.ensureShardDir(dir); err != nil {
+	if err := svc.local.ensureShardDir(dir); err != nil {
 		t.Fatalf("ensureShardDir: %v", err)
 	}
 	path := filepath.Join(dir, "shard_0")

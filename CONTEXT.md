@@ -452,6 +452,38 @@ legacy rows block membership mutation. The generic predicates for these
 policies live next to the snapshot module in `internal/cluster`; admin command
 packages use those predicates rather than re-deriving policy from strings.
 
+### Local Shard Store
+
+The local shard store (`internal/cluster.LocalShardStore`) is the private
+cluster module that owns the local-shard concern carved out of `ShardService`:
+shard-blob physical I/O on the node's own data directories, the at-rest seal
+(DEK-backed, shard key as AAD), the `syncDirChain` durability state machine
+(ancestor-directory fsync dedup via `dirCache`/`dirDurable`), and the
+staging→promote-local path for chunked-PUT segment staging.
+
+`ShardService` keeps the local shard store as a `local` field and is a facade
+over it: every local-shard method (`WriteLocalShard*`, `ReadLocalShard*`,
+`OpenLocalShard*`, `DeleteLocalShards`, `PromoteLocalStagedShards`, and the
+`DataDirs`/`DEKKeeper`/`ClusterID`/`segEnc` accessors) delegates to `s.local.*`.
+Callers continue to see `ShardService`, which still satisfies the `ecShardStore`
+(and `ecObjectSizedShardStore`) seam the EC writer and reader inject; the
+remote-shard half (peer RPC) and the generic raft buffered-route transport stay
+on `ShardService`. Explicit delegation is required — a named `local` field does
+not promote methods.
+
+`dataDirs` is shared config: both `ShardService` and the local shard store hold
+the same resolved shard roots (the facade's quorum-meta and manifest methods
+still use theirs). The at-rest sealer is mandatory — `NewLocalShardStore` panics
+without it, identical to `NewShardService`, which builds its local shard store
+bare before applying options and then enforces the invariant.
+
+The local shard store does not own object metadata, routing, or placement
+policy. Its interface is the test surface for shard durability ordering: the
+`syncFileHook`/`syncDirHook` fsync-order tests drive it directly, with no
+transport and no facade. This is the first slice of a decomposition that will
+also carve a semantic local quorum-meta store and a local manifest store out of
+the same facade.
+
 ### Data Group Bucket Forwarding
 
 Data group bucket forwarding is the runtime path that routes bucket-scoped
