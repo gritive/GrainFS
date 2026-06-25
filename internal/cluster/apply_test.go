@@ -433,147 +433,73 @@ func TestFSM_SnapshotRestore_WithExistingData(t *testing.T) {
 	assert.ErrorIs(t, err, badger.ErrKeyNotFound)
 }
 
-func TestFSM_MigrateShard_FiresCallback(t *testing.T) {
-	db := newTestDB(t)
-	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
+func TestRetiredMigrationCommandsRejectLiveEncoding(t *testing.T) {
+	_, err := EncodeCommand(CmdMigrateShard, struct{}{})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unknown command type")
 
-	ch := make(chan MigrationTask, 1)
-	fsm.SetMigrationHooks(ch, nil, nil)
-
-	data, err := EncodeCommand(CmdMigrateShard, MigrateShardFSMCmd{
-		Bucket:    "my-bucket",
-		Key:       "my-key",
-		VersionID: "v1",
-		SrcNode:   "node-a",
-		DstNode:   "node-b",
-	})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(data))
-
-	var received MigrationTask
-	select {
-	case received = <-ch:
-	default:
-		t.Fatal("expected migration task on channel")
-	}
-	assert.Equal(t, "my-bucket", received.Bucket)
-	assert.Equal(t, "node-b", received.DstNode)
+	_, err = EncodeCommand(CmdMigrationDone, struct{}{})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unknown command type")
 }
 
-func TestFSM_MigrationDone_NotifiesCommit(t *testing.T) {
-	db := newTestDB(t)
-	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
+func TestRetiredMigrationCommandEnvelopesDecodeRawPayload(t *testing.T) {
+	for _, typ := range []CommandType{CmdMigrateShard, CmdMigrationDone} {
+		raw, err := buildRawCommand(typ, []byte("legacy payload"))
+		require.NoError(t, err)
 
-	notified := make(chan struct{}, 1)
-	fsm.SetMigrationHooks(nil, &migrationDoneNotifier{fn: func(bucket, key, versionID string) {
-		notified <- struct{}{}
-	}}, nil)
-
-	data, err := EncodeCommand(CmdMigrationDone, MigrationDoneFSMCmd{
-		Bucket:    "my-bucket",
-		Key:       "my-key",
-		VersionID: "v1",
-		SrcNode:   "node-a",
-		DstNode:   "node-b",
-	})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(data))
-
-	select {
-	case <-notified:
-	default:
-		t.Fatal("NotifyCommit was not called")
+		cmd, err := DecodeCommand(raw)
+		require.NoError(t, err)
+		require.Equal(t, typ, cmd.Type)
+		require.Equal(t, []byte("legacy payload"), cmd.Data)
 	}
 }
 
-// migrationDoneNotifier is a test helper implementing the commitNotifier interface.
-type migrationDoneNotifier struct {
-	fn func(bucket, key, versionID string)
-}
-
-func (n *migrationDoneNotifier) NotifyCommit(bucket, key, versionID string) {
-	n.fn(bucket, key, versionID)
-}
-
-// --- F2: pending migration persistence tests ---
-
-func TestFSM_MigrateShard_ChannelFull_PersistsToDB(t *testing.T) {
-	// When migration channel is full, applyMigrateShard should persist the task
-	// to BadgerDB under "pending-migration:" key.
+func TestRetiredMigrationCommandsReplayAsNoOp(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
-	// Zero-capacity channel — always full
-	ch := make(chan MigrationTask, 0)
-	fsm.SetMigrationHooks(ch, nil, nil)
-
-	data, err := EncodeCommand(CmdMigrateShard, MigrateShardFSMCmd{
-		Bucket: "b", Key: "k", VersionID: "v1", SrcNode: "src", DstNode: "dst",
-	})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(data))
-
-	// Verify persisted to BadgerDB
-	err = db.View(func(txn *badger.Txn) error {
-		_, err := txn.Get(pendingMigrationKey("b", "k", "v1"))
-		return err
-	})
-	assert.NoError(t, err, "task should be persisted to BadgerDB when channel is full")
-}
-
-func TestFSM_RecoverPending_ReplaysTasks(t *testing.T) {
-	// RecoverPending reads all pending-migration keys and sends them to the channel.
-	db := newTestDB(t)
-	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-
-	// Manually write a pending-migration key to simulate a crash after persistence
-	task := MigrationTask{Bucket: "b", Key: "k", VersionID: "v1", SrcNode: "src", DstNode: "dst"}
-	require.NoError(t, fsm.db.Update(func(txn MetadataTxn) error { return fsm.persistPendingMigration(txn, task) }))
-
-	ch := make(chan MigrationTask, 10)
-	require.NoError(t, fsm.RecoverPending(context.Background(), ch))
-
-	var received MigrationTask
-	select {
-	case received = <-ch:
-	default:
-		t.Fatal("expected task on channel after RecoverPending")
+	for _, typ := range []CommandType{CmdMigrateShard, CmdMigrationDone} {
+		raw, err := buildRawCommand(typ, []byte("legacy payload"))
+		require.NoError(t, err)
+		require.NoError(t, fsm.Apply(raw))
 	}
-	assert.Equal(t, "b", received.Bucket)
-	assert.Equal(t, "k", received.Key)
-	assert.Equal(t, "v1", received.VersionID)
+
+	require.NoError(t, db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte("pending-migration:")
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		assert.False(t, it.Valid(), "retired migration replay must not create pending-migration keys")
+		return nil
+	}))
 }
 
-func TestFSM_MigrationDone_DeletesPendingKey(t *testing.T) {
-	// applyMigrationDone should delete the pending-migration key from BadgerDB.
+func TestLegacyPendingMigrationKeySurvivesSnapshotRestoreWithoutRecovery(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
+	legacyKey := fsm.keys.PendingMigrationKey("b", "k", "v1")
+	legacyVal := []byte("legacy payload")
 
-	// Pre-write a pending-migration entry
-	task := MigrationTask{Bucket: "b", Key: "k", VersionID: "v1", SrcNode: "src", DstNode: "dst"}
-	require.NoError(t, fsm.db.Update(func(txn MetadataTxn) error { return fsm.persistPendingMigration(txn, task) }))
+	require.NoError(t, fsm.db.Update(func(txn MetadataTxn) error {
+		return txn.Set(legacyKey, legacyVal)
+	}))
 
-	// Apply CmdMigrationDone — should clean up the key
-	data, err := EncodeCommand(CmdMigrationDone, MigrationDoneFSMCmd{
-		Bucket: "b", Key: "k", VersionID: "v1", SrcNode: "src", DstNode: "dst",
-	})
+	snap, err := fsm.Snapshot()
 	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(data))
 
-	// Verify key is gone
-	err = db.View(func(txn *badger.Txn) error {
-		_, err := txn.Get(pendingMigrationKey("b", "k", "v1"))
-		return err
-	})
-	assert.ErrorIs(t, err, badger.ErrKeyNotFound, "pending-migration key should be deleted after CmdMigrationDone")
-}
+	db2 := newTestDB(t)
+	restored := NewFSM(badgermeta.Wrap(db2), newStateKeyspaceEmpty())
+	require.NoError(t, restored.Restore(raft.SnapshotMeta{FormatVersion: raft.FSMSnapshotFormatVersion}, snap))
 
-func TestFSM_RecoverPending_EmptyDB_NoOp(t *testing.T) {
-	db := newTestDB(t)
-	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-	ch := make(chan MigrationTask, 10)
-	require.NoError(t, fsm.RecoverPending(context.Background(), ch))
-	assert.Empty(t, ch)
+	require.NoError(t, db2.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(legacyKey)
+		require.NoError(t, err)
+		got, err := item.ValueCopy(nil)
+		require.NoError(t, err)
+		require.Equal(t, legacyVal, got)
+		return nil
+	}))
 }
 
 // TestFSM_SetBucketVersioning_RetiredNoOp verifies that stale CmdSetBucketVersioning

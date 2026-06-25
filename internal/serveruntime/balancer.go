@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -39,8 +38,7 @@ func (a *RaftBalancerAdapter) PeerIDs() []string         { return a.peers }
 func (a *RaftBalancerAdapter) TransferLeadership() error { return a.node.TransferLeadership() }
 
 // StartBalancer wires and launches the BalancerProposer, GossipSender,
-// GossipReceiver, MigrationExecutor and migration task channel, then
-// replays any persisted pending tasks. Returns the GossipReceiver so the
+// GossipReceiver, disk collector, and request-rate collector. Returns the GossipReceiver so the
 // caller can wire additional StreamType consumers (e.g. Phase 16 Slice 2
 // receipt gossip) onto the same receiver.
 //
@@ -66,24 +64,8 @@ func StartBalancer(
 	gossipPeerProvider func() []string,
 ) (*cluster.BalancerProposer, *gossip.GossipReceiver, error) {
 	gossipInterval := clusterCfg.BalancerGossipInterval()
-	migrationPendingTTL := clusterCfg.BalancerMigrationPendingTTL()
-	migrationMaxRetries := int(clusterCfg.BalancerMigrationMaxRetries())
-
 	adapter := NewRaftBalancerAdapter(node, peers)
 	balancer := cluster.NewBalancerProposer(nodeID, statsStore, adapter, clusterCfg)
-
-	balancer.SetObjectPicker(cluster.NewLocalObjectPicker(filepath.Join(dataDir, "shards")))
-
-	taskCh := make(chan cluster.MigrationTask, 256)
-
-	exec := cluster.NewMigrationExecutorWithTTL(shardSvc, adapter, numShards, migrationPendingTTL)
-	if migrationMaxRetries > 0 {
-		exec.SetMaxWriteRetries(migrationMaxRetries)
-	}
-	exec.SetShardCounter(ECShardCounterFor(fsm))
-	exec.Start(ctx)
-
-	fsm.SetMigrationHooks(taskCh, exec, balancer)
 
 	capabilityEvidenceAliasProvider := func() []string {
 		if addrBook == nil {
@@ -109,7 +91,6 @@ func StartBalancer(
 	// /gossip/receipt routes (the transport's per-route drain goroutines
 	// replace the Receive()-loop goroutine).
 	receiver.RegisterNativeGossipRoutes()
-	go exec.Run(ctx, taskCh)
 	go balancer.Run(ctx)
 
 	statsStore.Set(gossip.NodeStats{
@@ -142,10 +123,6 @@ func StartBalancer(
 	// gossip → BoundedLoads/balancer load-signal supply chain (Phase 6 S6-2).
 	rpsCollector := cluster.NewRequestRateCollector(nodeID, statsStore, gossipInterval, metrics.ServiceRequestCount)
 	go rpsCollector.Run(ctx)
-
-	if err := fsm.RecoverPending(ctx, taskCh); err != nil {
-		log.Warn().Err(err).Msg("balancer: recover pending failed")
-	}
 
 	log.Info().Str("component", "balancer").
 		Dur("gossip_interval", gossipInterval).

@@ -861,7 +861,7 @@ API and coverage:
    - `internal/cluster/backend.go:729` (`GetBucketVersioning` raw `txn.Get`)
    - `internal/cluster/snapshotable.go:142,209` (snapshotable restore + blob lookup)
    - `internal/cluster/scrubbable.go:73` (already known)
-   - `internal/cluster/apply.go:558` (`RecoverPending`)
+   - retired balancer `pending-migration:` keys (legacy snapshot/restore compatibility only)
    - `internal/cluster/shard_placement.go:160,243` (fallback scans)
 
 6. **Snapshot v2 magic `GFSMSNAP` is not ambiguity-free** vs v1

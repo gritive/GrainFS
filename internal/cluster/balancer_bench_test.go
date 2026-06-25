@@ -2,7 +2,6 @@ package cluster
 
 import (
 	"context"
-	"runtime"
 	"testing"
 	"time"
 
@@ -27,23 +26,6 @@ func BenchmarkBalancerStatus(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			_ = bp.Status()
-		}
-	})
-}
-
-// BenchmarkBalancerNotify measures NotifyMigrationDone throughput.
-// It sends to the actor channel and is called from FSM goroutine.
-func BenchmarkBalancerNotify(b *testing.B) {
-	runtime.SetMutexProfileFraction(1)
-	defer runtime.SetMutexProfileFraction(0)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	bp := newTestBalancer(b)
-	go bp.Run(ctx)
-
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			bp.NotifyMigrationDone("bkt", "key", "v1")
 		}
 	})
 }

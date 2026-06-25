@@ -1,7 +1,6 @@
 package cluster
 
 import (
-	"context"
 	"fmt"
 	"strconv"
 	"sync"
@@ -22,35 +21,7 @@ type FSM struct {
 	keys      *stateKeyspace
 	clusterID [16]byte
 	dekKeeper *encrypt.DEKKeeper
-
-	// Guards onMigrateShard, commitNotifier, and balancerNotifier against
-	// concurrent Set* calls + Apply.
-	mu sync.RWMutex
-
-	// Optional hooks for Phase 13 balancer. Nil when no peers configured/non-balancer mode.
-	// onMigrateShard is a buffered channel; Apply sends non-blocking to avoid blocking the Raft apply loop.
-	onMigrateShard chan<- MigrationTask
-	commitNotifier interface {
-		NotifyCommit(bucket, key, versionID string)
-	}
-	balancerNotifier interface {
-		NotifyMigrationDone(bucket, key, versionID string)
-	}
-}
-
-// SetMigrationHooks wires the FSM to the balancer/migration subsystem.
-// ch must be a buffered channel; Apply drops tasks if the channel is full.
-// bn (balancerNotifier) is called on CmdMigrationDone to release the inflight slot.
-func (f *FSM) SetMigrationHooks(ch chan<- MigrationTask, notifier interface {
-	NotifyCommit(bucket, key, versionID string)
-}, bn interface {
-	NotifyMigrationDone(bucket, key, versionID string)
-}) {
-	f.mu.Lock()
-	f.onMigrateShard = ch
-	f.commitNotifier = notifier
-	f.balancerNotifier = bn
-	f.mu.Unlock()
+	mu        sync.RWMutex
 }
 
 // NewFSM creates a new finite state machine backed by BadgerDB.
@@ -79,10 +50,11 @@ func (f *FSM) ApplyTxn(txn MetadataTxn, raw []byte) error {
 		// slots are retired: a greenfield cluster never proposes them; old-log replay
 		// is a harmless no-op. Enum values kept reserved so wire format is stable.
 		return nil
-	case CmdMigrateShard:
-		return f.applyMigrateShard(txn, cmd.Data)
-	case CmdMigrationDone:
-		return f.applyMigrationDone(txn, cmd.Data)
+	case CmdMigrateShard, CmdMigrationDone:
+		// Balancer shard migration is retired. Greenfield code cannot propose
+		// these slots; brownfield logs may replay them and must not block on
+		// missing migration hooks or legacy payload decoding.
+		return nil
 	case CommandType(17):
 		// Retired CmdSetRing. The live proposer/encoder is gone, but brownfield
 		// logs may still replay type-17 entries with legacy payload bytes.
@@ -207,107 +179,6 @@ func appendBaseCoalescedRef(key, versionID string, existing *objectMeta) Coalesc
 		StripeBytes: existing.StripeBytes,
 		NodeIDs:     append([]string(nil), existing.NodeIDs...),
 	}
-}
-
-// pendingMigrationKey returns the BadgerDB key for a not-yet-executed migration task.
-// Note: this uses a bare "pending-migration:" prefix (no group prefix); used only by
-// apply_test.go to verify key format. The production writer uses f.keys.PendingMigrationKey.
-//
-//nolint:unused // referenced by apply_test.go
-func pendingMigrationKey(bucket, key, versionID string) []byte {
-	return []byte("pending-migration:" + bucket + "/" + key + "/" + versionID)
-}
-
-// persistPendingMigration writes a migration task to the supplied transaction
-// so it survives a crash. Shares the apply actor's batch transaction.
-func (f *FSM) persistPendingMigration(txn MetadataTxn, task MigrationTask) error {
-	val, err := encodeMigrateShardCmd(MigrateShardFSMCmd(task))
-	if err != nil {
-		return fmt.Errorf("fsm: marshal pending migration: %w", err)
-	}
-	return txn.Set(f.keys.PendingMigrationKey(task.Bucket, task.Key, task.VersionID), val)
-}
-
-// RecoverPending reads all pending-migration keys from BadgerDB and enqueues them
-// to ch for re-execution. Call this at startup AFTER starting the executor goroutine
-// so the channel consumer is running before tasks are sent.
-func (f *FSM) RecoverPending(ctx context.Context, ch chan<- MigrationTask) error {
-	return f.db.View(func(txn MetadataTxn) error {
-		return f.keys.scanGroupPrefix(txn, []byte("pending-migration:"), func(_ []byte, item MetaItem) error {
-			var taskData []byte
-			if err := item.Value(func(val []byte) error {
-				taskData = make([]byte, len(val))
-				copy(taskData, val)
-				return nil
-			}); err != nil {
-				log.Error().Err(err).Msg("fsm: recover pending migration: read failed")
-				return nil
-			}
-			cmd, err := decodeMigrateShardCmd(taskData)
-			if err != nil {
-				log.Error().Err(err).Msg("fsm: recover pending migration: decode failed")
-				return nil
-			}
-			task := MigrationTask(cmd)
-			select {
-			case ch <- task:
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-			return nil
-		})
-	})
-}
-
-func (f *FSM) applyMigrateShard(txn MetadataTxn, data []byte) error {
-	cmd, err := decodeMigrateShardCmd(data)
-	if err != nil {
-		return fmt.Errorf("decode MigrateShardCmd: %w", err)
-	}
-	// Guard: balancer proposals without object identity are placeholders; skip them.
-	if cmd.Bucket == "" || cmd.Key == "" {
-		return nil
-	}
-	task := MigrationTask(cmd)
-	f.mu.RLock()
-	ch := f.onMigrateShard
-	f.mu.RUnlock()
-	if ch != nil {
-		select {
-		case ch <- task:
-		default:
-			// Channel full: persist to BadgerDB so the task survives a crash.
-			if err := f.persistPendingMigration(txn, task); err != nil {
-				log.Error().Str("bucket", task.Bucket).Str("key", task.Key).Err(err).Msg("fsm: migration queue full and persist failed — task lost")
-			} else {
-				log.Warn().Str("bucket", task.Bucket).Str("key", task.Key).Msg("fsm: migration queue full, persisted to BadgerDB")
-			}
-		}
-	}
-	return nil
-}
-
-func (f *FSM) applyMigrationDone(txn MetadataTxn, data []byte) error {
-	cmd, err := decodeMigrationDoneCmd(data)
-	if err != nil {
-		return fmt.Errorf("decode MigrationDoneCmd: %w", err)
-	}
-	// Clean up any persisted pending-migration entry for this task using the
-	// shared batch transaction.
-	if derr := txn.Delete(f.keys.PendingMigrationKey(cmd.Bucket, cmd.Key, cmd.VersionID)); derr != nil && derr != ErrMetaKeyNotFound {
-		log.Warn().Str("bucket", cmd.Bucket).Str("key", cmd.Key).Err(derr).Msg("fsm: delete pending-migration key failed")
-	}
-	f.mu.RLock()
-	notifier := f.commitNotifier
-	bn := f.balancerNotifier
-	f.mu.RUnlock()
-	if notifier != nil {
-		notifier.NotifyCommit(cmd.Bucket, cmd.Key, cmd.VersionID)
-	}
-	if bn != nil {
-		bn.NotifyMigrationDone(cmd.Bucket, cmd.Key, cmd.VersionID)
-	}
-	return nil
 }
 
 // Snapshot serializes this group's metadata state for Raft snapshots. Keys in

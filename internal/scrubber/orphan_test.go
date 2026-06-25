@@ -189,10 +189,10 @@ func TestOrphanSweep_KnownObjectNotDeleted(t *testing.T) {
 // Crash simulation test
 // ----------------------------------------------------------------------------
 
-// TestOrphanSweep_CrashBetweenPhase3And4 simulates the Phase 3→4 crash gap:
-// CmdMigrationDone is applied (object removed from src metadata), but before
-// the Phase 4 src shard delete occurs, the process crashes. The scrubber must
-// detect and clean up the stranded shard directory within 2 scrub cycles.
+// TestOrphanSweep_CrashBetweenPhase3And4 simulates a crash after metadata stops
+// referencing a shard directory but before the physical shard delete occurs. The
+// scrubber must detect and clean up the stranded shard directory within 2 scrub
+// cycles.
 func TestOrphanSweep_CrashBetweenPhase3And4(t *testing.T) {
 	b := newOrphanBackend()
 

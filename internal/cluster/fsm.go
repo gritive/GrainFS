@@ -26,6 +26,8 @@ const (
 	CmdDeleteBucketPolicy CommandType = 9
 	// CmdSetBucketVersioning (15) is also retired — kept below for wire stability.
 
+	// RETIRED: balancer shard migration was removed. Slots kept reserved so old-log replay is safe.
+	// DO NOT reuse these numbers for new commands.
 	CmdMigrateShard  CommandType = 10
 	CmdMigrationDone CommandType = 11
 
@@ -214,24 +216,6 @@ type SetBucketPolicyCmd struct {
 
 type DeleteBucketPolicyCmd struct {
 	Bucket string
-}
-
-// MigrateShardFSMCmd is the FSM-level command requesting a shard migration.
-type MigrateShardFSMCmd struct {
-	Bucket    string
-	Key       string
-	VersionID string
-	SrcNode   string
-	DstNode   string
-}
-
-// MigrationDoneFSMCmd is the FSM-level command confirming a migration is complete.
-type MigrationDoneFSMCmd struct {
-	Bucket    string
-	Key       string
-	VersionID string
-	SrcNode   string
-	DstNode   string
 }
 
 // SetBucketVersioningCmd persists the S3 versioning state for a bucket.

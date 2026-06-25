@@ -377,17 +377,17 @@ var (
 
 	BalancerMigrationsProposedTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "grainfs_balancer_migrations_proposed_total",
-		Help: "Total CmdMigrateShard proposals submitted to Raft.",
+		Help: "Legacy counter for retired CmdMigrateShard proposals. Should remain 0.",
 	})
 
 	BalancerMigrationsDoneTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "grainfs_balancer_migrations_done_total",
-		Help: "Total migrations completed successfully.",
+		Help: "Legacy counter for retired balancer shard migrations. Should remain 0.",
 	})
 
 	BalancerMigrationsFailedTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "grainfs_balancer_migrations_failed_total",
-		Help: "Total migrations that failed.",
+		Help: "Legacy counter for retired balancer shard migration failures. Should remain 0.",
 	})
 
 	BalancerImbalancePct = promauto.NewGauge(prometheus.GaugeOpts{
@@ -397,7 +397,7 @@ var (
 
 	BalancerPendingTasks = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "grainfs_balancer_pending_tasks",
-		Help: "Number of pending-migration entries persisted in BadgerDB.",
+		Help: "Legacy pending-migration entries persisted in BadgerDB. Retired migration replay no longer creates them.",
 	})
 
 	BalancerLeaderTransfersTotal = promauto.NewCounter(prometheus.CounterOpts{
@@ -407,12 +407,12 @@ var (
 
 	BalancerShardWriteErrorsTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "grainfs_balancer_shard_write_errors_total",
-		Help: "Total shard write errors during migration copy phase.",
+		Help: "Legacy counter for retired balancer shard copy write errors. Should remain 0.",
 	})
 
 	BalancerShardCopyDuration = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name:    "grainfs_balancer_shard_copy_duration_seconds",
-		Help:    "Duration of shard copy operations during migration.",
+		Help:    "Legacy histogram for retired balancer shard copy operations.",
 		Buckets: prometheus.DefBuckets,
 	})
 
@@ -433,12 +433,12 @@ var (
 
 	BalancerShardWriteRetriesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "grainfs_balancer_shard_write_retries_total",
-		Help: "Total shard write retries per node and shard index.",
+		Help: "Legacy counter for retired balancer shard copy retries. Should remain 0.",
 	}, []string{"node_id", "shard_idx"})
 
 	BalancerMigrationPendingTTLExpiredTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "grainfs_balancer_migration_pending_ttl_expired_total",
-		Help: "Total pending migrations cancelled due to TTL expiry.",
+		Help: "Legacy counter for retired pending-migration TTL expiry. Should remain 0.",
 	})
 
 	// Orphan shard sweep metrics.
