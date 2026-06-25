@@ -529,24 +529,33 @@ func laggingGroupBackend(t *testing.T, b *DistributedBackend, groupID string) *D
 }
 
 // TestWalkOrphanShards_MultiGroup_SiblingLiveVersionProtected proves the shard
-// sweep protects a live versioned object whose shard is co-located in the shared
-// ShardService dataDirs (the multi-group case). Object metadata lives in the
-// off-raft quorum-meta blob store (not a per-group ks prefix), so the per-version
-// blob — shared across hosted groups — is the liveness authority; dropping it
-// turns the same dir into a true orphan.
+// sweep, when run in multi-group mode (this node hosts MORE than one data group),
+// still protects a live versioned object's shard. Two facts make this genuinely
+// multi-group, not a single-group test in disguise:
+//
+//  1. The sweep is gated on EVERY hosted group being caught up
+//     (orphanShardSweepAllowed unions hostedGroupBackends); the sibling group must
+//     be present-and-caught-up or the sweep would not run at all. We assert it DOES
+//     run by observing a true orphan get reclaimed below.
+//  2. Object metadata lives in the node-level off-raft quorum-meta blob store (NOT
+//     a per-group ks prefix), so hasLiveShardRecord — called once on the walking
+//     backend by (bucket,key,vid) — protects the shard regardless of which hosted
+//     group owns the bucket. This is exactly why the legacy per-group FSM
+//     forward-map (liveVersionedShardDirs) could be removed: a blob is shared.
 func TestWalkOrphanShards_MultiGroup_SiblingLiveVersionProtected(t *testing.T) {
 	b := orphanWalkerBackend(t)
 	sib := siblingGroupBackend(t, b, "group-3")
+	waitCaughtUp(t, sib) // the sweep runs only if every hosted group is caught up
 	b.SetHostedGroupBackendsSource(func() []*DistributedBackend { return []*DistributedBackend{b, sib} })
 	b.SetOwningGroupHostedChecker(func(string) bool { return true })
 
 	root := b.shardSvc.DataDirs()[0]
 	dir := writeShardLeaf(t, root, "bkt/key/v-sib", []int{0}, oldEnough)
-	// The per-version blob is shared across hosted groups (co-located with shards).
+	// The per-version blob is node-shared across hosted groups (co-located with shards).
 	putObjMeta(t, b, "bkt", "key", "v-sib", "e1")
 
 	require.Empty(t, collectOrphans(t, b, nil),
-		"a live versioned object's shard must be protected by its per-version blob")
+		"a live versioned object's shard must be protected by its node-shared per-version blob")
 
 	deleteVersionBlob(t, b, "bkt", "key", "v-sib")
 	require.Equal(t, []string{dir}, collectOrphans(t, b, nil),

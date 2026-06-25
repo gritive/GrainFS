@@ -87,17 +87,13 @@ func TestScanObjects_SkipsQuorumMetaTombstonesAndNonEC(t *testing.T) {
 	require.Equal(t, 0, got["plain.bin"], "non-EC object must be skipped")
 }
 
-// TestScanObjects_FSMTombstoneWinsOverStaleQuorumMeta proves the BLOCKER fix via
-// the PRODUCTION delete scenario: PUT a live object, DeleteObject it (raft commit
-// writes an FSM lat: tombstone and best-effort-removes quorum-meta), then a stale
-// LIVE quorum-meta file reappears for the same key (the best-effort cleanup
-// "failed"). The FSM tombstone is authoritative, so the object must NOT be
-// scrubbed — the `seen` set records the key even for the lat: tombstone,
-// suppressing the stale-live quorum-meta entry.
-//
-// Mutation: move `seen[key]` to after the tombstone `continue` (i.e. only record
-// non-tombstone keys) → the stale-live quorum-meta entry leaks → RED.
-func TestScanObjects_FSMTombstoneWinsOverStaleQuorumMeta(t *testing.T) {
+// TestScanObjects_DeleteTombstoneWinsOverStaleQuorumMeta proves the production
+// delete scenario via blob LWW: PUT a live object, DeleteObject it (writes a
+// delete-marker tombstone to the quorum-meta blob with a current ModTime), then a
+// stale LIVE write for the same key arrives with an OLDER ModTime. The tombstone
+// wins the Last-Write-Wins (the stale write is a no-op skip), so the object stays
+// out of the scrub set — the EC scrubber never repairs a deleted object's shards.
+func TestScanObjects_DeleteTombstoneWinsOverStaleQuorumMeta(t *testing.T) {
 	ctx := context.Background()
 	b := newTestDistributedBackend(t)
 	require.True(t, b.ECActive())
@@ -109,13 +105,14 @@ func TestScanObjects_FSMTombstoneWinsOverStaleQuorumMeta(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, b.DeleteObject(ctx, "bkt", "gone.bin"))
 
-	// Assert the delete took effect (FSM tombstone present, object gone): without
-	// the stale quorum-meta below, the object must not be scrubbable.
+	// Assert the delete took effect (blob tombstone present, object gone): without
+	// the stale write below, the object must not be scrubbable.
 	pre := collectScanObjectKeys(t, b, "bkt")
 	require.Equal(t, 0, pre["gone.bin"], "deleted object must be absent from the scrub set")
 
-	// Stale LIVE quorum-meta reappears for the SAME key (best-effort cleanup
-	// failed). The FSM tombstone must still win → object stays out of the set.
+	// A stale LIVE write for the SAME key arrives with an OLDER ModTime (1). The
+	// delete tombstone (current ModTime) wins LWW → the stale write is skipped →
+	// the object stays out of the scrub set.
 	require.NoError(t, b.writeQuorumMeta(ctx, PutObjectMetaCmd{
 		Bucket: "bkt", Key: "gone.bin", VersionID: "v-old",
 		Size: 1, ETag: "etag-old", ModTime: 1, ECData: 1, ECParity: 0,
