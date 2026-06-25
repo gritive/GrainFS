@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.697.0] - 2026-06-25
+
+### Changed
+- **Internal refactor: extracted `LocalShardStore` from the `ShardService` god-struct (no behavior,
+  API, wire, or on-disk format change).** The local-shard concern — shard-blob physical I/O, the
+  at-rest seal, the `syncDirChain` durability state machine (ancestor-fsync dedup), and the
+  staging→promote-local path — moved into a new `LocalShardStore` module; `ShardService` keeps it as
+  a field and is a facade that delegates every local-shard method to it. First slice of a
+  decomposition of the 1,940-LOC `ShardService`; the fsync-order durability tests now construct a
+  `LocalShardStore` directly, with no transport.
+
 ## [0.0.696.0] - 2026-06-25
 
 ### Changed

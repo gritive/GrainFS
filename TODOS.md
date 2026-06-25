@@ -2,6 +2,31 @@
 
 ## Follow-ups
 
+### ShardService decomposition follow-ups (2026-06-25, PR1 LocalShardStore done)
+
+`ShardService` (1,940 LOC god-struct) is being decomposed into a facade over deep local-store
+modules. **PR1 (LocalShardStore extraction) is done** — shard-blob I/O + durability + seal +
+staging carved out behind the facade, behavior-preserving. Remaining slices (each a separate PR,
+facade stays the spine — see design `docs/superpowers/specs/2026-06-25-shard-service-decomposition-design.md`):
+
+- **[P2] PR2 — semantic LocalQuorumMetaStore.** Carve the 30 quorum-meta `*ShardService` methods
+  (in `quorum_meta.go`) into a `LocalQuorumMetaStore`. **Semantic, not raw-KV**: the local write
+  decodes candidate + existing blobs and runs `decideQuorumMetaWrite` (CAS-reject / LWW-skip /
+  idempotent-replay) before the rename. This module becomes the injected adapter for the
+  Quorum Meta Store deepening (Card 1). Fields: `dataDirs` (shared) + `quorumMetaTargetLocks`.
+- **[P2] decideQuorumMetaWrite single-ownership.** The CAS/LWW conflict-resolution
+  (`decideQuorumMetaWrite` / `quorumMetaCmdWins`) is shared between the local write-accept and the
+  Quorum Meta Store orchestration merge. Decide where it lives (one place) when doing PR2/Card 1 —
+  this is the actual deepening, not the byte I/O.
+- **[P3] PR3 — LocalManifestStore.** Carve the 12 manifest-blob `*ShardService` methods
+  (`manifest_blob.go`, `.qmeta_mpu/{bucket}/{uploadID}`) into a `LocalManifestStore`.
+- **[P3] parent-dir fsync gap (pre-existing, surfaced by the decomposition).** Quorum-meta
+  (`quorum_meta.go` writeQuorumMetaLocal) and manifest (`manifest_blob.go`) writes fsync the temp
+  file then rename but do **not** fsync the parent directory (no `syncDirChain`, unlike shard
+  writes) — a crash can lose the rename even though bytes are durable. Extracting LocalQuorumMetaStore
+  makes this visible/testable. Behavior change, so a separate PR; may relate to Quorum Meta Store
+  data-loss ordering.
+
 ### ProxyTrust removal follow-ups (2026-06-25)
 
 The orphaned ProxyTrust subsystem (`authoritativeClientIP` + `trusted-proxy.cidr` config +

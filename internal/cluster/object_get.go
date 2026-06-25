@@ -106,7 +106,7 @@ func (b *DistributedBackend) PreferReadAt(bucket string) bool {
 }
 
 func (b *DistributedBackend) encryptedShardStorage() bool {
-	return b.shardSvc != nil && b.shardSvc.segEnc != nil
+	return b.shardSvc != nil && b.shardSvc.segEnc() != nil
 }
 
 func (b *DistributedBackend) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error) {

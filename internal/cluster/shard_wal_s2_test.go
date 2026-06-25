@@ -67,8 +67,8 @@ func TestWriteEncryptedShardFile_LockedFsyncOrder(t *testing.T) {
 		ECConfig{DataShards: 1, ParityShards: 0}, []string{"self"},
 		WithNoRedundancy(func() bool { return true }))
 	rec := &syncRecorder{}
-	backend.shardSvc.syncFileHook = rec.file
-	backend.shardSvc.syncDirHook = rec.dir
+	backend.shardSvc.local.syncFileHook = rec.file
+	backend.shardSvc.local.syncDirHook = rec.dir
 
 	large := bytes.Repeat([]byte("s2-locked-order-"), 1<<17) // > 1MiB, requireFsync=true
 	_, err := backend.PutObject(context.Background(), "b", "obj", bytes.NewReader(large), "application/octet-stream")
@@ -90,8 +90,8 @@ func TestSmallShard_Fsynced(t *testing.T) {
 		ECConfig{DataShards: 1, ParityShards: 0}, []string{"self"},
 		WithNoRedundancy(func() bool { return true }))
 	rec := &syncRecorder{}
-	backend.shardSvc.syncFileHook = rec.file
-	backend.shardSvc.syncDirHook = rec.dir
+	backend.shardSvc.local.syncFileHook = rec.file
+	backend.shardSvc.local.syncDirHook = rec.dir
 
 	small := []byte("tiny-s2") // << 1 MiB
 	_, err := backend.PutObject(context.Background(), "b", "obj-small", bytes.NewReader(small), "application/octet-stream")
@@ -115,8 +115,8 @@ func TestLargeNoRedundancy_Fsynced(t *testing.T) {
 		ECConfig{DataShards: 1, ParityShards: 0}, []string{"self"},
 		WithNoRedundancy(func() bool { return true }))
 	rec := &syncRecorder{}
-	backend.shardSvc.syncFileHook = rec.file
-	backend.shardSvc.syncDirHook = rec.dir
+	backend.shardSvc.local.syncFileHook = rec.file
+	backend.shardSvc.local.syncDirHook = rec.dir
 
 	large := bytes.Repeat([]byte("s2-large-noredund-"), 1<<17)
 	_, err := backend.PutObject(context.Background(), "b", "obj-nr", bytes.NewReader(large), "application/octet-stream")
@@ -133,8 +133,8 @@ func TestLargeRedundant_NoFsync(t *testing.T) {
 	backend, _, _, _ := newS1ShardSvc(t,
 		ECConfig{DataShards: 2, ParityShards: 1}, []string{"self", "self", "self"})
 	rec := &syncRecorder{}
-	backend.shardSvc.syncFileHook = rec.file
-	backend.shardSvc.syncDirHook = rec.dir
+	backend.shardSvc.local.syncFileHook = rec.file
+	backend.shardSvc.local.syncDirHook = rec.dir
 
 	large := bytes.Repeat([]byte("s2-large-redundant-"), 1<<17)
 	_, err := backend.PutObject(context.Background(), "b", "obj-r", bytes.NewReader(large), "application/octet-stream")
@@ -153,7 +153,7 @@ func TestDBV_NoRedundancyPath_DirFsyncFailureBlocksVisibility(t *testing.T) {
 		ECConfig{DataShards: 1, ParityShards: 0}, []string{"self"},
 		WithNoRedundancy(func() bool { return true }))
 	var dirCalls atomic.Int32
-	backend.shardSvc.syncDirHook = func(string) error {
+	backend.shardSvc.local.syncDirHook = func(string) error {
 		dirCalls.Add(1)
 		return errors.New("injected dir fsync failure")
 	}
@@ -179,7 +179,7 @@ func TestDBV_ECCommitPath_DirFsyncFailureBlocksVisibility(t *testing.T) {
 		ECConfig{DataShards: 2, ParityShards: 0}, []string{"self", "self"},
 		WithNoRedundancy(func() bool { return true }))
 	var dirCalls atomic.Int32
-	backend.shardSvc.syncDirHook = func(string) error {
+	backend.shardSvc.local.syncDirHook = func(string) error {
 		dirCalls.Add(1)
 		return errors.New("injected dir fsync failure")
 	}

@@ -72,7 +72,7 @@ func TestReadLocalShard_RejectsKeyEscapingShardRoot(t *testing.T) {
 func TestWriteLocalShard_RejectsKeyEscapingShardRoot(t *testing.T) {
 	svc, root := newTraversalTestShardService(t)
 
-	err := svc.writeLocalShard(context.Background(), "bucket", "../../../escape", 0, []byte("malicious"))
+	err := svc.local.writeLocalShard(context.Background(), "bucket", "../../../escape", 0, []byte("malicious"))
 	require.Error(t, err, "writeLocalShard must reject a key that escapes the shard root")
 
 	escaped := filepath.Join(filepath.Dir(root), "escape")
@@ -103,7 +103,7 @@ func TestShardPathUnderDataDir_RejectsEscapingBucket(t *testing.T) {
 		"a traversal bucket must not be reported as contained")
 
 	// A write with a traversal bucket must not materialize a shard outside root.
-	werr := svc.writeLocalShard(context.Background(), "..", "obj", 0, []byte("malicious"))
+	werr := svc.local.writeLocalShard(context.Background(), "..", "obj", 0, []byte("malicious"))
 	require.Error(t, werr, "writeLocalShard must reject a traversal bucket")
 	escaped := filepath.Join(filepath.Dir(root), "obj")
 	_, statErr := os.Stat(escaped)

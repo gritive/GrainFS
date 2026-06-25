@@ -33,7 +33,7 @@ func TestCollectStaleFSMValueKeys_PolicyAndObjOnly(t *testing.T) {
 	// Use newTestGroupBackend (keeper starts at gen 0).
 	gb, gbDB := newTestGroupBackendWithDB(t, "group-1")
 	ks := gb.ks()
-	keeper := gb.shardSvc.dekKeeper
+	keeper := gb.shardSvc.DEKKeeper()
 	require.NotNil(t, keeper)
 
 	// At gen 0: seal stale policy: key.
@@ -81,7 +81,7 @@ func TestCollectStaleFSMValueKeys_RespectsMaxBatch(t *testing.T) {
 	}
 
 	// Rotate to gen 1 so all 5 are stale.
-	require.NoError(t, gb.shardSvc.dekKeeper.Rotate())
+	require.NoError(t, gb.shardSvc.DEKKeeper().Rotate())
 
 	keys, err := gb.CollectStaleFSMValueKeys(1, 3, 10<<20) // maxBatch=3
 	require.NoError(t, err)
@@ -103,7 +103,7 @@ func TestCollectStaleFSMValueKeys_RespectsMaxBytes(t *testing.T) {
 	}
 
 	// Rotate to gen 1 so all 5 are stale.
-	require.NoError(t, gb.shardSvc.dekKeeper.Rotate())
+	require.NoError(t, gb.shardSvc.DEKKeeper().Rotate())
 
 	// Each raw frame is header(9 bytes) + AEAD overhead(~28) + 200 plaintext ≈ 237 bytes.
 	// maxBytes=300 → only 1 should fit before the budget is hit.
@@ -116,7 +116,7 @@ func TestCollectStaleFSMValueKeys_RespectsMaxBytes(t *testing.T) {
 func TestDrainFSMValueRewrap_DrainsGroupToActive(t *testing.T) {
 	gb, gbDB := newTestGroupBackendWithDB(t, "group-1")
 	ks := gb.ks()
-	keeper := gb.shardSvc.dekKeeper
+	keeper := gb.shardSvc.DEKKeeper()
 
 	// Seed 7 stale policy: keys at gen 0.
 	for i := 0; i < 7; i++ {
@@ -142,7 +142,7 @@ func TestDrainFSMValueRewrap_DrainsGroupToActive(t *testing.T) {
 func TestDrainFSMValueRewrap_IdempotentWhenClean(t *testing.T) {
 	gb, gbDB := newTestGroupBackendWithDB(t, "group-1")
 	ks := gb.ks()
-	keeper := gb.shardSvc.dekKeeper
+	keeper := gb.shardSvc.DEKKeeper()
 
 	// Rotate to gen 1.
 	require.NoError(t, keeper.Rotate())
@@ -183,7 +183,7 @@ func TestDrainFSMValueRewrap_IdempotentWhenClean(t *testing.T) {
 func TestDrainFSMValueRewrap_RotationMidDrainTerminatesAndConverges(t *testing.T) {
 	gb, gbDB := newTestGroupBackendWithDB(t, "group-1")
 	ks := gb.ks()
-	keeper := gb.shardSvc.dekKeeper
+	keeper := gb.shardSvc.DEKKeeper()
 
 	// Seed 6 stale policy: keys at gen 0, then rotate to gen 1 (initial active).
 	const n = 6

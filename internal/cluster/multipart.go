@@ -148,7 +148,7 @@ func (b *DistributedBackend) UploadPart(ctx context.Context, bucket, key, upload
 	if b.encryptedShardStorage() {
 		partWriter = &encryptedSpoolRecordWriter{
 			w:      f,
-			seam:   b.shardSvc.segEnc,
+			seam:   b.shardSvc.segEnc(),
 			domain: clusterMultipartPartDomain(uploadID, partNumber),
 		}
 	}
@@ -339,7 +339,7 @@ func (b *DistributedBackend) multipartPartSpooledObject(uploadID string, part st
 	}
 	if b.encryptedShardStorage() {
 		sp.encrypted = true
-		sp.seam = b.shardSvc.segEnc
+		sp.seam = b.shardSvc.segEnc()
 		sp.domain = clusterMultipartPartDomain(uploadID, part.PartNumber)
 	}
 	return sp
@@ -352,7 +352,7 @@ func (b *DistributedBackend) spoolMultipartCompleteManifest(ctx context.Context,
 	}
 	defer body.Close()
 	if b.encryptedShardStorage() {
-		return spoolObjectEncrypted(ctx, b.spoolDir(), body, bucket, b.shardSvc.segEnc, clusterMultipartSpoolDomain(uploadID, versionID))
+		return spoolObjectEncrypted(ctx, b.spoolDir(), body, bucket, b.shardSvc.segEnc(), clusterMultipartSpoolDomain(uploadID, versionID))
 	}
 	return spoolObject(ctx, b.spoolDir(), body, bucket)
 }
@@ -555,7 +555,7 @@ func (b *DistributedBackend) ListParts(ctx context.Context, bucket, key, uploadI
 func (b *DistributedBackend) openMultipartPart(uploadID string, partNumber int) (io.ReadCloser, error) {
 	full := b.partPath(uploadID, partNumber)
 	if b.encryptedShardStorage() {
-		return openSpoolEncryptedRecordFile(full, b.shardSvc.segEnc, clusterMultipartPartDomain(uploadID, partNumber))
+		return openSpoolEncryptedRecordFile(full, b.shardSvc.segEnc(), clusterMultipartPartDomain(uploadID, partNumber))
 	}
 	return os.Open(full)
 }
