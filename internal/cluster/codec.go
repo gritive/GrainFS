@@ -206,56 +206,10 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 		segmentsOff = b.EndVector(len(segOffs))
 	}
 	// parts — build child MultipartPartEntry tables BEFORE PutObjectMetaCmdStart.
-	var partsOff flatbuffers.UOffsetT
-	if len(c.Parts) > 0 {
-		partOffs := make([]flatbuffers.UOffsetT, len(c.Parts))
-		for i, p := range c.Parts {
-			etOff := b.CreateString(p.ETag)
-			clusterpb.MultipartPartEntryStart(b)
-			clusterpb.MultipartPartEntryAddPartNumber(b, int32(p.PartNumber))
-			clusterpb.MultipartPartEntryAddSize(b, p.Size)
-			clusterpb.MultipartPartEntryAddEtag(b, etOff)
-			partOffs[i] = clusterpb.MultipartPartEntryEnd(b)
-		}
-		clusterpb.PutObjectMetaCmdStartPartsVector(b, len(partOffs))
-		for i := len(partOffs) - 1; i >= 0; i-- {
-			b.PrependUOffsetT(partOffs[i])
-		}
-		partsOff = b.EndVector(len(partOffs))
-	}
+	partsOff := buildPartsVector(b, c.Parts, clusterpb.PutObjectMetaCmdStartPartsVector)
 	tagsVec := buildTagsVector(b, c.Tags, clusterpb.PutObjectMetaCmdStartTagsVector)
 	// coalesced — build child CoalescedShardRef tables BEFORE PutObjectMetaCmdStart.
-	var coalescedOff flatbuffers.UOffsetT
-	if len(c.Coalesced) > 0 {
-		cOffs := make([]flatbuffers.UOffsetT, len(c.Coalesced))
-		for i, cr := range c.Coalesced {
-			idOff := b.CreateString(cr.CoalescedID)
-			etOff := b.CreateString(cr.ETag)
-			skOff := b.CreateString(cr.ShardKey)
-			var nodesOff flatbuffers.UOffsetT
-			if len(cr.NodeIDs) > 0 {
-				nodesOff = buildStringVector(b, cr.NodeIDs, clusterpb.CoalescedShardRefStartNodeIdsVector)
-			}
-			clusterpb.CoalescedShardRefStart(b)
-			clusterpb.CoalescedShardRefAddCoalescedId(b, idOff)
-			clusterpb.CoalescedShardRefAddSize(b, cr.Size)
-			clusterpb.CoalescedShardRefAddEtag(b, etOff)
-			clusterpb.CoalescedShardRefAddShardKey(b, skOff)
-			clusterpb.CoalescedShardRefAddVersion(b, cr.Version)
-			clusterpb.CoalescedShardRefAddEcData(b, cr.ECData)
-			clusterpb.CoalescedShardRefAddEcParity(b, cr.ECParity)
-			clusterpb.CoalescedShardRefAddStripeBytes(b, cr.StripeBytes)
-			if nodesOff != 0 {
-				clusterpb.CoalescedShardRefAddNodeIds(b, nodesOff)
-			}
-			cOffs[i] = clusterpb.CoalescedShardRefEnd(b)
-		}
-		clusterpb.PutObjectMetaCmdStartCoalescedVector(b, len(cOffs))
-		for i := len(cOffs) - 1; i >= 0; i-- {
-			b.PrependUOffsetT(cOffs[i])
-		}
-		coalescedOff = b.EndVector(len(cOffs))
-	}
+	coalescedOff := buildCoalescedVector(b, c.Coalesced, clusterpb.PutObjectMetaCmdStartCoalescedVector)
 	// append_call_md5s — build child BytesValue tables BEFORE PutObjectMetaCmdStart.
 	var appendMD5sOff flatbuffers.UOffsetT
 	if len(c.AppendCallMD5s) > 0 {
@@ -586,6 +540,81 @@ func buildStringVector(b *flatbuffers.Builder, ss []string, startVec func(*flatb
 	return b.EndVector(len(ss))
 }
 
+// buildCoalescedVector encodes []CoalescedShardRef as a CoalescedShardRef
+// FlatBuffers vector using the provided parent-table startVector func (e.g.
+// clusterpb.PutObjectMetaCmdStartCoalescedVector /
+// clusterpb.ObjectMetaStartCoalescedVector). Returns 0 when len==0 so callers
+// can guard the Add call. Each ref's node_ids vector and child strings MUST be
+// built BEFORE that ref's CoalescedShardRefStart, and the whole vector BEFORE
+// the parent table's Start (flatbuffers nested-vector rule).
+//
+// EcData/EcParity/StripeBytes are written unconditionally to preserve
+// byte-identity with the inline loops this replaced (do NOT add a 0-default
+// omit — semantically similar but not byte-identical).
+func buildCoalescedVector(b *flatbuffers.Builder, refs []CoalescedShardRef, startVec func(*flatbuffers.Builder, int) flatbuffers.UOffsetT) flatbuffers.UOffsetT {
+	if len(refs) == 0 {
+		return 0
+	}
+	cOffs := make([]flatbuffers.UOffsetT, len(refs))
+	for i, c := range refs {
+		idOff := b.CreateString(c.CoalescedID)
+		etOff := b.CreateString(c.ETag)
+		skOff := b.CreateString(c.ShardKey)
+		var nodesOff flatbuffers.UOffsetT
+		if len(c.NodeIDs) > 0 {
+			nodesOff = buildStringVector(b, c.NodeIDs, clusterpb.CoalescedShardRefStartNodeIdsVector)
+		}
+		clusterpb.CoalescedShardRefStart(b)
+		clusterpb.CoalescedShardRefAddCoalescedId(b, idOff)
+		clusterpb.CoalescedShardRefAddSize(b, c.Size)
+		clusterpb.CoalescedShardRefAddEtag(b, etOff)
+		clusterpb.CoalescedShardRefAddShardKey(b, skOff)
+		clusterpb.CoalescedShardRefAddVersion(b, c.Version)
+		clusterpb.CoalescedShardRefAddEcData(b, c.ECData)
+		clusterpb.CoalescedShardRefAddEcParity(b, c.ECParity)
+		clusterpb.CoalescedShardRefAddStripeBytes(b, c.StripeBytes)
+		if nodesOff != 0 {
+			clusterpb.CoalescedShardRefAddNodeIds(b, nodesOff)
+		}
+		cOffs[i] = clusterpb.CoalescedShardRefEnd(b)
+	}
+	startVec(b, len(cOffs))
+	for i := len(cOffs) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(cOffs[i])
+	}
+	return b.EndVector(len(cOffs))
+}
+
+// buildPartsVector encodes []storage.MultipartPartEntry as a MultipartPartEntry
+// FlatBuffers vector using the provided parent-table startVector func (e.g.
+// clusterpb.PutObjectMetaCmdStartPartsVector /
+// clusterpb.ObjectMetaStartPartsVector). Returns 0 when len==0. Each entry's
+// etag string MUST be created BEFORE its MultipartPartEntryStart, and the whole
+// vector BEFORE the parent table's Start.
+//
+// Deliberately narrow to []storage.MultipartPartEntry (NOT storage.Part /
+// forward PartRef) so the int32(PartNumber) cast and Add order stay
+// byte-identical with the inline loops this replaced.
+func buildPartsVector(b *flatbuffers.Builder, parts []storage.MultipartPartEntry, startVec func(*flatbuffers.Builder, int) flatbuffers.UOffsetT) flatbuffers.UOffsetT {
+	if len(parts) == 0 {
+		return 0
+	}
+	partOffs := make([]flatbuffers.UOffsetT, len(parts))
+	for i, p := range parts {
+		etOff := b.CreateString(p.ETag)
+		clusterpb.MultipartPartEntryStart(b)
+		clusterpb.MultipartPartEntryAddPartNumber(b, int32(p.PartNumber))
+		clusterpb.MultipartPartEntryAddSize(b, p.Size)
+		clusterpb.MultipartPartEntryAddEtag(b, etOff)
+		partOffs[i] = clusterpb.MultipartPartEntryEnd(b)
+	}
+	startVec(b, len(partOffs))
+	for i := len(partOffs) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(partOffs[i])
+	}
+	return b.EndVector(len(partOffs))
+}
+
 // --- ObjectMeta codec ---
 
 func marshalObjectMeta(m objectMeta) ([]byte, error) { //nolint:unused // referenced by codec_test.go and multiple *_test.go helpers
@@ -656,73 +685,11 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) { //nolint:unused // refere
 	// coalesced — build child CoalescedShardRef tables BEFORE ObjectMetaStart.
 	// Note: node_ids vector for each ref MUST also be built BEFORE its
 	// owning table Start (flatbuffers nested-vector rule).
-	var coalescedOff flatbuffers.UOffsetT
-	if len(m.Coalesced) > 0 {
-		cOffs := make([]flatbuffers.UOffsetT, len(m.Coalesced))
-		for i, c := range m.Coalesced {
-			idOff := b.CreateString(c.CoalescedID)
-			etOff := b.CreateString(c.ETag)
-			skOff := b.CreateString(c.ShardKey)
-			var nodesOff flatbuffers.UOffsetT
-			if len(c.NodeIDs) > 0 {
-				nodesOff = buildStringVector(b, c.NodeIDs, clusterpb.CoalescedShardRefStartNodeIdsVector)
-			}
-			clusterpb.CoalescedShardRefStart(b)
-			clusterpb.CoalescedShardRefAddCoalescedId(b, idOff)
-			clusterpb.CoalescedShardRefAddSize(b, c.Size)
-			clusterpb.CoalescedShardRefAddEtag(b, etOff)
-			clusterpb.CoalescedShardRefAddShardKey(b, skOff)
-			clusterpb.CoalescedShardRefAddVersion(b, c.Version)
-			clusterpb.CoalescedShardRefAddEcData(b, c.ECData)
-			clusterpb.CoalescedShardRefAddEcParity(b, c.ECParity)
-			clusterpb.CoalescedShardRefAddStripeBytes(b, c.StripeBytes)
-			if nodesOff != 0 {
-				clusterpb.CoalescedShardRefAddNodeIds(b, nodesOff)
-			}
-			cOffs[i] = clusterpb.CoalescedShardRefEnd(b)
-		}
-		clusterpb.ObjectMetaStartCoalescedVector(b, len(cOffs))
-		for i := len(cOffs) - 1; i >= 0; i-- {
-			b.PrependUOffsetT(cOffs[i])
-		}
-		coalescedOff = b.EndVector(len(cOffs))
-	}
+	coalescedOff := buildCoalescedVector(b, m.Coalesced, clusterpb.ObjectMetaStartCoalescedVector)
 	// parts — build child MultipartPartEntry tables BEFORE ObjectMetaStart.
-	var partsOff flatbuffers.UOffsetT
-	if len(m.Parts) > 0 {
-		partOffs := make([]flatbuffers.UOffsetT, len(m.Parts))
-		for i, p := range m.Parts {
-			etOff := b.CreateString(p.ETag)
-			clusterpb.MultipartPartEntryStart(b)
-			clusterpb.MultipartPartEntryAddPartNumber(b, int32(p.PartNumber))
-			clusterpb.MultipartPartEntryAddSize(b, p.Size)
-			clusterpb.MultipartPartEntryAddEtag(b, etOff)
-			partOffs[i] = clusterpb.MultipartPartEntryEnd(b)
-		}
-		clusterpb.ObjectMetaStartPartsVector(b, len(partOffs))
-		for i := len(partOffs) - 1; i >= 0; i-- {
-			b.PrependUOffsetT(partOffs[i])
-		}
-		partsOff = b.EndVector(len(partOffs))
-	}
+	partsOff := buildPartsVector(b, m.Parts, clusterpb.ObjectMetaStartPartsVector)
 	// tags — build child Tag tables BEFORE ObjectMetaStart.
-	var tagsVec flatbuffers.UOffsetT
-	if len(m.Tags) > 0 {
-		tagOffsets := make([]flatbuffers.UOffsetT, len(m.Tags))
-		for i, t := range m.Tags {
-			kOff := b.CreateString(t.Key)
-			vOff := b.CreateString(t.Value)
-			clusterpb.TagStart(b)
-			clusterpb.TagAddKey(b, kOff)
-			clusterpb.TagAddValue(b, vOff)
-			tagOffsets[i] = clusterpb.TagEnd(b)
-		}
-		clusterpb.ObjectMetaStartTagsVector(b, len(tagOffsets))
-		for i := len(tagOffsets) - 1; i >= 0; i-- {
-			b.PrependUOffsetT(tagOffsets[i])
-		}
-		tagsVec = b.EndVector(len(tagOffsets))
-	}
+	tagsVec := buildTagsVector(b, m.Tags, clusterpb.ObjectMetaStartTagsVector)
 	clusterpb.ObjectMetaStart(b)
 	clusterpb.ObjectMetaAddKey(b, keyOff)
 	clusterpb.ObjectMetaAddSize(b, m.Size)
