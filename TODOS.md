@@ -2,6 +2,33 @@
 
 ## Follow-ups
 
+### `__grainfs_volumes` / `__grainfs_nfs4` leftover removal follow-ups (2026-06-26)
+
+PR removed the dead `__grainfs_volumes` EC-routing branch (`routeSourceFor`) and the
+`__grainfs_nfs4` `IsInternalBucket` carve-out (behavior-neutral; greenfield, nothing creates
+either bucket).
+
+- **[P3][pre-existing] Internal buckets get zero scrub coverage.** `routeSourceFor` now maps every
+  internal (`__grainfs_*`) bucket to the `"replication"` scrub source, but production registers only
+  the `"ec"` source (`boot_phases_scrubber.go`), so internal-bucket scrub requests resolve to a nil
+  source = safe logged no-op. Pre-existing (the old volumes branch was the only internal→"ec" path).
+  "Should internal buckets be scrubbed at all, and via which source" is a design question, not a
+  leftover fix — surfaced by the code-gate review.
+- **[P3][pre-existing] `internal/storage/local.go` legacy single-file read path.** Its only named
+  producer was `__grainfs_volumes` Volume Device blocks (now gone). Verify whether any non-segment
+  object can still reach this path; if none, the path itself may be removable (separate change — the
+  comment was fixed, the code kept).
+- **[P4][docs] nfs4 framing superseded.** Design doc
+  `docs/superpowers/specs/2026-06-23-data-plane-raft-free-completion-design.md` line 88 lists
+  `__grainfs_nfs4` as a deliberate KEEP, and `bucket.go`'s old "Phase 0b (D6)" comment framed it as
+  managed-as-regular-bucket. Both are now superseded — nfs4 was removed per user direction
+  (2026-06-26). Update the design doc note if it is revisited.
+- **[P4][hygiene] Incidental `__grainfs_volumes` test fixtures kept (Minimal scope).** `spool_test.go`,
+  `pullthrough_test.go`, `store_bench_test.go`, `backend_bucket_management_integration_test.go`, and
+  the `bucket_test.go` `{"__grainfs_volumes", true}` case still use the string as an arbitrary
+  internal-bucket name. Optional rename to a neutral name; the integration test's placement is
+  name-hash-coupled, so a rename must recompute its expected group.
+
 ### ShardService decomposition follow-ups (2026-06-25, PR1 LocalShardStore done)
 
 `ShardService` (1,940 LOC god-struct) is being decomposed into a facade over deep local-store
