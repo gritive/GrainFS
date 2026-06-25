@@ -11,10 +11,9 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/uuidutil"
 )
 
 // CoalesceSegmentsCmd is the Raft payload that records a single coalesce
@@ -264,7 +263,7 @@ func (b *DistributedBackend) processCoalesceJobB3(ctx context.Context, job coale
 	if !obj.IsAppendable || len(obj.Segments) == 0 {
 		return nil
 	}
-	coalescedID := uuid.Must(uuid.NewV7()).String()
+	coalescedID := uuidutil.MustNewV7()
 	coalescePlan := planCoalesceSnapshot(job.Bucket, job.Key, obj.Segments, coalescedID)
 	merged, mErr := b.mergeSegmentsOwnerLocal(job.Bucket, job.Key, coalescedID, coalescePlan.Segments)
 	if mErr != nil {
@@ -387,7 +386,7 @@ func (b *DistributedBackend) processCoalesceJobB2(ctx context.Context, job coale
 	}
 	// Snapshot segments — concurrent appends after this point are preserved
 	// by planCoalesceBlobRMW (consumed-set match is exact BlobID, F8).
-	coalescedID := uuid.Must(uuid.NewV7()).String()
+	coalescedID := uuidutil.MustNewV7()
 	coalescePlan := planCoalesceSnapshot(job.Bucket, job.Key, obj.Segments, coalescedID)
 	merged, mErr := b.mergeSegmentsOwnerLocal(job.Bucket, job.Key, coalescedID, coalescePlan.Segments)
 	if mErr != nil {

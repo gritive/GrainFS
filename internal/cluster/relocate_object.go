@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/google/uuid"
+	"github.com/gritive/GrainFS/internal/uuidutil"
 )
 
 // ErrRelocateSkipped marks a relocation that became a no-op because the object
@@ -96,7 +96,7 @@ func (b *DistributedBackend) relocateObjectToRedundantGroup(ctx context.Context,
 	}
 	blobIDs := make([]string, numSegments)
 	for i := range blobIDs {
-		blobIDs[i] = uuid.Must(uuid.NewV7()).String()
+		blobIDs[i] = uuidutil.MustNewV7()
 	}
 	csb := &clusterSegmentBackend{
 		b:            b,

@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.685.0] - 2026-06-25
+
+### Changed
+- **Internal refactor, no user-facing behavior change.** Centralized fatal-on-error UUIDv7 string
+  generation into a single `internal/uuidutil.MustNewV7()` helper, replacing the fragmented
+  `uuid.Must(uuid.NewV7()).String()` pattern that was duplicated across the cluster, storage,
+  scrubber, serveruntime, receiptsvc, and iam packages. Generated IDs are unchanged (still
+  k-sortable UUIDv7 strings) and the panic-on-entropy-failure contract is preserved. Sites with a
+  deliberately different error contract (graceful v4 fallback, error propagation, or raw-bytes use)
+  were intentionally left untouched.
+
 ## [0.0.684.0] - 2026-06-25
 
 ### Changed

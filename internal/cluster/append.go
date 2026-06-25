@@ -10,11 +10,11 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/uuidutil"
 )
 
 // ErrStalePlacement signals the placement group changed between the
@@ -121,7 +121,7 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 		versionID = base.VersionID
 	}
 	if versionID == "" {
-		versionID = uuid.Must(uuid.NewV7()).String()
+		versionID = uuidutil.MustNewV7()
 	}
 
 	// New-object manifest placement (quorum-meta replication target). On a
@@ -233,7 +233,7 @@ func cloneSegmentRef(in storage.SegmentRef) storage.SegmentRef {
 // <root>/data/<bucket>/<key>_segments/<blobID>. Mirrors LocalBackend.WriteSegmentBlob
 // but uses the cluster backend's own root and (optional) shard-service encryptor.
 func (b *DistributedBackend) writeSegmentBlobForAppend(bucket, key string, r io.Reader) (storage.SegmentRef, error) {
-	blobID := uuid.Must(uuid.NewV7()).String()
+	blobID := uuidutil.MustNewV7()
 	path := b.segmentBlobPath(bucket, key, blobID)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return storage.SegmentRef{}, err

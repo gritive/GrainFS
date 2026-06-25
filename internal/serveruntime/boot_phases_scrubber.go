@@ -5,7 +5,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/time/rate"
 
@@ -15,6 +14,7 @@ import (
 	"github.com/gritive/GrainFS/internal/server/receiptsvc"
 	"github.com/gritive/GrainFS/internal/startuprecovery"
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/uuidutil"
 )
 
 // redundancyUpgradeMax decides whether the EC-redundancy-upgrade sweep should
@@ -227,7 +227,7 @@ func bootRecoveryAndScrubber(ctx context.Context, state *bootState) error {
 			}
 			placementMonitor := cluster.NewShardPlacementMonitor(gb.FSMRef(), gb, shardSvc, gb.NodeID(), cfg.ScrubInterval)
 			placementMonitor.SetOnMissing(func(target cluster.ECShardScanTarget, shardIdx int) {
-				correlationID := uuid.Must(uuid.NewV7()).String()
+				correlationID := uuidutil.MustNewV7()
 				receiptID := "rcpt-" + correlationID
 				repairReq := cluster.IncidentRepairRequest{
 					Bucket:        target.Bucket,

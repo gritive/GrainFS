@@ -15,6 +15,7 @@ import (
 	"github.com/gritive/GrainFS/internal/adminapi"
 	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/uuidutil"
 )
 
 // SACreateRequest is the JSON body for POST /admin/iam/sa.
@@ -120,7 +121,7 @@ func (a *AdminAPI) CreateSA(ctx context.Context, req SACreateRequest) (SACreateR
 	now := time.Now().UTC()
 	accessKey, secretKey := genCredentialPair()
 	sa := ServiceAccount{
-		ID: NewUUIDv7(), Name: req.Name, Description: req.Description,
+		ID: uuidutil.MustNewV7(), Name: req.Name, Description: req.Description,
 		CreatedAt: now, CreatedBy: PrincipalFromContext(ctx),
 	}
 	// R2 code-gate codex P2: check encryptor + wrap the secret BEFORE the SA
