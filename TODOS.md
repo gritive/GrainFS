@@ -172,16 +172,6 @@ Deferred items:
 
 ### Multipart off-raft (M1-M5) follow-ups (2026-06-23)
 
-- **[P3][pre-existing] Non-blob-auth Suspended cross-group `lat:` split can desync HEAD vs LIST.**
-  Surfaced while migrating to ModTime-primary latest. For versioning-Suspended (non-blob-auth)
-  buckets, HEAD resolves latest from the latest-only quorum-meta blob (`readQuorumMeta`,
-  last-write-wins) while LIST resolves it from the FSM `lat:` pointer + `reconcileVersionIsLatest`.
-  These are independent mechanisms (the `lat:` path is legacy-migration-only — "NOTHING ELSE writes
-  FSM object meta any more"), so a key split across groups with a divergent `lat:` pointer can make
-  LIST `IsLatest` disagree with HEAD. Pre-existing (the migration kept reconcile consistent with the
-  rest of LIST; it did not introduce this) and out of scope for the latest-rule change. Low impact
-  given the legacy-only `lat:` writer. Fix would unify the non-blob-auth HEAD and LIST resolvers.
-
 - **[P3][known-edge] Create-ordering is ms-granular only.** `deriveMultipartVID` encodes the
   uploadID's 48-bit UUIDv7 ms timestamp into the derived vid. Two uploads created in the SAME
   millisecond get a hash-arbitrary relative ordering (bytes [6:16] are sha256(rawUploadID), which
