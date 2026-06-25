@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/gritive/GrainFS/internal/transport"
@@ -227,15 +228,167 @@ func TestWriteLocalShardStaged_AADIsFinalKey_PromoteReadable(t *testing.T) {
 	require.Equal(t, data, got)
 }
 
-// PR1 Task 5: the orphan-shard walker must WHOLESALE-skip the .segstaging/ staging area, so an
-// in-flight / crashed staged segment shard is never parsed as a fake full-object orphan and deleted.
-// (Reclaim of abandoned staging is PR2's age-out walker, not the orphan-shard walker.)
-func TestWalkOrphanShards_SkipsSegStaging(t *testing.T) {
+// PR2 Task (delete-time liveness rework): the orphan-shard walker AGES OUT abandoned
+// .segstaging/ staged shard leaves (crash / failed PUT / LWW loser) instead of
+// skipping them forever, while NEVER deleting a committed (live) object however it
+// was written. The branch is now: anchored match (relParts[1]==SegStagingPrefix) →
+// structural /segments/ exclusion → generous staging age gate → full-object liveness
+// IDENTICAL to the regular path → direct os.RemoveAll. The proof is on-disk: an OLD
+// abandoned staged leaf is gone after the walk; a RECENT one survives; a mid-aged one
+// survives (large in-flight PUT); a chunked user object keyed under .segstaging
+// (.../segments/...) survives via the /segments/ exclusion; a live non-chunked
+// full-object user object keyed under .segstaging survives via the liveness check; a
+// "foo/.segstaging/bar" path is handled by the regular path (anchored match excludes
+// it). None is ever yielded to fn as a fake full-object orphan.
+//
+// The staging age gate is the GENEROUS segStagingReclaimAge (~24h), NOT the per-shard
+// floor (~466s): all of an object's segments are staged before the commit-time
+// promote and each leaf's mtime is fixed at write time, so a large in-flight PUT's
+// early staging leaf can be minutes old (past minOrphanShardAge) while the PUT is
+// still running. The mid-age case below is exactly that regression.
+func TestWalkOrphanShards_SegStagingAgedOut(t *testing.T) {
 	b := orphanWalkerBackend(t)
 	root := b.shardSvc.DataDirs()[0]
-	staging := writeShardLeaf(t, root, "bkt/.segstaging/txn1/blob1", []int{0}, oldEnough)
+	// Old (abandoned) staged leaf: backdated past the generous staging floor. Derive
+	// from the constant so it tracks any future tuning (never silently drops under).
+	old := writeShardLeaf(t, root, "bkt/.segstaging/txnOld/blobOld", []int{0}, segStagingReclaimAge+time.Hour)
+	// Recent staged leaf: just written, could be a live in-flight PUT.
+	recent := writeShardLeaf(t, root, "bkt/.segstaging/txnNew/blobNew", []int{0}, 0)
+	// Mid-aged staged leaf: older than the per-shard floor (minOrphanShardAge ~466s,
+	// via oldEnough) but well under segStagingReclaimAge (~24h). The exact regression
+	// the reviewer flagged: a large in-flight PUT whose early segment was staged minutes
+	// ago. Under the per-shard `cutoff` it would be reclaimed mid-write; under the
+	// generous `stagingCutoff` it is kept.
+	midAge := writeShardLeaf(t, root, "bkt/.segstaging/txnMid/blobMid", []int{0}, oldEnough)
 
 	got := collectOrphans(t, b, map[string]bool{})
-	require.NotContains(t, got, staging,
-		".segstaging staging dir must be skipped, never yielded as an orphan-shard candidate")
+
+	require.NoDirExists(t, old,
+		"abandoned (old) .segstaging staged leaf must be reclaimed (age-out)")
+	require.DirExists(t, recent,
+		"recent .segstaging staged leaf must be kept (could be a live in-flight PUT)")
+	require.DirExists(t, midAge,
+		"staged leaf older than the per-shard floor but younger than segStagingReclaimAge "+
+			"must be kept (could be a large in-flight PUT) — the per-shard cutoff would wrongly reclaim it")
+	require.NotContains(t, got, old,
+		".segstaging dir must never be yielded to fn as a full-object orphan")
+	require.NotContains(t, got, recent,
+		".segstaging dir must never be yielded to fn as a full-object orphan")
+	require.NotContains(t, got, midAge,
+		".segstaging dir must never be yielded to fn as a full-object orphan")
+}
+
+// TestWalkOrphanShards_SegStaging_ChunkedUserObjectKept proves the structural
+// /segments/ exclusion (step 1 of the reworked branch): a CHUNKED user object whose
+// KEY lands under ".segstaging" has its committed segments at
+// <bucket>/.segstaging/<key>/segments/<blobID>. That path is .segstaging-prefixed AND
+// contains "/segments/", so it is a real committed object, NOT a staging leaf, and
+// must be kept WHOLESALE — never reclaimed and never parse-routed to the segment
+// liveness oracle. Old enough (>24h) that without the /segments/ guard it would be
+// reclaimed.
+func TestWalkOrphanShards_SegStaging_ChunkedUserObjectKept(t *testing.T) {
+	b := orphanWalkerBackend(t)
+	root := b.shardSvc.DataDirs()[0]
+	// A chunked user object keyed "userobj" under .segstaging: its committed segment
+	// shard lives at .segstaging/userobj/segments/<blobID>. Backdated past the staging
+	// floor so only the /segments/ exclusion can keep it.
+	chunked := writeShardLeaf(t, root, "bkt/.segstaging/userobj/segments/blobC", []int{0}, segStagingReclaimAge+time.Hour)
+
+	got := collectOrphans(t, b, map[string]bool{})
+
+	require.DirExists(t, chunked,
+		"a chunked user object keyed under .segstaging (.../segments/...) must be kept via the /segments/ exclusion")
+	require.NotContains(t, got, chunked,
+		".segstaging chunked user object must never be yielded to fn")
+}
+
+// TestWalkOrphanShards_SegStaging_LiveFullObjectKept proves the full-object liveness
+// check (step 3 of the reworked branch): a NON-chunked full-object user object whose
+// KEY is literally ".segstaging/foo" (data at <bucket>/.segstaging/foo/<vid>, NO
+// "/segments/") that is COMMITTED (live) must be kept by the SAME hasLiveShardRecord
+// the regular path uses. Liveness is established via a per-version blob on a
+// versioning-enabled bucket (seedVersionBlob) — NOT an FSM obj: record, which would
+// be forward-mapped into the live[] set and short-circuit BEFORE the liveness check,
+// making the teeth false-green. With only the blob, the dir is in neither known[] nor
+// live[]/frozen[], so the sole thing keeping it is hasLiveShardRecord. Old enough
+// (>24h) that without that check it would be reclaimed.
+func TestWalkOrphanShards_SegStaging_LiveFullObjectKept(t *testing.T) {
+	ctx := context.Background()
+	b := orphanWalkerBackend(t)
+	const vbkt = "vbkt" // distinct versioning-enabled bucket so it does not bleed into others
+	require.NoError(t, b.CreateBucket(ctx, vbkt))
+	setVersioningForTest(t, b, vbkt, "Enabled")
+	root := b.shardSvc.DataDirs()[0]
+	self := b.currentSelfAddr()
+
+	// Live non-chunked full object keyed ".segstaging/foo": per-version blob (the
+	// shard-liveness authority for a versioning-enabled bucket) + on-disk shard leaf.
+	seedVersionBlob(t, b, vbkt, ".segstaging/foo", "vLive", PutObjectMetaCmd{ETag: "e", ECData: 1, NodeIDs: []string{self}})
+	liveObj := writeShardLeaf(t, root, vbkt+"/.segstaging/foo/vLive", []int{0}, segStagingReclaimAge+time.Hour)
+
+	got := collectOrphans(t, b, map[string]bool{})
+
+	require.DirExists(t, liveObj,
+		"a live non-chunked full object keyed under .segstaging must be kept via hasLiveShardRecord (delete-time liveness)")
+	require.NotContains(t, got, liveObj,
+		".segstaging live full object must never be yielded to fn")
+}
+
+// TestWalkOrphanShards_SegStaging_AnchoredMatchExcludesNestedKey proves the anchored
+// match (relParts[1]==SegStagingPrefix) ROUTES a path whose key merely contains
+// ".segstaging" to the REGULAR path, not the staging branch. The path
+// "bkt/foo/.segstaging/bar" has relParts[1]=="foo" (bucket=relParts[0]="bkt"; key is
+// "foo/.segstaging" with ".segstaging" NOT directly under the bucket), so it is NOT a
+// staging leaf.
+//
+// To DISCRIMINATE the two branches the candidate must be a DEAD object (no record)
+// backdated `oldEnough` — squarely BETWEEN the per-shard regular cutoff (~466s) and
+// the generous staging cutoff (~24h):
+//   - Correct anchoring → regular path → hasLiveShardRecord=(false,certain) → YIELDED.
+//   - Broken anchoring (broad strings.Contains) → staging branch → the 24h staging age
+//     gate KEEPS it (466s < 24h) → not yielded → this assertion FAILS.
+//
+// A live object would be kept by BOTH branches (both consult liveness), so "mark live
+// → kept" cannot separate them; only a dead object in the inter-cutoff window can.
+func TestWalkOrphanShards_SegStaging_AnchoredMatchExcludesNestedKey(t *testing.T) {
+	b := orphanWalkerBackend(t)
+	root := b.shardSvc.DataDirs()[0]
+	// Bucket "bkt", object key "foo/.segstaging" — ".segstaging" is relParts[2], not [1].
+	// Dead (no obj:/blob record), aged into the inter-cutoff window.
+	nested := writeShardLeaf(t, root, "bkt/foo/.segstaging/bar", []int{0}, oldEnough)
+
+	got := collectOrphans(t, b, map[string]bool{})
+
+	require.Equal(t, []string{nested}, got,
+		"a dead object whose key contains .segstaging must be reclaimed via the REGULAR path "+
+			"(anchored staging match routes it there); the broad-Contains staging branch would wrongly keep it under the 24h gate")
+}
+
+// TestWalkOrphanShards_SegStaging_BareUnparseableKept proves the fail-CLOSED guard
+// on an UNPARSEABLE staging-prefixed leaf. A bare-legacy (unversioned) full object
+// keyed EXACTLY ".segstaging" stores its shards directly at <bucket>/.segstaging/shard_N,
+// so rel == "<bucket>/.segstaging" — relParts==[bucket, ".segstaging"], len 2. It
+// matches relParts[1]==SegStagingPrefix (enters the staging branch), has no
+// "/segments/", and is old (>24h), yet parseFullObjectRel returns okF=false (a len-2
+// path can't be split into bucket/key/version). The branch must therefore KEEP it,
+// exactly as the regular full-object path treats okF=false ("unversioned / unparseable
+// → keep, never delete"). Without the !okF⇒keep guard the okF block is skipped and
+// execution falls through to os.RemoveAll → a committed object is wrongly reclaimed
+// (data loss). This is the only seg-staging case whose on-disk leaf is len-2, so it
+// alone exercises the fail-closed-on-unparseable path.
+func TestWalkOrphanShards_SegStaging_BareUnparseableKept(t *testing.T) {
+	b := orphanWalkerBackend(t)
+	root := b.shardSvc.DataDirs()[0]
+	// Leaf is the bucket's ".segstaging" dir itself, holding shard files directly
+	// (rel == "bkt/.segstaging", len 2). Old enough that only the okF=false⇒keep
+	// guard can save it from the age-out reclaim.
+	bare := writeShardLeaf(t, root, "bkt/.segstaging", []int{0}, segStagingReclaimAge+time.Hour)
+
+	got := collectOrphans(t, b, map[string]bool{})
+
+	require.DirExists(t, bare,
+		"a bare-legacy full object keyed exactly .segstaging (unparseable len-2 leaf) must be KEPT "+
+			"(fail-closed on unparseable, mirroring the regular path) — not reclaimed by the staging age-out")
+	require.NotContains(t, got, bare,
+		".segstaging bare leaf must never be yielded to fn as a full-object orphan")
 }

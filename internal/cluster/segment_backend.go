@@ -272,7 +272,7 @@ func (c *clusterSegmentBackend) promoteStagedShards(ctx context.Context, node, b
 // occupy (getShardDir keys the dataDir on shardIdx alone), so the promote rename
 // is intra-device and atomic.
 func segmentStagingShardKey(txnID, blobID string) string {
-	return ".segstaging/" + txnID + "/" + blobID
+	return SegStagingPrefix + "/" + txnID + "/" + blobID
 }
 
 func chunkedMultipartCompleteChunkSize(defaultSize int) int {
