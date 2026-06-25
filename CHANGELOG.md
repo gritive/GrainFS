@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.675.0] - 2026-06-25
+
+### Fixed
+- **The orphan-shard scrubber now reclaims unreferenced coalesced erasure-coded shards** left behind
+  by an interrupted append-coalesce (previously leaked on disk forever). A coalesced shard is deleted
+  only after a certainty-aware, peer-fallback metadata read proves no live object references it
+  (matched on the shard's physical key), failing closed on any uncertainty; a real object whose key
+  ends in `/coalesced` is protected by a dual-interpretation check. Segment shards remain skipped
+  (separate follow-up); coalesced orphans in a bucket later switched to versioning-Enabled are kept
+  (a bounded, deliberate fail-closed tradeoff).
+- **`GET`/`HEAD` on a key whose name is a directory prefix (or whose parent is an object) now returns
+  `404 Not Found` instead of `500`.** The local quorum-meta read mapped only "file does not exist" to
+  not-found; a path-shape collision (`ENOTDIR`/`EISDIR`) surfaced as an internal error. Such a key
+  cannot hold an object, so it is now reported as not-found.
+
 ## [0.0.674.0] - 2026-06-25
 
 ### Fixed
