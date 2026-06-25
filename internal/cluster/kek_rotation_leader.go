@@ -530,18 +530,18 @@ func dryRunValidateKEKRotate(fsm *MetaFSM, cmd KEKRotateCmd, activeKEK, plainKne
 	aad := encrypt.BuildAAD(encrypt.DomainKEKRotate, clusterID[:], encrypt.FieldUint32(cmd.NewVersion))
 	unwrapped, err := encrypt.AESGCMOpenWithAAD(activeKEK, cmd.WrappedNewKEK, aad)
 	if err != nil {
-		return fmt.Errorf("AAD-unwrap K_new: %w", err)
+		return fmt.Errorf("aad-unwrap k_new: %w", err)
 	}
 	defer zeroKEK(unwrapped)
 	if len(unwrapped) != encrypt.KEKSize {
-		return fmt.Errorf("K_new wrong length %d, want %d", len(unwrapped), encrypt.KEKSize)
+		return fmt.Errorf("k_new wrong length %d, want %d", len(unwrapped), encrypt.KEKSize)
 	}
 	if len(unwrapped) != len(plainKnew) {
-		return fmt.Errorf("K_new length mismatch with leader-generated plain")
+		return fmt.Errorf("k_new length mismatch with leader-generated plain")
 	}
 	for i := range unwrapped {
 		if unwrapped[i] != plainKnew[i] {
-			return fmt.Errorf("K_new payload-vs-leader plaintext mismatch")
+			return fmt.Errorf("k_new payload-vs-leader plaintext mismatch")
 		}
 	}
 

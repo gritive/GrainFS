@@ -204,7 +204,7 @@ func (f *MetaFSM) CheckGreenfieldDEKBoundary() error {
 	}
 	return fmt.Errorf("refusing startup: replicated log contains legacy pre-Phase-D DEKRotate (type-48) entries. " +
 		"Phase D replicated-DEK is a greenfield boundary — pre-existing clusters with divergent DEKs cannot be upgraded in place. " +
-		"Provision a fresh cluster (the scope decision for Phase D is greenfield).")
+		"Provision a fresh cluster (the scope decision for Phase D is greenfield)")
 }
 
 // applyDEKReplicatedRotate installs a leader-generated, KEK-wrapped DEK

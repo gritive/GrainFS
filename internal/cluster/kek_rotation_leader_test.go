@@ -440,7 +440,7 @@ func TestDryRunValidateKEKRotate_RejectsBadAADUnwrap(t *testing.T) {
 	cmd.WrappedNewKEK = append([]byte(nil), cmd.WrappedNewKEK...)
 	cmd.WrappedNewKEK[len(cmd.WrappedNewKEK)-1] ^= 0xFF
 	err := dryRunValidateKEKRotate(fx.fsm, cmd, activeKEK, plainKnew)
-	if err == nil || !strings.Contains(err.Error(), "AAD-unwrap K_new") {
+	if err == nil || !strings.Contains(err.Error(), "aad-unwrap k_new") {
 		t.Errorf("expected AAD-unwrap reject, got: %v", err)
 	}
 }
@@ -452,7 +452,7 @@ func TestDryRunValidateKEKRotate_RejectsKNewLeaderMismatch(t *testing.T) {
 	fx, cmd, activeKEK, plainKnew := buildDryRunCmd(t)
 	other := bytes.Repeat([]byte{0x99}, encrypt.KEKSize) // != fx.k1
 	err := dryRunValidateKEKRotate(fx.fsm, cmd, activeKEK, other)
-	if err == nil || !strings.Contains(err.Error(), "K_new payload-vs-leader") {
+	if err == nil || !strings.Contains(err.Error(), "k_new payload-vs-leader") {
 		t.Errorf("expected K_new mismatch reject, got: %v", err)
 	}
 	_ = plainKnew

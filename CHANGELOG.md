@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.718.0] - 2026-06-26
+
+### Changed
+- **Cleaned up the remaining cluster ST1005 error-string nits from the health backlog.**
+  Rotation and DEK boundary error messages now follow Go stylecheck casing and punctuation
+  rules, and the corresponding TODO entry is removed.
+
 ## [0.0.717.0] - 2026-06-26
 
 ### Fixed
