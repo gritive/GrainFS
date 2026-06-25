@@ -136,12 +136,154 @@ func TestWalkOrphanShards_InFlightTmpSkipped(t *testing.T) {
 	require.Empty(t, collectOrphans(t, b, nil), "a dir with an in-flight .tmp must not be swept")
 }
 
-func TestWalkOrphanShards_SegmentAndCoalescedSkipped(t *testing.T) {
+func TestWalkOrphanShards_SegmentSkipped(t *testing.T) {
 	b := orphanWalkerBackend(t)
 	root := b.shardSvc.DataDirs()[0]
 	writeShardLeaf(t, root, "bkt/key/segments/blob1", []int{0}, oldEnough)
-	writeShardLeaf(t, root, "bkt/key/coalesced/c1", []int{0}, oldEnough)
-	require.Empty(t, collectOrphans(t, b, nil), "segment/coalesced shard dirs are a different class; never delete")
+	require.Empty(t, collectOrphans(t, b, nil), "segment shard dirs are a separate class; never delete")
+}
+
+func TestParseCoalescedRel(t *testing.T) {
+	cases := []struct {
+		name, rel, bucket, key, cid string
+		ok                          bool
+	}{
+		{"simple", "bkt/key/coalesced/c1", "bkt", "key", "c1", true},
+		{"nested key", "bkt/a/b/c/coalesced/c1", "bkt", "a/b/c", "c1", true},
+		{"empty key", "bkt/coalesced/c1", "", "", "", false},
+		{"not coalesced", "bkt/key/v1", "", "", "", false},
+		{"marker not penultimate", "bkt/key/coalesced/sub/c1", "", "", "", false},
+		{"empty cid", "bkt/key/coalesced/", "", "", "", false},
+		{"lookalike object key parses", "bkt/foo/coalesced/v1", "bkt", "foo", "v1", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bk, k, c, ok := parseCoalescedRel(tc.rel)
+			require.Equal(t, tc.ok, ok)
+			if tc.ok {
+				require.Equal(t, tc.bucket, bk)
+				require.Equal(t, tc.key, k)
+				require.Equal(t, tc.cid, c)
+			}
+		})
+	}
+}
+
+// coalCmd builds a versioning-disabled appendable object manifest carrying the
+// given coalesced refs, written via the live quorum-meta blob path.
+func coalCmd(b *DistributedBackend, bkt, key string, refs []CoalescedShardRef) PutObjectMetaCmd {
+	return PutObjectMetaCmd{
+		Bucket: bkt, Key: key, ETag: "e", IsAppendable: true,
+		NodeIDs: []string{b.currentSelfAddr()}, ECData: 1, Coalesced: refs,
+	}
+}
+
+func TestHasLiveCoalescedRef(t *testing.T) {
+	ctx := context.Background()
+	t.Run("referenced by ShardKey is live", func(t *testing.T) {
+		b := orphanWalkerBackend(t)
+		require.NoError(t, b.CreateBucket(ctx, "cb"))
+		require.NoError(t, b.writeQuorumMeta(ctx, coalCmd(b, "cb", "obj", []CoalescedShardRef{{CoalescedID: "live", ShardKey: "obj/coalesced/live"}})))
+		live, certain := b.hasLiveCoalescedRef("cb", "obj", "live")
+		require.True(t, live)
+		require.True(t, certain)
+	})
+	t.Run("unreferenced is orphan-eligible", func(t *testing.T) {
+		b := orphanWalkerBackend(t)
+		require.NoError(t, b.CreateBucket(ctx, "cb"))
+		require.NoError(t, b.writeQuorumMeta(ctx, coalCmd(b, "cb", "obj", []CoalescedShardRef{{CoalescedID: "other", ShardKey: "obj/coalesced/other"}})))
+		live, certain := b.hasLiveCoalescedRef("cb", "obj", "dead")
+		require.False(t, live)
+		require.True(t, certain)
+	})
+	t.Run("absent object is orphan-eligible", func(t *testing.T) {
+		b := orphanWalkerBackend(t)
+		require.NoError(t, b.CreateBucket(ctx, "cb"))
+		live, certain := b.hasLiveCoalescedRef("cb", "gone", "c1")
+		require.False(t, live)
+		require.True(t, certain)
+	})
+	t.Run("versioning-enabled keeps (fail-closed)", func(t *testing.T) {
+		b := orphanWalkerBackend(t)
+		require.NoError(t, b.CreateBucket(ctx, "cben"))
+		setVersioningForTest(t, b, "cben", "Enabled")
+		live, certain := b.hasLiveCoalescedRef("cben", "obj", "c1")
+		require.False(t, live)
+		require.False(t, certain)
+	})
+}
+
+func TestWalkOrphanShards_CoalescedOrphanYielded(t *testing.T) {
+	ctx := context.Background()
+	b := orphanWalkerBackend(t)
+	require.NoError(t, b.CreateBucket(ctx, "bkt"))
+	root := b.shardSvc.DataDirs()[0]
+	require.NoError(t, b.writeQuorumMeta(ctx, coalCmd(b, "bkt", "key", []CoalescedShardRef{{CoalescedID: "live", ShardKey: "key/coalesced/live"}})))
+	live := writeShardLeaf(t, root, "bkt/key/coalesced/live", []int{0}, oldEnough)
+	dead := writeShardLeaf(t, root, "bkt/key/coalesced/dead", []int{0}, oldEnough)
+	got := collectOrphans(t, b, nil)
+	require.Equal(t, []string{dead}, got, "unreferenced coalesced shard is reclaimed")
+	require.NotContains(t, got, live, "referenced coalesced shard must be kept")
+}
+
+func TestWalkOrphanShards_CoalescedKeptVersioningEnabled(t *testing.T) {
+	ctx := context.Background()
+	b := orphanWalkerBackend(t)
+	require.NoError(t, b.CreateBucket(ctx, "ben"))
+	setVersioningForTest(t, b, "ben", "Enabled")
+	root := b.shardSvc.DataDirs()[0]
+	writeShardLeaf(t, root, "ben/key/coalesced/c1", []int{0}, oldEnough)
+	require.Empty(t, collectOrphans(t, b, nil), "Enabled bucket: coalesced kept (fail-closed)")
+}
+
+func TestWalkOrphanShards_RegularObjectKeyedCoalescedProtected(t *testing.T) {
+	// T4: key whose PENULTIMATE segment is "coalesced" (foo/coalesced, vid v1) — same
+	// shape as a coalesced shard. Live full-object record must protect it (dual-interp).
+	ctx := context.Background()
+	b := orphanWalkerBackend(t)
+	require.NoError(t, b.CreateBucket(ctx, "bkt"))
+	root := b.shardSvc.DataDirs()[0]
+	require.NoError(t, b.writeQuorumMeta(ctx, PutObjectMetaCmd{Bucket: "bkt", Key: "foo/coalesced", ETag: "e", VersionID: "v1", NodeIDs: []string{b.currentSelfAddr()}, ECData: 1}))
+	writeShardLeaf(t, root, "bkt/foo/coalesced/v1", []int{0}, oldEnough)
+	require.Empty(t, collectOrphans(t, b, nil), "a real object keyed .../coalesced must not be mis-reclaimed")
+}
+
+func TestWalkOrphanShards_CoalescedComponentInKeyNotMisrouted(t *testing.T) {
+	// Regression lock: a full-object key with a "coalesced" component that is NOT the
+	// penultimate segment (key "coalesced/foo.txt" → path bkt/coalesced/foo.txt/v1) must
+	// route to the FULL-OBJECT branch (parseCoalescedRel fails), so a genuine orphan IS
+	// reclaimed. FAILS on strings.Contains routing (intercepted → kept → leaked).
+	b := orphanWalkerBackend(t)
+	root := b.shardSvc.DataDirs()[0]
+	dir := writeShardLeaf(t, root, "bkt/coalesced/foo.txt/v1", []int{0}, oldEnough) // no metadata → genuine orphan
+	require.Equal(t, []string{dir}, collectOrphans(t, b, nil),
+		"a full-object key with a non-penultimate 'coalesced' component must fall through to full-object reclaim")
+}
+
+func TestDeleteOrphanDir_CoalescedRevalidation(t *testing.T) {
+	ctx := context.Background()
+	t.Run("live coalesced NOT deleted", func(t *testing.T) {
+		b := orphanWalkerBackend(t)
+		require.NoError(t, b.CreateBucket(ctx, "bkt"))
+		root := b.shardSvc.DataDirs()[0]
+		require.NoError(t, b.writeQuorumMeta(ctx, coalCmd(b, "bkt", "key", []CoalescedShardRef{{CoalescedID: "live", ShardKey: "key/coalesced/live"}})))
+		dir := writeShardLeaf(t, root, "bkt/key/coalesced/live", []int{0}, oldEnough)
+		n, err := b.DeleteOrphanDir(dir)
+		require.NoError(t, err)
+		require.Zero(t, n)
+		_, statErr := os.Stat(filepath.Join(dir, "shard_0"))
+		require.NoError(t, statErr)
+	})
+	t.Run("orphan coalesced IS deleted", func(t *testing.T) {
+		b := orphanWalkerBackend(t)
+		require.NoError(t, b.CreateBucket(ctx, "bkt"))
+		root := b.shardSvc.DataDirs()[0]
+		require.NoError(t, b.writeQuorumMeta(ctx, coalCmd(b, "bkt", "key", []CoalescedShardRef{{CoalescedID: "other", ShardKey: "key/coalesced/other"}})))
+		dir := writeShardLeaf(t, root, "bkt/key/coalesced/dead", []int{0}, oldEnough)
+		n, err := b.DeleteOrphanDir(dir)
+		require.NoError(t, err)
+		require.Equal(t, 1, n)
+	})
 }
 
 func TestWalkOrphanShards_FrozenPinProtects(t *testing.T) {

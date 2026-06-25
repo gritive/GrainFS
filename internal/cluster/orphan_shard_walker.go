@@ -330,17 +330,37 @@ func (b *DistributedBackend) walkOneShardRoot(
 			return filepath.SkipDir
 		}
 		rel = filepath.ToSlash(rel)
-		if strings.Contains(rel, "/segments/") || strings.Contains(rel, "/coalesced/") {
-			return filepath.SkipDir // wrong shard class (segment/coalesced) — leak, never delete
+		if strings.Contains(rel, "/segments/") {
+			// Segments stay a WHOLESALE Contains-skip (NOT parse-routed like coalesced
+			// below): there is no parseSegmentRel, and a real segment shard falling
+			// through to parseFullObjectRel would be reclaimed as a fake full-object
+			// orphan = data loss on live append data. The coalesced/segments asymmetry
+			// is deliberate. (A full-object key containing a "segments" component is kept
+			// here — a pre-existing, safe leak; segment reclaim is a separate future slice.)
+			return filepath.SkipDir
 		}
 		if newest.After(cutoff) {
-			return filepath.SkipDir // age gate
+			return filepath.SkipDir // age gate (minOrphanShardAge already covers the coalesce publish window)
 		}
 		canonical := filepath.Clean(filepath.Join(canonRoot, rel))
 		if known[canonical] || frozen[canonical] || live[canonical] || seen[canonical] {
 			return filepath.SkipDir // latest-known, snapshot-pinned, or a live versioned object
 		}
 		seen[canonical] = true
+		// Route on a PARSE-validated coalesced shape (penultimate == "coalesced"), NOT
+		// strings.Contains: a full-object key with a "coalesced" path component (e.g.
+		// bkt/coalesced/foo.txt/v1) contains "/coalesced/" but is NOT a coalesced shard —
+		// a Contains branch would intercept it, never reach parseFullObjectRel, and leak
+		// it forever. parseCoalescedRel fails on such a path → fall through to full-object.
+		if _, _, _, okCoal := parseCoalescedRel(rel); okCoal {
+			if b.coalescedShardReclaimable(rel) {
+				if ferr := fn(canonical); ferr != nil {
+					stopErr = ferr
+					return filepath.SkipAll
+				}
+			}
+			return filepath.SkipDir // handled (reclaimed or kept) — never descend
+		}
 		bucket, key, versionID, ok := parseFullObjectRel(rel)
 		if !ok {
 			return filepath.SkipDir // unversioned / unparseable → keep (leak, never delete)
@@ -407,6 +427,25 @@ func parseFullObjectRel(rel string) (bucket, key, versionID string, ok bool) {
 		return "", "", "", false
 	}
 	return bucket, key, versionID, true
+}
+
+// parseCoalescedRel splits a dataDir-relative coalesced-shard leaf path
+// `<bucket>/<key…>/coalesced/<coalescedID>` (key may contain '/'). The literal
+// `coalesced` MUST be the second-to-last component — that is the shape the EC writer
+// produces (ShardKey = "<key>/coalesced/<coalescedID>"). Rejects (ok=false) anything
+// else; the walker then routes such a path to the full-object branch instead.
+func parseCoalescedRel(rel string) (bucket, key, coalescedID string, ok bool) {
+	parts := strings.Split(strings.TrimSuffix(filepath.ToSlash(rel), "/"), "/")
+	if len(parts) < 4 || parts[len(parts)-2] != "coalesced" {
+		return "", "", "", false
+	}
+	bucket = parts[0]
+	coalescedID = parts[len(parts)-1]
+	key = strings.Join(parts[1:len(parts)-2], "/")
+	if bucket == "" || key == "" || coalescedID == "" {
+		return "", "", "", false
+	}
+	return bucket, key, coalescedID, true
 }
 
 // hasLiveShardRecord reports whether (bucket,key,versionID) is backed by a live
@@ -595,6 +634,65 @@ func (b *DistributedBackend) canonicalInflightOrFresh(dataDirs []string, rel str
 	return false
 }
 
+// hasLiveCoalescedRef reports whether a coalesced EC shard (bucket/key, blob id
+// coalescedID) is still referenced by the live object manifest. Coalesced refs live
+// ONLY in the latest-only quorum-meta blob (appendable/coalesced objects are
+// versioning-disabled — append is 501-gated on Enabled — so there is no per-version
+// coalesced blob), making readQuorumMetaForReclaim the authority. Fail-closed:
+// certain=false (caller KEEPS) on a versioning-read error, on a versioning-ENABLED
+// bucket (a coalesced record cannot legitimately exist there; a stray shard there is
+// a can't-judge → keep, accepting a bounded residual leak for buckets switched to
+// Enabled after coalescing), and on any reclaim-read uncertainty. Membership matches
+// the physical ShardKey the EC reader uses, plus CoalescedID; keeps on either match.
+func (b *DistributedBackend) hasLiveCoalescedRef(bucket, key, coalescedID string) (live, certain bool) {
+	on, err := b.blobAuthReadOn(bucket)
+	if err != nil {
+		return false, false // versioning-read fault → uncertain → keep
+	}
+	if on {
+		return false, false // versioning-enabled → not reclaimable here → keep
+	}
+	obj, found, c := b.readQuorumMetaForReclaim(bucket, key)
+	if !c {
+		return false, false // peer-uncertainty / read error → keep
+	}
+	if !found || obj == nil {
+		return false, true // proven absent → orphan-eligible
+	}
+	wantShardKey := key + "/coalesced/" + coalescedID
+	for _, ref := range obj.Coalesced {
+		if ref.ShardKey == wantShardKey || ref.CoalescedID == coalescedID {
+			return true, true // still referenced → live
+		}
+	}
+	return false, true // live object does not reference this blob → orphan-eligible
+}
+
+// coalescedShardReclaimable reports whether a coalesced-shard leaf rel path is safe
+// to reclaim. Single source of truth shared by the walk and the DeleteOrphanDir
+// re-validation so they cannot drift. Fail-closed everywhere. T4 ambiguity guard: a
+// regular object literally keyed ".../coalesced" has an identical-shape shard path,
+// so interpret BOTH ways and reclaim ONLY if it is a definite orphan under both. The
+// full-object interpretation only applies when the path is ALSO a valid full-object
+// shape — if it is not, there is no live full-object to protect, so proceed to the
+// coalesced decision (else a true coalesced orphan would leak).
+func (b *DistributedBackend) coalescedShardReclaimable(rel string) bool {
+	bucket, keyCoal, coalescedID, ok := parseCoalescedRel(rel)
+	if !ok {
+		return false // not a coalesced shape → keep (caller should not have routed here)
+	}
+	if !b.owningGroupHosted(bucket) {
+		return false // balancer-floated from a non-hosted group → can't judge → keep
+	}
+	if bucketF, keyFull, vidFull, okF := parseFullObjectRel(rel); okF && bucketF == bucket {
+		if recLive, certain := b.hasLiveShardRecord(bucket, keyFull, vidFull); recLive || !certain {
+			return false // a real object lives here, or uncertain → keep
+		}
+	}
+	live, certain := b.hasLiveCoalescedRef(bucket, keyCoal, coalescedID)
+	return !live && certain
+}
+
 // orphanShardSweepReconfirm re-runs the gate + caught-up + snapshot + liveness
 // checks for a single canonical dir at deletion time (TOCTOU close).
 func (b *DistributedBackend) orphanShardSweepReconfirm(canonical string) bool {
@@ -621,7 +719,15 @@ func (b *DistributedBackend) orphanShardSweepReconfirm(canonical string) bool {
 	if rerr != nil {
 		return false
 	}
-	bucket, key, versionID, ok := parseFullObjectRel(filepath.ToSlash(rel))
+	relSlash := filepath.ToSlash(rel)
+	// Coalesced shards re-validate through the shared dual-interpretation predicate.
+	// Route on a parse-validated coalesced shape (NOT strings.Contains) for the same
+	// reason as the walk: a full-object key with a "coalesced" component must reach the
+	// full-object reconfirm below, not be intercepted here.
+	if _, _, _, okCoal := parseCoalescedRel(relSlash); okCoal {
+		return b.coalescedShardReclaimable(relSlash)
+	}
+	bucket, key, versionID, ok := parseFullObjectRel(relSlash)
 	if !ok {
 		return false
 	}
