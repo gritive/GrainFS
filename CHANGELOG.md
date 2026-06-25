@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.686.0] - 2026-06-25
+
+### Fixed
+- **Developer tooling, no user-facing behavior change.** Fixed `benchmarks/bench_s3_compat_compare.sh`
+  passing the removed `--nbd-port` flag to `grainfs serve`, which broke `make bench` and
+  `make bench-cluster` on every platform after NBD support was removed (the server aborted on the
+  unknown flag before any warp op ran). Also use a short `BENCH_DIR` base on macOS so each target's
+  admin Unix socket path stays within the 104-byte `sun_path` limit; the default `$TMPDIR` under
+  `/var/folders/...` overflowed it and failed admin-socket bind during IAM bootstrap.
+
 ## [0.0.685.0] - 2026-06-25
 
 ### Changed
