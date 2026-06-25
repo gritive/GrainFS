@@ -13,7 +13,6 @@ import (
 
 	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/metrics"
-	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // newTestShardService returns a ShardService rooted at a fresh temp dir.
@@ -49,11 +48,12 @@ func TestShardPlacementMonitor_Scan_AllPresent(t *testing.T) {
 	svc, _ := newTestShardService(t)
 
 	const self = "node-A"
-	// Seed an EC segment object: self is shard-0 owner, two peers hold shards 1+2.
+	// Seed an EC segment object in the quorum-meta blob (the monitor's enumeration
+	// source): self is shard-0 owner, two peers hold shards 1+2.
 	segNodes := []string{self, "node-B", "node-C"}
-	seedLatestObjectMetaVersion(t, backend, "b", "obj", "v1", objectMeta{
+	seedLatestBlobOnSvc(t, svc, "b", "obj", "v1", PutObjectMetaCmd{
 		ECData: 2, ECParity: 1, NodeIDs: segNodes,
-		Segments: []storage.SegmentRef{
+		Segments: []SegmentMetaEntry{
 			{BlobID: "seg-0", ECData: 2, ECParity: 1, NodeIDs: segNodes},
 		},
 	})
@@ -123,12 +123,12 @@ func TestShardPlacementMonitor_Scan_IgnoresPeerShards(t *testing.T) {
 	svc, _ := newTestShardService(t)
 
 	const self = "node-A"
-	// Seed an EC segment object where self is NOT in the node list.
-	// The monitor must skip all shards — they belong to peers.
+	// Seed an EC segment object (in the quorum-meta blob) where self is NOT in the
+	// node list. The monitor must skip all shards — they belong to peers.
 	peerNodes := []string{"node-B", "node-C", "node-D"}
-	seedLatestObjectMetaVersion(t, backend, "b", "obj", "v1", objectMeta{
+	seedLatestBlobOnSvc(t, svc, "b", "obj", "v1", PutObjectMetaCmd{
 		ECData: 2, ECParity: 1, NodeIDs: peerNodes,
-		Segments: []storage.SegmentRef{
+		Segments: []SegmentMetaEntry{
 			{BlobID: "seg-peer", ECData: 2, ECParity: 1, NodeIDs: peerNodes},
 		},
 	})
@@ -174,12 +174,13 @@ func TestShardPlacementMonitor_Scan_ContextCancel(t *testing.T) {
 	svc, _ := newTestShardService(t)
 
 	const self = "node-A"
-	// Seed several EC segment objects so iteration has real targets to traverse.
+	// Seed several EC segment objects (in the quorum-meta blob) so iteration has
+	// real targets to traverse.
 	for i := 0; i < 10; i++ {
 		nodes := []string{self, "node-B", "node-C"}
-		seedLatestObjectMetaVersion(t, backend, "b", fmtKey(i), "v1", objectMeta{
+		seedLatestBlobOnSvc(t, svc, "b", fmtKey(i), "v1", PutObjectMetaCmd{
 			ECData: 2, ECParity: 1, NodeIDs: nodes,
-			Segments: []storage.SegmentRef{
+			Segments: []SegmentMetaEntry{
 				{BlobID: "seg-" + fmtKey(i), ECData: 2, ECParity: 1, NodeIDs: nodes},
 			},
 		})
@@ -497,13 +498,14 @@ func TestShardPlacementMonitor_Scan_CtxCancelMidRepair(t *testing.T) {
 	svc, _ := newTestShardService(t)
 
 	const self = "node-A"
-	// Seed 5 EC segment objects with self as shard-0 owner but NO local shards on
-	// disk — so each will fire onMissing. We only cancel after the first.
+	// Seed 5 EC segment objects (in the quorum-meta blob) with self as shard-0
+	// owner but NO local shards on disk — so each will fire onMissing. We only
+	// cancel after the first.
 	for i := 0; i < 5; i++ {
 		nodes := []string{self, "node-B", "node-C"}
-		seedLatestObjectMetaVersion(t, backend, "b", fmtKey(i), "v1", objectMeta{
+		seedLatestBlobOnSvc(t, svc, "b", fmtKey(i), "v1", PutObjectMetaCmd{
 			ECData: 2, ECParity: 1, NodeIDs: nodes,
-			Segments: []storage.SegmentRef{
+			Segments: []SegmentMetaEntry{
 				{BlobID: "seg-" + fmtKey(i), ECData: 2, ECParity: 1, NodeIDs: nodes},
 			},
 		})
