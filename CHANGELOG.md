@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.719.0] - 2026-06-26
+
+### Changed
+- **Carved node-local multipart manifest blob I/O into `LocalManifestStore`.**
+  `ShardService` now keeps manifest RPC and fan-out orchestration as a facade while delegating
+  local `.qmeta_mpu` writes, reads, deletes, and strict scans to the focused store.
+
 ## [0.0.718.0] - 2026-06-26
 
 ### Changed

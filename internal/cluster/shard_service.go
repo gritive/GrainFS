@@ -41,14 +41,16 @@ func getShardBuilder(minSize int) *flatbuffers.Builder {
 // It is a facade (spine): the local-shard concern (blob I/O, seal,
 // syncDirChain durability, staging/promote-local) lives in `local
 // *LocalShardStore`, to which the exported and RPC-handler methods delegate. The
-// remote peer-RPC half (WriteShard/ReadShard/...), the quorum-meta + manifest
-// stores, and the generic raft buffered-route transport stay here. dataDirs is
-// shared config — the same resolved roots LocalShardStore holds — used by the
-// quorum-meta/manifest methods.
+// remote peer-RPC half (WriteShard/ReadShard/...), quorum-meta orchestration,
+// manifest RPC/fan-out orchestration, and the generic raft buffered-route
+// transport stay here. dataDirs is shared config — the same resolved roots
+// LocalShardStore and LocalManifestStore hold — used by quorum-meta paths and
+// the local manifest adapter.
 type ShardService struct {
 	dataDirs  []string
 	transport shardTransport
 	local     *LocalShardStore // local-shard concern (delegation target)
+	manifest  *LocalManifestStore
 	addrBook  NodeAddressBook
 	// quorumMetaTargetLocks serializes the (LWW guard-read + os.Rename) critical
 	// section in writeQuorumMetaLocal and writeQuorumMetaVersionLocal on a
@@ -125,7 +127,8 @@ func NewMultiRootShardService(dataDirs []string, tr shardTransport, opts ...Shar
 		transport: tr,
 		// Construct the LocalShardStore bare (sharing the resolved dataDirs) BEFORE
 		// applying options: the DEK/no-redundancy options write into s.local.
-		local: &LocalShardStore{dataDirs: resolvedDirs},
+		local:    &LocalShardStore{dataDirs: resolvedDirs},
+		manifest: NewLocalManifestStore(resolvedDirs),
 	}
 	for _, opt := range opts {
 		opt(s)

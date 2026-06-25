@@ -30,6 +30,31 @@ func TestManifestBlob_RoundTripSiblingRoot(t *testing.T) {
 	require.False(t, ok)
 }
 
+func TestLocalManifestStore_RoundTripAndStrictScan(t *testing.T) {
+	store := NewLocalManifestStore([]string{t.TempDir()})
+	meta := clusterMultipartMeta{Bucket: "bkt", Key: "k", ContentType: "text/plain", CreatedAt: 100}
+	raw, err := marshalClusterMultipartMeta(meta)
+	require.NoError(t, err)
+
+	require.NoError(t, store.Write("bkt", "up-1", raw))
+
+	got, ok, err := store.Read("bkt", "up-1")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, raw, got)
+
+	entries, err := store.ScanStrict("bkt")
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Equal(t, "up-1", entries[0].UploadID)
+	require.Equal(t, "k", entries[0].Meta.Key)
+
+	require.NoError(t, store.Delete("bkt", "up-1"))
+	_, ok, err = store.Read("bkt", "up-1")
+	require.NoError(t, err)
+	require.False(t, ok)
+}
+
 // TestUnpackManifestEntries_CorruptLengthNoPanic verifies that unpackManifestEntries
 // returns an error (not a panic) when fed a truncated buffer or a length-prefix whose
 // high bit is set (which a signed-int decode would turn negative).
