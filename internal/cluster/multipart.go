@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/uuidutil"
 )
 
 func (b *DistributedBackend) CreateMultipartUpload(ctx context.Context, bucket, key, contentType string) (*storage.MultipartUpload, error) {
@@ -58,7 +58,7 @@ func (b *DistributedBackend) createMultipartUploadInternal(ctx context.Context, 
 
 	// Mint a UUIDv7 uploadID: deriveMultipartVID reuses its 48-bit ms timestamp
 	// so the completed object's deterministic VersionID stays create-time ordered.
-	uploadID := uuid.Must(uuid.NewV7()).String()
+	uploadID := uuidutil.MustNewV7()
 	if err := os.MkdirAll(b.partDir(uploadID), 0o755); err != nil {
 		return "", 0, fmt.Errorf("create part dir: %w", err)
 	}

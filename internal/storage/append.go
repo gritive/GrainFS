@@ -24,10 +24,10 @@ import (
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
-	"github.com/google/uuid"
 
 	"github.com/gritive/GrainFS/internal/chunkref"
 	"github.com/gritive/GrainFS/internal/storage/datawal"
+	"github.com/gritive/GrainFS/internal/uuidutil"
 )
 
 // MaxAppendSegments caps appendable segments per object.
@@ -164,7 +164,7 @@ func (b *LocalBackend) ensureAppendableBase(ctx context.Context, bucket, key str
 // regression test TestEncryptedSegment_PerSegmentAADIsolation locks in
 // this contract — do not collapse the domain to a per-object value.
 func (b *LocalBackend) WriteSegmentBlob(bucket, key string, r io.Reader) (SegmentRef, error) {
-	blobID := uuid.Must(uuid.NewV7()).String()
+	blobID := uuidutil.MustNewV7()
 	path := b.segmentPath(bucket, key, blobID)
 	if b.dataWAL != nil {
 		payload, err := io.ReadAll(io.LimitReader(r, datawal.MaxPayloadBytes+1))

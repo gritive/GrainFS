@@ -6,10 +6,9 @@ import (
 	"io"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/uuidutil"
 )
 
 const (
@@ -277,7 +276,7 @@ func (b *DistributedBackend) putObjectChunked(
 	}
 	blobIDs := make([]string, numSegments)
 	for i := range blobIDs {
-		blobIDs[i] = uuid.Must(uuid.NewV7()).String()
+		blobIDs[i] = uuidutil.MustNewV7()
 	}
 	csb := &clusterSegmentBackend{
 		b:            b,
@@ -320,7 +319,7 @@ func (b *DistributedBackend) putMultipartObjectChunked(
 	}
 	blobIDs := make([]string, numSegments)
 	for i := range blobIDs {
-		blobIDs[i] = uuid.Must(uuid.NewV7()).String()
+		blobIDs[i] = uuidutil.MustNewV7()
 	}
 	csb := &clusterSegmentBackend{
 		b:            b,

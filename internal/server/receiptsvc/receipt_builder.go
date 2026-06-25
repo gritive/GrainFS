@@ -1,10 +1,9 @@
 package receiptsvc
 
 import (
-	"github.com/google/uuid"
-
 	"github.com/gritive/GrainFS/internal/receipt"
 	"github.com/gritive/GrainFS/internal/scrubber"
+	"github.com/gritive/GrainFS/internal/uuidutil"
 )
 
 // buildReceipt assembles a HealReceipt from the session's events.
@@ -55,7 +54,7 @@ func buildReceipt(correlationID string, events []scrubber.HealEvent) *receipt.He
 	durationMs := uint32(endTime.Sub(startTime).Milliseconds())
 
 	return &receipt.HealReceipt{
-		ReceiptID:     uuid.Must(uuid.NewV7()).String(),
+		ReceiptID:     uuidutil.MustNewV7(),
 		Timestamp:     startTime,
 		Object:        receipt.ObjectRef{Bucket: first.Bucket, Key: first.Key, VersionID: first.VersionID},
 		ShardsLost:    shardsLost,

@@ -3,7 +3,7 @@ package scrubber
 import (
 	"time"
 
-	"github.com/google/uuid"
+	"github.com/gritive/GrainFS/internal/uuidutil"
 )
 
 // HealPhase identifies a step within a healing session.
@@ -51,7 +51,7 @@ type HealEvent struct {
 // Callers fill in the remaining fields as appropriate for the phase.
 func NewEvent(phase HealPhase, outcome HealOutcome) HealEvent {
 	return HealEvent{
-		ID:        uuid.Must(uuid.NewV7()).String(),
+		ID:        uuidutil.MustNewV7(),
 		Timestamp: time.Now().UTC(),
 		Phase:     phase,
 		ShardID:   -1,
@@ -91,5 +91,5 @@ func (NoopEmitter) Emit(HealEvent) {}
 // newCorrelationID returns a fresh UUIDv7 string usable as a correlation ID.
 // Centralised so RepairEngine and BackgroundScrubber stay in sync on format.
 func newCorrelationID() string {
-	return uuid.Must(uuid.NewV7()).String()
+	return uuidutil.MustNewV7()
 }
