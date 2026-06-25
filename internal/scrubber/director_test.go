@@ -62,8 +62,19 @@ func TestDirector_ApplyFromFSM_Nonblocking(t *testing.T) {
 }
 
 func TestRouteSourceFor(t *testing.T) {
-	require.Equal(t, "replication", routeSourceFor("__grainfs_volumes"), "internal buckets are full-object replicated")
-	require.Equal(t, "ec", routeSourceFor("user-bucket"), "S3-exposed buckets ride the EC data path")
+	tests := []struct {
+		name   string
+		bucket string
+		want   string
+	}{
+		{"internal buckets are full-object replicated", "__grainfs_volumes", "replication"},
+		{"S3-exposed buckets ride the EC data path", "user-bucket", "ec"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, routeSourceFor(tt.bucket))
+		})
+	}
 }
 
 func TestDirector_LookupDedup_Hit(t *testing.T) {

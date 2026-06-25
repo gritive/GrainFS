@@ -43,13 +43,13 @@ func SingleBackendResolver(backend Scrubbable) GroupResolver {
 }
 
 // NewECScrubSource constructs an EC adapter. Director routes to it via
-// routeSource("<bucket>") → "ec" (anything not internal-replicated). nodeID
+// routeSourceFor("<bucket>") → "ec" (anything not internal-replicated). nodeID
 // enables ShardOwner filtering when the resolved backend implements ShardOwner.
 func NewECScrubSource(resolve GroupResolver, nodeID string) *ECScrubSource {
 	return &ECScrubSource{resolve: resolve, nodeID: nodeID}
 }
 
-// Name returns the registry name "ec" — matches Director.routeSource.
+// Name returns the registry name "ec" — matches Director.routeSourceFor.
 func (s *ECScrubSource) Name() string { return "ec" }
 
 func recordKey(bucket, key, versionID string) string {
