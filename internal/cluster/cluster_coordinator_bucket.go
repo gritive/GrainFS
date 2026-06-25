@@ -128,12 +128,10 @@ func (c *ClusterCoordinator) ForceDeleteBucket(ctx context.Context, bucket strin
 }
 
 // forceDeleteBucketBlobAuth is the blob-authoritative (versioned) cluster force-delete:
-// enumerate per-version blobs cluster-wide via ListObjectVersions (which includes
-// scanFsmCarveoutVersions for carve-outs), delete each vid-bearing entry via
-// DeleteObjectVersion (blob-purging), then finish with the blob-aware DeleteBucket.
-//
-// The legacy hardDeleteLegacyObject raft tail has been dropped: greenfield versioned
-// buckets have no legacy-bare FSM carve-outs, and Task 4c will retire CmdDeleteObject.
+// enumerate per-version blobs cluster-wide via ListObjectVersions, delete each
+// vid-bearing entry via DeleteObjectVersion (blob-purging), then finish with the
+// blob-aware DeleteBucket. Object metadata lives only in the off-raft quorum-meta
+// blob, so the per-version blob enumeration is exhaustive (no FSM tail).
 func (c *ClusterCoordinator) forceDeleteBucketBlobAuth(ctx context.Context, bucket string) error {
 	if err := c.purgePerVersionBlobs(ctx, bucket); err != nil {
 		return err
