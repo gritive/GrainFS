@@ -52,9 +52,11 @@ func (b *DistributedBackend) createMultipartUploadInternal(ctx context.Context, 
 	if err := guardInternalBucketObjectOp(bucket); err != nil {
 		return "", 0, err
 	}
-	if err := b.HeadBucket(ctx, bucket); err != nil {
+	unlockBucketWrite, err := b.enterBucketObjectWrite(ctx, bucket)
+	if err != nil {
 		return "", 0, err
 	}
+	defer unlockBucketWrite()
 
 	// Mint a UUIDv7 uploadID: deriveMultipartVID reuses its 48-bit ms timestamp
 	// so the completed object's deterministic VersionID stays create-time ordered.
@@ -211,6 +213,11 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 	if err := guardInternalBucketObjectOp(bucket); err != nil {
 		return nil, err
 	}
+	unlockBucketWrite, err := b.enterBucketObjectWrite(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	defer unlockBucketWrite()
 	lifeMu := b.multipartLifecycleLock(uploadID)
 	lifeMu.Lock()
 	defer func() {

@@ -85,7 +85,19 @@ func (b *DistributedBackend) HeadBucket(ctx context.Context, bucket string) erro
 	return storage.ErrBucketNotFound
 }
 
+func (b *DistributedBackend) enterBucketObjectWrite(ctx context.Context, bucket string) (func(), error) {
+	unlock := b.objectWriteBucketLocks.lockRead(bucket)
+	if err := b.HeadBucket(ctx, bucket); err != nil {
+		unlock()
+		return nil, err
+	}
+	return unlock, nil
+}
+
 func (b *DistributedBackend) DeleteBucket(ctx context.Context, bucket string) error {
+	unlockBucketWrites := b.objectWriteBucketLocks.lockWrite(bucket)
+	defer unlockBucketWrites()
+
 	// Existence check via HeadBucket (which reads from MetaBucketStore — the sole
 	// authority). Task 12: the old inline BucketKey read is replaced here since
 	// BucketKey is never written by the new meta path.

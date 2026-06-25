@@ -70,11 +70,6 @@ separate PR, facades stay the spine — see design
 
 ### DeleteBucket non-Enabled emptiness follow-ups (2026-06-24)
 
-- **[P3][pre-existing] TOCTOU between the DeleteBucket emptiness scan and the
-  meta-raft delete + `os.RemoveAll(bucketDir)`.** A concurrent PUT (needs only
-  `HeadBucket`) can commit qmeta in the window after the scan. Negligible at admin-only
-  scope; surfaced by the plan-gate codex pass.
-
 - **[DONE-local][pre-existing] Versioned/Suspended force-delete left per-version tombstone
   blobs in `.quorum_meta_versions/{bucket}/`.** `purgePerVersionBlobs` deletes versions
   via `DeleteObjectVersion`, which writes an `IsHardDeleted` tombstone (the versioned

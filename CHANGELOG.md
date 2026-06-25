@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.723.0] - 2026-06-26
+
+### Fixed
+- **Closed the `DeleteBucket` emptiness-scan TOCTOU window for object writes.**
+  Bucket-scoped object writes now hold a per-bucket admission fence from bucket existence check
+  through metadata commit, while `DeleteBucket` holds the exclusive side across emptiness checks and
+  meta delete.
+
 ## [0.0.722.0] - 2026-06-26
 
 ### Fixed
