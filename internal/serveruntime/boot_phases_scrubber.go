@@ -31,6 +31,80 @@ func redundancyUpgradeMax(cfg Config) (enabled bool, max int) {
 	return true, max
 }
 
+const gcFreshnessPingTimeout = 2 * time.Second
+
+type gcPeerPinger interface {
+	Ping(ctx context.Context, peer string) error
+}
+
+func gcFreshnessReachable(
+	ctx context.Context,
+	dgMgr *cluster.DataGroupManager,
+	meta cluster.ShardGroupSource,
+	pinger gcPeerPinger,
+	nodeID string,
+	raftAddr string,
+) bool {
+	if dgMgr == nil || meta == nil {
+		return false
+	}
+	seen := make(map[string]struct{})
+	for _, dg := range dgMgr.All() {
+		if dg == nil || dg.Backend() == nil {
+			continue
+		}
+		entry, ok := meta.ShardGroup(dg.ID())
+		if !ok || len(entry.PeerIDs) == 0 {
+			return false
+		}
+		peers := cluster.NewShardGroupPeerSet(entry)
+		localPeer, hasLocal := peers.MatchLocal(nodeID, raftAddr)
+		for _, peer := range entry.PeerIDs {
+			if hasLocal && peer == localPeer {
+				continue
+			}
+			if peer == "" {
+				return false
+			}
+			if _, dup := seen[peer]; dup {
+				continue
+			}
+			seen[peer] = struct{}{}
+			if pinger == nil {
+				return false
+			}
+			pingCtx, cancel := context.WithTimeout(ctx, gcFreshnessPingTimeout)
+			err := pinger.Ping(pingCtx, peer)
+			cancel()
+			if err != nil {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func gcSingletonOwnerForBucket(
+	dgMgr *cluster.DataGroupManager,
+	router *cluster.Router,
+	meta cluster.ShardGroupSource,
+	nodeID string,
+	raftAddr string,
+	bucket string,
+) bool {
+	dg, ok := dgMgr.GroupForBucket(bucket, router)
+	if !ok || dg == nil || meta == nil {
+		return false
+	}
+	entry, ok := meta.ShardGroup(dg.ID())
+	if !ok || len(entry.PeerIDs) == 0 {
+		return false
+	}
+	first := cluster.ShardGroupEntry{ID: entry.ID, PeerIDs: []string{entry.PeerIDs[0]}}
+	_, local := cluster.NewShardGroupPeerSet(first).MatchLocal(nodeID, raftAddr)
+	return local
+}
+
 // targetLogKey returns the log-friendly key for an EC shard scan target:
 // ObjectKey for object-version targets, ShardKey for segment/coalesced targets.
 func targetLogKey(t cluster.ECShardScanTarget) string {
@@ -138,9 +212,19 @@ func bootRecoveryAndScrubber(ctx context.Context, state *bootState) error {
 		// live per-group under each group's b.root, so the sweep iterates the union of
 		// every hosted group's buckets (SetOwningGroupBackendSource + the shared
 		// SetHostedGroupBackendsSource below) and dispatches each per-bucket op to its
-		// owning group's backend, gated per-bucket on that group's caught-up state
-		// (only the caught-up leader of a group GCs its segments).
+		// owning group's backend, gated by the raft-free GC freshness seam. Redundancy
+		// relocation additionally uses a deterministic per-group singleton owner
+		// because it rewrites global quorum-meta.
 		var segGCOpts []scrubber.ScrubberOption
+		if state.metaRaft != nil {
+			gcShardGroups := state.metaRaft.FSM()
+			state.dgMgr.SetGCFreshnessGate(func(gateCtx context.Context) bool {
+				return gcFreshnessReachable(gateCtx, dgMgr, gcShardGroups, state.shardSvc, state.nodeID, state.raftAddr)
+			})
+			state.distBackend.SetGCSingletonOwnerChecker(func(bucket string) bool {
+				return gcSingletonOwnerForBucket(dgMgr, clusterRouter, gcShardGroups, state.nodeID, state.raftAddr, bucket)
+			})
+		}
 		// The object-metadata snapshot feature was removed, so there are no
 		// snapshot-frozen segments/objects to pin. Wire EMPTY no-op frozen sources
 		// (NOT nil — a nil source fails closed and disables the whole sweep) so the

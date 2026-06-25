@@ -61,9 +61,9 @@ func (b *DistributedBackend) SegmentSweepBuckets(ctx context.Context) ([]string,
 
 // WalkOrphanSegments dispatches the per-bucket segment walk to the backend that
 // owns `bucket` (segments live under that group's b.root), and skips the bucket
-// when its owning group is not locally hosted or not caught-up (only the caught-up
-// leader of a group GCs its segments — a lagging/follower FSM could mark a
-// committed segment orphan). Implements scrubber.OrphanSegmentWalkable.
+// when its owning group is not locally hosted or not fresh enough for GC. The
+// freshness check fails closed so an incomplete known-set cannot mark a committed
+// segment orphan. Implements scrubber.OrphanSegmentWalkable.
 func (b *DistributedBackend) WalkOrphanSegments(bucket string, known map[string]bool, fn func(string) error) error {
 	gb := b.owningGroupBackend(bucket)
 	if gb == nil || !gb.CaughtUp(context.Background()) {

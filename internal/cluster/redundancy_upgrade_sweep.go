@@ -19,8 +19,8 @@ type redundancyUpgradeDeps interface {
 	clusterRedundant() bool
 	// listBuckets enumerates the buckets to sweep (union of hosted groups).
 	listBuckets() ([]string, error)
-	// caughtUpOwner reports whether this node hosts bucket's owning group AND is
-	// its caught-up leader. Only the caught-up leader relocates a group's objects.
+	// caughtUpOwner reports whether this node hosts bucket's owning group, passes
+	// the GC freshness gate, and owns that group's singleton relocation role.
 	caughtUpOwner(bucket string) bool
 	// scanObjects streams the live EC ObjectRecords for a bucket.
 	scanObjects(bucket string) (<-chan scrubber.ObjectRecord, error)
@@ -30,11 +30,12 @@ type redundancyUpgradeDeps interface {
 }
 
 // runRedundancyUpgradeSweep enumerates non-redundant (1+0) EC objects across the
-// caught-up groups this node owns and relocates up to maxPerCycle of them into a
-// redundant placement group, returning the count relocated. It stops early at the
-// cap. A bucket whose owning group is not the locally-hosted caught-up leader is
-// skipped. ErrRelocateSkipped is benign (continue); any other relocate error is
-// logged + counted (metric) but does not abort the sweep.
+// fresh, singleton-owned groups this node hosts and relocates up to maxPerCycle
+// of them into a redundant placement group, returning the count relocated. It
+// stops early at the cap. A bucket whose owning group is not locally hosted,
+// fresh, or singleton-owned here is skipped. ErrRelocateSkipped is benign
+// (continue); any other relocate error is logged + counted (metric) but does
+// not abort the sweep.
 //
 // clusterRedundant is checked once up front; needsRedundancyUpgrade is then called
 // with clusterRedundant=true per object (the cluster-level capacity is already
@@ -51,7 +52,7 @@ func runRedundancyUpgradeSweep(ctx context.Context, d redundancyUpgradeDeps, now
 
 	for _, bucket := range buckets {
 		if !d.caughtUpOwner(bucket) {
-			continue // not the locally-hosted caught-up leader for this group
+			continue // not locally hosted, fresh, or singleton-owned here
 		}
 		objCh, scanErr := d.scanObjects(bucket)
 		if scanErr != nil {

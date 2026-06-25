@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"sort"
+	"sync"
 	"sync/atomic"
 
 	"github.com/gritive/GrainFS/internal/raft"
@@ -43,8 +44,10 @@ type groupSnapshot struct {
 // DataGroupManager manages a set of DataGroups with lock-free reads (atomic.Pointer COW).
 // Writes (Add) are infrequent (rebalance events), so a CAS loop is sufficient.
 type DataGroupManager struct {
-	snap atomic.Pointer[groupSnapshot]
-	mbs  atomic.Pointer[mbsHolder]
+	snap   atomic.Pointer[groupSnapshot]
+	mbs    atomic.Pointer[mbsHolder]
+	gcGate atomic.Pointer[gcFreshnessGateHolder]
+	gcMu   sync.Mutex
 }
 
 // mbsHolder boxes the MetaBucketStore interface so it can live in an
@@ -70,6 +73,26 @@ func (m *DataGroupManager) SetMetaBucketStore(s MetaBucketStore) {
 	for _, dg := range m.All() {
 		if b := dg.Backend(); b != nil {
 			b.SetMetaBucketStore(s)
+		}
+	}
+}
+
+// SetGCFreshnessGate wires the GC freshness seam into every owned group backend
+// already registered and any owned group added later.
+func (m *DataGroupManager) SetGCFreshnessGate(gate GCFreshnessGate) {
+	m.gcMu.Lock()
+	defer m.gcMu.Unlock()
+	if gate == nil {
+		m.gcGate.Store(nil)
+	} else {
+		m.gcGate.Store(&gcFreshnessGateHolder{gate: gate})
+	}
+	for _, dg := range m.All() {
+		if dg == nil {
+			continue
+		}
+		if b := dg.Backend(); b != nil {
+			b.SetGCFreshnessGate(gate)
 		}
 	}
 }
@@ -101,6 +124,15 @@ func (m *DataGroupManager) Add(g *DataGroup) {
 
 		newSnap := &groupSnapshot{byID: newByID, all: all}
 		if m.snap.CompareAndSwap(old, newSnap) {
+			if b := g.Backend(); b != nil {
+				m.gcMu.Lock()
+				if h := m.gcGate.Load(); h != nil {
+					b.SetGCFreshnessGate(h.gate)
+				} else {
+					b.SetGCFreshnessGate(nil)
+				}
+				m.gcMu.Unlock()
+			}
 			return
 		}
 	}

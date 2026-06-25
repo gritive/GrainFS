@@ -96,14 +96,6 @@ func (s *ShardService) decodeQuorumMetaCmdBlob(data []byte) (PutObjectMetaCmd, e
 	return s.qmeta.decodeQuorumMetaCmdBlob(data)
 }
 
-func (s *ShardService) readQuorumMetaRawCmd(bucket, key string) (PutObjectMetaCmd, error) {
-	return s.qmeta.readQuorumMetaRawCmd(bucket, key)
-}
-
-func (s *ShardService) readQuorumMetaLocalDecoded(bucket, key string) (*storage.Object, PlacementMeta, error) {
-	return s.qmeta.readQuorumMetaLocalDecoded(bucket, key)
-}
-
 func (s *ShardService) IterQuorumMetaECShardTargets(fn func(ECShardScanTarget) error) error {
 	return s.qmeta.IterQuorumMetaECShardTargets(fn)
 }

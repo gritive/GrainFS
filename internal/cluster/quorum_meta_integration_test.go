@@ -114,7 +114,7 @@ func TestDeleteObject_QuorumMetaTombstone(t *testing.T) {
 	require.NoError(t, err)
 
 	// The quorum meta file must still exist as a tombstone.
-	cmd, err := b.shardSvc.readQuorumMetaRawCmd("bucket", "del.bin")
+	cmd, err := b.shardSvc.qmeta.readQuorumMetaRawCmd("bucket", "del.bin")
 	require.NoError(t, err, "quorum meta tombstone must be present after DELETE")
 	require.True(t, cmd.IsDeleteMarker, "quorum meta after DELETE must have IsDeleteMarker=true")
 }
