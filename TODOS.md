@@ -204,13 +204,6 @@ Deferred items:
   `CmdSetObjectACL`, `CmdPutObjectMeta` apply, `CmdPutObjectQuarantine`, `CmdDeleteObject`,
   `CmdDeleteObjectVersion` all retired. FSM is pure control-plane. See CHANGELOG Unreleased entry.
 
-- **[P3][design] Normal non-versioned `DeleteObject` leaves a latest-only tombstone blob
-  (the `IsHardDeleted` marker in the quorum-meta blob) that persists indefinitely.** EC shards
-  are reclaimed by the orphan-shard walker (which sees no live qmeta referencing them). The
-  tombstone blob itself is not reclaimed — confirm there is no unbounded growth path in
-  long-lived buckets with high churn, or add a tombstone GC sweep (age-gated, similar to the
-  per-version hard-delete tombstone GC already planned).
-
 - **[DONE] `deleteShardsQuorum` empty-placement guard.** Fixed in the Slice 2 code-gate: both
   `ForceDeleteBucket` non-versioned loops now fail closed with a descriptive error when
   `len(cmd.NodeIDs) == 0` (corrupt/incomplete qmeta blob) instead of silently stranding shards and

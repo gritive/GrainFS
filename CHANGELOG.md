@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.729.0] - 2026-06-26
+
+### Fixed
+- **Added convergence-gated GC for non-versioned delete tombstones.**
+  The scrubber's quorum-meta tombstone reconciler now also reclaims latest-only
+  delete markers once every placement node is reachable and none still holds a
+  live latest-only data blob, preventing unbounded marker growth in churny buckets.
+
 ## [0.0.728.0] - 2026-06-26
 
 ### Fixed
