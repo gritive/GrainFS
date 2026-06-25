@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.683.0] - 2026-06-25
+
+### Changed
+- **Internal refactor, no user-facing behavior change.** Deduplicated the FlatBuffers encode-side
+  vector-build loops that were repeated across the storage and cluster codecs, folding them into
+  in-package helpers (`buildCoalescedVector` / `buildPartsVector` in the cluster codec,
+  `buildTagsVector` / `readTagsVector` in the storage codec, and reuse of the existing
+  `appendForwardTagsVector` on the forward path). Wire output is byte-identical before and after
+  (verified by new golden byte-equality tests); the storage tags fast path keeps its
+  stack-local offset buffer so the encode hot path allocates no extra slice.
+
 ## [0.0.682.0] - 2026-06-25
 
 ### Changed

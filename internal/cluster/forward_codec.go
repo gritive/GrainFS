@@ -239,23 +239,7 @@ func buildSetObjectTagsArgs(bucket, key, versionID string, tags []storage.Tag) [
 	k := b.CreateString(key)
 	vid := b.CreateString(versionID)
 
-	var tagsVec flatbuffers.UOffsetT
-	if len(tags) > 0 {
-		offs := make([]flatbuffers.UOffsetT, len(tags))
-		for i, t := range tags {
-			kOff := b.CreateString(t.Key)
-			vOff := b.CreateString(t.Value)
-			raftpb.TagStart(b)
-			raftpb.TagAddKey(b, kOff)
-			raftpb.TagAddValue(b, vOff)
-			offs[i] = raftpb.TagEnd(b)
-		}
-		raftpb.SetObjectTagsArgsStartTagsVector(b, len(offs))
-		for i := len(offs) - 1; i >= 0; i-- {
-			b.PrependUOffsetT(offs[i])
-		}
-		tagsVec = b.EndVector(len(offs))
-	}
+	tagsVec := appendForwardTagsVector(b, tags, raftpb.SetObjectTagsArgsStartTagsVector)
 
 	raftpb.SetObjectTagsArgsStart(b)
 	raftpb.SetObjectTagsArgsAddBucket(b, bk)
@@ -388,23 +372,7 @@ func buildCreateMultipartUploadArgs(bucket, key, contentType string, tags []stor
 	k := b.CreateString(key)
 	ct := b.CreateString(contentType)
 
-	var tagsVec flatbuffers.UOffsetT
-	if len(tags) > 0 {
-		offs := make([]flatbuffers.UOffsetT, len(tags))
-		for i, t := range tags {
-			kOff := b.CreateString(t.Key)
-			vOff := b.CreateString(t.Value)
-			raftpb.TagStart(b)
-			raftpb.TagAddKey(b, kOff)
-			raftpb.TagAddValue(b, vOff)
-			offs[i] = raftpb.TagEnd(b)
-		}
-		raftpb.CreateMultipartUploadArgsStartTagsVector(b, len(offs))
-		for i := len(offs) - 1; i >= 0; i-- {
-			b.PrependUOffsetT(offs[i])
-		}
-		tagsVec = b.EndVector(len(offs))
-	}
+	tagsVec := appendForwardTagsVector(b, tags, raftpb.CreateMultipartUploadArgsStartTagsVector)
 
 	raftpb.CreateMultipartUploadArgsStart(b)
 	raftpb.CreateMultipartUploadArgsAddBucket(b, bk)
@@ -554,10 +522,11 @@ func appendPartsVector(b *flatbuffers.Builder, parts []storage.MultipartPartEntr
 // appendForwardTagsVector encodes []storage.Tag as a Tag FlatBuffers vector
 // using the provided parent-table startVector func (one of
 // ForwardObjectMetaStartTagsVector / ForwardObjectVersionMetaStartTagsVector /
-// ForwardReplyStartTagsVector). Mirrors appendPartsVector and the codec.go
-// buildTagsVector helper — note the FBS Tag tables here come from raftpb
-// (forward path), not clusterpb. MUST be invoked BEFORE the parent table's
-// Start on the same builder.
+// ForwardReplyStartTagsVector / SetObjectTagsArgsStartTagsVector /
+// CreateMultipartUploadArgsStartTagsVector). Mirrors appendPartsVector and the
+// codec.go buildTagsVector helper — note the FBS Tag tables here come from
+// raftpb (forward path), not clusterpb. MUST be invoked BEFORE the parent
+// table's Start on the same builder.
 func appendForwardTagsVector(b *flatbuffers.Builder, tags []storage.Tag, startVec func(*flatbuffers.Builder, int) flatbuffers.UOffsetT) flatbuffers.UOffsetT {
 	if len(tags) == 0 {
 		return 0
