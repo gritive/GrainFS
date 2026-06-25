@@ -160,40 +160,9 @@ func TestDedupVersionsKeepFirst(t *testing.T) {
 	require.Equal(t, "carve-B", idx[[2]string{"bare", ""}].ETag, "group-B carve-out kept")
 }
 
-// TestListObjectVersions_SplitKeyNoLocalLatest proves the leaf no longer emits a
-// corrupt legacy row for a versioned obj:{bucket}/{key}/{vid} record whose lat:
-// pointer is absent locally (cross-group key split, or a PreserveLatest write).
-// PreserveLatest writes the per-version key WITHOUT moving lat:, so on a fresh
-// key it reproduces exactly the "obj: without lat:" condition a remote-lat: group
-// would see. RED before the leaf fix: the row is treated as legacy and emitted
-// with Key="{key}/{vid}", VersionID="", IsLatest=true.
-func TestListObjectVersions_SplitKeyNoLocalLatest(t *testing.T) {
-	b := newSingleNode1Plus0ChunkCapable(t)
-	ctx := context.Background()
-	const bkt, key, vid = "vbkt", "obj", "00000000-0000-7000-8000-000000000abc"
-	require.NoError(t, b.CreateBucket(ctx, bkt))
-
-	// PreserveLatest: writes obj:{bkt}/{key}/{vid} but NOT lat:{bkt}/{key}.
-	// CmdPutObjectMeta is a no-op in apply.go (raft-free Slice 2), so we persist
-	// directly via persistPutObjectMetaUpdate.
-	putCmd := PutObjectMetaCmd{
-		Bucket:         bkt,
-		Key:            key,
-		VersionID:      vid,
-		Size:           3,
-		ETag:           "etag",
-		ModTime:        1,
-		PreserveLatest: true,
-	}
-	require.NoError(t, b.fsm.db.Update(func(txn MetadataTxn) error {
-		return b.fsm.persistPutObjectMetaUpdate(txn, putCmd, buildPutObjectMeta(putCmd))
-	}))
-
-	versions, err := b.ListObjectVersions(ctx, bkt, "", 0)
-	require.NoError(t, err)
-	require.Len(t, versions, 1)
-	got := versions[0]
-	require.Equal(t, key, got.Key, "key must not glue in the versionID (RED: Key=obj/<vid>)")
-	require.Equal(t, vid, got.VersionID, "must surface the real versionID (RED: empty)")
-	require.False(t, got.IsLatest, "a no-local-lat: version must not be flagged latest (RED: true)")
-}
+// TestListObjectVersions_SplitKeyNoLocalLatest was removed: it exercised the FSM
+// list leaf's handling of a versioned obj:{bucket}/{key}/{vid} record whose lat:
+// pointer is absent locally (the "obj: without lat: emits a corrupt legacy row"
+// bug). Under blob-primary ListObjectVersions reads only the quorum-meta blob
+// trees — never the FSM obj:/lat: keyspace — so that legacy-row mechanism (and
+// its bug class) no longer exists.

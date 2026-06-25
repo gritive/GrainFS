@@ -96,38 +96,14 @@ var _ = Describe("Backend EC object integration", func() {
 		Expect(gotObj.UserMetadata).To(Equal(map[string]string{"x-amz-meta-owner": "me"}))
 	})
 
-	It("rejects stale PutObjectMeta expected ETag updates", func() {
-		putMeta := func(etag string, ecData, ecParity uint8, expectedETag string) error {
-			GinkgoHelper()
-			cmd := PutObjectMetaCmd{
-				Bucket:       "bucket",
-				Key:          "race.bin",
-				Size:         1,
-				ContentType:  "application/octet-stream",
-				ETag:         etag,
-				ModTime:      1,
-				ECData:       ecData,
-				ECParity:     ecParity,
-				ExpectedETag: expectedETag,
-			}
-			return b.fsm.db.Update(func(txn MetadataTxn) error {
-				if err := b.fsm.checkPutObjectExpectedETag(txn, cmd.Bucket, cmd.Key, cmd.ExpectedETag); err != nil {
-					return err
-				}
-				return b.fsm.persistPutObjectMetaUpdate(txn, cmd, buildPutObjectMeta(cmd))
-			})
-		}
-
-		Expect(putMeta("old", 0, 0, "")).To(Succeed())
-		Expect(putMeta("new", 0, 0, "")).To(Succeed())
-		Expect(putMeta("old", 2, 1, "old")).To(HaveOccurred())
-
-		obj, placementMeta, err := b.headObjectMeta(ctx, "bucket", "race.bin")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(obj.ETag).To(Equal("new"))
-		Expect(placementMeta.ECData).To(Equal(uint8(0)))
-		Expect(placementMeta.ECParity).To(Equal(uint8(0)))
-	})
+	// "rejects stale PutObjectMeta expected ETag updates" was removed: the
+	// conditional-PUT (ExpectedETag) FSM CAS it exercised is retired under
+	// blob-primary — object metadata writes have no raft propose and the only
+	// ExpectedETag caller (object relocation) relies on the blob LWW
+	// (preserve-old-ModTime), not an FSM CAS (quorum_meta.go / relocate_object.go).
+	// The test-only checkPutObjectExpectedETag helper is still unit-tested in
+	// isolation in put_object_meta_test.go; there is no blob analogue to assert
+	// end-to-end via headObjectMeta (which now reads only blobs).
 
 	DescribeTable("cleans written shards when EC commit aborts before metadata",
 		func(cfg ECConfig) {

@@ -4,51 +4,38 @@ import (
 	"context"
 	"testing"
 
-	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-// seedObjectWithSegments writes an objectMeta carrying the given Segments
-// (and optionally Coalesced) directly into the backend's BadgerDB. This
-// bypasses the propose/apply path so we can seed fields (Coalesced) that
-// the PutObjectMetaCmd wire format doesn't carry yet.
-func seedObjectWithSegments(
+// seedNonVersionedObjectWithSegments writes a latest-only quorum-meta blob (the
+// non-versioned object authority) carrying the given Segments (and optionally
+// Coalesced) onto b's local ShardService.
+func seedNonVersionedObjectWithSegments(
 	t *testing.T,
 	b *DistributedBackend,
-	db *badger.DB,
-	bucket, key, versionID string,
-	segs []storage.SegmentRef,
+	bucket, key string,
+	segs []SegmentMetaEntry,
 	coalesced []CoalescedShardRef,
 ) {
 	t.Helper()
-	raw, err := marshalObjectMeta(objectMeta{
-		Key:       key,
-		Size:      0,
-		ETag:      "etag-seg",
-		Segments:  segs,
-		Coalesced: coalesced,
+	seedLatestBlob(t, b, bucket, key, PutObjectMetaCmd{
+		ETag: "etag-seg", NodeIDs: []string{b.currentSelfAddr()},
+		Segments: segs, Coalesced: coalesced,
 	})
-	require.NoError(t, err)
-	require.NoError(t, db.Update(func(txn *badger.Txn) error {
-		if err := txn.Set(b.ks().ObjectMetaKeyV(bucket, key, versionID), raw); err != nil {
-			return err
-		}
-		return txn.Set(b.ks().LatestKey(bucket, key), []byte(versionID))
-	}))
 }
 
 func TestListAllObjectsStrictPropagatesSegments(t *testing.T) {
-	b, db := newTestDistributedBackendWithDB(t)
+	b := newTestDistributedBackend(t)
 	ctx := context.Background()
 	require.NoError(t, b.CreateBucket(ctx, "bkt"))
 
-	segs := []storage.SegmentRef{
-		{BlobID: "chunk-A", Size: 10},
-		{BlobID: "chunk-B", Size: 20},
+	segs := []SegmentMetaEntry{
+		{BlobID: "chunk-A", Size: 10, SegmentIdx: 0},
+		{BlobID: "chunk-B", Size: 20, SegmentIdx: 1},
 	}
-	seedObjectWithSegments(t, b, db, "bkt", "k", "v1", segs, nil)
+	seedNonVersionedObjectWithSegments(t, b, "bkt", "k", segs, nil)
 
 	objs, err := b.ListAllObjectsStrict()
 	require.NoError(t, err)
@@ -67,18 +54,18 @@ func TestListAllObjectsStrictPropagatesSegments(t *testing.T) {
 }
 
 func TestListAllObjectsStrictPropagatesCoalesced(t *testing.T) {
-	b, db := newTestDistributedBackendWithDB(t)
+	b := newTestDistributedBackend(t)
 	ctx := context.Background()
 	require.NoError(t, b.CreateBucket(ctx, "bkt2"))
 
-	segs := []storage.SegmentRef{
-		{BlobID: "chunk-A", Size: 10},
-		{BlobID: "chunk-B", Size: 20},
+	segs := []SegmentMetaEntry{
+		{BlobID: "chunk-A", Size: 10, SegmentIdx: 0},
+		{BlobID: "chunk-B", Size: 20, SegmentIdx: 1},
 	}
 	coal := []CoalescedShardRef{
 		{CoalescedID: "coalesced-blob-1"},
 	}
-	seedObjectWithSegments(t, b, db, "bkt2", "obj", "v1", segs, coal)
+	seedNonVersionedObjectWithSegments(t, b, "bkt2", "obj", segs, coal)
 
 	objs, err := b.ListAllObjectsStrict()
 	require.NoError(t, err)
@@ -97,22 +84,20 @@ func TestListAllObjectsStrictPropagatesCoalesced(t *testing.T) {
 }
 
 // TestListAllObjectsStrictFailsClosedOnCorruptMeta proves the GC known-set
-// contract: an undecodable obj: record makes ListAllObjectsStrict fail closed
-// (returns an error) so the scrubber skips its sweep rather than treating the
-// corrupt object's segments as orphaned.
+// contract: an undecodable latest-only quorum-meta blob makes ListAllObjectsStrict
+// fail closed (returns an error) so the scrubber skips its sweep rather than
+// treating the corrupt object's segments as orphaned.
 func TestListAllObjectsStrictFailsClosedOnCorruptMeta(t *testing.T) {
-	b, db := newTestDistributedBackendWithDB(t)
+	b := newTestDistributedBackend(t)
 	ctx := context.Background()
 	require.NoError(t, b.CreateBucket(ctx, "bkt"))
 
 	// One valid object alongside the corrupt one.
-	seedObjectWithSegments(t, b, db, "bkt", "good", "v1",
-		[]storage.SegmentRef{{BlobID: "chunk-A", Size: 10}}, nil)
+	seedNonVersionedObjectWithSegments(t, b, "bkt", "good",
+		[]SegmentMetaEntry{{BlobID: "chunk-A", Size: 10, SegmentIdx: 0}}, nil)
 
-	// Inject a properly-keyed obj: record with an undecodable value.
-	require.NoError(t, db.Update(func(txn *badger.Txn) error {
-		return txn.Set(b.ks().ObjectMetaKeyV("bkt", "corrupt", "v1"), []byte{0xff, 0xff, 0xff})
-	}))
+	// Inject an undecodable latest-only quorum-meta blob.
+	require.NoError(t, b.shardSvc.writeQuorumMetaLocal("bkt", "corrupt", []byte{0xff, 0xff, 0xff}))
 
 	_, err := b.ListAllObjectsStrict()
 	require.Error(t, err, "strict ListAllObjectsStrict must fail closed on corrupt meta")

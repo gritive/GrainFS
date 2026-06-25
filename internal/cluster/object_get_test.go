@@ -7,8 +7,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-
-	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // TestObjectAndPlacementFromCmd_AppendableDeriveFields verifies that
@@ -89,41 +87,23 @@ func TestHeadObjectMeta_AppendableFromBlobOnly(t *testing.T) {
 	require.Equal(t, body, got, "appendable GET must round-trip byte-identical from the blob")
 }
 
-// TestHeadObjectMeta_LegacyMigratedFSMRecordStillReadable proves the SHARED
-// BadgerDB fallback in headObjectMeta is NOT dead: a plain (non-appendable,
-// non-coalesced) object whose metadata exists ONLY as a BadgerDB obj: record —
-// the shape MigrateLegacyMetaToCluster (bootAutoMigrate) writes when a
-// pre-cluster legacy meta DB is migrated — must still resolve via the fallback.
-// Removing the appendable/coalesced carve-out must not regress this live class.
-func TestHeadObjectMeta_LegacyMigratedFSMRecordStillReadable(t *testing.T) {
+// TestHeadObjectMeta_PlainNonVersionedBlobReadable proves a plain
+// (non-appendable, non-coalesced) non-versioned object resolves from its
+// latest-only quorum-meta blob — the sole authority for non-versioned objects
+// under blob-primary (the FSM obj: read fallback is removed).
+func TestHeadObjectMeta_PlainNonVersionedBlobReadable(t *testing.T) {
 	b := newTestBackendWithQuorumMeta(t)
 	ctx := context.Background()
 	const bkt, key = "bk", "legacy.txt"
 	require.NoError(t, b.CreateBucket(ctx, bkt))
 
-	// Simulate a legacy-migrated plain object: a bare obj: record with no lat:
-	// pointer and no quorum-meta blob (exactly what MigrateLegacyMetaToCluster
-	// produces). Write it directly into BadgerDB the way applyPutObjectMeta does.
-	meta := objectMeta{
-		Key:          key,
-		Size:         11,
-		ContentType:  "text/plain",
-		ETag:         "etag-legacy",
-		LastModified: 1700000000,
-	}
-	require.NoError(t, b.fsm.db.Update(func(txn MetadataTxn) error {
-		out, merr := marshalObjectMeta(meta)
-		require.NoError(t, merr)
-		// setValue seals the value with the active DEK exactly like
-		// applyPutObjectMeta, so headObjectMeta's itemValueCopy can un-seal it.
-		return b.fsm.setValue(txn, b.ks().ObjectMetaKey(bkt, key), out)
-	}))
+	// Plain non-versioned object: only the latest-only quorum-meta blob exists.
+	seedLatestBlob(t, b, bkt, key, PutObjectMetaCmd{
+		Size: 11, ContentType: "text/plain", ETag: "etag-legacy",
+		ModTime: 1700000000, NodeIDs: []string{b.currentSelfAddr()},
+	})
 
-	// No quorum-meta blob exists for this key.
-	_, qerr := b.readQuorumMetaCmd(bkt, key)
-	require.ErrorIs(t, qerr, storage.ErrObjectNotFound)
-
-	// HEAD must fall through to the BadgerDB fallback and return the plain object.
+	// HEAD must resolve via the latest-only blob and return the plain object.
 	head, _, err := b.headObjectMeta(ctx, bkt, key)
 	require.NoError(t, err)
 	require.False(t, head.IsAppendable)

@@ -243,23 +243,25 @@ acknowledge; parity nodes are best-effort. A 30-second bounded timeout
 fans out `ReadQuorumMeta` RPCs to all shard-group peers and applies
 Last-Write-Wins (LWW) by `ModTime`. The fan-out waits for all peers within
 `quorumMetaReadTimeout` (5 s) so a concurrent PUT racing the read can be
-observed. If all peers miss, the read falls back to BadgerDB.
+observed. If all peers miss, the object is absent (404) — there is NO FSM/BadgerDB
+read fallback for object metadata.
 
-**BadgerDB fallback**: the BadgerDB fallback covers two cases:
-1. Objects committed before Phase 3 upgrade (pre-existing BadgerDB entries).
-2. Repair/scrubber-written entries injected via the raft control plane.
+**Control-plane vs data-plane boundary (load-bearing):** object metadata
+(regular/chunked/multipart/appendable/coalesced PUT, tags, ACL, quarantine,
+delete) is written ONLY to the off-raft quorum-meta blob — there is no raft
+propose and no second writer. The meta-raft FSM is a pure CONTROL plane (bucket
+config/policy/versioning, bucket→group assignment, placement generations, IAM,
+DEK/KEK, JWT keys, invites, peers, protocol credentials, lifecycle, config) and
+holds ZERO per-object records. The two stores never hold the same data, so
+"unify Raft vs Quorum" is a non-goal. The former writer-less FSM obj:/lat:
+object-read scaffolding was removed (greenfield — no residual obj:/lat: records,
+per the s4c_cutover greenfield decision). The per-object FSM commands
+(`CmdAppendObject`, `CmdCoalesceSegments`, `CmdPutObjectMeta`, tags/acl,
+quarantine, delete) are all retired (apply as no-ops; enum slots reserved, not
+renumbered).
 
-Note: multipart-completed objects used to be case (1) but are now off-raft
-(manifest → `.qmeta_mpu` quorum-meta blob; completion → deterministic vid from
-uploadID UUIDv7, short-circuit on existing per-version blob).
-
-**Remaining per-object FSM commands (as of Slice 1):** delete carve-out,
-tags/acl, quarantine, and `CmdPutObjectMeta` — to be retired in Slice 2. The
-former per-object FSM commands `CmdAppendObject` and `CmdCoalesceSegments` were
-retired in Slice 1 (apply as no-ops; slots reserved, not renumbered).
-
-**Internal buckets** (`_grainfs_*`) always use raft and never touch the quorum
-meta store.
+**Internal buckets** (`_grainfs_*`) reject object operations
+(`ErrInternalBucketNotObjectStore`) and never touch the quorum meta store.
 
 **Conflict resolution**: concurrent PUTs to the same key race on ModTime (LWW).
 UUIDv7 version IDs provide natural monotone ordering per-node, mitigating

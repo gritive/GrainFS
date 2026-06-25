@@ -5,22 +5,21 @@ import (
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/chunkref"
-	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // Acceptance gate: an object's chunk references are recoverable from the
 // data-group live-version manifest (ListAllObjectsStrict) ALONE — no meta-Raft
 // refcount index needed.
 func TestChunkRefsRebuildableFromManifestAlone(t *testing.T) {
-	b, db := newTestDistributedBackendWithDB(t)
+	b := newTestDistributedBackend(t)
 	ctx := context.Background()
 	if err := b.CreateBucket(ctx, "bkt"); err != nil {
 		t.Fatalf("bucket: %v", err)
 	}
-	seedObjectWithSegments(t, b, db, "bkt", "k1", "v1",
-		[]storage.SegmentRef{{BlobID: "c-A"}, {BlobID: "c-B"}}, nil)
-	seedObjectWithSegments(t, b, db, "bkt", "k2", "v1",
-		[]storage.SegmentRef{{BlobID: "c-A"}}, nil)
+	seedNonVersionedObjectWithSegments(t, b, "bkt", "k1",
+		[]SegmentMetaEntry{{BlobID: "c-A", SegmentIdx: 0}, {BlobID: "c-B", SegmentIdx: 1}}, nil)
+	seedNonVersionedObjectWithSegments(t, b, "bkt", "k2",
+		[]SegmentMetaEntry{{BlobID: "c-A", SegmentIdx: 0}}, nil)
 
 	objs, err := b.ListAllObjectsStrict()
 	if err != nil {

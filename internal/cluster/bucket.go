@@ -263,9 +263,8 @@ func (b *DistributedBackend) ForceDeleteBucket(ctx context.Context, bucket strin
 // deletes each via DeleteObjectVersion, which already purges the per-version blob +
 // shards. Finishes with the blob-aware DeleteBucket.
 //
-// The legacy raft tail (scanFsmCarveoutVersions + HardDeleteLegacyObject) has been
-// dropped: greenfield versioned buckets have no legacy-bare FSM carve-outs, and Task
-// 4c will retire CmdDeleteObject entirely.
+// There is no FSM tail: object metadata lives only on the off-raft quorum-meta
+// blob, so the per-version blob enumeration is exhaustive.
 func (b *DistributedBackend) forceDeleteBucketBlobAuth(ctx context.Context, bucket string) error {
 	if err := b.purgePerVersionBlobs(ctx, bucket); err != nil {
 		return err
@@ -486,18 +485,16 @@ func (b *DistributedBackend) SetObjectTagsPropose(bucket, key, versionID string,
 	return nil
 }
 
-// GetObjectTags satisfies storage.ObjectTagsGetter. Reads from the local
-// FSM-consistent view; writes flow through Raft and replicate to every
-// node, so the local view is always current modulo replication lag.
+// GetObjectTags satisfies storage.ObjectTagsGetter. Object tags live on the
+// off-raft quorum-meta blob (versioned: per-version blob; non-versioned:
+// latest-only blob), so tags are read from there — there is no FSM read path.
 func (b *DistributedBackend) GetObjectTags(bucket, key, versionID string) ([]storage.Tag, error) {
 	if err := guardInternalBucketObjectOp(bucket); err != nil {
 		return nil, err
 	}
-	// S4c-c-read1 T3: under blob-authoritative the per-version blob is the SOLE
-	// AUTHORITY for a vid-bearing versioned object's tags. A blob MISS never
-	// falls through to a stale vid-bearing FSM record — blob absence for a
-	// versioned object is a 404 (no tags). Only carve-out classes
-	// (appendable/coalesced/legacy bare-unversioned) stay FSM-authoritative.
+	// Under blob-authoritative the per-version blob is the SOLE AUTHORITY for a
+	// vid-bearing versioned object's tags. A blob MISS is a 404 (no tags) — blob
+	// absence for a versioned object means the object is gone.
 	if on, err := b.blobAuthReadOn(bucket); err != nil {
 		return nil, err // fail closed
 	} else if on {
@@ -509,9 +506,7 @@ func (b *DistributedBackend) GetObjectTags(bucket, key, versionID string) ([]sto
 		}
 		if versionID == "" {
 			// Latest: per-version blobs present are authoritative. A not-live
-			// (delete-marker) latest means the versioned object is GONE → 404; do
-			// NOT fall through to a carve-out (codex code-gate [P1]). Only a true
-			// per-version MISS (no blobs for this key) is eligible for carve-out.
+			// (delete-marker) latest means the versioned object is GONE → 404.
 			if len(cmds) > 0 {
 				cmd, live := deriveLatestVersion(cmds)
 				if live {
@@ -521,8 +516,7 @@ func (b *DistributedBackend) GetObjectTags(bucket, key, versionID string) ([]sto
 			}
 		} else {
 			// Specific version: a matching blob is authoritative. A delete-marker
-			// blob folds like the object read (codex code-gate [P2]). A vid not in
-			// the blob tree falls to carve-out (mirrors T2 headObjectMetaV).
+			// blob folds like the object read.
 			for _, c := range cmds {
 				if c.VersionID == versionID {
 					if c.IsHardDeleted {
@@ -535,45 +529,33 @@ func (b *DistributedBackend) GetObjectTags(bucket, key, versionID string) ([]sto
 				}
 			}
 		}
-		// per-version MISS under on → carve-out classes ONLY.
-		obj, _, carve, cerr := b.fsmCarveoutObject(bucket, key, versionID)
-		if cerr != nil {
-			return nil, cerr
-		}
-		if carve {
-			return append([]storage.Tag(nil), obj.Tags...), nil
-		}
-		// No vid-bearing-versioned FSM resurrection under blob authority.
+		// per-version MISS under blob authority → object is gone (404).
 		return nil, storage.ErrObjectNotFound
 	}
 
-	var result []storage.Tag
-	err := b.store.View(func(txn MetadataTxn) error {
-		dbKey := b.ks().ObjectMetaKey(bucket, key)
-		if versionID != "" {
-			dbKey = b.ks().ObjectMetaKeyV(bucket, key, versionID)
-		}
-		item, err := txn.Get(dbKey)
-		if err == ErrMetaKeyNotFound {
-			return storage.ErrObjectNotFound
-		}
-		if err != nil {
-			return err
-		}
-		val, err := b.itemValueCopy(item)
-		if err != nil {
-			return err
-		}
-		m, err := unmarshalObjectMeta(val)
-		if err != nil {
-			return err
-		}
-		if len(m.Tags) > 0 {
-			result = append([]storage.Tag(nil), m.Tags...)
-		}
-		return nil
-	})
-	return result, err
+	// Non-versioned: tags live on the latest-only quorum-meta blob (SetObjectTags
+	// RMWs the blob, not raft). A miss is a 404.
+	obj, _, err := b.readQuorumMeta(bucket, key)
+	if err != nil {
+		return nil, err
+	}
+	// A soft-deleted non-versioned object leaves an IsDeleteMarker tombstone in
+	// the latest-only blob; it is gone → 404 (mirrors headObjectMeta, so HEAD/GET
+	// and tag reads agree). Without this a deleted object would return 200 + empty
+	// tags.
+	if obj.ETag == deleteMarkerETag {
+		return nil, storage.ErrObjectNotFound
+	}
+	// A specific-version request must match the single latest-only blob version;
+	// a mismatch means the requested version is not available → 404. Mirrors the
+	// per-version guard in headObjectMetaV (object_version.go).
+	if versionID != "" && obj.VersionID != versionID {
+		return nil, storage.ErrObjectNotFound
+	}
+	if len(obj.Tags) == 0 {
+		return nil, nil
+	}
+	return append([]storage.Tag(nil), obj.Tags...), nil
 }
 
 // GetBucketVersioning satisfies server.BucketVersioner. Returns "Unversioned"

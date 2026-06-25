@@ -82,15 +82,17 @@ func TestScanObjectsBlobAuthOn(t *testing.T) {
 		require.NotContains(t, got, "k", "a non-EC object has no EC shards to scrub")
 	})
 
-	t.Run("EC legacy-bare carve-out → record", func(t *testing.T) {
+	t.Run("EC per-version blob → record", func(t *testing.T) {
 		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "b"))
-		// Legacy-bare EC record (no lat:, not appendable/coalesced) stays FSM-authoritative.
-		seedFSMObject(t, b, "b", "lk", "", objectMeta{Key: "lk", ETag: "bare", ECData: 4, ECParity: 2}, false)
 		setVersioningForTest(t, b, "b", "Enabled")
+		// EC per-version blob (4+2) is the blob authority and must be scrubbed.
+		seedVersionBlob(t, b, "b", "lk", vidA1, PutObjectMetaCmd{
+			ETag: "bare", ECData: 4, ECParity: 2, NodeIDs: []string{b.currentSelfAddr()},
+		})
 
 		got := collectScanObjectRecs(t, b, "b")
-		require.Contains(t, got, "lk", "EC legacy-bare carve-out is scrubbed")
+		require.Contains(t, got, "lk", "EC per-version blob is scrubbed")
 		require.Equal(t, 4, got["lk"].DataShards)
 		require.Equal(t, 2, got["lk"].ParityShards)
 	})
@@ -108,17 +110,21 @@ func TestScanObjectsBlobAuthOn(t *testing.T) {
 	})
 }
 
-// TestScanObjectsBlobAuthOffUnchanged confirms the off path still uses the FSM
-// lat: walk + quorum-meta merge.
+// TestScanObjectsBlobAuthOffUnchanged confirms the off (non-versioned) path
+// enumerates the EC scrub set from the latest-only quorum-meta blob store.
 func TestScanObjectsBlobAuthOffUnchanged(t *testing.T) {
 	ctx := context.Background()
 	b := newTestDistributedBackend(t)
 	require.True(t, b.ECActive())
 	require.NoError(t, b.CreateBucket(ctx, "b"))
-	// FSM lat:-indexed EC object (off-path source).
-	seedPlacementMeta(t, b, "b", "fsm.bin", "v1", []string{b.selfAddr}, 1, 0)
+	// Non-versioned regular-PUT EC object: latest-only quorum-meta blob.
+	require.NoError(t, b.writeQuorumMeta(ctx, PutObjectMetaCmd{
+		Bucket: "b", Key: "q.bin", VersionID: "v1",
+		Size: 1, ETag: "etag", ModTime: 1, ECData: 1, ECParity: 0,
+		NodeIDs: []string{b.selfAddr},
+	}))
 	// blob-authority off (default)
 
 	got := collectScanObjectRecs(t, b, "b")
-	require.Contains(t, got, "fsm.bin", "off path still reads the FSM lat: walk")
+	require.Contains(t, got, "q.bin", "off path reads the latest-only quorum-meta blob")
 }

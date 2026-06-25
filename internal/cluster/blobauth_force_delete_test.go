@@ -38,9 +38,13 @@ func TestForceDeleteBucketBlobAuthOn(t *testing.T) {
 	})
 
 	t.Run("blob-authority read error → propagated (fail closed)", func(t *testing.T) {
-		b, db := newTestDistributedBackendWithDB(t)
+		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "berr"))
-		require.NoError(t, db.Close())
+		setVersioningForTest(t, b, "berr", "Enabled")
+		// A corrupt per-version blob must fail the strict purge enumeration closed —
+		// a read error must NOT be swallowed (which would leave live versions undeleted
+		// yet report success).
+		seedCorruptVersionBlob(t, b, "berr", "k", vidA1)
 
 		err := b.ForceDeleteBucket(ctx, "berr")
 		require.Error(t, err)

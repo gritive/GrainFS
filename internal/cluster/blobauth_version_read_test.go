@@ -54,11 +54,13 @@ func TestHeadObjectMetaVBlobAuthOn(t *testing.T) {
 		require.Nil(t, obj)
 	})
 
-	t.Run("appendable carve-out (no blob) → returns FSM object", func(t *testing.T) {
+	t.Run("appendable carve-out (blob) → returns blob object", func(t *testing.T) {
 		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "bapp"))
 		setVersioningForTest(t, b, "bapp", "Enabled")
-		seedFSMObject(t, b, "bapp", "k", "v1", objectMeta{Key: "k", ETag: "app", IsAppendable: true}, true)
+		seedVersionBlob(t, b, "bapp", "k", "v1", PutObjectMetaCmd{
+			ETag: "app", IsAppendable: true, NodeIDs: []string{b.currentSelfAddr()},
+		})
 
 		obj, _, err := b.headObjectMetaV(ctx, "bapp", "k", "v1")
 		require.NoError(t, err)
@@ -67,12 +69,15 @@ func TestHeadObjectMetaVBlobAuthOn(t *testing.T) {
 		require.Equal(t, "app", obj.ETag)
 	})
 
-	t.Run("coalesced carve-out (no blob) → returns FSM object", func(t *testing.T) {
+	t.Run("coalesced carve-out (blob) → returns blob object", func(t *testing.T) {
 		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "bco"))
 		setVersioningForTest(t, b, "bco", "Enabled")
-		m := objectMeta{Key: "k", ETag: "co", Coalesced: []CoalescedShardRef{{CoalescedID: "c1", Size: 10}}}
-		seedFSMObject(t, b, "bco", "k", "v1", m, true)
+		seedVersionBlob(t, b, "bco", "k", "v1", PutObjectMetaCmd{
+			ETag: "co", IsAppendable: true,
+			Coalesced: []CoalescedShardRef{{CoalescedID: "c1", Size: 10}},
+			NodeIDs:   []string{b.currentSelfAddr()},
+		})
 
 		obj, _, err := b.headObjectMetaV(ctx, "bco", "k", "v1")
 		require.NoError(t, err)

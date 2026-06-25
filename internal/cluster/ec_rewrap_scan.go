@@ -47,14 +47,10 @@ func (b *DistributedBackend) CollectECRewrapTargets() ([]ECRewrapTarget, error) 
 		return nil
 	}
 
-	// FSM scan: carve-outs (appendable/coalesced) + internal-bucket records. (Plain
-	// versioned and non-versioned objects no longer write FSM obj: records — they are
-	// blob-only; the per-version blob enum below covers versioned, the latest-only
-	// blob enum covers non-versioned/Suspended.)
-	if err := b.fsm.IterECShardScanTargetsAllVersions(appendTarget); err != nil {
-		return nil, err
-	}
-
+	// Object metadata lives only in the quorum-meta blob store (off-raft): the
+	// per-version blob enum covers versioned objects, the latest-only blob enum
+	// covers non-versioned/Suspended.
+	//
 	// Per-version blob enum (versioning-enabled buckets): the per-version blob is the
 	// authority for versioned objects once their FSM obj: records are removed, so DEK
 	// rewrap MUST enumerate from blobs or it would silently skip every versioned

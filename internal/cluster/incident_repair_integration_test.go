@@ -61,11 +61,19 @@ var _ = Describe("Incident repair integration", func() {
 		svc := NewShardService(dir, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID))
 		nodes := []string{"test-node", "other-a", "other-b", "other-c", "other-d", "other-e"}
 		b.SetShardService(svc, nodes)
-		seedPlacementMeta(GinkgoT(), b, "b", "k", "v1", nodes, 4, 2)
+		// Placement (NodeIDs + VersionID) lives on the latest-only quorum-meta blob —
+		// the authority readPlacementMeta resolves for the repair verify. VersionID
+		// "v1" makes the resolved shard key "k/v1", matching the on-disk shard below.
+		blob, err := encodeQuorumMetaBlob(PutObjectMetaCmd{
+			Bucket: "b", Key: "k", VersionID: "v1", Size: 1, ContentType: "application/octet-stream",
+			ETag: "etag", ModTime: 1, ECData: 4, ECParity: 2, NodeIDs: nodes,
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(svc.writeQuorumMetaLocal("b", "k", blob)).To(Succeed())
 		Expect(svc.WriteLocalShard("b", "k/v1", 0, []byte("already-repaired"))).To(Succeed())
 
 		rec := &recordingIncidentRecorder{}
-		err := b.RepairShardLocalWithIncident(context.Background(), IncidentRepairRequest{
+		err = b.RepairShardLocalWithIncident(context.Background(), IncidentRepairRequest{
 			Bucket: "b", Key: "k", VersionID: "v1", ShardIdx: 0, Recorder: rec, Now: time.Unix(100, 0).UTC(),
 		})
 		Expect(err).NotTo(HaveOccurred())

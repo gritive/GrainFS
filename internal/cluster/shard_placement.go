@@ -34,7 +34,8 @@ func (r PlacementRecord) ECConfigOrFallback(def ECConfig) ECConfig {
 	return ECConfig{DataShards: r.K, ParityShards: r.M}
 }
 
-// ObjectMetaRef is the tuple IterObjectMetas yields for each object.
+// ObjectMetaRef identifies one object version for EC shard target construction
+// (buildECShardTargets). Callers build it from a decoded quorum-meta blob.
 type ObjectMetaRef struct {
 	Bucket      string
 	Key         string
@@ -47,160 +48,6 @@ type ObjectMetaRef struct {
 	NodeIDs     []string
 	// PlacementGroupID is the data raft group that owns this object version.
 	PlacementGroupID string
-}
-
-// IterObjectMetas iterates every logical object's metadata, invoking fn
-// exactly once per (bucket, key). Used by the Phase 18 re-placement manager
-// to find N× objects that need conversion to EC.
-//
-// Versioned keys (`obj:{bucket}/{key}/{versionID}`) cannot be safely parsed by
-// splitting on '/' — S3 keys legitimately contain slashes. Iterate the
-// `lat:{bucket}/{key}` pointer table instead: each entry yields the exact
-// key and the latest versionID, which is the only version that matters for
-// re-placement. Delete markers (tombstones) are skipped.
-//
-// Legacy unversioned `obj:{bucket}/{key}` records that lack a `lat:` pointer
-// are caught by a fallback scan of the `obj:` space — for those the key has
-// no embedded versionID so first-slash split is unambiguous. We skip any
-// `obj:` key whose base has a `lat:` pointer (those come through the lat
-// pass already).
-//
-// fn returning a non-nil error stops iteration.
-func (f *FSM) IterObjectMetas(fn func(ObjectMetaRef) error) error {
-	return f.iterLatestObjectMetas(func(ref ObjectMetaRef, _ objectMeta) error {
-		return fn(ref)
-	})
-}
-
-// iterLatestObjectMetas runs both the lat: pass and the legacy obj: fallback,
-// reads+decrypts+unmarshals each meta once, applies the delete-marker skip and
-// seen-dedup, and invokes fn with the built ObjectMetaRef AND the full
-// objectMeta. It is the shared core behind IterObjectMetas and
-// IterECShardScanTargets; behavior must stay identical to the public contract
-// documented on IterObjectMetas.
-func (f *FSM) iterLatestObjectMetas(fn func(ref ObjectMetaRef, m objectMeta) error) error {
-	return f.db.View(func(txn MetadataTxn) error {
-		seen := make(map[string]struct{}) // "bucket\x00key" → visited
-
-		rawLatPrefix := []byte("lat:")
-		if serr := f.keys.scanGroupPrefix(txn, rawLatPrefix, func(raw []byte, item MetaItem) error {
-			rest := string(raw[len(rawLatPrefix):])
-			slash := -1
-			for i, c := range rest {
-				if c == '/' {
-					slash = i
-					break
-				}
-			}
-			if slash < 0 {
-				return nil
-			}
-			bucket := rest[:slash]
-			key := rest[slash+1:]
-
-			var versionID string
-			if err := item.Value(func(v []byte) error {
-				versionID = string(v)
-				return nil
-			}); err != nil || versionID == "" {
-				return nil
-			}
-
-			metaItem, err := txn.Get(f.keys.ObjectMetaKeyV(bucket, key, versionID))
-			if err != nil {
-				return nil
-			}
-			var ref ObjectMetaRef
-			ref.Bucket = bucket
-			ref.Key = key
-			ref.VersionID = versionID
-			skip := false
-			val, verr := f.itemValueCopy(metaItem)
-			if verr != nil {
-				return verr
-			}
-			m, verr := unmarshalObjectMeta(val)
-			if verr != nil {
-				return verr
-			}
-			if m.ETag == deleteMarkerETag {
-				skip = true
-			}
-			ref.Size = m.Size
-			ref.ETag = m.ETag
-			ref.ECData = m.ECData
-			ref.ECParity = m.ECParity
-			ref.StripeBytes = m.StripeBytes
-			ref.NodeIDs = m.NodeIDs
-			ref.PlacementGroupID = m.PlacementGroupID
-			if skip {
-				return nil
-			}
-			seen[bucket+"\x00"+key] = struct{}{}
-			return fn(ref, m)
-		}); serr != nil {
-			return serr
-		}
-
-		// Fallback: legacy unversioned obj:{bucket}/{key} entries with no
-		// lat: pointer. Split on first '/' — these predate versioning and
-		// therefore carry no embedded versionID.
-		rawObjPrefix := []byte("obj:")
-		return f.keys.scanGroupPrefix(txn, rawObjPrefix, func(raw []byte, item MetaItem) error {
-			trimmed := string(raw[len(rawObjPrefix):])
-			slash := -1
-			for i, c := range trimmed {
-				if c == '/' {
-					slash = i
-					break
-				}
-			}
-			if slash < 0 {
-				return nil
-			}
-			bucket := trimmed[:slash]
-			key := trimmed[slash+1:]
-
-			// Skip: handled via lat: pass already, OR this is a versioned
-			// sub-entry whose base key was covered above.
-			if _, ok := seen[bucket+"\x00"+key]; ok {
-				return nil
-			}
-			// Skip versioned sub-entries whose base is in seen. The suffix
-			// after the last '/' is a versionID when the base has a lat pointer.
-			// TODO(slice-3+): this heuristic over-skips when legacy data mixes a
-			// versioned key "a" with an unversioned key "a/b" (prefix collision).
-			// Fix by inserting versioned sub-keys into seen during the lat: pass.
-			if lastSlash := lastIndexByte(trimmed, '/'); lastSlash > slash {
-				base := trimmed[:lastSlash]
-				baseKey := base[slash+1:]
-				if _, ok := seen[bucket+"\x00"+baseKey]; ok {
-					return nil
-				}
-			}
-
-			var ref ObjectMetaRef
-			ref.Bucket = bucket
-			ref.Key = key
-			val, verr := f.itemValueCopy(item)
-			if verr != nil {
-				return verr
-			}
-			m, verr := unmarshalObjectMeta(val)
-			if verr != nil {
-				return verr
-			}
-			ref.Size = m.Size
-			ref.ETag = m.ETag
-			ref.ECData = m.ECData
-			ref.ECParity = m.ECParity
-			ref.StripeBytes = m.StripeBytes
-			ref.NodeIDs = m.NodeIDs
-			ref.PlacementGroupID = m.PlacementGroupID
-			seen[bucket+"\x00"+key] = struct{}{}
-			return fn(ref, m)
-		})
-	})
 }
 
 // ECShardKind distinguishes the provenance of an EC shard scan target. It is
@@ -237,11 +84,9 @@ type ECShardScanTarget struct {
 	Placement        PlacementRecord
 }
 
-// IterECShardScanTargets emits one target per EC shard to verify, covering
-// object-version, segment, and coalesced shards. Provenance (Kind) is set here
-// and must never be re-derived from ShardKey downstream.
-//
-// Per object meta:
+// buildECShardTargets emits ECShardScanTarget entries for one object meta ref.
+// Provenance (Kind) is set here and must never be re-derived from ShardKey
+// downstream. Callers feed it a quorum-meta-blob-decoded objectMeta:
 //   - An object-version target is emitted ONLY when the object has neither
 //     segments nor coalesced shards (a real key/versionID object-version shard
 //     exists on disk). For chunked/coalesced objects the top-level EC fields are
@@ -253,15 +98,6 @@ type ECShardScanTarget struct {
 //     malformed and is skipped with a warning + metric.
 //
 // fn returning a non-nil error stops iteration.
-func (f *FSM) IterECShardScanTargets(fn func(ECShardScanTarget) error) error {
-	return f.iterLatestObjectMetas(func(ref ObjectMetaRef, m objectMeta) error {
-		return f.buildECShardTargets(ref, m, fn)
-	})
-}
-
-// buildECShardTargets emits ECShardScanTarget entries for one object meta ref.
-// It is the factored closure body of IterECShardScanTargets, reused by
-// IterECShardScanTargetsAllVersions.
 func (f *FSM) buildECShardTargets(ref ObjectMetaRef, m objectMeta, fn func(ECShardScanTarget) error) error {
 	if len(m.Segments) == 0 && len(m.Coalesced) == 0 {
 		return fn(ECShardScanTarget{
@@ -365,86 +201,6 @@ func (f *FSM) buildECShardTargets(ref ObjectMetaRef, m objectMeta, fn func(ECSha
 	return nil
 }
 
-// IterECShardScanTargetsAllVersions emits one ECShardScanTarget per EC shard
-// across ALL stored object versions (including non-latest), not just the latest
-// version per key. It is used by the DEK rewrap lane so that a
-// compromise-recovery rekey re-encrypts every stored shard, not only the
-// current head version.
-//
-// Enumeration strategy: iterate the obj: keyspace (which stores every version).
-// Delete markers are skipped (same as iterLatestObjectMetas). The (key,
-// versionID) pair is derived from the authoritative m.Key field stored in each
-// meta record: if the on-disk tail (everything after "obj:{bucket}/") is longer
-// than m.Key and starts with m.Key+"/", the remainder is the versionID;
-// otherwise versionID is "" (legacy unversioned). This avoids the lat:-heuristic
-// which misclassified keys when a same-bucket lat: pointer had a slash-containing
-// key that collided with another object's {key}/{versionID} tail.
-func (f *FSM) IterECShardScanTargetsAllVersions(fn func(ECShardScanTarget) error) error {
-	return f.db.View(func(txn MetadataTxn) error {
-		// Enumerate all obj: entries (every stored version).
-		rawObjPrefix := []byte("obj:")
-		return f.keys.scanGroupPrefix(txn, rawObjPrefix, func(raw []byte, item MetaItem) error {
-			rest := string(raw[len(rawObjPrefix):]) // "{bucket}/{...}"
-			bslash := -1
-			for i, c := range rest {
-				if c == '/' {
-					bslash = i
-					break
-				}
-			}
-			if bslash <= 0 {
-				return nil
-			}
-			bucket := rest[:bslash]
-			tail := rest[bslash+1:]
-
-			// The scan item IS the meta entry — use it directly. Avoid
-			// constructing ObjectMetaKeyV(bucket, key, "") for legacy keys:
-			// that appends a trailing slash and misses "obj:b/key" records.
-			v, err := f.itemValueCopy(item)
-			if err != nil {
-				return nil
-			}
-			m, err := unmarshalObjectMeta(v)
-			if err != nil || m.ETag == deleteMarkerETag {
-				return nil // skip delete markers (like iterLatestObjectMetas)
-			}
-
-			// Derive (key, versionID) from the authoritative m.Key.
-			// On-disk layout: obj:{bucket}/{key}           → legacy (versionID="")
-			//                 obj:{bucket}/{key}/{versionID} → versioned
-			// Comparing tail to m.Key exactly closes both the cross-bucket and the
-			// same-bucket collision cases that the lat:-heuristic could not handle.
-			key := m.Key
-			var versionID string
-			if len(tail) > len(key) && tail[len(key)] == '/' && tail[:len(key)] == key {
-				versionID = tail[len(key)+1:]
-			}
-			if versionID == "" {
-				// Bare key with no version suffix. persistPutObjectMetaUpdate writes
-				// the bare alias obj:{b}/{k} alongside the versioned obj:{b}/{k}/{v}
-				// (same EC ref) AND a lat:{b}/{k} pointer for every modern object
-				// (versioning on OR off — any put that generates a versionID). For
-				// those, the bare alias is an alias for the current latest version;
-				// its EC shard physically lives at /{k}/{v}/, and the versioned obj:
-				// entry already emits the correct /{k}/{v}/ target. Emitting the bare
-				// alias here would derive a version-less shardKey ("k") pointing at
-				// /{k}/, where no shard exists — the EC rewrap lane would skip it with
-				// an aggregate error and suppress the whole completion report on every
-				// Kick. So skip the bare alias when a lat: pointer exists.
-				//
-				// A pre-versioning legacy bare key (replay path, no lat:) is a
-				// genuinely version-less stored object whose shard DOES live at /{k}/,
-				// so it is KEPT (no lat: → not skipped).
-				if _, lerr := txn.Get(f.keys.LatestKey(bucket, key)); lerr == nil {
-					return nil
-				}
-			}
-			return f.buildECShardTargets(ObjectMetaRef{Bucket: bucket, Key: key, VersionID: versionID}, m, fn)
-		})
-	})
-}
-
 // validateECRefPlacement reports whether an EC ref describes a distributedly-
 // striped blob with a well-formed node list. It returns false (and callers must
 // skip) for two cases:
@@ -456,16 +212,6 @@ func validateECRefPlacement(ecData, ecParity uint8, nodeIDs []string) bool {
 		return false
 	}
 	return len(nodeIDs) == int(ecData)+int(ecParity)
-}
-
-// lastIndexByte mirrors strings.LastIndexByte without pulling the import.
-func lastIndexByte(s string, b byte) int {
-	for i := len(s) - 1; i >= 0; i-- {
-		if s[i] == b {
-			return i
-		}
-	}
-	return -1
 }
 
 // IterShardPlacements iterates every shard placement record in the FSM, invoking

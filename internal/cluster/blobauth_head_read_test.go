@@ -55,11 +55,13 @@ func TestHeadObjectMetaBlobAuthOn(t *testing.T) {
 		require.Nil(t, obj)
 	})
 
-	t.Run("appendable carve-out (no blob) → returns FSM object", func(t *testing.T) {
+	t.Run("appendable carve-out (blob) → returns blob object", func(t *testing.T) {
 		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "bapp"))
 		setVersioningForTest(t, b, "bapp", "Enabled")
-		seedFSMObject(t, b, "bapp", "k", "v1", objectMeta{Key: "k", ETag: "app", IsAppendable: true}, true)
+		seedVersionBlob(t, b, "bapp", "k", "v1", PutObjectMetaCmd{
+			ETag: "app", IsAppendable: true, NodeIDs: []string{b.currentSelfAddr()},
+		})
 
 		obj, _, err := b.headObjectMeta(ctx, "bapp", "k")
 		require.NoError(t, err)
@@ -68,12 +70,15 @@ func TestHeadObjectMetaBlobAuthOn(t *testing.T) {
 		require.Equal(t, "app", obj.ETag)
 	})
 
-	t.Run("coalesced carve-out (no blob) → returns FSM object", func(t *testing.T) {
+	t.Run("coalesced carve-out (blob) → returns blob object", func(t *testing.T) {
 		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "bco"))
 		setVersioningForTest(t, b, "bco", "Enabled")
-		m := objectMeta{Key: "k", ETag: "co", Coalesced: []CoalescedShardRef{{CoalescedID: "c1", Size: 10}}}
-		seedFSMObject(t, b, "bco", "k", "v1", m, true)
+		seedVersionBlob(t, b, "bco", "k", "v1", PutObjectMetaCmd{
+			ETag: "co", IsAppendable: true,
+			Coalesced: []CoalescedShardRef{{CoalescedID: "c1", Size: 10}},
+			NodeIDs:   []string{b.currentSelfAddr()},
+		})
 
 		obj, _, err := b.headObjectMeta(ctx, "bco", "k")
 		require.NoError(t, err)
@@ -81,11 +86,13 @@ func TestHeadObjectMetaBlobAuthOn(t *testing.T) {
 		require.Len(t, obj.Coalesced, 1)
 	})
 
-	t.Run("legacy bare-unversioned record (no lat:, no blob) → returns FSM object", func(t *testing.T) {
+	t.Run("legacy bare-unversioned record (latest-only blob) → returns blob object", func(t *testing.T) {
 		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "bleg"))
-		// Bucket need not be versioning-enabled for a legacy carve-out; flip blob-authority on.
-		seedFSMObject(t, b, "bleg", "k", "", objectMeta{Key: "k", ETag: "legacy"}, false)
+		// Non-versioned legacy object: latest-only quorum-meta blob is the authority.
+		seedLatestBlob(t, b, "bleg", "k", PutObjectMetaCmd{
+			ETag: "legacy", NodeIDs: []string{b.currentSelfAddr()},
+		})
 
 		obj, _, err := b.headObjectMeta(ctx, "bleg", "k")
 		require.NoError(t, err)
@@ -125,17 +132,19 @@ func TestHeadObjectMetaBlobAuthOffUnchanged(t *testing.T) {
 		require.Equal(t, "v1", obj.VersionID)
 	})
 
-	t.Run("off: FSM-fallback hit resolves (no blob, plain versioned FSM record)", func(t *testing.T) {
+	t.Run("off: latest-only blob hit resolves (non-versioned authority)", func(t *testing.T) {
 		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "foff"))
-		// Internal/legacy path: a bare obj: FSM record, no blob, blob-authority off.
-		// Under off this must still resolve via the availability-first FSM fallback.
-		seedFSMObject(t, b, "foff", "k", "", objectMeta{Key: "k", ETag: "fsm-off"}, false)
+		// Non-versioned (blob-authority off) object: the latest-only quorum-meta
+		// blob is the sole authority and must resolve.
+		seedLatestBlob(t, b, "foff", "k", PutObjectMetaCmd{
+			ETag: "blob-off", NodeIDs: []string{b.currentSelfAddr()},
+		})
 
 		obj, _, err := b.headObjectMeta(ctx, "foff", "k")
 		require.NoError(t, err)
 		require.NotNil(t, obj)
-		require.Equal(t, "fsm-off", obj.ETag)
+		require.Equal(t, "blob-off", obj.ETag)
 	})
 
 	t.Run("blob-absent plain-versioned FSM record is 404 (blob-primary, no FSM resurrection)", func(t *testing.T) {

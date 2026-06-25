@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.0.711.0] - 2026-06-26
+
+### Fixed
+- **`GetObjectTags` on a non-versioned (or version-Suspended) bucket now returns `404 NoSuchKey` for
+  a soft-deleted object and for a mismatched `versionId`, instead of returning `200` with empty tags
+  or the latest version's tags.** A tag read of a soft-deleted object (whose latest-only record is a
+  delete-marker tombstone) returned `200` + empty tags, and a specific-`versionId` read that did not
+  match the stored version returned the latest version's tags; both now `404`, matching the behavior
+  of `HEAD`/`GET` for the same input. (Found in review while removing the dead metadata read path
+  below.)
+
+### Changed
+- **Removed the dead Raft/FSM object-metadata read scaffolding; object metadata is now served from a
+  single source.** Object metadata (regular/chunked/multipart/appendable/coalesced PUT, tags, ACL,
+  quarantine, delete) is written only to the off-raft, EC-co-located quorum-meta blob store; the
+  meta-raft FSM is a pure control plane (bucket config/policy/versioning, IAM, keys, lifecycle) and
+  holds no per-object records. The writer-less FSM `obj:`/`lat:` read fallbacks and carve-out
+  machinery — which a greenfield cluster never populates — were removed across the read, list,
+  tagging, scrub, orphan-reclaim, EC-rewrap, and bucket-delete paths. Behavior-neutral; no API, wire,
+  or on-disk format change.
+
 ## [0.0.710.0] - 2026-06-26
 
 ### Removed

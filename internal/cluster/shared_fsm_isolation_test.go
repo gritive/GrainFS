@@ -26,7 +26,6 @@ import (
 
 	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/badgerutil"
-	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // mustNewKS is a test helper that fatals if newStateKeyspace returns an error.
@@ -60,42 +59,6 @@ func setupTwoFSMs(t *testing.T) (
 	fA = NewFSM(badgermeta.Wrap(db), ksA)
 	fB = NewFSM(badgermeta.Wrap(db), ksB)
 	return db, ksA, ksB, fA, fB
-}
-
-func setupTwoGroups(t *testing.T) (
-	db *badger.DB,
-	ksA, ksB *stateKeyspace,
-	fA, fB *FSM,
-	backendA, backendB *DistributedBackend,
-) {
-	t.Helper()
-
-	db, ksA, ksB, fA, fB = setupTwoFSMs(t)
-
-	nodeA, _ := newTestNodeForSharedDB(t, "isoA-node")
-	var err error
-	backendA, err = NewDistributedBackend(t.TempDir(), badgermeta.Wrap(db), nodeA, ksA, true)
-	require.NoError(t, err)
-	stopA := make(chan struct{})
-	go backendA.RunApplyLoop(stopA)
-	t.Cleanup(func() { close(stopA) })
-
-	nodeB, _ := newTestNodeForSharedDB(t, "isoB-node")
-	backendB, err = NewDistributedBackend(t.TempDir(), badgermeta.Wrap(db), nodeB, ksB, true)
-	require.NoError(t, err)
-	stopB := make(chan struct{})
-	go backendB.RunApplyLoop(stopB)
-	t.Cleanup(func() { close(stopB) })
-
-	return db, ksA, ksB, fA, fB, backendA, backendB
-}
-
-// applyCmd is a convenience wrapper around EncodeCommand + FSM.Apply.
-func applyCmd(t *testing.T, f *FSM, cmdType CommandType, payload any) {
-	t.Helper()
-	raw, err := EncodeCommand(cmdType, payload)
-	require.NoError(t, err)
-	require.NoError(t, f.Apply(raw))
 }
 
 // dbHasKey reports whether fullKey (already encoded — no extra prefix added) exists.
@@ -158,46 +121,18 @@ func TestSharedFSM_PrefixIsolation_AllPaths(t *testing.T) {
 			},
 		},
 		{
-			// PutObjectMeta: same bucket + same key in both groups; each group sees
-			// only its own value. A-only object not visible from B.
-			name: "PutObjectMeta_Isolation",
+			// PutObjectMeta keyspace isolation: same bucket + key in both groups
+			// produce DISTINCT encoded object-meta keys. (Object metadata no longer
+			// lives in or is read from the shared FSM DB under blob-primary — it is
+			// blob-resident — so the former HeadObject point-read isolation probe is
+			// retired; this row keeps the keyspace-distinctness invariant, which is
+			// what guards against cross-group collision.)
+			name: "PutObjectMeta_KeyspaceIsolation",
 			exercise: func(t *testing.T) {
-				// Phase 4: LIST uses quorum meta (shardSvc path). Shared-FSM
-				// backends have no shardSvc, so isolation is proved via
-				// HeadObject point reads (BadgerDB path) instead of ListObjects.
-				_, ksA, ksB, fA, fB, backendA, backendB := setupTwoGroups(t)
-
-				putObjViaApply(t, fA, bucket, "obj1", "A-etag")
-				putObjViaApply(t, fB, bucket, "obj1", "B-etag")
-				putObjViaApply(t, fA, bucket, "a-only", "A2-etag")
-
-				// HeadBucket reads MetaBucketStore (sole authority since Task 12);
-				// register the shared bucket name in each backend's own MBS.
-				seedBucketsInMBS(t, backendA, bucket)
-				seedBucketsInMBS(t, backendB, bucket)
-
-				ctx := context.Background()
-
-				// Point read: distinct values per group.
-				objA, _, err := backendA.headObjectMeta(ctx, bucket, "obj1")
-				require.NoError(t, err)
-				assert.Equal(t, "A-etag", objA.ETag)
-
-				objB, _, err := backendB.headObjectMeta(ctx, bucket, "obj1")
-				require.NoError(t, err)
-				assert.Equal(t, "B-etag", objB.ETag)
-
-				// a-only belongs to A; B must not find it.
-				_, _, err = backendB.headObjectMeta(ctx, bucket, "a-only")
-				assert.Error(t, err, "a-only must not be visible from group B")
-
-				// A can still read its own a-only.
-				objA2, _, err := backendA.headObjectMeta(ctx, bucket, "a-only")
-				require.NoError(t, err)
-				assert.Equal(t, "A2-etag", objA2.ETag)
-
-				// Encoded object meta keys must be distinct.
-				assert.NotEqual(t, ksA.ObjectMetaKey(bucket, "obj1"), ksB.ObjectMetaKey(bucket, "obj1"))
+				ksA := mustNewKS(t, "iso-A")
+				ksB := mustNewKS(t, "iso-B")
+				assert.NotEqual(t, ksA.ObjectMetaKey(bucket, "obj1"), ksB.ObjectMetaKey(bucket, "obj1"),
+					"two groups must produce distinct encoded object-meta keys")
 			},
 		},
 		{
@@ -299,108 +234,14 @@ func TestSharedFSM_PrefixIsolation_AllPaths(t *testing.T) {
 				assert.False(t, dbHasKey(t, fB.db, qB), "B must not have a quarantine key")
 			},
 		},
-		{
-			// WalkObjects: A's WalkObjects must not see B's objects.
-			// Phase 4: WalkObjects uses quorum meta (shardSvc path). Shared-FSM
-			// backends have no shardSvc so WalkObjects returns empty — B's keys
-			// are absent by construction. Positive visibility is proved via
-			// HeadObject (BadgerDB path).
-			name: "WalkObjects_ScopedToGroup",
-			exercise: func(t *testing.T) {
-				_, _, _, fA, fB, backendA, backendB := setupTwoGroups(t)
-
-				putObjViaApply(t, fA, bucket, "walk-a1", "A1")
-				putObjViaApply(t, fA, bucket, "walk-a2", "A2")
-				putObjViaApply(t, fB, bucket, "walk-b1", "B1")
-
-				// HeadBucket reads MetaBucketStore (sole authority since Task 12);
-				// register the shared bucket name in each backend's own MBS.
-				seedBucketsInMBS(t, backendA, bucket)
-				seedBucketsInMBS(t, backendB, bucket)
-
-				ctx := context.Background()
-
-				// WalkObjects returns empty for no-shardSvc backends; B's keys
-				// must never surface in A's view.
-				var walkedA []string
-				err := backendA.WalkObjects(ctx, bucket, "", func(o *storage.Object) error {
-					walkedA = append(walkedA, o.Key)
-					return nil
-				})
-				require.NoError(t, err)
-				for _, k := range walkedA {
-					assert.NotEqual(t, "walk-b1", k, "B's key must not appear in A's walk")
-				}
-
-				// HeadObject proves each group sees only its own objects.
-				objA1, _, err := backendA.headObjectMeta(ctx, bucket, "walk-a1")
-				require.NoError(t, err)
-				assert.Equal(t, "A1", objA1.ETag)
-
-				objA2, _, err := backendA.headObjectMeta(ctx, bucket, "walk-a2")
-				require.NoError(t, err)
-				assert.Equal(t, "A2", objA2.ETag)
-
-				_, _, err = backendA.headObjectMeta(ctx, bucket, "walk-b1")
-				assert.Error(t, err, "B's key must not be visible from A via HeadObject")
-
-				objB1, _, err := backendB.headObjectMeta(ctx, bucket, "walk-b1")
-				require.NoError(t, err)
-				assert.Equal(t, "B1", objB1.ETag)
-			},
-		},
-		{
-			// ListAllObjectsStrict (live-version manifest): A's view excludes B's objects.
-			name: "ListAllObjectsStrict_ScopedToGroup",
-			exercise: func(t *testing.T) {
-				_, _, _, fA, fB, backendA, _ := setupTwoGroups(t)
-
-				// ListAllObjectsStrict iterates obj: versioned keys; need a VersionID.
-				// CmdPutObjectMeta is a no-op in the FSM after Slice 2; write via
-				// persistPutObjectMetaUpdate directly.
-				cmdA := PutObjectMetaCmd{
-					Bucket: bucket, Key: "snap-a", Size: 1, ContentType: "text/plain",
-					ETag: "A-snap", ModTime: 1, VersionID: "v1",
-				}
-				require.NoError(t, fA.db.Update(func(txn MetadataTxn) error {
-					return fA.persistPutObjectMetaUpdate(txn, cmdA, buildPutObjectMeta(cmdA))
-				}))
-
-				cmdB := PutObjectMetaCmd{
-					Bucket: bucket, Key: "snap-b", Size: 1, ContentType: "text/plain",
-					ETag: "B-snap", ModTime: 1, VersionID: "v1",
-				}
-				require.NoError(t, fB.db.Update(func(txn MetadataTxn) error {
-					return fB.persistPutObjectMetaUpdate(txn, cmdB, buildPutObjectMeta(cmdB))
-				}))
-
-				// Wire a MetaBucketStore on backendA so ListBuckets (called by
-				// ListAllObjectsStrict → listAllObjectsForGC) sees the bucket.
-				// (Task 12: CmdCreateBucket is retired; bucket existence comes from MetaFSM.)
-				mbsA := newTestMetaBucketStore(t)
-				require.NoError(t, mbsA.CreateBucket(context.Background(), bucket, "gA", false))
-				backendA.SetMetaBucketStore(mbsA)
-
-				objs, err := backendA.ListAllObjectsStrict()
-				require.NoError(t, err)
-				var keys []string
-				for _, o := range objs {
-					keys = append(keys, o.Key)
-				}
-				for _, k := range keys {
-					assert.NotEqual(t, "snap-b", k, "B's object must not appear in A's ListAllObjectsStrict")
-				}
-				// A's object must be present (if versioned format is written).
-				// (snap-a is present only if at least one versioned key was written.)
-				found := false
-				for _, k := range keys {
-					if k == "snap-a" {
-						found = true
-					}
-				}
-				assert.True(t, found, "A's snap-a must appear in ListAllObjectsStrict")
-			},
-		},
+		// Object-read isolation rows (PutObjectMeta HeadObject probe,
+		// WalkObjects_ScopedToGroup, ListAllObjectsStrict_ScopedToGroup) were
+		// removed: object metadata is no longer written to or read from the shared
+		// FSM BadgerDB (it is blob-resident under blob-primary), so the shared-DB
+		// object-collision risk these probed is structurally gone. FSM-keyspace
+		// isolation is still covered by the keyspace-distinctness rows above and by
+		// the snapshot/restore prefix-isolation tests in shared_fsm_test.go.
+		//
 		// Shard placement (CmdPutShardPlacement / CmdDeleteShardPlacement) is
 		// intentionally skipped: apply.go:94-100 treats both commands as no-ops
 		// ("placement is now derived deterministically from the ring"). Driving
@@ -433,8 +274,10 @@ func TestSharedFSM_PrefixIsolation_AllPaths(t *testing.T) {
 
 // TestSharedFSM_PathologicalGroupIDs_NoCollision is the end-to-end version of
 // TestStateKeyspace_NoCrossGroupCollision_PathologicalIDs: three groups whose
-// IDs look prefix-y are written through the FSM and then read back through
-// DistributedBackend.ListObjects to prove no cross-group leakage.
+// IDs look prefix-y are written through the FSM and proven to occupy distinct,
+// non-colliding encoded keyspaces (the length header prevents byte-prefix
+// collisions). The former backend HeadObject probe is retired — object metadata
+// is blob-resident under blob-primary and no longer read from the shared FSM DB.
 func TestSharedFSM_PathologicalGroupIDs_NoCollision(t *testing.T) {
 	db, err := badger.Open(badgerutil.SmallOptions("").WithInMemory(true))
 	require.NoError(t, err)
@@ -452,7 +295,7 @@ func TestSharedFSM_PathologicalGroupIDs_NoCollision(t *testing.T) {
 	putObjViaApply(t, fGx, "b", "k", "Gx-payload")
 	putObjViaApply(t, fLong, "b", "k", "Long-payload")
 
-	// All three encoded object-meta keys must be pairwise distinct.
+	// All three encoded object-meta keys must be pairwise distinct and present.
 	eG := ksG.ObjectMetaKey("b", "k")
 	eGx := ksGx.ObjectMetaKey("b", "k")
 	eLong := ksLong.ObjectMetaKey("b", "k")
@@ -464,55 +307,6 @@ func TestSharedFSM_PathologicalGroupIDs_NoCollision(t *testing.T) {
 	assert.NotEqual(t, eG, eGx, "g and g\\x00x must produce distinct encoded keys")
 	assert.NotEqual(t, eG, eLong, "g and long-z must produce distinct encoded keys")
 	assert.NotEqual(t, eGx, eLong, "g\\x00x and long-z must produce distinct encoded keys")
-
-	// Backend-level: each group's HeadObject sees only its own payload.
-	// Phase 4: LIST uses quorum meta (shardSvc path); shared-FSM backends have
-	// no shardSvc, so isolation is proved via HeadObject (BadgerDB path).
-	nodeG, _ := newTestNodeForSharedDB(t, "path-g")
-	backendG, err := NewDistributedBackend(t.TempDir(), badgermeta.Wrap(db), nodeG, ksG, true)
-	require.NoError(t, err)
-	stopG := make(chan struct{})
-	go backendG.RunApplyLoop(stopG)
-	t.Cleanup(func() { close(stopG) })
-
-	nodeGx, _ := newTestNodeForSharedDB(t, "path-gx")
-	backendGx, err := NewDistributedBackend(t.TempDir(), badgermeta.Wrap(db), nodeGx, ksGx, true)
-	require.NoError(t, err)
-	stopGx := make(chan struct{})
-	go backendGx.RunApplyLoop(stopGx)
-	t.Cleanup(func() { close(stopGx) })
-
-	nodeLong, _ := newTestNodeForSharedDB(t, "path-long")
-	backendLong, err := NewDistributedBackend(t.TempDir(), badgermeta.Wrap(db), nodeLong, ksLong, true)
-	require.NoError(t, err)
-	stopLong := make(chan struct{})
-	go backendLong.RunApplyLoop(stopLong)
-	t.Cleanup(func() { close(stopLong) })
-
-	// HeadBucket reads MetaBucketStore (sole authority since Task 12); register the
-	// shared bucket name "b" in each backend's own MBS so existence resolves.
-	seedBucketsInMBS(t, backendG, "b")
-	seedBucketsInMBS(t, backendGx, "b")
-	seedBucketsInMBS(t, backendLong, "b")
-
-	ctx := context.Background()
-
-	for _, tc := range []struct {
-		name     string
-		backend  *DistributedBackend
-		wantETag string
-	}{
-		{"group-g", backendG, "G-payload"},
-		{"group-gx", backendGx, "Gx-payload"},
-		{"group-long", backendLong, "Long-payload"},
-	} {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			obj, _, err := tc.backend.headObjectMeta(ctx, "b", "k")
-			require.NoError(t, err)
-			assert.Equal(t, tc.wantETag, obj.ETag, "each group must see only its own payload")
-		})
-	}
 }
 
 // TestSharedFSM_GroupCloseDoesNotCloseSharedDB verifies that a DistributedBackend

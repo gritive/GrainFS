@@ -3,12 +3,8 @@ package cluster
 // Scrubbable interface implementation for DistributedBackend. Exposes the
 // scrubber.ShardOwner, scrubber.ShardRepairer, and related contracts so the
 // cluster-mode scrubber can verify locally-assigned shards and repair missing
-// ones via RepairShard.
-//
-// Open issues:
-//   - IterObjectMetas parses versioned `obj:{bucket}/{key}/{versionID}` keys
-//     with a first-slash split, folding the versionID into the key. ScanObjects
-//     sidesteps the issue entirely by iterating `lat:` pointers instead.
+// ones via RepairShard. The scrub object set is derived from the off-raft
+// quorum-meta blob store (scanObjectsBlobAuth / scanQuorumMeta), not the FSM.
 
 import (
 	"context"
@@ -77,73 +73,12 @@ func (b *DistributedBackend) ScanObjects(bucket string) (<-chan scrubber.ObjectR
 		return ch, nil
 	}
 
+	// Non-versioned/Suspended bucket: regular-PUT EC objects are written to the
+	// latest-only quorum-meta blob (never the FSM), so enumerate the EC scrub set
+	// from there. Repair-only: this adds no deletion path.
 	go func() {
 		defer close(ch)
-		rawLatPrefix := []byte("lat:" + bucket + "/")
-
-		// seen records every key the FSM lat: walk visits — INCLUDING tombstones
-		// (recorded before the tombstone skip below) — so the quorum-meta merge
-		// that follows treats the FSM as authoritative and skips any stale-live
-		// quorum-meta file for a deleted key.
-		seen := make(map[string]struct{})
-
-		_ = b.store.View(func(txn MetadataTxn) error {
-			return b.ks().scanGroupPrefix(txn, rawLatPrefix, func(raw []byte, item MetaItem) error {
-				key := string(raw[len(rawLatPrefix):])
-				seen[key] = struct{}{}
-
-				var versionID string
-				if err := item.Value(func(v []byte) error {
-					versionID = string(v)
-					return nil
-				}); err != nil || versionID == "" {
-					return nil
-				}
-
-				metaItem, err := txn.Get(b.ks().ObjectMetaKeyV(bucket, key, versionID))
-				if err != nil {
-					return nil
-				}
-				var meta objectMeta
-				v, err := b.itemValueCopy(metaItem)
-				if err != nil {
-					return nil
-				}
-				meta, err = unmarshalObjectMeta(v)
-				if err != nil {
-					return nil
-				}
-				if meta.ETag == deleteMarkerETag {
-					return nil // tombstone — no shards to scrub
-				}
-
-				// Report the object's OWN EC profile (meta.ECData/ECParity), not the
-				// cluster's current config: a genesis 1+0 object in a grown 4+2 cluster
-				// must enumerate as 1+0 so the EC scrubber expects the right shard count
-				// AND the redundancy-upgrade sweep can detect it (parity==0). Using the
-				// cluster config here reported every FSM-resident object — including
-				// versioned 1+0 objects — with the current parity, silently hiding them
-				// from the upgrade sweep. Mirrors the quorum-meta branch (cmd.ECData).
-				ch <- scrubber.ObjectRecord{
-					Bucket:       bucket,
-					Key:          key,
-					VersionID:    versionID,
-					DataShards:   int(meta.ECData),
-					ParityShards: int(meta.ECParity),
-					ETag:         meta.ETag,
-					LastModified: meta.LastModified,
-				}
-				return nil
-			})
-		})
-
-		// S0: regular-PUT EC objects are written to quorum-meta only (never
-		// proposed to the FSM lat: index), so the lat: walk above misses them.
-		// Merge quorum-meta entries the scrubber must also repair, deduped by
-		// key against the FSM walk (FSM wins — including FSM tombstones, so a
-		// stale-live quorum-meta file for a deleted key is skipped). Repair-only:
-		// this adds no deletion path.
-		for _, rec := range b.quorumMetaScrubRecords(bucket, seen) {
+		for _, rec := range b.quorumMetaScrubRecords(bucket, nil) {
 			ch <- rec
 		}
 	}()
@@ -221,9 +156,7 @@ func (b *DistributedBackend) scanObjectsBlobAuth(bucket string) ([]scrubber.Obje
 		}
 	}
 	var recs []scrubber.ObjectRecord
-	seen := map[string]struct{}{}
 	for _, c := range latest {
-		seen[c.Key] = struct{}{}
 		if c.IsDeleteMarker || c.ETag == deleteMarkerETag {
 			continue // delete-marker latest — no shards to scrub
 		}
@@ -239,30 +172,6 @@ func (b *DistributedBackend) scanObjectsBlobAuth(bucket string) ([]scrubber.Obje
 			ETag:         c.ETag,
 			LastModified: c.ModTime,
 		})
-	}
-	// Local EC carve-out FSM records (appendable/coalesced/legacy-bare), deduped
-	// by key against the blob latest set (blob wins). Reuse the shared carve-out
-	// walk so the classification matches ListObjectVersions exactly.
-	if err := b.forEachLocalCarveout(bucket, "", func(key, vid string, _ bool, _ string, m objectMeta) error {
-		if _, dup := seen[key]; dup {
-			return nil // blob latest already covers this key
-		}
-		if m.ECData == 0 {
-			return nil // no EC shards to scrub
-		}
-		seen[key] = struct{}{}
-		recs = append(recs, scrubber.ObjectRecord{
-			Bucket:       bucket,
-			Key:          key,
-			VersionID:    vid,
-			DataShards:   int(m.ECData),
-			ParityShards: int(m.ECParity),
-			ETag:         m.ETag,
-			LastModified: m.LastModified,
-		})
-		return nil
-	}); err != nil {
-		return nil, err
 	}
 	return recs, nil
 }

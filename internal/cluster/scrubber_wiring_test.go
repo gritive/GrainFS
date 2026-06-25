@@ -4,6 +4,7 @@ package cluster
 // (NodeID, OwnedShards) and scrubber.ShardRepairer (RepairShardLocal).
 
 import (
+	"context"
 	"testing"
 
 	"github.com/dgraph-io/badger/v4"
@@ -65,14 +66,12 @@ func TestRaftNodeID_NilNode(t *testing.T) {
 }
 
 func TestOwnedShards_MetadataOnlyPlacement(t *testing.T) {
-	db := newTestDB(t)
-	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
-	b := &DistributedBackend{store: badgermeta.Wrap(db), fsm: fsm}
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(context.Background(), "b"))
 
-	cmd := PutObjectMetaCmd{
-		Bucket:      "b",
-		Key:         "obj",
-		VersionID:   "v1",
+	// Placement (NodeIDs) lives on the latest-only quorum-meta blob — the
+	// non-versioned object authority readPlacementMeta resolves.
+	seedLatestBlob(t, b, "b", "obj", PutObjectMetaCmd{
 		Size:        1,
 		ContentType: "application/octet-stream",
 		ETag:        "etag",
@@ -80,10 +79,7 @@ func TestOwnedShards_MetadataOnlyPlacement(t *testing.T) {
 		ECData:      2,
 		ECParity:    1,
 		NodeIDs:     []string{"test-node", "other", "test-node"},
-	}
-	require.NoError(t, fsm.db.Update(func(txn MetadataTxn) error {
-		return fsm.persistPutObjectMetaUpdate(txn, cmd, buildPutObjectMeta(cmd))
-	}))
+	})
 
 	got := b.OwnedShards("b", "obj", "v1", "test-node")
 	assert.Equal(t, []int{0, 2}, got)

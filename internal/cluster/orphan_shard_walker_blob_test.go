@@ -8,9 +8,10 @@ import (
 )
 
 // TestHasLiveShardRecord_VersioningEnabled proves that for a versioning-enabled
-// bucket the per-version blob is the shard-liveness authority (live/tombstone/marker),
-// with carve-out (appendable/coalesced) FSM records still protected, and a stale
-// plain-versioned FSM record is NON-authoritative (orphan-eligible).
+// bucket the per-version blob is the SOLE shard-liveness authority
+// (live/tombstone/marker). A per-version MISS is orphan-eligible — there is no FSM
+// read fallback, so a stale FSM record (which greenfield never produces) can never
+// keep shards alive.
 func TestHasLiveShardRecord_VersioningEnabled(t *testing.T) {
 	ctx := context.Background()
 	b := orphanWalkerBackend(t)
@@ -21,9 +22,10 @@ func TestHasLiveShardRecord_VersioningEnabled(t *testing.T) {
 	seedVersionBlob(t, b, "vb", "k", "vLive", PutObjectMetaCmd{ETag: "e", NodeIDs: []string{self}})
 	seedVersionBlob(t, b, "vb", "k", "vTomb", PutObjectMetaCmd{ETag: "e", NodeIDs: []string{self}, IsHardDeleted: true})
 	seedVersionBlob(t, b, "vb", "k", "vMark", PutObjectMetaCmd{ETag: deleteMarkerETag, IsDeleteMarker: true, NodeIDs: []string{self}})
-	// Appendable carve-out (FSM-authoritative, no blob).
-	seedFSMObject(t, b, "vb", "ak", "vA", objectMeta{Key: "ak", ETag: "app", IsAppendable: true}, true)
-	// A stale plain-versioned FSM record with no blob (e.g. C4 left it on hard delete).
+	// Appendable object: blob-resident (greenfield writes the blob, not an FSM record).
+	seedVersionBlob(t, b, "vb", "ak", "vA", PutObjectMetaCmd{ETag: "app", IsAppendable: true, NodeIDs: []string{self}})
+	// A stale plain-versioned FSM record with NO blob: it must NOT keep shards alive
+	// (the FSM record is never read).
 	seedFSMObject(t, b, "vb", "k", "vGhost", objectMeta{Key: "k", ETag: "stale"}, true)
 
 	cases := []struct {
@@ -34,8 +36,8 @@ func TestHasLiveShardRecord_VersioningEnabled(t *testing.T) {
 		{"k", "vLive", true, true},
 		{"k", "vTomb", false, true},
 		{"k", "vMark", false, true},
-		{"ak", "vA", true, true},     // carve-out FSM
-		{"k", "vGhost", false, true}, // stale plain-versioned FSM record → orphan-eligible
+		{"ak", "vA", true, true},     // appendable blob → live
+		{"k", "vGhost", false, true}, // stale FSM record, no blob → orphan-eligible
 		{"k", "vMissing", false, true},
 	}
 	for _, tc := range cases {
@@ -47,9 +49,9 @@ func TestHasLiveShardRecord_VersioningEnabled(t *testing.T) {
 
 // TestWalkOrphanShards_VersioningEnabled_BlobAuthority proves the shard sweep, for a
 // versioning-enabled bucket: protects a live version (per-version blob), protects an
-// appendable carve-out (FSM forward-map), and ORPHANS a hard-deleted version's shards
-// even when a stale plain-versioned FSM record lingers (blob tombstone wins; the
-// lingering FSM record must NOT keep the shards alive).
+// appendable object (blob-resident), and ORPHANS a hard-deleted version's shards
+// even when a stale plain-versioned FSM record lingers (the blob tombstone wins; the
+// lingering FSM record is never read and must NOT keep the shards alive).
 func TestWalkOrphanShards_VersioningEnabled_BlobAuthority(t *testing.T) {
 	ctx := context.Background()
 	b := orphanWalkerBackend(t)
@@ -65,8 +67,8 @@ func TestWalkOrphanShards_VersioningEnabled_BlobAuthority(t *testing.T) {
 	seedVersionBlob(t, b, "vb", "k", "vDead", PutObjectMetaCmd{ETag: "e", ECData: 1, NodeIDs: []string{self}, IsHardDeleted: true})
 	seedFSMObject(t, b, "vb", "k", "vDead", objectMeta{Key: "k", ETag: "e", ECData: 1}, true)
 	dead := writeShardLeaf(t, root, "vb/k/vDead", []int{0}, oldEnough)
-	// appendable carve-out: FSM record (no blob) + shard → protected via forward-map.
-	seedFSMObject(t, b, "vb", "ak", "vA", objectMeta{Key: "ak", ETag: "app", IsAppendable: true, ECData: 1}, true)
+	// appendable object: blob-resident (greenfield) + shard → protected.
+	seedVersionBlob(t, b, "vb", "ak", "vA", PutObjectMetaCmd{ETag: "app", IsAppendable: true, ECData: 1, NodeIDs: []string{self}})
 	carve := writeShardLeaf(t, root, "vb/ak/vA", []int{0}, oldEnough)
 
 	got := collectOrphans(t, b, nil)

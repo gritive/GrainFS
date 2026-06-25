@@ -137,25 +137,6 @@ func TestClusterCoordinatorBucketPolicyPassesClusterAwareHeadBucket(t *testing.T
 	require.Contains(t, base.calls, "DeleteBucketPolicy:bk-pol")
 }
 
-func requireMutationProposedBeforeApply(t *testing.T, gb *GroupBackend, errCh <-chan error, op string) {
-	t.Helper()
-	initialCommit := gb.Node().CommittedIndex()
-	require.Eventually(t, func() bool {
-		select {
-		case err := <-errCh:
-			require.Failf(t, op+" returned before local object apply", "err=%v", err)
-			return false
-		default:
-		}
-		return gb.Node().CommittedIndex() > initialCommit
-	}, time.Second, time.Millisecond)
-	select {
-	case err := <-errCh:
-		require.Failf(t, op+" returned before local object apply", "err=%v", err)
-	default:
-	}
-}
-
 func TestClusterCoordinatorSelfPeerAlias(t *testing.T) {
 	c := NewClusterCoordinator(nil, nil, nil, nil, "node-a").WithSelfPeerAlias("127.0.0.1:9001")
 
@@ -493,21 +474,14 @@ func TestClusterCoordinator_DeleteObject_MissingObjectIsIdempotentWhenBucketExis
 
 func TestClusterCoordinator_HeadObject_UsesLocalSingletonVoterReadBeforeForward(t *testing.T) {
 	base := &fakeBackend{}
-	gb, gbDB := newTestFollowerGroupBackend(t, "g1", "self")
-	metaBytes, err := marshalObjectMeta(objectMeta{
-		Key:          "key",
-		Size:         4,
-		ContentType:  "text/plain",
-		ETag:         "etag",
-		LastModified: time.Now().Unix(),
+	gb, _ := newTestFollowerGroupBackend(t, "g1", "self")
+	require.NoError(t, gb.CreateBucket(context.Background(), "read-bucket"))
+	// Non-versioned object: latest-only quorum-meta blob is the authority the
+	// local HeadObject read resolves.
+	seedLatestBlob(t, gb.DistributedBackend, "read-bucket", "key", PutObjectMetaCmd{
+		Size: 4, ContentType: "text/plain", ETag: "etag",
+		ModTime: time.Now().Unix(), NodeIDs: []string{gb.currentSelfAddr()},
 	})
-	require.NoError(t, err)
-	require.NoError(t, gbDB.Update(func(txn *badger.Txn) error {
-		if err := txn.Set(bucketKey("read-bucket"), []byte{1}); err != nil {
-			return err
-		}
-		return txn.Set(objectMetaKey("read-bucket", "key"), metaBytes)
-	}))
 	mgr := NewDataGroupManager()
 	mgr.Add(NewDataGroupWithBackend("g1", []string{"self"}, gb))
 	router := NewRouter(mgr)

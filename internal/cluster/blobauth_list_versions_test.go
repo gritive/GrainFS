@@ -83,47 +83,15 @@ func TestListObjectVersionsBlobAuthOn(t *testing.T) {
 		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "bapp"))
 		setVersioningForTest(t, b, "bapp", "Enabled")
-		seedFSMObject(t, b, "bapp", "ak", vidA1, objectMeta{Key: "ak", ETag: "app", IsAppendable: true}, true)
+		seedVersionBlob(t, b, "bapp", "ak", vidA1, PutObjectMetaCmd{
+			ETag: "app", IsAppendable: true, NodeIDs: []string{b.currentSelfAddr()},
+		})
 
 		vs, err := b.ListObjectVersions(ctx, "bapp", "", 0)
 		require.NoError(t, err)
 		idx := versionByKeyVID(vs)
 		require.NotNil(t, idx[[2]string{"ak", vidA1}], "appendable carve-out appears")
 		require.Equal(t, "app", idx[[2]string{"ak", vidA1}].ETag)
-	})
-
-	t.Run("versioned appendable slashless mirror → no bogus empty-VID duplicate", func(t *testing.T) {
-		// codex code-gate [P2]: a versioned appendable object can persist BOTH the
-		// versioned key obj:b/ak/v1 (lat:b/ak→v1) AND a slashless mirror obj:b/ak.
-		// The bucket-wide carve-out scan must follow lat: (like read1's per-key
-		// fsmCarveoutObject) and emit ONLY the versioned (ak,v1) entry — NOT a
-		// spurious (ak,"") row (which would duplicate the object and yield two
-		// IsLatest=true rows for one key).
-		b := newTestDistributedBackend(t)
-		require.NoError(t, b.CreateBucket(ctx, "bmir"))
-		setVersioningForTest(t, b, "bmir", "Enabled")
-		// versioned appendable record + lat:bmir/ak→vidA1
-		seedFSMObject(t, b, "bmir", "ak", vidA1, objectMeta{Key: "ak", ETag: "app", IsAppendable: true}, true)
-		// slashless mirror obj:bmir/ak (appendable), WITHOUT touching lat:
-		seedFSMObject(t, b, "bmir", "ak", "", objectMeta{Key: "ak", ETag: "app", IsAppendable: true}, false)
-
-		vs, err := b.ListObjectVersions(ctx, "bmir", "", 0)
-		require.NoError(t, err)
-		idx := versionByKeyVID(vs)
-		require.NotNil(t, idx[[2]string{"ak", vidA1}], "versioned appendable entry appears")
-		require.Nil(t, idx[[2]string{"ak", ""}], "slashless mirror must NOT emit a bogus empty-VID carve-out")
-		// Exactly one row for key "ak", and exactly one IsLatest.
-		var akRows, akLatest int
-		for _, v := range vs {
-			if v.Key == "ak" {
-				akRows++
-				if v.IsLatest {
-					akLatest++
-				}
-			}
-		}
-		require.Equal(t, 1, akRows, "exactly one version row for the appendable key")
-		require.Equal(t, 1, akLatest, "exactly one IsLatest=true row for the key")
 	})
 
 	t.Run("blob winner + stale appendable carve-out (diff VID) → exactly one IsLatest, on the blob", func(t *testing.T) {
@@ -157,16 +125,20 @@ func TestListObjectVersionsBlobAuthOn(t *testing.T) {
 		require.Equal(t, vidA2, head.VersionID)
 	})
 
-	t.Run("multiple appendable carve-out versions, one lat: → only the lat: target is IsLatest", func(t *testing.T) {
-		// codex code-gate: hasLat is key-level, so a key with >1 appendable/coalesced
-		// FSM version record and one lat: pointer must flag IsLatest ONLY on the lat:
-		// target vid — not every carve-out row (HEAD resolves only the lat: vid).
+	t.Run("multiple appendable blob versions → only the ModTime winner is IsLatest", func(t *testing.T) {
+		// A key with >1 appendable per-version blob must flag IsLatest ONLY on the
+		// ModTime-primary winner (vidA2) — not every appendable row — matching
+		// HeadObject's deriveLatestVersion.
 		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "bca"))
 		setVersioningForTest(t, b, "bca", "Enabled")
-		// Two appendable version records of key "k"; lat: → vidA2 only.
-		seedFSMObject(t, b, "bca", "k", vidA1, objectMeta{Key: "k", ETag: "app1", IsAppendable: true}, false)
-		seedFSMObject(t, b, "bca", "k", vidA2, objectMeta{Key: "k", ETag: "app2", IsAppendable: true}, true)
+		// Two appendable versions of key "k"; vidA2 wins by ModTime.
+		seedVersionBlob(t, b, "bca", "k", vidA1, PutObjectMetaCmd{
+			ETag: "app1", IsAppendable: true, ModTime: 100, NodeIDs: []string{b.currentSelfAddr()},
+		})
+		seedVersionBlob(t, b, "bca", "k", vidA2, PutObjectMetaCmd{
+			ETag: "app2", IsAppendable: true, ModTime: 200, NodeIDs: []string{b.currentSelfAddr()},
+		})
 
 		vs, err := b.ListObjectVersions(ctx, "bca", "", 0)
 		require.NoError(t, err)
@@ -177,15 +149,18 @@ func TestListObjectVersionsBlobAuthOn(t *testing.T) {
 			}
 		}
 		require.Equal(t, []string{vidA2}, latest,
-			"only the lat:-targeted appendable version is IsLatest, not every carve-out row")
+			"only the ModTime-winner appendable version is IsLatest, not every row")
 	})
 
 	t.Run("coalesced carve-out → appears", func(t *testing.T) {
 		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "bco"))
 		setVersioningForTest(t, b, "bco", "Enabled")
-		m := objectMeta{Key: "ck", ETag: "co", Coalesced: []CoalescedShardRef{{CoalescedID: "c1", Size: 10}}}
-		seedFSMObject(t, b, "bco", "ck", vidA1, m, true)
+		seedVersionBlob(t, b, "bco", "ck", vidA1, PutObjectMetaCmd{
+			ETag: "co", IsAppendable: true,
+			Coalesced: []CoalescedShardRef{{CoalescedID: "c1", Size: 10}},
+			NodeIDs:   []string{b.currentSelfAddr()},
+		})
 
 		vs, err := b.ListObjectVersions(ctx, "bco", "", 0)
 		require.NoError(t, err)
@@ -196,8 +171,11 @@ func TestListObjectVersionsBlobAuthOn(t *testing.T) {
 	t.Run("legacy bare record → appears with VersionID empty, IsLatest true", func(t *testing.T) {
 		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "bbare"))
-		// bare obj: record, NO lat: pointer, NOT appendable/coalesced.
-		seedFSMObject(t, b, "bbare", "lk", "", objectMeta{Key: "lk", ETag: "bare"}, false)
+		// Non-versioned object: the latest-only quorum-meta blob carries it; the
+		// off-path lists it as a single latest version with VersionID empty.
+		seedLatestBlob(t, b, "bbare", "lk", PutObjectMetaCmd{
+			ETag: "bare", NodeIDs: []string{b.currentSelfAddr()},
+		})
 
 		vs, err := b.ListObjectVersions(ctx, "bbare", "", 0)
 		require.NoError(t, err)
@@ -248,9 +226,12 @@ func TestListObjectVersionsBlobAuthOn(t *testing.T) {
 	})
 
 	t.Run("blob-authority read error → propagated (fail closed)", func(t *testing.T) {
-		b, db := newTestDistributedBackendWithDB(t)
+		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "berr"))
-		require.NoError(t, db.Close())
+		setVersioningForTest(t, b, "berr", "Enabled")
+		// A corrupt per-version blob must fail the strict blob-authority scan
+		// closed — never be silently dropped (which would hide a live version).
+		seedCorruptVersionBlob(t, b, "berr", "k", vidA1)
 
 		vs, err := b.ListObjectVersions(ctx, "berr", "", 0)
 		require.Error(t, err)
@@ -283,10 +264,13 @@ func TestListObjectVersionsBlobAuthOffUnchanged(t *testing.T) {
 		require.True(t, idx[[2]string{"k2", vidB1}].IsLatest)
 	})
 
-	t.Run("off: legacy bare listing", func(t *testing.T) {
+	t.Run("off: latest-only blob listing", func(t *testing.T) {
 		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "boff"))
-		seedFSMObject(t, b, "boff", "lk", "", objectMeta{Key: "lk", ETag: "bare"}, false)
+		// Non-versioned object: latest-only quorum-meta blob is the authority.
+		seedLatestBlob(t, b, "boff", "lk", PutObjectMetaCmd{
+			ETag: "bare", NodeIDs: []string{b.currentSelfAddr()},
+		})
 
 		vs, err := b.ListObjectVersions(ctx, "boff", "", 0)
 		require.NoError(t, err)

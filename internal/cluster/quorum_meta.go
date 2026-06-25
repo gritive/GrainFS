@@ -19,6 +19,27 @@ import (
 	"github.com/gritive/GrainFS/internal/storage/directio"
 )
 
+// Control-plane vs data-plane metadata boundary (load-bearing, intentional):
+//
+//   - DATA-PLANE (object metadata): every per-object record — regular/chunked/
+//     multipart/appendable/coalesced PUT, tags, ACL, quarantine, delete — is
+//     written ONLY to the off-raft quorum-meta blob co-located with its EC shards
+//     (K-of-N quorum, LWW-merged on read; this file). There is NO raft propose for
+//     object metadata, and there is no SINGLE shared writer beyond the blob RMW.
+//     Reads, LIST, the orphan/segment GCs, the EC scrub/placement monitor, and DEK
+//     rewrap all derive from the quorum-meta blobs.
+//
+//   - CONTROL-PLANE: bucket existence/policy/versioning, bucket→group assignment,
+//     placement generations, IAM, DEK/KEK, JWT keys, invites, peer registry,
+//     protocol credentials, lifecycle, config — all replicated via the meta-raft
+//     FSM (BadgerDB). The FSM holds ZERO per-object records.
+//
+// Consequence: the FSM keyspace's obj:/lat: (ObjectMetaKey/ObjectMetaKeyV/
+// LatestKey) tiers are NOT a second writer of object metadata; the writer-less FSM
+// object-read scaffolding was removed (greenfield: no residual obj:/lat: records,
+// per the s4c_cutover greenfield decision). "Unify Raft vs Quorum" is therefore a
+// non-goal — the two stores never hold the same data.
+
 // quorumMetaSubDir is the per-dataDir subdirectory where per-node quorum object
 // metadata is durably stored. Sibling to shard files on the same device so the
 // write rides the same I/O path (same spindle/NVMe).
