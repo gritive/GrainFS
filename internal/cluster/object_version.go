@@ -513,12 +513,14 @@ func (b *DistributedBackend) ListObjectVersions(ctx context.Context, bucket, pre
 	// lifecycle worker (ScanObjectsGrouped) consume the leaf directly, bypassing the
 	// coordinator's dedup.
 	versions = dedupVersionsKeepFirst(versions)
-	// Sort DESC by VersionID (UUIDv7 is lex-ASC-by-time, so reverse = newest-first).
+	// Sort latest-first within each key by the ModTime-primary order (objectVersionWins:
+	// higher ModTime, tie VID) so the IsLatest version sorts first — agrees with the
+	// per-key latest-pick above and the coordinator's sortObjectVersions.
 	sort.Slice(versions, func(i, j int) bool {
 		if versions[i].Key != versions[j].Key {
 			return versions[i].Key < versions[j].Key
 		}
-		return versions[i].VersionID > versions[j].VersionID
+		return objectVersionWins(versions[i], versions[j])
 	})
 	if maxKeys > 0 && len(versions) > maxKeys {
 		versions = versions[:maxKeys]
@@ -532,8 +534,8 @@ func (b *DistributedBackend) ListObjectVersions(ctx context.Context, bucket, pre
 //  1. Versioned objects from the cluster-wide all-version blob enumerator
 //     (scanQuorumMetaVersionsClusterAll) — already (Key,VID)+MetaSeq deduped
 //     (T1). One ObjectVersion per blob INCLUDING delete markers; the per-key
-//     max VID is IsLatest EVEN when it is a delete marker (matching the off-path
-//     which lists+flags a delete-marker-latest).
+//     ModTime-primary latest (last-completed write) is IsLatest EVEN when it is a
+//     delete marker (matching the off-path which lists+flags a delete-marker-latest).
 //  2. FSM carve-out records on THIS NODE's LOCAL group only (the coordinator's
 //     fan-out unions each group's locals): appendable / coalesced / legacy-bare.
 //     Plain vid-bearing versioned FSM records are DROPPED (blob-authoritative).
@@ -551,11 +553,17 @@ func (b *DistributedBackend) listObjectVersionsBlobAuth(bucket, prefix string, m
 	// Hard-delete tombstones are not versions: drop them before deriving IsLatest /
 	// emitting (a delete MARKER is kept — it IS a version in S3 ListObjectVersions).
 	cmds = dropHardDeletedVersions(cmds)
-	// Per-key max VID (UUIDv7 string max) so the max-VID blob is flagged IsLatest.
-	maxVID := map[string]string{}
+	// Per-key ModTime-primary latest (quorumMetaCmdWins = ModTime → VID → MetaSeq,
+	// with the hard-delete tombstone tiebreak): the last-completed write is flagged
+	// IsLatest, not the max VID. The winner's VersionID identifies it uniquely. A
+	// multipart minted (low VID) before but COMPLETED (high ModTime) after a later
+	// PUT is the latest — the old max-VID rule wrongly flagged the PUT.
+	latestVID := map[string]string{}
+	latestCmd := map[string]PutObjectMetaCmd{}
 	for _, c := range cmds {
-		if c.VersionID > maxVID[c.Key] {
-			maxVID[c.Key] = c.VersionID
+		if ex, ok := latestCmd[c.Key]; !ok || quorumMetaCmdWins(c, ex) {
+			latestCmd[c.Key] = c
+			latestVID[c.Key] = c.VersionID
 		}
 	}
 	var versions []*storage.ObjectVersion
@@ -565,7 +573,7 @@ func (b *DistributedBackend) listObjectVersionsBlobAuth(bucket, prefix string, m
 		versions = append(versions, &storage.ObjectVersion{
 			Key:            c.Key,
 			VersionID:      c.VersionID,
-			IsLatest:       c.VersionID == maxVID[c.Key],
+			IsLatest:       c.VersionID == latestVID[c.Key],
 			IsDeleteMarker: c.IsDeleteMarker,
 			LastModified:   c.ModTime,
 			ETag:           c.ETag,

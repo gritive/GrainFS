@@ -210,13 +210,13 @@ func (b *DistributedBackend) scanObjectsBlobAuth(bucket string) ([]scrubber.Obje
 	// Hard-delete tombstones have no live shards to scrub: drop them before the
 	// per-key collapse so a hard-deleted latest falls to its live predecessor.
 	cmds = dropHardDeletedVersions(cmds)
-	// Collapse to latest (max-VID) per key; same-VID replicas dedup by the full
-	// LWW comparator (quorumMetaCmdWins) so the winner is deterministic regardless
-	// of scan order (mirrors readQuorumMetaVersions).
+	// Collapse to latest per key by the full LWW comparator (quorumMetaCmdWins =
+	// ModTime → VID → MetaSeq, with the hard-delete tombstone tiebreak): the
+	// last-completed write wins, not the max VID. Deterministic regardless of scan
+	// order (mirrors readQuorumMetaVersions / listObjectsPerVersion).
 	latest := map[string]PutObjectMetaCmd{}
 	for _, c := range cmds {
-		if ex, ok := latest[c.Key]; !ok || c.VersionID > ex.VersionID ||
-			(c.VersionID == ex.VersionID && quorumMetaCmdWins(c, ex)) {
+		if ex, ok := latest[c.Key]; !ok || quorumMetaCmdWins(c, ex) {
 			latest[c.Key] = c
 		}
 	}

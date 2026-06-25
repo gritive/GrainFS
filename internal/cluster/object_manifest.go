@@ -150,8 +150,8 @@ func (b *DistributedBackend) listAllObjectsForGC() ([]storage.SnapshotObject, er
 // listBlobAuthBucketObjectsForGC enumerates every per-version blob for a
 // blob-authoritative bucket via the FAIL-CLOSED strict enumerator, mapping each
 // PutObjectMetaCmd to a storage.SnapshotObject with full fidelity (placement,
-// Segments, Tags, ACL). IsLatest is max-VersionID per key over all blobs
-// (markers included), matching the LWW semantics of readQuorumMetaVersions. It
+// Segments, Tags, ACL). IsLatest is the ModTime-primary latest per key over all
+// blobs (markers included), matching the LWW semantics of readQuorumMetaVersions. It
 // is the blob-authoritative branch of the segment-GC known-set: without it the sweep
 // would orphan-delete an on-bucket's live segments.
 func (b *DistributedBackend) listBlobAuthBucketObjectsForGC(bucket string) ([]storage.SnapshotObject, error) {
@@ -168,18 +168,23 @@ func (b *DistributedBackend) listBlobAuthBucketObjectsForGC(bucket string) ([]st
 	// unions all remaining live versions).
 	cmds = dropHardDeletedVersions(cmds)
 
-	// First pass: find the max VersionID per key (markers included).
-	maxVID := make(map[string]string, len(cmds))
+	// First pass: find the ModTime-primary latest version per key (markers included).
+	// quorumMetaCmdWins = ModTime → VID → MetaSeq (with the hard-delete tombstone
+	// tiebreak): the last-completed write is latest, not the max VID. The winner's
+	// VersionID identifies it uniquely (VIDs are unique within a key).
+	latestVID := make(map[string]string, len(cmds))
+	latestCmd := make(map[string]PutObjectMetaCmd, len(cmds))
 	for _, cmd := range cmds {
-		if cur, ok := maxVID[cmd.Key]; !ok || cmd.VersionID > cur {
-			maxVID[cmd.Key] = cmd.VersionID
+		if ex, ok := latestCmd[cmd.Key]; !ok || quorumMetaCmdWins(cmd, ex) {
+			latestCmd[cmd.Key] = cmd
+			latestVID[cmd.Key] = cmd.VersionID
 		}
 	}
 
 	// Second pass: map each PutObjectMetaCmd to a SnapshotObject.
 	out := make([]storage.SnapshotObject, 0, len(cmds))
 	for _, cmd := range cmds {
-		out = append(out, snapshotObjectFromQuorumCmd(bucket, cmd, maxVID[cmd.Key] == cmd.VersionID))
+		out = append(out, snapshotObjectFromQuorumCmd(bucket, cmd, latestVID[cmd.Key] == cmd.VersionID))
 	}
 	return out, nil
 }

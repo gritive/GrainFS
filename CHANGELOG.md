@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.677.0] - 2026-06-25
+
+### Fixed
+- **The latest version of an object now respects completion time, not creation time.** When a
+  multipart upload was *created* before a `PutObject` but *completed* after it, the `PutObject`
+  was wrongly left as the latest version (and served by `GET`/`HEAD`, flagged `IsLatest` by
+  `ListObjectVersions`), because the latest version was chosen by version-ID order (which is
+  fixed at creation time) rather than by which write completed last. Latest-version selection
+  is now driven by the object's modification time (the last completed write wins), with the
+  version ID and an internal sequence as deterministic tie-breakers. This applies consistently
+  to `GET`/`HEAD`, `ListObjectVersions`, delete-marker placement, and the internal
+  garbage-collection and scrub scans, so reads and listings agree on the same latest version.
+  Limitation: modification time has one-second granularity, so only writes whose completion
+  times differ by at least one second are reordered; writes completing within the same second
+  still fall back to the version-ID tie-break (unchanged behavior).
+
 ## [0.0.676.0] - 2026-06-25
 
 ### Changed

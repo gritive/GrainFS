@@ -1429,12 +1429,27 @@ func (c *ClusterCoordinator) fanOutListObjectVersions(
 	return merged, nil
 }
 
+// objectVersionWins reports whether a beats b as the latest version of a key:
+// higher ModTime (LastModified) wins; on an equal ModTime (second granularity)
+// the lexicographically greater VersionID wins. ObjectVersion carries no MetaSeq
+// (it is the post-dedup read type), so this is the ModTime → VID prefix of
+// quorumMetaBlobWins — the ObjectVersion analogue of the cmd-side comparator. A
+// multipart minted (low VID) before but COMPLETED (high ModTime) after a later
+// PUT therefore wins, matching the cmd-side latest-pick.
+func objectVersionWins(a, b *storage.ObjectVersion) bool {
+	if a.LastModified != b.LastModified {
+		return a.LastModified > b.LastModified
+	}
+	return a.VersionID > b.VersionID
+}
+
 // reconcileVersionIsLatest enforces exactly one IsLatest per key after a
 // cross-group merge. Candidates are ONLY versions a group already flagged
 // IsLatest (its lat: pointer) — a non-flagged version (e.g. a PreserveLatest
 // write) is never promoted. When a key split across groups left >1 flagged
-// version (divergent lat:), the newest (max UUIDv7 VersionID) wins and the
-// others are demoted. No-op in the common single-group-per-key case.
+// version (divergent lat:), the ModTime-primary latest (objectVersionWins:
+// last-completed write) wins and the others are demoted. No-op in the common
+// single-group-per-key case.
 func reconcileVersionIsLatest(versions []*storage.ObjectVersion) {
 	latestByKey := make(map[string]*storage.ObjectVersion)
 	for _, v := range versions {
@@ -1446,7 +1461,7 @@ func reconcileVersionIsLatest(versions []*storage.ObjectVersion) {
 			latestByKey[v.Key] = v
 			continue
 		}
-		if v.VersionID > cur.VersionID {
+		if objectVersionWins(v, cur) {
 			cur.IsLatest = false
 			latestByKey[v.Key] = v
 		} else {
@@ -1455,14 +1470,15 @@ func reconcileVersionIsLatest(versions []*storage.ObjectVersion) {
 	}
 }
 
-// sortObjectVersions orders by (Key asc, VersionID desc) — newest version first
-// within each key (UUIDv7 is lex-ASC-by-time). Mirrors the per-group leaf sort.
+// sortObjectVersions orders by (Key asc, then latest-first within the key) —
+// the ModTime-primary latest (objectVersionWins: higher ModTime, tie VID) sorts
+// first so it agrees with the IsLatest flag. Mirrors the per-group leaf sort.
 func sortObjectVersions(versions []*storage.ObjectVersion) {
 	sort.Slice(versions, func(i, j int) bool {
 		if versions[i].Key != versions[j].Key {
 			return versions[i].Key < versions[j].Key
 		}
-		return versions[i].VersionID > versions[j].VersionID
+		return objectVersionWins(versions[i], versions[j])
 	})
 }
 

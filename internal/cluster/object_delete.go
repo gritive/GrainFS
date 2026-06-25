@@ -53,7 +53,8 @@ func (b *DistributedBackend) deleteObjectWithMarker(ctx context.Context, bucket,
 	// Blob-primary (raft-free): if the object exists as a versioned object — i.e. it
 	// has per-version blobs — the delete marker is a durable per-version blob
 	// (IsDeleteMarker) with NO raft propose, reusing the object's placement. Reads,
-	// LIST, and latest-derive all treat the max-VID marker blob as "deleted".
+	// LIST, and latest-derive all treat the ModTime-latest marker blob as "deleted"
+	// (the marker is stamped with a fresh ModTime, so it is the last-completed write).
 	//
 	// The decision is made from the object's ACTUAL storage (a cluster-wide
 	// per-version read), NOT the bucket's versioning meta-state: the delete leaf may
@@ -73,13 +74,25 @@ func (b *DistributedBackend) deleteObjectWithMarker(ctx context.Context, bucket,
 			return "", fmt.Errorf("resolve per-version blobs for delete marker %s/%s: %w", bucket, key, verr)
 		}
 		if len(cmds) > 0 {
-			placement := cmds[0]
+			// Reuse the placement of the ModTime-primary latest version (quorumMetaBlobWins:
+			// the last-completed write), so the delete marker lands on the latest live
+			// object's nodes — not the max-VID version, which may be an earlier write. Only
+			// versions that actually carry placement (non-empty NodeIDs) are candidates so a
+			// marker/tombstone with empty placement can never win the pick.
+			var placement PutObjectMetaCmd
+			havePlacement := false
 			for i := range cmds {
-				if cmds[i].VersionID > placement.VersionID {
+				if len(cmds[i].NodeIDs) == 0 {
+					continue
+				}
+				if !havePlacement || quorumMetaBlobWins(
+					cmds[i].ModTime, cmds[i].VersionID, cmds[i].MetaSeq,
+					placement.ModTime, placement.VersionID, placement.MetaSeq) {
 					placement = cmds[i]
+					havePlacement = true
 				}
 			}
-			if len(placement.NodeIDs) > 0 {
+			if havePlacement && len(placement.NodeIDs) > 0 {
 				marker := PutObjectMetaCmd{
 					Bucket:           bucket,
 					Key:              key,

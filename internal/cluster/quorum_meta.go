@@ -1124,12 +1124,11 @@ func (b *DistributedBackend) listObjectsPerVersion(ctx context.Context, bucket, 
 		return nil, nil
 	}
 	byKey := map[string]PutObjectMetaCmd{}
-	// Latest stays vid-primary (cross-vid max-VID wins); on a SAME-vid replica
-	// dedup by the full LWW comparator (quorumMetaCmdWins) so it is deterministic
-	// regardless of fan-out iteration order, mirroring readQuorumMetaVersions.
+	// Latest is ModTime-primary (quorumMetaCmdWins = ModTime → VID → MetaSeq, with the
+	// hard-delete tombstone tiebreak): the last-completed write wins, not the max VID.
+	// Deterministic regardless of fan-out iteration order (mirrors readQuorumMetaVersions).
 	put := func(c PutObjectMetaCmd) {
-		if ex, ok := byKey[c.Key]; !ok || c.VersionID > ex.VersionID ||
-			(c.VersionID == ex.VersionID && quorumMetaCmdWins(c, ex)) {
+		if ex, ok := byKey[c.Key]; !ok || quorumMetaCmdWins(c, ex) {
 			byKey[c.Key] = c
 		}
 	}
@@ -1422,7 +1421,8 @@ func (b *DistributedBackend) readQuorumMetaVersionDecodeStrict(bucket, key, vers
 	return PutObjectMetaCmd{}, false, nil
 }
 
-// deriveLatestVersion returns the max-VersionID blob and whether the object's
+// deriveLatestVersion returns the ModTime-primary latest blob (last-completed
+// write: quorumMetaCmdWins = ModTime → VID → MetaSeq) and whether the object's
 // latest state is live (false = no versions OR latest is a delete marker).
 // Hard-delete tombstones (IsHardDeleted) are skipped as if the version were not
 // present, so a hard-delete of the current latest version correctly falls through
@@ -1434,7 +1434,12 @@ func deriveLatestVersion(cmds []PutObjectMetaCmd) (PutObjectMetaCmd, bool) {
 		if c.IsHardDeleted {
 			continue // hard-delete tombstone: version is gone, never the latest
 		}
-		if !found || c.VersionID > latest.VersionID {
+		// ModTime-primary latest: the last-completed write wins (quorumMetaCmdWins =
+		// ModTime → VID → MetaSeq, with the hard-delete tombstone tiebreak). A multipart
+		// minted (low VID) before but COMPLETED (high ModTime) after a later PUT is the
+		// true latest; the old max-VID rule wrongly kept the PUT. Tombstones are already
+		// filtered above and live VIDs are unique, so the comparator reduces to ModTime→VID.
+		if !found || quorumMetaCmdWins(c, latest) {
 			latest = c
 			found = true
 		}
@@ -1667,8 +1672,9 @@ func (s *ShardService) scanQuorumMetaBucketStrict(bucket string) ([]PutObjectMet
 // ScanQuorumMetaVersionsBucket walks .quorum_meta_versions/{bucket}/, decodes
 // EVERY version blob, groups by the decoded cmd.Key (authoritative — keys contain
 // '/', so a dir can be both a key-leaf and an intermediate dir, e.g. a/b and
-// a/b/c.txt; dir structure can't be trusted), and returns the max-VersionID blob
-// per key (markers included; the coordinator merge decides exclusion). Cost is
+// a/b/c.txt; dir structure can't be trusted), and returns the ModTime-primary
+// latest blob (last-completed write: quorumMetaCmdWins) per key (markers included;
+// the coordinator merge decides exclusion). Cost is
 // O(total versions on this node). ADDITIVE: it does NOT replace
 // ScanQuorumMetaBucket, whose latest-only consumers (scatterGatherList /
 // ScanObjectMetaEntries facts, the ScanQuorumMeta RPC fan-in, scrubbable.go scrub
@@ -1700,10 +1706,11 @@ func (s *ShardService) ScanQuorumMetaVersionsBucket(bucket, prefix string) ([]Pu
 		if prefix != "" && !strings.HasPrefix(cmd.Key, prefix) {
 			return nil
 		}
-		// Latest stays vid-primary (cross-vid max-VID); same-vid replicas dedup by
-		// the full LWW comparator (quorumMetaCmdWins) for fan-out-order independence.
-		if ex, ok := byKey[cmd.Key]; !ok || cmd.VersionID > ex.VersionID ||
-			(cmd.VersionID == ex.VersionID && quorumMetaCmdWins(cmd, ex)) {
+		// Latest is ModTime-primary (quorumMetaCmdWins = ModTime → VID → MetaSeq, with the
+		// hard-delete tombstone tiebreak): the last-completed write wins, not the max VID.
+		// Per-node pre-collapse — must match listObjectsPerVersion or it would discard the
+		// ModTime winner locally before the cross-node merge ever sees it.
+		if ex, ok := byKey[cmd.Key]; !ok || quorumMetaCmdWins(cmd, ex) {
 			byKey[cmd.Key] = cmd
 		}
 		return nil
