@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/klauspost/reedsolomon"
 )
 
 const (
@@ -32,11 +31,7 @@ func spoolECShards(ctx context.Context, cfg ECConfig, dir string, sp *spooledObj
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create ec spool dir: %w", err)
 	}
-	enc, err := reedsolomon.NewStream(
-		cfg.DataShards,
-		cfg.ParityShards,
-		reedsolomon.WithStreamBlockSize(ecStreamBlockSize(cfg, sp.Size)),
-	)
+	enc, err := getStreamEncoder(cfg, ecStreamBlockSize(cfg, sp.Size))
 	if err != nil {
 		return nil, fmt.Errorf("ec stream encoder: %w", err)
 	}
