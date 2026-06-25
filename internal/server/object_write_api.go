@@ -38,10 +38,19 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
-	// Check if this is an UploadPart request
+	// Check if this is an UploadPart / UploadPartCopy request. Both carry
+	// uploadId+partNumber; UploadPartCopy is distinguished by x-amz-copy-source.
+	// This copy-source check MUST stay INSIDE the uploadId+partNumber branch:
+	// the standalone CopyObject check below runs only for non-part requests, so
+	// without this fork an UploadPartCopy is silently handled as a plain
+	// UploadPart and the copy source is dropped (empty part stored).
 	uploadID := string(c.QueryArgs().Peek("uploadId"))
 	partNumberStr := string(c.QueryArgs().Peek("partNumber"))
 	if uploadID != "" && partNumberStr != "" {
+		if copySource := string(c.GetHeader("x-amz-copy-source")); copySource != "" {
+			s.uploadPartCopy(ctx, c, bucket, key, uploadID, partNumberStr, copySource)
+			return
+		}
 		s.uploadPart(ctx, c, bucket, key, uploadID, partNumberStr)
 		return
 	}
