@@ -23,7 +23,14 @@ BENCH_DIR_PROVIDED=0
 if [[ -n "${BENCH_DIR:-}" ]]; then
   BENCH_DIR_PROVIDED=1
 else
-  BENCH_DIR="$(mktemp -d "${TMPDIR:-/tmp}/grainfs-s3-compat-compare.XXXXXX")"
+  # macOS caps unix-socket sun_path at 104 bytes; the default TMPDIR under
+  # /var/folders/... overflows it once the nested data dir + admin.sock are
+  # appended, so admin.sock bind fails with EINVAL. Use a short base on Darwin.
+  bench_tmp_base="${TMPDIR:-/tmp}"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    bench_tmp_base="/tmp"
+  fi
+  BENCH_DIR="$(mktemp -d "${bench_tmp_base%/}/grainfs-s3-compat-compare.XXXXXX")"
 fi
 BUCKET="${BUCKET:-bench}"
 WARP_BIN="${WARP_BIN:-$(command -v warp 2>/dev/null || true)}"
@@ -328,7 +335,6 @@ start_grainfs_single() {
     --data "$data_arg" \
     --port "$port" \
     $(bench_encryption_args) \
-    --nbd-port 0 \
     --scrub-interval 0 \
     --lifecycle-interval 0 \
     --log-level warn \
@@ -427,7 +433,6 @@ start_grainfs_cluster() {
       --raft-addr "127.0.0.1:${raft_ports[$zero_idx]}" \
       --join-listen-addr "127.0.0.1:${join_ports[$zero_idx]}" \
       $(bench_encryption_args) \
-      --nbd-port 0 \
       --scrub-interval 0 \
       --lifecycle-interval 0 \
       --log-level warn \
