@@ -146,90 +146,110 @@ func (o *Operations) Backend() Backend {
 	return o.backend
 }
 
+// buildOperationsPlan resolves the storage decorator chain's optional
+// capabilities into an operationsPlan. Two distinct rules apply:
+//   - The 13 capabilities in assignFirstWinsCapabilities are first-implementer-
+//     across-the-whole-chain wins (order-independent).
+//   - The copy pair (accelerator + copier) is OUTERMOST-ONLY; see
+//     resolveCopyCapability.
 func buildOperationsPlan(backend Backend) operationsPlan {
 	var p operationsPlan
-	copyMustUseOuterFallback := false
 	for b := backend; b != nil; b = unwrapOperationBackend(b) {
-		next := unwrapOperationBackend(b)
-		if p.atomicACLPutter == nil {
-			if v, ok := b.(AtomicACLPutter); ok {
-				p.atomicACLPutter = v
-			}
+		assignFirstWinsCapabilities(&p, b)
+	}
+	p.copyObjectAccelerator, p.copier = resolveCopyCapability(backend)
+	return p
+}
+
+// assignFirstWinsCapabilities records, for each order-independent optional
+// capability not yet found, the first implementing layer b. Called for every
+// layer of the chain, so the outermost implementer of each capability wins.
+func assignFirstWinsCapabilities(p *operationsPlan, b Backend) {
+	if p.atomicACLPutter == nil {
+		if v, ok := b.(AtomicACLPutter); ok {
+			p.atomicACLPutter = v
 		}
-		if p.aclSetter == nil {
-			if v, ok := b.(ACLSetter); ok {
-				p.aclSetter = v
-			}
+	}
+	if p.aclSetter == nil {
+		if v, ok := b.(ACLSetter); ok {
+			p.aclSetter = v
 		}
-		if p.copyObjectAccelerator == nil && !copyMustUseOuterFallback {
-			if v, ok := b.(copyObjectAccelerator); ok {
-				p.copyObjectAccelerator = v
-				copyMustUseOuterFallback = true
-			}
+	}
+	if p.bucketVersioner == nil {
+		if v, ok := b.(BucketVersioner); ok {
+			p.bucketVersioner = v
 		}
-		if p.copier == nil && !copyMustUseOuterFallback {
-			if v, ok := b.(Copier); ok {
-				p.copier = v
-				copyMustUseOuterFallback = true
-			}
+	}
+	if p.versionedGetter == nil {
+		if v, ok := b.(VersionedGetter); ok {
+			p.versionedGetter = v
 		}
-		if next != nil {
-			copyMustUseOuterFallback = true
+	}
+	if p.versionedHeader == nil {
+		if v, ok := b.(VersionedHeader); ok {
+			p.versionedHeader = v
 		}
-		if p.bucketVersioner == nil {
-			if v, ok := b.(BucketVersioner); ok {
-				p.bucketVersioner = v
-			}
+	}
+	if p.objectVersionLister == nil {
+		if v, ok := b.(ObjectVersionLister); ok {
+			p.objectVersionLister = v
 		}
-		if p.versionedGetter == nil {
-			if v, ok := b.(VersionedGetter); ok {
-				p.versionedGetter = v
-			}
+	}
+	if p.objectVersionDeleter == nil {
+		if v, ok := b.(ObjectVersionDeleter); ok {
+			p.objectVersionDeleter = v
 		}
-		if p.versionedHeader == nil {
-			if v, ok := b.(VersionedHeader); ok {
-				p.versionedHeader = v
-			}
+	}
+	if p.versionedSoftDeleter == nil {
+		if v, ok := b.(VersionedSoftDeleter); ok {
+			p.versionedSoftDeleter = v
 		}
-		if p.objectVersionLister == nil {
-			if v, ok := b.(ObjectVersionLister); ok {
-				p.objectVersionLister = v
-			}
+	}
+	if p.policyBackend == nil {
+		if v, ok := b.(PolicyBackend); ok {
+			p.policyBackend = v
 		}
-		if p.objectVersionDeleter == nil {
+	}
+	// deleteObjectVersionForUndo probes the same ObjectVersionDeleter interface as
+	// objectVersionDeleter but is a separate field: it skips any write-blocking
+	// layer so an undo never routes through a decorator that rejects writes.
+	if p.deleteObjectVersionForUndo == nil {
+		if _, blocksWrites := b.(writeBlocker); !blocksWrites {
 			if v, ok := b.(ObjectVersionDeleter); ok {
-				p.objectVersionDeleter = v
-			}
-		}
-		if p.versionedSoftDeleter == nil {
-			if v, ok := b.(VersionedSoftDeleter); ok {
-				p.versionedSoftDeleter = v
-			}
-		}
-		if p.policyBackend == nil {
-			if v, ok := b.(PolicyBackend); ok {
-				p.policyBackend = v
-			}
-		}
-		if p.deleteObjectVersionForUndo == nil {
-			if _, blocksWrites := b.(writeBlocker); !blocksWrites {
-				if v, ok := b.(ObjectVersionDeleter); ok {
-					p.deleteObjectVersionForUndo = v
-				}
-			}
-		}
-		if p.tagsSetter == nil {
-			if v, ok := b.(ObjectTagsSetter); ok {
-				p.tagsSetter = v
-			}
-		}
-		if p.tagsGetter == nil {
-			if v, ok := b.(ObjectTagsGetter); ok {
-				p.tagsGetter = v
+				p.deleteObjectVersionForUndo = v
 			}
 		}
 	}
-	return p
+	if p.tagsSetter == nil {
+		if v, ok := b.(ObjectTagsSetter); ok {
+			p.tagsSetter = v
+		}
+	}
+	if p.tagsGetter == nil {
+		if v, ok := b.(ObjectTagsGetter); ok {
+			p.tagsGetter = v
+		}
+	}
+}
+
+// resolveCopyCapability resolves the copy fast-path from the OUTERMOST backend
+// only — deliberately not first-wins. The accelerated copy path bypasses inner
+// decorators (encryption etc.), so it must only be taken when the topmost layer
+// offers it; sourcing copier from a deeper layer would skip those decorators and
+// corrupt data. The accelerator is preferred when the outermost layer implements
+// both; at most one is non-nil.
+//
+// This is equivalent to the former inline copyMustUseOuterFallback flag: that
+// flag was forced true at the end of the first iteration, so the old loop could
+// only assign copy during iteration 1 (b == backend), accelerator first.
+func resolveCopyCapability(backend Backend) (copyObjectAccelerator, Copier) {
+	if v, ok := backend.(copyObjectAccelerator); ok {
+		return v, nil
+	}
+	if v, ok := backend.(Copier); ok {
+		return nil, v
+	}
+	return nil, nil
 }
 
 type operationPlanGeneration interface {
