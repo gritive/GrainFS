@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.727.0] - 2026-06-26
+
+### Fixed
+- **Made tag/ACL quorum-meta RMWs honor versioned per-version blobs.**
+  Versioning-enabled object tag writes now target the requested version blob, latest tag/ACL writes
+  mutate the derived latest live version, and non-versioned buckets keep the latest-only blob path.
+
 ## [0.0.726.0] - 2026-06-26
 
 ### Fixed

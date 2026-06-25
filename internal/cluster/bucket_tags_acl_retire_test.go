@@ -61,3 +61,60 @@ func TestSetObjectACL_BlobObject_NoRaftFallback(t *testing.T) {
 	require.Equal(t, uint8(1), m.ACL)
 	require.Greater(t, m.MetaSeq, uint64(0), "MetaSeq must advance on blob RMW")
 }
+
+func TestSetObjectTags_VersionIDMutatesPerVersionBlob(t *testing.T) {
+	b := newTestBackendWithQuorumMeta(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "b"))
+	setVersioningForTest(t, b, "b", "Enabled")
+	seedVersionBlob(t, b, "b", "k", "v1", PutObjectMetaCmd{
+		ETag: "v1", Tags: []storage.Tag{{Key: "old", Value: "v1"}},
+		NodeIDs: []string{b.currentSelfAddr()}, ECData: 1,
+	})
+	seedVersionBlob(t, b, "b", "k", "v2", PutObjectMetaCmd{
+		ETag: "v2", Tags: []storage.Tag{{Key: "old", Value: "v2"}},
+		NodeIDs: []string{b.currentSelfAddr()}, ECData: 1,
+	})
+
+	want := []storage.Tag{{Key: "target", Value: "v1"}}
+	require.NoError(t, b.SetObjectTags("b", "k", "v1", want))
+
+	v1, ok, err := b.readQuorumMetaVersion("b", "k", "v1")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, want, v1.Tags)
+	require.Greater(t, v1.MetaSeq, uint64(0), "targeted tag RMW must advance MetaSeq")
+
+	v2, ok, err := b.readQuorumMetaVersion("b", "k", "v2")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, []storage.Tag{{Key: "old", Value: "v2"}}, v2.Tags, "sibling version must be untouched")
+}
+
+func TestSetObjectACL_VersionedLatestMutatesPerVersionBlob(t *testing.T) {
+	b := newTestBackendWithQuorumMeta(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "b"))
+	setVersioningForTest(t, b, "b", "Enabled")
+	seedVersionBlob(t, b, "b", "k", "v1", PutObjectMetaCmd{
+		ETag: "v1", ACL: 0,
+		NodeIDs: []string{b.currentSelfAddr()}, ECData: 1,
+	})
+	seedVersionBlob(t, b, "b", "k", "v2", PutObjectMetaCmd{
+		ETag: "v2", ACL: 0,
+		NodeIDs: []string{b.currentSelfAddr()}, ECData: 1,
+	})
+
+	require.NoError(t, b.SetObjectACL("b", "k", 1))
+
+	v1, ok, err := b.readQuorumMetaVersion("b", "k", "v1")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, uint8(0), v1.ACL, "older sibling ACL must be untouched")
+
+	v2, ok, err := b.readQuorumMetaVersion("b", "k", "v2")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, uint8(1), v2.ACL)
+	require.Greater(t, v2.MetaSeq, uint64(0), "latest ACL RMW must advance MetaSeq")
+}
