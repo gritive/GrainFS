@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -27,4 +28,29 @@ func TestForceDeleteBucketRemovesQuorumMetaTrees(t *testing.T) {
 
 	require.NoDirExists(t, versTree, "force-delete must physically remove the per-bucket .quorum_meta_versions tree")
 	require.NoDirExists(t, filepath.Join(dataDir, ".quorum_meta", "vb"), "force-delete must physically remove the per-bucket .quorum_meta tree")
+}
+
+func TestShardServiceRemoveBucketPhysicalTreesRPCRemovesBucketAndMeta(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	svc := b.shardSvc
+	shardRoot := svc.DataDirs()[0]
+	dataRoot := filepath.Dir(shardRoot)
+
+	require.NoError(t, os.MkdirAll(filepath.Join(dataRoot, "b", "legacy"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dataRoot, "b", "legacy", "object"), []byte("x"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(shardRoot, ".quorum_meta", "b"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(shardRoot, ".quorum_meta", "b", "k"), []byte("q"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(shardRoot, ".quorum_meta_versions", "b", "k"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(shardRoot, ".quorum_meta_versions", "b", "k", "v1"), []byte("qv"), 0o644))
+
+	envb := buildShardEnvelope("RemoveBucketPhysicalTrees", "b", "", 0, nil)
+	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
+	resp := svc.handleRPC(envb.FinishedBytes())
+	rpcType, data, err := unmarshalEnvelope(resp)
+	require.NoError(t, err)
+	require.Equalf(t, "OK", rpcType, "response: %s", string(data))
+
+	require.NoDirExists(t, filepath.Join(dataRoot, "b"))
+	require.NoDirExists(t, filepath.Join(shardRoot, ".quorum_meta", "b"))
+	require.NoDirExists(t, filepath.Join(shardRoot, ".quorum_meta_versions", "b"))
 }

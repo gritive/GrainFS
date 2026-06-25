@@ -519,6 +519,32 @@ func (s *ShardService) DeleteShards(ctx context.Context, peer, bucket, key strin
 	return err
 }
 
+// RemoveBucketPhysicalTreesRPC asks a peer to remove its local bucket data and
+// quorum-meta trees after DeleteBucket has committed.
+func (s *ShardService) RemoveBucketPhysicalTreesRPC(ctx context.Context, peer, bucket string) error {
+	peerAddr, err := s.resolvePeerAddress(peer)
+	if err != nil {
+		return err
+	}
+	if s.transport == nil {
+		return fmt.Errorf("shard service: no transport")
+	}
+	envb := buildShardEnvelope("RemoveBucketPhysicalTrees", bucket, "", 0, nil)
+	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
+	respEnvelope, err := s.callShardRPC(ctx, peerAddr, envb)
+	if err != nil {
+		return fmt.Errorf("remove bucket physical trees on %s: %w", peerAddr, err)
+	}
+	rpcType, data, err := unmarshalEnvelope(respEnvelope)
+	if err != nil {
+		return fmt.Errorf("remove bucket physical trees on %s: unmarshal response: %w", peerAddr, err)
+	}
+	if rpcType == "Error" {
+		return fmt.Errorf("remove bucket physical trees on %s: %s", peerAddr, data)
+	}
+	return nil
+}
+
 // PromoteStagedShards renames a segment's staged shard dirs (stagingKey) to their final path
 // (finalKey) on a remote node — the remote counterpart of PromoteLocalStagedShards. The single-Key
 // envelope carries stagingKey in Key and finalKey in Data. PR1 segment staging.
@@ -612,6 +638,8 @@ func (s *ShardService) handleRPC(payload []byte) []byte {
 		return s.handleReadRange(sr)
 	case "DeleteShards":
 		return s.handleDelete(sr)
+	case "RemoveBucketPhysicalTrees":
+		return s.handleRemoveBucketPhysicalTrees(sr)
 	case "PromoteStagedShards":
 		return s.handlePromoteStaged(sr)
 	case "WriteQuorumMeta":
@@ -1177,6 +1205,13 @@ func (s *ShardService) handleRead(sr *shardRequest) []byte {
 
 func (s *ShardService) handleDelete(sr *shardRequest) []byte {
 	if err := s.DeleteLocalShards(sr.Bucket, sr.Key); err != nil {
+		return s.errorResponse(err.Error())
+	}
+	return s.okResponse(nil)
+}
+
+func (s *ShardService) handleRemoveBucketPhysicalTrees(sr *shardRequest) []byte {
+	if err := s.RemoveBucketPhysicalTrees(sr.Bucket); err != nil {
 		return s.errorResponse(err.Error())
 	}
 	return s.okResponse(nil)
