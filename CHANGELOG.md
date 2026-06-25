@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.708.0] - 2026-06-26
+
+### Changed
+- **Documentation accuracy: the S3-compatibility matrix now backs its "Conditional headers — Supported"
+  claim with end-to-end tests.** RFC 7232 read conditional headers (If-Match / If-None-Match /
+  If-Modified-Since / If-Unmodified-Since) were already implemented and correct on GET / HEAD / Range,
+  but had no e2e coverage, so the matrix overclaimed under the project's "Supported requires e2e" policy.
+  Single-node and 4-node cluster e2e now characterize the 200 / 304 / 412 outcomes on GET and HEAD plus
+  Range-GET precondition precedence, and the matrix Notes were tightened to state exactly what is covered
+  and to flag that conditional writes (PutObject If-None-Match CAS) remain out of scope. Test- and
+  docs-only; no server behavior change.
+
 ## [0.0.707.0] - 2026-06-26
 
 ### Changed
