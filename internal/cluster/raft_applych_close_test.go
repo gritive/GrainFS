@@ -56,7 +56,6 @@ func (s *applyChCloseStubNode) SetTimeoutNowTransport(
 	func(string, *raft.TimeoutNowArgs) (*raft.TimeoutNowReply, error),
 ) {
 }
-func (s *applyChCloseStubNode) SetNoOpCommand([]byte)                {}
 func (s *applyChCloseStubNode) RegisterObserver(chan<- raft.Event)   {}
 func (s *applyChCloseStubNode) DeregisterObserver(chan<- raft.Event) {}
 func (s *applyChCloseStubNode) AddVoter(string, string) error        { panic("unused") }

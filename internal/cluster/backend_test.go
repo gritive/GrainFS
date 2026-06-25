@@ -128,11 +128,6 @@ func newTestDistributedBackendWithDB(t clusterTestTB) (*DistributedBackend, *bad
 	return backend, db
 }
 
-func TestProposalForwardPeersFallsBackToShardServicePeers(t *testing.T) {
-	got := proposalForwardPeers(nil, []string{"127.0.0.1:7001", "127.0.0.1:7002"}, "127.0.0.1:7002")
-	require.Equal(t, []string{"127.0.0.1:7001"}, got)
-}
-
 func TestDistributedBackend_Close(t *testing.T) {
 	dir := t.TempDir()
 
@@ -197,54 +192,20 @@ func TestSelectPeerByLoad_SingleNode(t *testing.T) {
 	require.False(t, ok, "single node: no peers to redirect to")
 }
 
-// TestSetOnFSMValueResealDone_CallbackFiresOnMarker verifies that the callback
-// registered via SetOnFSMValueResealDone fires when CmdFSMValueResealDone is
-// applied, does NOT fire for CmdResealFSMValues or CmdPutObjectMeta, and that
-// the callback is dispatched in its own goroutine (non-blocking on apply path).
-func TestSetOnFSMValueResealDone_CallbackFiresOnMarker(t *testing.T) {
+func TestNotifyOnApply_UnknownCommandsNoOp(t *testing.T) {
 	gb := newTestGroupBackend(t, "callback-test-group")
 
-	fired := make(chan struct{}, 1)
-	gb.SetOnFSMValueResealDone(func() {
-		fired <- struct{}{}
-	})
-
-	// Apply the marker: should fire the callback.
-	raw, err := EncodeCommand(CmdFSMValueResealDone, FSMValueResealDoneCmd{Gen: 5})
+	raw, err := buildRawCommand(250, []byte("legacy payload"))
 	require.NoError(t, err)
-	gb.notifyOnApply(raw)
+	require.NotPanics(t, func() { gb.notifyOnApply(raw) })
 
-	select {
-	case <-fired:
-		// callback fired as expected
-	case <-time.After(2 * time.Second):
-		t.Fatal("SetOnFSMValueResealDone callback did not fire for CmdFSMValueResealDone")
-	}
-
-	// Apply CmdResealFSMValues: must NOT fire the callback.
-	rawReseal, err := EncodeCommand(CmdResealFSMValues, ResealFSMValuesCmd{Keys: []string{"policy:b1"}, ActiveGen: 1})
+	rawReseal, err := buildRawCommand(251, []byte("legacy payload"))
 	require.NoError(t, err)
-	gb.notifyOnApply(rawReseal)
-	select {
-	case <-fired:
-		t.Fatal("callback must NOT fire for CmdResealFSMValues")
-	case <-time.After(50 * time.Millisecond):
-		// correct: no callback
-	}
+	require.NotPanics(t, func() { gb.notifyOnApply(rawReseal) })
 
-	// Apply a retired object slot (CommandType 3, formerly CmdPutObjectMeta):
-	// notifyOnApply's object-cache switch was removed (object cache is no longer
-	// apply-driven), so a retired/object slot hits the default path and must NOT
-	// fire the reseal callback.
 	payload, err := encodeQuorumMetaBlob(PutObjectMetaCmd{Bucket: "b", Key: "k", Size: 1, ETag: "e"})
 	require.NoError(t, err)
-	rawPut, err := buildRawCommand(CommandType(3), payload)
+	rawPut, err := buildRawCommand(3, payload)
 	require.NoError(t, err)
-	gb.notifyOnApply(rawPut)
-	select {
-	case <-fired:
-		t.Fatal("callback must NOT fire for the retired object slot (CommandType 3)")
-	case <-time.After(50 * time.Millisecond):
-		// correct: no callback
-	}
+	require.NotPanics(t, func() { gb.notifyOnApply(rawPut) })
 }

@@ -202,7 +202,6 @@ type bootState struct {
 	shardCache       *shardcache.Cache
 	effectiveEC      cluster.ECConfig
 	stopApply        chan struct{}
-	rebalancer       *cluster.Rebalancer
 	evacuator        *cluster.DataGroupEvacuator
 	loadReporter     *cluster.LoadReporter
 	loadReporterStor *gossip.NodeStatsStore

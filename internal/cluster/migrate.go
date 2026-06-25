@@ -71,12 +71,10 @@ func MigrateLegacyMetaToCluster(legacyStore MetadataStore, dataDir, nodeID strin
 		return fmt.Errorf("scan metadata: %w", err)
 	}
 
-	// CmdCreateBucket is retired (bucket control-plane moved to meta-raft): there
-	// is nothing to propose. Per-object FSM commands (CmdPutObjectMeta) were
-	// retired earlier (data-plane raft-free Slice 2). The raft node setup +
-	// proposal loop that used to live here is removed; the metadata scan above
-	// still logs counts for operator visibility. Greenfield clusters never reach
-	// bootAutoMigrate.
+	// Bucket control-plane moved to meta-raft and per-object metadata moved
+	// off-raft, so there is nothing to propose. The raft node setup + proposal
+	// loop that used to live here is removed; the metadata scan above still logs
+	// counts for operator visibility. Greenfield clusters never reach bootAutoMigrate.
 	logger.Info().Int("buckets", len(buckets)).Int("objects", len(objects)).Int("multiparts", len(multiparts)).Msg("migration: legacy metadata scan complete (no proposals needed)")
 
 	return nil

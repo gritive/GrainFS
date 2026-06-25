@@ -1,13 +1,31 @@
 # Changelog
 
+## [0.0.714.0] - 2026-06-26
+
+### Removed
+- **The last FSM-value reseal dependency on data-group Raft is retired.** `policy:` and `obj:`
+  FSM values are now rewrapped by the node-local rewrap lane on every holder, and
+  the old data-group command constants, payload schema, generated code, codecs, no-op hooks, and
+  apply tests are gone. Brownfield data-group command envelopes now pass through the generic no-op
+  replay path instead of decoding or mutating state.
+- **The automatic data-group rebalancer plan surface is removed.** The dead `GroupRebalancer`
+  abstraction, automatic `Rebalancer` loop, meta `RebalancePlan`/`AbortPlan` commands, active-plan
+  snapshot slot, generated schema, and tests are gone. Revoked-node evacuation still keeps its live
+  data-group membership executor.
+
+### Changed
+- **DEK rewrap completion no longer needs a raft marker re-kick.** The FSM-value lane now drains
+  local stale values during the normal rewrap controller kick, while the kick path retries boundedly
+  on transient lane failures and still suppresses epoch progress reports until every lane is clean.
+
 ## [0.0.713.0] - 2026-06-26
 
 ### Removed
 - **The balancer no longer proposes or executes Raft-backed shard migrations.** Disk and request-rate
   gossip still run, the balancer status endpoint still reports skew and active hysteresis, and
-  load-based leader transfer remains gated off by default, but the old `CmdMigrateShard` /
-  `CmdMigrationDone` producer, executor, pending queue, retry helper, object picker, and apply hooks
-  are gone. Fresh clusters cannot enqueue new balancer data movement through meta-Raft.
+  load-based leader transfer remains gated off by default, but the old data-group migration producer,
+  executor, pending queue, retry helper, object picker, and apply hooks are gone. Fresh clusters
+  cannot enqueue new balancer data movement through meta-Raft.
 
 ### Changed
 - **Old balancer migration log entries now replay as inert compatibility slots.** Command types 10

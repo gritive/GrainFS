@@ -2,10 +2,7 @@ package cluster
 
 import (
 	"fmt"
-	"strconv"
 	"sync"
-
-	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/raft"
@@ -15,7 +12,7 @@ import (
 // and before the re-write — simulates a process crash mid-Restore.
 var restoreCrashAfterDrop func()
 
-// FSM applies committed Raft log entries to BadgerDB metadata store.
+// FSM owns snapshot/restore access to the BadgerDB metadata store.
 type FSM struct {
 	db        MetadataStore
 	keys      *stateKeyspace
@@ -31,133 +28,6 @@ func NewFSM(db MetadataStore, keys *stateKeyspace) *FSM {
 		keys = newStateKeyspaceEmpty()
 	}
 	return &FSM{db: db, keys: keys}
-}
-
-// ApplyTxn decodes a committed command and applies it to the supplied
-// transaction. The caller owns the transaction lifecycle (commit/discard);
-// this lets the apply actor batch many entries into one transaction.
-func (f *FSM) ApplyTxn(txn MetadataTxn, raw []byte) error {
-	cmd, err := DecodeCommand(raw)
-	if err != nil {
-		return fmt.Errorf("decode command: %w", err)
-	}
-
-	switch cmd.Type {
-	case CmdNoOp:
-		return nil
-	case CmdCreateBucket, CmdDeleteBucket, CmdSetBucketPolicy, CmdDeleteBucketPolicy:
-		// Bucket control-plane moved to meta-raft (MetaBucketStore). These group-0
-		// slots are retired: a greenfield cluster never proposes them; old-log replay
-		// is a harmless no-op. Enum values kept reserved so wire format is stable.
-		return nil
-	case CmdMigrateShard, CmdMigrationDone:
-		// Balancer shard migration is retired. Greenfield code cannot propose
-		// these slots; brownfield logs may replay them and must not block on
-		// missing migration hooks or legacy payload decoding.
-		return nil
-	case CommandType(17):
-		// Retired CmdSetRing. The live proposer/encoder is gone, but brownfield
-		// logs may still replay type-17 entries with legacy payload bytes.
-		return nil
-	case CmdSetBucketVersioning:
-		// Bucket versioning moved to meta-raft (MetaBucketStore). Retired no-op;
-		// enum value kept reserved so old-log replay is safe.
-		return nil
-	case CmdResealFSMValues:
-		return f.applyResealFSMValues(txn, cmd.Data)
-	case CmdFSMValueResealDone:
-		// Ordering fence: the marker mutates no state; its only effect is the
-		// per-node post-apply hook (notifyOnApply) firing a re-Kick after all
-		// preceding CmdResealFSMValues batches in raft order. Gen is carried
-		// for logging/observability only — the re-Kick is gen-agnostic. S7-1a-2.
-		return nil
-	default:
-		// Unknown / retired command types (the data plane moved off-raft; the
-		// retired per-object/multipart/append/placement slots are no longer named).
-		// A greenfield cluster never proposes these; any stale replay is a no-op.
-		log.Warn().Uint8("type", uint8(cmd.Type)).Msg("fsm: unknown command type")
-		return nil
-	}
-}
-
-// Apply processes a committed command in its own transaction. Retained for
-// offline replay (migrate.go) and tests; the apply actor uses ApplyTxn directly.
-func (f *FSM) Apply(raw []byte) error {
-	return f.db.Update(func(txn MetadataTxn) error {
-		return f.ApplyTxn(txn, raw)
-	})
-}
-
-// applyResealFSMValues handles CmdResealFSMValues in the serialized apply loop.
-// For each key in the command, it reads the CURRENT value from the badger txn
-// and reseals it at the KEEPER-CURRENT active gen (via setValue). The skip
-// decision compares the value's frame gen to the keeper-current gen — NOT to
-// cmd.ActiveGen, which is only a hint (used for the metric label). Tracking
-// keeper-current is what prevents a back-to-back-rotation livelock: if a 2nd
-// rotation lands mid-drain, this node reseals onto the new current gen and the
-// drain's next scan sees the values as already-current.
-//
-// We deliberately do NOT SealAtGen(cmd.ActiveGen): a follower may have applied
-// this data-group command before installing cmd.ActiveGen via meta-raft, so
-// SealAtGen would fail closed (ErrDEKGenUnknown). setValue seals at the gen the
-// keeper actually holds, which is always resident. Cross-node gen-determinism
-// is not required: FSM-value seals are already per-node non-deterministic
-// (random nonce), any node can open any node's value while the gen is resident,
-// and S7-0 blocks prune so a value never sits at a pruned gen.
-//
-// The reseal is race-free because it runs in the single-threaded apply loop:
-// a concurrent SetBucketPolicy is Raft-ordered before or after, never clobbered.
-func (f *FSM) applyResealFSMValues(txn MetadataTxn, data []byte) error {
-	c, err := decodeResealFSMValuesCmd(data)
-	if err != nil {
-		return err
-	}
-	de := f.dataEncryptor()
-	if de == nil {
-		return nil // encryption disabled — nothing sealed
-	}
-	current, ok := f.activeDEKGen()
-	if !ok {
-		return nil // encryption disabled — nothing sealed
-	}
-	for _, k := range c.Keys {
-		key := []byte(k)
-		item, err := txn.Get(key)
-		if err == ErrMetaKeyNotFound {
-			continue // key deleted since the leader scanned it — fine
-		}
-		if err != nil {
-			return err
-		}
-		raw, err := item.ValueCopy(nil)
-		if err != nil {
-			return err
-		}
-		gen, ct, frameOK, derr := decodeFSMValueFrameV2(raw)
-		if derr != nil {
-			// Deliberate fail-closed-and-break: any non-NotFound error (decode,
-			// Open, seal) returns, failing the apply → ProposeResealFSMValues
-			// errors → DrainFSMValueRewrap returns and the single-flight guard
-			// releases via its defer. We do NOT skip-and-continue: that would
-			// re-livelock the drain on a persistently-stale key.
-			return derr
-		}
-		if !frameOK || gen == current {
-			continue // plaintext or already keeper-current — idempotent skip
-		}
-		plain, err := de.Open(encrypt.DomainFSMValue, []encrypt.AADField{encrypt.FieldBytes(key)}, gen, ct)
-		if err != nil {
-			return err // fail-closed-and-break (see above)
-		}
-		if err := f.setValue(txn, key, plain); err != nil { // reseals at keeper-current gen
-			return err // fail-closed-and-break (see above)
-		}
-		// Label with the actual reseal target (keeper-current), not cmd.ActiveGen
-		// (which is only a hint of the rotation that drove this batch and can lag
-		// keeper-current under back-to-back rotations).
-		RewrapFSMValuesTotal.WithLabelValues(strconv.FormatUint(uint64(current), 10)).Inc()
-	}
-	return nil
 }
 
 // deleteMarkerETag is the sentinel ETag we store on a tombstone (soft-delete).

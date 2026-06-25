@@ -102,9 +102,8 @@ type raftSnapshotResponse struct {
 	err    error
 }
 
-// DistributedBackend implements storage.Backend with Raft-replicated metadata
-// and local file storage for data. Metadata mutations go through Raft;
-// reads are served from the local BadgerDB (kept in sync by the FSM).
+// DistributedBackend implements storage.Backend over local object data,
+// quorum-meta blobs, and meta-raft control-plane metadata.
 type DistributedBackend struct {
 	root string
 	// store carries ALL metadata transactions. Ownership follows shared:
@@ -246,12 +245,6 @@ type DistributedBackend struct {
 	// scrubOrphanAge is the age gate for WalkOrphanSegments. Set via SetScrubOrphanAge.
 	scrubOrphanAge time.Duration
 
-	// onFSMValueResealDone, if set, fires once per applied CmdFSMValueResealDone
-	// marker (on EVERY node, after raft-ordered reseal batches). It runs in the
-	// apply-actor goroutine, so the callback MUST dispatch a goroutine for any
-	// proposal/Kick. Wired by the serveruntime to re-Kick the RewrapController.
-	onFSMValueResealDone func()
-
 	// removeAll is the function used to physically remove a bucket directory.
 	// Defaults to os.RemoveAll; tests inject a spy to verify ordering relative
 	// to MetaBucketStore.DeleteBucket (consensus must precede physical remove).
@@ -288,10 +281,6 @@ func NewDistributedBackend(root string, store MetadataStore, node RaftNode, keys
 	}
 
 	fsm := NewFSM(store, keys)
-
-	if noOp, err := EncodeNoOpCommand(); err == nil {
-		node.SetNoOpCommand(noOp)
-	}
 
 	b := &DistributedBackend{
 		root:         root,
@@ -784,132 +773,19 @@ func (b *DistributedBackend) SetMultiGeneration(v bool) {
 	b.multiGeneration.Store(v)
 }
 
-// SetOnFSMValueResealDone registers a callback that fires once per applied
-// CmdFSMValueResealDone marker on every node. The marker is applied after all
-// preceding CmdResealFSMValues batches in raft order, so the callback fires
-// with this node's FSM-values already resealed. The callback runs in the
-// apply-actor goroutine and MUST dispatch a goroutine for any blocking work
-// (Kick/propose). Must be called before RunApplyLoop.
-func (b *DistributedBackend) SetOnFSMValueResealDone(fn func()) {
-	b.onFSMValueResealDone = fn
-}
-
-// ProposeFSMValueResealDone proposes a CmdFSMValueResealDone marker to the
-// data-group raft log. The marker is an ordering fence: it mutates no state but
-// its position in the log guarantees that every node applies it AFTER all
-// preceding CmdResealFSMValues batches. gen is a log hint for observability.
-func (b *DistributedBackend) ProposeFSMValueResealDone(ctx context.Context, gen uint32) error {
-	return b.propose(ctx, CmdFSMValueResealDone, FSMValueResealDoneCmd{Gen: gen})
-}
-
-// RunApplyLoop consumes committed entries from the Raft node and applies them to the FSM.
-// This must run in a goroutine. Delegates to applyActor, which opportunistically
-// batches command entries into a single BadgerDB transaction per commit.
+// RunApplyLoop consumes committed entries from the Raft node.
+// This must run in a goroutine. Delegates to applyActor, which decodes legacy
+// data-group command envelopes for no-op replay and restores snapshot entries.
 func (b *DistributedBackend) RunApplyLoop(stop <-chan struct{}) {
-	a := &applyActor{db: b.store, fsm: b.fsm}
+	a := &applyActor{fsm: b.fsm}
 	a.run(b, stop)
 }
 
-// notifyOnApply runs post-apply hooks for a committed command. The only live
-// hook is the CmdFSMValueResealDone reseal-done fence; all apply-driven
-// cache-invalidation paths have been retired.
+// notifyOnApply runs post-apply hooks for a committed command. All apply-driven
+// cache-invalidation and reseal marker paths have been retired, so this is a
+// decode-only no-op kept for the apply actor's call shape.
 func (b *DistributedBackend) notifyOnApply(raw []byte) {
-	cmd, err := DecodeCommand(raw)
-	if err != nil {
-		return
-	}
-
-	// CmdFSMValueResealDone is an ordering-fence marker: it fires the per-node
-	// re-Kick callback and then returns early (no object-cache invalidation).
-	// The callback must dispatch its own goroutine for any blocking work.
-	if cmd.Type == CmdFSMValueResealDone {
-		if b.onFSMValueResealDone != nil {
-			b.onFSMValueResealDone()
-		}
-		return
-	}
-
-	// No apply-driven cache invalidation beyond the reseal-done early-return above.
-	// The group-0 bucket-policy commands (CmdSetBucketPolicy/CmdDeleteBucketPolicy)
-	// are retired (Task 12: bucket control-plane moved to meta-raft); policy
-	// invalidation is now driven by the meta post-commit hook (metaPolicyInvalidation
-	// worker). Per-object/multipart commands were retired earlier (data-plane raft-free
-	// Slices 0-2); object mutations flow through the quorum-meta blob path, which
-	// invalidates caches directly. No remaining live control-plane command names an
-	// object or policy, so this hook is a no-op for everything except reseal-done.
-}
-
-// forwardPropose는 팔로워에서 리더로 propose 요청을 cluster-transport RPC로 전달한다.
-// 응답 형식: [8B index big-endian][4B errLen big-endian][errBytes...]
-func (b *DistributedBackend) forwardPropose(ctx context.Context, leaderAddr string, data []byte) (uint64, error) {
-	if b.shardSvc == nil {
-		return 0, fmt.Errorf("forwardPropose: no transport available")
-	}
-	route := transport.RouteForwardProposeLegacy
-	payload := data
-	if groupID, ok := PlacementGroupFromContext(ctx); ok {
-		route = transport.RouteForwardProposeDataGroup
-		payload = encodeGroupForwardPayload(groupID, data)
-	}
-	reply, err := b.shardSvc.SendRequest(ctx, leaderAddr, route, payload)
-	if err != nil {
-		return 0, fmt.Errorf("forwardPropose: send: %w", err)
-	}
-	index, applyErr, transportErr := decodeProposeForwardReply(reply)
-	if transportErr != nil {
-		return 0, fmt.Errorf("forwardPropose: %w", transportErr)
-	}
-	if applyErr != nil {
-		// raft.ErrNotLeader is a propose-time signal — keep the legacy
-		// string match so callers can errors.Is() the canonical sentinel.
-		if applyErr.Error() == raft.ErrNotLeader.Error() {
-			return 0, raft.ErrNotLeader
-		}
-		return 0, applyErr
-	}
-	return index, nil
-}
-
-// RegisterProposeForwardHandler는 StreamProposeForward 핸들러를 transport 라우터에 등록한다.
-// 리더 노드에서 호출해야 하며, 팔로워의 propose를 대신 처리한다.
-//
-// Phase A (Task 16): the leader also waits for the entry to be applied locally
-// and harvests any FSM apply error via ApplyError(idx), encoding it on the wire
-// as a stable code so the follower can reconstruct the original sentinel via
-// decodeApplyError.
-func (b *DistributedBackend) RegisterProposeForwardHandler() {
-	if b.shardSvc == nil {
-		return
-	}
-	h := func(payload []byte) ([]byte, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), proposeForwardTimeout)
-		defer cancel()
-		idx, err := b.node.ProposeWait(ctx, payload)
-		if err == nil {
-			// Wait for apply, then surface FSM apply error (if any).
-			for b.lastApplied.Load() < idx {
-				select {
-				case <-ctx.Done():
-					err = ctx.Err()
-				default:
-				}
-				if err != nil {
-					break
-				}
-				time.Sleep(time.Millisecond)
-			}
-			if err == nil {
-				if applyErr := b.ApplyError(idx); applyErr != nil {
-					err = applyErr
-				}
-			}
-		}
-		return encodeProposeForwardReply(idx, err), nil
-	}
-	// Native /forward/propose/legacy buffered route. Every propose outcome
-	// (index + apply error) is in-band in the reply payload, exactly as the
-	// tunnel delivered it.
-	b.shardSvc.RegisterBufferedRoute(transport.RouteForwardProposeLegacy, h)
+	_ = DecodeCommand(raw)
 }
 
 // forwardReadIndex sends a StreamReadIndex RPC to leaderAddr and returns the leader's commitIndex.
@@ -1026,217 +902,6 @@ func (b *DistributedBackend) WaitApplied(ctx context.Context, index uint64) erro
 	}
 }
 
-// proposeDeadlineSentinel returns a wrapped ErrProposeTimeout when proposeCtx
-// expired by DeadlineExceeded (the server-side propose bound fired), and nil
-// otherwise. Callers use it at every return point that a propose deadline can
-// reach so the S3 layer maps the failure to a retryable 503 instead of a 500.
-// Client cancellation (context.Canceled) returns nil — the caller is gone and
-// keeps its natural error.
-func proposeDeadlineSentinel(proposeCtx context.Context, where string) error {
-	if errors.Is(proposeCtx.Err(), context.DeadlineExceeded) {
-		return fmt.Errorf("propose: %s timed out: %w", where, ErrProposeTimeout)
-	}
-	return nil
-}
-
-// propose encodes the command and dispatches it down the raft commit path. It
-// is a thin orchestrator: leader nodes commit locally via proposeAsLeader,
-// followers/edge nodes forward via proposeViaForward. The two duplicated blocks
-// it used to inline — the leader-commit-then-apply-wait sequence and the
-// 1ms-sleep apply-wait loop — now live in exactly one place each
-// (proposeAsLeader / waitLocalApplied).
-func (b *DistributedBackend) propose(ctx context.Context, cmdType CommandType, payload any) error {
-	if b.groupID != "" {
-		if _, ok := PlacementGroupFromContext(ctx); !ok {
-			ctx = ContextWithPlacementGroup(ctx, b.groupID)
-		}
-	}
-	data, err := EncodeCommand(cmdType, payload)
-	if err != nil {
-		return fmt.Errorf("encode command: %w", err)
-	}
-
-	if b.node.IsLeader() {
-		// Leader fast-path: the orchestrator owns the deadline-bound proposeCtx
-		// (created + canceled here) and hands it to proposeAsLeader, which must
-		// NOT create its own timeout. proposeCtx is not referenced after
-		// proposeAsLeader returns, so defer-cancel at this scope is safe.
-		proposeCtx, cancel := context.WithTimeout(ctx, proposeForwardTimeout)
-		defer cancel()
-		return b.proposeAsLeader(proposeCtx, data)
-	}
-	return b.proposeViaForward(ctx, data)
-}
-
-// waitLocalApplied blocks until this backend's FSM has applied at least idx,
-// then returns any FSM apply error recorded for idx (read-your-writes). The
-// where string is diagnostic-only (it appears in the ErrProposeTimeout sentinel
-// message, not in any test assertion). This is the single home for the
-// 1ms-sleep apply-wait loop that propose used to inline three times.
-//
-// CRITICAL: on proposeCtx.Done() it checks proposeDeadlineSentinel FIRST and,
-// only if that is nil (i.e. the context was canceled rather than deadline-
-// exceeded), returns the BARE proposeCtx.Err(). It must NOT collapse to
-// `return sentinel`: on a client cancellation the sentinel is nil, so returning
-// it would turn a context.Canceled into a false nil success.
-//
-// It uses a 1ms time.Sleep cadence, NOT the 5ms WaitApplied ticker — WaitApplied
-// lacks the sentinel/ApplyError semantics and is not interchangeable here.
-//
-// idx==0 is a natural no-op: the loop condition (lastApplied < 0) is never true.
-func (b *DistributedBackend) waitLocalApplied(proposeCtx context.Context, idx uint64, where string) error {
-	for b.lastApplied.Load() < idx {
-		select {
-		case <-proposeCtx.Done():
-			if sentinel := proposeDeadlineSentinel(proposeCtx, where); sentinel != nil {
-				return sentinel
-			}
-			return proposeCtx.Err()
-		default:
-			time.Sleep(time.Millisecond)
-		}
-	}
-	// Phase A: surface FSM apply errors to the caller. recordApplyResult runs
-	// before lastApplied.Store in the apply loop, so by the time we observe
-	// lastApplied >= idx the entry (if any) is already set.
-	return b.ApplyError(idx)
-}
-
-// proposeAsLeader commits data on the local raft leader and waits for the local
-// apply to catch up, surfacing any FSM apply error.
-//
-// CRITICAL: the caller owns ctx deadline-bounding; this fn must NOT create a
-// timeout. The asymmetry is load-bearing: the leader fast-path passes a fresh
-// proposeCtx created by the orchestrator, while proposeViaForward's in-loop
-// follower-became-leader call passes the forward loop's SHARED proposeCtx (so
-// the election-settles-after-the-entry case stays inside the single bounded
-// retry window). A future edit that adds a timeout here would silently break
-// that shared-deadline contract.
-func (b *DistributedBackend) proposeAsLeader(proposeCtx context.Context, data []byte) error {
-	idx, err := b.node.ProposeWait(proposeCtx, data)
-	if err != nil {
-		if sentinel := proposeDeadlineSentinel(proposeCtx, "leader commit"); sentinel != nil {
-			return sentinel
-		}
-		return err
-	}
-	return b.waitLocalApplied(proposeCtx, idx, "leader apply-wait")
-}
-
-// proposeViaForward handles the follower / edge-node path: forward to the
-// data-group leader. When the leader hint is known we forward only there;
-// otherwise we fan out to the configured peer set (covers dynamic-join edge
-// nodes that don't know the raft topology yet).
-//
-// A freshly-instantiated multi-voter data group may not have completed its first
-// election by the time a write arrives (raft tick + heartbeat race the very
-// first request to land on a non-leader). We retry on ErrNotLeader with bounded
-// backoff so the propose converges as soon as the election settles rather than
-// failing with a 500. This function owns the deadline-bound proposeCtx for the
-// entire retry loop (created + canceled here).
-func (b *DistributedBackend) proposeViaForward(ctx context.Context, data []byte) error {
-	proposeCtx, cancel := context.WithTimeout(ctx, proposeForwardTimeout)
-	defer cancel()
-	const retryInterval = 50 * time.Millisecond
-	var lastErr error
-	for {
-		if b.node.IsLeader() {
-			// Election settled after the request landed on this node: commit
-			// directly, reusing the forward loop's shared proposeCtx (NOT a
-			// fresh one) so the leader commit stays inside the same bounded
-			// retry window.
-			return b.proposeAsLeader(proposeCtx, data)
-		}
-		peers := b.forwardPeersForPropose()
-		if len(peers) == 0 {
-			lastErr = raft.ErrNotLeader
-		} else {
-			lastErr = nil
-			allNotLeader := true
-			for _, peer := range peers {
-				idx, err := b.forwardPropose(proposeCtx, peer, data)
-				if err == nil {
-					// Wait for this follower's local apply to catch up to the
-					// committed index before returning (read-your-writes). This
-					// ensures a forwarded-propose caller on a follower sees its
-					// own write reflected in the local committed state before the
-					// next operation. Without this wait, a lagging follower could
-					// see a stale local state after forwardPropose succeeds (the
-					// leader committed, but the follower hasn't applied yet).
-					//
-					// idx is the global raft log index returned by the leader's
-					// ProposeWait; b.lastApplied tracks the same log, so the
-					// comparison is direct.
-					return b.waitLocalApplied(proposeCtx, idx, "follower apply-wait")
-				}
-				lastErr = err
-				if !errors.Is(err, raft.ErrNotLeader) {
-					allNotLeader = false
-				}
-			}
-			// Preserve the original try-all-peers semantics: a non-ErrNotLeader
-			// error from any peer is surfaced only after the full peer list has
-			// been attempted, so a transient transport error on peer #1 doesn't
-			// mask peer #2 being the actual leader.
-			if !allNotLeader {
-				// A non-ErrNotLeader error includes a deadline-induced transport
-				// i/o timeout (proposeCtx expiring mid-SendRequest); surface the
-				// retryable sentinel in that case so it doesn't leak as a 500. A
-				// genuine (pre-deadline) leader-reject keeps its real error.
-				if sentinel := proposeDeadlineSentinel(proposeCtx, "forward"); sentinel != nil {
-					return sentinel
-				}
-				return lastErr
-			}
-		}
-		select {
-		case <-proposeCtx.Done():
-			// On a server-side deadline, surface the retryable sentinel even
-			// though lastErr (transient ErrNotLeader / transport error) is set —
-			// otherwise that lastErr leaks to the client as a fatal 500 instead
-			// of the retryable 503 the deadline warrants.
-			if sentinel := proposeDeadlineSentinel(proposeCtx, "forward"); sentinel != nil {
-				return sentinel
-			}
-			if lastErr != nil {
-				return lastErr
-			}
-			return proposeCtx.Err()
-		case <-time.After(retryInterval):
-		}
-	}
-}
-
-// forwardPeersForPropose returns the preferred set of peers for forwarding a
-// follower propose. When the raft layer knows the leader (LeaderID non-empty),
-// only the leader is returned to avoid futile round-robin to other followers.
-// Otherwise falls back to the full peer set (raft membership when available,
-// configured node list otherwise).
-func (b *DistributedBackend) forwardPeersForPropose() []string {
-	selfAddr := b.currentSelfAddr()
-	if leader := b.node.LeaderID(); leader != "" && leader != selfAddr {
-		return []string{leader}
-	}
-	return proposalForwardPeers(b.node.Peers(), b.configuredNodeList(), selfAddr)
-}
-
-func proposalForwardPeers(raftPeers, allNodes []string, selfAddr string) []string {
-	if len(raftPeers) > 0 {
-		return append([]string(nil), raftPeers...)
-	}
-	if len(allNodes) == 0 {
-		return nil
-	}
-	peers := make([]string, 0, len(allNodes))
-	for _, node := range allNodes {
-		if node == "" || node == selfAddr {
-			continue
-		}
-		peers = append(peers, node)
-	}
-	return peers
-}
-
 // Close closes the metadata database. When shared is true the DB is owned by
 // the caller and Close is a no-op for the DB (only internal state is released).
 func (b *DistributedBackend) Close() error {
@@ -1275,13 +940,6 @@ func (b *DistributedBackend) SetRouter(r *Router) { b.router = r }
 func (b *DistributedBackend) SetShardGroupSource(s ShardGroupSource) { b.shardGroup = s }
 
 // --- Bucket operations ---
-
-// ProposeResealFSMValues proposes a CmdResealFSMValues command to re-seal the
-// given full storage keys onto activeGen. Called by DrainFSMValueRewrap on the
-// group leader. The command is applied in the serialized apply loop. S7-1a.
-func (b *DistributedBackend) ProposeResealFSMValues(ctx context.Context, keys []string, activeGen uint32) error {
-	return b.propose(ctx, CmdResealFSMValues, ResealFSMValuesCmd{Keys: keys, ActiveGen: activeGen})
-}
 
 // FSMRef returns the underlying FSM so reshard / monitor code can iterate
 // placements + object metas without reaching through the backend's private fields.
@@ -1381,7 +1039,7 @@ func (b *DistributedBackend) objectMetaRMWLock(bucket, key string) func() {
 // Node returns the RaftNode interface for leadership and raft control.
 func (b *DistributedBackend) Node() RaftNode { return b.node }
 
-// recordApplyResult records an FSM apply error for the given Raft log index.
+// recordApplyResult records a data-group apply error for the given Raft log index.
 // Mirrors MetaRaft.recordApplyResult (meta_raft.go:797): only non-nil errors
 // are stored, and a 1024-index lookback window self-trims to prevent unbounded
 // growth.
@@ -1402,7 +1060,7 @@ func (b *DistributedBackend) recordApplyResult(index uint64, err error) {
 	b.applyResultMu.Unlock()
 }
 
-// ApplyError returns the FSM apply error for the given Raft log index, or nil
+// ApplyError returns the data-group apply error for the given Raft log index, or nil
 // if no error was recorded. Reading consumes the entry — callers must read
 // exactly once per ProposeWait.
 func (b *DistributedBackend) ApplyError(index uint64) error {

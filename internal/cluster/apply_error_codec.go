@@ -59,6 +59,8 @@ func encodeApplyError(err error) (applyErrorCode, string) {
 // decodeApplyError reconstructs a sentinel error from a code + message.
 // Cross-version safe: unknown codes fall through to a generic error built
 // from the transported message so callers can still log/surface them.
+//
+//nolint:unused // exercised by backend_apply_error_test.go to reserve old wire compatibility.
 func decodeApplyError(code applyErrorCode, msg string) error {
 	switch code {
 	case applyErrCodeNone:
@@ -127,6 +129,8 @@ func encodeProposeForwardReply(index uint64, err error) []byte {
 //
 // Backward-compat: payloads of exactly 12+errLen bytes (no trailing code) are
 // accepted and treated as applyErrCodeNone, falling through to errors.New(msg).
+//
+//nolint:unused // exercised by backend_apply_error_test.go to reserve old wire compatibility.
 func decodeProposeForwardReply(payload []byte) (uint64, error, error) {
 	if len(payload) < 12 {
 		return 0, nil, fmt.Errorf("propose-forward: short payload: %d bytes", len(payload))

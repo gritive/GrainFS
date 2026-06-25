@@ -1,37 +1,12 @@
 package cluster
 
 import (
-	"reflect"
-	"strings"
 	"testing"
 
-	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/raft"
 )
-
-// applyBatched applies raw commands to fsm, grouping them into transactions of
-// the given sizes, and returns the per-entry error strings ("" for nil).
-func applyBatched(t *testing.T, fsm *FSM, cmds [][]byte, batchSizes []int) []string {
-	t.Helper()
-	results := make([]string, 0, len(cmds))
-	i := 0
-	for _, n := range batchSizes {
-		txn := fsm.db.NewTransaction(true)
-		for j := 0; j < n && i < len(cmds); j++ {
-			if err := fsm.ApplyTxn(txn, cmds[i]); err != nil {
-				results = append(results, err.Error())
-			} else {
-				results = append(results, "")
-			}
-			i++
-		}
-		require.NoError(t, txn.Commit())
-	}
-	require.Equal(t, len(cmds), i, "batchSizes must cover every command")
-	return results
-}
 
 // dumpFSMState returns every key/value in fsm's DB as a map for comparison.
 func dumpFSMState(t *testing.T, fsm *FSM) map[string]string {
@@ -54,127 +29,55 @@ func dumpFSMState(t *testing.T, fsm *FSM) map[string]string {
 	return out
 }
 
-// determinismCmdSequence builds a fixed sequence of retired-slot commands to
-// verify batch-apply determinism across different transaction groupings.
-//
-// Task 12: CmdCreateBucket/CmdDeleteBucket/CmdSetBucketVersioning/
-// CmdSetBucketPolicy/CmdDeleteBucketPolicy are all retired (group-0 bucket
-// control-plane moved to meta-raft). Their applies are no-ops; the sequence
-// exercises the batch-actor infrastructure (not the applies themselves) by
-// confirming the same final DB state is produced regardless of how commands
-// are grouped into transactions.
-func determinismCmdSequence(t *testing.T) [][]byte {
+func unknownCmdSequence(t *testing.T) [][]byte {
 	t.Helper()
-	enc := func(ct CommandType, p any) []byte {
-		b, err := EncodeCommand(ct, p)
+	raw := func(ct uint32) []byte {
+		b, err := buildNoDataCommand(ct)
 		require.NoError(t, err)
 		return b
 	}
 	return [][]byte{
-		enc(CmdCreateBucket, CreateBucketCmd{Bucket: "b1"}),
-		enc(CmdSetBucketVersioning, SetBucketVersioningCmd{Bucket: "b1", State: "Enabled"}),
-		enc(CmdSetBucketPolicy, SetBucketPolicyCmd{Bucket: "b1", PolicyJSON: []byte(`{"v":1}`)}),
-		enc(CmdDeleteBucketPolicy, DeleteBucketPolicyCmd{Bucket: "b1"}),
-		enc(CmdCreateBucket, CreateBucketCmd{Bucket: "b2"}),
-		enc(CmdSetBucketVersioning, SetBucketVersioningCmd{Bucket: "b2", State: "Enabled"}),
-		enc(CmdSetBucketPolicy, SetBucketPolicyCmd{Bucket: "b2", PolicyJSON: []byte(`{"v":2}`)}),
-		enc(CmdDeleteBucket, DeleteBucketCmd{Bucket: "b2"}),
+		raw(1),
+		raw(2),
+		raw(8),
+		raw(9),
+		raw(10),
+		raw(11),
+		raw(15),
+		raw(250),
 	}
 }
 
-func TestApplyTxnBatchDeterminism(t *testing.T) {
-	cmds := determinismCmdSequence(t)
-	n := len(cmds)
-
-	// Batch groupings. Each must sum to n. nil entry == one transaction per cmd.
-	groupings := [][]int{
-		nil, // unbatched (reference)
-		{2, 2, 2, 2},
-		{n}, // single batch — exercises iterator pending writes
-		{1, 3, 1, 3},
-	}
-
-	var refState map[string]string
-	var refResults []string
-	for gi, g := range groupings {
-		if g == nil {
-			g = make([]int, n)
-			for i := range g {
-				g[i] = 1
-			}
-		}
-		fsm := NewFSM(newTestStore(t), newStateKeyspaceEmpty())
-		results := applyBatched(t, fsm, cmds, g)
-		state := dumpFSMState(t, fsm)
-		if gi == 0 {
-			refState, refResults = state, results
-			continue
-		}
-		require.True(t, reflect.DeepEqual(state, refState),
-			"grouping %d: DB state diverged from unbatched", gi)
-		require.Equal(t, refResults, results,
-			"grouping %d: result vector diverged", gi)
-	}
-}
-
-func TestApplyBatch_CommitFailureFallback(t *testing.T) {
-	cmds := determinismCmdSequence(t)
+func TestCommitBatch_UnknownCommandsNoOp(t *testing.T) {
+	cmds := unknownCmdSequence(t)
 	batch := make([]raft.LogEntry, len(cmds))
 	for i, c := range cmds {
 		batch[i] = raft.LogEntry{Index: uint64(i + 1), Term: 1, Type: raft.LogEntryCommand, Command: c}
 	}
 
-	// Reference: unbatched apply on a separate FSM.
-	refFSM := NewFSM(newTestStore(t), newStateKeyspaceEmpty())
-	for _, c := range cmds {
-		_ = refFSM.Apply(c)
-	}
-	refState := dumpFSMState(t, refFSM)
-
-	// Force the batch commit to fail once; subsequent commits go through.
-	orig := commitApplyTxn
-	failed := false
-	commitApplyTxn = func(txn MetadataTxn) error {
-		if !failed {
-			failed = true
-			txn.Discard()
-			return badger.ErrConflict
-		}
-		return orig(txn)
-	}
-	defer func() { commitApplyTxn = orig }()
-
 	fsm := NewFSM(newTestStore(t), newStateKeyspaceEmpty())
-	a := &applyActor{db: fsm.db, fsm: fsm}
-	results := a.applyBatch(batch)
+	a := &applyActor{fsm: fsm}
+	b := &DistributedBackend{fsm: fsm}
+	a.batch = append(a.batch[:0], batch...)
+	a.commitBatch(b)
 
-	require.True(t, failed, "commit-failure seam was not exercised")
-	require.Len(t, results, len(cmds))
-	require.Equal(t, refState, dumpFSMState(t, fsm),
-		"fallback must produce the same state as unbatched apply")
+	require.Empty(t, b.applyErrs)
+	require.Equal(t, uint64(len(batch)), b.lastApplied.Load())
+	require.Empty(t, dumpFSMState(t, fsm), "unknown data-group commands must not mutate the FSM DB")
 }
 
-func TestApplyBatch_BusinessErrorDoesNotAbortBatch(t *testing.T) {
-	// Build a batch where entry 2 (index 2) has a corrupt payload for a
-	// live command (CmdResealFSMValues decode will fail on garbage bytes).
+func TestCommitBatch_DecodeErrorDoesNotAbortBatch(t *testing.T) {
+	// Build a batch where entry 2 (index 2) is not a valid command envelope.
 	// Entries before and after must be applied successfully.
-	//
-	// Note: the bucket commands (CmdCreateBucket, CmdDeleteBucket) were retired
-	// in Task 12 (group-0 bucket control-plane → meta-raft); their applies are
-	// no-ops that cannot produce a business error. We use CmdResealFSMValues
-	// with a garbage payload to get a decode error at entry 2.
-	goodNoOp, err := buildRawCommand(CmdNoOp, nil)
+	goodNoOp, err := buildRawCommand(0, nil)
 	require.NoError(t, err)
-	// Empty payload triggers "empty data" error in fbSafe, which is a reliable
-	// decode error independent of FlatBuffers internals.
-	badReseal, err := buildRawCommand(CmdResealFSMValues, nil)
-	require.NoError(t, err)
+	badCommand := []byte("not a command envelope")
 
 	cmds := [][]byte{
-		goodNoOp,  // entry 0: no-op → nil
-		goodNoOp,  // entry 1: no-op → nil
-		badReseal, // entry 2: decode error → error
-		goodNoOp,  // entry 3: no-op → nil (must not be aborted)
+		goodNoOp,   // entry 0: no-op → nil
+		goodNoOp,   // entry 1: no-op → nil
+		badCommand, // entry 2: decode error → error
+		goodNoOp,   // entry 3: no-op → nil (must not be aborted)
 	}
 	batch := make([]raft.LogEntry, len(cmds))
 	for i, c := range cmds {
@@ -182,52 +85,16 @@ func TestApplyBatch_BusinessErrorDoesNotAbortBatch(t *testing.T) {
 	}
 
 	fsm := NewFSM(newTestStore(t), newStateKeyspaceEmpty())
-	a := &applyActor{db: fsm.db, fsm: fsm}
-	results := a.applyBatch(batch)
+	a := &applyActor{fsm: fsm}
+	b := &DistributedBackend{fsm: fsm}
+	a.batch = append(a.batch[:0], batch...)
+	a.commitBatch(b)
 
-	require.NoError(t, results[0])
-	require.NoError(t, results[1])
-	require.Error(t, results[2], "corrupt CmdResealFSMValues payload must be reported as error")
-	require.NoError(t, results[3], "entries after a business error must still be applied")
-}
-
-func TestApplyBatch_ErrTxnTooBigFallback(t *testing.T) {
-	// Many large PutObjectMeta commands whose summed writes exceed the Badger
-	// txn limit force a mid-batch ErrTxnTooBig. The fallback must re-apply each
-	// entry individually so no committed Raft entry is silently dropped.
-	bigMeta := map[string]string{"x": strings.Repeat("a", 64<<10)} // 64 KiB each
-	var cmds [][]byte
-	for i := 0; i < 32; i++ {
-		// Retired object slot (CommandType 3, formerly CmdPutObjectMeta): the apply
-		// loop no-ops it but must still process every committed entry without dropping.
-		payload, err := encodeQuorumMetaBlob(PutObjectMetaCmd{
-			Bucket: "b1", Key: "k" + string(rune('a'+i)), Size: 1, ETag: "e",
-			UserMetadata: bigMeta,
-		})
-		require.NoError(t, err)
-		b, err := buildRawCommand(CommandType(3), payload)
-		require.NoError(t, err)
-		cmds = append(cmds, b)
-	}
-	batch := make([]raft.LogEntry, len(cmds))
-	for i, c := range cmds {
-		batch[i] = raft.LogEntry{Index: uint64(i + 1), Term: 1, Type: raft.LogEntryCommand, Command: c}
-	}
-
-	refFSM := NewFSM(newTestStore(t), newStateKeyspaceEmpty())
-	for _, c := range cmds {
-		require.NoError(t, refFSM.Apply(c))
-	}
-
-	fsm := NewFSM(newTestStore(t), newStateKeyspaceEmpty())
-	a := &applyActor{db: fsm.db, fsm: fsm}
-	results := a.applyBatch(batch)
-
-	for i, r := range results {
-		require.NoError(t, r, "entry %d must be applied via fallback, not dropped", i)
-	}
-	require.Equal(t, dumpFSMState(t, refFSM), dumpFSMState(t, fsm),
-		"every entry past the overflow point must be applied")
+	require.NotContains(t, b.applyErrs, uint64(1))
+	require.NotContains(t, b.applyErrs, uint64(2))
+	require.Contains(t, b.applyErrs, uint64(3), "corrupt command envelope must be reported as error")
+	require.NotContains(t, b.applyErrs, uint64(4), "entries after a decode error must still be recorded")
+	require.Equal(t, uint64(4), b.lastApplied.Load())
 }
 
 // snapshotBarrierFakeNode is a RaftNode stub for the snapshot-barrier test. It
@@ -248,10 +115,8 @@ func TestApplyActor_SnapshotIsBatchBarrier(t *testing.T) {
 	applyBatchEntriesCap = maxApplyBatchEntries
 	defer func() { applyBatchEntriesCap = origCap }()
 
-	// Task 12: CmdCreateBucket is retired (group-0 bucket control-plane moved to
-	// meta-raft); its apply is a no-op and writes no keys. Use
-	// persistPutObjectMetaUpdate to write real state into the source FSM so the
-	// snapshot has actual content to restore, and use ObjectMetaKey for assertions.
+	// Write real state into the source FSM so the snapshot has actual content to
+	// restore, and use ObjectMetaKey for assertions.
 	writeObj := func(f *FSM, bucket, key, etag string) {
 		t.Helper()
 		cmd := PutObjectMetaCmd{
@@ -271,27 +136,26 @@ func TestApplyActor_SnapshotIsBatchBarrier(t *testing.T) {
 	// Target FSM + backend. Pre-snapshot object keys are written via direct DB
 	// update (simulating entries already applied before the snapshot arrives).
 	// Feed: command(pre1), command(pre2), snapshot, command(post).
-	// Commands use retired CmdNoOp (wire-stable) since the batch actor must handle
-	// all committed log entries, including no-ops and retired slots.
+	// Commands use a valid legacy envelope since the batch actor must handle
+	// committed command entries without mutating the FSM.
 	noOp := func() []byte {
-		raw, nerr := buildRawCommand(CmdNoOp, nil)
+		raw, nerr := buildRawCommand(0, nil)
 		require.NoError(t, nerr)
 		return raw
 	}
 
 	fsm := NewFSM(newTestStore(t), newStateKeyspaceEmpty())
 	b := &DistributedBackend{store: fsm.db, fsm: fsm, node: snapshotBarrierFakeNode{}}
-	a := &applyActor{db: fsm.db, fsm: fsm}
+	a := &applyActor{fsm: fsm}
 
 	// Write pre-snapshot objects directly (pre1, pre2) — simulates state that
 	// the snapshot should wipe.
 	writeObj(fsm, "snap-bkt", "pre1", "pre-etag")
 	writeObj(fsm, "snap-bkt", "pre2", "pre-etag")
 
-	// The post-snapshot command (c3) uses a retired migration slot. It must
-	// replay as a no-op after the snapshot without blocking or creating a
-	// pending-migration key.
-	c3, err := buildRawCommand(CmdMigrateShard, []byte("legacy payload"))
+	// The post-snapshot command (c3) uses an unknown slot. It must replay as a
+	// no-op after the snapshot without blocking or creating a pending-migration key.
+	c3, err := buildRawCommand(250, []byte("legacy payload"))
 	require.NoError(t, err)
 	postSnapKey := string(fsm.keys.PendingMigrationKey("snap-bkt", "post-snap", "v1"))
 

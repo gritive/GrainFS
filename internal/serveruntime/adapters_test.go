@@ -189,7 +189,6 @@ func (f *fakeRaftNode) SetInstallSnapshotTransport(func(string, *raft.InstallSna
 }
 func (f *fakeRaftNode) SetTimeoutNowTransport(func(string, *raft.TimeoutNowArgs) (*raft.TimeoutNowReply, error)) {
 }
-func (f *fakeRaftNode) SetNoOpCommand([]byte)                             {}
 func (f *fakeRaftNode) RegisterObserver(chan<- raft.Event)                {}
 func (f *fakeRaftNode) DeregisterObserver(chan<- raft.Event)              {}
 func (f *fakeRaftNode) AddVoter(string, string) error                     { return nil }

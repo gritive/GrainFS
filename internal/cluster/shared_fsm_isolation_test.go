@@ -242,25 +242,20 @@ func TestSharedFSM_PrefixIsolation_AllPaths(t *testing.T) {
 		// isolation is still covered by the keyspace-distinctness rows above and by
 		// the snapshot/restore prefix-isolation tests in shared_fsm_test.go.
 		//
-		// Shard placement (CmdPutShardPlacement / CmdDeleteShardPlacement) is
-		// intentionally skipped: apply.go:94-100 treats both commands as no-ops
-		// ("placement is now derived deterministically from the ring"). Driving
-		// the placement path via apply is impossible, and there is no key written
-		// to BadgerDB to assert on. The keyspace correctness for ShardPlacementKey
-		// is covered by TestStateKeyspace_PrefixRoundTrip at the unit level.
+		// Shard placement is intentionally skipped: the data-group placement apply
+		// path is gone ("placement is now derived deterministically from the ring").
+		// Driving the placement path via apply is impossible, and there is no key
+		// written to BadgerDB to assert on. The keyspace correctness for
+		// ShardPlacementKey is covered by TestStateKeyspace_PrefixRoundTrip at the
+		// unit level.
 		//
-		// CmdMigrateShard is likewise omitted: balancer shard migration is
-		// retired, and stale log replay is a no-op. The legacy
-		// pending-migration: keyspace is covered by the keyspace-level
-		// round-trip test (TestStateKeyspace_PrefixRoundTrip).
+		// Balancer shard migration is likewise omitted: it is retired, and stale
+		// log replay is a no-op. The legacy pending-migration: keyspace is covered
+		// by the keyspace-level round-trip test (TestStateKeyspace_PrefixRoundTrip).
 	}
 
-	// Rows run sequentially (no t.Parallel). NewDistributedBackend calls
-	// SetNoOpCommand after the per-row raft goroutine has started, which races
-	// on raft.Node.noOpCmd — a pre-existing bug in internal/raft, out of scope
-	// here. Running rows one at a time keeps the test green under -race without
-	// touching raft. The fresh-DB-per-row setup means there is no correctness
-	// reason the rows need to be parallel.
+	// Rows run sequentially (no t.Parallel). Each row owns a fresh DB and raft
+	// node; there is no correctness reason the rows need to be parallel.
 	for _, row := range rows {
 		row := row
 		t.Run(row.name, func(t *testing.T) {

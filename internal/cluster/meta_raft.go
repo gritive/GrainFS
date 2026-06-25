@@ -12,7 +12,6 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/scrubber"
@@ -149,14 +148,6 @@ func NewMetaRaft(cfg MetaRaftConfig) (*MetaRaft, error) {
 	}
 
 	fsm := NewMetaFSM()
-
-	// §5.4.2: new leader must commit an entry in its own term to allow previous-term
-	// entries to be committed (leader completeness). Wire a MetaCmdTypeNoOp so
-	// runLeader automatically proposes it on every leadership win, committing any
-	// backlogged entries (e.g. lifecycle config from the dead leader's term).
-	if noOp, err := encodeMetaCmd(MetaCmdTypeNoOp, nil); err == nil {
-		node.SetNoOpCommand(noOp)
-	}
 
 	m := &MetaRaft{
 		node:        node,
@@ -568,24 +559,6 @@ func (m *MetaRaft) ProposeLoadSnapshot(ctx context.Context, entries []LoadStatEn
 	return m.waitAppliedResult(ctx, idx)
 }
 
-// ProposeRebalancePlan encodes a ProposeRebalancePlan command and proposes it to the
-// cluster, blocking until the entry is applied to the local FSM.
-func (m *MetaRaft) ProposeRebalancePlan(ctx context.Context, plan RebalancePlan) error {
-	payload, err := encodeMetaProposeRebalancePlanCmd(plan)
-	if err != nil {
-		return fmt.Errorf("meta_raft: encode ProposeRebalancePlan: %w", err)
-	}
-	data, err := encodeMetaCmd(MetaCmdTypeProposeRebalancePlan, payload)
-	if err != nil {
-		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
-	}
-	idx, err := m.node.ProposeWait(ctx, data)
-	if err != nil {
-		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
-	}
-	return m.waitAppliedResult(ctx, idx)
-}
-
 // ProposeScrubTrigger encodes a ScrubTrigger command and proposes it to the
 // cluster, blocking until the entry is applied to the local FSM. Each node's
 // onScrubTrigger callback (wired to Director.ApplyFromFSM) creates a session
@@ -597,24 +570,6 @@ func (m *MetaRaft) ProposeScrubTrigger(ctx context.Context, entry scrubber.Scrub
 		return fmt.Errorf("meta_raft: encode ScrubTrigger: %w", err)
 	}
 	data, err := encodeMetaCmd(MetaCmdTypeScrubTrigger, payload)
-	if err != nil {
-		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
-	}
-	idx, err := m.node.ProposeWait(ctx, data)
-	if err != nil {
-		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
-	}
-	return m.waitAppliedResult(ctx, idx)
-}
-
-// ProposeAbortPlan encodes an AbortPlan command and proposes it to the cluster,
-// blocking until the entry is applied to the local FSM.
-func (m *MetaRaft) ProposeAbortPlan(ctx context.Context, planID string, reason clusterpb.AbortPlanReason) error {
-	payload, err := encodeMetaAbortPlanCmd(planID, reason)
-	if err != nil {
-		return fmt.Errorf("meta_raft: encode AbortPlan: %w", err)
-	}
-	data, err := encodeMetaCmd(MetaCmdTypeAbortPlan, payload)
 	if err != nil {
 		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
 	}

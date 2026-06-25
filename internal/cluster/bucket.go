@@ -31,7 +31,7 @@ func (b *DistributedBackend) createBucketInternal(ctx context.Context, bucket st
 		return fmt.Errorf("create bucket %q: MetaBucketStore not wired", bucket)
 	}
 	// Existence check via MetaBucketStore (authoritative): group-0 BucketKey
-	// is no longer written (Task 12: CmdCreateBucket retired).
+	// is no longer written by bucket creation.
 	if _, ok := mbs.Record(bucket); ok {
 		return storage.ErrBucketAlreadyExists
 	}
@@ -88,7 +88,7 @@ func (b *DistributedBackend) HeadBucket(ctx context.Context, bucket string) erro
 func (b *DistributedBackend) DeleteBucket(ctx context.Context, bucket string) error {
 	// Existence check via HeadBucket (which reads from MetaBucketStore — the sole
 	// authority). Task 12: the old inline BucketKey read is replaced here since
-	// CmdCreateBucket is retired and BucketKey is never written by the new meta path.
+	// BucketKey is never written by the new meta path.
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return err
 	}
@@ -112,7 +112,7 @@ func (b *DistributedBackend) DeleteBucket(ctx context.Context, bucket string) er
 	} else {
 		// NOT Enabled (never-versioned OR Suspended). Live objects can sit in TWO
 		// blob trees and the old FSM obj: scan saw NEITHER (greenfield never writes
-		// obj: records -- CmdPutObjectMeta apply is a no-op), so a non-empty bucket
+		// obj: records via apply), so a non-empty bucket
 		// deleted silently (data loss). Both probes are CLUSTER-WIDE — objects are
 		// key-hash-placed across shard groups, so a node-local scan would miss
 		// objects on other nodes (the cluster coordinator always falls through to

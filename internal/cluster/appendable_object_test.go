@@ -125,7 +125,7 @@ func TestPlanAppendSeedsAppendCallMD5sOnFirstCall(t *testing.T) {
 
 func TestPlanCoalescePreservesAppendCallMD5s(t *testing.T) {
 	base := PutObjectMetaCmd{Bucket: "b", Key: "k", IsAppendable: true, Segments: []SegmentMetaEntry{{BlobID: "s1"}}, AppendCallMD5s: [][]byte{[]byte("aaaaaaaaaaaaaaaa")}}
-	next, res, err := planCoalesceBlobRMW(base, CoalesceSegmentsCmd{Bucket: "b", Key: "k", CoalescedID: "x", ShardKey: "k/coalesced/x", ConsumedSegmentIDs: []string{"s1"}})
+	next, res, err := planCoalesceBlobRMW(base, CoalesceSegmentsPlan{Bucket: "b", Key: "k", CoalescedID: "x", ShardKey: "k/coalesced/x", ConsumedSegmentIDs: []string{"s1"}})
 	require.NoError(t, err)
 	require.False(t, res.Noop)
 	require.Equal(t, base.AppendCallMD5s, next.AppendCallMD5s, "coalesce must carry the per-call digest history forward unchanged")

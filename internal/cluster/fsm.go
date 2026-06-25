@@ -3,86 +3,9 @@ package cluster
 import (
 	"fmt"
 
-	flatbuffers "github.com/google/flatbuffers/go"
-
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/storage"
 )
-
-// CommandType identifies the type of FSM command replicated through Raft.
-type CommandType uint8
-
-const (
-	// CmdNoOp is proposed by a new leader to commit entries from previous terms.
-	// The FSM ignores it; it exists only to advance advanceCommitIndex.
-	CmdNoOp CommandType = 0
-
-	// RETIRED: bucket control-plane moved to meta-raft (MetaBucketStore).
-	// Enum slots kept reserved so old-log replay is safe (apply is a no-op).
-	// DO NOT reuse these numbers for new commands.
-	CmdCreateBucket       CommandType = 1
-	CmdDeleteBucket       CommandType = 2
-	CmdSetBucketPolicy    CommandType = 8
-	CmdDeleteBucketPolicy CommandType = 9
-	// CmdSetBucketVersioning (15) is also retired — kept below for wire stability.
-
-	// RETIRED: balancer shard migration was removed. Slots kept reserved so old-log replay is safe.
-	// DO NOT reuse these numbers for new commands.
-	CmdMigrateShard  CommandType = 10
-	CmdMigrationDone CommandType = 11
-
-	// RETIRED: bucket versioning moved to meta-raft. Slot kept reserved.
-	CmdSetBucketVersioning CommandType = 15
-	// CmdResealFSMValues re-seals a batch of data-group FSM state values
-	// (policy:, obj:) from a retired DEK generation onto the active generation.
-	// Applied in the serialized apply loop for race-freedom. S7-1a.
-	CmdResealFSMValues CommandType = 41
-	// CmdFSMValueResealDone is an ordering-fence marker proposed by the group
-	// leader after DrainFSMValueRewrap returns nil. Every node applies the
-	// marker after all preceding CmdResealFSMValues batches (raft ordering),
-	// so the per-node post-apply hook fires with the node's store already
-	// clean. Gen is a log hint only — the re-Kick is gen-agnostic. S7-1a-2.
-	CmdFSMValueResealDone CommandType = 42
-
-	// RETIRED SLOTS — these CommandType values once named per-object, multipart,
-	// append/coalesce, and ring-derived placement commands. The data plane moved
-	// off-raft (Slices 0-2 + multipart/append-off-raft epics), so these commands
-	// have no production proposer and their applies were no-ops. The named
-	// constants are removed; the explicit numeric values above are unchanged so
-	// the LIVE control-plane commands keep their byte-stable wire contract.
-	// Retired slot numbers — DO NOT REUSE for a new command:
-	//   3  CmdPutObjectMeta        (off-raft quorum-meta blob; see encodeQuorumMetaBlob)
-	//   4  CmdDeleteObject         (blob-physical force-delete)
-	//   5  CmdCreateMultipartUpload
-	//   6  CmdCompleteMultipart
-	//   7  CmdAbortMultipart
-	//   12 CmdPutShardPlacement    (ring-derived placement)
-	//   13 CmdDeleteShardPlacement (ring-derived placement)
-	//   14 CmdDeleteObjectVersion  (per-version blob tombstone)
-	//   16 CmdSetObjectACL         (blob RMW SetObjectACLPropose)
-	//   17 CmdSetRing             (consistent-hash ring; no-op apply removed)
-	//   18 CmdAppendObject         (append-off-raft Slice 1)
-	//   19 CmdCoalesceSegments     (append-off-raft Slice 1)
-	//   20 CmdSetObjectTags        (blob RMW SetObjectTagsPropose)
-	//   40 CmdPutObjectQuarantine  (folded into quorum-meta blob)
-	//   43 CmdDeleteMultipartDone
-	//   44 CmdSetBucketSoleAuthority (soleauth teardown, blob-primary epic)
-)
-
-// Command is a serializable FSM command for Raft log entries.
-type Command struct {
-	Type CommandType
-	Data []byte
-}
-
-type CreateBucketCmd struct {
-	Bucket         string
-	BypassReserved bool
-}
-
-type DeleteBucketCmd struct {
-	Bucket string
-}
 
 type PutObjectMetaCmd struct {
 	Bucket      string
@@ -96,7 +19,7 @@ type PutObjectMetaCmd struct {
 	ECParity    uint8    // EC m (parity shards)
 	StripeBytes uint32   // 0 = contiguous/legacy, >0 = stripe-interleaved chunk size
 	NodeIDs     []string // EC 샤드 배치 노드 (index i = shard i); N× 오브젝트는 빈 슬라이스
-	// PlacementGroupID is the data Raft group that owns this object version.
+	// PlacementGroupID is the placement group that owns this object version.
 	PlacementGroupID string
 	UserMetadata     map[string]string
 	SSEAlgorithm     string
@@ -180,113 +103,23 @@ type SegmentMetaEntry struct {
 	StripeBytes      uint32
 }
 
-type PutObjectQuarantineCmd struct {
-	Bucket    string
-	Key       string
-	VersionID string
-	Cause     string
-	Reason    string
-}
-
-// ResealFSMValuesCmd carries a batch of full storage keys whose FSM-state values
-// (policy:, obj:) must be re-sealed onto ActiveGen. Applied in the serialized
-// apply loop; the apply handler reads the current value and reseals it — never
-// carries plaintext or ciphertext on the wire. S7-1a.
-type ResealFSMValuesCmd struct {
-	Keys      []string
-	ActiveGen uint32
-}
-
-// FSMValueResealDoneCmd is the ordering-fence marker for CmdFSMValueResealDone.
-// Gen is a log hint for observability only; the re-Kick triggered by the
-// post-apply hook is gen-agnostic. S7-1a-2.
-type FSMValueResealDoneCmd struct {
-	Gen uint32
-}
-
 // DeleteMultipartDoneCmd, CreateMultipartUploadCmd, CompleteMultipartCmd, and
 // AbortMultipartCmd are removed in the multipart-off-raft epic (M4).
-// The CommandType constants (5, 6, 7, 43) are kept reserved above; the structs
-// are deleted because no production code constructs or decodes them.
+// Their data-group command slots are not named in code anymore; brownfield log
+// replay decodes the envelope type numerically and no-ops.
 
-type SetBucketPolicyCmd struct {
-	Bucket     string
-	PolicyJSON []byte
-}
-
-type DeleteBucketPolicyCmd struct {
-	Bucket string
-}
-
-// SetBucketVersioningCmd persists the S3 versioning state for a bucket.
-type SetBucketVersioningCmd struct {
-	Bucket string
-	State  string // "Enabled" | "Suspended"
-}
-
-// AppendObjectCmd records one appended segment. Only PlacementGroupID is
-// frozen at propose time — FSM apply derives NodeIDs/EC params from the
-// current ShardGroup record (single source of truth, avoids drift).
-type AppendObjectCmd struct {
-	Bucket           string
-	Key              string
-	ExpectedOffset   int64
-	BlobID           string
-	SegmentSize      int64
-	SegmentETag      string
-	PlacementGroupID string
-	// VersionID is frozen into the Raft log so all replicas write the same
-	// versioned key. AppendObject reuses the current latest version after the
-	// first segment because versioning-enabled buckets reject AppendObject.
-	// When empty (legacy replay / direct apply-test fixtures), apply falls back
-	// to the legacy ObjectMetaKey-only single-write path.
-	VersionID       string
-	ModifiedUnixSec int64
-}
-
-// EncodeNoOpCommand returns a serialized CmdNoOp suitable for SetNoOpCommand.
-func EncodeNoOpCommand() ([]byte, error) {
-	return EncodeCommand(CmdNoOp, nil)
-}
-
-// EncodeCommand serializes a command for Raft proposal using FlatBuffers.
-func EncodeCommand(cmdType CommandType, payload any) ([]byte, error) {
-	data, err := encodePayload(cmdType, payload)
-	if err != nil {
-		return nil, fmt.Errorf("marshal payload: %w", err)
-	}
-	b := flatbuffers.NewBuilder(len(data) + 16)
-	var dataOff flatbuffers.UOffsetT
-	if len(data) > 0 {
-		dataOff = b.CreateByteVector(data)
-	}
-	clusterpb.CommandStart(b)
-	clusterpb.CommandAddType(b, uint32(cmdType))
-	if len(data) > 0 {
-		clusterpb.CommandAddData(b, dataOff)
-	}
-	root := clusterpb.CommandEnd(b)
-	b.Finish(root)
-	raw := b.FinishedBytes()
-	out := make([]byte, len(raw))
-	copy(out, raw)
-	return out, nil
-}
-
-// DecodeCommand deserializes a command from a Raft log entry using FlatBuffers.
-func DecodeCommand(raw []byte) (cmd *Command, err error) {
+// DecodeCommand validates a legacy data-group raft command envelope.
+func DecodeCommand(raw []byte) (err error) {
 	if len(raw) == 0 {
-		return nil, fmt.Errorf("unmarshal command: empty data")
+		return fmt.Errorf("unmarshal command: empty data")
 	}
 	defer func() {
 		if r := recover(); r != nil {
-			cmd = nil
 			err = fmt.Errorf("unmarshal command: invalid flatbuffer: %v", r)
 		}
 	}()
 	t := clusterpb.GetRootAsCommand(raw, 0)
-	return &Command{
-		Type: CommandType(t.Type()),
-		Data: t.DataBytes(),
-	}, nil
+	_ = t.Type()
+	_ = t.DataBytes()
+	return nil
 }

@@ -124,7 +124,7 @@ func TestWireDEKPostCommit_RegistersHook(t *testing.T) {
 	// PostCommitHook on the FSM that fires on subsequent applies.
 	fsm := cluster.NewMetaFSM()
 	p := &fakeDEKProposer{}
-	WireDEKPostCommit(fsm, p, func() bool { return true }, nil /* scrubberKick */, nil /* fsmValueRewrap */)
+	WireDEKPostCommit(fsm, p, func() bool { return true }, nil /* scrubberKick */)
 	// We can't easily trigger a real apply here without spinning up MetaRaft.
 	// The fact that wireDEKPostCommit didn't panic and the registration
 	// returned proves the wiring path compiles + runs end-to-end. Direct hook

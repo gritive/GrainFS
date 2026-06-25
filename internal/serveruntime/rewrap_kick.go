@@ -3,6 +3,7 @@ package serveruntime
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -36,11 +37,43 @@ func newRewrapScrubberKick(
 	nodeID string,
 	report func(ctx context.Context, nodeID string, gen, epoch uint32) error,
 ) func(context.Context, uint32) {
+	return newRewrapScrubberKickWithRetry(ctrl, nodeID, report, time.Second, 3)
+}
+
+func newRewrapScrubberKickWithRetry(
+	ctrl *encrypt.RewrapController,
+	nodeID string,
+	report func(ctx context.Context, nodeID string, gen, epoch uint32) error,
+	retryDelay time.Duration,
+	maxAttempts int,
+) func(context.Context, uint32) {
+	if maxAttempts <= 0 {
+		maxAttempts = 1
+	}
 	return func(ctx context.Context, oldGen uint32) {
-		activeGen, err := ctrl.Kick(ctx, oldGen)
-		if err != nil {
-			log.Warn().Err(err).Uint32("old_gen", oldGen).Msg("dek rewrap kick incomplete or not ready; not reporting completion")
-			return
+		var activeGen uint32
+		var err error
+		for attempt := 1; attempt <= maxAttempts; attempt++ {
+			activeGen, err = ctrl.Kick(ctx, oldGen)
+			if err == nil {
+				break
+			}
+			if attempt == maxAttempts {
+				log.Warn().Err(err).Uint32("old_gen", oldGen).Int("attempts", attempt).
+					Msg("dek rewrap kick incomplete or not ready; not reporting completion")
+				return
+			}
+			log.Warn().Err(err).Uint32("old_gen", oldGen).Int("attempt", attempt).
+				Msg("dek rewrap kick incomplete or not ready; retrying before reporting completion")
+			timer := time.NewTimer(retryDelay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				log.Warn().Err(ctx.Err()).Uint32("old_gen", oldGen).
+					Msg("dek rewrap kick retry cancelled; not reporting completion")
+				return
+			case <-timer.C:
+			}
 		}
 		if report == nil {
 			return

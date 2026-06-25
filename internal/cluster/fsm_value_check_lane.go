@@ -7,19 +7,14 @@ import (
 	"github.com/gritive/GrainFS/internal/encrypt"
 )
 
-// FSMValueCheckLane is a read-only encrypt.RewrapLane that errors if this node
-// still holds any policy: or obj: FSM-value below keeper-current generation.
+// FSMValueCheckLane is an encrypt.RewrapLane that reseals this node's policy:
+// and obj: FSM values onto keeper-current generation.
 //
 // It is registered in the RewrapController alongside the EC and packblob lanes.
-// Because RewrapController.Kick returns the FIRST lane error, a stale
-// FSMValueCheckLane suppresses the completion report until this node's
-// FSM-values are drained. Once all policy:/obj: values are at keeper-current,
-// RewrapByGen returns nil and Kick can report completion.
-//
-// Design: this lane does NO mutation — it is a predicate. The actual resealing
-// is driven by CmdResealFSMValues batches proposed by the group leader (S7-1a).
-// The marker CmdFSMValueResealDone (proposed after drain) re-Kicks the
-// controller on every node after all reseal batches are applied.
+// Because RewrapController.Kick reports completion only after every lane
+// returns nil, decode/open/write errors in this lane fail closed and suppress
+// the epoch report. Stale values are not an error by themselves: this lane
+// drains them locally without data-group raft.
 type FSMValueCheckLane struct {
 	groups func() []*GroupBackend
 }
@@ -35,30 +30,23 @@ func NewFSMValueCheckLane(groups func() []*GroupBackend) *FSMValueCheckLane {
 // Name identifies the lane in rewrap orchestration.
 func (l *FSMValueCheckLane) Name() string { return "fsmvalue-check" }
 
-// RewrapByGen does NO mutation. It returns an error if this node still holds
-// any policy:/obj: value below keeper-current generation — making
-// RewrapController.Kick suppress the completion report until the
-// marker-driven reseal has converged on this node.
-//
-// activeGen (from the controller's snapshot of the keeper) is used for the
-// stale check; we re-read keeper-current per group so the predicate matches
-// what the drain converges toward (per-node keeper-current may differ from
-// the controller's view in lagged-follower scenarios).
+// RewrapByGen drains policy:/obj: values below keeper-current generation. The
+// controller passes activeGen from its keeper snapshot, but the local rewrite
+// re-reads keeper-current per group so back-to-back rotations converge on the
+// latest locally installed DEK generation.
 func (l *FSMValueCheckLane) RewrapByGen(ctx context.Context, _, _ uint32) error {
 	for _, gb := range l.groups() {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		current, ok := gb.fsm.activeDEKGen()
-		if !ok {
-			continue // encryption disabled for this group
-		}
-		stale, err := gb.CollectStaleFSMValueKeys(current, 1, fsmValueRewrapMaxBytes)
-		if err != nil {
-			return fmt.Errorf("fsmvalue-check: group %s: collect stale keys: %w", gb.ID(), err)
-		}
-		if len(stale) > 0 {
-			return fmt.Errorf("fsmvalue-check: group %s has FSM-values below gen %d (not yet drained)", gb.ID(), current)
+		for {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			n, err := RewrapLocalFSMValues(ctx, gb, 0)
+			if err != nil {
+				return fmt.Errorf("fsmvalue-rewrap: group %s: %w", gb.ID(), err)
+			}
+			if n == 0 {
+				break
+			}
 		}
 	}
 	return nil

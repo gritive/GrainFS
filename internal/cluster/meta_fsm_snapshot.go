@@ -43,11 +43,6 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	for _, v := range f.loadSnapshot {
 		lsEntries = append(lsEntries, v)
 	}
-	var activePlanCopy *RebalancePlan
-	if f.activePlan != nil {
-		cp := *f.activePlan
-		activePlanCopy = &cp
-	}
 	// Snapshot dekRefCounts while holding the read lock.
 	dekRefCountsCopy := make(map[uint32]uint64, len(f.dekRefCounts))
 	for g, c := range f.dekRefCounts {
@@ -126,7 +121,6 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	nodesVec := buildNodesVector(b, nodes)
 	baVec := buildBucketAssignmentsVector(b, buckets)
 	lsVec := buildLoadSnapshotVector(b, lsEntries)
-	activePlanOff := buildActivePlan(b, activePlanCopy)
 
 	// Object index removed in Phase 4; encode empty vector for wire compatibility.
 	clusterpb.MetaStateSnapshotStartObjectIndexVector(b, 0)
@@ -152,9 +146,6 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	clusterpb.MetaStateSnapshotAddPlacementGenerations(b, pgVec)
 	clusterpb.MetaStateSnapshotAddBucketAssignments(b, baVec)
 	clusterpb.MetaStateSnapshotAddLoadSnapshot(b, lsVec)
-	if activePlanCopy != nil {
-		clusterpb.MetaStateSnapshotAddActivePlan(b, activePlanOff)
-	}
 	clusterpb.MetaStateSnapshotAddObjectIndex(b, objectIndexVec)
 	clusterpb.MetaStateSnapshotAddClusterConfig(b, clusterConfigVec)
 	clusterpb.MetaStateSnapshotAddLastRotationRequestEntries(b, lrrVec)

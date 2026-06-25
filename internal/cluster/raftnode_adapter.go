@@ -362,12 +362,6 @@ func (b *raftTransportBridge) SendTimeoutNow(peer string, args *raft.TimeoutNowA
 	return (*sendPtr)(peer, args)
 }
 
-// --- No-op stubs ---
-
-// SetNoOpCommand is a no-op. The actor emits no-op entries on leader
-// election internally without requiring an externally supplied FSM payload.
-func (a *raftNodeAdapter) SetNoOpCommand(_ []byte) {}
-
 // RegisterObserver is a no-op; leadership detection uses State() polling.
 func (a *raftNodeAdapter) RegisterObserver(_ chan<- raft.Event) {
 	a.once.Do(func() {

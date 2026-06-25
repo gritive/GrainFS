@@ -108,7 +108,7 @@ func TestCoalesce_Idempotent_DuplicatePublishNoOps(t *testing.T) {
 	require.Len(t, base.Segments, 2)
 
 	// Build a fixed coalesce command (deterministic CoalescedID) and publish it twice.
-	cmd := CoalesceSegmentsCmd{
+	cmd := CoalesceSegmentsPlan{
 		Bucket:             bucket,
 		Key:                key,
 		CoalescedID:        "0192f3c0-aaaa-7eee-8fff-000000000001",
@@ -160,7 +160,7 @@ func TestCoalesce_F8_PreservesConcurrentAppendSegment(t *testing.T) {
 	require.Len(t, mid.Segments, 3)
 	survivorBlobID := mid.Segments[2].BlobID
 
-	cmd := CoalesceSegmentsCmd{
+	cmd := CoalesceSegmentsPlan{
 		Bucket:             bucket,
 		Key:                key,
 		CoalescedID:        "0192f3c0-bbbb-7eee-8fff-000000000002",

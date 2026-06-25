@@ -88,10 +88,10 @@ func TestClusterCoordinatorSetBucketVersioningPassesClusterAwareHeadBucket(t *te
 	// On a freshly bootstrapped cluster, CreateBucket replicates the bucket
 	// assignment through meta-Raft, but the receiving follower's
 	// DistributedBackend (local Badger) may not have applied the
-	// CmdCreateBucket data-Raft entry yet. ClusterCoordinator.HeadBucket
-	// already handles this by falling back to bucketAssigned. Without the
-	// same cluster-aware pre-check on SetBucketVersioning, the request goes
-	// straight to the base layer's local pre-check, which still returns
+	// local meta record yet. ClusterCoordinator.HeadBucket already handles
+	// this by falling back to bucketAssigned. Without the same cluster-aware
+	// pre-check on SetBucketVersioning, the request goes straight to the base
+	// layer's local pre-check, which still returns
 	// ErrBucketNotFound and the warp versioned workload fails at
 	// PutBucketVersioning.
 	base := &fakeBackend{headErr: storage.ErrBucketNotFound}

@@ -258,8 +258,7 @@ func (b *DistributedBackend) writeSegmentBlobForAppend(bucket, key string, r io.
 
 	// TODO(Phase 2): replace MD5 with xxhash3-128 to match storage-side
 	// segment checksum. For now, the raw 16-byte MD5 digest is stashed in
-	// Checksum so the cluster wire path (AppendObjectCmd.SegmentETag) can
-	// still propagate the per-segment digest in hex form.
+	// Checksum so the blob manifest can persist the per-append digest.
 	return storage.SegmentRef{
 		BlobID:   blobID,
 		Size:     size,
@@ -621,8 +620,8 @@ func (b *DistributedBackend) readAtChunk(ctx context.Context, bucket, key string
 	return io.ReadFull(rc, buf)
 }
 
-// lookupPlacementGroupForAppend resolves the placement group ID to freeze into
-// AppendObjectCmd. Order:
+// lookupPlacementGroupForAppend resolves the placement group ID to persist in
+// the next appendable object manifest. Order:
 //  1. existing objectMeta's PG (anchors subsequent appends to the original PG).
 //  2. PlacementGroupFromContext (coordinator-provided).
 //  3. default "group-0" (single-node / test path).

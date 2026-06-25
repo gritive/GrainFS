@@ -26,7 +26,7 @@ type objectMeta struct {
 	ECParity     uint8    // EC m (parity shards)
 	StripeBytes  uint32   // 0 = contiguous/legacy, >0 = stripe-interleaved chunk size
 	NodeIDs      []string // shard placement nodes (index i = shard i); empty for N× objects
-	// PlacementGroupID is the data Raft group that owns this object version.
+	// PlacementGroupID is the placement group that owns this object version.
 	PlacementGroupID string
 	UserMetadata     map[string]string
 	SSEAlgorithm     string
@@ -107,36 +107,6 @@ func fbSafe[T any](data []byte, fn func([]byte) T) (t T, err error) {
 }
 
 // --- Command encode/decode ---
-
-func encodeCreateBucketCmd(c CreateBucketCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	clusterpb.CreateBucketCmdStart(b)
-	clusterpb.CreateBucketCmdAddBucket(b, bucketOff)
-	clusterpb.CreateBucketCmdAddBypassReserved(b, c.BypassReserved)
-	return fbFinish(b, clusterpb.CreateBucketCmdEnd(b)), nil
-}
-
-// encodeCreateBucketCmdBypass encodes a CreateBucketCmd with bypass_reserved=true.
-// Use only from the bootstrap path to seed reserved buckets (e.g. "default", "_grainfs").
-// Public-API callers must use encodeCreateBucketCmd with BypassReserved=false (the default).
-//
-//nolint:unused // referenced by codec_test.go.
-func encodeCreateBucketCmdBypass(bucket string) ([]byte, error) {
-	return encodeCreateBucketCmd(CreateBucketCmd{Bucket: bucket, BypassReserved: true})
-}
-
-// decodeCreateBucketCmd is test-only (see codec_bucket_retired_test.go).
-
-func encodeDeleteBucketCmd(c DeleteBucketCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	clusterpb.DeleteBucketCmdStart(b)
-	clusterpb.DeleteBucketCmdAddBucket(b, bucketOff)
-	return fbFinish(b, clusterpb.DeleteBucketCmdEnd(b)), nil
-}
-
-// decodeDeleteBucketCmd is test-only (see codec_bucket_retired_test.go).
 
 func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	b := clusterBuilderPool.Get()
@@ -456,33 +426,6 @@ func decodePutObjectMetaCmd(data []byte) (out PutObjectMetaCmd, err error) {
 		AppendCallMD5s:   appendCallMD5s,
 	}, nil
 }
-
-func encodeSetBucketPolicyCmd(c SetBucketPolicyCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	var policyOff flatbuffers.UOffsetT
-	if len(c.PolicyJSON) > 0 {
-		policyOff = b.CreateByteVector(c.PolicyJSON)
-	}
-	clusterpb.SetBucketPolicyCmdStart(b)
-	clusterpb.SetBucketPolicyCmdAddBucket(b, bucketOff)
-	if len(c.PolicyJSON) > 0 {
-		clusterpb.SetBucketPolicyCmdAddPolicyJson(b, policyOff)
-	}
-	return fbFinish(b, clusterpb.SetBucketPolicyCmdEnd(b)), nil
-}
-
-// decodeSetBucketPolicyCmd is test-only (see codec_bucket_retired_test.go).
-
-func encodeDeleteBucketPolicyCmd(c DeleteBucketPolicyCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	clusterpb.DeleteBucketPolicyCmdStart(b)
-	clusterpb.DeleteBucketPolicyCmdAddBucket(b, bucketOff)
-	return fbFinish(b, clusterpb.DeleteBucketPolicyCmdEnd(b)), nil
-}
-
-// decodeDeleteBucketPolicyCmd is test-only (see codec_bucket_retired_test.go).
 
 // buildTagsVector encodes []storage.Tag as a FlatBuffers Tag vector using the
 // provided parent-table startVector func (e.g.
@@ -956,91 +899,4 @@ func unmarshalClusterMultipartMeta(data []byte) (clusterMultipartMeta, error) {
 		PlacementGroupID: string(t.PlacementGroupId()),
 		Tags:             readTagsVector(t.TagsLength(), t.Tags),
 	}, nil
-}
-
-func encodeSetBucketVersioningCmd(c SetBucketVersioningCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	stateOff := b.CreateString(c.State)
-	clusterpb.SetBucketVersioningCmdStart(b)
-	clusterpb.SetBucketVersioningCmdAddBucket(b, bucketOff)
-	clusterpb.SetBucketVersioningCmdAddState(b, stateOff)
-	return fbFinish(b, clusterpb.SetBucketVersioningCmdEnd(b)), nil
-}
-
-// decodeSetBucketVersioningCmd is test-only (see codec_bucket_retired_test.go).
-
-// --- Payload encoding dispatch ---
-
-func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
-	switch cmdType {
-	case CmdNoOp:
-		return nil, nil
-	case CmdCreateBucket:
-		return encodeCreateBucketCmd(payload.(CreateBucketCmd))
-	case CmdDeleteBucket:
-		return encodeDeleteBucketCmd(payload.(DeleteBucketCmd))
-	case CmdSetBucketPolicy:
-		return encodeSetBucketPolicyCmd(payload.(SetBucketPolicyCmd))
-	case CmdDeleteBucketPolicy:
-		return encodeDeleteBucketPolicyCmd(payload.(DeleteBucketPolicyCmd))
-	case CmdSetBucketVersioning:
-		return encodeSetBucketVersioningCmd(payload.(SetBucketVersioningCmd))
-	case CmdResealFSMValues:
-		return encodeResealFSMValuesCmd(payload.(ResealFSMValuesCmd))
-	case CmdFSMValueResealDone:
-		return encodeFSMValueResealDoneCmd(payload.(FSMValueResealDoneCmd))
-	default:
-		// Unknown / retired command type. The per-object/multipart/append/placement
-		// commands moved off-raft and have no production proposer; the quorum-meta
-		// blob is encoded via encodeQuorumMetaBlob, not through this raft payload path.
-		return nil, fmt.Errorf("unknown command type: %d", cmdType)
-	}
-}
-
-func encodeResealFSMValuesCmd(c ResealFSMValuesCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	var keysOff flatbuffers.UOffsetT
-	if len(c.Keys) > 0 {
-		keysOff = buildStringVector(b, c.Keys, clusterpb.ResealFSMValuesCmdStartKeysVector)
-	}
-	clusterpb.ResealFSMValuesCmdStart(b)
-	if len(c.Keys) > 0 {
-		clusterpb.ResealFSMValuesCmdAddKeys(b, keysOff)
-	}
-	clusterpb.ResealFSMValuesCmdAddActiveGen(b, c.ActiveGen)
-	return fbFinish(b, clusterpb.ResealFSMValuesCmdEnd(b)), nil
-}
-
-func decodeResealFSMValuesCmd(data []byte) (ResealFSMValuesCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.ResealFSMValuesCmd {
-		return clusterpb.GetRootAsResealFSMValuesCmd(d, 0)
-	})
-	if err != nil {
-		return ResealFSMValuesCmd{}, err
-	}
-	n := t.KeysLength()
-	keys := make([]string, n)
-	for i := 0; i < n; i++ {
-		keys[i] = string(t.Keys(i))
-	}
-	return ResealFSMValuesCmd{Keys: keys, ActiveGen: t.ActiveGen()}, nil
-}
-
-func encodeFSMValueResealDoneCmd(c FSMValueResealDoneCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	clusterpb.FSMValueResealDoneCmdStart(b)
-	clusterpb.FSMValueResealDoneCmdAddGen(b, c.Gen)
-	return fbFinish(b, clusterpb.FSMValueResealDoneCmdEnd(b)), nil
-}
-
-//nolint:unused // referenced by codec_test.go (TestFSMValueResealDoneCmd_RoundTrip).
-func decodeFSMValueResealDoneCmd(data []byte) (FSMValueResealDoneCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.FSMValueResealDoneCmd {
-		return clusterpb.GetRootAsFSMValueResealDoneCmd(d, 0)
-	})
-	if err != nil {
-		return FSMValueResealDoneCmd{}, err
-	}
-	return FSMValueResealDoneCmd{Gen: t.Gen()}, nil
 }

@@ -295,7 +295,6 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 	srvOpts = append(srvOpts, server.WithRaftSnapshotter(state.distBackend))
 
 	state.distBackend.RegisterReadIndexHandler()
-	state.distBackend.RegisterProposeForwardHandler()
 
 	state.mutationGate = server.NewMutationGate(nil)
 	if state.recoveryReadOnly {

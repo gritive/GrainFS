@@ -61,11 +61,10 @@ func newTestNodeForSharedDB(t *testing.T, nodeID string) (node RaftNode, closeFn
 // and the keyspace-distinctness rows in shared_fsm_isolation_test.go.
 
 // putObjViaApply writes an object into a group's FSM. The object meta is written
-// via persistPutObjectMetaUpdate directly because CmdPutObjectMeta is a no-op in
-// the FSM after data-plane raft-free Slice 2. Bucket existence is no longer seeded
-// here (CmdCreateBucket is a retired no-op in Task 12; HeadBucket reads the sole
-// authority, MetaBucketStore) — callers that exercise HeadBucket must wire an MBS
-// via seedBucketsInMBS.
+// via persistPutObjectMetaUpdate directly because object metadata apply is a no-op
+// in the FSM after data-plane raft-free Slice 2. Bucket existence is no longer
+// seeded here; HeadBucket reads the sole authority, MetaBucketStore. Callers that
+// exercise HeadBucket must wire an MBS via seedBucketsInMBS.
 func putObjViaApply(t *testing.T, f *FSM, bucket, key, etag string) {
 	t.Helper()
 	cmd := PutObjectMetaCmd{

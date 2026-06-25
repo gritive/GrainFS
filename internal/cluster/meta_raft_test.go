@@ -13,7 +13,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/raft"
@@ -485,50 +484,6 @@ func TestMetaRaft_ProposeShardGroupForwarding_LeaderAppliesLocally(t *testing.T)
 	require.True(t, ok)
 	assert.Equal(t, "group-0", sg.ID)
 	assert.Equal(t, []string{"node-0"}, sg.PeerIDs)
-}
-
-func TestMetaRaft_ProposeRebalancePlan_CommitToFSM(t *testing.T) {
-	m := newSingleMetaRaft(t)
-	t.Cleanup(func() { _ = m.Close() })
-
-	require.NoError(t, m.Bootstrap())
-	require.NoError(t, m.Start(context.Background(), nil))
-	require.Eventually(t, func() bool {
-		return m.node.State() == raft.Leader
-	}, 2*time.Second, 20*time.Millisecond)
-
-	plan := RebalancePlan{
-		PlanID:    "plan-1",
-		GroupID:   "group-0",
-		FromNode:  "n1",
-		ToNode:    "n2",
-		CreatedAt: time.Now(),
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	require.NoError(t, m.ProposeRebalancePlan(ctx, plan))
-	assert.Equal(t, "plan-1", m.FSM().ActivePlanID())
-}
-
-func TestMetaRaft_ProposeAbortPlan_CommitToFSM(t *testing.T) {
-	m := newSingleMetaRaft(t)
-	t.Cleanup(func() { _ = m.Close() })
-
-	require.NoError(t, m.Bootstrap())
-	require.NoError(t, m.Start(context.Background(), nil))
-	require.Eventually(t, func() bool {
-		return m.node.State() == raft.Leader
-	}, 2*time.Second, 20*time.Millisecond)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	plan := RebalancePlan{PlanID: "plan-1", GroupID: "g0", FromNode: "n1", ToNode: "n2", CreatedAt: time.Now()}
-	require.NoError(t, m.ProposeRebalancePlan(ctx, plan))
-	require.Equal(t, "plan-1", m.FSM().ActivePlanID())
-
-	require.NoError(t, m.ProposeAbortPlan(ctx, "plan-1", clusterpb.AbortPlanReasonCompleted))
-	assert.Empty(t, m.FSM().ActivePlanID())
 }
 
 // TestMetaRaft_ConcurrentJoin_AtLeastOneSucceeds verifies that concurrent Join

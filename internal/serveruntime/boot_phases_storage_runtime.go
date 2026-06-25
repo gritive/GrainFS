@@ -299,7 +299,7 @@ type ownedGroupsState struct {
 
 // bootOwnedGroupsAndEC is the largest storage runtime phase. It wires the
 // distributed backend, the legacy group-0 wrapper, the shard cache, the
-// rebalancer, the per-group multi-raft instantiation loop, and the
+// revoked-node evacuator, the per-group multi-raft instantiation loop, and the
 // shutdown hook that drains every owned group on cleanup.
 //
 // Phase ordering is critical here:
@@ -307,10 +307,7 @@ type ownedGroupsState struct {
 //     wrap → dgMgr.Add. group-0 has the legacy single-backend semantics.
 //  2. distBackend.SetRouter + SetShardGroupSource. Routing wired before
 //     any per-group instantiation can fire.
-//  3. Rebalancer + SetOnRebalancePlan callback (race-free: meta-raft is
-//     already Started by PR 4, so this MUST register before any rebalance
-//     plan apply commits — the callback is set before any future plan
-//     proposal.).
+//  3. Revoked-node evacuator + SetOnNodeRevoked callback.
 //  4. ownedGroups loop: synchronous cold-start instantiation for entries
 //     already in FSM (records startup decisions on Badger role failures
 //     before the server accepts traffic), then SetOnShardGroupAdded
@@ -376,26 +373,6 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState) error {
 	distBackend.SetRouter(state.clusterRouter)
 	distBackend.SetShardGroupSource(state.metaRaft.FSM())
 
-	rebalancerCfg := cluster.DefaultRebalancerConfig()
-	rebalancer := cluster.NewRebalancer(state.nodeID, state.metaRaft, state.dgMgr, rebalancerCfg)
-	rebalancer.SetGroupRebalancer(
-		cluster.NewDataGroupPlanExecutor(state.nodeID, state.dgMgr, state.metaRaft.FSM(), state.metaRaft),
-	)
-	state.metaRaft.FSM().SetOnRebalancePlan(func(plan *cluster.RebalancePlan) {
-		if state.inviteJoinMode {
-			return
-		}
-		execCtx, execCancel := context.WithTimeout(ctx, rebalancerCfg.PlanTimeout)
-		go func() {
-			defer execCancel()
-			if err := rebalancer.ExecutePlan(execCtx, plan); err != nil {
-				log.Error().Err(err).Str("plan_id", plan.PlanID).Msg("rebalancer: ExecutePlan failed")
-			}
-		}()
-	})
-	go rebalancer.Run(ctx)
-	state.rebalancer = rebalancer
-
 	evacExec := cluster.NewDataGroupPlanExecutor(state.nodeID, state.dgMgr, state.metaRaft.FSM(), state.metaRaft)
 	loadPick := func(groupID string, exclude map[string]struct{}) (string, bool) {
 		members := map[string]struct{}{}
@@ -420,9 +397,9 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState) error {
 	}
 	evacuator := cluster.NewDataGroupEvacuator(state.nodeID, state.metaRaft.FSM(), state.dgMgr, evacExec, loadPick, 30*time.Second)
 	state.metaRaft.FSM().SetOnNodeRevoked(func(string) { evacuator.Wake() })
-	// Run UNCONDITIONALLY on every node (mirror the ungated `go rebalancer.Run(ctx)`).
-	// LOAD-BEARING: data groups are led by invite-JOINED nodes, and only that group's
-	// leader can issue the data-raft ChangeMembership that evicts a revoked voter.
+	// Run UNCONDITIONALLY on every node. LOAD-BEARING: data groups are led by
+	// invite-JOINED nodes, and only that group's leader can issue the data-raft
+	// ChangeMembership that evicts a revoked voter.
 	// Gating on joinMode would make joiner-led groups never evict. The single-node /
 	// leads-no-foreign-group case is a true no-op via empty led-targets, not a boot gate.
 	go evacuator.Run(ctx)

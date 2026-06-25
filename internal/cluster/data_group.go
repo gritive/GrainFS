@@ -7,7 +7,7 @@ import (
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
-// DataGroup is the data Raft group scaffold. PR-D adds raft.Node + FSM.
+// DataGroup records a placement group's peer set and optional backend wiring.
 // bucket→group routing is handled by Router (Layer 1). key-range sharding excluded.
 type DataGroup struct {
 	id      string

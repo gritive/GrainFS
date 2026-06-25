@@ -95,7 +95,7 @@ func (f *fakeMetaBucketStore) AllRecords() map[string]BucketRecord {
 // --- Create tests ---
 
 // TestBucketWrite_Create_GoesToMetaBucketStore verifies that createBucketInternal
-// routes exactly ONE CreateBucket call to MetaBucketStore (no group-0 CmdCreateBucket),
+// routes exactly ONE CreateBucket call to MetaBucketStore (no group-0 data-raft command),
 // with bypassReserved=false for the normal entrypoint.
 func TestBucketWrite_Create_GoesToMetaBucketStore(t *testing.T) {
 	b := newTestDistributedBackend(t)
@@ -129,8 +129,8 @@ func TestBucketWrite_CreateBypassReserved_PassesTrueFlag(t *testing.T) {
 // --- Delete tests ---
 
 // seedBucketForDelete seeds the bucket so that DeleteBucket's HeadBucket check
-// passes. Task 12: CmdCreateBucket is a retired no-op; existence lives in
-// MetaBucketStore (the sole authority), so seed via the wired MBS.
+// passes. Existence lives in MetaBucketStore (the sole authority), so seed via
+// the wired MBS.
 func seedBucketForDelete(t *testing.T, b *DistributedBackend, bucket string) {
 	t.Helper()
 	require.NoError(t, b.MetaBucketStore().CreateBucket(context.Background(), bucket, "local", false))
