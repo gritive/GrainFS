@@ -439,32 +439,11 @@ func (r ecObjectReader) readShards(ctx context.Context, bucket, shardKey string,
 	// parity when BoundedLoads is active.
 	primary, fallback := r.computeAttemptOrder(rec, recCfg)
 
-	// Local primary-shard fast path: if all primary shards are local-or-cached,
-	// read them without spinning up goroutines.
-	localDataFastPath := true
-	for _, i := range primary {
-		if !cached[i] && !r.endpointFor(rec.Nodes[i]).IsLocal() {
-			localDataFastPath = false
-			break
-		}
-	}
-	if !localDataFastPath {
-		fetchShards(primary, false)
-		if available < recCfg.DataShards {
-			fetchShards(fallback, true)
-			if available < recCfg.DataShards {
-				return ECConfig{}, nil, fmt.Errorf("ec get: only %d/%d shards available, need %d",
-					available, len(rec.Nodes), recCfg.DataShards)
-			}
-		}
-		return recCfg, shards, nil
-	}
-
+	// Try data (primary) shards first; fall back to parity only when they do not
+	// satisfy K. fetchShards no-ops once K is reached (its entry guard returns
+	// when available >= DataShards), so the fallback call is a cheap early-out on
+	// the healthy path.
 	fetchShards(primary, false)
-	if available >= recCfg.DataShards {
-		return recCfg, shards, nil
-	}
-
 	fetchShards(fallback, true)
 	if available < recCfg.DataShards {
 		return ECConfig{}, nil, fmt.Errorf("ec get: only %d/%d shards available, need %d",
