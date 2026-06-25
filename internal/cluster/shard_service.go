@@ -576,8 +576,24 @@ func (s *ShardService) PromoteStagedShards(ctx context.Context, peer, bucket, st
 	}
 	envb := buildShardEnvelope("PromoteStagedShards", bucket, stagingKey, 0, []byte(finalKey))
 	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
-	_, err = s.callShardRPC(ctx, peerAddr, envb)
-	return err
+	respEnvelope, err := s.callShardRPC(ctx, peerAddr, envb)
+	if err != nil {
+		return fmt.Errorf("promote staged shards on %s: %w", peerAddr, err)
+	}
+	// Promote sits on the commit critical path (all-or-fail, data-before-meta), so
+	// the handler's in-band application error (rename/mkdir/path failure surfaces as
+	// an "Error" reply envelope, NOT a transport error) MUST be parsed and treated
+	// as a promote failure — otherwise the manifest could commit while a peer's
+	// shard is still staged. This differs from DeleteShards, whose best-effort
+	// cleanup can swallow the reply.
+	rpcType, _, err := unmarshalEnvelope(respEnvelope)
+	if err != nil {
+		return fmt.Errorf("promote staged shards on %s: unmarshal response: %w", peerAddr, err)
+	}
+	if rpcType == "Error" {
+		return fmt.Errorf("promote staged shards on %s: remote error", peer)
+	}
+	return nil
 }
 
 // buildShardEnvelope builds an RPCMessage FlatBuffer wrapping a ShardRequest without make+copy.
@@ -1496,30 +1512,55 @@ func (s *ShardService) writeLocalShardStreamContext(ctx context.Context, bucket,
 // done. The shard files keep their final-key AAD (set at staged-write time), so post-promote reads
 // decrypt correctly. PR1 segment staging.
 func (s *ShardService) PromoteLocalStagedShards(bucket, stagingKey, finalKey string) error {
+	// promotedAny guards against committing a manifest that references absent
+	// shards: every node in a segment's placement holds at least one shard, so a
+	// promote that renames nothing AND finds nothing already at the final path
+	// means the shards are gone (never written / over-eager cleanup race) — fail
+	// rather than silently report success.
+	promotedAny := false
 	for d := 0; d < len(s.dataDirs); d++ {
 		src, err := s.getShardDir(bucket, stagingKey, d)
 		if err != nil {
 			return err
 		}
-		if _, statErr := os.Stat(src); statErr != nil {
-			if os.IsNotExist(statErr) {
-				continue // no staged shards landed on this dataDir
-			}
-			return statErr
-		}
 		dst, err := s.getShardDir(bucket, finalKey, d)
 		if err != nil {
 			return err
+		}
+		if _, statErr := os.Stat(src); statErr != nil {
+			if os.IsNotExist(statErr) {
+				// No staged dir on this dataDir: either it never held a shard for this
+				// blob, or a prior promote already moved it. A present destination means
+				// the latter (idempotent retry / concurrent completer) — count it.
+				if _, derr := os.Stat(dst); derr == nil {
+					promotedAny = true
+				}
+				continue
+			}
+			return statErr
 		}
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			return fmt.Errorf("promote staged segment: mkdir final parent: %w", err)
 		}
 		if err := os.Rename(src, dst); err != nil {
 			if _, derr := os.Stat(dst); derr == nil {
+				promotedAny = true
 				continue // destination already present (idempotent retry / concurrent completer)
 			}
 			return fmt.Errorf("promote staged segment rename %s -> %s: %w", src, dst, err)
 		}
+		// Make the rename durable BEFORE the manifest commit (data-before-meta): the
+		// shard bytes are already fsynced, but the freshly created final-path dir
+		// entries are not, so a post-commit crash could lose the rename and strand an
+		// acknowledged object with no final shards. Persist the new link up to the
+		// dataDir, mirroring the write path's syncDirChain.
+		if err := s.syncDirChain(dst, s.dataDirs[d]); err != nil {
+			return fmt.Errorf("promote staged segment fsync %s: %w", dst, err)
+		}
+		promotedAny = true
+	}
+	if !promotedAny {
+		return fmt.Errorf("promote staged segment: no staged or promoted shards for %q -> %q", stagingKey, finalKey)
 	}
 	return nil
 }

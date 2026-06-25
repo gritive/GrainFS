@@ -147,6 +147,31 @@ func TestNativeWriteHandler_StagedRequest_WritesStagingWithFinalAAD(t *testing.T
 	require.Equal(t, data, got, "receiver must seal with finalKey AAD so the promoted read decrypts")
 }
 
+// TestPromoteLocalStagedShards_NothingStaged_Fails locks the code-gate fix: a
+// promote that renames nothing AND finds nothing already at the final path must
+// FAIL, not silently report success — otherwise the manifest commit would
+// reference shards that are absent on that node (over-eager cleanup race / never
+// written).
+func TestPromoteLocalStagedShards_NothingStaged_Fails(t *testing.T) {
+	svc, _ := newTestShardService(t)
+	err := svc.PromoteLocalStagedShards("b", ".segstaging/txnX/blobX", "obj/segments/blobX")
+	require.Error(t, err, "promote with no staged or final shards must fail")
+}
+
+// TestHandlePromoteStaged_Failure_ReturnsErrorEnvelope locks the receiver half of
+// the all-or-fail contract: when PromoteLocalStagedShards fails, the RPC handler
+// must surface it as an in-band "Error" reply envelope (which the now-fixed
+// PromoteStagedShards client parses), not a silent OK.
+func TestHandlePromoteStaged_Failure_ReturnsErrorEnvelope(t *testing.T) {
+	svc, _ := newTestShardService(t)
+	// stagingKey with nothing staged -> PromoteLocalStagedShards fails.
+	sr := &shardRequest{Bucket: "b", Key: ".segstaging/txnY/blobY", Data: []byte("obj/segments/blobY")}
+	resp := svc.handlePromoteStaged(sr)
+	rpcType, _, err := unmarshalEnvelope(resp)
+	require.NoError(t, err)
+	require.Equal(t, "Error", rpcType, "a failed promote must reply with an Error envelope")
+}
+
 func TestWriteLocalShardStaged_AADIsFinalKey_PromoteReadable(t *testing.T) {
 	svc, _ := newTestShardService(t)
 	ctx := context.Background()
