@@ -312,10 +312,11 @@ clears it; 67/68 testable packages pass, 0 real failures. Standalone `staticchec
 golangci's `make lint` subset, and it analyzes test files that golangci skips via `tests: false`)
 surfaced the items below. None block; tracked for cleanup.
 
-- **[P4] 54 unused test-helper symbols (staticcheck U1000) across `_test.go` files** (e2e 25,
-  cluster 15, raft 6, scrubber 4, server 2, storage/lifecycle 2). golangci `unused` skips them
-  (`tests: false`) so `make lint` stays green. Batch-removable dead test scaffolding; low risk.
-  Enumerate with `staticcheck ./... | grep U1000`.
+- **[P4] ~42 unused test-helper symbols (staticcheck U1000) across `_test.go` files** (e2e 25,
+  cluster 15, storage/lifecycle 2). The raft (6), scrubber (4), and server (2) symbols were removed.
+  golangci `unused` skips them (`tests: false`) so `make lint` stays green. Batch-removable dead test
+  scaffolding; low risk. The remaining `internal/cluster` / `tests/e2e` ones overlap the active
+  decompose fleet — clear them once it drains. Enumerate with `staticcheck ./... | grep U1000`.
 
 - **[P4][note, not a defect] staticcheck also flags 3 PRODUCTION U1000 that are INTENTIONAL
   `//nolint:unused` scaffolding** — `(*MetaFSM).incDEKRef` / `decDEKRef` (`meta_fsm_rotation.go`, kept

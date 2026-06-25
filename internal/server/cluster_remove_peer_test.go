@@ -193,7 +193,6 @@ func (f *fakeMembership) called() []string {
 type removePeerHarness struct {
 	baseURL string
 	ci      ClusterInfo
-	mem     *fakeMembership
 	gate    *MutationGate
 	events  *eventstore.Store
 }

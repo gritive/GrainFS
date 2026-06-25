@@ -5,24 +5,12 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
-	"testing"
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 )
-
-// openTestDB opens a Badger DB at dir with no logger. It remains as a
-// testing.TB helper for older non-Ginkgo tests that still share it.
-func openTestDB(t testing.TB, dir string) (*badger.DB, func()) {
-	t.Helper()
-	db, err := badger.Open(badger.DefaultOptions(dir).WithLogger(nil))
-	if err != nil {
-		t.Fatalf("open badger: %v", err)
-	}
-	return db, func() { _ = db.Close() }
-}
 
 func openRecoveryDB(dir string) (*badger.DB, func(), error) {
 	db, err := badger.Open(badger.DefaultOptions(dir).WithLogger(nil))

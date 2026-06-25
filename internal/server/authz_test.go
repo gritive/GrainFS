@@ -165,26 +165,6 @@ func (h *iamTestHelper) applyKeyCreateScoped(t *testing.T, ak, saID, secret stri
 	require.NoError(t, h.applier.ApplyKeyCreateScoped(b.FinishedBytes()))
 }
 
-func (h *iamTestHelper) applyKeyCreate(t *testing.T, ak, saID, secret string) {
-	t.Helper()
-	wrapped, gen, err := iam.WrapSecret(h.enc, saID, ak, secret)
-	require.NoError(t, err)
-	_ = gen
-
-	b := flatbuffers.NewBuilder(128)
-	akOff := b.CreateString(ak)
-	saOff := b.CreateString(saID)
-	encOff := b.CreateByteVector(wrapped)
-	iampb.KeyCreatePayloadStart(b)
-	iampb.KeyCreatePayloadAddAccessKey(b, akOff)
-	iampb.KeyCreatePayloadAddSecretKeyEnc(b, encOff)
-	iampb.KeyCreatePayloadAddSaId(b, saOff)
-	iampb.KeyCreatePayloadAddCreatedAtUnixNs(b, time.Now().UnixNano())
-	end := iampb.KeyCreatePayloadEnd(b)
-	b.Finish(end)
-	require.NoError(t, h.applier.ApplyKeyCreate(b.FinishedBytes()))
-}
-
 // TestAuthz_Layer0_ScopeMismatch_403 verifies that a scoped key targeting a
 // bucket outside its scope is denied at Layer 0 with reason "key_scope_mismatch".
 func TestAuthz_Layer0_ScopeMismatch_403(t *testing.T) {
