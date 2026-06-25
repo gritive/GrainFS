@@ -219,10 +219,17 @@ func derivePrivKeyFromHKDF(r io.Reader, curve elliptic.Curve) (*ecdsa.PrivateKey
 		if k.Sign() == 0 {
 			continue
 		}
-		priv := new(ecdsa.PrivateKey)
-		priv.PublicKey.Curve = curve
-		priv.D = k
-		priv.PublicKey.X, priv.PublicKey.Y = curve.ScalarBaseMult(k.Bytes())
+		// k is already reduced mod N and non-zero (loop above). Encode it
+		// fixed-width big-endian (byteLen) so ParseRawPrivateKey accepts it and
+		// computes the public point identically to the old ScalarBaseMult path:
+		// ParseRawPrivateKey derives (X,Y)=k·G, so D/X/Y are byte-identical to
+		// the deprecated priv.D / priv.PublicKey.X,Y assignment it replaces.
+		scalar := make([]byte, byteLen)
+		k.FillBytes(scalar)
+		priv, err := ecdsa.ParseRawPrivateKey(curve, scalar)
+		if err != nil {
+			return nil, fmt.Errorf("parse raw ecdsa scalar: %w", err)
+		}
 		return priv, nil
 	}
 	return nil, errors.New("hkdf produced 8 consecutive zero scalars (impossible without a broken PSK)")
