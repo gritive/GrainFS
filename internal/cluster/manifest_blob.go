@@ -25,6 +25,12 @@ import (
 // manifestMPUSubDir is the sibling-root sub-directory for multipart manifest blobs.
 const manifestMPUSubDir = ".qmeta_mpu"
 
+const completedMultipartUploadPrefix = ".complete/"
+
+func completedMultipartUploadKey(uploadID string) string {
+	return completedMultipartUploadPrefix + uploadID
+}
+
 // manifestEntry is a decoded manifest blob plus its uploadID.
 type manifestEntry struct {
 	UploadID string
@@ -223,12 +229,16 @@ func (b *DistributedBackend) selfNodeIDs() []string {
 // nodeIDs must be the placement nodes of the owning group (the caller — Create,
 // M2b — computes them from PickVoters / the group peer set).
 func (b *DistributedBackend) writeManifestBlob(ctx context.Context, m clusterMultipartMeta, uploadID string, nodeIDs []string) error {
-	if b.shardSvc == nil || len(nodeIDs) == 0 {
-		return fmt.Errorf("manifest blob write: no shard service or empty placement")
-	}
 	data, err := marshalClusterMultipartMeta(m)
 	if err != nil {
 		return fmt.Errorf("manifest blob encode: %w", err)
+	}
+	return b.writeManifestRawBlob(ctx, m.Bucket, uploadID, data, nodeIDs)
+}
+
+func (b *DistributedBackend) writeManifestRawBlob(ctx context.Context, bucket, uploadID string, data []byte, nodeIDs []string) error {
+	if b.shardSvc == nil || len(nodeIDs) == 0 {
+		return fmt.Errorf("manifest blob write: no shard service or empty placement")
 	}
 	self := b.currentSelfAddr()
 	// K = 1 for single-node; for multi-node use majority (len(nodeIDs)/2+1).
@@ -239,38 +249,31 @@ func (b *DistributedBackend) writeManifestBlob(ctx context.Context, m clusterMul
 	defer cancel()
 	return fanOutQuorumMeta(wctx, nodeIDs, k, func(fctx context.Context, node string) error {
 		if node == self {
-			return b.shardSvc.writeManifestBlobLocal(m.Bucket, uploadID, data)
+			return b.shardSvc.writeManifestBlobLocal(bucket, uploadID, data)
 		}
 		addr, rerr := b.shardSvc.resolvePeerAddress(node)
 		if rerr != nil {
 			return rerr
 		}
-		return b.shardSvc.WriteManifestBlob(fctx, addr, m.Bucket, uploadID, data)
+		return b.shardSvc.WriteManifestBlob(fctx, addr, bucket, uploadID, data)
 	})
 }
 
-// readManifestBlob reads the manifest for (bucket, uploadID): local-first fast
-// path, then peer fan-out on a local miss. Returns (zero, false, nil) when no
-// node has the manifest.
-func (b *DistributedBackend) readManifestBlob(bucket, uploadID string) (clusterMultipartMeta, bool, error) {
+func (b *DistributedBackend) readManifestRawBlob(bucket, uploadID string) ([]byte, bool, error) {
 	if b.shardSvc == nil {
-		return clusterMultipartMeta{}, false, nil
+		return nil, false, nil
 	}
 	// Local-first fast path.
 	localRaw, ok, err := b.shardSvc.readManifestBlobLocal(bucket, uploadID)
 	if err != nil {
-		return clusterMultipartMeta{}, false, err
+		return nil, false, err
 	}
 	if ok {
-		meta, derr := unmarshalClusterMultipartMeta(localRaw)
-		if derr != nil {
-			return clusterMultipartMeta{}, false, fmt.Errorf("manifest blob decode: %w", derr)
-		}
-		return meta, true, nil
+		return localRaw, true, nil
 	}
 	// Peer fan-out on miss.
 	if b.shardGroup == nil {
-		return clusterMultipartMeta{}, false, nil
+		return nil, false, nil
 	}
 	self := b.currentSelfAddr()
 	seen := map[string]bool{self: true}
@@ -290,14 +293,25 @@ func (b *DistributedBackend) readManifestBlob(bucket, uploadID string) (clusterM
 			if rerr != nil || len(raw) == 0 {
 				continue
 			}
-			meta, derr := unmarshalClusterMultipartMeta(raw)
-			if derr != nil {
-				continue
-			}
-			return meta, true, nil
+			return raw, true, nil
 		}
 	}
-	return clusterMultipartMeta{}, false, nil
+	return nil, false, nil
+}
+
+// readManifestBlob reads the manifest for (bucket, uploadID): local-first fast
+// path, then peer fan-out on a local miss. Returns (zero, false, nil) when no
+// node has the manifest.
+func (b *DistributedBackend) readManifestBlob(bucket, uploadID string) (clusterMultipartMeta, bool, error) {
+	raw, ok, err := b.readManifestRawBlob(bucket, uploadID)
+	if err != nil || !ok {
+		return clusterMultipartMeta{}, ok, err
+	}
+	meta, derr := unmarshalClusterMultipartMeta(raw)
+	if derr != nil {
+		return clusterMultipartMeta{}, false, fmt.Errorf("manifest blob decode: %w", derr)
+	}
+	return meta, true, nil
 }
 
 // deleteManifestBlob removes the manifest for (bucket, uploadID): idempotent

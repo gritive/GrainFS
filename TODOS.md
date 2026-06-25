@@ -198,18 +198,6 @@ Deferred items:
   `readDoneMarker` / `MultipartDoneKey` usage sites, stale `//nolint:unused` directives) cleaned
   up; `MultipartDoneKey` (zero callers after M4) removed.
 
-- **[P3][follow-up] Non-versioned multipart-complete idempotency fence weakened vs the removed done-marker.**
-  The deterministic-vid existence short-circuit is keyed on the latest-only blob's current VID, so for a
-  NON-VERSIONED bucket a client retry of an already-succeeded CompleteMultipartUpload that is preceded by
-  an intervening same-key PutObject no longer returns an idempotent 200 — it returns InvalidPart (if a
-  leaked manifest replica survives) or NoSuchUpload. NOT data loss (parts are deleted on the first
-  successful complete at multipart.go:317 BEFORE the best-effort manifest delete, so re-assembly fails
-  closed and never overwrites the newer object — codex final-review P0 'stale overwrite' REFUTED on this
-  linchpin). Narrow reachability: non-versioned + lost original 200 + concurrent same-key PUT. A proper
-  fix re-introduces the uploadID-keyed completion fence the done-marker provided (e.g. a short-lived
-  completion sentinel on the blob, or return NoSuchUpload not InvalidPart when parts are gone). Deferred
-  — disproportionate to the narrow non-data-loss impact.
-
 ### Data-plane raft-free Slice 2 follow-ups (2026-06-24)
 
 - **[DONE] Retire remaining per-object FSM commands (Slice 2).** `CmdSetObjectTags`,

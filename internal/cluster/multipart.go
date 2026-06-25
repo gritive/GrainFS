@@ -325,6 +325,9 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 	if err != nil {
 		return nil, err
 	}
+	if serr := b.writeCompletedMultipartSentinel(ctx, bucket, uploadID, obj); serr != nil {
+		b.logger.Debug().Err(serr).Str("upload_id", uploadID).Msg("multipart completion sentinel write failed")
+	}
 	if err := os.RemoveAll(b.partDir(uploadID)); err != nil {
 		b.logger.Debug().Err(err).Str("upload_id", uploadID).Msg("multipart part cleanup after complete failed")
 	}
@@ -336,6 +339,95 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 		b.logger.Debug().Err(derr).Str("upload_id", uploadID).Msg("multipart manifest blob cleanup after complete failed")
 	}
 	return obj, nil
+}
+
+func completedMultipartCmdFromObject(bucket string, obj *storage.Object) PutObjectMetaCmd {
+	if obj == nil {
+		return PutObjectMetaCmd{}
+	}
+	return PutObjectMetaCmd{
+		Bucket:           bucket,
+		Key:              obj.Key,
+		Size:             obj.Size,
+		ContentType:      obj.ContentType,
+		ETag:             obj.ETag,
+		ModTime:          obj.LastModified,
+		VersionID:        obj.VersionID,
+		ECData:           obj.ECData,
+		ECParity:         obj.ECParity,
+		StripeBytes:      obj.StripeBytes,
+		NodeIDs:          cloneStringSlice(obj.NodeIDs),
+		PlacementGroupID: obj.PlacementGroupID,
+		UserMetadata:     cloneStringMap(obj.UserMetadata),
+		SSEAlgorithm:     obj.SSEAlgorithm,
+		IsDeleteMarker:   obj.IsDeleteMarker,
+		Parts:            append([]storage.MultipartPartEntry(nil), obj.Parts...),
+		Segments:         segmentRefsToMetaEntries(obj.Segments),
+		Tags:             append([]storage.Tag(nil), obj.Tags...),
+		ACL:              obj.ACL,
+		Coalesced:        coalescedStorageRefsToMeta(obj.Coalesced),
+		IsAppendable:     obj.IsAppendable,
+		AppendCallMD5s:   cloneBytesSlice(obj.AppendCallMD5s),
+	}
+}
+
+func coalescedStorageRefsToMeta(in []storage.CoalescedRef) []CoalescedShardRef {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]CoalescedShardRef, len(in))
+	for i, c := range in {
+		out[i] = CoalescedShardRef{
+			CoalescedID: c.CoalescedID,
+			Size:        c.Size,
+			ETag:        c.ETag,
+			ShardKey:    c.ShardKey,
+			ECData:      c.ECData,
+			ECParity:    c.ECParity,
+			StripeBytes: c.StripeBytes,
+			NodeIDs:     cloneStringSlice(c.NodeIDs),
+		}
+	}
+	return out
+}
+
+func cloneBytesSlice(in [][]byte) [][]byte {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([][]byte, len(in))
+	for i := range in {
+		out[i] = append([]byte(nil), in[i]...)
+	}
+	return out
+}
+
+func (b *DistributedBackend) writeCompletedMultipartSentinel(ctx context.Context, bucket, uploadID string, obj *storage.Object) error {
+	cmd := completedMultipartCmdFromObject(bucket, obj)
+	if cmd.Key == "" || cmd.VersionID == "" {
+		return nil
+	}
+	blob, err := encodeQuorumMetaBlob(cmd)
+	if err != nil {
+		return fmt.Errorf("multipart completion sentinel encode: %w", err)
+	}
+	return b.writeManifestRawBlob(ctx, bucket, completedMultipartUploadKey(uploadID), blob, b.multipartManifestNodeIDs(ctx))
+}
+
+func (b *DistributedBackend) readCompletedMultipartSentinel(bucket, key, uploadID string) (*storage.Object, bool, error) {
+	raw, ok, err := b.readManifestRawBlob(bucket, completedMultipartUploadKey(uploadID))
+	if err != nil || !ok {
+		return nil, ok, err
+	}
+	cmd, err := decodeQuorumMetaBlob(raw)
+	if err != nil {
+		return nil, false, fmt.Errorf("multipart completion sentinel decode: %w", err)
+	}
+	if cmd.Bucket != bucket || cmd.Key != key {
+		return nil, false, nil
+	}
+	obj, _ := objectAndPlacementFromCmd(cmd)
+	return obj, true, nil
 }
 
 func (b *DistributedBackend) multipartPartSpooledObject(uploadID string, part storage.MultipartPartEntry) *spooledObject {
@@ -483,7 +575,10 @@ func (b *DistributedBackend) multipartCompletedObjectExists(_ context.Context, b
 		return nil, false, lerr
 	}
 	if latestCmd.VersionID != detVID {
-		return nil, false, nil
+		if latestCmd.IsHardDeleted || latestCmd.IsDeleteMarker || latestCmd.ETag == deleteMarkerETag {
+			return nil, false, nil
+		}
+		return b.readCompletedMultipartSentinel(bucket, key, rawUploadID)
 	}
 	obj, _ := objectAndPlacementFromCmd(latestCmd)
 	return obj, true, nil
