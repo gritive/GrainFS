@@ -127,13 +127,19 @@ surfaced by that removal:
   but leaves marshal+ETag O(N) (still O(N²), smaller constant). True O(1)/append needs incremental
   metadata persistence (append-only segment log + running ETag state) — a storage-format redesign in
   the chunkref/object-meta area (data-loss-sensitive), so it wants its own design pass (office-hours/
-  spec) before implementation. Cluster append is a separate path (not measured here).
-- **[P3][follow-up] eccodec EC-shard write may share the per-chunk fresh-seal allocation that
-  v0.0.693.0 pooled in `writeEncryptedObjectFile`.** `SealAtGen`'s doc names both "eccodec,
-  encrypted_object_file" as pinned-gen chunked-seal callers; only the latter was switched to the
-  pooled `SealTo`/`SealAtGenTo` seam. Cluster EC shard writes likely still allocate a fresh sealed
-  slice per chunk → ~shard-size transient buffers. Confirm with a cluster shard-write micro-bench,
-  then apply the same SealTo-into-pooled-buffer fix if it reproduces. Not measured here (storage-only).
+  spec) before implementation. Cluster append: #895 measured it (`BenchmarkClusterAppend`, EC 4+2,
+  coalesce-off) — same super-linear O(N²) (n=4 → 545 allocs, n=8 → 1,356, n=16 → 3,711), same
+  meta-rewrite root cause (`readAppendBase` decode + manifest re-marshal + quorum-meta), softened in
+  production by coalesce every 16 segments. The same storage-format redesign applies to both paths.
+- **[P3][follow-up] EC multipart-complete still materializes staged parts in memory (`readShardPayload`).**
+  #895 pooled the per-chunk seal and pre-sized the shard-encode buffer (`EncodeEncryptedShardToBuffer`
+  + `EncryptedShardUpperBound`), dropping EC multipart Complete from 231 → 142 MB/op at 32 MiB (−39%).
+  A re-memprofile shows the new alloc dominant is `readShardPayload` (~30%): each staged part is read
+  whole into memory (`io.ReadAll`/`make`) before re-encode. The other large piece is the pre-sized
+  encode buffer itself — the shard payload materialized as `[]byte`. Eliminating it needs streaming the
+  shard encode straight to the file, blocked today by `writeEncryptedShardFile`'s `[]byte` contract
+  (len-based fsync decision + tmp+rename). Wants a streaming-shard-write redesign of that contract;
+  re-measure via `BenchmarkClusterMultipart_Complete`.
 ### group-0 control-plane demotion follow-ups (2026-06-24, epic DONE)
 
 The demotion shipped: bucket existence/policy/versioning consolidated onto meta-raft as a unified
