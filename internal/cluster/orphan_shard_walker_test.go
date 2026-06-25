@@ -260,6 +260,21 @@ func TestWalkOrphanShards_CoalescedComponentInKeyNotMisrouted(t *testing.T) {
 		"a full-object key with a non-penultimate 'coalesced' component must fall through to full-object reclaim")
 }
 
+func TestWalkOrphanShards_CoalescedReclaimedWhenKeyPathIsDir(t *testing.T) {
+	// EISDIR symmetry: an object "k/sub" exists → .quorum_meta/bkt/k is a DIRECTORY, so
+	// reading the manifest for key "k" hits EISDIR. That must read as not-found (no blob
+	// at "k"), so a genuine orphan coalesced shard for "k" IS reclaimed, not leaked.
+	// Without the EISDIR→not-found mapping the coalesced interp reads uncertain → kept.
+	ctx := context.Background()
+	b := orphanWalkerBackend(t)
+	require.NoError(t, b.CreateBucket(ctx, "bkt"))
+	root := b.shardSvc.DataDirs()[0]
+	require.NoError(t, b.writeQuorumMeta(ctx, PutObjectMetaCmd{Bucket: "bkt", Key: "k/sub", ETag: "e", VersionID: "v1", NodeIDs: []string{b.currentSelfAddr()}, ECData: 1}))
+	dir := writeShardLeaf(t, root, "bkt/k/coalesced/orphan", []int{0}, oldEnough) // object "k" never existed → genuine orphan
+	require.Equal(t, []string{dir}, collectOrphans(t, b, nil),
+		"a coalesced orphan for a key whose manifest path is a directory (EISDIR) must be reclaimed, not leaked")
+}
+
 func TestDeleteOrphanDir_CoalescedRevalidation(t *testing.T) {
 	ctx := context.Background()
 	t.Run("live coalesced NOT deleted", func(t *testing.T) {

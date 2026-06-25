@@ -1502,12 +1502,16 @@ func (s *ShardService) readQuorumMetaRaw(bucket, key string) ([]byte, error) {
 	}
 	data, err := os.ReadFile(target)
 	if err != nil {
-		// ENOTDIR: an ancestor of `key` is a FILE (e.g. reading "k/coalesced" when the
-		// quorum-meta blob for "k" is a file at .quorum_meta/{bucket}/k). The key then
-		// cannot have a blob, so this is a definitive not-found, not a read fault —
-		// mapping it lets the orphan-reclaim certainty read treat it as proven-absent
-		// instead of uncertain (which would wrongly keep a coalesced orphan forever).
-		if os.IsNotExist(err) || errors.Is(err, syscall.ENOTDIR) {
+		// A path-shape collision between `key` and the on-disk layout is a definitive
+		// not-found, not a read fault — both directions:
+		//   ENOTDIR: an ANCESTOR of `key` is a FILE (reading "k/coalesced" when the blob
+		//     for "k" is a file at .quorum_meta/{bucket}/k).
+		//   EISDIR:  `key` ITSELF is a DIRECTORY (reading "k" when "k/sub" objects exist,
+		//     so .quorum_meta/{bucket}/k is a dir, not a blob file).
+		// In both cases no blob can exist at `key`, so map to ErrObjectNotFound — this
+		// lets the orphan-reclaim certainty read treat it as proven-absent instead of
+		// uncertain (which would wrongly KEEP a coalesced orphan forever).
+		if os.IsNotExist(err) || errors.Is(err, syscall.ENOTDIR) || errors.Is(err, syscall.EISDIR) {
 			return nil, storage.ErrObjectNotFound
 		}
 		return nil, fmt.Errorf("quorum meta read raw: %w", err)
