@@ -237,23 +237,26 @@ Deferred items:
 
 - **[DONE] Slice 2 — retire remaining per-object FSM commands.** See Slice 2 section above.
 
-- **[P2] EC-sharded chunked segment orphan reclaim — staging-write redesign (PR2: `.segstaging`
-  age-out reclaimer).** The dangerous cluster-wide + all-version + certainty-aware live-segment ORACLE
-  (3-axis data-loss risk: cross-node placement / Suspended per-version / never-versioned no-FSM-backstop)
-  is **ABANDONED** in favor of fixing the WRITE path (prior art: MinIO/Ceph-RGW/S3 all stage + atomic-
-  rename, never trace-all-live-then-delete on final data).
-  - **PR1 DONE (#889, v0.0.691.0):** chunked-PUT segments now write their EC shards to a per-node
-    staging dir (`.segstaging/<txn>/<blobID>`, AAD = final key) and **promote (atomic rename) to the
-    final path only at commit** (data-before-meta, all-or-fail, fsynced). This NARROWS the orphan
-    window — a mid-write/crash failure now strands shards under `.segstaging`, not the final namespace —
-    and resolves the old in-flight-window risk (in-flight shards are never in the final namespace, so
-    the orphan-shard walker, which already skips `.segstaging`, can't reclaim a live upload mid-write).
-  - **PR2 (this item, the actual leak fix):** a background age-out reclaimer that deletes
-    `.segstaging/<txn>/` dirs older than a safe threshold (no active PUT). Closes the residual leak PR1
-    only narrowed: a crash between promote and commit, or a concurrent-completer LWW loser, leaves
-    final-path shards with no manifest reference (disk leak, NEVER data loss). Trivial staging age-out
-    is safe (no liveness oracle needed — staged shards are by construction not yet committed).
-  - **PR3 (P3):** gap/perf — promote-fanout RPC count, empty `.segstaging/<txn>` parent-dir cleanup.
+- **[P3] EC-sharded chunked segment orphan reclaim — staging-write redesign (PR1+PR2 DONE; only PR3
+  perf left).** The dangerous cluster-wide live-segment ORACLE (3-axis data-loss) was ABANDONED in
+  favor of fixing the WRITE path (stage + promote-on-commit), prior-art aligned (MinIO/Ceph-RGW/S3).
+  - **PR1 DONE (#889, v0.0.691.0):** chunked-PUT segments write EC shards to `.segstaging/<txn>/<blobID>`
+    (AAD = final key) and **promote (atomic rename) to the final path only at commit** (data-before-meta,
+    all-or-fail, fsynced) — NARROWS the orphan window (mid-write/crash strands shards under `.segstaging`,
+    not the final namespace).
+  - **PR2 DONE (#895? — segment staging PR2):** the orphan-shard walker AGES OUT abandoned `.segstaging`
+    leaves (crash promote↔commit / failed PUT / LWW loser) — closing the residual disk leak. NOT a trivial
+    age-out: a user object key can collide with the `.segstaging` namespace, so the walker decides by
+    **delete-time full-object LIVENESS** (mirrors the regular orphan path: known/frozen/live/seen,
+    parseFullObjectRel, owningGroupHosted, hasLiveShardRecord certainty-aware; `!okF`/uncertain/non-hosted
+    → keep) + a structural `/segments/` exclusion (chunked user objects under `.segstaging` are skipped, so
+    the abandoned SEGMENT oracle is never consulted) + a 24h age floor (in-flight protection). A
+    write-edge `.segstaging` key RESERVATION was tried and ABANDONED — pull-through cache + path-
+    normalizing keys kept bypassing it; delete-time liveness makes all write-path holes moot. ★Safety
+    relies on getShardDir/ShardPathUnderDataDir per-bucket containment (parsed bucket == physical owner ==
+    liveness lookup target). new metric `grainfs_scrub_segstaging_reclaimed_total`.
+  - **PR3 (this item, P3):** gap/perf — promote-fanout RPC count, empty `.segstaging/<txn>` parent-dir
+    cleanup after leaf reclaim.
 - **[P3][known-tradeoff] Coalesced orphans in a bucket switched to versioning-Enabled are not
   reclaimed.** `hasLiveCoalescedRef` gates on `blobAuthReadOn` and fails closed (keep) for Enabled
   buckets, so coalesced orphans created during a bucket's prior Unversioned/Suspended life leak after

@@ -458,6 +458,17 @@ var (
 		Help: "Total orphan shards deferred because maxOrphansPerCycle was reached.",
 	})
 
+	// SegStagingReclaimed counts abandoned segment-staging shard-leaf dirs
+	// (.segstaging) aged out by the orphan-shard walker. Counted per physical
+	// shard-leaf COPY reclaimed (the walk processes each dataDir independently and
+	// removes that dataDir's instance directly), so a leaf striped across N dataDirs
+	// increments this N times — unlike OrphanShardsDeletedTotal, which dedups per
+	// canonical logical dir. Informational only.
+	SegStagingReclaimed = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_scrub_segstaging_reclaimed_total",
+		Help: "Total abandoned segment-staging shard-leaf copies reclaimed (age-out) by the orphan-shard walker.",
+	})
+
 	OrphanSegmentsFoundTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "grainfs_scrub_orphan_segments_found_total",
 		Help: "Total orphan raw segment files newly tombstoned during scrubbing.",

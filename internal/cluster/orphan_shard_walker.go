@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -38,6 +39,32 @@ var shardFileRe = regexp.MustCompile(`^shard_\d+$`)
 // delays reclaim of genuine orphans (harmless).
 const minOrphanShardAge = ecShardWriteAttempts*(shardRPCTimeout+ecShardWriteBackoff) +
 	(1+maxCoalesceCASRetries)*(quorumMetaReadTimeout+quorumMetaWriteTimeout)
+
+// segStagingReclaimAge is the age floor for reclaiming an abandoned .segstaging
+// staged shard-leaf. It must exceed the FULL server-side lifetime of one chunked
+// PUT / multipart-complete — which writes ALL of an object's segments to staging
+// before the commit-time promote, with each leaf's mtime fixed at write time — not
+// just a single shard's in-flight window (minOrphanShardAge ~466s). A large/slow
+// object whose whole segment-write→promote span exceeds that per-shard floor would
+// otherwise have its early staging leaves reclaimed WHILE THE PUT IS STILL IN
+// FLIGHT, then fail its commit-time promote (a spurious large-upload failure). The
+// staging shards of a chunked PUT / CompleteMultipartUpload are written synchronously
+// within the single request (UploadPart does not stage), so the span is bounded by
+// one request; a generous fixed floor cleanly separates "abandoned" (crash / failed
+// PUT / LWW loser) from "still in flight" at any realistic object size, with no
+// per-upload registry. Staging reclaim is not latency-sensitive: a staged dir
+// lingering well past any real request is only wasted disk, never data.
+const segStagingReclaimAge = 24 * time.Hour
+
+// SegStagingPrefix is the reserved bucket-relative path component under which a
+// chunked-PUT / multipart-complete stages its segment EC shards before the
+// commit-time promote: a real staging leaf is always
+// <bucket>/.segstaging/<txn>/<blobID> (see segmentStagingShardKey), i.e. the
+// component DIRECTLY under the bucket. The orphan walker anchors its staging
+// branch on relParts[1]==SegStagingPrefix so a user object whose KEY merely
+// contains ".segstaging" deeper in the path (e.g. "foo/.segstaging/bar") is NOT
+// misclassified as staging and instead falls through to the regular path.
+const SegStagingPrefix = ".segstaging"
 
 // SetOrphanShardSweepGate wires the boot-computed predicate that permits the EC
 // full-object orphan-shard sweep. Default (unset) is fail-closed: the sweep
@@ -274,10 +301,16 @@ func (b *DistributedBackend) WalkOrphanShards(known map[string]bool, fn func(dir
 		return nil
 	}
 	cutoff := time.Now().Add(-b.effectiveOrphanShardAge())
+	// .segstaging leaves use a separate, far more generous floor (see
+	// segStagingReclaimAge): their mtime is fixed when the segment is written, so a
+	// large in-flight PUT's early staging leaf can age past the per-shard cutoff
+	// while the PUT is still running. The generous floor exceeds the whole
+	// segment-write→promote span of one request.
+	stagingCutoff := time.Now().Add(-segStagingReclaimAge)
 	seen := make(map[string]bool)
 
 	for _, dataDir := range dataDirs {
-		stopErr := b.walkOneShardRoot(dataDir, dataDirs[0], known, frozen, live, seen, cutoff, fn)
+		stopErr := b.walkOneShardRoot(dataDir, dataDirs[0], known, frozen, live, seen, cutoff, stagingCutoff, fn)
 		if stopErr != nil {
 			return stopErr
 		}
@@ -299,7 +332,7 @@ func (b *DistributedBackend) effectiveOrphanShardAge() time.Duration {
 func (b *DistributedBackend) walkOneShardRoot(
 	dataDir, canonRoot string,
 	known, frozen, live, seen map[string]bool,
-	cutoff time.Time,
+	cutoff, stagingCutoff time.Time,
 	fn func(dir string) error,
 ) error {
 	var stopErr error
@@ -330,13 +363,86 @@ func (b *DistributedBackend) walkOneShardRoot(
 			return filepath.SkipDir
 		}
 		rel = filepath.ToSlash(rel)
-		if strings.Contains(rel, "/.segstaging/") {
-			// Segment staging area (PR1): in-flight / crashed staged segment shards live under
-			// <bucket>/.segstaging/<txn>/<blobID> until promoted to <key>/segments/<blobID> at commit.
-			// They are never referenced by a committed manifest, so the orphan-SHARD walker must NOT
-			// parse them as full-object orphans and delete them (that would corrupt a live in-flight
-			// chunked PUT). Abandoned staging is reclaimed by a dedicated age-out sweep (PR2), not here.
-			return filepath.SkipDir
+		relParts := strings.Split(rel, "/")
+		if len(relParts) >= 2 && relParts[1] == SegStagingPrefix {
+			// Segment staging area. A REAL staging leaf is always
+			// <bucket>/.segstaging/<txn>/<blobID> (segmentStagingShardKey), so the staging
+			// namespace is the component DIRECTLY under the bucket (relParts[1]). We anchor on
+			// that, NOT a broad strings.Contains: a user key like "foo/.segstaging/bar" has
+			// relParts[1]=="foo" and must fall through to the regular path below.
+			//
+			// PR2 ages out ABANDONED staging leaves (crash between promote and commit, failed
+			// PUT, LWW-loser completer) here. The model is DELETE-TIME LIVENESS, not a write-edge
+			// invariant: we never assume staging is a closed namespace; instead we keep ANY
+			// committed (live) object, however it was written, by reusing the SAME full-object
+			// liveness used on the regular path. The order is exact:
+			//
+			//   1. /segments/ exclusion (FIRST): a real staging leaf is exactly
+			//      .segstaging/<txn>/<blobID> and NEVER contains "/segments/". So a
+			//      .segstaging-prefixed path WITH "/segments/" is a CHUNKED user object keyed
+			//      under ".segstaging" whose committed segments live at
+			//      .segstaging/<key>/segments/<blobID>; skip it wholesale exactly like the
+			//      regular /segments/ branch. This is what lets the rest of this branch use ONLY
+			//      full-object liveness and NEVER consult the (abandoned cross-node / Suspended /
+			//      never-versioned) SEGMENT liveness oracle.
+			//   2. Age gate: newest > stagingCutoff (segStagingReclaimAge ~24h) → KEEP. ALL of an
+			//      object's segments are staged before the commit-time promote and each leaf's
+			//      mtime is fixed at write time, so a large/slow in-flight PUT's early staging leaf
+			//      can age past the per-shard cutoff (~466s) while the PUT is still running. The
+			//      generous staging floor exceeds the whole segment-write→promote span of one
+			//      request, so only a leaf no in-flight request can still own reaches reclaim.
+			//   3. Full-object liveness — IDENTICAL to the regular path: the remaining candidate is
+			//      a real abandoned staging leaf OR a NON-chunked full-object user object keyed
+			//      ".segstaging/foo" (no "/segments/"). A real leaf .segstaging/<txn>/<blobID> →
+			//      parseFullObjectRel sees key ".segstaging/<txn>", vid "<blobID>" → no committed
+			//      object → (false, certain) in a healthy cluster → reclaim; degraded → uncertain →
+			//      kept. A live ".segstaging/foo" full object → (true, …) → kept. Non-hosted /
+			//      uncertain → keep (fail-closed).
+			//
+			// Reclaim is a DIRECT os.RemoveAll — NOT routed through fn/DeleteOrphanDir, which
+			// reconfirms via a parseable full-object key that a real .segstaging leaf is not. The
+			// empty <txn>/ parent dir is left behind (negligible inode residual; cleaned by PR3).
+			if strings.Contains(rel, "/segments/") {
+				return filepath.SkipDir // chunked user object keyed under .segstaging → keep
+			}
+			if newest.After(stagingCutoff) {
+				return filepath.SkipDir // recent → could be a live in-flight PUT → keep
+			}
+			canonical := filepath.Clean(filepath.Join(canonRoot, rel))
+			if known[canonical] || frozen[canonical] || live[canonical] || seen[canonical] {
+				return filepath.SkipDir // latest-known, snapshot-pinned, or a live versioned object
+			}
+			// LOAD-BEARING INVARIANT: this reclaim's liveness check is correct only
+			// because parseFullObjectRel's bucket (parts[0]) is the PHYSICAL owner of
+			// rel's directory, so hasLiveShardRecord queries the right bucket. That
+			// parsed-bucket == physical-owner identity holds because every shard write
+			// goes through getShardDir → ShardPathUnderDataDir, which enforces per-bucket
+			// containment (rejects "../"-escapes and non-segment bucket names), so a key
+			// can never land under a DIFFERENT bucket's .segstaging tree. If that
+			// containment is ever weakened, this age-out (and the regular orphan path
+			// below, which makes the same assumption) must be re-examined.
+			bkt, fkey, vid, okF := parseFullObjectRel(rel)
+			if !okF {
+				// Unparseable staging-prefixed leaf (e.g. a bare-legacy object keyed
+				// EXACTLY ".segstaging" → rel "<bucket>/.segstaging", len 2). Mirror the
+				// regular full-object path's okF=false treatment EXACTLY: keep, never
+				// delete. Falling through to os.RemoveAll here would reclaim a committed
+				// object we cannot even resolve a liveness record for = data loss.
+				return filepath.SkipDir
+			}
+			if !b.owningGroupHosted(bkt) {
+				return filepath.SkipDir // balancer-floated from a non-hosted group → can't judge → keep
+			}
+			if recLive, certain := b.hasLiveShardRecord(bkt, fkey, vid); recLive || !certain {
+				return filepath.SkipDir // live full object OR uncertain → keep (fail-closed)
+			}
+			// Only a parseable, hosted, certainly-dead staging leaf reaches reclaim.
+			if rerr := os.RemoveAll(p); rerr != nil {
+				stopErr = fmt.Errorf("reclaim staging %q: %w", p, rerr)
+				return filepath.SkipDir
+			}
+			metrics.SegStagingReclaimed.Inc()
+			return filepath.SkipDir // reclaimed → never descend past a removed leaf
 		}
 		if strings.Contains(rel, "/segments/") {
 			// Segments stay a WHOLESALE Contains-skip (NOT parse-routed like coalesced
