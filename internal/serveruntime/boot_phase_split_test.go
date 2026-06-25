@@ -121,7 +121,6 @@ func TestBootSequenceCompleteness(t *testing.T) {
 		"bootBalancerAndGossip",
 		"bootSrvOptsAndReceipt",
 		"bootHTTPServerAndAdmin",
-		"bootTLSPostureGate",
 		"bootPhase0Banner",
 		"bootRecoveryAndScrubber",
 		"bootGreenfieldDEKBoundary",

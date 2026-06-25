@@ -37,8 +37,8 @@ type bootPhase struct {
 //     packedBackend) and before bootRegisterForwardHandlers.
 //   - bootRegisterForwardHandlers runs AFTER bootShardService so racing
 //     forwarded RPCs see a clean not-ready error, BEFORE bootBalancerAndGossip.
-//   - bootTLSPostureGate / bootPhase0Banner run AFTER bootHTTPServerAndAdmin
-//     and BEFORE bootDegradedAndServices (which starts the listener).
+//   - bootPhase0Banner runs AFTER bootHTTPServerAndAdmin and BEFORE
+//     bootDegradedAndServices (which starts the listener).
 //   - bootGreenfieldDEKBoundary runs AFTER bootRecoveryAndScrubber and BEFORE
 //     bootDegradedAndServices.
 //   - bootSelfRegisterMember runs LAST (after Phase-2 membership promotion).
@@ -107,7 +107,6 @@ func bootSequence() []bootPhase {
 		{"bootBalancerAndGossip", bootBalancerAndGossip},
 		{"bootSrvOptsAndReceipt", bootSrvOptsAndReceipt},
 		{"bootHTTPServerAndAdmin", func(_ context.Context, s *bootState) error { return bootHTTPServerAndAdmin(s) }},
-		{"bootTLSPostureGate", func(_ context.Context, s *bootState) error { return bootTLSPostureGate(s) }},
 		{"bootPhase0Banner", func(_ context.Context, s *bootState) error { return bootPhase0Banner(s) }},
 		{"bootRecoveryAndScrubber", bootRecoveryAndScrubber},
 		{"bootGreenfieldDEKBoundary", bootGreenfieldDEKBoundary},
