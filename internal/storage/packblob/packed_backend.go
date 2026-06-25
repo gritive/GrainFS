@@ -828,8 +828,7 @@ func (pb *PackedBackend) ReadAtObject(ctx context.Context, bucket, key string, o
 
 // WriteAt is a pass-through to inner. Packed (small S3 object) entries are
 // immutable blob slices and never receive pwrite traffic — internal buckets
-// (NFS4 / VFS Volume Device) live entirely on the inner path, so this is a
-// plain delegate.
+// live entirely on the inner path, so this is a plain delegate.
 func (pb *PackedBackend) WriteAt(ctx context.Context, bucket, key string, offset uint64, data []byte) (*storage.Object, error) {
 	wa, ok := pb.inner.(storage.PartialIO)
 	if !ok {

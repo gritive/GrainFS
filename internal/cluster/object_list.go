@@ -40,7 +40,7 @@ func objectFromCmd(cmd PutObjectMetaCmd) *storage.Object {
 // not bucketVersioningEnabled's local-read fallback. The S3 LIST edge stamps the
 // ctx (PR-A: list_objects_runtime.go) and the forward receiver re-stamps it, so
 // the S3 path's ctx is always resolved → derive activates. Internal/non-S3 LIST
-// consumers (DeleteBucket empty-check, vfs/nfs4/p9/metrics) call with an
+// consumers (DeleteBucket empty-check, metrics) call with an
 // UNSTAMPED context.Background() → not resolved → legacy scatterGatherList (their
 // existing quorum-acked latest-only view). This keeps the derive scoped to the S3
 // LIST surface and avoids a DeleteBucket data-loss path where a best-effort

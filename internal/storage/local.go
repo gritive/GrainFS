@@ -406,9 +406,8 @@ func (b *LocalBackend) GetObject(ctx context.Context, bucket, key string) (io.Re
 		return io.NopCloser(NewSegmentReader(store, obj.Segments)), obj, nil
 	}
 
-	// Legacy single-file path for objects predating segments (e.g.
-	// __grainfs_volumes Volume Device blocks written via WriteAt). Range
-	// GETs and Volume Device reads keep using ReadAt directly.
+	// Legacy single-file path for objects predating segments. Range GETs
+	// keep using ReadAt directly.
 	if b.segEnc != nil {
 		rc, err := openEncryptedObjectFile(b.objectPath(bucket, key), b.segEnc, objectFileAADFields(bucket, key), obj.Size)
 		if err != nil {

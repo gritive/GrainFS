@@ -306,8 +306,8 @@ type BackgroundScrubber struct {
 	redundancyUpgradeMinAge      time.Duration
 
 	// Replication-source registry. EC scrub keeps using the legacy runOnce
-	// path above; replication sources (volume blocks today, future internal
-	// buckets tomorrow) ride the same interval ticker via SourceRunOnce.
+	// path above; replication sources (internal full-object-replicated
+	// buckets) ride the same interval ticker via SourceRunOnce.
 	sources   map[string]BlockSource
 	verifiers map[string]BlockVerifier
 }

@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.0.710.0] - 2026-06-26
+
+### Removed
+- **Internal dead-code removal, no user-facing behavior change.** Removed two leftovers from the
+  already-removed volume/NBD and NFS subsystems:
+  - The dead `__grainfs_volumes` erasure-coding scrub-routing branch in `internal/scrubber`
+    (`routeSourceFor`). The volume subsystem was removed (#781-785), so no internal bucket needs the
+    EC scrub source anymore; `routeSourceFor` now routes internal buckets to the replication source
+    and all other buckets to the EC source. The now-unused `keyPrefix` parameter and `strings`
+    import are dropped with the branch.
+  - The `__grainfs_nfs4` carve-out in `storage.IsInternalBucket` (`internal/storage`). The NFS mount
+    protocol was removed, so `__grainfs_nfs4` is now classified as a normal internal bucket instead
+    of being excluded. Behavior-neutral in practice — nothing in production creates either bucket
+    (greenfield, no on-disk objects), and the read-side `VerifyETag` selects its hash by ETag length,
+    not by bucket classification.
+  Plus the stale comments that referenced the removed `__grainfs_volumes` Volume Device blocks and
+  the `__grainfs_nfs4` bucket across scrubber/storage/cluster/colima-fixture files. The "formerly
+  NFS4" port-reservation comments in the e2e cluster harnesses are intentionally kept (they document
+  removed protocol ports, not the bucket).
+
 ## [0.0.709.0] - 2026-06-26
 
 ### Changed

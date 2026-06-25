@@ -38,7 +38,6 @@ func PutXXH3Hasher(h *xxh3.Hasher) {
 // VerifyETag recomputes the ETag of rc and compares against expected.
 // Algorithm is selected by expected's hex length: 32=MD5, 16=xxhash3.
 // Internal buckets (__grainfs_*) use 16-char xxhash3; S3-exposed use 32-char MD5.
-// __grainfs_nfs4 is excluded from IsInternalBucket and always produces MD5 ETags.
 // Multipart ETags (hex-N, 34+ chars) fall to default — internal buckets never use multipart.
 func VerifyETag(rc io.Reader, expected string) (bool, error) {
 	switch len(expected) {

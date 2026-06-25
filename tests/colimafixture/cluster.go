@@ -98,7 +98,7 @@ func StartCluster(t testing.TB, opts Options) *Cluster {
 		t.Cleanup(c.Stop)
 	}
 
-	// Allocate 6 slots/node (http, raft, reserved[nfs4], reserved, reserved, join).
+	// Allocate 6 slots/node (http, raft, reserved, reserved, reserved, join).
 	// Slots 2–4 per node are reserved for future or removed protocols so that
 	// port indices (and the join slot at index 5) remain stable across changes.
 	ports := uniqueFreePorts(t, numNodes*6)
