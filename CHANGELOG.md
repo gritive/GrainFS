@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.681.0] - 2026-06-25
+
+### Changed
+- **Internal refactor, no user-facing behavior change.** Decomposed the background-scrubber cycle
+  driver `(*BackgroundScrubber).runOnce` (the package's highest-complexity function) into a thin
+  per-cycle sequencer plus phase sub-functions (`resolveSigningState`, `scanAndRepair` /
+  `scrubOneObject`, `sweepOrphanSegments`, `upgradeRedundancy`). The phase order, the cycle-global
+  repair cap, cross-bucket known-dir accumulation, every metric/stat/emit call, and the
+  abort-everything-on-cancellation contract (a mid-scan context cancellation still skips all
+  downstream sweeps and the stats finalization, distinct from per-object skips) are preserved
+  unchanged.
+
 ## [0.0.680.0] - 2026-06-25
 
 ### Changed
