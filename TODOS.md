@@ -30,11 +30,6 @@ either bucket).
   producer was `__grainfs_volumes` Volume Device blocks (now gone). Verify whether any non-segment
   object can still reach this path; if none, the path itself may be removable (separate change — the
   comment was fixed, the code kept).
-- **[P4][docs] nfs4 framing superseded.** Design doc
-  `docs/superpowers/specs/2026-06-23-data-plane-raft-free-completion-design.md` line 88 lists
-  `__grainfs_nfs4` as a deliberate KEEP, and `bucket.go`'s old "Phase 0b (D6)" comment framed it as
-  managed-as-regular-bucket. Both are now superseded — nfs4 was removed per user direction
-  (2026-06-26). Update the design doc note if it is revisited.
 - **[P4][hygiene] Incidental `__grainfs_volumes` test fixtures kept (Minimal scope).** `spool_test.go`,
   `pullthrough_test.go`, `store_bench_test.go`, `backend_bucket_management_integration_test.go`, and
   the `bucket_test.go` `{"__grainfs_volumes", true}` case still use the string as an arbitrary
