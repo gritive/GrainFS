@@ -44,7 +44,7 @@ var (
 // AppendObjecter is the optional interface for S3 Express AppendObject support.
 // Server-side HTTP handler probes via type assertion; backends without support
 // get a clean 501 NotImplemented. Mirrors existing optional-interface pattern
-// (Truncatable, ACLSetter, RequestPutter, UserMetadataPutter).
+// (ACLSetter, RequestPutter, UserMetadataPutter).
 type AppendObjecter interface {
 	AppendObject(ctx context.Context, bucket, key string, expectedOffset int64, r io.Reader) (*Object, error)
 }

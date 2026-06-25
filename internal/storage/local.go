@@ -64,7 +64,6 @@ var (
 	_ Backend            = (*LocalBackend)(nil)
 	_ UserMetadataPutter = (*LocalBackend)(nil)
 	_ PartialIO          = (*LocalBackend)(nil)
-	_ Truncatable        = (*LocalBackend)(nil)
 )
 
 // NewLocalBackend creates a new local storage backend.
@@ -554,7 +553,7 @@ func (b *LocalBackend) GetObjectTags(bucket, key, versionID string) ([]Tag, erro
 	return result, err
 }
 
-// Truncate implements storage.Truncatable.
+// Truncate implements the storage.PartialIO Truncate method.
 func (b *LocalBackend) Truncate(ctx context.Context, bucket, key string, size int64) error {
 	obj, err := b.HeadObject(ctx, bucket, key)
 	if err == nil && obj.Segments != nil {
@@ -1109,7 +1108,7 @@ func (m localDataWALMaterializer) Materialize(ctx context.Context, rec datawal.R
 	}
 }
 
-// Sync implements storage.Syncable.
+// Sync fsyncs the on-disk state for a specific object.
 func (b *LocalBackend) Sync(bucket, key string) error {
 	if b.dataWAL != nil {
 		return b.dataWAL.Flush()
