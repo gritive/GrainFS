@@ -539,6 +539,12 @@ func (b *DistributedBackend) GetObjectTags(bucket, key, versionID string) ([]sto
 	if err != nil {
 		return nil, err
 	}
+	// A specific-version request must match the single latest-only blob version;
+	// a mismatch means the requested version is not available → 404. Mirrors the
+	// per-version guard in headObjectMetaV (object_version.go).
+	if versionID != "" && obj.VersionID != versionID {
+		return nil, storage.ErrObjectNotFound
+	}
 	if len(obj.Tags) == 0 {
 		return nil, nil
 	}

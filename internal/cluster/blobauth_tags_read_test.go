@@ -186,4 +186,24 @@ func TestGetObjectTags_BlobAuthOff_LatestOnlyBlob(t *testing.T) {
 		require.ErrorIs(t, err, storage.ErrObjectNotFound)
 		require.Nil(t, tags)
 	})
+
+	t.Run("specific-version request mismatching the latest-only blob → 404 (not latest tags)", func(t *testing.T) {
+		b := newTestDistributedBackend(t)
+		require.NoError(t, b.CreateBucket(ctx, "off3"))
+		// The latest-only blob holds version "v-latest" with its own tags.
+		seedLatestBlob(t, b, "off3", "k", PutObjectMetaCmd{
+			VersionID: "v-latest", ETag: "e",
+			Tags:    []storage.Tag{{Key: "latest", Value: "1"}},
+			NodeIDs: []string{b.currentSelfAddr()},
+		})
+		// A request for a DIFFERENT version must 404 — never return the latest
+		// version's tags (mirrors headObjectMetaV's per-version guard).
+		tags, err := b.GetObjectTags("off3", "k", "v-other")
+		require.ErrorIs(t, err, storage.ErrObjectNotFound)
+		require.Nil(t, tags)
+		// The matching version still resolves.
+		tags, err = b.GetObjectTags("off3", "k", "v-latest")
+		require.NoError(t, err)
+		require.Equal(t, []storage.Tag{{Key: "latest", Value: "1"}}, tags)
+	})
 }
