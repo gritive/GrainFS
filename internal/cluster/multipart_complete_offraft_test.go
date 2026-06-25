@@ -132,6 +132,33 @@ func TestCompleteMultipart_RetryShortCircuitsNoReassembly(t *testing.T) {
 		"idempotent retry must short-circuit on the det-vid object and write no new segment shards")
 }
 
+func TestCompleteMultipart_NonVersionedRetryAfterInterveningPutReturnsOriginal(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	const bkt, key = "plainbkt", "mp-retry.bin"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+
+	up, err := b.CreateMultipartUpload(ctx, bkt, key, "application/octet-stream")
+	require.NoError(t, err)
+	payload := []byte("non-versioned-retry-after-put")
+	part, err := b.UploadPart(ctx, bkt, key, up.UploadID, 1, bytes.NewReader(payload), "")
+	require.NoError(t, err)
+
+	obj1, err := b.CompleteMultipartUpload(ctx, bkt, key, up.UploadID, []storage.Part{*part})
+	require.NoError(t, err)
+	require.NotEmpty(t, obj1.VersionID)
+
+	newObj, err := b.PutObject(ctx, bkt, key, bytes.NewReader([]byte("newer-put-data")), "text/plain")
+	require.NoError(t, err)
+	require.NotEqual(t, obj1.VersionID, newObj.VersionID, "intervening PUT must replace the latest-only blob")
+
+	obj2, err := b.CompleteMultipartUpload(ctx, bkt, key, up.UploadID, []storage.Part{*part})
+	require.NoError(t, err, "retry after an intervening PUT must remain idempotent")
+	require.Equal(t, obj1.VersionID, obj2.VersionID)
+	require.Equal(t, obj1.ETag, obj2.ETag)
+	require.Equal(t, obj1.Size, obj2.Size)
+}
+
 // TestCompleteMultipart_NonVersionedLatestOnlyFailClosed proves M3 F7: with the
 // non-versioned multipart object's latest-only quorum-meta blob now the SOLE
 // authority, a forced fault on that write makes CompleteMultipartUpload return an

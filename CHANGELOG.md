@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.728.0] - 2026-06-26
+
+### Fixed
+- **Restored non-versioned multipart-complete retry idempotency after intervening PUTs.**
+  Completed multipart uploads now leave a hidden uploadID-keyed completion sentinel, so a retry can
+  return the original completed object even after a later same-key PUT replaces the latest-only blob.
+
 ## [0.0.727.0] - 2026-06-26
 
 ### Fixed
