@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.679.0] - 2026-06-25
+
+### Changed
+- **Internal refactor, no user-facing behavior change.** Decomposed the raft propose path
+  `(*DistributedBackend).propose` into a thin orchestrator plus named sub-functions
+  (`proposeAsLeader`, `proposeViaForward`, `waitLocalApplied`), collapsing the apply-wait loop and
+  leader-commit block that were previously inlined multiple times. Error sentinels
+  (`ErrProposeTimeout`, `raft.ErrNotLeader`) and client-cancellation surfacing are preserved
+  byte-for-byte; behavior is unchanged.
+
 ## [0.0.678.0] - 2026-06-25
 
 ### Removed
