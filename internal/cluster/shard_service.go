@@ -544,6 +544,23 @@ func (s *ShardService) DeleteShards(ctx context.Context, peer, bucket, key strin
 	return err
 }
 
+// PromoteStagedShards renames a segment's staged shard dirs (stagingKey) to their final path
+// (finalKey) on a remote node — the remote counterpart of PromoteLocalStagedShards. The single-Key
+// envelope carries stagingKey in Key and finalKey in Data. PR1 segment staging.
+func (s *ShardService) PromoteStagedShards(ctx context.Context, peer, bucket, stagingKey, finalKey string) error {
+	peerAddr, err := s.resolvePeerAddress(peer)
+	if err != nil {
+		return err
+	}
+	if s.transport == nil {
+		return fmt.Errorf("shard service: no transport")
+	}
+	envb := buildShardEnvelope("PromoteStagedShards", bucket, stagingKey, 0, []byte(finalKey))
+	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
+	_, err = s.callShardRPC(ctx, peerAddr, envb)
+	return err
+}
+
 // buildShardEnvelope builds an RPCMessage FlatBuffer wrapping a ShardRequest without make+copy.
 // Returns a Builder that MUST be Reset()+Put() to shardBuilderPool after use.
 func buildShardEnvelope(msgType, bucket, key string, shardIdx int32, data []byte) *flatbuffers.Builder {
@@ -604,6 +621,8 @@ func (s *ShardService) handleRPC(payload []byte) []byte {
 		return s.handleReadRange(sr)
 	case "DeleteShards":
 		return s.handleDelete(sr)
+	case "PromoteStagedShards":
+		return s.handlePromoteStaged(sr)
 	case "WriteQuorumMeta":
 		return s.handleQuorumMetaWrite(sr)
 	case "WriteQuorumMetaVersion":
@@ -1798,6 +1817,15 @@ func (s *ShardService) handleRead(sr *shardRequest) []byte {
 
 func (s *ShardService) handleDelete(sr *shardRequest) []byte {
 	if err := s.DeleteLocalShards(sr.Bucket, sr.Key); err != nil {
+		return s.errorResponse(err.Error())
+	}
+	return s.okResponse(nil)
+}
+
+// handlePromoteStaged renames staged segment shard dirs (sr.Key) to the final path; the final logical
+// key is carried in sr.Data (the single-Key envelope). PR1 segment staging.
+func (s *ShardService) handlePromoteStaged(sr *shardRequest) []byte {
+	if err := s.PromoteLocalStagedShards(sr.Bucket, sr.Key, string(sr.Data)); err != nil {
 		return s.errorResponse(err.Error())
 	}
 	return s.okResponse(nil)
