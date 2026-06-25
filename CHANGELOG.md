@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.704.0] - 2026-06-25
+
+### Removed
+- **Internal dead-code removal, no user-facing behavior change.** Removed the now-unused `AdminAPI`
+  `PostureChecker` optional first-SA pre-check seam (`internal/iam`): the interface, the `posture`
+  field, `SetPostureChecker`, and the `CheckAnonOff` pre-check in `CreateSA`. It existed only for the
+  earlier anon-switch feature whose only implementation and wiring were already removed, so the
+  pre-check was already always-skipped in production — `CreateSA` behavior is unchanged.
+
 ## [0.0.703.0] - 2026-06-25
 
 ### Changed
