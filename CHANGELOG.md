@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.706.0] - 2026-06-26
+
+### Removed
+- **Internal test-only cleanup, no production code or behavior change.** Removed 12 unused
+  (staticcheck U1000) dead test-helper symbols across `internal/raft`, `internal/scrubber`, and
+  `internal/server` `_test.go` files.
+
 ## [0.0.705.0] - 2026-06-25
 
 ### Changed
