@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -57,6 +58,44 @@ func TestNewRewrapScrubberKick_LaneErrorDoesNotPanic(t *testing.T) {
 	ctrl.MarkReady()
 	kick := newRewrapScrubberKick(ctrl, "node-A", nil)
 	require.NotPanics(t, func() { kick(context.Background(), 0) })
+}
+
+type failOnceLane struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (f *failOnceLane) Name() string { return "fail-once" }
+func (f *failOnceLane) RewrapByGen(_ context.Context, _, _ uint32) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	if f.calls == 1 {
+		return errors.New("transient")
+	}
+	return nil
+}
+
+func TestNewRewrapScrubberKick_RetriesTransientLaneFailure(t *testing.T) {
+	ctrl := encrypt.NewRewrapController(keeperAtGen1(t))
+	ctrl.RegisterLane(&failOnceLane{})
+	ctrl.MarkReady()
+
+	reports := make(chan uint32, 1)
+	report := func(_ context.Context, _ string, gen, _ uint32) error {
+		reports <- gen
+		return nil
+	}
+
+	kick := newRewrapScrubberKickWithRetry(ctrl, "node-A", report, 10*time.Millisecond, 3)
+	kick(context.Background(), 0)
+
+	select {
+	case gen := <-reports:
+		require.Equal(t, uint32(0), gen)
+	case <-time.After(time.Second):
+		t.Fatal("expected retry to report completion after transient lane failure")
+	}
 }
 
 func TestScrubberKick_ReportsFullSweptSetOnlyOnCleanReadyKick(t *testing.T) {

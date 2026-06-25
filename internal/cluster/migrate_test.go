@@ -95,7 +95,7 @@ func TestMigrateLegacyMetaToCluster_Basic(t *testing.T) {
 	err := migrateLegacyDir(t, dir, "node-1")
 	require.NoError(t, err)
 
-	// Task 12: CmdCreateBucket is retired (bucket control-plane moved to meta-raft).
+	// Task 12: bucket control-plane moved to meta-raft.
 	// MigrateLegacyMetaToCluster no longer spins up a raft node or writes a raft log;
 	// it only scans the legacy store for operator visibility. No raft/ directory expected.
 

@@ -16,15 +16,15 @@ import (
 	"github.com/gritive/GrainFS/internal/uuidutil"
 )
 
-// CoalesceSegmentsCmd is the Raft payload that records a single coalesce
-// operation: take a prefix of objectMeta.Segments (identified by blobIDs in
-// ConsumedSegmentIDs) and replace them with one CoalescedShardRef.
+// CoalesceSegmentsPlan describes a single coalesce publish: take a prefix of
+// objectMeta.Segments (identified by blobIDs in ConsumedSegmentIDs) and replace
+// them with one CoalescedShardRef.
 //
-// Apply MUST be idempotent: replay after partial application is safe because
-// the apply path only removes segments whose BlobID still appears in
+// Publish MUST be idempotent: retry after partial application is safe because
+// the manifest RMW only removes segments whose BlobID still appears in
 // objectMeta.Segments. See design 2026-05-18-append-segment-coalesce-ec-design.md
-// § "Race handling".
-type CoalesceSegmentsCmd struct {
+// section "Race handling".
+type CoalesceSegmentsPlan struct {
 	Bucket             string
 	Key                string
 	CoalescedID        string   // UUIDv7
@@ -78,7 +78,7 @@ func (b *DistributedBackend) coalesceOwnerGate() bool {
 // and retry (bounded). Coalesce is best-effort background work: a persistent
 // reject or a missing base aborts safely (the raw segments stay intact and a
 // future trigger/backstop re-coalesces).
-func (b *DistributedBackend) publishCoalesceBlob(ctx context.Context, cmd CoalesceSegmentsCmd) error {
+func (b *DistributedBackend) publishCoalesceBlob(ctx context.Context, cmd CoalesceSegmentsPlan) error {
 	if b.shardSvc == nil {
 		return fmt.Errorf("coalesce publish: quorum-meta store unavailable")
 	}
@@ -329,7 +329,7 @@ func (b *DistributedBackend) processCoalesceJobB3(ctx context.Context, job coale
 		}
 	}
 
-	cmd := CoalesceSegmentsCmd{
+	cmd := CoalesceSegmentsPlan{
 		Bucket:             job.Bucket,
 		Key:                job.Key,
 		CoalescedID:        coalescePlan.CoalescedID,
@@ -392,7 +392,7 @@ func (b *DistributedBackend) processCoalesceJobB2(ctx context.Context, job coale
 	if mErr != nil {
 		return fmt.Errorf("merge: %w", mErr)
 	}
-	cmd := CoalesceSegmentsCmd{
+	cmd := CoalesceSegmentsPlan{
 		Bucket:             coalescePlan.Bucket,
 		Key:                coalescePlan.Key,
 		CoalescedID:        coalescePlan.CoalescedID,

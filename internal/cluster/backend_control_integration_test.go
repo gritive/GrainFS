@@ -85,15 +85,17 @@ var _ = Describe("Backend control integration", func() {
 	It("waits for backend apply progress", func() {
 		Expect(b.CreateBucket(ctx, "bucket")).To(Succeed())
 		// CreateBucket now goes through MetaBucketStore (direct FSM), not raft.
-		// Propose a raft entry explicitly to get a committed log index.
-		Expect(b.propose(ctx, CmdCreateBucket, CreateBucketCmd{Bucket: "raft-fence"})).To(Succeed())
-		applied := b.lastApplied.Load()
-		Expect(applied).NotTo(BeZero())
+		// Commit a raft no-op explicitly to get an applied log index.
+		raw, err := buildRawCommand(0, nil)
+		Expect(err).NotTo(HaveOccurred())
+		applied, err := b.node.ProposeWait(ctx, raw)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(b.WaitApplied(ctx, applied)).To(Succeed())
 		b.lastApplied.Store(0)
 
 		waitCtx, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
 		defer cancel()
-		err := b.WaitApplied(waitCtx, applied)
+		err = b.WaitApplied(waitCtx, applied)
 		Expect(errors.Is(err, context.DeadlineExceeded)).To(BeTrue())
 	})
 

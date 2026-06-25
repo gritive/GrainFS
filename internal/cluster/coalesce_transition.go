@@ -11,11 +11,9 @@ type coalesceSegmentsTransitionResult struct {
 	CoalescedEntriesAtCap bool
 }
 
-// coalescedRefFromCmd builds the CoalescedShardRef that a coalesce operation
-// appends to the manifest. Shared by the FSM apply path
-// (applyCoalesceSegmentsTransition) and the off-raft blob RMW
-// (planCoalesceBlobRMW) so the two produce byte-identical refs.
-func coalescedRefFromCmd(cmd CoalesceSegmentsCmd) CoalescedShardRef {
+// coalescedRefFromPlan builds the CoalescedShardRef that a coalesce operation
+// appends to the manifest.
+func coalescedRefFromPlan(cmd CoalesceSegmentsPlan) CoalescedShardRef {
 	return CoalescedShardRef{
 		CoalescedID: cmd.CoalescedID,
 		Size:        cmd.Size,
@@ -28,19 +26,17 @@ func coalescedRefFromCmd(cmd CoalesceSegmentsCmd) CoalescedShardRef {
 	}
 }
 
-// planCoalesceBlobRMW is the off-raft (quorum-meta blob) twin of
-// applyCoalesceSegmentsTransition: it lifts the idempotency (CoalescedID),
+// planCoalesceBlobRMW lifts the idempotency (CoalescedID),
 // MaxCoalescedEntries cap, and consumed-segment removal into a PutObjectMetaCmd
-// RMW against the CURRENT base manifest blob. It mirrors the FSM transition's
-// semantics exactly, with two off-raft additions:
+// RMW against the CURRENT base manifest blob:
 //   - F8: consumed segment IDs are removed from the CURRENT base.Segments by
 //     EXACT BlobID match, so a segment a concurrent append added AFTER the
 //     coalesce job snapshotted its candidates survives (it is not in
 //     ConsumedSegmentIDs, so it is kept).
 //   - the published cmd is a CAS candidate: MetaSeqCAS=true, MetaSeq=base+1.
 //     Size/ETag are unchanged (coalesce is a reorganization, not a content
-//     change). The result Noop/cap flags match the FSM transition.
-func planCoalesceBlobRMW(base PutObjectMetaCmd, cmd CoalesceSegmentsCmd) (PutObjectMetaCmd, coalesceSegmentsTransitionResult, error) {
+//     change).
+func planCoalesceBlobRMW(base PutObjectMetaCmd, cmd CoalesceSegmentsPlan) (PutObjectMetaCmd, coalesceSegmentsTransitionResult, error) {
 	for _, c := range base.Coalesced {
 		if c.CoalescedID == cmd.CoalescedID {
 			return PutObjectMetaCmd{}, coalesceSegmentsTransitionResult{Noop: true}, nil
@@ -63,7 +59,7 @@ func planCoalesceBlobRMW(base PutObjectMetaCmd, cmd CoalesceSegmentsCmd) (PutObj
 
 	next := base
 	next.Segments = kept
-	next.Coalesced = append(append([]CoalescedShardRef(nil), base.Coalesced...), coalescedRefFromCmd(cmd))
+	next.Coalesced = append(append([]CoalescedShardRef(nil), base.Coalesced...), coalescedRefFromPlan(cmd))
 	next.IsAppendable = true
 	// Coalesce is a reorganization: Size/ETag/VersionID/PlacementGroupID/ModTime
 	// are carried forward unchanged from the base. Only the CAS fence advances.

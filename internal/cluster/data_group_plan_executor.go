@@ -51,7 +51,8 @@ type dataRaftNode interface {
 	Configuration() raft.Configuration
 }
 
-// DataGroupPlanExecutor implements GroupRebalancer via real Raft voter migration.
+// DataGroupPlanExecutor performs data-group Raft membership changes for
+// live paths that still need voter edits, such as revoked-node evacuation.
 //
 // MoveReplica algorithm (PR-K2):
 //

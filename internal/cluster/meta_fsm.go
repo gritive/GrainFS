@@ -41,8 +41,6 @@ const (
 	MetaCmdTypeAddPlacementGeneration = clusterpb.MetaCmdTypeAddPlacementGeneration // Phase 7
 	MetaCmdTypePutBucketAssignment    = clusterpb.MetaCmdTypePutBucketAssignment    // PR-D
 	MetaCmdTypeSetLoadSnapshot        = clusterpb.MetaCmdTypeSetLoadSnapshot        // PR-D
-	MetaCmdTypeProposeRebalancePlan   = clusterpb.MetaCmdTypeProposeRebalancePlan   // PR-D
-	MetaCmdTypeAbortPlan              = clusterpb.MetaCmdTypeAbortPlan              // PR-D
 	// 9-13 reserved — do not reuse (no renumber).
 	MetaCmdTypeRotateKeyBegin            = clusterpb.MetaCmdTypeRotateKeyBegin
 	MetaCmdTypeRotateKeySwitch           = clusterpb.MetaCmdTypeRotateKeySwitch
@@ -124,7 +122,7 @@ type MetaNodeEntry struct {
 	Role    uint8 // 0=Voter 1=Learner
 }
 
-// ShardGroupEntry describes data Raft group membership.
+// ShardGroupEntry describes placement group membership.
 // bucket→group mapping is managed separately by Router. key-range sharding excluded.
 type ShardGroupEntry struct {
 	ID      string
@@ -150,7 +148,7 @@ type LoadStatEntry struct {
 }
 
 // ObjectIndexEntry is the meta-Raft global object index row used to route an
-// object version to its owning data Raft group before touching group-local FSMs.
+// object version to its owning placement group.
 type ObjectIndexEntry struct {
 	Bucket           string
 	Key              string
@@ -177,15 +175,6 @@ type ObjectIndexEntry struct {
 type ObjectIndexSummary struct {
 	Bucket               string         `json:"bucket,omitempty"`
 	PlacementGroupCounts map[string]int `json:"placement_group_counts"`
-}
-
-// RebalancePlan describes a single voter migration between data Raft group nodes.
-type RebalancePlan struct {
-	PlanID    string
-	GroupID   string
-	FromNode  string
-	ToNode    string
-	CreatedAt time.Time
 }
 
 // MetaFSM implements raft.Snapshotter for the meta-Raft group.
@@ -217,10 +206,8 @@ type MetaFSM struct {
 	placementGenerations []placementGeneration
 	bucketRecords        map[string]BucketRecord          // bucket → BucketRecord (PR-D; replaces bucketAssignments)
 	loadSnapshot         map[string]LoadStatEntry         // node_id → stats (PR-D)
-	activePlan           *RebalancePlan                   // nil = no active plan (PR-D)
 	onBucketAssigned     func(string, string)             // protected by mu; set before Start() (PR-D)
 	onBucketUnassigned   func(string)                     // protected by mu; set before Start() (group0-demotion)
-	onRebalancePlan      func(*RebalancePlan)             // must not block; set before Start() (PR-D)
 	onShardGroupAdded    func(ShardGroupEntry)            // fired after PutShardGroup applies; protected by mu (v0.0.7.0)
 	onScrubTrigger       func(scrubber.ScrubTriggerEntry) // PR4: cluster-wide scrub trigger applied; must not block
 	// 클러스터 키 회전 — 결정론적 FSM은 여기, side-effect (디스크 I/O,
@@ -723,10 +710,6 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		return f.applyPutBucketAssignment(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeSetLoadSnapshot:
 		return f.applySetLoadSnapshot(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeProposeRebalancePlan:
-		return f.applyProposeRebalancePlan(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeAbortPlan:
-		return f.applyAbortPlan(cmd.DataBytes())
 	// 9-13 reserved — fall through to default (skip); no renumber.
 	case clusterpb.MetaCmdTypeRotateKeyBegin:
 		return f.applyRotateKeyBegin(cmd.DataBytes())

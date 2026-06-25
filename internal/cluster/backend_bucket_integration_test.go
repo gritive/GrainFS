@@ -54,8 +54,8 @@ var _ = Describe("Backend bucket integration", func() {
 	})
 
 	It("stores and retrieves bucket policy via MetaBucketStore", func() {
-		// Task 12: bucket policy moved from group-0 BadgerDB (FSM CmdSetBucketPolicy)
-		// to MetaBucketStore (meta-raft BucketRecord). The policy is stored in the
+		// Task 12: bucket policy moved from group-0 BadgerDB to MetaBucketStore
+		// (meta-raft BucketRecord). The policy is stored in the
 		// MetaFSM in-memory map (no group-0 BadgerDB key), so the encryption test
 		// for the old policy: BadgerDB key is retired. This test verifies the live
 		// round-trip: SetBucketPolicy→MetaBucketStore; GetBucketPolicy reads back.

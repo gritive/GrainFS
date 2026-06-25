@@ -234,9 +234,9 @@ var _ = ginkgo.Describe("DEK rewrap lanes (DEK rotation S6b)", func() {
 	})
 })
 
-// DEK FSM-value rewrap ledger e2e (S7-1a-2): after a data-DEK rotation and FSM-value
-// drain, the grainfs_rewrap_progress_reports_total{epoch="1"} counter must increment,
-// proving the marker-driven re-Kick ran all lanes (EC+packblob+FSMvalue-check) and
+// DEK FSM-value rewrap ledger e2e (S7-1a-2): after a data-DEK rotation, the
+// grainfs_rewrap_progress_reports_total{epoch="1"} counter must increment,
+// proving the rewrap kick ran all lanes (EC+packblob+FSMvalue check) and
 // proposed a DEKRewrapProgress entry with epoch=1 to the meta-raft ledger. This is
 // the observable proxy for IsGenFullyRewrapped(..., requiredEpoch=1) — the prune
 // precondition gated by S7-final.
@@ -245,7 +245,7 @@ var _ = ginkgo.Describe("DEK rewrap lanes (DEK rotation S6b)", func() {
 // rewrap lane counters but the progress report carries epoch=0 (no FSM-value check),
 // and epoch=1 is never reported.
 var _ = ginkgo.Describe("DEK FSM-value rewrap ledger epoch (DEK rotation S7-1a-2)", func() {
-	ginkgo.It("reports epoch=1 progress to ledger after FSM-value drain following rotate-dek", func() {
+	ginkgo.It("reports epoch=1 progress to ledger after FSM-value check following rotate-dek", func() {
 		t := ginkgo.GinkgoTB()
 
 		// packThreshold=1024: small objects → packblob, objects > 1024 → EC.
@@ -254,9 +254,10 @@ var _ = ginkgo.Describe("DEK FSM-value rewrap ledger epoch (DEK rotation S7-1a-2
 		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 		ginkgo.DeferCleanup(cancel)
 
-		// Create a bucket and PUT an object — writes policy: and obj: FSM-values sealed
-		// at gen 0. These will be stale after the rotation and must be drained before
-		// the check-lane passes and the progress report can carry epoch=1.
+		// Create a bucket and PUT an object so the black-box e2e has real user data
+		// to read after the rotation. Legacy data-group policy:/obj: FSM-values are
+		// no longer produced by this path; direct stale-value drain coverage lives in
+		// internal/cluster unit tests that can seed the legacy keys explicitly.
 		const bucket = "ledger-epoch-test"
 		createBucketWithAdminPolicyAttachViaUDSAny(t, []string{dataDir}, saID, bucket, cli)
 
@@ -272,9 +273,6 @@ var _ = ginkgo.Describe("DEK FSM-value rewrap ledger epoch (DEK rotation S7-1a-2
 		// Capture all baselines BEFORE rotation so we compare against a stable snapshot.
 		// Baseline: epoch=1 reports before rotation must be 0 (no rotation yet).
 		epoch1Baseline := scrapeMetricWithLabel(t, endpoint, "grainfs_rewrap_progress_reports_total", `epoch="1"`)
-		// FSM-value drain baseline: captured before rotation so the Eventually can detect
-		// the increment even if the drain completes quickly after the rotation commits.
-		fsmBaseline := scrapeRewrapCounter(t, endpoint, "grainfs_rewrap_fsm_values_total")
 
 		// Record DEK generation before rotation.
 		beforeGen := kekStatusViaSocket(t, dataDir).ActiveDEKGeneration
@@ -291,23 +289,14 @@ var _ = ginkgo.Describe("DEK FSM-value rewrap ledger epoch (DEK rotation S7-1a-2
 		}, 20*time.Second, 100*time.Millisecond).Should(gomega.Equal(wantGen),
 			"active DEK generation must advance to %d after rotate-dek", wantGen)
 
-		// Wait for the FSM-value drain to complete — a prerequisite for the check-lane to pass.
-		// The drain trigger runs asynchronously; the drain itself runs on the leader.
-		gomega.Eventually(func() float64 {
-			return scrapeRewrapCounter(t, endpoint, "grainfs_rewrap_fsm_values_total")
-		}, 30*time.Second, 500*time.Millisecond).Should(gomega.BeNumerically(">", fsmBaseline),
-			"grainfs_rewrap_fsm_values_total must increment (FSM drain must converge) before epoch-1 report")
-
-		// After the marker is applied and the re-Kick runs all lanes clean,
+		// After the kick runs all lanes clean,
 		// grainfs_rewrap_progress_reports_total{epoch="1"} must increment.
-		// This proves the S7-1a-2 path: CmdFSMValueResealDone → re-Kick →
-		// FSMValueCheckLane returns nil → ProposeDEKRewrapProgress(epoch=1).
-		// Allow up to 60s: the drain runs async, then the marker propose waits
-		// for raft apply, then the re-Kick sweeps all lanes and reports.
+		// This proves the local-lane path:
+		// FSMValueCheckLane verifies/drains locally → ProposeDEKRewrapProgress(epoch=1).
 		gomega.Eventually(func() float64 {
 			return scrapeMetricWithLabel(t, endpoint, "grainfs_rewrap_progress_reports_total", `epoch="1"`)
 		}, 60*time.Second, 500*time.Millisecond).Should(gomega.BeNumerically(">", epoch1Baseline),
-			"grainfs_rewrap_progress_reports_total{epoch=\"1\"} must increment after FSM-value drain + marker re-Kick (baseline=%.0f)", epoch1Baseline)
+			"grainfs_rewrap_progress_reports_total{epoch=\"1\"} must increment after FSM-value check (baseline=%.0f)", epoch1Baseline)
 
 		// The object must still be readable after the reseal.
 		getResp, err := cli.GetObject(ctx, &s3.GetObjectInput{
@@ -322,12 +311,13 @@ var _ = ginkgo.Describe("DEK FSM-value rewrap ledger epoch (DEK rotation S7-1a-2
 	})
 })
 
-// DEK FSM-value rewrap e2e (S7-1a): after a data-DEK rotation, the
-// grainfs_rewrap_fsm_values_total counter must increment (the bucket-policy
-// value sealed at gen N must be resealed at gen N+1). Multipart state (mpu:)
-// must NOT be rewrapped (D4 census-only).
+// DEK FSM-value rewrap e2e (S7-1a): after a data-DEK rotation, the FSM-value
+// check lane participates in the epoch=1 completion report and user data remains
+// readable. Direct legacy policy:/obj: stale-value counter coverage lives in
+// internal/cluster unit tests because modern black-box object and bucket-policy
+// paths no longer create data-group FSM values.
 var _ = ginkgo.Describe("DEK FSM-value rewrap lane (DEK rotation S7-1a)", func() {
-	ginkgo.It("increments fsm_values rewrap counter after rotate-dek and preserves bucket-policy content", func() {
+	ginkgo.It("reports epoch=1 after rotate-dek and preserves object content", func() {
 		t := ginkgo.GinkgoTB()
 
 		// packThreshold=1024: use default pack settings; object data isn't the focus here.
@@ -336,8 +326,8 @@ var _ = ginkgo.Describe("DEK FSM-value rewrap lane (DEK rotation S7-1a)", func()
 		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 		ginkgo.DeferCleanup(cancel)
 
-		// Create a bucket and PUT an object — this writes an obj: FSM-value in the
-		// data group, sealed at the current DEK generation (will be stale after rotation).
+		// Create a bucket and PUT an object. The object content verifies the normal
+		// read path remains intact after the FSM-value check lane runs.
 		const bucket = "fsm-rewrap-test"
 		createBucketWithAdminPolicyAttachViaUDSAny(t, []string{dataDir}, saID, bucket, cli)
 
@@ -348,10 +338,10 @@ var _ = ginkgo.Describe("DEK FSM-value rewrap lane (DEK rotation S7-1a)", func()
 			Key:    aws.String(objKey),
 			Body:   bytes.NewReader(objBody),
 		})
-		gomega.Expect(putErr).NotTo(gomega.HaveOccurred(), "PUT seed object to create stale obj: FSM value")
+		gomega.Expect(putErr).NotTo(gomega.HaveOccurred(), "PUT seed object")
 
-		// Baseline counter before rotation.
-		fsmBaseline := scrapeRewrapCounter(t, endpoint, "grainfs_rewrap_fsm_values_total")
+		// Baseline epoch=1 report counter before rotation.
+		epoch1Baseline := scrapeMetricWithLabel(t, endpoint, "grainfs_rewrap_progress_reports_total", `epoch="1"`)
 
 		// Record the DEK generation before rotation.
 		beforeGen := kekStatusViaSocket(t, dataDir).ActiveDEKGeneration
@@ -368,15 +358,22 @@ var _ = ginkgo.Describe("DEK FSM-value rewrap lane (DEK rotation S7-1a)", func()
 		}, 20*time.Second, 100*time.Millisecond).Should(gomega.Equal(wantGen),
 			"active DEK generation must advance to %d after rotate-dek", wantGen)
 
-		// Wait for the FSM-values rewrap counter to rise above baseline.
-		// The trigger runs asynchronously after the rotation commits; allow up to 30s.
+		// Wait for the epoch=1 completion report. The trigger runs asynchronously
+		// after the rotation commits; allow up to 60s.
 		gomega.Eventually(func() float64 {
-			return scrapeRewrapCounter(t, endpoint, "grainfs_rewrap_fsm_values_total")
-		}, 30*time.Second, 500*time.Millisecond).Should(gomega.BeNumerically(">", fsmBaseline),
-			"grainfs_rewrap_fsm_values_total must increment after DEK rotation (baseline=%.0f)", fsmBaseline)
+			return scrapeMetricWithLabel(t, endpoint, "grainfs_rewrap_progress_reports_total", `epoch="1"`)
+		}, 60*time.Second, 500*time.Millisecond).Should(gomega.BeNumerically(">", epoch1Baseline),
+			"grainfs_rewrap_progress_reports_total{epoch=\"1\"} must increment after DEK rotation (baseline=%.0f)", epoch1Baseline)
 
-		// The bucket must still be accessible after the reseal.
-		_, err = cli.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(bucket)})
-		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "bucket must remain accessible after FSM-value reseal")
+		// The object must still GET and return byte-identical content after the check.
+		getResp, err := cli.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(objKey),
+		})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "GET object after FSM-value check")
+		defer getResp.Body.Close()
+		gotBody, err := io.ReadAll(getResp.Body)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(gotBody).To(gomega.Equal(objBody), "object must be byte-identical after DEK rewrap")
 	})
 })

@@ -11,11 +11,11 @@ const (
 	MetaCmdTypeAddNode                      MetaCmdType = 1
 	MetaCmdTypeRemoveNode                   MetaCmdType = 2
 	MetaCmdTypePutShardGroup                MetaCmdType = 3
-	MetaCmdTypeSetActivePlan                MetaCmdType = 4
+	MetaCmdTypeReserved4                    MetaCmdType = 4
 	MetaCmdTypePutBucketAssignment          MetaCmdType = 5
 	MetaCmdTypeSetLoadSnapshot              MetaCmdType = 6
-	MetaCmdTypeProposeRebalancePlan         MetaCmdType = 7
-	MetaCmdTypeAbortPlan                    MetaCmdType = 8
+	MetaCmdTypeReserved7                    MetaCmdType = 7
+	MetaCmdTypeReserved8                    MetaCmdType = 8
 	MetaCmdTypeRotateKeyBegin               MetaCmdType = 14
 	MetaCmdTypeRotateKeySwitch              MetaCmdType = 15
 	MetaCmdTypeRotateKeyDrop                MetaCmdType = 16
@@ -97,11 +97,11 @@ var EnumNamesMetaCmdType = map[MetaCmdType]string{
 	MetaCmdTypeAddNode:                      "AddNode",
 	MetaCmdTypeRemoveNode:                   "RemoveNode",
 	MetaCmdTypePutShardGroup:                "PutShardGroup",
-	MetaCmdTypeSetActivePlan:                "SetActivePlan",
+	MetaCmdTypeReserved4:                    "Reserved4",
 	MetaCmdTypePutBucketAssignment:          "PutBucketAssignment",
 	MetaCmdTypeSetLoadSnapshot:              "SetLoadSnapshot",
-	MetaCmdTypeProposeRebalancePlan:         "ProposeRebalancePlan",
-	MetaCmdTypeAbortPlan:                    "AbortPlan",
+	MetaCmdTypeReserved7:                    "Reserved7",
+	MetaCmdTypeReserved8:                    "Reserved8",
 	MetaCmdTypeRotateKeyBegin:               "RotateKeyBegin",
 	MetaCmdTypeRotateKeySwitch:              "RotateKeySwitch",
 	MetaCmdTypeRotateKeyDrop:                "RotateKeyDrop",
@@ -183,11 +183,11 @@ var EnumValuesMetaCmdType = map[string]MetaCmdType{
 	"AddNode":                      MetaCmdTypeAddNode,
 	"RemoveNode":                   MetaCmdTypeRemoveNode,
 	"PutShardGroup":                MetaCmdTypePutShardGroup,
-	"SetActivePlan":                MetaCmdTypeSetActivePlan,
+	"Reserved4":                    MetaCmdTypeReserved4,
 	"PutBucketAssignment":          MetaCmdTypePutBucketAssignment,
 	"SetLoadSnapshot":              MetaCmdTypeSetLoadSnapshot,
-	"ProposeRebalancePlan":         MetaCmdTypeProposeRebalancePlan,
-	"AbortPlan":                    MetaCmdTypeAbortPlan,
+	"Reserved7":                    MetaCmdTypeReserved7,
+	"Reserved8":                    MetaCmdTypeReserved8,
 	"RotateKeyBegin":               MetaCmdTypeRotateKeyBegin,
 	"RotateKeySwitch":              MetaCmdTypeRotateKeySwitch,
 	"RotateKeyDrop":                MetaCmdTypeRotateKeyDrop,

@@ -326,11 +326,10 @@ func (f *MetaFSM) applyPolicyAttachToGroupDelete(payload []byte) error {
 // applyCreateBucketWithPolicyAttach handles MetaCmd 62 - the IAM half of the
 // sequenced bucket-create + policy-attach operation (D#13, F#2).
 //
-// Approach: sequenced (not cross-FSM atomic). The bucket itself is created by
-// the data-plane FSM via the existing CreateBucket path; this MetaCmd only
-// handles the IAM side: validate SA + policy existence, then attach the policy
-// to the SA. The admin handler is responsible for rolling back via DeleteBucket
-// if this propose fails.
+// Approach: sequenced (not cross-store atomic). The bucket itself is created by
+// the meta bucket path; this MetaCmd only handles the IAM side: validate SA +
+// policy existence, then attach the policy to the SA. The admin handler is
+// responsible for rolling back via DeleteBucket if this propose fails.
 //
 // If both attach_sa and attach_policy are empty, this is a no-op (create-only
 // caller path; the bucket was already created by the prior CreateBucket propose).

@@ -150,26 +150,6 @@ func buildLoadSnapshotVector(b *flatbuffers.Builder, lsEntries []LoadStatEntry) 
 	return prependOffsetsVector(b, lsOffs)
 }
 
-// buildActivePlan encodes the active rebalance plan, returning 0 when there is
-// no plan. The caller keeps the AddActivePlan add CONDITIONAL on the same nil
-// check so a nil plan is omitted from the root, not added as offset 0.
-func buildActivePlan(b *flatbuffers.Builder, activePlanCopy *RebalancePlan) flatbuffers.UOffsetT {
-	if activePlanCopy == nil {
-		return 0
-	}
-	planIDOff := b.CreateString(activePlanCopy.PlanID)
-	groupIDOff := b.CreateString(activePlanCopy.GroupID)
-	fromOff := b.CreateString(activePlanCopy.FromNode)
-	toOff := b.CreateString(activePlanCopy.ToNode)
-	clusterpb.RebalancePlanStart(b)
-	clusterpb.RebalancePlanAddPlanId(b, planIDOff)
-	clusterpb.RebalancePlanAddGroupId(b, groupIDOff)
-	clusterpb.RebalancePlanAddFromNode(b, fromOff)
-	clusterpb.RebalancePlanAddToNode(b, toOff)
-	clusterpb.RebalancePlanAddCreatedAtUnix(b, activePlanCopy.CreatedAt.Unix())
-	return clusterpb.RebalancePlanEnd(b)
-}
-
 // buildLastRotationRequestEntriesVector encodes the KEK rotation request ring
 // (Phase B Task 2).
 func buildLastRotationRequestEntriesVector(b *flatbuffers.Builder, lastRotationRequests []rotationRequestRecord) flatbuffers.UOffsetT {

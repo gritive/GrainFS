@@ -44,7 +44,6 @@ type restoredMetaState struct {
 	placementGenerations []placementGeneration
 	bucketRecords        map[string]BucketRecord
 	loadSnapshot         map[string]LoadStatEntry
-	activePlan           *RebalancePlan
 	lastRotationRequests []rotationRequestRecord
 	kekStatuses          []kekStatusRecord
 	clusterKeyDropped    bool
@@ -210,24 +209,11 @@ func decodeCoreTopology(snap *clusterpb.MetaStateSnapshot, st *restoredMetaState
 		newLoadSnapshot[e.NodeID] = e
 	}
 
-	var newActivePlan *RebalancePlan
-	var planFB clusterpb.RebalancePlan
-	if p := snap.ActivePlan(&planFB); p != nil && len(p.PlanId()) > 0 {
-		newActivePlan = &RebalancePlan{
-			PlanID:    string(p.PlanId()),
-			GroupID:   string(p.GroupId()),
-			FromNode:  string(p.FromNode()),
-			ToNode:    string(p.ToNode()),
-			CreatedAt: time.Unix(p.CreatedAtUnix(), 0),
-		}
-	}
-
 	st.nodes = newNodes
 	st.shardGroups = newShardGroups
 	st.placementGenerations = newPlacementGenerations
 	st.bucketRecords = newBucketRecords
 	st.loadSnapshot = newLoadSnapshot
-	st.activePlan = newActivePlan
 	return nil
 }
 
@@ -353,8 +339,8 @@ func decodePeerRegistry(snap *clusterpb.MetaStateSnapshot, st *restoredMetaState
 
 	// zero-CA revoked-node set (slot 17): decode into a local map. A missing
 	// vector (legacy snapshot) yields an empty set, matching a fresh FSM. The
-	// evacuator re-derives from the restored set on its next tick, so no
-	// onNodeRevoked callback is fired from Restore (mirrors onRebalancePlan).
+	// evacuator re-derives from the restored set on its next tick, so Restore
+	// does not fire onNodeRevoked callbacks.
 	newRevokedNodeIDs := make(map[string]struct{}, snap.RevokedNodeIdsLength())
 	for i := 0; i < snap.RevokedNodeIdsLength(); i++ {
 		id := string(snap.RevokedNodeIds(i))
@@ -527,7 +513,6 @@ func (f *MetaFSM) commitCoreState(st *restoredMetaState) func(bucket, groupID st
 	f.placementGenerations = st.placementGenerations
 	f.bucketRecords = st.bucketRecords
 	f.loadSnapshot = st.loadSnapshot
-	f.activePlan = st.activePlan
 	f.lastRotationRequests = st.lastRotationRequests
 	f.kekStatuses = st.kekStatuses
 	f.clusterKeyDropped = st.clusterKeyDropped
@@ -592,9 +577,6 @@ func (f *MetaFSM) commitSatelliteStores(st *restoredMetaState, onBucketAssigned 
 			onBucketAssigned(bucket, rec.GroupID)
 		}
 	}
-	// onRebalancePlan is intentionally NOT called here.
-	// Rebalancer handles resume on next tick by checking ActivePlan().
-
 	// IAM commit — iamTempStore holds the fully-decoded snapshot; swap it in atomically.
 	// RestoreFrom copies the state pointer from iamTempStore into f.iamStore in one
 	// atomic store — no second decode/parse is needed, so no error is possible here

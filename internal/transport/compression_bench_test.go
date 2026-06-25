@@ -24,10 +24,10 @@ import (
 //	gossip_node_stats   ~100B  FlatBuffers, mostly numeric (1 string + 4 nums)
 //	receipt_gossip      ~2KB   FlatBuffers, list of 50 UUIDs (high entropy)
 //	receipt_json        ~1KB   text JSON (HealReceipt — what receipt_query returns)
-//	put_object_meta     ~300B  FlatBuffers, single S3 PUT command record
-//	raft_batch          ~30KB  100 × put_object_meta back-to-back, simulates an
-//	                           AppendEntries batch the leader sends out
-//	set_ring            ~6KB   FlatBuffers, 256 vnodes — periodic ring rebroadcast
+//	put_object_meta     ~300B  FlatBuffers, single quorum-meta object record
+//	quorum_meta_batch   ~30KB  100 × put_object_meta back-to-back, simulates a
+//	                           quorum-meta fanout batch
+//	meta_shard_group    ~2KB   FlatBuffers, shard group peer list broadcast
 //
 // We compare zstd at default level (high ratio) against s2 (Snappy fork,
 // goal is throughput). klauspost/compress is already in go.mod for both,
@@ -115,15 +115,14 @@ func samplePayloads() map[string][]byte {
 		out["receipt_json"] = raw
 	}
 
-	// 4) PutObjectMetaCmd — single S3 PUT record. Real workload sends
-	//    these constantly through Raft replication.
+	// 4) PutObjectMetaCmd — single quorum-meta object record.
 	{
 		out["put_object_meta"] = makePutObjectMeta(0)
 	}
 
-	// 5) raft_batch — 100 PutObjectMetaCmd records concatenated into
-	//    one buffer to simulate an AppendEntries batch on a busy leader.
-	//    Length-prefix each record so it survives transport framing.
+	// 5) quorum_meta_batch — 100 PutObjectMetaCmd records concatenated
+	//    into one buffer. Length-prefix each record so it survives
+	//    transport framing.
 	{
 		var bigBuf []byte
 		for i := 0; i < 100; i++ {
@@ -132,38 +131,32 @@ func samplePayloads() map[string][]byte {
 			bigBuf = append(bigBuf, lenPrefix...)
 			bigBuf = append(bigBuf, rec...)
 		}
-		out["raft_batch"] = bigBuf
+		out["quorum_meta_batch"] = bigBuf
 	}
 
-	// 6) SetRingCmd — 256 vnodes. The ring is rebroadcast on membership
-	//    change and on snapshot install.
+	// 6) MetaPutShardGroupCmd — a large-ish control-plane peer list.
 	{
 		b := flatbuffers.NewBuilder(8192)
-		const vnodeCount = 256
-		const nodeCount = 8
-		nodeIDs := make([]flatbuffers.UOffsetT, nodeCount)
-		for i := 0; i < nodeCount; i++ {
-			nodeIDs[i] = b.CreateString(fmt.Sprintf("node-east-1%c-%016x", 'a'+byte(i%3), uint64(i)*0x9e3779b97f4a7c15))
+		const peerCount = 64
+		peerIDs := make([]flatbuffers.UOffsetT, peerCount)
+		for i := 0; i < peerCount; i++ {
+			peerIDs[i] = b.CreateString(fmt.Sprintf("node-east-1%c-%016x", 'a'+byte(i%3), uint64(i)*0x9e3779b97f4a7c15))
 		}
-		entries := make([]flatbuffers.UOffsetT, vnodeCount)
-		for i := 0; i < vnodeCount; i++ {
-			clusterpb.VNodeEntryStart(b)
-			clusterpb.VNodeEntryAddToken(b, uint32(i)*0x01010101)
-			clusterpb.VNodeEntryAddNodeId(b, nodeIDs[i%nodeCount])
-			entries[i] = clusterpb.VNodeEntryEnd(b)
+		clusterpb.ShardGroupEntryStartPeerIdsVector(b, len(peerIDs))
+		for i := len(peerIDs) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(peerIDs[i])
 		}
-		clusterpb.SetRingCmdStartVnodesVector(b, len(entries))
-		for i := len(entries) - 1; i >= 0; i-- {
-			b.PrependUOffsetT(entries[i])
-		}
-		entriesVec := b.EndVector(len(entries))
-		clusterpb.SetRingCmdStart(b)
-		clusterpb.SetRingCmdAddVersion(b, 42)
-		clusterpb.SetRingCmdAddVnodes(b, entriesVec)
-		clusterpb.SetRingCmdAddVperNode(b, vnodeCount/nodeCount)
-		root := clusterpb.SetRingCmdEnd(b)
+		peersVec := b.EndVector(len(peerIDs))
+		idOff := b.CreateString("group-east-1-primary")
+		clusterpb.ShardGroupEntryStart(b)
+		clusterpb.ShardGroupEntryAddId(b, idOff)
+		clusterpb.ShardGroupEntryAddPeerIds(b, peersVec)
+		group := clusterpb.ShardGroupEntryEnd(b)
+		clusterpb.MetaPutShardGroupCmdStart(b)
+		clusterpb.MetaPutShardGroupCmdAddGroup(b, group)
+		root := clusterpb.MetaPutShardGroupCmdEnd(b)
 		b.Finish(root)
-		out["set_ring"] = append([]byte(nil), b.FinishedBytes()...)
+		out["meta_shard_group"] = append([]byte(nil), b.FinishedBytes()...)
 	}
 
 	return out

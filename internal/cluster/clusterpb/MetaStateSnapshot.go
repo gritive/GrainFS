@@ -121,19 +121,6 @@ func (rcv *MetaStateSnapshot) LoadSnapshotLength() int {
 	return 0
 }
 
-func (rcv *MetaStateSnapshot) ActivePlan(obj *RebalancePlan) *RebalancePlan {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
-	if o != 0 {
-		x := rcv._tab.Indirect(o + rcv._tab.Pos)
-		if obj == nil {
-			obj = new(RebalancePlan)
-		}
-		obj.Init(rcv._tab.Bytes, x)
-		return obj
-	}
-	return nil
-}
-
 func (rcv *MetaStateSnapshot) ObjectIndex(obj *MetaObjectIndexEntry, j int) bool {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
 	if o != 0 {
@@ -375,9 +362,6 @@ func MetaStateSnapshotAddLoadSnapshot(builder *flatbuffers.Builder, loadSnapshot
 }
 func MetaStateSnapshotStartLoadSnapshotVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
-}
-func MetaStateSnapshotAddActivePlan(builder *flatbuffers.Builder, activePlan flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(4, flatbuffers.UOffsetT(activePlan), 0)
 }
 func MetaStateSnapshotAddObjectIndex(builder *flatbuffers.Builder, objectIndex flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(7, flatbuffers.UOffsetT(objectIndex), 0)

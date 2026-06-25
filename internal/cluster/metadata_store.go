@@ -22,7 +22,7 @@ var (
 	// ErrMetaKeyNotFound is the missing-key sentinel cluster code checks
 	// (migrated off the badger sentinel in S6.5-2).
 	ErrMetaKeyNotFound = metastore.ErrKeyNotFound
-	// ErrMetaTxnTooBig is the batch-limit sentinel for apply_actor's
-	// split-and-retry path (commitApplyTxn fallback in apply_actor.go).
+	// ErrMetaTxnTooBig is re-exported for cluster storage helpers that still
+	// perform Badger-backed writes outside the retired data-group apply path.
 	ErrMetaTxnTooBig = metastore.ErrTxnTooBig
 )

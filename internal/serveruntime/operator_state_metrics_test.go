@@ -129,7 +129,6 @@ func (f *fakeOperatorRaftNode) ProposeWait(context.Context, []byte) (uint64, err
 func (f *fakeOperatorRaftNode) ReadIndex(context.Context) (uint64, error)           { return 0, nil }
 func (f *fakeOperatorRaftNode) WaitApplied(context.Context, uint64) error           { return nil }
 func (f *fakeOperatorRaftNode) ApplyCh() <-chan raft.LogEntry                       { return nil }
-func (f *fakeOperatorRaftNode) SetNoOpCommand([]byte)                               {}
 func (f *fakeOperatorRaftNode) RegisterObserver(chan<- raft.Event)                  {}
 func (f *fakeOperatorRaftNode) DeregisterObserver(chan<- raft.Event)                {}
 func (f *fakeOperatorRaftNode) AddVoter(string, string) error                       { return nil }

@@ -154,7 +154,6 @@ func TestBootStoragePhases_OrderingInvariant(t *testing.T) {
 	assert.Nil(t, state.shardSvc)
 	assert.Nil(t, state.distBackend)
 	assert.Nil(t, state.shardCache)
-	assert.Nil(t, state.rebalancer)
 	assert.Equal(t, 0, state.effectiveEC.NumShards(), "effectiveEC zero-value before phases")
 
 	// 1. ShardService — populates shardSvc + effectiveEC; no router yet. The shard
@@ -179,12 +178,11 @@ func TestBootStoragePhases_OrderingInvariant(t *testing.T) {
 	state.node.Start()
 	state.AddCleanup(func() { state.node.Close() })
 
-	// 3. OwnedGroupsAndEC — populates distBackend + shardCache + rebalancer +
-	//    loadReporter; shutdown hook registered.
+	// 3. OwnedGroupsAndEC — populates distBackend + shardCache + loadReporter;
+	//    shutdown hook registered.
 	require.NoError(t, bootOwnedGroupsAndEC(ctx, state))
 	require.NotNil(t, state.distBackend, "distBackend after bootOwnedGroupsAndEC")
 	require.NotNil(t, state.shardCache, "shardCache after bootOwnedGroupsAndEC")
-	require.NotNil(t, state.rebalancer, "rebalancer after bootOwnedGroupsAndEC")
 	require.NotNil(t, state.loadReporter, "loadReporter after bootOwnedGroupsAndEC")
 	require.NotNil(t, state.loadReporterStor, "loadReporter store after bootOwnedGroupsAndEC")
 	require.NotNil(t, state.stopApply, "stopApply channel after bootOwnedGroupsAndEC")

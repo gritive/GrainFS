@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 )
 
 func TestQuorumMetaBlobCodec_RoundTripBareFB(t *testing.T) {
@@ -22,23 +24,17 @@ func TestQuorumMetaBlobCodec_RoundTripBareFB(t *testing.T) {
 	// Decoupling proof: the blob is NOT a clusterpb.Command-wrapped CmdPutObjectMeta.
 	// A bare PutObjectMetaCmd FB decoded as a Command must not yield the retired
 	// object slot 3 (formerly CmdPutObjectMeta) carrying a re-decodable payload.
-	if env, derr := DecodeCommand(blob); derr == nil {
-		require.NotEqual(t, CommandType(3), env.Type, "blob must not be a retired-object-slot-tagged Command envelope")
+	if derr := DecodeCommand(blob); derr == nil {
+		env := clusterpb.GetRootAsCommand(blob, 0)
+		require.NotEqual(t, uint32(3), env.Type(), "blob must not be a retired-object-slot-tagged Command envelope")
 	}
 }
 
-func TestCommandTypeWireValuesStable(t *testing.T) {
-	// Live control-plane commands persist in the raft log; their values are a
-	// wire contract and must never shift when retired slots are removed.
-	require.Equal(t, CommandType(0), CmdNoOp)
-	require.Equal(t, CommandType(1), CmdCreateBucket)
-	require.Equal(t, CommandType(2), CmdDeleteBucket)
-	require.Equal(t, CommandType(8), CmdSetBucketPolicy)
-	require.Equal(t, CommandType(9), CmdDeleteBucketPolicy)
-	require.Equal(t, CommandType(10), CmdMigrateShard)
-	require.Equal(t, CommandType(11), CmdMigrationDone)
-	require.Equal(t, CommandType(15), CmdSetBucketVersioning)
-	require.Equal(t, CommandType(17), retiredSetRingSlot, "slot 17 is reserved for retired CmdSetRing and must not be reused")
-	require.Equal(t, CommandType(41), CmdResealFSMValues)
-	require.Equal(t, CommandType(42), CmdFSMValueResealDone)
+func TestLegacyCommandEnvelopeTypeZeroValid(t *testing.T) {
+	// Data-group command type 0 remains a valid legacy envelope type.
+	raw, err := buildRawCommand(0, nil)
+	require.NoError(t, err)
+	require.NoError(t, DecodeCommand(raw))
+	cmd := clusterpb.GetRootAsCommand(raw, 0)
+	require.Equal(t, uint32(0), cmd.Type())
 }

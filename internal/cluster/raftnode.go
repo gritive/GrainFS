@@ -70,10 +70,6 @@ type RaftNode interface {
 	// on shutdown (Raft §3.10) instead of waiting for election timeout.
 	SetTimeoutNowTransport(send func(peer string, args *raft.TimeoutNowArgs) (*raft.TimeoutNowReply, error))
 
-	// SetNoOpCommand configures the FSM no-op payload proposed on leader election.
-	// The canonical actor emits no-op entries internally; the adapter is a no-op.
-	SetNoOpCommand(cmd []byte)
-
 	// Observer pattern. The adapter stubs are no-ops that log a warning once.
 	RegisterObserver(ch chan<- raft.Event)
 	DeregisterObserver(ch chan<- raft.Event)

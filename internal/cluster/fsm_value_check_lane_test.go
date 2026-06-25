@@ -14,10 +14,9 @@ func TestFSMValueCheckLane_ImplementsRewrapLane(t *testing.T) {
 	var _ encrypt.RewrapLane = (*FSMValueCheckLane)(nil)
 }
 
-// TestFSMValueCheckLane_ErrorsWhenStaleCleanWhenDrained verifies:
-//   - lane.RewrapByGen errors when this node has a stale FSM-value below keeper-current;
-//   - lane.RewrapByGen returns nil once the store is drained (all at keeper-current).
-func TestFSMValueCheckLane_ErrorsWhenStaleCleanWhenDrained(t *testing.T) {
+// TestFSMValueCheckLane_RewrapByGenDrainsLocalValues verifies that the lane
+// actively drains stale local FSM values instead of waiting for a raft marker.
+func TestFSMValueCheckLane_RewrapByGenDrainsLocalValues(t *testing.T) {
 	gb, gbDB := newTestGroupBackendWithDB(t, "check-lane-group")
 	keeper := gb.shardSvc.DEKKeeper()
 	ks := gb.ks()
@@ -35,15 +34,12 @@ func TestFSMValueCheckLane_ErrorsWhenStaleCleanWhenDrained(t *testing.T) {
 
 	lane := NewFSMValueCheckLane(func() []*GroupBackend { return []*GroupBackend{gb} })
 
-	// Stale value → lane must error (predicate not met).
-	require.Error(t, lane.RewrapByGen(context.Background(), 0, 1), "stale FSM-value should cause error")
+	require.NoError(t, lane.RewrapByGen(context.Background(), 0, 1))
 
-	// Drain: re-seal the value at gen 1 (apply via DrainFSMValueRewrap which goes
-	// through raft propose; we use DrainFSMValueRewrap which is already tested).
-	require.NoError(t, DrainFSMValueRewrap(context.Background(), gb, 0))
-
-	// All drained → lane must return nil.
-	require.NoError(t, lane.RewrapByGen(context.Background(), 0, 1), "drained store should be clean")
+	left, err := gb.CollectStaleFSMValueKeys(1, 10, 10<<20)
+	require.NoError(t, err)
+	require.Empty(t, left)
+	require.Equal(t, uint32(1), gbFrameGenOf(t, gb, polKey))
 }
 
 // TestFSMValueCheckLane_CleanWhenNoEncryption verifies that the lane returns nil

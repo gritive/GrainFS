@@ -106,15 +106,6 @@ table MetaClusterConfigPatchCmd {
   bounded_loads_max_stale_ttl_ns:     Int64Box;
 }
 
-table CreateBucketCmd {
-  bucket:string;
-  bypass_reserved:bool = false;
-}
-
-table DeleteBucketCmd {
-  bucket:string;
-}
-
 table PutObjectMetaCmd {
   bucket:string;
   key:string;
@@ -194,47 +185,8 @@ table SegmentMetaEntry {
   stripe_bytes:uint32 = 0;
 }
 
-table DeleteObjectCmd {
-  bucket:string;
-  key:string;
-  version_id:string;
-}
-
-// DeleteObjectVersionCmd hard-deletes a specific version (no tombstone).
-// Used by lifecycle/scrubber to purge expired versions.
-table DeleteObjectVersionCmd {
-  bucket:string;
-  key:string;
-  version_id:string;
-}
-
-table PutObjectQuarantineCmd {
-  bucket:string;
-  key:string;
-  version_id:string;
-  cause:string;
-  reason:string;
-}
-
-// ResealFSMValuesCmd: reseal a batch of data-group FSM state values (policy:,
-// obj:) from a retired DEK generation onto active_gen. Applied in the
-// serialized apply loop for race-freedom. S7-1a.
-table ResealFSMValuesCmd {
-  keys:[string];
-  active_gen:uint32;
-}
-
-// FSMValueResealDoneCmd: ordering-fence marker proposed by the group leader
-// after DrainFSMValueRewrap returns nil. Every node applies the marker after
-// all preceding CmdResealFSMValues batches (raft ordering), so the per-node
-// post-apply hook fires with the node's store already clean. Gen is a log
-// hint only — the re-Kick is gen-agnostic. S7-1a-2.
-table FSMValueResealDoneCmd {
-  gen:uint32;
-}
-
 // CreateMultipartUploadCmd, CompleteMultipartCmd, AbortMultipartCmd are removed in
-// the multipart-off-raft epic (M4). CommandType slots 5/6/7 are reserved.
+// the multipart-off-raft epic (M4). Legacy data-group slots 5/6/7 are not reused.
 
 table SetBucketPolicyCmd {
   bucket:string;
@@ -303,27 +255,6 @@ table CoalescedShardRef {
   stripe_bytes:uint32 = 0;
 }
 
-// CoalesceSegmentsCmd records a single coalesce operation: consume the listed
-// segment blob IDs into a single coalesced blob identified by CoalescedID +
-// ShardKey. ConsumedSegmentIDs MUST match a contiguous prefix of
-// objectMeta.segments at apply time; absent IDs are silently skipped
-// (idempotent on Raft replay).
-//
-// Phase B3 adds EC placement params so the FSM apply stores them on the
-// resulting CoalescedShardRef. placement[] order matches shard index 0..k+m.
-table CoalesceSegmentsCmd {
-  bucket:string;
-  key:string;
-  coalesced_id:string;
-  shard_key:string;
-  size:int64;
-  etag:string;
-  consumed_segment_ids:[string];
-  placement:[string];
-  ec_data:uint8 = 0;
-  ec_parity:uint8 = 0;
-}
-
 // SegmentRef mirrors storage.SegmentRef — one appendable or chunked-PUT
 // segment. Cluster stores its own copy in ObjectMeta because cluster
 // ObjectMeta is the source of truth on the data path; storage.Object is
@@ -344,34 +275,6 @@ table SegmentRef {
 table SetBucketVersioningCmd {
   bucket:string;
   state:string;
-}
-
-table SetObjectACLCmd {
-  bucket:string;
-  key:string;
-  acl:uint8;
-}
-
-table SetObjectTagsCmd {
-  bucket:string;
-  key:string;
-  version_id:string;
-  tags:[Tag];
-}
-
-// AppendObjectCmd records one appended segment. PlacementGroupID is frozen at
-// propose time — FSM apply derives NodeIDs/EC params from the current
-// ShardGroup record (single source of truth, avoids drift).
-table AppendObjectCmd {
-  bucket:string;
-  key:string;
-  expected_offset:int64;
-  blob_id:string;
-  segment_size:int64;
-  segment_etag:string;
-  placement_group_id:string;
-  version_id:string;
-  modified_unix_sec:int64;
 }
 
 table KeyValue {
@@ -425,33 +328,6 @@ table ReceiptQueryResponseMsg {
   receipt:[ubyte];
 }
 
-table MigrateShardCmd {
-  bucket:string;
-  key:string;
-  version_id:string;
-  src_node:string;
-  dst_node:string;
-}
-
-table MigrationDoneCmd {
-  bucket:string;
-  key:string;
-  version_id:string;
-  src_node:string;
-  dst_node:string;
-}
-
-table VNodeEntry {
-  token:uint32;
-  node_id:string;
-}
-
-table SetRingCmd {
-  version:uint64;
-  vnodes:[VNodeEntry];
-  vper_node:uint32;
-}
-
 root_type Command;
 
 // PR-B: meta-Raft FSM commands — cluster control plane
@@ -459,12 +335,12 @@ enum MetaCmdType : uint8 {
   NoOp                 = 0,
   AddNode              = 1,
   RemoveNode           = 2,
-  PutShardGroup        = 3,   // shard → Raft 그룹 매핑 (PR-C)
-  SetActivePlan        = 4,   // 진행 중 rebalance plan ID
+  PutShardGroup        = 3,   // shard/placement group registry update
+  Reserved4            = 4,
   PutBucketAssignment  = 5,   // bucket → group_id 영속 매핑 (PR-D)
   SetLoadSnapshot      = 6,   // PR-D: leader 주기적 load commit
-  ProposeRebalancePlan = 7,   // PR-D: rebalancer가 plan 제안
-  AbortPlan            = 8,   // PR-D: timeout / operator 취소 / 완료 마커
+  Reserved7            = 7,
+  Reserved8            = 8,
   // 9-13 reserved — do not reuse (no renumber).
   RotateKeyBegin     = 14,  // 클러스터 키 회전: phase 1 → 2 (operator-distributed next.key SPKI 합의)
   RotateKeySwitch    = 15,  // 회전 phase 2 → 3 (active 인증서를 NEW로 전환)
@@ -650,11 +526,11 @@ table MetaDEKVersionSnapshot {
   rewrap_done:[DEKRewrapDoneEntry];
 }
 
-// PR-C: ShardGroupEntry는 데이터 Raft 그룹 멤버십을 기술한다.
+// PR-C: ShardGroupEntry describes placement group membership.
 // bucket→group 매핑(shard_map)은 별도 메타데이터로 관리. key-range sharding 제외.
 table ShardGroupEntry {
   id:string;           // e.g. "group-0"
-  peer_ids:[string];   // 이 데이터 그룹의 Raft voter 노드 ID 목록
+  peer_ids:[string];   // placement group voter node IDs
 }
 
 // PR-C: MetaPutShardGroup 커맨드 — shard group 매핑을 기록·갱신한다.
@@ -743,36 +619,9 @@ table LoadStatEntry {
   updated_at_unix:int64;
 }
 
-// PR-D: data 그룹의 voter 이동 계획
-table RebalancePlan {
-  plan_id:string;
-  group_id:string;
-  from_node:string;
-  to_node:string;
-  created_at_unix:int64;
-}
-
 // PR-D: meta leader가 30s마다 gossip 수집 결과를 meta log에 commit
 table MetaSetLoadSnapshotCmd {
   entries:[LoadStatEntry];
-}
-
-// PR-D: rebalancer가 RebalancePlan commit 요청
-table MetaProposeRebalancePlanCmd {
-  plan:RebalancePlan;
-}
-
-enum AbortPlanReason : uint8 {
-  Unknown = 0,
-  Timeout = 1,
-  ExecutionFailed = 2,
-  Completed = 3,
-}
-
-// PR-D: plan timeout / operator 취소 / 완료 마커
-table MetaAbortPlanCmd {
-  plan_id:string;
-  reason:AbortPlanReason;
 }
 
 // 클러스터 키 회전 — 4-phase rolling state machine.
@@ -880,7 +729,7 @@ table MetaStateSnapshot {
   shard_groups:[ShardGroupEntry];             // PR-C
   bucket_assignments:[BucketAssignmentEntry]; // PR-D
   load_snapshot:[LoadStatEntry];              // PR-D
-  active_plan:RebalancePlan;                  // PR-D; nil = no active plan
+  reserved_4:[ubyte] (deprecated);            // dead slot (was the removed rebalance active plan); retained for wire stability (no-renumber)
   reserved_5:[ubyte] (deprecated);            // dead slot (was the removed Iceberg namespaces vector); retained for wire stability (no-renumber)
   reserved_6:[ubyte] (deprecated);            // dead slot (was the removed Iceberg tables vector); retained for wire stability (no-renumber)
   object_index:[MetaObjectIndexEntry];
@@ -1141,8 +990,8 @@ table MetaBucketPolicyDeleteCmd {
 }
 
 // MetaCreateBucketWithPolicyAttachCmd payload: sequenced bucket-create + IAM-half attach.
-// Bucket creation itself happens in the data-plane FSM (CreateBucket MetaCmd on the data
-// group); this MetaCmd only handles the IAM half: validate SA + policy exist, then attach.
+// Bucket creation is handled by meta-raft bucket records; this payload handles the IAM
+// half: validate SA + policy exist, then attach.
 // attach_sa and attach_policy both empty = policy attach skipped (create-only path, no IAM).
 table MetaCreateBucketWithPolicyAttachCmd {
   bucket:string;
@@ -1385,7 +1234,7 @@ table DropClusterKeyAcceptCmd {
 }
 
 // MultipartDone and DeleteMultipartDoneCmd are removed in the multipart-off-raft
-// epic (M4). CommandType slot 43 is reserved; see fsm.go.
+// epic (M4). Legacy data-group slot 43 is not reused.
 
 // MetaCreateBucketCmd (cmd 91): atomic bucket creation — stores existence record
 // and group assignment in a single meta-raft apply.

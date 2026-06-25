@@ -4,12 +4,15 @@
 
 ### Data-group Raft cleanup follow-ups (CmdSetRing retirement, 2026-06-26)
 
-- **[P2][raft-removal] Remove reseal machinery only after proving brownfield DEK/off-raft rewrap
-  compatibility.** `CmdResealFSMValues` / `CmdFSMValueResealDone` are vestigial for greenfield
-  object metadata, but brownfield clusters may still depend on legacy sealed FSM values. Start in
-  `internal/cluster/fsm_value_rewrap.go`, `internal/serveruntime/fsm_value_rewrap_trigger.go`, and
-  the KEK/reseal tests; retire the raft commands only after the off-raft rewrap lane is proven to
-  cover legacy DEK generations.
+- **[DONE][raft-removal] Reseal machinery retired after proving node-local FSM-value rewrap
+  compatibility.** `FSMValueCheckLane` now actively rewrites each node's local `policy:` / `obj:`
+  FSM values through the shared rewrap controller, re-reading the current value inside the write
+  transaction so a live active-generation write cannot be clobbered by stale scan-time data.
+  The retired data-group reseal command API is removed; brownfield data-group command envelopes
+  replay through the generic no-op path. Epoch-1 progress no longer depends on a data-group raft
+  marker; `newRewrapScrubberKick` has bounded retry for transient lane failures. The automatic
+  data-group `Rebalancer` / `GroupRebalancer` plan surface is also removed, while revoked-node
+  evacuation keeps the live membership executor path.
 
 ### `__grainfs_volumes` / `__grainfs_nfs4` leftover removal follow-ups (2026-06-26)
 
@@ -73,7 +76,7 @@ separate PR, facades stay the spine — see design
 ### DeleteBucket non-Enabled emptiness follow-ups (2026-06-24)
 
 - **[P3][pre-existing] TOCTOU between the DeleteBucket emptiness scan and the
-  `propose(CmdDeleteBucket)` + `os.RemoveAll(bucketDir)`.** A concurrent PUT (needs only
+  meta-raft delete + `os.RemoveAll(bucketDir)`.** A concurrent PUT (needs only
   `HeadBucket`) can commit qmeta in the window after the scan. Negligible at admin-only
   scope; surfaced by the plan-gate codex pass.
 
@@ -132,9 +135,9 @@ separate PR, facades stay the spine — see design
   the local committed replica via an injected loader (`storage.NewOperations` wires
   `loadCommittedBucketPolicy` → `PolicyBackend.GetBucketPolicy`), compiles, and caches it positive
   **or** negative; a successfully-read committed Deny is always honored on the first request. (2)
-  **apply-hook invalidate** — `notifyOnApply` fires `CompiledPolicyStore.Invalidate(bucket)` on
-  committed `CmdSetBucketPolicy`/`CmdDeleteBucketPolicy` (wired via `DistributedBackend.SetOnBucketPolicyApply`
-  in boot) so deletes/tightening on any node drop the cached entry → next `Allow` re-pulls. (3)
+  **apply-hook invalidate** — the old data-group policy apply hook invalidated
+  `CompiledPolicyStore` on committed policy changes so deletes/tightening on any node dropped the
+  cached entry → next `Allow` re-pulled. (3)
   snapshot install flushes the whole policy cache (`restore` → `Invalidate("")`). A global generation
   stamp drops an in-flight pull's result if a concurrent mutation raced it. Fault/structural-read
   errors fail **open** (legacy default-allow, uncached, self-healing — no spurious-deny regression);

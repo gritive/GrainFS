@@ -102,7 +102,6 @@ func (n *clusterInfoRaftNode) SetInstallSnapshotTransport(
 	func(string, *raft.InstallSnapshotArgs) (*raft.InstallSnapshotReply, error),
 ) {
 }
-func (n *clusterInfoRaftNode) SetNoOpCommand([]byte)                {}
 func (n *clusterInfoRaftNode) RegisterObserver(chan<- raft.Event)   {}
 func (n *clusterInfoRaftNode) DeregisterObserver(chan<- raft.Event) {}
 func (n *clusterInfoRaftNode) AddVoter(string, string) error        { return nil }

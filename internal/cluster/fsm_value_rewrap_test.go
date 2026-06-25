@@ -157,6 +157,61 @@ func TestDrainFSMValueRewrap_IdempotentWhenClean(t *testing.T) {
 	require.NoError(t, DrainFSMValueRewrap(context.Background(), gb, 100))
 }
 
+func TestRewrapLocalFSMValues_DrainsWithoutRaft(t *testing.T) {
+	gb, gbDB := newTestGroupBackendWithDB(t, "group-1")
+	ks := gb.ks()
+	keeper := gb.shardSvc.DEKKeeper()
+
+	polKey := ks.Key([]byte("policy:b1"))
+	objKey := ks.ObjectMetaKey("b1", "k1")
+	for _, key := range [][]byte{polKey, objKey} {
+		raw, err := gb.fsm.sealValue(key, []byte(`{"ok":true}`))
+		require.NoError(t, err)
+		dbSet(t, gbDB, key, raw)
+		require.Equal(t, uint32(0), gbFrameGenOf(t, gb, key))
+	}
+	require.NoError(t, keeper.Rotate())
+
+	rewrapped, err := RewrapLocalFSMValues(context.Background(), gb, 1)
+	require.NoError(t, err)
+	require.Equal(t, 1, rewrapped, "maxBatch=1 rewrites exactly one stale value")
+
+	rewrapped, err = RewrapLocalFSMValues(context.Background(), gb, 10)
+	require.NoError(t, err)
+	require.Equal(t, 1, rewrapped, "second call drains the remaining stale value")
+
+	left, err := gb.CollectStaleFSMValueKeys(1, 10, 10<<20)
+	require.NoError(t, err)
+	require.Empty(t, left)
+	require.JSONEq(t, `{"ok":true}`, string(mustOpenValue(t, gb.fsm, polKey)))
+	require.JSONEq(t, `{"ok":true}`, string(mustOpenValue(t, gb.fsm, objKey)))
+}
+
+func TestRewrapLocalFSMValueKeys_DoesNotClobberConcurrentActiveWriteAfterScan(t *testing.T) {
+	gb, gbDB := newTestGroupBackendWithDB(t, "group-1")
+	ks := gb.ks()
+	keeper := gb.shardSvc.DEKKeeper()
+	key := ks.Key([]byte("policy:b1"))
+
+	staleRaw, err := gb.fsm.sealValue(key, []byte(`{"v":"stale"}`))
+	require.NoError(t, err)
+	dbSet(t, gbDB, key, staleRaw)
+	require.NoError(t, keeper.Rotate())
+
+	keys, err := gb.CollectStaleFSMValueKeys(1, 10, 10<<20)
+	require.NoError(t, err)
+	require.Equal(t, []string{string(key)}, keys)
+
+	activeRaw, err := gb.fsm.sealValue(key, []byte(`{"v":"live"}`))
+	require.NoError(t, err)
+	dbSet(t, gbDB, key, activeRaw)
+
+	rewrapped, err := gb.rewrapLocalFSMValueKeys(keys)
+	require.NoError(t, err)
+	require.Equal(t, 0, rewrapped, "already-active live write is skipped")
+	require.JSONEq(t, `{"v":"live"}`, string(mustOpenValue(t, gb.fsm, key)))
+}
+
 // TestDrainFSMValueRewrap_RotationMidDrainTerminatesAndConverges is the
 // regression test for the back-to-back-rotation livelock. The OLD code pinned
 // the drain to a fixed activeGen captured at trigger time: if a 2nd rotation

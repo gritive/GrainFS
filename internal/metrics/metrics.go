@@ -377,7 +377,7 @@ var (
 
 	BalancerMigrationsProposedTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "grainfs_balancer_migrations_proposed_total",
-		Help: "Legacy counter for retired CmdMigrateShard proposals. Should remain 0.",
+		Help: "Legacy counter for retired balancer shard migration proposals. Should remain 0.",
 	})
 
 	BalancerMigrationsDoneTotal = promauto.NewCounter(prometheus.CounterOpts{

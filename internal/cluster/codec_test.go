@@ -11,49 +11,6 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-func TestEncodeDecodeCommand_CreateBucket(t *testing.T) {
-	orig := CreateBucketCmd{Bucket: "my-bucket"}
-
-	encoded, err := EncodeCommand(CmdCreateBucket, orig)
-	require.NoError(t, err)
-
-	cmd, err := DecodeCommand(encoded)
-	require.NoError(t, err)
-	assert.Equal(t, CmdCreateBucket, cmd.Type)
-
-	decoded, err := decodeCreateBucketCmd(cmd.Data)
-	require.NoError(t, err)
-	assert.Equal(t, "my-bucket", decoded.Bucket)
-	assert.False(t, decoded.BypassReserved, "default bypass_reserved must be false")
-}
-
-func TestEncodeDecodeCommand_CreateBucket_BypassReserved(t *testing.T) {
-	// Roundtrip with BypassReserved=true (bootstrap bypass path).
-	orig := CreateBucketCmd{Bucket: "_grainfs", BypassReserved: true}
-
-	encoded, err := EncodeCommand(CmdCreateBucket, orig)
-	require.NoError(t, err)
-
-	cmd, err := DecodeCommand(encoded)
-	require.NoError(t, err)
-
-	decoded, err := decodeCreateBucketCmd(cmd.Data)
-	require.NoError(t, err)
-	assert.Equal(t, "_grainfs", decoded.Bucket)
-	assert.True(t, decoded.BypassReserved, "bypass_reserved must round-trip as true")
-}
-
-func TestEncodeDecodeCommand_CreateBucket_BypassHelper(t *testing.T) {
-	// encodeCreateBucketCmdBypass must produce a decodable bypass=true payload.
-	data, err := encodeCreateBucketCmdBypass("default")
-	require.NoError(t, err)
-
-	decoded, err := decodeCreateBucketCmd(data)
-	require.NoError(t, err)
-	assert.Equal(t, "default", decoded.Bucket)
-	assert.True(t, decoded.BypassReserved)
-}
-
 func TestEncodeDecodeCommand_PutObjectMeta(t *testing.T) {
 	orig := PutObjectMetaCmd{
 		Bucket:           "test-bucket",
@@ -252,88 +209,26 @@ func TestClusterMultipartMetaCodecLegacyDecodeZeroValues(t *testing.T) {
 	assert.Equal(t, "group-legacy", decoded.PlacementGroupID)
 }
 
-func TestEncodeDecodeCommand_DeleteBucket(t *testing.T) {
-	orig := DeleteBucketCmd{Bucket: "remove-me"}
-
-	encoded, err := EncodeCommand(CmdDeleteBucket, orig)
-	require.NoError(t, err)
-
-	cmd, err := DecodeCommand(encoded)
-	require.NoError(t, err)
-	assert.Equal(t, CmdDeleteBucket, cmd.Type)
-
-	decoded, err := decodeDeleteBucketCmd(cmd.Data)
-	require.NoError(t, err)
-	assert.Equal(t, "remove-me", decoded.Bucket)
-}
-
-// TestEncodeDecodeCommand_DeleteObject removed: CmdDeleteObject = 4 is reserved
-// in data-plane raft-free Slice 2. EncodeCommand returns a reserved error;
-// DeleteObjectCmd struct and decode func are deleted. Covered by
-// TestCmdDeleteObject_RetiredNoOp (no-op replay) and the reserved-error check
-// in TestEncodeCommand_ReservedCmdsReturnError (if present).
-
-// TestEncodeDecodeCommand_CreateMultipartUpload, TestEncodeDecodeCommand_AbortMultipart
-// removed in M4: CmdCreateMultipartUpload/CmdAbortMultipart and their structs are deleted.
-
-func TestEncodeDecodeCommand_SetBucketPolicy(t *testing.T) {
-	policyJSON := []byte(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow"}]}`)
-	orig := SetBucketPolicyCmd{Bucket: "my-bucket", PolicyJSON: policyJSON}
-
-	encoded, err := EncodeCommand(CmdSetBucketPolicy, orig)
-	require.NoError(t, err)
-
-	cmd, err := DecodeCommand(encoded)
-	require.NoError(t, err)
-	assert.Equal(t, CmdSetBucketPolicy, cmd.Type)
-
-	decoded, err := decodeSetBucketPolicyCmd(cmd.Data)
-	require.NoError(t, err)
-	assert.Equal(t, "my-bucket", decoded.Bucket)
-	assert.Equal(t, policyJSON, decoded.PolicyJSON)
-}
-
-func TestEncodeDecodeCommand_DeleteBucketPolicy(t *testing.T) {
-	orig := DeleteBucketPolicyCmd{Bucket: "policy-bucket"}
-
-	encoded, err := EncodeCommand(CmdDeleteBucketPolicy, orig)
-	require.NoError(t, err)
-
-	cmd, err := DecodeCommand(encoded)
-	require.NoError(t, err)
-	assert.Equal(t, CmdDeleteBucketPolicy, cmd.Type)
-
-	decoded, err := decodeDeleteBucketPolicyCmd(cmd.Data)
-	require.NoError(t, err)
-	assert.Equal(t, "policy-bucket", decoded.Bucket)
-}
-
 func TestDecodeCommands_InvalidData(t *testing.T) {
 	// FlatBuffers panics on malformed data; test that the top-level entry
 	// points (DecodeCommand, unmarshalSnapshotState) convert panics to errors.
 	// Inner decode functions are only called with already-validated data.
-	_, err := DecodeCommand([]byte("not valid flatbuffer data"))
+	err := DecodeCommand([]byte("not valid flatbuffer data"))
 	assert.Error(t, err, "DecodeCommand should fail on invalid data")
 
 	_, err = unmarshalSnapshotState([]byte("not valid flatbuffer data"))
 	assert.Error(t, err, "unmarshalSnapshotState should fail on invalid data")
 
-	_, err = DecodeCommand(nil)
+	err = DecodeCommand(nil)
 	assert.Error(t, err, "DecodeCommand should fail on nil data")
 
 	_, err = unmarshalSnapshotState(nil)
 	assert.Error(t, err, "unmarshalSnapshotState should fail on nil data")
 }
 
-func TestEncodePayload_UnknownCommandType(t *testing.T) {
-	_, err := encodePayload(CommandType(99), CreateBucketCmd{Bucket: "x"})
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "unknown command type")
-}
-
 func TestClusterCodecOutputIsNotJSON(t *testing.T) {
 	// Encode a command and verify the output is not valid JSON
-	encoded, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "test"})
+	encoded, err := buildRawCommand(0, nil)
 	require.NoError(t, err)
 
 	var js json.RawMessage
@@ -354,18 +249,6 @@ func TestClusterCodecOutputIsNotJSON(t *testing.T) {
 	err = json.Unmarshal(snapBytes, &js)
 	assert.Error(t, err, "protobuf snapshot output should not parse as valid JSON")
 }
-
-func TestCodec_SetBucketVersioningCmd_RoundTrip(t *testing.T) {
-	cmd := SetBucketVersioningCmd{Bucket: "mybucket", State: "Enabled"}
-	raw, err := encodeSetBucketVersioningCmd(cmd)
-	require.NoError(t, err)
-	got, err := decodeSetBucketVersioningCmd(raw)
-	require.NoError(t, err)
-	assert.Equal(t, cmd, got)
-}
-
-// TestCodec_SetObjectACLCmd_RoundTrip removed: CmdSetObjectACL is retired in
-// data-plane raft-free Slice 2; encode/decode funcs deleted; codec returns reserved error.
 
 func TestCodec_ObjectMeta_ACL_RoundTrip(t *testing.T) {
 	m := objectMeta{Key: "f", Size: 5, ContentType: "text/plain", ETag: "e", LastModified: 1, ACL: 2}
@@ -593,10 +476,6 @@ func TestCodec_ObjectMeta_TagsRoundTrip(t *testing.T) {
 	require.Equal(t, original.Tags, got.Tags)
 }
 
-// TestCodec_SetObjectTagsCmd_RoundTrip and TestCodec_SetObjectTagsCmd_EmptyTags_RoundTrip
-// removed: CmdSetObjectTags is retired in data-plane raft-free Slice 2;
-// encode/decode funcs deleted; codec returns reserved error.
-
 func TestCodec_ClusterMultipartMeta_RoundTrip_WithTags(t *testing.T) {
 	orig := clusterMultipartMeta{
 		Bucket: "b", Key: "k", CreatedAt: 123, ContentType: "text/plain",
@@ -611,17 +490,6 @@ func TestCodec_ClusterMultipartMeta_RoundTrip_WithTags(t *testing.T) {
 }
 
 // TestCodec_CreateMultipartUploadCmd_RoundTrip_WithTags removed in M4.
-
-func TestFSMValueResealDoneCmd_RoundTrip(t *testing.T) {
-	data, err := EncodeCommand(CmdFSMValueResealDone, FSMValueResealDoneCmd{Gen: 3})
-	require.NoError(t, err)
-	cmd, err := DecodeCommand(data)
-	require.NoError(t, err)
-	require.Equal(t, CmdFSMValueResealDone, cmd.Type)
-	got, err := decodeFSMValueResealDoneCmd(cmd.Data)
-	require.NoError(t, err)
-	require.Equal(t, uint32(3), got.Gen)
-}
 
 func TestPutObjectMetaCmd_AppendManifestRoundTrip(t *testing.T) {
 	in := PutObjectMetaCmd{
