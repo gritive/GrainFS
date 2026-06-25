@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.698.0] - 2026-06-25
+
+### Changed
+- **Internal refactor, no user-facing behavior change.** The cluster-mode server boot sequence
+  (`internal/serveruntime`) now drives its ~30 startup phases from an explicit ordered registry
+  (`bootSequence()`) instead of a hand-inlined call list. Boot failures now carry a phase label
+  (`boot phase <name>: ...`) for easier operator diagnosis; the success path and phase ordering are
+  unchanged. No protocol, API, CLI, or on-disk format change.
+
 ## [0.0.697.0] - 2026-06-25
 
 ### Changed
