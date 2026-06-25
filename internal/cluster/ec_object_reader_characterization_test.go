@@ -24,6 +24,13 @@ import (
 // k-of-n early-exit cancel/drain path deterministic: the K winners are released
 // first, then the slow shard observes the cancel (context.Canceled) rather than
 // racing.
+//
+// It is a separate type from fakeECObjectShardFetcher (and not an embedding of
+// it) deliberately: that fake's ReadShard ignores ctx, so it cannot honor the
+// cancellation that the drain path depends on, and a race-dependent repro would
+// be flaky. The per-index release/cancel semantics are specific to this
+// characterization test, so a distinct minimal fake is clearer than bolting
+// optional blocking onto the shared fake used by ~20 other tests.
 type blockingShardFetcher struct {
 	localShards map[string][]byte // "bucket/key/idx" → raw shard bytes (with header)
 	remoteErr   map[string]error  // node → immediate error (fail-fast shards)
@@ -173,7 +180,10 @@ func TestECObjectReader_ReadShards_DrainUnderCancel_DoesNotMarkCanceledPeerUnhea
 
 // spyShardCache records Peek/Get call counts so the cache partial-promote
 // accounting (only the first K of cachedIdx get Get-promoted when Peek already
-// satisfies K) is assertable.
+// satisfies K) is assertable. fakeECObjectShardCache has no call instrumentation
+// and is used unmodified by other tests; adding per-key counters here keeps that
+// shared fake untouched. (The spec's note to reuse the CacheBypassSpy spy was a
+// mis-pointer — that is a spyHotChecker, not a cache spy; none existed.)
 type spyShardCache struct {
 	data      map[string][]byte
 	capacity  int64
