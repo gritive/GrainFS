@@ -113,6 +113,40 @@ func runECObjectsCases(getCtx func() context.Context, getTgt func() s3Target, ge
 		gomega.Expect(body).To(gomega.Equal(data))
 	})
 
+	ginkgo.It("round-trips a multi-segment object through staging (MultiSegmentStaging)", func() {
+		t := ginkgo.GinkgoTB()
+		ctx := getCtx()
+		tgt := getTgt()
+		cli := getClient()
+		bucket := tgt.uniqueBucket(t, "multiseg")
+		// 40MiB body exceeds the 16MiB default chunk size, so the chunked PUT spans
+		// 3 segments. PR1 segment staging writes every segment's EC shards to a
+		// per-node staging dir and promotes them (per-segment, per-node) at commit;
+		// a subsequent GET must reconstruct byte-identical. A position-derived
+		// pattern makes a lost/swapped/mis-promoted segment fail the comparison.
+		data := make([]byte, 40*1024*1024)
+		for i := range data {
+			data[i] = byte(i * 7)
+		}
+		_, err := cli.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String("multiseg.bin"),
+			Body:   bytes.NewReader(data),
+		})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+		getOut, err := cli.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String("multiseg.bin"),
+		})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		ginkgo.DeferCleanup(getOut.Body.Close)
+
+		body, err := io.ReadAll(getOut.Body)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(body).To(gomega.Equal(data))
+	})
+
 	ginkgo.It("completes multipart upload (MultipartUpload)", func() {
 		t := ginkgo.GinkgoTB()
 		ctx := getCtx()
