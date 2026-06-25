@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.712.0] - 2026-06-26
+
+### Removed
+- **Removed the dead `CmdSetRing` data-group Raft proposer path while keeping old log replay safe.**
+  The consistent-hash ring command no longer has a named command constant, payload struct, live
+  encoder, or apply helper; command type 17 is now an explicit retired-slot tombstone that quietly
+  no-ops if a brownfield Raft log still replays an old SetRing entry with legacy payload bytes.
+  FlatBuffers schema/generated compatibility code remains in place for old data and benchmark
+  fixtures, and the wire-slot test now reserves type 17 numerically so it cannot be reused.
+
 ## [0.0.711.0] - 2026-06-26
 
 ### Fixed

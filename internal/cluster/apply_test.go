@@ -667,13 +667,29 @@ func TestPersistPutObjectMetaUpdate_MaterialisesTags(t *testing.T) {
 	}))
 }
 
-// Retired CommandType slot bytes that once named the append/coalesce-off-raft
-// Slice 1 commands. The named constants were removed; the slots must stay
-// reserved (never renumbered) and replay-safe.
+// Retired CommandType slot bytes. Slot 17 once named CmdSetRing; slots 18/19
+// once named append/coalesce-off-raft Slice 1 commands. The named constants
+// were removed; the slots must stay reserved (never renumbered) and replay-safe.
 const (
 	retiredAppendObjectSlot     = CommandType(18)
 	retiredCoalesceSegmentsSlot = CommandType(19)
+	retiredSetRingSlot          = CommandType(17)
 )
+
+func TestSetRingCommand_Retired(t *testing.T) {
+	var err error
+	require.NotPanics(t, func() {
+		_, err = EncodeCommand(retiredSetRingSlot, struct{}{})
+	}, "retired set-ring slot must use the unknown-command error path, not a live encoder type assertion")
+	require.Error(t, err, "retired set-ring slot must return error from EncodeCommand")
+
+	raw, err := buildRawCommand(retiredSetRingSlot, []byte{0x01, 0x02, 0x03})
+	require.NoError(t, err)
+
+	db := newTestDB(t)
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
+	require.NoError(t, fsm.Apply(raw), "retired set-ring slot apply must be a no-op")
+}
 
 // TestAppendCoalesceCommands_Retired verifies that the retired append/coalesce
 // slots (18, 19) stay safe after the named constants were removed:

@@ -31,7 +31,6 @@ const (
 
 	// RETIRED: bucket versioning moved to meta-raft. Slot kept reserved.
 	CmdSetBucketVersioning CommandType = 15
-	CmdSetRing             CommandType = 17
 	// CmdResealFSMValues re-seals a batch of data-group FSM state values
 	// (policy:, obj:) from a retired DEK generation onto the active generation.
 	// Applied in the serialized apply loop for race-freedom. S7-1a.
@@ -59,6 +58,7 @@ const (
 	//   13 CmdDeleteShardPlacement (ring-derived placement)
 	//   14 CmdDeleteObjectVersion  (per-version blob tombstone)
 	//   16 CmdSetObjectACL         (blob RMW SetObjectACLPropose)
+	//   17 CmdSetRing             (consistent-hash ring; no-op apply removed)
 	//   18 CmdAppendObject         (append-off-raft Slice 1)
 	//   19 CmdCoalesceSegments     (append-off-raft Slice 1)
 	//   20 CmdSetObjectTags        (blob RMW SetObjectTagsPropose)
@@ -176,21 +176,6 @@ type SegmentMetaEntry struct {
 	ECData           uint8
 	ECParity         uint8
 	StripeBytes      uint32
-}
-
-// virtualNode는 SetRingCmd 역직렬화 경로에서 사용되는 레거시 타입이다.
-// SetRingCmd.applySetRing은 no-op stub — 레거시 Raft 로그 재생 호환용.
-type virtualNode struct {
-	Token  uint32
-	NodeID string
-}
-
-// SetRingCmd는 컨시스턴트 해시 링을 FSM에 커밋하는 명령이다.
-// 멤버십 변경 시에만 propose됐다. applySetRing은 no-op stub — 레거시 Raft 로그 재생용.
-type SetRingCmd struct {
-	Version  uint64
-	VNodes   []virtualNode
-	VPerNode int
 }
 
 type PutObjectQuarantineCmd struct {

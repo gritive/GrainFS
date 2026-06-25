@@ -1036,30 +1036,6 @@ func encodeSetBucketVersioningCmd(c SetBucketVersioningCmd) ([]byte, error) {
 
 // decodeSetBucketVersioningCmd is test-only (see codec_bucket_retired_test.go).
 
-// encodeSetRingCmd serializes a SetRingCmd for Raft proposal.
-func encodeSetRingCmd(c SetRingCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	// VNodeEntry 객체들을 먼저 역순으로 빌드 (FlatBuffers vector prepend 방식)
-	vnOffsets := make([]flatbuffers.UOffsetT, len(c.VNodes))
-	for i := len(c.VNodes) - 1; i >= 0; i-- {
-		nodeIDOff := b.CreateString(c.VNodes[i].NodeID)
-		clusterpb.VNodeEntryStart(b)
-		clusterpb.VNodeEntryAddToken(b, c.VNodes[i].Token)
-		clusterpb.VNodeEntryAddNodeId(b, nodeIDOff)
-		vnOffsets[i] = clusterpb.VNodeEntryEnd(b)
-	}
-	clusterpb.SetRingCmdStartVnodesVector(b, len(vnOffsets))
-	for i := len(vnOffsets) - 1; i >= 0; i-- {
-		b.PrependUOffsetT(vnOffsets[i])
-	}
-	vnodesVec := b.EndVector(len(vnOffsets))
-	clusterpb.SetRingCmdStart(b)
-	clusterpb.SetRingCmdAddVersion(b, c.Version)
-	clusterpb.SetRingCmdAddVnodes(b, vnodesVec)
-	clusterpb.SetRingCmdAddVperNode(b, uint32(c.VPerNode))
-	return fbFinish(b, clusterpb.SetRingCmdEnd(b)), nil
-}
-
 // --- Payload encoding dispatch ---
 
 func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
@@ -1080,8 +1056,6 @@ func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
 		return encodeMigrationDoneCmd(payload.(MigrationDoneFSMCmd))
 	case CmdSetBucketVersioning:
 		return encodeSetBucketVersioningCmd(payload.(SetBucketVersioningCmd))
-	case CmdSetRing:
-		return encodeSetRingCmd(payload.(SetRingCmd))
 	case CmdResealFSMValues:
 		return encodeResealFSMValuesCmd(payload.(ResealFSMValuesCmd))
 	case CmdFSMValueResealDone:
