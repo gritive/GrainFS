@@ -32,25 +32,6 @@ func awaitRequestVote(t *testing.T, n *Node, args *RequestVoteArgs) *RequestVote
 	}
 }
 
-// awaitAppendEntries is the AppendEntries counterpart to awaitRequestVote.
-func awaitAppendEntries(t *testing.T, n *Node, args *AppendEntriesArgs) *AppendEntriesReply {
-	t.Helper()
-	g := gomega.NewWithT(t)
-	type result struct {
-		reply *AppendEntriesReply
-	}
-	ch := make(chan result, 1)
-	go func() { ch <- result{n.HandleAppendEntries(args)} }()
-	select {
-	case r := <-ch:
-		g.Expect(r.reply).NotTo(gomega.BeNil(), "HandleAppendEntries returned nil reply")
-		return r.reply
-	case <-time.After(rpcTimeout):
-		t.Fatalf("HandleAppendEntries timed out after %s", rpcTimeout)
-		return nil
-	}
-}
-
 func startFollowerWithPeers(t *testing.T, id string, peers ...string) *Node {
 	t.Helper()
 	g := gomega.NewWithT(t)

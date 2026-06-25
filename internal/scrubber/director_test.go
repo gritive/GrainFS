@@ -23,12 +23,6 @@ func (r *recordingIncident) Record(ctx context.Context, facts []incident.Fact) e
 	return nil
 }
 
-func (r *recordingIncident) count() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return len(r.facts)
-}
-
 func TestDirector_TriggerDedupSameRequest(t *testing.T) {
 	d := NewDirector(DirectorOpts{Incident: &recordingIncident{}, QueueSize: 8})
 	d.Register("replication", &countingSource{name: "replication"}, noopVerifier{})

@@ -124,11 +124,6 @@ func (p *partitionNet) Heal() {
 	p.snap.Store(&empty)
 }
 
-func (p *partitionNet) isIsolated(id string) bool {
-	snap := p.snap.Load()
-	return (*snap)[id]
-}
-
 // partitionTransport wraps a memTransport and blocks RPCs to/from isolated peers,
 // applies probabilistic drop, and injects reorder delays. All three mechanisms
 // are checked on every send.

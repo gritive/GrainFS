@@ -1,5 +1,59 @@
 # Changelog
 
+## [0.0.709.0] - 2026-06-26
+
+### Changed
+- **Internal style fix, no behavior change.** Dropped trailing punctuation from two error-string
+  messages flagged by staticcheck ST1005 (`encrypt` legacy-KEK boot error, `iam/oidc` `group_prefix`
+  validation error). Wording/meaning preserved; the sentinel error identity is unchanged.
+
+## [0.0.708.0] - 2026-06-26
+
+### Changed
+- **Documentation accuracy: the S3-compatibility matrix now backs its "Conditional headers — Supported"
+  claim with end-to-end tests.** RFC 7232 read conditional headers (If-Match / If-None-Match /
+  If-Modified-Since / If-Unmodified-Since) were already implemented and correct on GET / HEAD / Range,
+  but had no e2e coverage, so the matrix overclaimed under the project's "Supported requires e2e" policy.
+  Single-node and 4-node cluster e2e now characterize the 200 / 304 / 412 outcomes on GET and HEAD plus
+  Range-GET precondition precedence, and the matrix Notes were tightened to state exactly what is covered
+  and to flag that conditional writes (PutObject If-None-Match CAS) remain out of scope. Test- and
+  docs-only; no server behavior change.
+
+## [0.0.707.0] - 2026-06-26
+
+### Changed
+- **Performance: reuse the Reed-Solomon stream encoder across EC PUTs instead of
+  rebuilding it per request.** The chunked EC write path created a fresh
+  `reedsolomon.NewStream` encoder for every PUT; each encoder owns an internal
+  pool of aligned scratch buffers that never survived the call, so every encode
+  re-allocated that scratch — profiling showed it at ~22% of EC-write allocation,
+  the single largest reducible allocator on the path. The encoder is now cached
+  and shared per (EC config, block size), mirroring the existing non-stream
+  encoder cache, so its scratch pool is reused. Measured allocation on a 16 MiB EC
+  PUT drops ~6% (the pool is GC-cleared between collections, so steady production
+  traffic keeps it warmer); throughput is unchanged (the path is disk-I/O bound).
+  No protocol, API, CLI, or on-disk format change; EC output is byte-identical.
+
+## [0.0.706.0] - 2026-06-26
+
+### Removed
+- **Internal test-only cleanup, no production code or behavior change.** Removed 12 unused
+  (staticcheck U1000) dead test-helper symbols across `internal/raft`, `internal/scrubber`, and
+  `internal/server` `_test.go` files.
+
+## [0.0.705.0] - 2026-06-25
+
+### Changed
+- **Internal refactor: extracted `QuorumMetaStore` from the `DistributedBackend` god-struct (no
+  behavior, API, wire, or on-disk format change).** The quorum-meta orchestration — K-of-N fan-out
+  write (per-version-blob-before-latest), peer read + Last-Write-Wins merge, version resolution, and
+  cluster-wide scatter-gather LIST — moved into a new `QuorumMetaStore` module; `DistributedBackend`
+  keeps it as a `qms` field and is a facade that delegates. The store injects narrow adapters today's
+  `ShardService`/`DistributedBackend` satisfy, conflict resolution stays as package-level pure
+  functions, and the fan-out write ordering and LWW merge are now unit-tested with fake adapters and
+  no transport. Second slice of the ShardService/DistributedBackend decomposition (the first was
+  LocalShardStore).
+
 ## [0.0.704.0] - 2026-06-25
 
 ### Removed

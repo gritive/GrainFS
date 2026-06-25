@@ -202,6 +202,15 @@ type DistributedBackend struct {
 	// stale same-generation local copy.
 	multiGeneration atomic.Bool
 
+	// qms is the extracted quorum-meta ORCHESTRATION module (quorum_meta_store.go):
+	// the K-of-N fan-out write, the LWW read merge, the certainty-aware reclaim read
+	// and the cluster-wide LIST/scan scatter-gather. The 21 facade methods on
+	// DistributedBackend (quorum_meta.go) delegate to it. Built in SetShardService
+	// AFTER shardSvc + the topology snapshot are set (see newQuorumMetaStore); nil
+	// before then, but no caller invokes the delegated methods pre-wire (they would
+	// have nil-panicked on b.shardSvc in the original too).
+	qms *QuorumMetaStore
+
 	// chunkedPutChunkSize is a test seam; zero keeps the production default.
 	chunkedPutChunkSize int
 
@@ -427,6 +436,12 @@ func (b *DistributedBackend) SetShardService(svc *ShardService, allNodes []strin
 	b.peerHealth = topology.peerHealth
 	b.topologySnapshot.Store(topology)
 	b.publishRuntimeSnapshot(*topology, b.currentECConfig())
+	// Build the quorum-meta orchestration store now that shardSvc is set. Built
+	// ONCE here: its adapter fields are live accessors closing over b (local/peer/
+	// groups read b.shardSvc / b.shardGroup every call), so a later shardSvc
+	// reassignment or a deferred SetShardGroupSource is observed live with no
+	// rebuild (see buildQuorumMetaStore). Facade methods call b.qms directly.
+	b.qms = b.buildQuorumMetaStore()
 }
 
 // SetClusterNodes refreshes the configured placement node set without

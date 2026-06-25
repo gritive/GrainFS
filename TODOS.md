@@ -29,22 +29,29 @@ either bucket).
   internal-bucket name. Optional rename to a neutral name; the integration test's placement is
   name-hash-coupled, so a rename must recompute its expected group.
 
-### ShardService decomposition follow-ups (2026-06-25, PR1 LocalShardStore done)
+### ShardService/DistributedBackend decomposition follow-ups (2026-06-25, PR1 LocalShardStore + Card1 QuorumMetaStore done)
 
-`ShardService` (1,940 LOC god-struct) is being decomposed into a facade over deep local-store
-modules. **PR1 (LocalShardStore extraction) is done** — shard-blob I/O + durability + seal +
-staging carved out behind the facade, behavior-preserving. Remaining slices (each a separate PR,
-facade stays the spine — see design `docs/superpowers/specs/2026-06-25-shard-service-decomposition-design.md`):
+The `ShardService` (1,940 LOC) and `DistributedBackend` (54-field/300-method) god-structs are being
+decomposed into facades over deep modules. **Done:** PR1 = LocalShardStore (MERGED #899; shard-blob
+I/O + durability + seal + staging). Card1 = `QuorumMetaStore` (quorum-meta orchestration: fan-out
+write, LWW read merge, version resolution, scatter-gather list — 21 methods carved out of
+DistributedBackend behind a `qms` facade, injecting `localQuorumMetaStore`/`quorumMetaPeerRPC`/
+`ShardGroupSource`/`versioningSource` adapters `*ShardService` satisfies today; conflict-resolution
+kept as package-level pure functions; raft-free). Both behavior-preserving. Remaining slices (each a
+separate PR, facades stay the spine — see design
+`docs/superpowers/specs/2026-06-25-shard-service-decomposition-design.md`):
 
 - **[P2] PR2 — semantic LocalQuorumMetaStore.** Carve the 30 quorum-meta `*ShardService` methods
   (in `quorum_meta.go`) into a `LocalQuorumMetaStore`. **Semantic, not raw-KV**: the local write
   decodes candidate + existing blobs and runs `decideQuorumMetaWrite` (CAS-reject / LWW-skip /
-  idempotent-replay) before the rename. This module becomes the injected adapter for the
-  Quorum Meta Store deepening (Card 1). Fields: `dataDirs` (shared) + `quorumMetaTargetLocks`.
-- **[P2] decideQuorumMetaWrite single-ownership.** The CAS/LWW conflict-resolution
-  (`decideQuorumMetaWrite` / `quorumMetaCmdWins`) is shared between the local write-accept and the
-  Quorum Meta Store orchestration merge. Decide where it lives (one place) when doing PR2/Card 1 —
-  this is the actual deepening, not the byte I/O.
+  idempotent-replay) before the rename. Fields: `dataDirs` (shared) + `quorumMetaTargetLocks`.
+  → **Card1 done**, so PR2 now just swaps `*ShardService` for a focused `LocalQuorumMetaStore`
+  behind the existing `localQuorumMetaStore` adapter interface (the second adapter = the real seam).
+- **[RESOLVED] decideQuorumMetaWrite single-ownership → stays package-level pure functions.** The
+  Card1 grilling + advisor cut-test confirmed `latestWins`/`quorumMetaBlobWins`/`quorumMetaCmdWins`/
+  `decideQuorumMetaWrite` are already pure, co-located, zero-dep testable; 23 call sites = leverage,
+  not scatter; a hypothetical `LWWResolver` module fails the deletion test. No module — shared by the
+  local write-accept and the orchestration merge as free functions.
 - **[P3] PR3 — LocalManifestStore.** Carve the 12 manifest-blob `*ShardService` methods
   (`manifest_blob.go`, `.qmeta_mpu/{bucket}/{uploadID}`) into a `LocalManifestStore`.
 - **[P3] parent-dir fsync gap (pre-existing, surfaced by the decomposition).** Quorum-meta
@@ -332,10 +339,11 @@ clears it; 67/68 testable packages pass, 0 real failures. Standalone `staticchec
 golangci's `make lint` subset, and it analyzes test files that golangci skips via `tests: false`)
 surfaced the items below. None block; tracked for cleanup.
 
-- **[P4] 54 unused test-helper symbols (staticcheck U1000) across `_test.go` files** (e2e 25,
-  cluster 15, raft 6, scrubber 4, server 2, storage/lifecycle 2). golangci `unused` skips them
-  (`tests: false`) so `make lint` stays green. Batch-removable dead test scaffolding; low risk.
-  Enumerate with `staticcheck ./... | grep U1000`.
+- **[P4] ~42 unused test-helper symbols (staticcheck U1000) across `_test.go` files** (e2e 25,
+  cluster 15, storage/lifecycle 2). The raft (6), scrubber (4), and server (2) symbols were removed.
+  golangci `unused` skips them (`tests: false`) so `make lint` stays green. Batch-removable dead test
+  scaffolding; low risk. The remaining `internal/cluster` / `tests/e2e` ones overlap the active
+  decompose fleet — clear them once it drains. Enumerate with `staticcheck ./... | grep U1000`.
 
 - **[P4][note, not a defect] staticcheck also flags 3 PRODUCTION U1000 that are INTENTIONAL
   `//nolint:unused` scaffolding** — `(*MetaFSM).incDEKRef` / `decDEKRef` (`meta_fsm_rotation.go`, kept
@@ -345,10 +353,11 @@ surfaced the items below. None block; tracked for cleanup.
   wired into CI, switch these to `//lint:ignore U1000 <reason>` for parity, or accept the noise. No
   code change otherwise — recorded so the next /health run does not misread these as a regression.
 
-- **[P4][optional] ~18 ST1005 error-string style nits** (capitalized / trailing-punctuation error
-  strings in `kek_rotation_leader.go`, `rotation_state.go`, `preflight_errors.go`, `dek_keeper_*.go`,
-  `encrypt/keystore.go`, `iam/oidc/config.go`) not gated by `make lint`. Enable golangci `stylecheck`
-  to gate them going forward, or leave as-is.
+- **[P4][optional] ST1005 error-string style nits** not gated by `make lint`. The `encrypt/keystore.go`
+  and `iam/oidc/config.go` trailing-punctuation nits were fixed; the remaining ones live in
+  `internal/cluster` rotation/DEK files (`kek_rotation_leader.go`, `rotation_state.go`,
+  `preflight_errors.go`, `dek_keeper_*.go`) which overlap the active decompose fleet — clear them once
+  it drains. Enable golangci `stylecheck` to gate them going forward, or leave as-is.
 
 ### ROADMAP v2 retirement — remaining deferred / unverified items (2026-06-25)
 
