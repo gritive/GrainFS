@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
@@ -134,24 +133,4 @@ func TestBootHTTPServerAndAdminUsesDurableProtocolCredentialsWhenMetaRaftIsWired
 	require.NoError(t, bootHTTPServerAndAdmin(state))
 	require.IsType(t, &cluster.ProtocolCredentialService{}, state.adminDeps.ProtocolCredentials)
 	require.Same(t, store, state.protocolCredentialStore)
-}
-
-func TestLifecycleCascadeEnabled(t *testing.T) {
-	for _, c := range []struct {
-		name            string
-		metaRaftPresent bool
-		interval        time.Duration
-		want            bool
-	}{
-		{"enabled: meta-raft + interval", true, time.Hour, true},
-		{"disabled: interval zero (store unwired)", true, 0, false},
-		{"disabled: no meta-raft", false, time.Hour, false},
-		{"disabled: neither", false, 0, false},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			if got := lifecycleCascadeEnabled(c.metaRaftPresent, c.interval); got != c.want {
-				t.Fatalf("lifecycleCascadeEnabled(%v, %v) = %v, want %v", c.metaRaftPresent, c.interval, got, c.want)
-			}
-		})
-	}
 }

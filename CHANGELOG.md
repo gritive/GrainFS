@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.726.0] - 2026-06-26
+
+### Fixed
+- **Made bucket delete apply clear lifecycle and IAM bucket-upstream state atomically.**
+  `DeleteBucket` meta-FSM apply now removes the bucket record, lifecycle config, and bucket-upstream
+  credentials under the same committed log entry, eliminating the coordinator-crash window between
+  separate post-delete cascade proposes.
+
 ## [0.0.725.0] - 2026-06-26
 
 ### Fixed

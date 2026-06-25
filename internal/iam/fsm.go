@@ -346,3 +346,14 @@ func (a *Applier) ApplyBucketUpstreamDelete(payload []byte) error {
 	a.store.applyBucketUpstreamDelete(bucket)
 	return nil
 }
+
+// ApplyBucketUpstreamDeleteUnconditional removes bucket-upstream state as part
+// of a bucket deletion apply. It avoids a second raft command, so the bucket
+// record and its upstream credentials cannot be split by a coordinator crash.
+func (a *Applier) ApplyBucketUpstreamDeleteUnconditional(bucket string) error {
+	if bucket == "" {
+		return fmt.Errorf("iam: BucketUpstreamDelete missing bucket")
+	}
+	a.store.applyBucketUpstreamDelete(bucket)
+	return nil
+}

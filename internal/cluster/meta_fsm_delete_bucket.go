@@ -53,6 +53,22 @@ func (f *MetaFSM) applyDeleteBucket(data []byte) error {
 	}
 
 	f.mu.Lock()
+	lifecycleStore := f.lifecycleStore
+	iamApplier := f.iamApplier
+	f.mu.Unlock()
+
+	if lifecycleStore != nil {
+		if err := lifecycleStore.Delete(bucket); err != nil {
+			return fmt.Errorf("meta_fsm: DeleteBucket lifecycle cascade: %w", err)
+		}
+	}
+	if iamApplier != nil {
+		if err := iamApplier.ApplyBucketUpstreamDeleteUnconditional(bucket); err != nil {
+			return fmt.Errorf("meta_fsm: DeleteBucket IAM upstream cascade: %w", err)
+		}
+	}
+
+	f.mu.Lock()
 	_, existed := f.bucketRecords[bucket]
 	if existed {
 		delete(f.bucketRecords, bucket)
