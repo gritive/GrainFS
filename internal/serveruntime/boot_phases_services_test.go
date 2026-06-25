@@ -5,8 +5,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/gritive/GrainFS/internal/badgerrole"
 )
 
 // servicesPhasePrereqs runs every prior boot phase (config, storage open,
@@ -17,7 +15,7 @@ func servicesPhasePrereqs(t *testing.T) *bootState {
 	ctx, state := storagePhasePrereqs(t)
 	require.NoError(t, bootShardService(ctx, state))
 	require.NoError(t, bootShardRoutes(state))
-	require.NoError(t, bootOwnedGroupsAndEC(ctx, state, func(badgerrole.Decision) {}))
+	require.NoError(t, bootOwnedGroupsAndEC(ctx, state))
 	return state
 }
 

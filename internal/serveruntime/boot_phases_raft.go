@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"time"
 
@@ -16,8 +17,149 @@ import (
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/nodeconfig"
 	"github.com/gritive/GrainFS/internal/protocred"
+	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/transport"
 )
+
+// bootDataRaftNode constructs the data-plane raft node (between the transport
+// and meta-raft phases), wires the v2 Raft RPC bridge, and Starts the data-raft
+// actor early. It is consumed by both PR 4 (RPC transport wiring) and PR 5
+// (storage runtime). Bootstrap runs in non-join mode.
+//
+// MOVE-ONLY EXTRACTION (Slice 1): this body is the former Run() inline block
+// verbatim; the only edit is cfg.RaftLogGCInterval → state.cfg.RaftLogGCInterval
+// (the cfg param is gone now that this is a phase). ctx is reserved for the
+// uniform phase signature and intentionally unused here. The escaping outputs
+// are state.node = v2Node plus two state.AddCleanup registrations; every other
+// local (v2Node/v2Close/v2RPCTransport/raftCfg/raftPeers) stays internal.
+func bootDataRaftNode(ctx context.Context, state *bootState) error {
+	// Construct the data-plane raft node here (between transport and meta-raft
+	// phases) — consumed by both PR 4 (RPC transport wiring) and PR 5 (storage
+	// runtime). Bootstrap runs in non-join mode.
+	//
+	// In join mode, state.peers carries the join target transport address
+	// (used by PerformMetaJoin); it is NOT a node-ID
+	// list and must NOT be fed to raft as cfg.Peers — doing so makes v2's
+	// reconstructConfig seed the initial voter set with a transport address
+	// as a voter ID, triggering a term storm that step-downs n1 mid-promote.
+	// The joiner enters the cluster as a learner via PromoteToVoter from the
+	// leader's perspective; its local raft starts as a single-voter {selfID}.
+	// state.joinMode is set by bootValidateConfig (Task 3 populates it from
+	// the .join-pending sentinel file).
+	raftPeers := state.peers
+	if state.inviteJoinMode {
+		raftPeers = nil
+	}
+	raftCfg := raft.DefaultConfig(state.nodeID, raftPeers)
+	raftCfg.ManagedMode = true
+	raftCfg.LogGCInterval = state.cfg.RaftLogGCInterval
+	// JoinMode is forwarded to v2 so the joiner's solo-voter local config
+	// ({selfID} when raftPeers is nil) does NOT auto-promote to Leader —
+	// see internal/raft/v2/types.go JoinMode docstring. Without this gate
+	// the joiner becomes a phantom leader of its own 1-node cluster and
+	// the cluster leader's joint AddVoter wait deadlocks.
+	raftCfg.JoinMode = state.inviteJoinMode
+
+	// M5 PR 29: raft v2 is the only path. The GRAINFS_RAFT_V2 flag is gone;
+	// v1 (*raft.Node) is unreachable from serveruntime. PR 30 deletes the v1
+	// package outright. Durable LogStore + StableStore + SnapshotStore live
+	// in <raftDir>/raft-v2/.
+	v2Node, v2Close, err := cluster.NewRaftV2NodeForServeruntimeWithStoreOptions(raftCfg, state.raftDir, cluster.RaftV2StoreOptions{
+		EncryptionKey: state.raftStoreKey,
+	})
+	if err != nil {
+		return fmt.Errorf("raft v2 init: %w", err)
+	}
+	state.AddCleanup(func() {
+		if v2Close != nil {
+			_ = v2Close()
+		}
+	})
+	if !state.inviteJoinMode {
+		if err := v2Node.Bootstrap(); err != nil && !errors.Is(err, raft.ErrAlreadyBootstrapped) {
+			return fmt.Errorf("raft v2 bootstrap: %w", err)
+		}
+	}
+	state.node = v2Node
+	// M5 PR 27: wire the v2 Raft RPC bridge so multi-node v2 clusters can
+	// exchange Raft RPCs. The bridge re-implements v1's Raft RPC dispatch on
+	// top of cluster.RaftNode.Handle* (the v2 adapter translates to
+	// raftv2.Node). Wire format is byte-identical to v1; v1 is frozen until
+	// PR 30 deletes it.
+	v2RPCTransport := cluster.NewRaftRPCTransport(state.clusterTransport, v2Node)
+	v2RPCTransport.SetTransport()
+	v2RPCTransport.SetTimeoutNowTransport()
+	log.Info().Msg("raft v2: Raft RPC transport wired (TimeoutNow enabled)")
+	// Start the data-raft actor IMMEDIATELY after the RPC bridge is wired —
+	// BEFORE invite-join Phase-2 (inside bootWALAndForwardersPart1). During
+	// Phase-2 the leader's post-join hook calls AddVoterCtx and replicates
+	// AppendEntries to this joiner; if the actor isn't draining cmdCh yet,
+	// HandleAppendEntries blocks forever and the leader's AddVoter times out —
+	// the join deadlocks (the long-standing 5-node EC e2e failure, TODOS §6).
+	// Early start is safe: the applyLoop buffers applied entries UNBOUNDED
+	// until distBackend.RunApplyLoop (bootOwnedGroupsAndEC) drains them, and
+	// JoinMode (set above for invite-joiners) suppresses both the solo-voter
+	// auto-promote and election-timer campaigns until the leader's AE installs
+	// the real multi-voter config (actor.go JoinMode guards).
+	state.node.Start()
+	state.AddCleanup(func() { state.node.Close() })
+	return nil
+}
+
+// bootWaitDEKReady gates boot on the DEK keeper being populated. The keeper is
+// guaranteed populated by the join / invite catch-up at the end of
+// bootWALAndForwardersPart1 (the meta-raft apply loop, started in
+// bootMetaRaftStart, installs gen-0). Bounded so a joiner that cannot install
+// fails fast instead of deadlocking. No-op when encryption is disabled (nil
+// keeper). Extracted from Run() in Slice 1 — behavior-preserving.
+func bootWaitDEKReady(ctx context.Context, state *bootState) error {
+	if state.dekKeeper != nil {
+		readyCtx, readyCancel := context.WithTimeout(ctx, dekReadyBootTimeout)
+		err := WaitDEKReady(readyCtx, state.dekKeeper)
+		readyCancel()
+		if err != nil {
+			return fmt.Errorf("DEK readiness: %w", err)
+		}
+	}
+	return nil
+}
+
+// bootGreenfieldDEKBoundary refuses to boot if the replayed raft log contained a
+// legacy type-48 DEKRotate (pre-Phase-D). Live-log path guard; snapshot path is
+// covered by LoadFromFSM AAD-unwrap failing during Restore. Extracted from Run()
+// in Slice 1 — behavior-preserving.
+//
+// REPLAY-ORDERING BARRIER: applyDEKRotate sets legacyDEKRotateSeen during the
+// apply loop, which runs ASYNC after MetaRaft.Start() returns. We must drain the
+// apply loop up to the current COMMITTED index before reading the flag, or the
+// guard passes silently on an un-replayed legacy log.
+//
+// We target CommittedIndex (captured HERE). This phase runs late in boot — after
+// bootMetaRaftStart, the becomeLeader no-op (single voter), join, and
+// AppendEntries catch-up (follower) have all advanced commit past the snapshot
+// floor to cover every legacy type-48 entry that was committed on the
+// pre-Phase-D cluster. Committed entries are exactly the ones that WILL apply, so
+// waiting on them is sufficient. We do NOT wait on LastLogIndex: an uncommitted
+// tail (e.g. a former leader that appended but never replicated before crashing)
+// may be truncated by the new leader and would otherwise block this drain until
+// the 10s timeout, failing boot spuriously during leader churn. Bounded: a
+// genuinely stuck apply fails loud rather than booting divergent.
+func bootGreenfieldDEKBoundary(ctx context.Context, state *bootState) error {
+	if state.metaRaft != nil {
+		if committed := state.metaRaft.Node().CommittedIndex(); committed > 0 {
+			drainCtx, drainCancel := context.WithTimeout(ctx, 10*time.Second)
+			err := state.metaRaft.WaitApplied(drainCtx, committed)
+			drainCancel()
+			if err != nil {
+				return fmt.Errorf("greenfield DEK boundary: wait for log drain: %w", err)
+			}
+		}
+		if err := state.metaRaft.FSM().CheckGreenfieldDEKBoundary(); err != nil {
+			return fmt.Errorf("greenfield DEK boundary: %w", err)
+		}
+	}
+	return nil
+}
 
 // bootMetaRaftWiring constructs the meta-raft control plane and its cluster-transport
 // transport. NO callbacks are registered and Start is NOT called here — that
@@ -365,10 +507,12 @@ func bootRotationAndAdminAPI(state *bootState) error {
 // finishes replay inside Start, so calling Sync afterwards seeds the router
 // with all buckets persisted before Start returned.
 //
-// startRotationSocket is plumbed via parameter to keep this phase testable
-// without a real admin UDS. Production callers pass StartRotationSocket;
-// tests can pass a no-op.
-func bootMetaRaftStart(ctx context.Context, state *bootState, startRotationSocket func(context.Context, string, Config, *cluster.MetaRaft) error) error {
+// The rotation-socket starter is read from state.startRotationSocket (a
+// bootState field, defaulted to StartRotationSocket in Run; nil in tests that
+// exercise the phase without a real admin UDS). Keeping it a field rather than a
+// parameter lets this phase fit the uniform bootSequence() signature while
+// preserving the test-override seam.
+func bootMetaRaftStart(ctx context.Context, state *bootState) error {
 	// An invite-joiner (inviteJoinMode) must NOT bootstrap its own meta-raft —
 	// same as joinMode, the leader adds it as a voter via the Phase-2 ACK.
 	if !state.inviteJoinMode {
@@ -400,8 +544,8 @@ func bootMetaRaftStart(ctx context.Context, state *bootState, startRotationSocke
 	// RotationPreviousGrace expires. Runs on all nodes (FSM state is
 	// identical via raft); each node deletes its own local file.
 	state.metaRaft.StartPreviousKeyCleanup(ctx, state.rotationKeystore)
-	if startRotationSocket != nil {
-		if err := startRotationSocket(ctx, state.cfg.DataDir, state.cfg, state.metaRaft); err != nil {
+	if state.startRotationSocket != nil {
+		if err := state.startRotationSocket(ctx, state.cfg.DataDir, state.cfg, state.metaRaft); err != nil {
 			log.Warn().Err(err).Msg("rotation socket failed to start; cluster rotate-key CLI will be unavailable")
 		}
 	}

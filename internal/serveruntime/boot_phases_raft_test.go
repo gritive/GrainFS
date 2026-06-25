@@ -82,7 +82,7 @@ func TestBootRaftPhases_OrderingInvariant(t *testing.T) {
 	// 4. Only NOW is Start fired. Both callbacks are already wired into
 	//    metaRaft.FSM(); the apply loop cannot fire any event before
 	//    bootMetaRaftStart returns.
-	require.NoError(t, bootMetaRaftStart(ctx, state, nil))
+	require.NoError(t, bootMetaRaftStart(ctx, state))
 	assert.NotNil(t, state.metaRaft.Node(), "node alive after Start")
 	// metaRaft is now live; Close cleanup is on the stack. State.Cleanup
 	// (deferred via t.Cleanup) will tear it down.

@@ -47,6 +47,12 @@ type bootState struct {
 	cfg      Config
 	cleanups []func()
 	cancel   context.CancelFunc // set by Run; triggers graceful shutdown
+	// startRotationSocket is the rotation-socket starter consumed by
+	// bootMetaRaftStart. Run() sets it to StartRotationSocket; tests that
+	// exercise the phase without a real admin UDS leave it nil (a no-op). It is
+	// a field rather than a phase parameter so bootMetaRaftStart fits the
+	// uniform bootSequence() signature while keeping the test-override seam.
+	startRotationSocket func(context.Context, string, Config, *cluster.MetaRaft) error
 
 	// Resolved config (populated by bootValidateConfig).
 	nodeID      string
