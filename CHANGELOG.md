@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.693.0] - 2026-06-25
+
+### Changed
+- **Performance: pooled the per-record ciphertext buffer in encrypted object writes (lower memory
+  and GC pressure on multipart and large encrypted writes).** `writeEncryptedObjectFile` sealed each
+  128 KiB record into a freshly allocated slice, so an N-record object allocated ~object-size of
+  transient ciphertext buffers on every write — every multipart UploadPart, every multipart Complete
+  (which re-encodes the whole object), and every large encrypted PUT. It now seals through the
+  existing `SealTo`/`SealAtGenTo` seam into one reused buffer (pooled across writes); the on-disk
+  output is byte-identical. Measured: an encrypted multipart Complete of a 10 MiB object drops from
+  ~11.4 MiB to ~760 KiB allocated per call (−93%); a 5 MiB UploadPart from ~5.5 MiB to ~187 KiB
+  (−97%). No API, wire, or on-disk format change.
+
 ## [0.0.692.0] - 2026-06-25
 
 ### Changed

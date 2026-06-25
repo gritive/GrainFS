@@ -114,6 +114,26 @@ surfaced by that removal:
   own metadata anyway. Fail-closing would also reduce append availability on the common non-versioned
   bucket when versioning-read transiently faults. Decide strict-parity vs availability if it ever
   matters; not worth a behavior change now.
+- **[P2][follow-up] AppendObject is O(N²) in segment count (single-node).** A micro-benchmark sweep
+  (`BenchmarkS3Append`, allocs/op deterministic) showed per-append cost GROWS with the existing
+  segment count: n=4 → 885 allocs, n=8 → 2,835, n=16 → 10,490 (doubling appends ≈ 3.5× allocs).
+  Root cause (memprofile): every `appendExisting` → `PutObjectRecordInTxn` (a) re-reads + decodes the
+  full N-segment record (`unmarshalObjectInto`), (b) RemoveRef-all-then-AddRef-all the chunkref
+  membership (O(N) pure churn; only 1 chunk actually changed), (c) re-marshals the whole object, and
+  (d) `CompositeETag` re-hashes all N+1 call-MD5s. So N sequential appends = O(N²) metadata work;
+  with `MaxAppendSegments=10000` the worst case is severe, and AppendObject's whole point is repeated
+  append. A bounded win (skip the prev-read on the append path — `existing` is already in hand — and
+  AddRef only the NEW segment's chunks instead of remove-all/add-all) removes 3 of the O(N) factors
+  but leaves marshal+ETag O(N) (still O(N²), smaller constant). True O(1)/append needs incremental
+  metadata persistence (append-only segment log + running ETag state) — a storage-format redesign in
+  the chunkref/object-meta area (data-loss-sensitive), so it wants its own design pass (office-hours/
+  spec) before implementation. Cluster append is a separate path (not measured here).
+- **[P3][follow-up] eccodec EC-shard write may share the per-chunk fresh-seal allocation that
+  v0.0.693.0 pooled in `writeEncryptedObjectFile`.** `SealAtGen`'s doc names both "eccodec,
+  encrypted_object_file" as pinned-gen chunked-seal callers; only the latter was switched to the
+  pooled `SealTo`/`SealAtGenTo` seam. Cluster EC shard writes likely still allocate a fresh sealed
+  slice per chunk → ~shard-size transient buffers. Confirm with a cluster shard-write micro-bench,
+  then apply the same SealTo-into-pooled-buffer fix if it reproduces. Not measured here (storage-only).
 ### group-0 control-plane demotion follow-ups (2026-06-24, epic DONE)
 
 The demotion shipped: bucket existence/policy/versioning consolidated onto meta-raft as a unified

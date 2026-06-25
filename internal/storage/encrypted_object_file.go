@@ -28,6 +28,12 @@ const (
 var (
 	encObjectWriteBufioPool = sync.Pool{New: func() any { return bufio.NewWriterSize(nil, encryptedObjectWriteBufSize) }}
 	encObjectWriteChunkPool = sync.Pool{New: func() any { b := make([]byte, encryptedChunkSize); return &b }}
+	// encObjectWriteSealedPool holds the reusable per-write sealed-record scratch.
+	// Without it each 128 KiB record's Seal output is a fresh slice, so an N-record
+	// object allocates ~object-size of transient ciphertext buffers. SealTo reuses
+	// this across records → one buffer per write, not per record. Slack covers the
+	// nonce + AEAD tag the seal prepends/appends to the plaintext chunk.
+	encObjectWriteSealedPool = sync.Pool{New: func() any { b := make([]byte, 0, encryptedChunkSize+64); return &b }}
 )
 
 // writeEncryptedObjectHeader writes the GFOBJENC2 file header: magic,
@@ -97,6 +103,15 @@ func writeEncryptedObjectFile(path string, enc DataEncryptor, baseFields []encry
 	bufp := encObjectWriteChunkPool.Get().(*[]byte)
 	defer encObjectWriteChunkPool.Put(bufp)
 	buf := *bufp
+	// sealed is reused across records via SealTo/SealAtGenTo so the per-record
+	// ciphertext is not a fresh allocation. Its grown capacity is returned to the
+	// pool for the next write.
+	sealedp := encObjectWriteSealedPool.Get().(*[]byte)
+	sealed := *sealedp
+	defer func() {
+		*sealedp = sealed
+		encObjectWriteSealedPool.Put(sealedp)
+	}()
 	var size int64
 	var chunk uint64
 	var pinnedGen uint32
@@ -113,11 +128,10 @@ func writeEncryptedObjectFile(path string, enc DataEncryptor, baseFields []encry
 			// chunks 1+ seal AT the pinned gen so a DEK rotation racing this
 			// (possibly non-seekable) write can't split the object across
 			// generations.
-			var sealed []byte
 			var err error
 			if chunk == 0 {
 				var gen uint32
-				sealed, gen, err = enc.Seal(encrypt.DomainShard, fields, plain)
+				sealed, gen, err = enc.SealTo(sealed[:0], encrypt.DomainShard, fields, plain)
 				if err != nil {
 					return 0, fmt.Errorf("encrypt object chunk %d: %w", chunk, err)
 				}
@@ -127,7 +141,7 @@ func writeEncryptedObjectFile(path string, enc DataEncryptor, baseFields []encry
 				}
 				headerWritten = true
 			} else {
-				sealed, err = enc.SealAtGen(encrypt.DomainShard, fields, plain, pinnedGen)
+				sealed, err = enc.SealAtGenTo(sealed[:0], encrypt.DomainShard, fields, plain, pinnedGen)
 				if err != nil {
 					return 0, fmt.Errorf("encrypt object chunk %d: %w", chunk, err)
 				}
