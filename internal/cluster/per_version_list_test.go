@@ -197,7 +197,7 @@ func TestListObjects_LegacyFallbackNonVersioned(t *testing.T) {
 // latest-only blob — proving the branch reads the ctx flag, not just local state.
 //
 // It also pins the UNSTAMPED-versioning-enabled case: an internal/non-S3 LIST
-// consumer (DeleteBucket empty-check, vfs/nfs4/p9/metrics) calls with an
+// consumer (DeleteBucket empty-check, metrics) calls with an
 // unstamped context.Background() even on an Enabled bucket. Because the derive is
 // gated on the STAMPED ctx ONLY (not the local-read fallback), the unstamped call
 // MUST route legacy too — otherwise a best-effort per-version write failure could
