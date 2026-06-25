@@ -223,13 +223,6 @@ Deferred items:
   long-lived buckets with high churn, or add a tombstone GC sweep (age-gated, similar to the
   per-version hard-delete tombstone GC already planned).
 
-- **[P3][pre-existing] Per-version tags/acl are latest-only.** `SetObjectTags` / `SetObjectACL`
-  blob RMW reads/writes the latest-only quorum-meta blob; the `versionID` parameter is accepted
-  but ignored. The only versionID-aware path was the retired `CmdSetObjectTags/ACL` raft command.
-  To implement version-scoped tag/acl, wire the RMW through `readQuorumMetaVersion` +
-  per-version write. Verified pre-existing (the blob path ignored versionID before Slice 2 too);
-  not a Slice 2 regression.
-
 - **[DONE] `deleteShardsQuorum` empty-placement guard.** Fixed in the Slice 2 code-gate: both
   `ForceDeleteBucket` non-versioned loops now fail closed with a descriptive error when
   `len(cmd.NodeIDs) == 0` (corrupt/incomplete qmeta blob) instead of silently stranding shards and
