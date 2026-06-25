@@ -50,12 +50,6 @@ kept as package-level pure functions; raft-free). Both behavior-preserving. Rema
 separate PR, facades stay the spine — see design
 `docs/superpowers/specs/2026-06-25-shard-service-decomposition-design.md`):
 
-- **[P2] PR2 — semantic LocalQuorumMetaStore.** Carve the 30 quorum-meta `*ShardService` methods
-  (in `quorum_meta.go`) into a `LocalQuorumMetaStore`. **Semantic, not raw-KV**: the local write
-  decodes candidate + existing blobs and runs `decideQuorumMetaWrite` (CAS-reject / LWW-skip /
-  idempotent-replay) before the rename. Fields: `dataDirs` (shared) + `quorumMetaTargetLocks`.
-  → **Card1 done**, so PR2 now just swaps `*ShardService` for a focused `LocalQuorumMetaStore`
-  behind the existing `localQuorumMetaStore` adapter interface (the second adapter = the real seam).
 - **[RESOLVED] decideQuorumMetaWrite single-ownership → stays package-level pure functions.** The
   Card1 grilling + advisor cut-test confirmed `latestWins`/`quorumMetaBlobWins`/`quorumMetaCmdWins`/
   `decideQuorumMetaWrite` are already pure, co-located, zero-dep testable; 23 call sites = leverage,

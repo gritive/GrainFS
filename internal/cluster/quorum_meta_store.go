@@ -62,8 +62,7 @@ type QuorumMetaStore struct {
 }
 
 // localQuorumMetaStore is the local-filesystem quorum-meta primitive set the
-// orchestration depends on. *ShardService satisfies it today (a focused
-// LocalQuorumMetaStore is the PR2 replacement). Every method the moved
+// orchestration depends on. LocalQuorumMetaStore satisfies it. Every method the moved
 // orchestration calls on the local store is enumerated here — a missing method
 // fails the var-_ compile guard below.
 type localQuorumMetaStore interface {
@@ -110,7 +109,7 @@ type versioningSource interface {
 
 // Compile guards: the production collaborators satisfy the adapter interfaces.
 var (
-	_ localQuorumMetaStore = (*ShardService)(nil)
+	_ localQuorumMetaStore = (*LocalQuorumMetaStore)(nil)
 	_ quorumMetaPeerRPC    = (*ShardService)(nil)
 	_ versioningSource     = (*DistributedBackend)(nil)
 )
@@ -128,10 +127,10 @@ var (
 func (b *DistributedBackend) buildQuorumMetaStore() *QuorumMetaStore {
 	return &QuorumMetaStore{
 		local: func() localQuorumMetaStore {
-			if b.shardSvc == nil {
+			if b.shardSvc == nil || b.shardSvc.qmeta == nil {
 				return nil
 			}
-			return b.shardSvc
+			return b.shardSvc.qmeta
 		},
 		peer: func() quorumMetaPeerRPC {
 			if b.shardSvc == nil {

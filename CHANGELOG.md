@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.724.0] - 2026-06-26
+
+### Changed
+- **Carved node-local quorum-meta filesystem semantics into `LocalQuorumMetaStore`.**
+  `ShardService` keeps the quorum-meta RPC facade while local quorum-meta reads, writes, scans,
+  deletes, CAS/LWW acceptance, and per-target publish locks now live behind the focused store
+  used by `QuorumMetaStore`'s local adapter.
+
 ## [0.0.723.0] - 2026-06-26
 
 ### Fixed

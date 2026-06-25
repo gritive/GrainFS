@@ -44,22 +44,14 @@ func getShardBuilder(minSize int) *flatbuffers.Builder {
 // remote peer-RPC half (WriteShard/ReadShard/...), quorum-meta orchestration,
 // manifest RPC/fan-out orchestration, and the generic raft buffered-route
 // transport stay here. dataDirs is shared config — the same resolved roots
-// LocalShardStore and LocalManifestStore hold — used by quorum-meta paths and
-// the local manifest adapter.
+// LocalShardStore, LocalManifestStore, and LocalQuorumMetaStore hold.
 type ShardService struct {
 	dataDirs  []string
 	transport shardTransport
 	local     *LocalShardStore // local-shard concern (delegation target)
 	manifest  *LocalManifestStore
+	qmeta     *LocalQuorumMetaStore
 	addrBook  NodeAddressBook
-	// quorumMetaTargetLocks serializes the (LWW guard-read + os.Rename) critical
-	// section in writeQuorumMetaLocal and writeQuorumMetaVersionLocal on a
-	// per-target-path basis. Without this lock two concurrent writers to the same
-	// target can both observe the existing blob, both decide their candidate wins,
-	// and then race on the rename — allowing a lower-priority blob to land last
-	// and clobber the true LWW winner. The temp-create/write/fsync/close steps
-	// remain outside the lock (each writer uses a unique temp name; no contention).
-	quorumMetaTargetLocks keyedRWMutex // per-target write lock (refcounted, bounded)
 }
 
 // ShardServiceOption is a functional option for ShardService.
@@ -129,6 +121,7 @@ func NewMultiRootShardService(dataDirs []string, tr shardTransport, opts ...Shar
 		// applying options: the DEK/no-redundancy options write into s.local.
 		local:    &LocalShardStore{dataDirs: resolvedDirs},
 		manifest: NewLocalManifestStore(resolvedDirs),
+		qmeta:    NewLocalQuorumMetaStore(resolvedDirs),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -143,15 +136,6 @@ func NewMultiRootShardService(dataDirs []string, tr shardTransport, opts ...Shar
 // DataDirs returns the active shard data directories.
 func (s *ShardService) DataDirs() []string {
 	return s.dataDirs
-}
-
-// quorumMetaTargetLock takes the per-target write lock that serializes the
-// (LWW guard-read + os.Rename) critical section in the leaf writers and returns
-// an unlock closure. Mirrors DistributedBackend.objectMetaRMWLock: concurrent
-// callers converge on a single lock per target path, and the lock is reclaimed
-// once the last holder releases (bounded memory).
-func (s *ShardService) quorumMetaTargetLock(target string) func() {
-	return s.quorumMetaTargetLocks.lockWrite(target)
 }
 
 // getShardDir delegates to the LocalShardStore; it stays on the facade because
