@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.730.0] - 2026-06-26
+
+### Tests
+- **Pinned Suspended HEAD/LIST agreement against stale `lat:` pointers.**
+  Suspended LIST already follows the latest-only quorum-meta path, matching HEAD;
+  the new regression test records that stale legacy `lat:` metadata is ignored.
+
 ## [0.0.729.0] - 2026-06-26
 
 ### Fixed
