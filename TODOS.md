@@ -305,17 +305,6 @@ clears it; 67/68 testable packages pass, 0 real failures. Standalone `staticchec
 golangci's `make lint` subset, and it analyzes test files that golangci skips via `tests: false`)
 surfaced the items below. None block; tracked for cleanup.
 
-- **[P3] AdminAPI `PostureChecker` seam is now prod-dead (surfaced by the anon-switch tls_posture
-  shim removal).** Deleting `iamPostureChecker` (its only implementation) and the two
-  `SetPostureChecker(newIAMPostureChecker(...))` injection sites left the `internal/iam`
-  `PostureChecker` interface + `AdminAPI.posture` field + `SetPostureChecker` + the first-SA
-  `CheckAnonOff` call-site with **zero production callers** — only `admin_api_posture_test.go` (a test
-  double) exercises them. The "retained for compatibility" comment refers to the now-removed
-  anon-switch, so it is a relic, not a design intent. Decide: remove the whole seam (touches the
-  first-SA creation path — behavior-preserving since `posture` is now always nil) vs keep it as a
-  generic optional pre-check extension point. Left in place by the shim-removal PR to avoid touching
-  the SA-bootstrap path inside a dead-code cleanup.
-
 - **[P4] 54 unused test-helper symbols (staticcheck U1000) across `_test.go` files** (e2e 25,
   cluster 15, raft 6, scrubber 4, server 2, storage/lifecycle 2). golangci `unused` skips them
   (`tests: false`) so `make lint` stays green. Batch-removable dead test scaffolding; low risk.

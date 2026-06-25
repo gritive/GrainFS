@@ -55,20 +55,12 @@ type GrantDeleteRequest struct {
 	Bucket string `json:"bucket"`
 }
 
-// PostureChecker is an optional dependency retained for compatibility with
-// older serveruntime wiring. First-SA creation no longer changes anonymous
-// access posture.
-type PostureChecker interface {
-	CheckAnonOff(ctx context.Context) error
-}
-
 // AdminAPI hosts HTTP handlers for /admin/iam/* endpoints. Stdlib handlers
 // are wrapped onto Hertz at the admin UDS in Task 21.
 type AdminAPI struct {
 	store    *Store
 	proposer Proposer
 	enc      atomic.Pointer[storage.DataEncryptor] // nil until SetEncryptor; swapped after DEK keeper is ready
-	posture  PostureChecker                        // optional; nil = skip first-SA pre-check (legacy/test default)
 }
 
 // NewAdminAPI returns an AdminAPI bound to the given Store and Proposer. The
@@ -101,22 +93,11 @@ func (a *AdminAPI) SetEncryptor(de storage.DataEncryptor) {
 	a.enc.Store(&de)
 }
 
-// SetPostureChecker installs the optional PostureChecker.
-func (a *AdminAPI) SetPostureChecker(pc PostureChecker) { a.posture = pc }
-
 // CreateSA creates a new ServiceAccount and an initial access key for it.
 // Returns *adminapi.Error on validation or conflict; use errors.As to inspect.
 func (a *AdminAPI) CreateSA(ctx context.Context, req SACreateRequest) (SACreateResponse, error) {
 	if req.Name == "" {
 		return SACreateResponse{}, &adminapi.Error{Code: "invalid", Message: "name required"}
-	}
-	// Retain the optional first-SA pre-check hook for compatibility. The
-	// default serveruntime checker is now a no-op because SA creation no longer
-	// flips a global anonymous-access config key.
-	if a.posture != nil && a.store.IsEmpty() {
-		if err := a.posture.CheckAnonOff(ctx); err != nil {
-			return SACreateResponse{}, &adminapi.Error{Code: "precondition", Message: err.Error()}
-		}
 	}
 	now := time.Now().UTC()
 	accessKey, secretKey := genCredentialPair()
