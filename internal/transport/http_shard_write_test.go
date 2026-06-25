@@ -84,6 +84,69 @@ func TestShardWrite_SealedFlagAndKeyEscaping(t *testing.T) {
 	}
 }
 
+// TestShardWrite_StagingKeyRoundTrips locks the PR1 segment-staging wire: the
+// optional StagingKey (staging physical path) must round-trip via the `staging`
+// query param while Key stays the final logical key. A receiver that did not read
+// the param would see StagingKey="" and write to the final path, silently
+// bypassing staging — exactly what this guards.
+func TestShardWrite_StagingKeyRoundTrips(t *testing.T) {
+	srv, cli, addr := shardWritePair(t)
+	got := make(chan ShardWriteRequest, 1)
+	srv.RegisterShardWriteHandler(func(req ShardWriteRequest, body io.Reader) error {
+		_, _ = io.Copy(io.Discard, body)
+		got <- req
+		return nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req := ShardWriteRequest{
+		Bucket:     "bkt",
+		Key:        "obj/segments/blob-1", // final logical key (AAD)
+		StagingKey: ".segstaging/txn-7/blob-1",
+		ShardIdx:   2,
+		Sealed:     false,
+	}
+	if err := cli.ShardWrite(ctx, addr, req, bytes.NewReader([]byte("staged-shard-bytes"))); err != nil {
+		t.Fatalf("ShardWrite: %v", err)
+	}
+	select {
+	case w := <-got:
+		if w != req {
+			t.Fatalf("handler req = %+v, want %+v (StagingKey must round-trip)", w, req)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("handler not invoked")
+	}
+}
+
+// TestShardWrite_NoStagingKeyOmitsParam confirms the legacy path is unchanged: an
+// empty StagingKey round-trips as empty (the client omits the `staging` param).
+func TestShardWrite_NoStagingKeyOmitsParam(t *testing.T) {
+	srv, cli, addr := shardWritePair(t)
+	got := make(chan ShardWriteRequest, 1)
+	srv.RegisterShardWriteHandler(func(req ShardWriteRequest, body io.Reader) error {
+		_, _ = io.Copy(io.Discard, body)
+		got <- req
+		return nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req := ShardWriteRequest{Bucket: "bkt", Key: "obj/key", ShardIdx: 1, Sealed: false}
+	if err := cli.ShardWrite(ctx, addr, req, bytes.NewReader([]byte("x"))); err != nil {
+		t.Fatalf("ShardWrite: %v", err)
+	}
+	select {
+	case w := <-got:
+		if w.StagingKey != "" {
+			t.Fatalf("StagingKey = %q, want empty for legacy write", w.StagingKey)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("handler not invoked")
+	}
+}
+
 func TestShardWrite_HandlerErrorSurfacesText(t *testing.T) {
 	srv, cli, addr := shardWritePair(t)
 	srv.RegisterShardWriteHandler(func(req ShardWriteRequest, body io.Reader) error {

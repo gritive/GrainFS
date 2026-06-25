@@ -40,6 +40,11 @@ type ShardWriteRequest struct {
 	Key      string
 	ShardIdx int
 	Sealed   bool
+	// StagingKey, when non-empty, is the staging physical path the shard bytes are
+	// written to; Key stays the FINAL logical key used as encryption AAD (PR1
+	// segment staging). Empty ⇒ legacy direct-to-final write (Key is both path and
+	// AAD). Carried on the wire as the optional `staging` query param.
+	StagingKey string
 }
 
 // ShardWriteHandler is the consumer-registered native handler. A nil return
@@ -93,10 +98,11 @@ func (t *HTTPTransport) handleShardWrite(c context.Context, ctx *app.RequestCont
 		return
 	}
 	req := ShardWriteRequest{
-		Bucket:   string(ctx.Query("bucket")),
-		Key:      string(ctx.Query("key")),
-		ShardIdx: idx,
-		Sealed:   sealedStr == "1",
+		Bucket:     string(ctx.Query("bucket")),
+		Key:        string(ctx.Query("key")),
+		ShardIdx:   idx,
+		Sealed:     sealedStr == "1",
+		StagingKey: string(ctx.Query("staging")),
 	}
 	if req.Bucket == "" || req.Key == "" {
 		ctx.SetStatusCode(consts.StatusBadRequest)
@@ -134,6 +140,9 @@ func (t *HTTPTransport) ShardWrite(ctx context.Context, addr string, req ShardWr
 		q.Set("sealed", "1")
 	} else {
 		q.Set("sealed", "0")
+	}
+	if req.StagingKey != "" {
+		q.Set("staging", req.StagingKey)
 	}
 
 	hreq := protocol.AcquireRequest()

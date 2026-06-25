@@ -384,6 +384,25 @@ func (s *ShardService) WriteShardStream(ctx context.Context, peer, bucket, key s
 	return nil
 }
 
+// WriteShardStreamStaged streams a shard to a remote node's STAGING physical path
+// (stagingKey) while the receiver seals it with finalKey as AAD (PR1 segment
+// staging). The wire carries finalKey in the request Key — so a legacy/AAD-by-key
+// receiver still derives the final AAD — and stagingKey as the StagingKey redirect.
+func (s *ShardService) WriteShardStreamStaged(ctx context.Context, peer, bucket, stagingKey, finalKey string, shardIdx int, body io.Reader) error {
+	peerAddr, err := s.resolvePeerAddress(peer)
+	if err != nil {
+		return err
+	}
+	if s.transport == nil {
+		return fmt.Errorf("shard service: no transport")
+	}
+	req := transport.ShardWriteRequest{Bucket: bucket, Key: finalKey, StagingKey: stagingKey, ShardIdx: shardIdx, Sealed: false}
+	if err := s.transport.ShardWrite(ctx, peerAddr, req, body); err != nil {
+		return fmt.Errorf("stream staged shard to %s: %w", peerAddr, err)
+	}
+	return nil
+}
+
 // SealedShardTrailerLen is the length of the completeness trailer appended to a
 // streamed sealed-shard body: an 8-byte big-endian count of the payload bytes
 // that precede it. The receiver requires it to reject a TRUNCATED body. Without
@@ -944,6 +963,16 @@ func (s *ShardService) NativeWriteHandler() transport.ShardWriteHandler {
 			observePutStage("shard_stream_server", "write_local_sealed", stageStart)
 			return nil
 		}
+		// PR1 segment staging: a non-empty StagingKey redirects the bytes to the
+		// staging physical path while Key stays the FINAL key used as AAD, so a
+		// post-promote read of Key decrypts correctly.
+		if req.StagingKey != "" {
+			if err := s.WriteLocalShardStreamStagedContext(context.Background(), req.Bucket, req.StagingKey, req.Key, req.ShardIdx, body); err != nil {
+				return err
+			}
+			observePutStage("shard_stream_server", "write_local_staged", stageStart)
+			return nil
+		}
 		if err := s.WriteLocalShardStream(req.Bucket, req.Key, req.ShardIdx, body); err != nil {
 			return err
 		}
@@ -1429,6 +1458,20 @@ func (s *ShardService) WriteLocalShardStreamContext(ctx context.Context, bucket,
 
 func (s *ShardService) WriteLocalShardStreamSizedContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader, streamSize int64) error {
 	return s.writeLocalShardStreamContext(ctx, bucket, key, shardIdx, body, streamSize)
+}
+
+// WriteLocalShardStreamStagedContext is the streaming counterpart of
+// writeLocalShardStaged: it buffers the shard body (bounded) and writes it to the
+// STAGING physical path stagingKey while sealing with the FINAL logical key
+// (finalKey) as AAD. PR1 segment staging; used by the local endpoint and the
+// native shard-write receiver when a staging redirect is present.
+func (s *ShardService) WriteLocalShardStreamStagedContext(ctx context.Context, bucket, stagingKey, finalKey string, shardIdx int, body io.Reader) error {
+	rawCap := maxRawShardPayload(false)
+	data, err := readShardPayload(body, rawCap, -1, false)
+	if err != nil {
+		return err
+	}
+	return s.writeLocalShardStaged(ctx, bucket, stagingKey, finalKey, shardIdx, data)
 }
 
 func (s *ShardService) writeLocalShardStreamContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader, streamSize int64) error {

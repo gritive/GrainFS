@@ -115,6 +115,14 @@ func (f *blockingShardFetcher) WriteShardStream(context.Context, string, string,
 	panic("WriteShardStream: not used by ecObjectReader")
 }
 
+func (f *blockingShardFetcher) WriteLocalShardStreamStagedContext(context.Context, string, string, string, int, io.Reader) error {
+	panic("WriteLocalShardStreamStagedContext: not used by ecObjectReader")
+}
+
+func (f *blockingShardFetcher) WriteShardStreamStaged(context.Context, string, string, string, string, int, io.Reader) error {
+	panic("WriteShardStreamStaged: not used by ecObjectReader")
+}
+
 func (f *blockingShardFetcher) DeleteShards(context.Context, string, string, string) error {
 	panic("DeleteShards: not used by ecObjectReader")
 }
