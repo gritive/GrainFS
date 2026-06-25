@@ -87,7 +87,7 @@ func (c IssuerConfig) Validate() error {
 		return err
 	}
 	if !strings.HasPrefix(c.GroupPrefix, "oidc:") {
-		return errors.New("group_prefix must start with oidc:")
+		return errors.New("group_prefix must start with \"oidc:\"")
 	}
 	if strings.ContainsFunc(c.GroupPrefix, unicode.IsSpace) {
 		return errors.New("group_prefix must not contain whitespace")
