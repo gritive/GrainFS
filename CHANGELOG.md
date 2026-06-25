@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.703.0] - 2026-06-25
+
+### Changed
+- **Internal crypto-API migration, no behavior change.** The deterministic cluster-identity key
+  derivation (`internal/transport`, PSK → ECDSA TLS key) now constructs the key via the
+  non-deprecated `ecdsa.ParseRawPrivateKey` instead of hand-setting the deprecated
+  `PrivateKey.D` / `PublicKey.X` / `PublicKey.Y` fields with `elliptic.Curve.ScalarBaseMult`
+  (deprecated since Go 1.21/1.25). The scalar derivation is unchanged and the derived key — and thus
+  the pinned SPKI — is byte-identical (proven by golden regression vectors), so existing clusters
+  keep the same identity.
+
 ## [0.0.702.0] - 2026-06-25
 
 ### Removed
