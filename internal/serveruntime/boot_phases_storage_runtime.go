@@ -319,10 +319,11 @@ type ownedGroupsState struct {
 //     accepting new instantiations, mark shuttingDown, wait for in-flight
 //     goroutines, then close every owned group in parallel with 5s timeout.
 //
-// recordStartupDecision is plumbed via parameter (rather than method on
-// bootState) because it's a closure over startupDecisions that the run.go
-// body reads for the boot summary; passing it in keeps the phase signature
-// honest about what's mutated.
+// Startup decisions on Badger role failures are recorded via
+// recordBadgerStartupDecision(state, ...) — it appends to state.startupDecisions,
+// which the boot summary reads. (Slice 1 collapsed the former
+// recordStartupDecision closure parameter into this direct call so the phase
+// fits the uniform bootSequence() signature.)
 
 // instantiateGroupWithConfig is the canonical entry point for booting a
 // per-server GroupBackend in this runtime. It bundles InstantiateLocalGroup
@@ -341,7 +342,7 @@ func (state *bootState) instantiateGroupWithConfig(glc cluster.GroupLifecycleCon
 	return gb, nil
 }
 
-func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDecision func(badgerrole.Decision)) error {
+func bootOwnedGroupsAndEC(ctx context.Context, state *bootState) error {
 	// group-0 main backend: FSM state lives in the per-node shared FSM-state
 	// DB under the "group-0" keyspace prefix (C2 P3). The shared DB is owned
 	// by bootOpenSharedFSMDB; this backend opens in shared mode (Close no-ops
@@ -513,7 +514,7 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 	})
 	for _, entry := range state.metaRaft.FSM().ShardGroups() {
 		if err := instantiateOwnedIfNeeded(entry); err != nil {
-			recordStartupDecision(badgerrole.Decision{
+			recordBadgerStartupDecision(state, badgerrole.Decision{
 				Role:    badgerrole.RoleGroupState,
 				GroupID: entry.ID,
 				Status:  badgerrole.DecisionOpenFailed,

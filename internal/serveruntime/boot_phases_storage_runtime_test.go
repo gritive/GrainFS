@@ -10,7 +10,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/raft"
 )
@@ -64,7 +63,7 @@ func storagePhasePrereqs(t *testing.T) (context.Context, *bootState) {
 	require.NoError(t, bootMetaRaftWiring(state))
 	require.NoError(t, bootDataGroupRouter(state))
 	require.NoError(t, bootRotationAndAdminAPI(state))
-	require.NoError(t, bootMetaRaftStart(ctx, state, nil))
+	require.NoError(t, bootMetaRaftStart(ctx, state))
 	return ctx, state
 }
 
@@ -182,7 +181,7 @@ func TestBootStoragePhases_OrderingInvariant(t *testing.T) {
 
 	// 3. OwnedGroupsAndEC — populates distBackend + shardCache + rebalancer +
 	//    loadReporter; shutdown hook registered.
-	require.NoError(t, bootOwnedGroupsAndEC(ctx, state, func(badgerrole.Decision) {}))
+	require.NoError(t, bootOwnedGroupsAndEC(ctx, state))
 	require.NotNil(t, state.distBackend, "distBackend after bootOwnedGroupsAndEC")
 	require.NotNil(t, state.shardCache, "shardCache after bootOwnedGroupsAndEC")
 	require.NotNil(t, state.rebalancer, "rebalancer after bootOwnedGroupsAndEC")
