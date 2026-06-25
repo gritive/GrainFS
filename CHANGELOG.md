@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.731.0] - 2026-06-26
+
+### Fixed
+- **Pruned empty segment-staging transaction directories.**
+  The orphan-shard walker now removes an empty `.segstaging/<txn>` parent after
+  reclaiming its last abandoned staged shard leaf, avoiding residual empty
+  transaction directories.
+
 ## [0.0.730.0] - 2026-06-26
 
 ### Tests
