@@ -2,11 +2,8 @@ package cluster
 
 import (
 	"context"
-	"io/fs"
 	"math"
-	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,83 +15,9 @@ import (
 	"github.com/gritive/GrainFS/internal/metrics"
 )
 
-// migrationInflightTTL is the duration a proposed migration is tracked to prevent
-// re-proposing the same object while Phase 1-3 are in progress.
-const migrationInflightTTL = 5 * time.Minute
-
 // balancerChanBuf is the channel buffer for actor message delivery.
-// Sized to absorb burst FSM notifications without blocking the apply loop.
+// Sized to absorb burst status requests without blocking callers.
 const balancerChanBuf = 64
-
-// ObjectPicker selects an object stored locally on the source node for migration.
-// SrcNode is always the leader itself, so implementations scan local storage.
-type ObjectPicker interface {
-	// PickObjectOnSrcNode returns a (bucket, key, versionID, ok) tuple identifying
-	// one locally-stored object suitable for migration. skipIDs contains inflight
-	// migration IDs (bucket/key/versionID) to skip. Returns ok=false if none found.
-	PickObjectOnSrcNode(nodeID string, skipIDs map[string]bool) (bucket, key, versionID string, ok bool)
-}
-
-// LocalObjectPicker scans the local shard directory (shardsDir/{bucket}/{key}/shard_0)
-// to find objects stored on this node. This is correct because BadgerDB obj: metadata
-// is Raft-replicated to every node — scanning it would return cluster-wide objects,
-// not locally-stored ones.
-type LocalObjectPicker struct {
-	shardsDir string
-}
-
-// NewLocalObjectPicker creates a picker that scans shardsDir for locally-stored objects.
-// shardsDir should be the directory passed to ShardService (typically dataDir/shards).
-func NewLocalObjectPicker(shardsDir string) *LocalObjectPicker {
-	return &LocalObjectPicker{shardsDir: shardsDir}
-}
-
-// PickObjectOnSrcNode returns the first locally-stored object that has a shard_0 file
-// and is not present in skipIDs (inflight migrations). nodeID is accepted for interface
-// compatibility but ignored (always scans local dir).
-// Uses WalkDir to handle S3 keys containing '/' — ShardService stores them verbatim as
-// nested directories (e.g. key "a/b/c" → {bucket}/a/b/c/shard_0), so a 2-level ReadDir
-// would miss them. versionID is always "" because ShardService is version-oblivious.
-func (p *LocalObjectPicker) PickObjectOnSrcNode(_ string, skipIDs map[string]bool) (string, string, string, bool) {
-	var foundBucket, foundKey string
-	found := false
-
-	_ = filepath.WalkDir(p.shardsDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			log.Warn().Str("path", path).Err(err).Msg("LocalObjectPicker: WalkDir error")
-			return nil
-		}
-		if found {
-			return nil
-		}
-		if d.IsDir() || d.Name() != "shard_0" {
-			return nil
-		}
-		rel, relErr := filepath.Rel(p.shardsDir, path)
-		if relErr != nil {
-			return nil
-		}
-		// rel = "{bucket}/{key...}/shard_0"
-		parts := strings.SplitN(rel, string(filepath.Separator), 2)
-		if len(parts) != 2 {
-			return nil
-		}
-		bucket := parts[0]
-		key := filepath.Dir(parts[1]) // strip trailing "/shard_0"
-		if skipIDs[bucket+"/"+key+"/"] {
-			return nil // already inflight, keep walking
-		}
-		foundBucket = bucket
-		foundKey = key
-		found = true
-		return fs.SkipAll
-	})
-
-	if found {
-		return foundBucket, foundKey, "", true
-	}
-	return "", "", "", false
-}
 
 // BalancerConfig holds tunable parameters for the BalancerProposer.
 // All fields can be injected at construction time; tests use small values to speed up loops.
@@ -102,13 +25,13 @@ type BalancerConfig struct {
 	GossipInterval      time.Duration
 	WarmupTimeout       time.Duration
 	ImbalanceTriggerPct float64 // start migration when max-min disk diff exceeds this
-	ImbalanceStopPct    float64 // stop migration when max-min disk diff drops below this
-	MigrationRate       int     // max proposals per tick (reserved for rate limiting)
+	ImbalanceStopPct    float64 // clear active hysteresis when max-min disk diff drops below this
+	MigrationRate       int     // legacy inert knob from the retired shard migration path
 	LeaderTenureMin     time.Duration
 	LeaderLoadThreshold float64 // leader's requestsPerSec / median before transfer
 	// GracePeriod is how long after a node joins before it's counted toward the normal
-	// imbalance trigger. During this window the trigger is relaxed by 1.5× to prevent
-	// migration storms caused by newly-added nodes.
+	// imbalance trigger. During this window the trigger is relaxed by 1.5× to avoid
+	// false active states caused by newly-added nodes.
 	GracePeriod time.Duration
 	// PeerSeenWindow is the maximum age of a peer's last gossip for warmupComplete.
 	// Peers with UpdatedAt older than this are treated as not-yet-gossiped.
@@ -180,33 +103,26 @@ type BalancerClusterCfg interface {
 type balancerMsgKind int
 
 const (
-	msgBalancerNotifyDone balancerMsgKind = iota
-	msgBalancerStatus
+	msgBalancerStatus balancerMsgKind = iota
 )
 
 type balancerMsg struct {
 	kind    balancerMsgKind
-	bucket  string
-	key     string
-	ver     string
 	replyCh chan BalancerStatus
 }
 
-// BalancerProposer monitors gossip.NodeStatsStore and proposes CmdMigrateShard when
-// disk usage is imbalanced across nodes. Only the Raft leader runs proposals.
-// All mutable state (active, inflight, cbs) is owned exclusively by the Run()
-// goroutine — no mutex needed.
+// BalancerProposer monitors gossip.NodeStatsStore for disk skew and load signals.
+// The old Raft-backed shard migration proposal path is retired; the actor now
+// keeps status/metrics current without proposing data movement commands.
 type BalancerProposer struct {
 	nodeID     string
 	store      *gossip.NodeStatsStore
 	node       RaftBalancerNode
 	clusterCfg BalancerClusterCfg
 	// Non-cluster (still hardcoded) defaults — read once at construction.
-	leaderLoadThreshold   float64
-	gracePeriod           time.Duration
-	peerSeenWindow        time.Duration
-	migrationProposalRate float64
-	stickyDonorHoldTime   time.Duration
+	leaderLoadThreshold float64
+	gracePeriod         time.Duration
+	peerSeenWindow      time.Duration
 
 	// leaderLoadTransferEnabled gates the load-driven meta-Raft leadership
 	// transfer (selectPeerByLoad → TransferLeadership). Default false: this
@@ -216,18 +132,13 @@ type BalancerProposer struct {
 	// churn. Enabled in code (SetLeaderLoadTransferEnabled) once validated.
 	leaderLoadTransferEnabled bool
 
-	active      atomic.Bool // hysteresis state: true once trigger fired, false after stop threshold
-	startedAt   time.Time
-	picker      ObjectPicker               // nil = no proposals until SetObjectPicker is called
-	inflight    map[string]time.Time       // proposed migrations not yet committed; keyed by task.id()
-	cbs         map[string]*circuitBreaker // per-peer CBs; keyed by peer nodeID
-	migQueue    *MigrationPriorityQueue    // ordered src candidates
-	stickyDonor string                     // last used src node
-	stickyUntil time.Time                  // switch donor only after this time
-	logger      zerolog.Logger
-	ch          chan balancerMsg // inbound messages to the actor loop
-	stopCh      chan struct{}    // closed by Stop()
-	stopOnce    sync.Once
+	active    atomic.Bool // hysteresis state: true once trigger fired, false after stop threshold
+	startedAt time.Time
+	cbs       map[string]*circuitBreaker // per-peer CBs; keyed by peer nodeID
+	logger    zerolog.Logger
+	ch        chan balancerMsg // inbound messages to the actor loop
+	stopCh    chan struct{}    // closed by Stop()
+	stopOnce  sync.Once
 
 	// tickCount is incremented at the end of each tickOnce call (test-only
 	// observability for hot-reload tests).
@@ -235,29 +146,24 @@ type BalancerProposer struct {
 }
 
 // NewBalancerProposer creates a BalancerProposer that reads tunables from
-// clusterCfg at every tick (hot-reload). The 5 non-cluster fields
-// (LeaderLoadThreshold / GracePeriod / PeerSeenWindow / MigrationProposalRate /
-// StickyDonorHoldTime) come from DefaultBalancerConfig() and are fixed for the
-// lifetime of the proposer.
+// clusterCfg at every tick (hot-reload). The non-cluster fields
+// (LeaderLoadThreshold / GracePeriod / PeerSeenWindow) come from
+// DefaultBalancerConfig() and are fixed for the lifetime of the proposer.
 func NewBalancerProposer(nodeID string, store *gossip.NodeStatsStore, node RaftBalancerNode, clusterCfg BalancerClusterCfg) *BalancerProposer {
 	def := DefaultBalancerConfig()
 	return &BalancerProposer{
-		nodeID:                nodeID,
-		store:                 store,
-		node:                  node,
-		clusterCfg:            clusterCfg,
-		leaderLoadThreshold:   def.LeaderLoadThreshold,
-		gracePeriod:           def.GracePeriod,
-		peerSeenWindow:        def.PeerSeenWindow,
-		migrationProposalRate: def.MigrationProposalRate,
-		stickyDonorHoldTime:   def.StickyDonorHoldTime,
-		startedAt:             time.Now(),
-		inflight:              make(map[string]time.Time),
-		cbs:                   make(map[string]*circuitBreaker),
-		migQueue:              NewMigrationPriorityQueue(def.MigrationProposalRate),
-		logger:                log.With().Str("component", "balancer").Logger(),
-		ch:                    make(chan balancerMsg, balancerChanBuf),
-		stopCh:                make(chan struct{}),
+		nodeID:              nodeID,
+		store:               store,
+		node:                node,
+		clusterCfg:          clusterCfg,
+		leaderLoadThreshold: def.LeaderLoadThreshold,
+		gracePeriod:         def.GracePeriod,
+		peerSeenWindow:      def.PeerSeenWindow,
+		startedAt:           time.Now(),
+		cbs:                 make(map[string]*circuitBreaker),
+		logger:              log.With().Str("component", "balancer").Logger(),
+		ch:                  make(chan balancerMsg, balancerChanBuf),
+		stopCh:              make(chan struct{}),
 	}
 }
 
@@ -322,25 +228,6 @@ func (p *BalancerProposer) selectDstNode() (string, bool) {
 	return lightest, true
 }
 
-// NotifyMigrationDone removes the inflight entry for the given migration, allowing
-// the same object to be re-proposed if it still exists on this node.
-// Called by the FSM when CmdMigrationDone is applied (FSM goroutine).
-func (p *BalancerProposer) NotifyMigrationDone(bucket, key, versionID string) {
-	msg := balancerMsg{kind: msgBalancerNotifyDone, bucket: bucket, key: key, ver: versionID}
-	select {
-	case p.ch <- msg:
-	default:
-		p.logger.Warn().Str("bucket", bucket).Str("key", key).
-			Msg("balancer: NotifyMigrationDone dropped — channel full; will re-propose on next sweep")
-	}
-}
-
-// SetObjectPicker sets the picker used by proposeMigration to select which object to move.
-// Must be called before Run; if never called, no migration proposals are emitted.
-func (p *BalancerProposer) SetObjectPicker(picker ObjectPicker) {
-	p.picker = picker
-}
-
 // SetLeaderLoadTransferEnabled toggles the load-driven leadership transfer (off by
 // default). Must be called before Run() starts; the field is read only from the
 // actor goroutine. Intended for validation/tests until the behavior is vetted.
@@ -384,8 +271,6 @@ func (p *BalancerProposer) Run(ctx context.Context) {
 // handleMsg dispatches an inbound actor message. Called from Run() goroutine only.
 func (p *BalancerProposer) handleMsg(msg balancerMsg) {
 	switch msg.kind {
-	case msgBalancerNotifyDone:
-		delete(p.inflight, msg.bucket+"/"+msg.key+"/"+msg.ver)
 	case msgBalancerStatus:
 		msg.replyCh <- BalancerStatus{
 			Active:       p.active.Load(),
@@ -463,36 +348,10 @@ func (p *BalancerProposer) tickOnce() {
 		}
 	}
 
-	dst, ok := p.selectDstNode()
-	if !ok {
+	if _, ok := p.selectDstNode(); !ok {
 		return
 	}
-
-	// Feed all overloaded nodes into the migration queue, sorted by DiskUsedPct.
-	for _, ns := range allPeers {
-		if ns.DiskUsedPct >= triggerPct {
-			p.migQueue.Upsert(ns.NodeID, ns.DiskUsedPct)
-		}
-	}
-	// Always ensure self is in the queue (self is always a valid src when overloaded).
-	if selfNS, ok := p.store.Get(p.nodeID); ok && selfNS.DiskUsedPct >= triggerPct {
-		p.migQueue.Upsert(p.nodeID, selfNS.DiskUsedPct)
-	}
-
-	// Sticky donor: keep using the last src node until hold time passes.
-	var src string
-	now := time.Now()
-	if p.stickyDonor != "" && now.Before(p.stickyUntil) {
-		src = p.stickyDonor
-	} else if s, ok := p.migQueue.TryDequeue(); ok {
-		src = s
-		p.stickyDonor = src
-		p.stickyUntil = now.Add(p.stickyDonorHoldTime)
-	} else {
-		src = p.nodeID // fallback to self
-	}
-
-	p.proposeMigration(src, dst)
+	p.logger.Debug().Float64("imbalance_pct", diff).Msg("balancer: shard migration retired; no raft proposal emitted")
 }
 
 // BalancerStatus is a point-in-time snapshot of the balancer's state.
@@ -547,56 +406,6 @@ func (p *BalancerProposer) warmupComplete(peers []string) bool {
 		}
 	}
 	return true
-}
-
-// proposeMigration selects one object from src via the ObjectPicker and proposes
-// a CmdMigrateShard to Raft. Returns early if picker is nil or returns ok=false.
-// Must be called from the actor goroutine only.
-func (p *BalancerProposer) proposeMigration(src, dst string) {
-	if p.picker == nil {
-		return
-	}
-
-	// Sweep expired inflight entries and build skip set.
-	now := time.Now()
-	for k, exp := range p.inflight {
-		if now.After(exp) {
-			delete(p.inflight, k)
-		}
-	}
-	skipIDs := make(map[string]bool, len(p.inflight))
-	for k := range p.inflight {
-		skipIDs[k] = true
-	}
-
-	bucket, key, versionID, ok := p.picker.PickObjectOnSrcNode(src, skipIDs)
-	if !ok {
-		return
-	}
-
-	// Guard: picker may not respect skipIDs (e.g., mock in tests). Double-check.
-	inflightID := bucket + "/" + key + "/" + versionID
-	if exp, inFlight := p.inflight[inflightID]; inFlight && now.Before(exp) {
-		return
-	}
-	p.inflight[inflightID] = now.Add(migrationInflightTTL)
-
-	outer, err := EncodeCommand(CmdMigrateShard, MigrateShardFSMCmd{
-		Bucket:    bucket,
-		Key:       key,
-		VersionID: versionID,
-		SrcNode:   src,
-		DstNode:   dst,
-	})
-	if err != nil {
-		p.logger.Error().Err(err).Msg("balancer: marshal MigrateShardCmd")
-		return
-	}
-	if err := p.node.Propose(outer); err != nil {
-		p.logger.Warn().Str("src", src).Str("dst", dst).Err(err).Msg("balancer: propose failed")
-		return
-	}
-	metrics.BalancerMigrationsProposedTotal.Inc()
 }
 
 // selectLightestPeer returns the nodeID with the lowest DiskUsedPct, excluding self.

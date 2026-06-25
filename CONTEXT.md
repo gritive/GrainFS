@@ -617,7 +617,7 @@ meaningful for multi-group topologies with a dedicated meta-raft.
 Gossip carries soft state — per-node disk used/available and `RequestsPerSec` — off
 the critical path. `DiskCollector` and `RequestRateCollector` each own their field
 on the local node and write it to `NodeStatsStore`; gossip propagates it; consumers
-are write placement (capacity-weighted HRW), the balancer (disk-skew migration),
+are write placement (capacity-weighted HRW), the balancer (disk-skew evaluation/status),
 and BoundedLoads (hot-node read reranking). The request-rate signal is sampled from
 the already-incremented service-request counter once per gossip interval, so it adds
 no per-request cost. Load-based **leader transfer** (`selectPeerByLoad →
@@ -849,4 +849,3 @@ See `docs/adr/0013-lifecycle-service-lock-free-publication.md` for the
 follow-up closure of ADR 0012's reservation. ADR 0012 and ADR 0013
 together establish the **lock-free publication pattern** for leader-only
 executor services in this codebase.
-

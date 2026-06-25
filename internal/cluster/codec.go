@@ -958,72 +958,6 @@ func unmarshalClusterMultipartMeta(data []byte) (clusterMultipartMeta, error) {
 	}, nil
 }
 
-// --- MigrateShard / MigrationDone codec ---
-
-func encodeMigrateShardCmd(c MigrateShardFSMCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	keyOff := b.CreateString(c.Key)
-	vidOff := b.CreateString(c.VersionID)
-	srcOff := b.CreateString(c.SrcNode)
-	dstOff := b.CreateString(c.DstNode)
-	clusterpb.MigrateShardCmdStart(b)
-	clusterpb.MigrateShardCmdAddBucket(b, bucketOff)
-	clusterpb.MigrateShardCmdAddKey(b, keyOff)
-	clusterpb.MigrateShardCmdAddVersionId(b, vidOff)
-	clusterpb.MigrateShardCmdAddSrcNode(b, srcOff)
-	clusterpb.MigrateShardCmdAddDstNode(b, dstOff)
-	return fbFinish(b, clusterpb.MigrateShardCmdEnd(b)), nil
-}
-
-func decodeMigrateShardCmd(data []byte) (MigrateShardFSMCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.MigrateShardCmd {
-		return clusterpb.GetRootAsMigrateShardCmd(d, 0)
-	})
-	if err != nil {
-		return MigrateShardFSMCmd{}, err
-	}
-	return MigrateShardFSMCmd{
-		Bucket:    string(t.Bucket()),
-		Key:       string(t.Key()),
-		VersionID: string(t.VersionId()),
-		SrcNode:   string(t.SrcNode()),
-		DstNode:   string(t.DstNode()),
-	}, nil
-}
-
-func decodeMigrationDoneCmd(data []byte) (MigrationDoneFSMCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.MigrationDoneCmd {
-		return clusterpb.GetRootAsMigrationDoneCmd(d, 0)
-	})
-	if err != nil {
-		return MigrationDoneFSMCmd{}, err
-	}
-	return MigrationDoneFSMCmd{
-		Bucket:    string(t.Bucket()),
-		Key:       string(t.Key()),
-		VersionID: string(t.VersionId()),
-		SrcNode:   string(t.SrcNode()),
-		DstNode:   string(t.DstNode()),
-	}, nil
-}
-
-func encodeMigrationDoneCmd(c MigrationDoneFSMCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	keyOff := b.CreateString(c.Key)
-	vidOff := b.CreateString(c.VersionID)
-	srcOff := b.CreateString(c.SrcNode)
-	dstOff := b.CreateString(c.DstNode)
-	clusterpb.MigrationDoneCmdStart(b)
-	clusterpb.MigrationDoneCmdAddBucket(b, bucketOff)
-	clusterpb.MigrationDoneCmdAddKey(b, keyOff)
-	clusterpb.MigrationDoneCmdAddVersionId(b, vidOff)
-	clusterpb.MigrationDoneCmdAddSrcNode(b, srcOff)
-	clusterpb.MigrationDoneCmdAddDstNode(b, dstOff)
-	return fbFinish(b, clusterpb.MigrationDoneCmdEnd(b)), nil
-}
-
 func encodeSetBucketVersioningCmd(c SetBucketVersioningCmd) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 	bucketOff := b.CreateString(c.Bucket)
@@ -1050,10 +984,6 @@ func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
 		return encodeSetBucketPolicyCmd(payload.(SetBucketPolicyCmd))
 	case CmdDeleteBucketPolicy:
 		return encodeDeleteBucketPolicyCmd(payload.(DeleteBucketPolicyCmd))
-	case CmdMigrateShard:
-		return encodeMigrateShardCmd(payload.(MigrateShardFSMCmd))
-	case CmdMigrationDone:
-		return encodeMigrationDoneCmd(payload.(MigrationDoneFSMCmd))
 	case CmdSetBucketVersioning:
 		return encodeSetBucketVersioningCmd(payload.(SetBucketVersioningCmd))
 	case CmdResealFSMValues:

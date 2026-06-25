@@ -1,7 +1,8 @@
 # Balancer Operator Runbook
 
-`GrainFS` auto-balancer reduces disk usage skew across cluster nodes. This
-runbook covers the operator checks, debugging steps, and tuning knobs.
+`GrainFS` balancer runtime gossips disk usage, capability evidence, and request
+rate across cluster nodes. The old Raft-backed shard migration path is retired:
+the runtime still tracks disk skew, but it no longer moves object shards.
 
 ## Contents
 
@@ -15,7 +16,8 @@ runbook covers the operator checks, debugging steps, and tuning knobs.
 
 ## Overview
 
-The balancer runs only on the Raft leader.
+The balancer actor runs only on the Raft leader. Gossip senders, receivers, disk
+collectors, and request-rate collectors still run as part of the balancer runtime.
 
 Flow:
 
@@ -23,17 +25,14 @@ Flow:
 GossipSender  -> broadcasts each node's DiskUsedPct over the cluster transport
 GossipReceiver -> updates NodeStatsStore
 BalancerProposer -> evaluates disk skew every 30 seconds
-  imbalance > 20% -> proposes CmdMigrateShard through Raft
-  imbalance < 5%  -> stops proposing migrations
-FSM.applyMigrateShard -> MigrationExecutor.Execute()
-  Step 1: copy shards from source to destination
-  Step 2: propose CmdMigrationDone through Raft
-  Step 3: wait for FSM commit through NotifyCommit
-  Step 4: delete the source shard
+  imbalance > 20% -> marks balancer active and updates metrics
+  imbalance < 5%  -> clears active hysteresis
+RequestRateCollector -> writes RequestsPerSec for hot-node read reranking
 ```
 
-If the migration channel is full, `GrainFS` persists the task under the BadgerDB
-`pending-migration:` keyspace and recovers it after restart.
+Legacy `CmdMigrateShard` / `CmdMigrationDone` Raft command slots replay as
+no-ops. Existing `pending-migration:` BadgerDB keys are inert legacy state; new
+runtime code no longer creates or recovers them.
 
 ### Load signal (RequestsPerSec) and leader transfer
 
@@ -45,7 +44,7 @@ hot-node read reranking and is exported as `grainfs_node_requests_per_sec`.
 **Load-based leader transfer is disabled by default.** Transferring the (control-
 plane) meta-Raft leadership in response to a (data-plane) S3 request-load signal is
 unvalidated and risks election churn, so the `selectPeerByLoad → TransferLeadership`
-path is gated off and never fires regardless of load. Disk-skew migration and
+path is gated off and never fires regardless of load. Disk-skew observability and
 hot-node read reranking are unaffected. The `--balancer-leader-tenure-min` flag and
 `grainfs_balancer_leader_transfers_total` metric below describe that gated path; it
 is inert until the behavior is validated and the gate is enabled in code.
@@ -54,16 +53,16 @@ is inert until the behavior is validated and the gate is enabled in code.
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `--balancer-enabled` | `true` | Enables the balancer. |
+| `--balancer-enabled` | `true` | Enables balancer runtime collection and skew evaluation. |
 | `--balancer-gossip-interval` | `30s` | Gossip and disk-skew evaluation interval. |
-| `--balancer-imbalance-trigger-pct` | `20.0` | Starts migration when `max-min` disk usage exceeds this percentage. |
-| `--balancer-imbalance-stop-pct` | `5.0` | Stops migration proposals once skew drops below this percentage. |
-| `--balancer-migration-rate` | `1` | Maximum proposals per tick. Reserved for rate limiting. |
+| `--balancer-imbalance-trigger-pct` | `20.0` | Marks balancer active when `max-min` disk usage exceeds this percentage. |
+| `--balancer-imbalance-stop-pct` | `5.0` | Clears active hysteresis once skew drops below this percentage. |
+| `--balancer-migration-rate` | `1` | Legacy inert knob from the retired shard migration path. |
 | `--balancer-leader-tenure-min` | `5m` | Minimum leader tenure before load-based leader transfer. |
-| `--balancer-warmup-timeout` | `60s` | Grace period after node start to avoid false migrations during join or recovery. |
-| `--balancer-cb-threshold` | `0.90` | Disk usage fraction above which a node is excluded as a migration target. |
-| `--balancer-migration-max-retries` | `3` | Maximum shard-write retries. Uses exponential backoff with +/-20% jitter; `ErrPermanent` fails immediately. |
-| `--balancer-migration-pending-ttl` | `5m` | TTL for stale pending migrations. Extended once after the Raft completion proposal, then cancelled on the second expiry. |
+| `--balancer-warmup-timeout` | `60s` | Grace period after node start before skew evaluation activates. |
+| `--balancer-cb-threshold` | `0.90` | Disk usage fraction used by legacy destination circuit-breaker metrics. |
+| `--balancer-migration-max-retries` | `3` | Legacy inert knob from the retired shard migration executor. |
+| `--balancer-migration-pending-ttl` | `5m` | Legacy inert knob from retired pending-migration recovery. |
 
 Conservative production example:
 
@@ -85,22 +84,20 @@ grainfs serve \
 # Balancer startup
 journalctl -u grainfs | grep 'component=balancer'
 
-# Migration activity
-journalctl -u grainfs | grep 'migrate\|migration'
+# Skew/load activity
+journalctl -u grainfs | grep 'component=balancer'
 ```
 
 Expected sequence:
 
 ```text
 INFO  balancer started component=balancer gossip_interval=30s trigger_pct=20
-INFO  migration execute... component=migration task=mybucket/mykey/
-INFO  migration complete  component=migration
 ```
 
-### Check Pending Migrations
+### Check Legacy Pending Migrations
 
-Many `pending-migration:` keys means the migration channel is staying under
-backpressure.
+`pending-migration:` keys are legacy inert state after shard migration retirement.
+New code should not create more of them.
 
 ```bash
 badger-cli list --prefix pending-migration: --db /data/meta | wc -l
@@ -111,19 +108,27 @@ badger-cli list --prefix pending-migration: --db /data/meta | wc -l
 | Metric | Meaning | Alert trigger |
 | --- | --- | --- |
 | `grainfs_balancer_gossip_total` | Gossip broadcast count. | Sustained gossip errors. |
-| `grainfs_balancer_migrations_proposed_total` | Number of proposed `CmdMigrateShard` commands. | Informational. |
-| `grainfs_balancer_migrations_done_total` | Completed migration count. | Informational. |
-| `grainfs_balancer_migrations_failed_total` | Failed migration count. | Investigate if nonzero and sustained. |
+| `grainfs_balancer_migrations_proposed_total` | Legacy retired migration counter. | Should remain `0`. |
+| `grainfs_balancer_migrations_done_total` | Legacy retired migration counter. | Should remain `0`. |
+| `grainfs_balancer_migrations_failed_total` | Legacy retired migration counter. | Should remain `0`. |
+| `grainfs_balancer_shard_write_errors_total` | Legacy retired migration copy counter. | Should remain `0`. |
+| `grainfs_balancer_shard_write_retries_total` | Legacy retired migration copy retry counter. | Should remain `0`. |
+| `grainfs_balancer_migration_pending_ttl_expired_total` | Legacy retired pending-migration TTL counter. | Should remain `0`. |
 | `grainfs_balancer_imbalance_pct` | Current `max-min` disk skew percentage. | Sustained value above trigger percentage. |
-| `grainfs_balancer_pending_tasks` | Number of `pending-migration:` keys. | Investigate if sustained above 10. |
+| `grainfs_balancer_pending_tasks` | Legacy `pending-migration:` key count. | Any growth means a stale binary is still running. |
 | `grainfs_balancer_leader_transfers_total` | Load-based leader transfer count. Stays `0` while the gate is off (default). | Frequent increases indicate cluster instability or load concentration (only possible once the gate is enabled). |
 | `grainfs_node_requests_per_sec` | Locally-measured request rate per node, gossiped as the load signal. | Large per-node skew indicates load concentration. |
 
 ## Alert Response
 
-### Alert: Migration Has Not Completed For Hours
+### Alert: Legacy Migration Counters Increase
 
-1. Check leader logs:
+The current binary no longer proposes or executes balancer shard migrations. If
+legacy migration counters increase, a stale binary is still running somewhere.
+
+1. Check deployed versions on all nodes.
+
+2. Check leader logs:
 
    ```bash
    journalctl -u grainfs | grep 'migration.*failed\|migration.*error' | tail -20
@@ -141,7 +146,7 @@ badger-cli list --prefix pending-migration: --db /data/meta | wc -l
    df -h /data
    ```
 
-4. Stop new migrations if the incident is active:
+3. Stop stale balancer migration code by upgrading or disabling the old node:
 
    ```bash
    systemctl edit grainfs --force  # add --balancer-enabled=false
@@ -150,10 +155,10 @@ badger-cli list --prefix pending-migration: --db /data/meta | wc -l
 
 ### Alert: Pending Migration Keys Keep Growing
 
-The migration channel has capacity 256. Sustained growth usually means shard
-copy speed is below proposal speed, or the gossip interval is too short.
+New binaries no longer write `pending-migration:` keys. Sustained growth means a
+stale binary is still proposing retired migration commands.
 
-Reduce proposal frequency:
+Disable or upgrade the stale node:
 
 ```bash
 systemctl edit grainfs --force  # add --balancer-gossip-interval=120s
@@ -184,7 +189,7 @@ frequently, one node is likely receiving too much request load.
 
 ### Larger Clusters, 10+ Nodes
 
-Use a slower cadence to avoid migration storms.
+Use a slower cadence to reduce skew-evaluation churn.
 
 ```bash
 --balancer-gossip-interval=60s
@@ -195,25 +200,18 @@ Use a slower cadence to avoid migration storms.
 
 ### After Adding A Node
 
-The balancer waits through the warm-up window before proposing migrations. This
-prevents false moves while a joining or recovering node is still settling.
+The balancer waits through the warm-up window before activating disk-skew
+observability. It does not move shards.
 
 ## Emergency Stop
 
-Stop the balancer before incident debugging if migration traffic could make the
-incident harder to read.
+Stop the balancer before incident debugging if gossip/load collection could make
+the incident harder to read.
 
 ```bash
-# Disable future balancer proposals. Requires restart.
+# Disable balancer runtime collection. Requires restart.
 grainfs serve --balancer-enabled=false ...
-
-# Existing shard copies are not interrupted. Let them finish.
-
-# Check pending migration keys only if the restart does not recover them.
 ```
-
-Forced interruption can leave copied shards on the destination. The scrubber is
-expected to clean orphan shards.
 
 ## Test And Development
 

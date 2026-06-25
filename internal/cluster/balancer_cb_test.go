@@ -42,7 +42,6 @@ func TestTickOnce_AllDstsCBOpen_NoProposal(t *testing.T) {
 
 	p := NewBalancerProposer("self", store, node, cfg)
 	p.startedAt = p.startedAt.Add(-cfg.warmupTimeout - time.Second)
-	p.SetObjectPicker(&mockPicker{bucket: "b", key: "k"})
 
 	// Self has high disk, peers all full
 	store.Set(gossip.NodeStats{NodeID: "self", DiskUsedPct: 80})
@@ -51,11 +50,12 @@ func TestTickOnce_AllDstsCBOpen_NoProposal(t *testing.T) {
 
 	p.tickOnce()
 
-	// No migration proposal should have been made
+	// No migration proposal should have been made.
 	assert.Equal(t, 0, node.ProposedLen(), "no proposal when all dst CBs are open")
 }
 
-// TestTickOnce_CBOpenSkipsDst: CB-open dst is excluded from migration target.
+// TestTickOnce_CBOpenSkipsDst: CB-open dst is excluded from migration target,
+// but the retired migration path still emits no Raft proposal.
 func TestTickOnce_CBOpenSkipsDst(t *testing.T) {
 	store := gossip.NewNodeStatsStore(time.Minute)
 	node := &mockRaftNode{nodeID: "self", peerIDs: []string{"n1", "n2"}, state: 2}
@@ -65,27 +65,13 @@ func TestTickOnce_CBOpenSkipsDst(t *testing.T) {
 
 	p := NewBalancerProposer("self", store, node, cfg)
 	p.startedAt = p.startedAt.Add(-cfg.warmupTimeout - time.Second)
-	p.SetObjectPicker(&mockPicker{bucket: "b", key: "k"})
 
-	// Self heavy, n1 full (CB open), n2 light (CB closed) — expect migration to n2
+	// Self heavy, n1 full (CB open), n2 light (CB closed).
 	store.Set(gossip.NodeStats{NodeID: "self", DiskUsedPct: 80})
 	store.Set(gossip.NodeStats{NodeID: "n1", DiskUsedPct: 95})
 	store.Set(gossip.NodeStats{NodeID: "n2", DiskUsedPct: 10})
 
 	p.tickOnce()
 
-	assert.Equal(t, 1, node.ProposedLen(), "must propose one migration to n2")
-}
-
-// mockPicker always returns the same object.
-type mockPicker struct {
-	bucket, key string
-}
-
-func (m *mockPicker) PickObjectOnSrcNode(_ string, skip map[string]bool) (string, string, string, bool) {
-	id := m.bucket + "/" + m.key + "/"
-	if skip[id] {
-		return "", "", "", false
-	}
-	return m.bucket, m.key, "", true
+	assert.Equal(t, 0, node.ProposedLen(), "retired shard migration must not propose raft commands")
 }

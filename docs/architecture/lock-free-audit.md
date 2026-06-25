@@ -136,13 +136,13 @@ rg -n "sync\.(Mutex|RWMutex)" internal cmd --glob '*.go' --glob '!*_test.go'
   snapshot/restore boundaries.
 - `internal/cluster/meta_raft.go` - apply notification channel swaps, per-index
   apply errors.
-- `internal/cluster/apply.go` - migration and commit hook registration against
-  raft apply.
+- `internal/cluster/apply.go` - shared FSM state and raft apply command
+  dispatch.
 - `internal/cluster/ring_store.go` - current ring and refcounts must change
   together.
 - `internal/cluster/peer_health.go`, `rotation_state.go`,
   `capability_gate.go`, `circuit_breaker.go`, `disk_collector.go`,
-  `migration_queue.go`, `rebalance_executor.go`, `meta_join.go` - low-frequency
+  `rebalance_executor.go`, `meta_join.go` - low-frequency
   control-plane state with multi-field invariants.
 - `internal/cluster/backend.go` - per-shard RWMutexes for scrubbable shard
   read/write exclusion; local fan-in mutex for concurrent EC writes.

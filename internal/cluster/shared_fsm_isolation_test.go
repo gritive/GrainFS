@@ -249,13 +249,10 @@ func TestSharedFSM_PrefixIsolation_AllPaths(t *testing.T) {
 		// to BadgerDB to assert on. The keyspace correctness for ShardPlacementKey
 		// is covered by TestStateKeyspace_PrefixRoundTrip at the unit level.
 		//
-		// CmdMigrateShard is likewise omitted: applyMigrateShard writes a
-		// PendingMigrationKey to BadgerDB only on the channel-overflow path, and
-		// when no migration hooks are wired (the unit-test default) onMigrateShard
-		// is nil and applyMigrateShard returns early without writing anything. It
-		// is therefore not exercisable at the unit-test level without
-		// SetMigrationHooks; the pending-migration: keyspace is covered by the
-		// keyspace-level round-trip test (TestStateKeyspace_PrefixRoundTrip).
+		// CmdMigrateShard is likewise omitted: balancer shard migration is
+		// retired, and stale log replay is a no-op. The legacy
+		// pending-migration: keyspace is covered by the keyspace-level
+		// round-trip test (TestStateKeyspace_PrefixRoundTrip).
 	}
 
 	// Rows run sequentially (no t.Parallel). NewDistributedBackend calls

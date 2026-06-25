@@ -288,20 +288,12 @@ func TestApplyActor_SnapshotIsBatchBarrier(t *testing.T) {
 	writeObj(fsm, "snap-bkt", "pre1", "pre-etag")
 	writeObj(fsm, "snap-bkt", "pre2", "pre-etag")
 
-	// The post-snapshot command (c3) MUST mutate observable FSM state so the test
-	// fails if its apply were silently dropped (lastApplied alone is not enough —
-	// commitBatch bumps it for every collected entry regardless of apply effect).
-	// Use CmdMigrateShard with an unbuffered, receiver-less migration channel: the
-	// non-blocking send falls through to the persist branch, which writes a
-	// PendingMigrationKey — a distinguishable, deterministic post-snapshot mutation.
-	fsm.SetMigrationHooks(make(chan MigrationTask), nil, nil)
-	c3Migrate := MigrateShardFSMCmd{
-		Bucket: "snap-bkt", Key: "post-snap", VersionID: "v1",
-		SrcNode: "node-a", DstNode: "node-b",
-	}
-	c3, err := EncodeCommand(CmdMigrateShard, c3Migrate)
+	// The post-snapshot command (c3) uses a retired migration slot. It must
+	// replay as a no-op after the snapshot without blocking or creating a
+	// pending-migration key.
+	c3, err := buildRawCommand(CmdMigrateShard, []byte("legacy payload"))
 	require.NoError(t, err)
-	postSnapKey := string(fsm.keys.PendingMigrationKey(c3Migrate.Bucket, c3Migrate.Key, c3Migrate.VersionID))
+	postSnapKey := string(fsm.keys.PendingMigrationKey("snap-bkt", "post-snap", "v1"))
 
 	c1 := noOp()
 	c2 := noOp()
@@ -325,10 +317,8 @@ func TestApplyActor_SnapshotIsBatchBarrier(t *testing.T) {
 		"pre-snapshot state must be wiped by Restore")
 	require.NotContains(t, state, string(fsm.keys.ObjectMetaKey("snap-bkt", "pre2")),
 		"pre-snapshot state must be wiped by Restore")
-	// The post-snapshot command's apply MUST have mutated state: its
-	// PendingMigrationKey must be present. This fails if c3's apply were dropped.
-	require.Contains(t, state, postSnapKey,
-		"post-snapshot command must be applied and mutate FSM state (not silently dropped)")
+	require.NotContains(t, state, postSnapKey,
+		"retired migration replay must not create pending-migration state")
 	require.Equal(t, uint64(4), b.lastApplied.Load())
 }
 

@@ -2,8 +2,6 @@ package cluster
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -113,7 +111,7 @@ func defaultFakeBalancerCfg() *fakeBalancerCfg {
 	f := &fakeBalancerCfg{
 		enabled:             true,
 		warmupTimeout:       50 * time.Millisecond,
-		migrationRate:       100, // migrations per second in tests
+		migrationRate:       100, // legacy inert knob
 		leaderTenureMin:     0,   // no tenure requirement in tests
 		migrationMaxRetries: int32(def.MigrationMaxRetries),
 		migrationPendingTTL: def.MigrationPendingTTL,
@@ -146,7 +144,7 @@ func TestBalancerProposer_NoActionWhenBalanced(t *testing.T) {
 	assert.Empty(t, node.proposed, "should not propose when disk diff < 20%")
 }
 
-func TestBalancerProposer_ProposesMigrationWhenImbalanced(t *testing.T) {
+func TestBalancerProposer_DiskSkewActivatesWithoutMigrationProposal(t *testing.T) {
 	store := gossip.NewNodeStatsStore(1 * time.Minute)
 	store.Set(gossip.NodeStats{NodeID: "node-a", DiskUsedPct: 80.0, DiskAvailBytes: 10 << 30})
 	store.Set(gossip.NodeStats{NodeID: "node-b", DiskUsedPct: 40.0, DiskAvailBytes: 100 << 30}) // 40% diff
@@ -155,14 +153,10 @@ func TestBalancerProposer_ProposesMigrationWhenImbalanced(t *testing.T) {
 	cfg := testBalancerConfig()
 
 	p := NewBalancerProposer("node-a", store, node, cfg)
-	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
 	p.tickOnce()
 
-	require.NotEmpty(t, node.proposed, "should propose migration when imbalanced")
-
-	cmd, err := DecodeCommand(node.proposed[0])
-	require.NoError(t, err)
-	assert.Equal(t, CmdMigrateShard, cmd.Type)
+	assert.True(t, p.Active(), "disk skew should still enter active hysteresis")
+	assert.Empty(t, node.proposed, "retired shard migration must not propose raft commands")
 }
 
 func TestBalancerProposer_OnlyLeaderProposes(t *testing.T) {
@@ -205,13 +199,12 @@ func TestBalancerProposer_WarmupBypassAfterTimeout(t *testing.T) {
 	cfg.warmupTimeout = 1 * time.Millisecond // immediate timeout
 
 	p := NewBalancerProposer("node-a", store, node, cfg)
-	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
 	time.Sleep(5 * time.Millisecond) // let warm-up timeout pass
 
 	p.tickOnce()
 
-	// With available peers showing 40% imbalance, should propose
-	require.NotEmpty(t, node.proposed, "should proceed after warm-up timeout")
+	assert.True(t, p.Active(), "should proceed after warm-up timeout")
+	assert.Empty(t, node.proposed, "retired shard migration must not propose raft commands")
 }
 
 func TestBalancerProposer_HysteresisStopsAtLowThreshold(t *testing.T) {
@@ -230,27 +223,6 @@ func TestBalancerProposer_HysteresisStopsAtLowThreshold(t *testing.T) {
 
 	assert.Empty(t, node.proposed, "should stop migration when diff < 5% (hysteresis)")
 	assert.False(t, p.active.Load(), "active flag should be cleared below stop threshold")
-}
-
-func TestBalancerProposer_MigrationTargetIsLightestNode(t *testing.T) {
-	store := gossip.NewNodeStatsStore(1 * time.Minute)
-	store.Set(gossip.NodeStats{NodeID: "node-a", DiskUsedPct: 80.0, DiskAvailBytes: 10 << 30})
-	store.Set(gossip.NodeStats{NodeID: "node-b", DiskUsedPct: 60.0, DiskAvailBytes: 50 << 30})
-	store.Set(gossip.NodeStats{NodeID: "node-c", DiskUsedPct: 30.0, DiskAvailBytes: 200 << 30}) // lightest
-
-	node := &mockRaftNode{state: 2, nodeID: "node-a", peerIDs: []string{"node-b", "node-c"}}
-	cfg := testBalancerConfig()
-
-	p := NewBalancerProposer("node-a", store, node, cfg)
-	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
-	p.tickOnce()
-
-	require.NotEmpty(t, node.proposed)
-	cmd, err := DecodeCommand(node.proposed[0])
-	require.NoError(t, err)
-	migrate, err := decodeMigrateShardCmd(cmd.Data)
-	require.NoError(t, err)
-	assert.Equal(t, "node-c", migrate.DstNode, "should migrate to lightest node")
 }
 
 // --- selectLightestPeer tests ---
@@ -414,7 +386,6 @@ func TestBalancerProposer_GracePeriod_RelaxesTrigger(t *testing.T) {
 	cfg := testBalancerConfig() // grace period inherits 10m default from DefaultBalancerConfig
 
 	p := NewBalancerProposer("node-a", store, node, cfg)
-	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
 	p.tickOnce()
 
 	assert.Empty(t, node.proposed, "25% imbalance below relaxed 30% trigger during grace period: no proposal expected")
@@ -431,10 +402,10 @@ func TestBalancerProposer_GracePeriod_FiresAboveRelaxedTrigger(t *testing.T) {
 	cfg := testBalancerConfig()
 
 	p := NewBalancerProposer("node-a", store, node, cfg)
-	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
 	p.tickOnce()
 
-	assert.NotEmpty(t, node.proposed, "40% imbalance exceeds relaxed 30% trigger: proposal expected")
+	assert.True(t, p.Active(), "40% imbalance exceeds relaxed 30% trigger")
+	assert.Empty(t, node.proposed, "retired shard migration must not propose raft commands")
 }
 
 func TestBalancerProposer_GracePeriod_ExpiredNodeUseNormalTrigger(t *testing.T) {
@@ -449,36 +420,13 @@ func TestBalancerProposer_GracePeriod_ExpiredNodeUseNormalTrigger(t *testing.T) 
 	cfg := testBalancerConfig()
 
 	p := NewBalancerProposer("node-a", store, node, cfg)
-	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
 	p.tickOnce()
 
-	assert.NotEmpty(t, node.proposed, "grace period expired: normal 20% trigger applies, 25% should fire")
+	assert.True(t, p.Active(), "grace period expired: normal 20% trigger applies, 25% should fire")
+	assert.Empty(t, node.proposed, "retired shard migration must not propose raft commands")
 }
 
-// TestBalancerProposer_InflightDedup verifies that the same object is not
-// proposed again on the next tick while a migration is already in flight.
-func TestBalancerProposer_InflightDedup(t *testing.T) {
-	store := gossip.NewNodeStatsStore(1 * time.Minute)
-	store.Set(gossip.NodeStats{NodeID: "node-a", DiskUsedPct: 80})
-	store.Set(gossip.NodeStats{NodeID: "node-b", DiskUsedPct: 10})
-
-	node := &mockRaftNode{state: 2, nodeID: "node-a", peerIDs: []string{"node-b"}}
-	cfg := testBalancerConfig()
-	p := NewBalancerProposer("node-a", store, node, cfg)
-	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
-
-	// First tick: migration proposed and added to inflight.
-	p.tickOnce()
-	require.Len(t, node.proposed, 1, "first tick must propose")
-
-	// Second tick: same object still in inflight → must be skipped.
-	p.tickOnce()
-	assert.Len(t, node.proposed, 1, "second tick must not re-propose while migration is inflight")
-}
-
-// TestBalancerProposer_ConcurrentStatusAndNotify verifies that concurrent Status()
-// and NotifyMigrationDone() calls do not race with each other or the actor loop.
-func TestBalancerProposer_ConcurrentStatusAndNotify(t *testing.T) {
+func TestBalancerProposer_ConcurrentStatus(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	store := gossip.NewNodeStatsStore(1 * time.Minute)
@@ -487,13 +435,6 @@ func TestBalancerProposer_ConcurrentStatusAndNotify(t *testing.T) {
 	go p.Run(ctx)
 
 	var wg sync.WaitGroup
-	for range 10 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			p.NotifyMigrationDone("bkt", "key", "v1")
-		}()
-	}
 	for range 10 {
 		wg.Add(1)
 		go func() {
@@ -519,30 +460,11 @@ func TestBalancerProposer_StopIdempotent(t *testing.T) {
 	})
 }
 
-// TestLocalObjectPicker_NestedKey verifies that PickObjectOnSrcNode finds objects
-// whose S3 key contains '/' (stored as nested directories by ShardService).
-func TestLocalObjectPicker_NestedKey(t *testing.T) {
-	dir := t.TempDir()
-	// Simulate ShardService on-disk layout: {shardsDir}/{bucket}/{key}/shard_0
-	// Key "photos/2024/img.jpg" → nested dirs
-	keyPath := filepath.Join(dir, "mybucket", "photos", "2024", "img.jpg")
-	require.NoError(t, os.MkdirAll(keyPath, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(keyPath, "shard_0"), []byte("data"), 0o644))
-
-	picker := NewLocalObjectPicker(dir)
-	bucket, key, versionID, ok := picker.PickObjectOnSrcNode("any", nil)
-
-	require.True(t, ok, "should find the nested-key object")
-	assert.Equal(t, "mybucket", bucket)
-	assert.Equal(t, filepath.Join("photos", "2024", "img.jpg"), key)
-	assert.Empty(t, versionID)
-}
-
 // --- Hot-reload tests (Task 14) ---
 
 // TestBalancer_HotReload_TriggerPct verifies that mutating the cluster-config
 // fake mid-run changes the balancer's hysteresis behavior on the next tick.
-// Start with a very high trigger (no migration), then lower it — the balancer
+// Start with a very high trigger (inactive), then lower it — the balancer
 // should activate.
 func TestBalancer_HotReload_TriggerPct(t *testing.T) {
 	store := gossip.NewNodeStatsStore(1 * time.Minute)
@@ -557,7 +479,6 @@ func TestBalancer_HotReload_TriggerPct(t *testing.T) {
 	cfg.warmupTimeout = 1 * time.Millisecond // skip warmup
 
 	p := NewBalancerProposer("node-a", store, node, cfg)
-	p.SetObjectPicker(&mockObjectPicker{bucket: "b", key: "k", ok: true})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
