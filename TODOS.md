@@ -326,10 +326,11 @@ surfaced the items below. None block; tracked for cleanup.
   wired into CI, switch these to `//lint:ignore U1000 <reason>` for parity, or accept the noise. No
   code change otherwise — recorded so the next /health run does not misread these as a regression.
 
-- **[P4][optional] ~18 ST1005 error-string style nits** (capitalized / trailing-punctuation error
-  strings in `kek_rotation_leader.go`, `rotation_state.go`, `preflight_errors.go`, `dek_keeper_*.go`,
-  `encrypt/keystore.go`, `iam/oidc/config.go`) not gated by `make lint`. Enable golangci `stylecheck`
-  to gate them going forward, or leave as-is.
+- **[P4][optional] ST1005 error-string style nits** not gated by `make lint`. The `encrypt/keystore.go`
+  and `iam/oidc/config.go` trailing-punctuation nits were fixed; the remaining ones live in
+  `internal/cluster` rotation/DEK files (`kek_rotation_leader.go`, `rotation_state.go`,
+  `preflight_errors.go`, `dek_keeper_*.go`) which overlap the active decompose fleet — clear them once
+  it drains. Enable golangci `stylecheck` to gate them going forward, or leave as-is.
 
 ### ROADMAP v2 retirement — remaining deferred / unverified items (2026-06-25)
 

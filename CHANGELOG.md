@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.709.0] - 2026-06-26
+
+### Changed
+- **Internal style fix, no behavior change.** Dropped trailing punctuation from two error-string
+  messages flagged by staticcheck ST1005 (`encrypt` legacy-KEK boot error, `iam/oidc` `group_prefix`
+  validation error). Wording/meaning preserved; the sentinel error identity is unchanged.
+
 ## [0.0.708.0] - 2026-06-26
 
 ### Changed
