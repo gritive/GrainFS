@@ -225,8 +225,8 @@ Deferred items:
     normalizing keys kept bypassing it; delete-time liveness makes all write-path holes moot. ★Safety
     relies on getShardDir/ShardPathUnderDataDir per-bucket containment (parsed bucket == physical owner ==
     liveness lookup target). new metric `grainfs_scrub_segstaging_reclaimed_total`.
-  - **PR3 (this item, P3):** gap/perf — promote-fanout RPC count, empty `.segstaging/<txn>` parent-dir
-    cleanup after leaf reclaim.
+  - **PR3 (this item, P3):** gap/perf — promote-fanout RPC count. Empty `.segstaging/<txn>`
+    parent-dir cleanup after leaf reclaim is fixed in v0.0.731.0.
 - **[P3][known-tradeoff] Coalesced orphans in a bucket switched to versioning-Enabled are not
   reclaimed.** `hasLiveCoalescedRef` gates on `blobAuthReadOn` and fails closed (keep) for Enabled
   buckets, so coalesced orphans created during a bucket's prior Unversioned/Suspended life leak after

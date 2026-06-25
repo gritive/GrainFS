@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gritive/GrainFS/internal/metrics"
@@ -280,8 +281,8 @@ func (b *DistributedBackend) walkOneShardRoot(
 			//      uncertain → keep (fail-closed).
 			//
 			// Reclaim is a DIRECT os.RemoveAll — NOT routed through fn/DeleteOrphanDir, which
-			// reconfirms via a parseable full-object key that a real .segstaging leaf is not. The
-			// empty <txn>/ parent dir is left behind (negligible inode residual; cleaned by PR3).
+			// reconfirms via a parseable full-object key that a real .segstaging leaf is not.
+			// After the leaf is gone, remove its empty <txn>/ parent dir best-effort.
 			if strings.Contains(rel, "/segments/") {
 				return filepath.SkipDir // chunked user object keyed under .segstaging → keep
 			}
@@ -321,6 +322,7 @@ func (b *DistributedBackend) walkOneShardRoot(
 				stopErr = fmt.Errorf("reclaim staging %q: %w", p, rerr)
 				return filepath.SkipDir
 			}
+			removeEmptySegStagingTxnDir(p)
 			metrics.SegStagingReclaimed.Inc()
 			return filepath.SkipDir // reclaimed → never descend past a removed leaf
 		}
@@ -380,6 +382,13 @@ func (b *DistributedBackend) walkOneShardRoot(
 		return fmt.Errorf("walk shard root %s: %w", dataDir, walkErr)
 	}
 	return stopErr
+}
+
+func removeEmptySegStagingTxnDir(stagingLeaf string) {
+	parent := filepath.Dir(stagingLeaf)
+	if err := os.Remove(parent); err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ENOTEMPTY) {
+		return
+	}
 }
 
 // classifyShardDir reports whether dir entries contain ≥1 shard_<N> file, any

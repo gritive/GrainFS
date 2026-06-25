@@ -11,6 +11,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -252,8 +253,10 @@ func TestWalkOrphanShards_SegStagingAgedOut(t *testing.T) {
 	// Old (abandoned) staged leaf: backdated past the generous staging floor. Derive
 	// from the constant so it tracks any future tuning (never silently drops under).
 	old := writeShardLeaf(t, root, "bkt/.segstaging/txnOld/blobOld", []int{0}, segStagingReclaimAge+time.Hour)
+	oldTxn := filepath.Dir(old)
 	// Recent staged leaf: just written, could be a live in-flight PUT.
 	recent := writeShardLeaf(t, root, "bkt/.segstaging/txnNew/blobNew", []int{0}, 0)
+	recentTxn := filepath.Dir(recent)
 	// Mid-aged staged leaf: older than the per-shard floor (minOrphanShardAge ~466s,
 	// via oldEnough) but well under segStagingReclaimAge (~24h). The exact regression
 	// the reviewer flagged: a large in-flight PUT whose early segment was staged minutes
@@ -265,8 +268,12 @@ func TestWalkOrphanShards_SegStagingAgedOut(t *testing.T) {
 
 	require.NoDirExists(t, old,
 		"abandoned (old) .segstaging staged leaf must be reclaimed (age-out)")
+	require.NoDirExists(t, oldTxn,
+		"empty .segstaging transaction parent must be removed after its last staged leaf is reclaimed")
 	require.DirExists(t, recent,
 		"recent .segstaging staged leaf must be kept (could be a live in-flight PUT)")
+	require.DirExists(t, recentTxn,
+		"non-empty .segstaging transaction parent must be kept")
 	require.DirExists(t, midAge,
 		"staged leaf older than the per-shard floor but younger than segStagingReclaimAge "+
 			"must be kept (could be a large in-flight PUT) — the per-shard cutoff would wrongly reclaim it")
