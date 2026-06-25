@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.696.0] - 2026-06-25
+
+### Changed
+- **Performance: stream the sized EC shard write instead of buffering the whole plaintext shard.**
+  Every sized EC shard write (large PUT, multipart Complete, server-side COPY) buffered the plaintext
+  shard as a `[]byte` (`readShardPayload`) and then re-encoded it into the encrypted payload — two
+  whole-shard buffers per shard. The sized path now streams the body straight into the encoder
+  (`writeLocalShardAADStream` / `EncodeEncryptedShardStreamToBuffer`), dropping the plaintext buffer;
+  a bounded counting read still rejects a short or oversized body so a truncated shard fails loudly.
+  Measured: a cluster COPY of a 16 MiB object drops from ~84 MB to ~58 MB allocated per call (−31%);
+  an EC multipart Complete of a 32 MiB object from ~142 MB to ~91 MB (−36%). The encrypted payload
+  still materializes for the shard-file write contract — that residual is unchanged. No API, wire, or
+  on-disk format change.
+
 ## [0.0.695.0] - 2026-06-25
 
 ### Changed

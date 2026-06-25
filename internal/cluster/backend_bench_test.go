@@ -18,21 +18,24 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-func newECBenchmarkBackend(b *testing.B) *DistributedBackend {
-	b.Helper()
+// newECBenchmarkBackend builds an all-local EC 4+2 DistributedBackend. It takes
+// clusterTestTB so both benchmarks (*testing.B) and round-trip tests (*testing.T)
+// can exercise the same EC write/read wiring.
+func newECBenchmarkBackend(tb clusterTestTB) *DistributedBackend {
+	tb.Helper()
 
-	bk := newTestDistributedBackend(b)
+	bk := newTestDistributedBackend(tb)
 	cfg := ECConfig{DataShards: 4, ParityShards: 2}
 	bk.SetECConfig(cfg)
 
-	keeper, clusterID := testDEKKeeper(b)
-	svc := NewShardService(bk.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(b, keeper, clusterID))
+	keeper, clusterID := testDEKKeeper(tb)
+	svc := NewShardService(bk.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(tb, keeper, clusterID))
 	allNodes := make([]string, cfg.NumShards())
 	for i := range allNodes {
 		allNodes[i] = bk.selfAddr
 	}
 	bk.SetShardService(svc, allNodes)
-	require.True(b, bk.ECActive(), "benchmark setup must exercise the EC path")
+	require.True(tb, bk.ECActive(), "EC setup must exercise the EC path")
 	return bk
 }
 
