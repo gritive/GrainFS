@@ -82,15 +82,17 @@ func TestScanObjectsBlobAuthOn(t *testing.T) {
 		require.NotContains(t, got, "k", "a non-EC object has no EC shards to scrub")
 	})
 
-	t.Run("EC legacy-bare carve-out → record", func(t *testing.T) {
+	t.Run("EC per-version blob → record", func(t *testing.T) {
 		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "b"))
-		// Legacy-bare EC record (no lat:, not appendable/coalesced) stays FSM-authoritative.
-		seedFSMObject(t, b, "b", "lk", "", objectMeta{Key: "lk", ETag: "bare", ECData: 4, ECParity: 2}, false)
 		setVersioningForTest(t, b, "b", "Enabled")
+		// EC per-version blob (4+2) is the blob authority and must be scrubbed.
+		seedVersionBlob(t, b, "b", "lk", vidA1, PutObjectMetaCmd{
+			ETag: "bare", ECData: 4, ECParity: 2, NodeIDs: []string{b.currentSelfAddr()},
+		})
 
 		got := collectScanObjectRecs(t, b, "b")
-		require.Contains(t, got, "lk", "EC legacy-bare carve-out is scrubbed")
+		require.Contains(t, got, "lk", "EC per-version blob is scrubbed")
 		require.Equal(t, 4, got["lk"].DataShards)
 		require.Equal(t, 2, got["lk"].ParityShards)
 	})

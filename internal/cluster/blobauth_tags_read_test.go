@@ -66,13 +66,14 @@ func TestGetObjectTags_BlobAuthOn_BlobDerive(t *testing.T) {
 		require.Nil(t, tags)
 	})
 
-	t.Run("appendable carve-out FSM Tags", func(t *testing.T) {
+	t.Run("appendable carve-out blob Tags", func(t *testing.T) {
 		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "ba"))
-		seedFSMObject(t, b, "ba", "k", "v1", objectMeta{
-			Key: "k", ETag: "e", IsAppendable: true,
-			Tags: []storage.Tag{{Key: "ap", Value: "1"}},
-		}, true)
+		seedVersionBlob(t, b, "ba", "k", "v1", PutObjectMetaCmd{
+			ETag: "e", IsAppendable: true,
+			Tags:    []storage.Tag{{Key: "ap", Value: "1"}},
+			NodeIDs: []string{b.currentSelfAddr()},
+		})
 		setVersioningForTest(t, b, "ba", "Enabled")
 
 		tags, err := b.GetObjectTags("ba", "k", "")
@@ -80,14 +81,15 @@ func TestGetObjectTags_BlobAuthOn_BlobDerive(t *testing.T) {
 		require.Equal(t, []storage.Tag{{Key: "ap", Value: "1"}}, tags)
 	})
 
-	t.Run("coalesced carve-out FSM Tags", func(t *testing.T) {
+	t.Run("coalesced carve-out blob Tags", func(t *testing.T) {
 		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "bc"))
-		seedFSMObject(t, b, "bc", "k", "v1", objectMeta{
-			Key: "k", ETag: "e",
+		seedVersionBlob(t, b, "bc", "k", "v1", PutObjectMetaCmd{
+			ETag: "e", IsAppendable: true,
 			Coalesced: []CoalescedShardRef{{CoalescedID: "c1", Size: 10}},
 			Tags:      []storage.Tag{{Key: "co", Value: "1"}},
-		}, true)
+			NodeIDs:   []string{b.currentSelfAddr()},
+		})
 		setVersioningForTest(t, b, "bc", "Enabled")
 
 		tags, err := b.GetObjectTags("bc", "k", "")
@@ -95,14 +97,14 @@ func TestGetObjectTags_BlobAuthOn_BlobDerive(t *testing.T) {
 		require.Equal(t, []storage.Tag{{Key: "co", Value: "1"}}, tags)
 	})
 
-	t.Run("legacy bare-unversioned carve-out FSM Tags", func(t *testing.T) {
+	t.Run("legacy bare-unversioned carve-out latest-only blob Tags", func(t *testing.T) {
 		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "bl"))
-		// bare obj: record, NO lat: pointer, not appendable/coalesced.
-		seedFSMObject(t, b, "bl", "k", "", objectMeta{
-			Key: "k", ETag: "e",
-			Tags: []storage.Tag{{Key: "lg", Value: "1"}},
-		}, false)
+		// Non-versioned object: tags live on the latest-only quorum-meta blob.
+		seedLatestBlob(t, b, "bl", "k", PutObjectMetaCmd{
+			ETag: "e", Tags: []storage.Tag{{Key: "lg", Value: "1"}},
+			NodeIDs: []string{b.currentSelfAddr()},
+		})
 
 		tags, err := b.GetObjectTags("bl", "k", "")
 		require.NoError(t, err)
@@ -159,19 +161,20 @@ func TestGetObjectTags_BlobAuthOn_BlobDerive(t *testing.T) {
 	})
 }
 
-// TestGetObjectTags_BlobAuthOff_ByteIdenticalFSM proves the off (default) path
-// is the unchanged FSM read: a plain versioned FSM record's Tags are returned,
-// and a missing record is ErrObjectNotFound.
-func TestGetObjectTags_BlobAuthOff_ByteIdenticalFSM(t *testing.T) {
+// TestGetObjectTags_BlobAuthOff_LatestOnlyBlob proves the off (default,
+// non-versioned) path reads tags from the latest-only quorum-meta blob (the
+// non-versioned authority), and a missing record is ErrObjectNotFound.
+func TestGetObjectTags_BlobAuthOff_LatestOnlyBlob(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("plain versioned FSM Tags returned (off)", func(t *testing.T) {
+	t.Run("latest-only blob Tags returned (off)", func(t *testing.T) {
 		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "off"))
-		seedFSMObject(t, b, "off", "k", "v1", objectMeta{
-			Key: "k", ETag: "e", Tags: []storage.Tag{{Key: "x", Value: "1"}},
-		}, false)
-		tags, err := b.GetObjectTags("off", "k", "v1")
+		seedLatestBlob(t, b, "off", "k", PutObjectMetaCmd{
+			ETag: "e", Tags: []storage.Tag{{Key: "x", Value: "1"}},
+			NodeIDs: []string{b.currentSelfAddr()},
+		})
+		tags, err := b.GetObjectTags("off", "k", "")
 		require.NoError(t, err)
 		require.Equal(t, []storage.Tag{{Key: "x", Value: "1"}}, tags)
 	})

@@ -11,7 +11,6 @@ package cluster
 //   fail decode before any DropPrefix; pre-existing state intact.
 
 import (
-	"context"
 	"path/filepath"
 	"testing"
 
@@ -77,45 +76,10 @@ func TestSharedFSM_RestartPersistence(t *testing.T) {
 	}))
 	assert.NotEqual(t, valA, valB, "A-obj1 and B-obj1 values must be distinct after restart")
 
-	// Backend-level scoping: A's backend sees only A's objects; B's backend
-	// knows nothing about A's bucket.
-	nodeA, _ := newTestNodeForSharedDB(t, "restart-nodeA")
-	backendA, err := NewDistributedBackend(t.TempDir(), badgermeta.Wrap(db2), nodeA, ksA, true)
-	require.NoError(t, err)
-	stopA := make(chan struct{})
-	go backendA.RunApplyLoop(stopA)
-	t.Cleanup(func() { close(stopA) })
-
-	nodeB, _ := newTestNodeForSharedDB(t, "restart-nodeB")
-	backendB, err := NewDistributedBackend(t.TempDir(), badgermeta.Wrap(db2), nodeB, ksB, true)
-	require.NoError(t, err)
-	stopB := make(chan struct{})
-	go backendB.RunApplyLoop(stopB)
-	t.Cleanup(func() { close(stopB) })
-
-	ctx := context.Background()
-
-	// HeadBucket reads MetaBucketStore (sole authority since Task 12). Each
-	// backend's MBS knows only its own bucket, which also proves group scoping:
-	// B has no record of bA.
-	seedBucketsInMBS(t, backendA, "bA")
-	seedBucketsInMBS(t, backendB, "bB")
-
-	// Phase 4: LIST uses quorum meta (shardSvc path). Shared-FSM backends have
-	// no shardSvc, so scoped visibility is proved via HeadObject (BadgerDB path).
-
-	// A's backend sees obj1 + obj2 in bA.
-	objA1, _, err := backendA.headObjectMeta(ctx, "bA", "obj1")
-	require.NoError(t, err, "A backend must see obj1 after restart")
-	assert.Equal(t, "A-payload", objA1.ETag)
-
-	objA2, _, err := backendA.headObjectMeta(ctx, "bA", "obj2")
-	require.NoError(t, err, "A backend must see obj2 after restart")
-	assert.Equal(t, "A-payload2", objA2.ETag)
-
-	// B's backend must not find bA's objects (bA belongs to group A).
-	_, _, err = backendB.headObjectMeta(ctx, "bA", "obj1")
-	assert.Error(t, err, "B backend must not find A's objects after restart")
+	// Backend-level HeadObject scoping was removed: object metadata is no longer
+	// read from the shared FSM DB (it is blob-resident under blob-primary). The
+	// raw group-scoped key persistence asserted above is the durable FSM-keyspace
+	// invariant this test guards.
 }
 
 // TestSharedFSM_RestoreCrashMidway_SelfHealsOnBoot proves that if the process

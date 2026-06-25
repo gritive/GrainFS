@@ -3,12 +3,8 @@ package cluster
 // Scrubbable interface implementation for DistributedBackend. Exposes the
 // scrubber.ShardOwner, scrubber.ShardRepairer, and related contracts so the
 // cluster-mode scrubber can verify locally-assigned shards and repair missing
-// ones via RepairShard.
-//
-// Open issues:
-//   - IterObjectMetas parses versioned `obj:{bucket}/{key}/{versionID}` keys
-//     with a first-slash split, folding the versionID into the key. ScanObjects
-//     sidesteps the issue entirely by iterating `lat:` pointers instead.
+// ones via RepairShard. The scrub object set is derived from the off-raft
+// quorum-meta blob store (scanObjectsBlobAuth / scanQuorumMeta), not the FSM.
 
 import (
 	"context"

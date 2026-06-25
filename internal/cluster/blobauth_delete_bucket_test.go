@@ -39,7 +39,9 @@ func TestDeleteBucketEmptinessBlobAuthOn(t *testing.T) {
 		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "bapp"))
 		setVersioningForTest(t, b, "bapp", "Enabled")
-		seedFSMObject(t, b, "bapp", "ak", vidA1, objectMeta{Key: "ak", ETag: "app", IsAppendable: true}, true)
+		seedVersionBlob(t, b, "bapp", "ak", vidA1, PutObjectMetaCmd{
+			ETag: "app", IsAppendable: true, NodeIDs: []string{b.currentSelfAddr()},
+		})
 
 		err := b.DeleteBucket(ctx, "bapp")
 		require.ErrorIs(t, err, storage.ErrBucketNotEmpty)
@@ -68,9 +70,12 @@ func TestDeleteBucketEmptinessBlobAuthOn(t *testing.T) {
 	})
 
 	t.Run("blob-authority read error → propagated (fail closed)", func(t *testing.T) {
-		b, db := newTestDistributedBackendWithDB(t)
+		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "berr"))
-		require.NoError(t, db.Close())
+		setVersioningForTest(t, b, "berr", "Enabled")
+		// A corrupt per-version blob must fail the emptiness probe closed — a read
+		// error must NOT be mistaken for "empty" and silently delete the bucket.
+		seedCorruptVersionBlob(t, b, "berr", "k", vidA1)
 
 		err := b.DeleteBucket(ctx, "berr")
 		require.Error(t, err)

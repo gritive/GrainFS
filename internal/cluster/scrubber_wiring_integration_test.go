@@ -86,7 +86,15 @@ var _ = Describe("Scrubber wiring integration", func() {
 			tc := tc
 			By(tc.name)
 			if tc.nodes != nil {
-				seedPlacementMeta(GinkgoT(), b, tc.bucket, tc.key, testVersionID, tc.nodes, tc.ecData, tc.ecParity)
+				// Placement (NodeIDs) lives on the latest-only quorum-meta blob —
+				// the non-versioned object authority readPlacementMeta resolves.
+				blob, err := encodeQuorumMetaBlob(PutObjectMetaCmd{
+					Bucket: tc.bucket, Key: tc.key, Size: 1,
+					ContentType: "application/octet-stream", ETag: "etag", ModTime: 1,
+					ECData: tc.ecData, ECParity: tc.ecParity, NodeIDs: tc.nodes,
+				})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(b.shardSvc.writeQuorumMetaLocal(tc.bucket, tc.key, blob)).To(Succeed())
 			}
 			Expect(b.OwnedShards(tc.bucket, tc.key, testVersionID, tc.nodeID)).To(Equal(tc.want))
 		}

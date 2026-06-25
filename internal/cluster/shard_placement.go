@@ -214,16 +214,6 @@ func validateECRefPlacement(ecData, ecParity uint8, nodeIDs []string) bool {
 	return len(nodeIDs) == int(ecData)+int(ecParity)
 }
 
-// lastIndexByte mirrors strings.LastIndexByte without pulling the import.
-func lastIndexByte(s string, b byte) int {
-	for i := len(s) - 1; i >= 0; i-- {
-		if s[i] == b {
-			return i
-		}
-	}
-	return -1
-}
-
 // IterShardPlacements iterates every shard placement record in the FSM, invoking
 // fn with the bucket, key, and PlacementRecord for each. Iteration stops if fn
 // returns a non-nil error, which is propagated. Used by ShardPlacementMonitor
