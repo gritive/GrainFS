@@ -316,15 +316,6 @@ surfaced the items below. None block; tracked for cleanup.
   generic optional pre-check extension point. Left in place by the shim-removal PR to avoid touching
   the SA-bootstrap path inside a dead-code cleanup.
 
-- **[P3] `internal/transport/transport_shared.go:224-225` uses Go-deprecated raw EC crypto (SA1019).**
-  The deterministic-key derivation sets `priv.D` / `priv.PublicKey.X` / `priv.PublicKey.Y` via
-  `curve.ScalarBaseMult(k.Bytes())` to turn the cluster-PSK HKDF stream into a deterministic ECDSA
-  key. `priv.D`/`X`/`Y` are deprecated since Go 1.25/1.26 and `ScalarBaseMult` since Go 1.21. Migrate
-  to `crypto/ecdh` (`ecdh.Curve.NewPrivateKey(scalar)`). Security-sensitive (PSK-derived transport
-  identity) — preserve the exact scalar derivation + retry-on-zero-scalar loop and add a regression
-  vector pinning the derived key bytes. NOT caught by `make lint` (golangci's staticcheck subset
-  excludes SA1019 here), so it will not regress the lint gate.
-
 - **[P4] 54 unused test-helper symbols (staticcheck U1000) across `_test.go` files** (e2e 25,
   cluster 15, raft 6, scrubber 4, server 2, storage/lifecycle 2). golangci `unused` skips them
   (`tests: false`) so `make lint` stays green. Batch-removable dead test scaffolding; low risk.
