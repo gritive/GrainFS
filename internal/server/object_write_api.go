@@ -37,6 +37,15 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 		s.putObjectRetention(ctx, c)
 		return
 	}
+	// PUT /:bucket/:key?legal-hold has no dedicated route; without this dispatch it
+	// falls through to a plain PutObject and OVERWRITES the object body with the
+	// legal-hold XML (silent data corruption). Reject with 501. Placed after the
+	// isDegraded guard above so degraded nodes still return 503, and before the
+	// PutObject fall-through so the object is never mutated.
+	if c.QueryArgs().Has("legal-hold") {
+		s.putObjectLegalHold(ctx, c)
+		return
+	}
 
 	// Check if this is an UploadPart / UploadPartCopy request. Both carry
 	// uploadId+partNumber; UploadPartCopy is distinguished by x-amz-copy-source.
@@ -86,6 +95,15 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 	defer func() {
 		cluster.ObservePutTraceStage(ctx, cluster.PutTraceStageHTTPPutTotal, requestStart, cluster.PutTraceStageFields{})
 	}()
+
+	// PutObject carrying Object Lock headers (x-amz-object-lock-*) requests WORM
+	// semantics we do not implement; today they are silently ignored and the PUT
+	// succeeds (false success). Reject with 501 (fail-closed) on the plain
+	// PutObject path only — multipart/copy/append have already returned above.
+	if hasObjectLockHeaders(c) {
+		writeObjectLockNotImplemented(c)
+		return
+	}
 
 	prepareStart := time.Now()
 	systemMetadata, sseErr := parseObjectSSEHeaders(c)

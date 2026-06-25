@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.690.0] - 2026-06-25
+
+### Fixed
+- **Object Lock operations now fail closed (501 NotImplemented) instead of falsely succeeding.**
+  Object Lock / retention / legal-hold are not implemented, but several paths returned misleading
+  success: `PutObjectRetention` validated and then returned `200` without storing anything;
+  `GetBucketObjectLockConfiguration` advertised `Enabled`; and `GET ?retention`, `PUT/GET ?legal-hold`,
+  and `PutObject` carrying `x-amz-object-lock-*` headers had no dedicated routing, so they fell through
+  to plain GetObject/PutObject — returning object bytes as a "retention document" or, worst, silently
+  overwriting the object body with legal-hold XML (data corruption). All of these are now rejected with
+  `501 NotImplemented`, consistent with the existing SSE-C/KMS and lifecycle fail-closed convention. No
+  object is mutated on the legal-hold path. WORM/compliance support remains future work.
+
 ## [0.0.689.0] - 2026-06-25
 
 ### Fixed
