@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.694.0] - 2026-06-25
+
+### Changed
+- **Performance: cut allocation in the cluster EC shard-encode path (lower memory and GC pressure on
+  EC multipart Complete and large EC writes).** `EncodeEncryptedShard` sealed each 1 MiB chunk into a
+  freshly allocated slice, and its buffered callers (`writeLocalShardAAD`, the EC shard-file writer,
+  and `EncodeEncryptedShardBuffer`) collected the output in a `bytes.Buffer` that doubled from empty
+  on every write — so an EC multipart Complete re-encoded every shard with per-chunk sealed
+  allocations on top of a repeatedly-grown buffer. It now seals through the existing
+  `SealTo`/`SealAtGenTo` seam into one reused buffer and pre-sizes the output buffer to a guaranteed
+  upper bound (single allocation, no doubling); the on-disk output is byte-identical. Measured: an
+  encrypted EC multipart Complete of a 32 MiB object drops from ~231 MB to ~142 MB allocated per call
+  (−39%), a 10 MiB object from ~107 MB to ~71 MB (−34%). No API, wire, or on-disk format change.
+
 ## [0.0.693.0] - 2026-06-25
 
 ### Changed
