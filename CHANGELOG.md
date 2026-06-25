@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.691.0] - 2026-06-25
+
+### Changed
+- **Internal reliability change, no user-facing behavior change.** Chunked-PUT segment writes now
+  stage their erasure-coded shards in a per-node staging area (`.segstaging/<txn>/<blobID>`) and
+  promote (atomically rename) them to their final path only at commit time, right before the object
+  manifest is written (data-before-meta). Each shard is sealed with its FINAL logical key as
+  encryption AAD even while staged, so a post-promote read decrypts unchanged; the promote is
+  fail-closed and all-or-fail (a promote error aborts the commit and the staged/final shards are
+  reclaimed). GET/PUT remain byte-identical. This narrows the window in which an interrupted or
+  failed chunked write could leave orphaned segment shards in the final namespace — a mid-write
+  failure now strands shards under `.segstaging` instead. It does not fully close the orphan class:
+  a crash between promote and commit, or a concurrent-completer last-writer-wins loser, can still
+  leave final-path shards with no manifest reference (a disk leak, never data loss). A background
+  age-out reclaimer for `.segstaging` is follow-up work.
+
 ## [0.0.690.0] - 2026-06-25
 
 ### Fixed

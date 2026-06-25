@@ -52,6 +52,12 @@ type ecObjectWritePlan struct {
 	// SegmentIdx is the 0-based chunk index. Meaningful only when
 	// SegmentBlobID != "".
 	SegmentIdx int
+	// StagingTxnID, when non-empty, activates PR1 segment staging for this
+	// segment write: each shard's bytes land in the per-node staging dir
+	// (.segstaging/<StagingTxnID>/<SegmentBlobID>) while the AAD stays the FINAL
+	// shardKey, so a post-promote read decrypts correctly. Meaningful only when
+	// SegmentBlobID != "". Empty ⇒ legacy direct-to-final write.
+	StagingTxnID string
 }
 
 type ecObjectWriteResult struct {
@@ -110,6 +116,16 @@ func ecObjectSegmentShardKey(plan ecObjectWritePlan) string {
 	return plan.Key + "/segments/" + plan.SegmentBlobID
 }
 
+// stagingShardKey is the per-node STAGING physical shard key for this plan's
+// segment when PR1 staging is active, else "". Only segment writes
+// (SegmentBlobID set) with a StagingTxnID stage; whole-object EC writes never do.
+func (plan ecObjectWritePlan) stagingShardKey() string {
+	if plan.StagingTxnID == "" || plan.SegmentBlobID == "" {
+		return ""
+	}
+	return segmentStagingShardKey(plan.StagingTxnID, plan.SegmentBlobID)
+}
+
 // writeSegmentInput bundles the per-segment write parameters consumed by
 // writeOneSegment. Caller (clusterSegmentBackend.WriteSegment) buffers the
 // SegmentWriter chunk into Data; segments are ≤ DefaultChunkSize.
@@ -130,6 +146,9 @@ type writeSegmentInput struct {
 	// WeightedEnabled mirrors ClusterConfig.WeightedHRWEnabled(). When false the
 	// segment placement uses plain (unweighted) HRW regardless of Weights.
 	WeightedEnabled bool
+	// StagingTxnID propagates clusterSegmentBackend.stagingTxnID into the per-
+	// segment write plan (PR1 segment staging). Empty ⇒ legacy direct-to-final.
+	StagingTxnID string
 }
 
 // writeOneSegment is a thin wrapper around writeDataShards that fills in the
@@ -161,6 +180,7 @@ func (w ecObjectWriter) writeOneSegment(ctx context.Context, in writeSegmentInpu
 		Placement:        placement,
 		SegmentBlobID:    in.SegmentBlobID,
 		SegmentIdx:       in.SegmentIdx,
+		StagingTxnID:     in.StagingTxnID,
 	}
 	res, err := w.writeDataShards(ctx, plan, in.Data)
 	if err != nil {
@@ -218,12 +238,21 @@ func (w ecObjectWriter) writeShardReadersWithSize(
 	metricPath string,
 ) (ecObjectWriteResult, error) {
 	shardKey := ecObjectSegmentShardKey(plan)
+	// PR1 segment staging: when active, shards are written to the per-node staging
+	// path (stagingShardKey) while keeping shardKey (the FINAL path) as AAD. The
+	// write-failure cleanup must therefore target the path the bytes actually
+	// landed on — staging when active, final otherwise.
+	stagingShardKey := plan.stagingShardKey()
+	cleanupKey := shardKey
+	if stagingShardKey != "" {
+		cleanupKey = stagingShardKey
+	}
 	written := make(chan string, len(plan.Placement))
 
 	cleanup := func() {
 		close(written)
 		for node := range written {
-			_ = w.endpointFor(node).DeleteShards(ctx, plan.Bucket, shardKey)
+			_ = w.endpointFor(node).DeleteShards(ctx, plan.Bucket, cleanupKey)
 		}
 	}
 
@@ -233,7 +262,7 @@ func (w ecObjectWriter) writeShardReadersWithSize(
 		i, node := i, node
 		g.Go(func() error {
 			ep := w.endpointFor(node)
-			if werr := ep.WriteShardReader(gctx, plan.Bucket, shardKey, i, openShard, shardSize); werr != nil {
+			if werr := ep.WriteShardReader(gctx, plan.Bucket, shardKey, stagingShardKey, i, openShard, shardSize); werr != nil {
 				return &ecObjectShardWriteError{shardIdx: i, node: node, err: werr}
 			}
 			written <- node

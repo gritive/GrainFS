@@ -45,6 +45,7 @@ type clusterSegmentBackend struct {
 	writeSegmentFn    func(ctx context.Context, idx int, in writeSegmentInput) (PlacementRecord, string, string, error)
 	groupSelectorFn   func(bucket, key string, idx int, blobID string) (ShardGroupEntry, error)
 	deleteShardsFn    func(ctx context.Context, peer, bucket, shardKey string) error
+	promoteStagedFn   func(ctx context.Context, node, bucket, stagingKey, finalKey string) error
 	writeQuorumMetaFn func(ctx context.Context, cmd PutObjectMetaCmd) error
 	ecConfigFn        func() ECConfig
 	// peerWeightsFn returns the per-peer disk-capacity weight snapshot aligned
@@ -52,6 +53,14 @@ type clusterSegmentBackend struct {
 	// leaves it nil; the default routes through b.nodeStatsStore + b.clusterCfg.
 	peerWeightsFn func(peers []string) (weights []float64, enabled bool)
 	chunkSize     int
+
+	// stagingTxnID, when non-empty, activates PR1 segment staging: each segment's
+	// EC shards are written to a per-node staging dir (.segstaging/<stagingTxnID>/
+	// <blobID>) with the FINAL logical key as AAD, then promoted (renamed) to their
+	// final path right before the manifest commit (data-before-meta). Empty = legacy
+	// direct-to-final write. Set once per PUT (uploadID for multipart, a fresh
+	// UUIDv7 for simple chunked PUT).
+	stagingTxnID string
 }
 
 // segmentPlacement captures the post-write placement metadata for one
@@ -109,6 +118,7 @@ func (c *clusterSegmentBackend) WriteSegmentBytes(ctx context.Context, bucket, k
 		Data:            data,
 		Weights:         weights,
 		WeightedEnabled: weightedEnabled,
+		StagingTxnID:    c.stagingTxnID,
 	}
 	rec, _, blobID, werr := c.writeOne(ctx, idx, in)
 	if werr != nil {
@@ -229,6 +239,34 @@ func (c *clusterSegmentBackend) deleteShards(ctx context.Context, peer, bucket, 
 	return c.b.shardSvc.DeleteShards(ctx, peer, bucket, shardKey)
 }
 
+// promoteStagedShards renames a segment's staged shard dirs (stagingKey) to their
+// final path (finalKey) on node — the commit-time promote of PR1 segment staging.
+// Self is short-circuited to the local rename (no RPC to self); peers go through
+// the PromoteStagedShards RPC. The shards keep their final-key AAD (set at staged
+// write), so post-promote reads decrypt correctly.
+func (c *clusterSegmentBackend) promoteStagedShards(ctx context.Context, node, bucket, stagingKey, finalKey string) error {
+	if c.promoteStagedFn != nil {
+		return c.promoteStagedFn(ctx, node, bucket, stagingKey, finalKey)
+	}
+	if c.b.shardSvc == nil {
+		return fmt.Errorf("shard service not wired")
+	}
+	if node == c.b.currentSelfAddr() {
+		return c.b.shardSvc.PromoteLocalStagedShards(bucket, stagingKey, finalKey)
+	}
+	return c.b.shardSvc.PromoteStagedShards(ctx, node, bucket, stagingKey, finalKey)
+}
+
+// segmentStagingShardKey is the per-node STAGING physical shard key for a segment
+// blob: .segstaging/<txnID>/<blobID> (no "/segments/" — kept out of the final
+// namespace so the orphan-shard walker's wholesale skip and the PR2 age-out sweep
+// classify it cleanly). The shard lands on the SAME dataDir its final shard will
+// occupy (getShardDir keys the dataDir on shardIdx alone), so the promote rename
+// is intra-device and atomic.
+func segmentStagingShardKey(txnID, blobID string) string {
+	return ".segstaging/" + txnID + "/" + blobID
+}
+
 func chunkedMultipartCompleteChunkSize(defaultSize int) int {
 	if defaultSize <= 0 || defaultSize > defaultChunkedMultipartCompleteSize {
 		return defaultChunkedMultipartCompleteSize
@@ -290,6 +328,9 @@ func (b *DistributedBackend) putObjectChunked(
 		acl:          acl,
 		placements:   make([]segmentPlacement, numSegments),
 		chunkSize:    int(chunkSize),
+		// PR1 segment staging: a fresh per-PUT txn id isolates this write's in-flight
+		// segment shards under .segstaging until the commit-time promote.
+		stagingTxnID: uuidutil.MustNewV7(),
 	}
 	body, err := sp.Open()
 	if err != nil {
@@ -332,6 +373,9 @@ func (b *DistributedBackend) putMultipartObjectChunked(
 		sseAlgorithm: sseAlgorithm,
 		placements:   make([]segmentPlacement, numSegments),
 		chunkSize:    int(chunkSize),
+		// PR1 segment staging: the uploadID is the natural per-upload txn id, so
+		// concurrent/idempotent completers of the same upload share a staging dir.
+		stagingTxnID: uploadID,
 	}
 	body, err := manifest.Open()
 	if err != nil {
@@ -407,6 +451,17 @@ func runChunkedPutWithParts(
 			for _, node := range p.NodeIDs {
 				_ = csb.deleteShards(context.Background(), node, bucket, shardKey)
 			}
+			// PR1 staging: shards may still be at the staging path (write done,
+			// promote not reached or failed). Delete both — the promote fanout below
+			// is data-before-meta, so a not-committed object can have shards at
+			// staging (un-promoted) OR final (promoted then commit failed). Both
+			// deletes are idempotent no-ops when the path is absent.
+			if csb.stagingTxnID != "" {
+				stagingKey := segmentStagingShardKey(csb.stagingTxnID, p.BlobID)
+				for _, node := range p.NodeIDs {
+					_ = csb.deleteShards(context.Background(), node, bucket, stagingKey)
+				}
+			}
 		}
 	}()
 
@@ -437,6 +492,29 @@ func runChunkedPutWithParts(
 	if beforeCommit != nil {
 		if cerr := beforeCommit(); cerr != nil {
 			return nil, cerr
+		}
+	}
+
+	// 4b. PR1 segment staging promote (data-before-meta): the shards were written
+	// to per-node staging dirs; rename them to their final paths BEFORE the
+	// manifest commit so the committed meta only ever references shards already at
+	// their final location. All-or-fail: the first promote error aborts the commit,
+	// leaving committed=false so the cleanup defer reclaims both staging and final
+	// shards. The residual orphan window (promote succeeds, commit fails, OR a crash
+	// between promote and commit) leaves final-path shards no manifest references —
+	// a disk leak, not data loss; PR1 narrows the leak, it does not close the class.
+	if csb.stagingTxnID != "" {
+		for _, p := range csb.placements {
+			if p.BlobID == "" {
+				continue
+			}
+			stagingKey := segmentStagingShardKey(csb.stagingTxnID, p.BlobID)
+			finalKey := key + "/segments/" + p.BlobID
+			for _, node := range p.NodeIDs {
+				if perr := csb.promoteStagedShards(ctx, node, bucket, stagingKey, finalKey); perr != nil {
+					return nil, fmt.Errorf("promote staged segment shards (blob %s, node %s): %w", p.BlobID, node, perr)
+				}
+			}
 		}
 	}
 

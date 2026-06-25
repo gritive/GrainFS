@@ -15,6 +15,11 @@ import (
 // asserted without a real ShardService.
 type recordingShardStore struct {
 	calls []string
+	// stagedStagingKey / stagedFinalKey capture the last staged-write args so the
+	// endpoint-delegation tests can assert PR1 staging passes (path=staging,
+	// AAD=final) correctly across the local and remote seams.
+	stagedStagingKey string
+	stagedFinalKey   string
 }
 
 func (s *recordingShardStore) record(name string) { s.calls = append(s.calls, name) }
@@ -26,6 +31,13 @@ func (s *recordingShardStore) WriteLocalShardContext(context.Context, string, st
 
 func (s *recordingShardStore) WriteLocalShardStreamContext(_ context.Context, _ string, _ string, _ int, body io.Reader) error {
 	s.record("WriteLocalShardStreamContext")
+	_, _ = io.Copy(io.Discard, body)
+	return nil
+}
+
+func (s *recordingShardStore) WriteLocalShardStreamStagedContext(_ context.Context, _ string, stagingKey, finalKey string, _ int, body io.Reader) error {
+	s.record("WriteLocalShardStreamStagedContext")
+	s.stagedStagingKey, s.stagedFinalKey = stagingKey, finalKey
 	_, _ = io.Copy(io.Discard, body)
 	return nil
 }
@@ -57,6 +69,13 @@ func (s *recordingShardStore) WriteShard(context.Context, string, string, string
 
 func (s *recordingShardStore) WriteShardStream(_ context.Context, _ string, _ string, _ string, _ int, body io.Reader) error {
 	s.record("WriteShardStream")
+	_, _ = io.Copy(io.Discard, body)
+	return nil
+}
+
+func (s *recordingShardStore) WriteShardStreamStaged(_ context.Context, _ string, _ string, stagingKey, finalKey string, _ int, body io.Reader) error {
+	s.record("WriteShardStreamStaged")
+	s.stagedStagingKey, s.stagedFinalKey = stagingKey, finalKey
 	_, _ = io.Copy(io.Discard, body)
 	return nil
 }
@@ -128,7 +147,7 @@ func TestShardTargetLocalEndpointDelegatesToLocalMethods(t *testing.T) {
 		{
 			name: "buffered write -> WriteLocalShardContext",
 			call: func(t *testing.T, ep shardEndpoint) {
-				err := ep.WriteShardReader(context.Background(), "b", "k", 0,
+				err := ep.WriteShardReader(context.Background(), "b", "k", "", 0,
 					func(int) (io.Reader, error) { return strings.NewReader("x"), nil },
 					func(int) (int64, error) { return 1, nil })
 				require.NoError(t, err)
@@ -138,7 +157,7 @@ func TestShardTargetLocalEndpointDelegatesToLocalMethods(t *testing.T) {
 		{
 			name: "unknown-size write -> WriteLocalShardStreamContext",
 			call: func(t *testing.T, ep shardEndpoint) {
-				err := ep.WriteShardReader(context.Background(), "b", "k", 0,
+				err := ep.WriteShardReader(context.Background(), "b", "k", "", 0,
 					func(int) (io.Reader, error) { return strings.NewReader("x"), nil }, nil)
 				require.NoError(t, err)
 			},
@@ -199,7 +218,7 @@ func TestShardTargetRemoteEndpointDelegatesToRemoteMethods(t *testing.T) {
 		{
 			name: "buffered write -> WriteShard",
 			call: func(t *testing.T, ep shardEndpoint) {
-				err := ep.WriteShardReader(context.Background(), "b", "k", 0,
+				err := ep.WriteShardReader(context.Background(), "b", "k", "", 0,
 					func(int) (io.Reader, error) { return strings.NewReader("x"), nil },
 					func(int) (int64, error) { return 1, nil })
 				require.NoError(t, err)
@@ -209,7 +228,7 @@ func TestShardTargetRemoteEndpointDelegatesToRemoteMethods(t *testing.T) {
 		{
 			name: "unknown-size write -> WriteShardStream",
 			call: func(t *testing.T, ep shardEndpoint) {
-				err := ep.WriteShardReader(context.Background(), "b", "k", 0,
+				err := ep.WriteShardReader(context.Background(), "b", "k", "", 0,
 					func(int) (io.Reader, error) { return strings.NewReader("x"), nil }, nil)
 				require.NoError(t, err)
 			},
@@ -267,6 +286,50 @@ func TestShardTargetRemoteEndpointDelegatesToRemoteMethods(t *testing.T) {
 	}
 }
 
+// TestShardTargetStagedWriteRoutesAndPreservesAADKey pins the PR1 segment-staging
+// contract at the endpoint seam: a non-empty stagingShardKey must route to the
+// STAGED write method (never the legacy buffered/stream methods), and it must pass
+// the staging key as the PHYSICAL path while the shardKey stays the FINAL key used
+// as AAD. A swapped pair (staging used as AAD) would corrupt every staged read —
+// this is the swap guard.
+func TestShardTargetStagedWriteRoutesAndPreservesAADKey(t *testing.T) {
+	const (
+		finalKey   = "obj/segments/blob-1"
+		stagingKey = ".segstaging/txn-9/blob-1"
+	)
+
+	t.Run("local endpoint -> WriteLocalShardStreamStagedContext(staging, final)", func(t *testing.T) {
+		store := &recordingShardStore{}
+		ep := newECObjectWriter("self", store, nil).endpointFor("self")
+		require.True(t, ep.IsLocal())
+		// shardSize is non-nil and small: the legacy path would pick the buffered
+		// WriteLocalShardContext, so routing to the staged method proves staging wins.
+		err := ep.WriteShardReader(context.Background(), "b", finalKey, stagingKey, 0,
+			func(int) (io.Reader, error) { return strings.NewReader("payload"), nil },
+			func(int) (int64, error) { return int64(len("payload")), nil })
+		require.NoError(t, err)
+		require.Contains(t, store.calls, "WriteLocalShardStreamStagedContext")
+		require.NotContains(t, store.calls, "WriteLocalShardContext")
+		require.Equal(t, stagingKey, store.stagedStagingKey, "staging key must be the physical path")
+		require.Equal(t, finalKey, store.stagedFinalKey, "shardKey must remain the final AAD key")
+	})
+
+	t.Run("remote endpoint -> WriteShardStreamStaged(staging, final)", func(t *testing.T) {
+		store := &recordingShardStore{}
+		ep := remoteShardEndpoint{node: "peer", shards: store, writeAttempts: 1}
+		require.False(t, ep.IsLocal())
+		err := ep.WriteShardReader(context.Background(), "b", finalKey, stagingKey, 0,
+			func(int) (io.Reader, error) { return strings.NewReader("payload"), nil },
+			func(int) (int64, error) { return int64(len("payload")), nil })
+		require.NoError(t, err)
+		require.Contains(t, store.calls, "WriteShardStreamStaged")
+		require.NotContains(t, store.calls, "WriteShard")
+		require.NotContains(t, store.calls, "WriteShardStream")
+		require.Equal(t, stagingKey, store.stagedStagingKey, "staging key must be the physical path")
+		require.Equal(t, finalKey, store.stagedFinalKey, "finalKey must be the AAD key")
+	})
+}
+
 // TestShardTargetRemoteEndpointMarksPeerHealth pins the peerHealth contract:
 // remote success marks healthy, remote failure marks unhealthy, and the local
 // endpoint never marks (a node does not health-check itself).
@@ -274,7 +337,7 @@ func TestShardTargetRemoteEndpointMarksPeerHealth(t *testing.T) {
 	t.Run("remote write success marks healthy", func(t *testing.T) {
 		ph := &fakeECObjectPeerHealth{}
 		ep := remoteShardEndpoint{node: "peer", shards: &recordingShardStore{}, peerHealth: ph, writeAttempts: 1}
-		err := ep.WriteShardReader(context.Background(), "b", "k", 0,
+		err := ep.WriteShardReader(context.Background(), "b", "k", "", 0,
 			func(int) (io.Reader, error) { return strings.NewReader("x"), nil },
 			func(int) (int64, error) { return 1, nil })
 		require.NoError(t, err)
@@ -287,7 +350,7 @@ func TestShardTargetRemoteEndpointMarksPeerHealth(t *testing.T) {
 		writer := newECObjectWriter("self", &recordingShardStore{}, ph)
 		ep := writer.endpointFor("self")
 		require.True(t, ep.IsLocal())
-		err := ep.WriteShardReader(context.Background(), "b", "k", 0,
+		err := ep.WriteShardReader(context.Background(), "b", "k", "", 0,
 			func(int) (io.Reader, error) { return strings.NewReader("x"), nil },
 			func(int) (int64, error) { return 1, nil })
 		require.NoError(t, err)

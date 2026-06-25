@@ -384,6 +384,25 @@ func (s *ShardService) WriteShardStream(ctx context.Context, peer, bucket, key s
 	return nil
 }
 
+// WriteShardStreamStaged streams a shard to a remote node's STAGING physical path
+// (stagingKey) while the receiver seals it with finalKey as AAD (PR1 segment
+// staging). The wire carries finalKey in the request Key — so a legacy/AAD-by-key
+// receiver still derives the final AAD — and stagingKey as the StagingKey redirect.
+func (s *ShardService) WriteShardStreamStaged(ctx context.Context, peer, bucket, stagingKey, finalKey string, shardIdx int, body io.Reader) error {
+	peerAddr, err := s.resolvePeerAddress(peer)
+	if err != nil {
+		return err
+	}
+	if s.transport == nil {
+		return fmt.Errorf("shard service: no transport")
+	}
+	req := transport.ShardWriteRequest{Bucket: bucket, Key: finalKey, StagingKey: stagingKey, ShardIdx: shardIdx, Sealed: false}
+	if err := s.transport.ShardWrite(ctx, peerAddr, req, body); err != nil {
+		return fmt.Errorf("stream staged shard to %s: %w", peerAddr, err)
+	}
+	return nil
+}
+
 // SealedShardTrailerLen is the length of the completeness trailer appended to a
 // streamed sealed-shard body: an 8-byte big-endian count of the payload bytes
 // that precede it. The receiver requires it to reject a TRUNCATED body. Without
@@ -544,6 +563,39 @@ func (s *ShardService) DeleteShards(ctx context.Context, peer, bucket, key strin
 	return err
 }
 
+// PromoteStagedShards renames a segment's staged shard dirs (stagingKey) to their final path
+// (finalKey) on a remote node — the remote counterpart of PromoteLocalStagedShards. The single-Key
+// envelope carries stagingKey in Key and finalKey in Data. PR1 segment staging.
+func (s *ShardService) PromoteStagedShards(ctx context.Context, peer, bucket, stagingKey, finalKey string) error {
+	peerAddr, err := s.resolvePeerAddress(peer)
+	if err != nil {
+		return err
+	}
+	if s.transport == nil {
+		return fmt.Errorf("shard service: no transport")
+	}
+	envb := buildShardEnvelope("PromoteStagedShards", bucket, stagingKey, 0, []byte(finalKey))
+	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
+	respEnvelope, err := s.callShardRPC(ctx, peerAddr, envb)
+	if err != nil {
+		return fmt.Errorf("promote staged shards on %s: %w", peerAddr, err)
+	}
+	// Promote sits on the commit critical path (all-or-fail, data-before-meta), so
+	// the handler's in-band application error (rename/mkdir/path failure surfaces as
+	// an "Error" reply envelope, NOT a transport error) MUST be parsed and treated
+	// as a promote failure — otherwise the manifest could commit while a peer's
+	// shard is still staged. This differs from DeleteShards, whose best-effort
+	// cleanup can swallow the reply.
+	rpcType, _, err := unmarshalEnvelope(respEnvelope)
+	if err != nil {
+		return fmt.Errorf("promote staged shards on %s: unmarshal response: %w", peerAddr, err)
+	}
+	if rpcType == "Error" {
+		return fmt.Errorf("promote staged shards on %s: remote error", peer)
+	}
+	return nil
+}
+
 // buildShardEnvelope builds an RPCMessage FlatBuffer wrapping a ShardRequest without make+copy.
 // Returns a Builder that MUST be Reset()+Put() to shardBuilderPool after use.
 func buildShardEnvelope(msgType, bucket, key string, shardIdx int32, data []byte) *flatbuffers.Builder {
@@ -604,6 +656,8 @@ func (s *ShardService) handleRPC(payload []byte) []byte {
 		return s.handleReadRange(sr)
 	case "DeleteShards":
 		return s.handleDelete(sr)
+	case "PromoteStagedShards":
+		return s.handlePromoteStaged(sr)
 	case "WriteQuorumMeta":
 		return s.handleQuorumMetaWrite(sr)
 	case "WriteQuorumMetaVersion":
@@ -925,6 +979,16 @@ func (s *ShardService) NativeWriteHandler() transport.ShardWriteHandler {
 			observePutStage("shard_stream_server", "write_local_sealed", stageStart)
 			return nil
 		}
+		// PR1 segment staging: a non-empty StagingKey redirects the bytes to the
+		// staging physical path while Key stays the FINAL key used as AAD, so a
+		// post-promote read of Key decrypts correctly.
+		if req.StagingKey != "" {
+			if err := s.WriteLocalShardStreamStagedContext(context.Background(), req.Bucket, req.StagingKey, req.Key, req.ShardIdx, body); err != nil {
+				return err
+			}
+			observePutStage("shard_stream_server", "write_local_staged", stageStart)
+			return nil
+		}
 		if err := s.WriteLocalShardStream(req.Bucket, req.Key, req.ShardIdx, body); err != nil {
 			return err
 		}
@@ -977,7 +1041,25 @@ func (s *ShardService) EncodeEncryptedShardBuffer(bucket, key string, shardIdx i
 	return buf.Bytes(), nil
 }
 
+// writeLocalShard writes shard shardIdx of (bucket,key) to its final on-disk path,
+// encrypted with (bucket,key,shardIdx) as AAD.
 func (s *ShardService) writeLocalShard(ctx context.Context, bucket, key string, shardIdx int, data []byte) error {
+	return s.writeLocalShardAAD(ctx, bucket, key, key, shardIdx, data)
+}
+
+// writeLocalShardStaged writes shard shardIdx to the STAGING physical path stagingKey but encrypts it
+// with the FINAL logical shard key (finalKey) as AAD, so a post-promote read of finalKey — which
+// decrypts with the final-key AAD — succeeds. PR1 segment staging: in-flight segment shards land in a
+// per-dataDir staging dir and are promoted (renamed) to finalKey only at commit. stagingKey MUST place
+// the shard on the SAME dataDir as finalKey (shardIdx%len(dataDirs)) so the promote rename is atomic.
+func (s *ShardService) writeLocalShardStaged(ctx context.Context, bucket, stagingKey, finalKey string, shardIdx int, data []byte) error {
+	return s.writeLocalShardAAD(ctx, bucket, stagingKey, finalKey, shardIdx, data)
+}
+
+// writeLocalShardAAD is the shared core: the shard FILE is written under pathKey's shard dir, but the
+// encryption AAD is derived from aadKey. The two are equal for a normal write and differ for a staged
+// write (pathKey = staging path, aadKey = final logical key).
+func (s *ShardService) writeLocalShardAAD(ctx context.Context, bucket, key, aadKey string, shardIdx int, data []byte) error {
 	dir, err := s.getShardDir(bucket, key, shardIdx)
 	if err != nil {
 		return err
@@ -1000,7 +1082,7 @@ func (s *ShardService) writeLocalShard(ctx context.Context, bucket, key string, 
 	path := filepath.Join(dir, fmt.Sprintf("shard_%d", shardIdx))
 	encodeStart := time.Now()
 	var encoded bytes.Buffer
-	if err := eccodec.EncodeEncryptedShard(&encoded, bytes.NewReader(data), s.segEnc, ShardAADFields(bucket, key, shardIdx), eccodec.DefaultEncryptedChunkSize); err != nil {
+	if err := eccodec.EncodeEncryptedShard(&encoded, bytes.NewReader(data), s.segEnc, ShardAADFields(bucket, aadKey, shardIdx), eccodec.DefaultEncryptedChunkSize); err != nil {
 		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncode, encodeStart, PutTraceStageFields{
 			Bytes:            int64(len(data)),
 			ShardIndex:       shardIdx,
@@ -1394,6 +1476,20 @@ func (s *ShardService) WriteLocalShardStreamSizedContext(ctx context.Context, bu
 	return s.writeLocalShardStreamContext(ctx, bucket, key, shardIdx, body, streamSize)
 }
 
+// WriteLocalShardStreamStagedContext is the streaming counterpart of
+// writeLocalShardStaged: it buffers the shard body (bounded) and writes it to the
+// STAGING physical path stagingKey while sealing with the FINAL logical key
+// (finalKey) as AAD. PR1 segment staging; used by the local endpoint and the
+// native shard-write receiver when a staging redirect is present.
+func (s *ShardService) WriteLocalShardStreamStagedContext(ctx context.Context, bucket, stagingKey, finalKey string, shardIdx int, body io.Reader) error {
+	rawCap := maxRawShardPayload(false)
+	data, err := readShardPayload(body, rawCap, -1, false)
+	if err != nil {
+		return err
+	}
+	return s.writeLocalShardStaged(ctx, bucket, stagingKey, finalKey, shardIdx, data)
+}
+
 func (s *ShardService) writeLocalShardStreamContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader, streamSize int64) error {
 	// Buffer the body bounded by a 64 MiB memory cap (derived from
 	// datawal.MaxPayloadBytes; the value is retained purely as a memory bound,
@@ -1406,6 +1502,83 @@ func (s *ShardService) writeLocalShardStreamContext(ctx context.Context, bucket,
 		return err
 	}
 	return s.writeLocalShard(ctx, bucket, key, shardIdx, data)
+}
+
+// PromoteLocalStagedShards renames a segment's staged shard dirs (written under stagingKey by
+// writeLocalShardStaged) to their final path (finalKey), one intra-dataDir atomic dir-rename per
+// dataDir. stagingKey and finalKey map to the SAME dataDir per shard index (both via getShardDir), so
+// each rename stays within one device. Idempotent: a missing staging dir (already promoted / none on
+// this dataDir) is skipped, and a pre-existing destination (concurrent completer / retry) is treated as
+// done. The shard files keep their final-key AAD (set at staged-write time), so post-promote reads
+// decrypt correctly. PR1 segment staging.
+func (s *ShardService) PromoteLocalStagedShards(bucket, stagingKey, finalKey string) error {
+	// promotedAny guards against committing a manifest that references absent
+	// shards: every node in a segment's placement holds at least one shard, so a
+	// promote that renames nothing AND finds nothing already at the final path
+	// means the shards are gone (never written / over-eager cleanup race) — fail
+	// rather than silently report success.
+	promotedAny := false
+	// promote accepts dst as durable: it persists the final-path dir entries up to
+	// the dataDir BEFORE the manifest commit (data-before-meta), so a post-commit
+	// crash cannot lose the rename and strand an acknowledged object with no final
+	// shards. Called on EVERY promoted path — including when dst was already present
+	// (rename race / idempotent retry / concurrent completer): an earlier mover may
+	// have created dst but crashed/failed before ITS fsync, so this caller must not
+	// proceed to commit until it has personally made the link durable. fsync is
+	// idempotent (syncDirChain dedups once this process persisted it), so re-syncing
+	// an already-durable dst is cheap.
+	promote := func(dst string, d int) error {
+		if err := s.syncDirChain(dst, s.dataDirs[d]); err != nil {
+			return fmt.Errorf("promote staged segment fsync %s: %w", dst, err)
+		}
+		promotedAny = true
+		return nil
+	}
+	for d := 0; d < len(s.dataDirs); d++ {
+		src, err := s.getShardDir(bucket, stagingKey, d)
+		if err != nil {
+			return err
+		}
+		dst, err := s.getShardDir(bucket, finalKey, d)
+		if err != nil {
+			return err
+		}
+		if _, statErr := os.Stat(src); statErr != nil {
+			if os.IsNotExist(statErr) {
+				// No staged dir on this dataDir: either it never held a shard for this
+				// blob, or a prior promote already moved it. A present destination means
+				// the latter (idempotent retry / concurrent completer) — accept it, but
+				// still fsync the final chain before counting it as promoted.
+				if _, derr := os.Stat(dst); derr == nil {
+					if err := promote(dst, d); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+			return statErr
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return fmt.Errorf("promote staged segment: mkdir final parent: %w", err)
+		}
+		if err := os.Rename(src, dst); err != nil {
+			if _, derr := os.Stat(dst); derr == nil {
+				// destination already present (idempotent retry / concurrent completer)
+				if err := promote(dst, d); err != nil {
+					return err
+				}
+				continue
+			}
+			return fmt.Errorf("promote staged segment rename %s -> %s: %w", src, dst, err)
+		}
+		if err := promote(dst, d); err != nil {
+			return err
+		}
+	}
+	if !promotedAny {
+		return fmt.Errorf("promote staged segment: no staged or promoted shards for %q -> %q", stagingKey, finalKey)
+	}
+	return nil
 }
 
 func (s *ShardService) ensureShardDir(dir string) error {
@@ -1744,6 +1917,15 @@ func (s *ShardService) handleRead(sr *shardRequest) []byte {
 
 func (s *ShardService) handleDelete(sr *shardRequest) []byte {
 	if err := s.DeleteLocalShards(sr.Bucket, sr.Key); err != nil {
+		return s.errorResponse(err.Error())
+	}
+	return s.okResponse(nil)
+}
+
+// handlePromoteStaged renames staged segment shard dirs (sr.Key) to the final path; the final logical
+// key is carried in sr.Data (the single-Key envelope). PR1 segment staging.
+func (s *ShardService) handlePromoteStaged(sr *shardRequest) []byte {
+	if err := s.PromoteLocalStagedShards(sr.Bucket, sr.Key, string(sr.Data)); err != nil {
 		return s.errorResponse(err.Error())
 	}
 	return s.okResponse(nil)

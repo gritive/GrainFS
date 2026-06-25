@@ -29,7 +29,14 @@ type shardEndpoint interface {
 	// choose buffered-vs-stream against ecShardBufferedLimit. The local and remote
 	// impls emit their own trace stages and (remote) peerHealth marks so the
 	// observable call set is identical to the pre-refactor inline dispatch.
-	WriteShardReader(ctx context.Context, bucket, shardKey string, shardIdx int, openShard func(int) (io.Reader, error), shardSize func(int) (int64, error)) error
+	//
+	// stagingShardKey (PR1 segment staging): when non-empty the shard BYTES are
+	// written to this staging physical path while shardKey stays the FINAL path
+	// used as encryption AAD, so a post-promote read of shardKey decrypts
+	// correctly. Empty ⇒ legacy direct-to-final write (shardKey is both path and
+	// AAD). Staged writes always stream (the buffered-RPC optimization is skipped)
+	// to keep the receiver-side staging contract on one wire path.
+	WriteShardReader(ctx context.Context, bucket, shardKey, stagingShardKey string, shardIdx int, openShard func(int) (io.Reader, error), shardSize func(int) (int64, error)) error
 	// DeleteShards removes all shards for shardKey on this slot (write cleanup).
 	DeleteShards(ctx context.Context, bucket, shardKey string) error
 
@@ -94,6 +101,9 @@ type localShardEndpoint struct {
 type localShardStore interface {
 	WriteLocalShardContext(ctx context.Context, bucket, key string, shardIdx int, data []byte) error
 	WriteLocalShardStreamContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader) error
+	// WriteLocalShardStreamStagedContext writes a shard to the staging physical
+	// path stagingKey while sealing with finalKey as AAD (PR1 segment staging).
+	WriteLocalShardStreamStagedContext(ctx context.Context, bucket, stagingKey, finalKey string, shardIdx int, body io.Reader) error
 	DeleteLocalShards(bucket, key string) error
 	ReadLocalShard(bucket, key string, shardIdx int) ([]byte, error)
 	OpenLocalShard(bucket, key string, shardIdx int) (io.ReadCloser, error)
@@ -103,7 +113,7 @@ type localShardStore interface {
 func (e localShardEndpoint) Node() string  { return e.node }
 func (e localShardEndpoint) IsLocal() bool { return true }
 
-func (e localShardEndpoint) WriteShardReader(ctx context.Context, bucket, shardKey string, shardIdx int, openShard func(int) (io.Reader, error), shardSize func(int) (int64, error)) error {
+func (e localShardEndpoint) WriteShardReader(ctx context.Context, bucket, shardKey, stagingShardKey string, shardIdx int, openShard func(int) (io.Reader, error), shardSize func(int) (int64, error)) error {
 	shardStageStart := time.Now()
 
 	// An openShard failure returns before the local trace stage is emitted,
@@ -112,6 +122,28 @@ func (e localShardEndpoint) WriteShardReader(ctx context.Context, bucket, shardK
 	body, err := openShard(shardIdx)
 	if err != nil {
 		return fmt.Errorf("open ec shard %d: %w", shardIdx, err)
+	}
+
+	// PR1 segment staging: write the bytes to stagingShardKey but seal with
+	// shardKey (the FINAL path) as AAD via the staged stream primitive. The
+	// streaming write buffers the shard bounded internally; the buffered-size
+	// optimization below is skipped for staged writes on purpose (one staging
+	// write path, mirrors the remote endpoint forcing the stream RPC).
+	if stagingShardKey != "" {
+		werr := e.shards.WriteLocalShardStreamStagedContext(ctx, bucket, stagingShardKey, shardKey, shardIdx, body)
+		if closer, ok := body.(io.Closer); ok {
+			if closeErr := closer.Close(); werr == nil && closeErr != nil {
+				werr = fmt.Errorf("close ec shard %d: %w", shardIdx, closeErr)
+			}
+		}
+		observePutStage("ec_write_shard", "local", shardStageStart)
+		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocal, shardStageStart, PutTraceStageFields{
+			ShardIndex:       shardIdx,
+			ShardTarget:      e.node,
+			ShardTargetClass: "local",
+			Error:            putTraceErrorString(werr),
+		})
+		return werr
 	}
 
 	var werr error
@@ -190,6 +222,11 @@ type remoteShardEndpoint struct {
 type remoteShardStore interface {
 	WriteShard(ctx context.Context, peer, bucket, key string, shardIdx int, data []byte) error
 	WriteShardStream(ctx context.Context, peer, bucket, key string, shardIdx int, body io.Reader) error
+	// WriteShardStreamStaged streams a shard to peer, written to the staging
+	// physical path stagingKey but sealed with finalKey as AAD (PR1 segment
+	// staging). The wire carries finalKey in the request Key (so AAD stays final)
+	// and stagingKey as a separate redirect field.
+	WriteShardStreamStaged(ctx context.Context, peer, bucket, stagingKey, finalKey string, shardIdx int, body io.Reader) error
 	DeleteShards(ctx context.Context, peer, bucket, key string) error
 	ReadShard(ctx context.Context, peer, bucket, key string, shardIdx int) ([]byte, error)
 	ReadShardStream(ctx context.Context, peer, bucket, key string, shardIdx int) (io.ReadCloser, error)
@@ -211,9 +248,9 @@ func (e remoteShardEndpoint) markHealth(ok bool) {
 	}
 }
 
-func (e remoteShardEndpoint) WriteShardReader(ctx context.Context, bucket, shardKey string, shardIdx int, openShard func(int) (io.Reader, error), shardSize func(int) (int64, error)) error {
+func (e remoteShardEndpoint) WriteShardReader(ctx context.Context, bucket, shardKey, stagingShardKey string, shardIdx int, openShard func(int) (io.Reader, error), shardSize func(int) (int64, error)) error {
 	shardStageStart := time.Now()
-	werr := e.writeRemoteShard(ctx, openShard, shardSize, shardIdx, bucket, shardKey)
+	werr := e.writeRemoteShard(ctx, openShard, shardSize, shardIdx, bucket, shardKey, stagingShardKey)
 	observePutStage("ec_write_shard", "remote", shardStageStart)
 	ObservePutTraceStage(ctx, PutTraceStageShardWriteRemote, shardStageStart, PutTraceStageFields{
 		ShardIndex:       shardIdx,
@@ -230,7 +267,7 @@ func (e remoteShardEndpoint) writeRemoteShard(
 	openShard func(int) (io.Reader, error),
 	shardSize func(int) (int64, error),
 	shardIdx int,
-	bucket, shardKey string,
+	bucket, shardKey, stagingShardKey string,
 ) error {
 	attempts := e.writeAttempts
 	if attempts <= 0 {
@@ -262,7 +299,19 @@ func (e remoteShardEndpoint) writeRemoteShard(
 		})
 
 		writeCtx, writeCancel := context.WithTimeout(ctx, shardRPCTimeout)
-		if shardSize != nil {
+		if stagingShardKey != "" {
+			// PR1 segment staging: always stream (skip the buffered-RPC
+			// optimization) so the receiver sees one staging-aware wire path. The
+			// bytes land at stagingShardKey; finalKey (shardKey) is the AAD.
+			rpcStart := time.Now()
+			err = e.shards.WriteShardStreamStaged(writeCtx, node, bucket, stagingShardKey, shardKey, shardIdx, readerWithoutWriterTo{Reader: body})
+			ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteRPC, rpcStart, PutTraceStageFields{
+				ShardIndex:       shardIdx,
+				ShardTarget:      node,
+				ShardTargetClass: "remote",
+				Error:            putTraceErrorString(err),
+			})
+		} else if shardSize != nil {
 			if size, sizeErr := shardSize(shardIdx); sizeErr == nil && size <= ecShardBufferedLimit {
 				bufferStart := time.Now()
 				data := make([]byte, size)

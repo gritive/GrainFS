@@ -114,6 +114,7 @@ func TestECObjectWriter_WriteRemoteShardRecordsTraceBreakdown(t *testing.T) {
 		2,
 		"bucket",
 		"object/v1",
+		"",
 	)
 	require.NoError(t, err)
 
@@ -315,8 +316,20 @@ type fakeECObjectWriterShards struct {
 	bufferedLocalWrites []fakeECObjectWriterLocalWrite
 	bufferedWrites      []fakeECObjectWriterBufferedWrite
 	streamWrites        []fakeECObjectWriterStreamWrite
+	stagedWrites        []fakeECObjectWriterStagedWrite
 	deleteLocalCalls    []string
 	deleteRemoteCalls   []string
+}
+
+// fakeECObjectWriterStagedWrite captures a PR1 staged shard write (local or
+// remote) so a test can assert the path is the STAGING key while the AAD is the
+// FINAL key.
+type fakeECObjectWriterStagedWrite struct {
+	peer       string // "" for a local staged write
+	bucket     string
+	stagingKey string
+	finalKey   string
+	shardIdx   int
 }
 
 type fakeECObjectWriterLocalWrite struct {
@@ -350,6 +363,36 @@ func (f *fakeECObjectWriterShards) WriteLocalShardStream(bucket, key string, sha
 
 func (f *fakeECObjectWriterShards) WriteLocalShardStreamContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader) error {
 	return f.WriteLocalShardStream(bucket, key, shardIdx, body)
+}
+
+func (f *fakeECObjectWriterShards) WriteLocalShardStreamStagedContext(ctx context.Context, bucket, stagingKey, finalKey string, shardIdx int, body io.Reader) error {
+	_, _ = io.Copy(io.Discard, body)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stagedWrites = append(f.stagedWrites, fakeECObjectWriterStagedWrite{
+		bucket:     bucket,
+		stagingKey: stagingKey,
+		finalKey:   finalKey,
+		shardIdx:   shardIdx,
+	})
+	return nil
+}
+
+func (f *fakeECObjectWriterShards) WriteShardStreamStaged(ctx context.Context, peer, bucket, stagingKey, finalKey string, shardIdx int, body io.Reader) error {
+	_, _ = io.Copy(io.Discard, body)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stagedWrites = append(f.stagedWrites, fakeECObjectWriterStagedWrite{
+		peer:       peer,
+		bucket:     bucket,
+		stagingKey: stagingKey,
+		finalKey:   finalKey,
+		shardIdx:   shardIdx,
+	})
+	if err := f.writeShardErr[peer]; err != nil {
+		return err
+	}
+	return nil
 }
 
 func (f *fakeECObjectWriterShards) WriteLocalShard(bucket, key string, shardIdx int, data []byte) error {
