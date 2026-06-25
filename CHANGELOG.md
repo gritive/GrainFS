@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.722.0] - 2026-06-26
+
+### Fixed
+- **Failed owner-local-first CAS quorum-meta writes now roll back their local latest-only blob.**
+  If an append/coalesce RMW publishes the owner-local blob but cannot reach peer quorum, GrainFS
+  compare-rolls back that fresh publish so readers do not observe a phantom manifest. Rollback also
+  restores any previously committed local blob instead of deleting it, while idempotent replays and
+  CAS/LWW no-op skips remain untouched.
+
 ## [0.0.721.0] - 2026-06-26
 
 ### Fixed

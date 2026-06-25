@@ -13,6 +13,12 @@
   marker; `newRewrapScrubberKick` has bounded retry for transient lane failures. The automatic
   data-group `Rebalancer` / `GroupRebalancer` plan surface is also removed, while revoked-node
   evacuation keeps the live membership executor path.
+- [x] **phantom-on-CAS-reject cleanup** — owner-local-first CAS quorum-meta writes now
+  compare-delete a freshly published owner-local latest-only blob if the peer quorum later
+  fails, preventing failed append/coalesce RMW attempts from leaving a readable phantom manifest.
+- [ ] GC singleton/freshness raft-free replacement.
+- [ ] HRW-primary append/multipart owner.
+- [ ] per-group raft membership mirror removal.
 
 ### `__grainfs_volumes` / `__grainfs_nfs4` leftover removal follow-ups (2026-06-26)
 

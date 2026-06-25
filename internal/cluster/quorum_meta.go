@@ -392,13 +392,17 @@ func fanOutQuorumMeta(ctx context.Context, nodes []string, k int, dispatch func(
 // (peerCount)-(k-selfCount) = n-k. A CAS reject on the owner-local write is
 // surfaced immediately (the owner's own base advanced — the genuine retry signal).
 // When self is NOT a placement node the behavior is identical to plain
-// fanOutQuorumMeta over all nodes.
+// fanOutQuorumMeta over all nodes. If the owner-local write succeeds but peer
+// fan-out cannot reach quorum, cleanupLocal is called before returning the
+// original fan-out error. The cleanup must be compare-and-delete: a failed write
+// must not remove a newer local write or a previously committed idempotent replay.
 func fanOutQuorumMetaOwnerLocalFirst(
 	ctx context.Context,
 	nodes []string,
 	self string,
 	k int,
 	writeLocal func() error,
+	cleanupLocal func() error,
 	writePeer func(context.Context, string) error,
 ) error {
 	if k <= 0 {
@@ -435,25 +439,49 @@ func fanOutQuorumMetaOwnerLocalFirst(
 	if remaining <= 0 {
 		return nil
 	}
-	return fanOutQuorumMeta(ctx, peers, remaining, writePeer)
+	err := fanOutQuorumMeta(ctx, peers, remaining, writePeer)
+	if err == nil {
+		return nil
+	}
+	if cleanupLocal != nil {
+		if cerr := cleanupLocal(); cerr != nil {
+			return errors.Join(err, fmt.Errorf("owner-local quorum-meta cleanup after fan-out failure: %w", cerr))
+		}
+	}
+	return err
 }
 
 // writeQuorumMetaLocal durably writes the encoded quorum meta blob for
 // (bucket, key) under {dataDirs[0]}/.quorum_meta/{bucket}/{key}. One fsync —
 // same durability cost as the shard write it co-locates with.
 func (s *ShardService) writeQuorumMetaLocal(bucket, key string, data []byte) error {
+	_, err := s.writeQuorumMetaLocalWithResult(bucket, key, data)
+	return err
+}
+
+type quorumMetaLocalWriteResult struct {
+	applied     bool
+	hadPrevious bool
+	previous    []byte
+}
+
+// writeQuorumMetaLocalWithResult mirrors writeQuorumMetaLocal and also reports
+// whether this call actually renamed the candidate over the target. A nil error
+// with applied=false means the write was a no-op: byte-identical CAS replay,
+// CAS/LWW guard skip, or another non-publish path.
+func (s *ShardService) writeQuorumMetaLocalWithResult(bucket, key string, data []byte) (quorumMetaLocalWriteResult, error) {
 	if len(s.dataDirs) == 0 {
-		return fmt.Errorf("quorum meta: no data dir")
+		return quorumMetaLocalWriteResult{}, fmt.Errorf("quorum meta: no data dir")
 	}
 	root := filepath.Join(s.dataDirs[0], quorumMetaSubDir)
 	target := filepath.Join(root, bucket, key)
 	rel, err := filepath.Rel(root, target)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("quorum meta: key %q escapes root", key)
+		return quorumMetaLocalWriteResult{}, fmt.Errorf("quorum meta: key %q escapes root", key)
 	}
 	dir := filepath.Dir(target)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("quorum meta mkdir: %w", err)
+		return quorumMetaLocalWriteResult{}, fmt.Errorf("quorum meta mkdir: %w", err)
 	}
 	// Atomic publish: write to a unique temp file in the same directory, fsync,
 	// then rename over the target. An in-place O_TRUNC write exposes a window where
@@ -465,20 +493,20 @@ func (s *ShardService) writeQuorumMetaLocal(bucket, key string, data []byte) err
 	// complete blob or the new one, never a torn one.
 	tmp, err := os.CreateTemp(dir, ".qmeta-*.tmp")
 	if err != nil {
-		return fmt.Errorf("quorum meta tmp create: %w", err)
+		return quorumMetaLocalWriteResult{}, fmt.Errorf("quorum meta tmp create: %w", err)
 	}
 	tmpName := tmp.Name()
 	defer func() { _ = os.Remove(tmpName) }() // no-op once the rename succeeds
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("quorum meta write: %w", err)
+		return quorumMetaLocalWriteResult{}, fmt.Errorf("quorum meta write: %w", err)
 	}
 	if err := directio.Sync(tmp); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("quorum meta fsync: %w", err)
+		return quorumMetaLocalWriteResult{}, fmt.Errorf("quorum meta fsync: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("quorum meta tmp close: %w", err)
+		return quorumMetaLocalWriteResult{}, fmt.Errorf("quorum meta tmp close: %w", err)
 	}
 	// Per-target lock: serializes the (guard-read + rename) critical section so
 	// two concurrent writers for the same target cannot both observe the old blob,
@@ -498,25 +526,93 @@ func (s *ShardService) writeQuorumMetaLocal(bucket, key string, data []byte) err
 	// LWW loss stays a silent no-op skip. Decode failures of the existing blob keep
 	// the legacy behavior: fall through and rename (do not regress the corruption
 	// path).
+	result := quorumMetaLocalWriteResult{}
 	if existing, rerr := os.ReadFile(target); rerr == nil {
+		result.hadPrevious = true
+		result.previous = append([]byte(nil), existing...)
 		if cand, derr := s.decodeQuorumMetaCmdBlob(data); derr == nil {
 			// Byte-identical CAS re-delivery (same write to the same node twice) is a
 			// no-op, NOT a reject — checked before the +1 guard.
 			if quorumMetaBlobIsIdempotentReplay(existing, data, cand.MetaSeqCAS) {
-				return nil
+				return quorumMetaLocalWriteResult{}, nil
 			}
 			if cur, derr2 := s.decodeQuorumMetaCmdBlob(existing); derr2 == nil {
 				switch decideQuorumMetaWrite(cur, cand) {
 				case quorumMetaWriteRejectCAS:
-					return errQuorumMetaCASReject // CAS base mismatch — caller retries
+					return quorumMetaLocalWriteResult{}, errQuorumMetaCASReject // CAS base mismatch — caller retries
 				case quorumMetaWriteSkip:
-					return nil // LWW loss — keep existing, skip the rename
+					return quorumMetaLocalWriteResult{}, nil // LWW loss — keep existing, skip the rename
 				}
 			}
 		}
 	}
 	if err := os.Rename(tmpName, target); err != nil {
-		return fmt.Errorf("quorum meta rename: %w", err)
+		return quorumMetaLocalWriteResult{}, fmt.Errorf("quorum meta rename: %w", err)
+	}
+	result.applied = true
+	return result, nil
+}
+
+// rollbackQuorumMetaLocalIfMatch removes or restores the latest-only quorum-meta
+// blob only if the on-disk bytes still equal expected. It rolls back an
+// owner-local CAS publish after peer quorum failure without deleting a newer local
+// write or discarding the previously committed local blob that the failed publish
+// overwrote.
+func (s *ShardService) rollbackQuorumMetaLocalIfMatch(bucket, key string, expected []byte, previous []byte, hadPrevious bool) error {
+	if len(s.dataDirs) == 0 {
+		return fmt.Errorf("quorum meta rollback-if-match: no data dir")
+	}
+	root := filepath.Join(s.dataDirs[0], quorumMetaSubDir)
+	target := filepath.Join(root, bucket, key)
+	rel, err := filepath.Rel(root, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("quorum meta rollback-if-match: key %q escapes root", key)
+	}
+	unlock := s.quorumMetaTargetLock(target)
+	defer unlock()
+	cur, err := os.ReadFile(target)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("quorum meta rollback-if-match read: %w", err)
+	}
+	if !bytes.Equal(cur, expected) {
+		return nil
+	}
+	if !hadPrevious {
+		if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("quorum meta rollback-if-match remove: %w", err)
+		}
+		return nil
+	}
+	return s.writeQuorumMetaFileAtomic(target, previous, "quorum meta rollback")
+}
+
+func (s *ShardService) writeQuorumMetaFileAtomic(target string, data []byte, label string) error {
+	dir := filepath.Dir(target)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("%s mkdir: %w", label, err)
+	}
+	tmp, err := os.CreateTemp(dir, ".qmeta-*.tmp")
+	if err != nil {
+		return fmt.Errorf("%s tmp create: %w", label, err)
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("%s write: %w", label, err)
+	}
+	if err := directio.Sync(tmp); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("%s fsync: %w", label, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("%s tmp close: %w", label, err)
+	}
+	if err := os.Rename(tmpName, target); err != nil {
+		return fmt.Errorf("%s rename: %w", label, err)
 	}
 	return nil
 }
@@ -526,31 +622,7 @@ func (s *ShardService) writeQuorumMetaLocal(bucket, key string, data []byte) err
 // caller has already validated the target path and holds the per-target lock
 // (the LWW-guard critical section in writeQuorumMetaVersionLocal).
 func (s *ShardService) writeQuorumMetaVersionLocalCore(target string, data []byte) error {
-	dir := filepath.Dir(target)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("quorum meta version mkdir: %w", err)
-	}
-	tmp, err := os.CreateTemp(dir, ".qmeta-*.tmp")
-	if err != nil {
-		return fmt.Errorf("quorum meta version tmp create: %w", err)
-	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("quorum meta version write: %w", err)
-	}
-	if err := directio.Sync(tmp); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("quorum meta version fsync: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("quorum meta version tmp close: %w", err)
-	}
-	if err := os.Rename(tmpName, target); err != nil {
-		return fmt.Errorf("quorum meta version rename: %w", err)
-	}
-	return nil
+	return s.writeQuorumMetaFileAtomic(target, data, "quorum meta version")
 }
 
 // writeQuorumMetaVersionLocal durably writes an immutable per-version quorum-meta

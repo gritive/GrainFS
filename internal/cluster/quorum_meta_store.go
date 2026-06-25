@@ -68,6 +68,7 @@ type QuorumMetaStore struct {
 // fails the var-_ compile guard below.
 type localQuorumMetaStore interface {
 	writeQuorumMetaLocal(bucket, key string, data []byte) error
+	writeQuorumMetaLocalWithResult(bucket, key string, data []byte) (quorumMetaLocalWriteResult, error)
 	writeQuorumMetaVersionLocal(bucket, versionSubpath string, data []byte) error
 	readQuorumMetaRaw(bucket, key string) ([]byte, error)
 	readQuorumMetaVersionsLocal(bucket, key string) ([]PutObjectMetaCmd, error)
@@ -77,6 +78,7 @@ type localQuorumMetaStore interface {
 	ScanQuorumMetaVersionsBucket(bucket, prefix string) ([]PutObjectMetaCmd, error)
 	scanQuorumMetaVersionsBucketAllStrict(bucket, prefix string) ([]PutObjectMetaCmd, error)
 	deleteQuorumMetaLocal(bucket, key string) error
+	rollbackQuorumMetaLocalIfMatch(bucket, key string, expected []byte, previous []byte, hadPrevious bool) error
 	decodeQuorumMetaBlob(data []byte) (*storage.Object, PlacementMeta, error)
 	decodeQuorumMetaCmdBlob(data []byte) (PutObjectMetaCmd, error)
 }
@@ -214,6 +216,18 @@ func (s *QuorumMetaStore) writeQuorumMeta(ctx context.Context, cmd PutObjectMeta
 	wctx, cancel := context.WithTimeout(ctx, quorumMetaWriteTimeout)
 	defer cancel()
 	writeLocal := func() error { return s.local().writeQuorumMetaLocal(cmd.Bucket, cmd.Key, blob) }
+	localWrite := quorumMetaLocalWriteResult{}
+	writeLocalCAS := func() error {
+		result, err := s.local().writeQuorumMetaLocalWithResult(cmd.Bucket, cmd.Key, blob)
+		localWrite = result
+		return err
+	}
+	cleanupLocal := func() error {
+		if !localWrite.applied {
+			return nil
+		}
+		return s.local().rollbackQuorumMetaLocalIfMatch(cmd.Bucket, cmd.Key, blob, localWrite.previous, localWrite.hadPrevious)
+	}
 	writePeer := func(fctx context.Context, node string) error {
 		addr, rerr := s.peer().resolvePeerAddress(node)
 		if rerr != nil {
@@ -227,7 +241,7 @@ func (s *QuorumMetaStore) writeQuorumMeta(ctx context.Context, cmd PutObjectMeta
 		// owner-local-first, so the owner-local copy MUST be durable before this
 		// returns (BUG-2). Owner-local-first guarantees that while preserving the
 		// exact N-K peer failure budget. LWW writers keep the plain fan-out below.
-		latestErr = fanOutQuorumMetaOwnerLocalFirst(wctx, cmd.NodeIDs, self, k, writeLocal, writePeer)
+		latestErr = fanOutQuorumMetaOwnerLocalFirst(wctx, cmd.NodeIDs, self, k, writeLocalCAS, cleanupLocal, writePeer)
 	} else {
 		latestErr = fanOutQuorumMeta(wctx, cmd.NodeIDs, k, func(fctx context.Context, node string) error {
 			if node == self {
