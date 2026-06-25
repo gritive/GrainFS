@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.705.0] - 2026-06-25
+
+### Changed
+- **Internal refactor: extracted `QuorumMetaStore` from the `DistributedBackend` god-struct (no
+  behavior, API, wire, or on-disk format change).** The quorum-meta orchestration — K-of-N fan-out
+  write (per-version-blob-before-latest), peer read + Last-Write-Wins merge, version resolution, and
+  cluster-wide scatter-gather LIST — moved into a new `QuorumMetaStore` module; `DistributedBackend`
+  keeps it as a `qms` field and is a facade that delegates. The store injects narrow adapters today's
+  `ShardService`/`DistributedBackend` satisfy, conflict resolution stays as package-level pure
+  functions, and the fan-out write ordering and LWW merge are now unit-tested with fake adapters and
+  no transport. Second slice of the ShardService/DistributedBackend decomposition (the first was
+  LocalShardStore).
+
 ## [0.0.704.0] - 2026-06-25
 
 ### Removed

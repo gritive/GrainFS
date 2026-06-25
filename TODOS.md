@@ -2,22 +2,29 @@
 
 ## Follow-ups
 
-### ShardService decomposition follow-ups (2026-06-25, PR1 LocalShardStore done)
+### ShardService/DistributedBackend decomposition follow-ups (2026-06-25, PR1 LocalShardStore + Card1 QuorumMetaStore done)
 
-`ShardService` (1,940 LOC god-struct) is being decomposed into a facade over deep local-store
-modules. **PR1 (LocalShardStore extraction) is done** — shard-blob I/O + durability + seal +
-staging carved out behind the facade, behavior-preserving. Remaining slices (each a separate PR,
-facade stays the spine — see design `docs/superpowers/specs/2026-06-25-shard-service-decomposition-design.md`):
+The `ShardService` (1,940 LOC) and `DistributedBackend` (54-field/300-method) god-structs are being
+decomposed into facades over deep modules. **Done:** PR1 = LocalShardStore (MERGED #899; shard-blob
+I/O + durability + seal + staging). Card1 = `QuorumMetaStore` (quorum-meta orchestration: fan-out
+write, LWW read merge, version resolution, scatter-gather list — 21 methods carved out of
+DistributedBackend behind a `qms` facade, injecting `localQuorumMetaStore`/`quorumMetaPeerRPC`/
+`ShardGroupSource`/`versioningSource` adapters `*ShardService` satisfies today; conflict-resolution
+kept as package-level pure functions; raft-free). Both behavior-preserving. Remaining slices (each a
+separate PR, facades stay the spine — see design
+`docs/superpowers/specs/2026-06-25-shard-service-decomposition-design.md`):
 
 - **[P2] PR2 — semantic LocalQuorumMetaStore.** Carve the 30 quorum-meta `*ShardService` methods
   (in `quorum_meta.go`) into a `LocalQuorumMetaStore`. **Semantic, not raw-KV**: the local write
   decodes candidate + existing blobs and runs `decideQuorumMetaWrite` (CAS-reject / LWW-skip /
-  idempotent-replay) before the rename. This module becomes the injected adapter for the
-  Quorum Meta Store deepening (Card 1). Fields: `dataDirs` (shared) + `quorumMetaTargetLocks`.
-- **[P2] decideQuorumMetaWrite single-ownership.** The CAS/LWW conflict-resolution
-  (`decideQuorumMetaWrite` / `quorumMetaCmdWins`) is shared between the local write-accept and the
-  Quorum Meta Store orchestration merge. Decide where it lives (one place) when doing PR2/Card 1 —
-  this is the actual deepening, not the byte I/O.
+  idempotent-replay) before the rename. Fields: `dataDirs` (shared) + `quorumMetaTargetLocks`.
+  → **Card1 done**, so PR2 now just swaps `*ShardService` for a focused `LocalQuorumMetaStore`
+  behind the existing `localQuorumMetaStore` adapter interface (the second adapter = the real seam).
+- **[RESOLVED] decideQuorumMetaWrite single-ownership → stays package-level pure functions.** The
+  Card1 grilling + advisor cut-test confirmed `latestWins`/`quorumMetaBlobWins`/`quorumMetaCmdWins`/
+  `decideQuorumMetaWrite` are already pure, co-located, zero-dep testable; 23 call sites = leverage,
+  not scatter; a hypothetical `LWWResolver` module fails the deletion test. No module — shared by the
+  local write-accept and the orchestration merge as free functions.
 - **[P3] PR3 — LocalManifestStore.** Carve the 12 manifest-blob `*ShardService` methods
   (`manifest_blob.go`, `.qmeta_mpu/{bucket}/{uploadID}`) into a `LocalManifestStore`.
 - **[P3] parent-dir fsync gap (pre-existing, surfaced by the decomposition).** Quorum-meta

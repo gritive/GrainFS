@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -43,129 +42,25 @@ const quorumMetaReadTimeout = 5 * time.Second
 // absent — an in-process DistributedBackend PUT that bypasses the coordinator —
 // it falls back to a local versioning read, which is correct in that case
 // because the single backend does hold the bucketver state.
+// bucketVersioningEnabled delegates to the extracted QuorumMetaStore (see
+// quorum_meta_store.go). DistributedBackend stays a behavior-preserving facade.
 func (b *DistributedBackend) bucketVersioningEnabled(ctx context.Context, bucket string) bool {
-	if enabled, resolved := bucketVersioningFromContext(ctx); resolved {
-		return enabled
-	}
-	state, err := b.GetBucketVersioning(bucket)
-	return err == nil && state == "Enabled"
+	return b.qmsOrBuild().bucketVersioningEnabled(ctx, bucket)
 }
 
+// writeQuorumMeta delegates to the extracted QuorumMetaStore.
 func (b *DistributedBackend) writeQuorumMeta(ctx context.Context, cmd PutObjectMetaCmd) error {
-	// Blob-primary (raft-free): for versioning-enabled buckets the per-version blob
-	// (written below via fanOutPerVersionBlob) is the BLOB AUTHORITY for object
-	// metadata — there is no raft propose for object metadata. Reads, LIST, the orphan GCs,
-	// and DEK rewrap all derive from the per-version blobs; the latest-only blob is
-	// the LIST-latest fast path. The conditional-PUT (ExpectedETag) CAS that used to
-	// be enforced inside the propose is dropped for versioned objects: the only
-	// caller that sets ExpectedETag is object relocation, which already relies on the
-	// blob LWW (preserve-old-ModTime), not the FSM CAS. Internal buckets keep their
-	// propose above.
-	if b.shardSvc == nil || len(cmd.NodeIDs) == 0 {
-		return fmt.Errorf("quorum meta write: no shard service or empty placement")
-	}
-	blob, err := encodeQuorumMetaBlob(cmd)
-	if err != nil {
-		return fmt.Errorf("quorum meta write encode: %w", err)
-	}
-	self := b.currentSelfAddr()
-	// K-of-N write quorum: ECData nodes must ack. Parity nodes are best-effort.
-	// Any node that misses the write can still read via fetchQuorumMetaFromPeers.
-	k := int(cmd.ECData)
-	if k <= 0 {
-		k = 1
-	}
-	// Per-version blob FIRST, durable and FAIL-CLOSED. The immutable per-version blob
-	// in the separate .quorum_meta_versions subtree is the AUTHORITATIVE metadata for a
-	// versioned object, so a versioned write is durable only if its per-version blob
-	// reaches the K-of-N write quorum. It is written BEFORE the latest-only blob so a
-	// per-version failure returns before the latest blob is published — the caller's
-	// shard cleanup is then a clean rollback, never a published latest blob left
-	// pointing at data the caller is about to delete. Gated on versioning-enabled:
-	// non-versioned buckets retain no version history (latest-only blob / off-raft).
-	if cmd.VersionID != "" && b.bucketVersioningEnabled(ctx, cmd.Bucket) {
-		if verr := b.fanOutPerVersionBlob(ctx, cmd, blob); verr != nil {
-			return verr
-		}
-	}
-	// Latest-only blob (LIST-latest / legacy read fast path), same K-of-N, fail-closed.
-	wctx, cancel := context.WithTimeout(ctx, quorumMetaWriteTimeout)
-	defer cancel()
-	writeLocal := func() error { return b.shardSvc.writeQuorumMetaLocal(cmd.Bucket, cmd.Key, blob) }
-	writePeer := func(fctx context.Context, node string) error {
-		addr, rerr := b.shardSvc.resolvePeerAddress(node)
-		if rerr != nil {
-			return rerr
-		}
-		return b.shardSvc.WriteQuorumMeta(fctx, addr, cmd.Bucket, cmd.Key, blob)
-	}
-	var latestErr error
-	if cmd.MetaSeqCAS {
-		// CAS write (append/coalesce): the next same-owner RMW reads this blob
-		// owner-local-first, so the owner-local copy MUST be durable before this
-		// returns (BUG-2). Owner-local-first guarantees that while preserving the
-		// exact N-K peer failure budget. LWW writers keep the plain fan-out below.
-		latestErr = fanOutQuorumMetaOwnerLocalFirst(wctx, cmd.NodeIDs, self, k, writeLocal, writePeer)
-	} else {
-		latestErr = fanOutQuorumMeta(wctx, cmd.NodeIDs, k, func(fctx context.Context, node string) error {
-			if node == self {
-				return writeLocal()
-			}
-			return writePeer(fctx, node)
-		})
-	}
-	if latestErr != nil {
-		return latestErr
-	}
-	return nil
+	return b.qmsOrBuild().writeQuorumMeta(ctx, cmd)
 }
 
-// fanOutPerVersionBlob durably writes ONE per-version quorum-meta blob
-// (.quorum_meta_versions/{key}/{vid}) to the version's K-of-N placement quorum,
-// FAIL-CLOSED. It is the per-version half of writeQuorumMeta (the latest-only blob
-// and the raft propose are NOT touched here) and the sole writer of hard-delete
-// tombstones (DeleteObjectVersion). The encoded blob is passed in so the hot PUT
-// path encodes once and shares it with the latest-only write.
+// fanOutPerVersionBlob delegates to the extracted QuorumMetaStore.
 func (b *DistributedBackend) fanOutPerVersionBlob(ctx context.Context, cmd PutObjectMetaCmd, blob []byte) error {
-	if b.shardSvc == nil || len(cmd.NodeIDs) == 0 {
-		return fmt.Errorf("per-version quorum-meta write: no shard service or empty placement")
-	}
-	self := b.currentSelfAddr()
-	k := int(cmd.ECData)
-	if k <= 0 {
-		k = 1
-	}
-	verSubpath := path.Join(cmd.Key, cmd.VersionID)
-	vctx, vcancel := context.WithTimeout(ctx, quorumMetaWriteTimeout)
-	defer vcancel()
-	if verr := fanOutQuorumMeta(vctx, cmd.NodeIDs, k, func(fctx context.Context, node string) error {
-		if node == self {
-			return b.shardSvc.writeQuorumMetaVersionLocal(cmd.Bucket, verSubpath, blob)
-		}
-		addr, rerr := b.shardSvc.resolvePeerAddress(node)
-		if rerr != nil {
-			return rerr
-		}
-		return b.shardSvc.WriteQuorumMetaVersion(fctx, addr, cmd.Bucket, verSubpath, blob)
-	}); verr != nil {
-		return fmt.Errorf("per-version quorum-meta write %s/%s@%s: %w", cmd.Bucket, cmd.Key, cmd.VersionID, verr)
-	}
-	return nil
+	return b.qmsOrBuild().fanOutPerVersionBlob(ctx, cmd, blob)
 }
 
-// readQuorumMeta reads object metadata from the local quorum store, falling
-// back to a peer fan-out when the local file is absent (e.g. parity node that
-// missed the K-of-N write). Returns ErrObjectNotFound only when no peer has
-// the file; callers then fall through to BadgerDB for pre-Phase-3 objects.
+// readQuorumMeta delegates to the extracted QuorumMetaStore.
 func (b *DistributedBackend) readQuorumMeta(bucket, key string) (*storage.Object, PlacementMeta, error) {
-	if b.shardSvc == nil {
-		return nil, PlacementMeta{}, storage.ErrObjectNotFound
-	}
-	raw, err := b.readQuorumMetaWinningRaw(bucket, key)
-	if err != nil {
-		return nil, PlacementMeta{}, err
-	}
-	return b.shardSvc.decodeQuorumMetaBlob(raw)
+	return b.qmsOrBuild().readQuorumMeta(bucket, key)
 }
 
 // quorumMetaBlobWins reports whether candidate (modA, verA, seqA) beats
@@ -329,154 +224,12 @@ func quorumMetaBlobIsIdempotentReplay(existing, candidate []byte, candIsCAS bool
 	return candIsCAS && bytes.Equal(existing, candidate)
 }
 
-// readQuorumMetaWinningRaw returns the raw quorum-meta blob that wins the LWW
-// comparison for (bucket, key). It is the shared read funnel for both
-// readQuorumMeta (decodes to storage.Object) and readQuorumMetaCmd (decodes to
-// PutObjectMetaCmd).
-//
-// Single-generation default (multiGeneration false): local-first fast path —
-// return the local blob on hit, fan out to peers only on a local miss. This is
-// byte-identical to the legacy readQuorumMeta/readQuorumMetaCmd behavior.
-//
-// Multi-generation (S7-6): a routed (newest-generation) leader holding a stale
-// local copy must not shadow a fresher copy that an add-window split-brain write
-// landed in an older generation. So merge the local blob AND the cross-generation
-// peer fan-out (fetchQuorumMetaFromPeers already spans every ShardGroups() peer),
-// returning the LWW winner. fetchQuorumMetaFromPeers excludes self, so the local
-// blob is merged in separately here rather than dropped.
-func (b *DistributedBackend) readQuorumMetaWinningRaw(bucket, key string) ([]byte, error) {
-	localRaw, localErr := b.shardSvc.readQuorumMetaRaw(bucket, key)
-	if localErr != nil && !errors.Is(localErr, storage.ErrObjectNotFound) {
-		return nil, localErr
-	}
-
-	if !b.multiGeneration.Load() {
-		// Local-first fast path (byte-identical to legacy).
-		if localErr == nil {
-			return localRaw, nil
-		}
-		raw, ok := b.fetchQuorumMetaFromPeers(bucket, key)
-		if !ok {
-			return nil, storage.ErrObjectNotFound
-		}
-		return raw, nil
-	}
-
-	// Multi-generation cross-generation LWW merge: combine the local blob with
-	// the peer-best blob and pick the winner.
-	peerRaw, peerOK := b.fetchQuorumMetaFromPeers(bucket, key)
-	switch {
-	case localErr == nil && peerOK:
-		return b.pickQuorumMetaWinner(localRaw, peerRaw), nil
-	case localErr == nil:
-		return localRaw, nil
-	case peerOK:
-		return peerRaw, nil
-	default:
-		return nil, storage.ErrObjectNotFound
-	}
-}
-
-// pickQuorumMetaWinner returns whichever of two raw quorum-meta blobs wins the
-// LWW comparison (quorumMetaBlobWins). A blob that fails to decode loses to a
-// decodable one; if both fail it returns a (the caller already holds both as
-// candidate winners, so returning either preserves liveness).
-func (b *DistributedBackend) pickQuorumMetaWinner(a, bRaw []byte) []byte {
-	cmdA, errA := b.shardSvc.decodeQuorumMetaCmdBlob(a)
-	cmdB, errB := b.shardSvc.decodeQuorumMetaCmdBlob(bRaw)
-	switch {
-	case errA != nil && errB != nil:
-		return a
-	case errA != nil:
-		return bRaw
-	case errB != nil:
-		return a
-	}
-	if quorumMetaBlobWins(cmdB.ModTime, cmdB.VersionID, cmdB.MetaSeq, cmdA.ModTime, cmdA.VersionID, cmdA.MetaSeq) {
-		return bRaw
-	}
-	return a
-}
-
-// fetchQuorumMetaFromPeers fans out ReadQuorumMeta RPCs to all shard group
-// peers concurrently and returns the blob with the highest ModTime (LWW).
-// Waits for all peers within quorumMetaReadTimeout so that a concurrent PUT
-// race resolves to the latest write rather than the fastest responder.
-// Returns (nil, false) when no peer has the file or b.shardGroup is nil.
-func (b *DistributedBackend) fetchQuorumMetaFromPeers(bucket, key string) ([]byte, bool) {
-	if b.shardSvc == nil || b.shardGroup == nil {
-		return nil, false
-	}
-	// Collect unique peer addresses from all shard groups, excluding self.
-	self := b.currentSelfAddr()
-	seen := map[string]bool{self: true}
-	var peers []string
-	for _, g := range b.shardGroup.ShardGroups() {
-		for _, p := range g.PeerIDs {
-			if !seen[p] {
-				seen[p] = true
-				peers = append(peers, p)
-			}
-		}
-	}
-	if len(peers) == 0 {
-		return nil, false
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), quorumMetaReadTimeout)
-	defer cancel()
-
-	type peerResult struct {
-		data      []byte
-		modTime   int64
-		versionID string
-		metaSeq   uint64
-	}
-	ch := make(chan peerResult, len(peers))
-	var wg sync.WaitGroup
-	for _, p := range peers {
-		p := p
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			addr, err := b.shardSvc.resolvePeerAddress(p)
-			if err != nil {
-				return
-			}
-			data, err := b.shardSvc.ReadQuorumMetaRaw(ctx, addr, bucket, key)
-			if err != nil || len(data) == 0 {
-				return
-			}
-			// Decode ModTime+VersionID for LWW: pick the blob written latest,
-			// breaking same-second ties deterministically by VersionID.
-			var (
-				modTime   int64
-				versionID string
-				metaSeq   uint64
-			)
-			if cmd, decErr := b.shardSvc.decodeQuorumMetaCmdBlob(data); decErr == nil {
-				modTime = cmd.ModTime
-				versionID = cmd.VersionID
-				metaSeq = cmd.MetaSeq
-			}
-			ch <- peerResult{data: data, modTime: modTime, versionID: versionID, metaSeq: metaSeq}
-		}()
-	}
-	go func() { wg.Wait(); close(ch) }()
-
-	// Collect all peer responses; return the LWW winner (highest ModTime, then
-	// highest VersionID on a tie). hasBest guards the zero-ModTime case: two
-	// blobs with ModTime=0 must still resolve to a deterministic winner.
-	var best peerResult
-	hasBest := false
-	for r := range ch {
-		if !hasBest || quorumMetaBlobWins(r.modTime, r.versionID, r.metaSeq, best.modTime, best.versionID, best.metaSeq) {
-			best = r
-			hasBest = true
-		}
-	}
-	return best.data, hasBest
-}
+// readQuorumMetaWinningRaw, pickQuorumMetaWinner and fetchQuorumMetaFromPeers moved
+// to QuorumMetaStore (quorum_meta_store.go) in the extraction. They are internal to
+// the read orchestration — only QuorumMetaStore calls them, on itself — so no
+// DistributedBackend facade delegate is needed (and a zero-caller delegate would be
+// dead code). The DistributedBackend-level read entrypoints (readQuorumMeta /
+// readQuorumMetaCmd / readQuorumMetaForReclaim) remain as facades below.
 
 // peerReadOutcome is one peer's response to a reclaim quorum-meta read.
 type peerReadOutcome int
@@ -530,107 +283,7 @@ func reclaimCertainty(localHasData, localUncertain bool, peers []peerReadOutcome
 // The peer read RPC returns OK+empty for a definitive not-found and an error for a
 // read/transport failure, so the client can tell them apart (handleQuorumMetaRead).
 func (b *DistributedBackend) readQuorumMetaForReclaim(bucket, key string) (*storage.Object, bool, bool) {
-	if b.shardSvc == nil {
-		return nil, false, false // can't judge → keep
-	}
-	localRaw, localErr := b.shardSvc.readQuorumMetaRaw(bucket, key)
-	localHasData := localErr == nil && len(localRaw) > 0
-	localUncertain := localErr != nil && !errors.Is(localErr, storage.ErrObjectNotFound)
-
-	bestRaw, bestMod, bestVer, bestSeq, hasBest := []byte(nil), int64(0), "", uint64(0), false
-	consider := func(raw []byte) {
-		if len(raw) == 0 {
-			return
-		}
-		var mod int64
-		var ver string
-		var seq uint64
-		if cmd, derr := b.shardSvc.decodeQuorumMetaCmdBlob(raw); derr == nil {
-			mod, ver, seq = cmd.ModTime, cmd.VersionID, cmd.MetaSeq
-		}
-		if !hasBest || quorumMetaBlobWins(mod, ver, seq, bestMod, bestVer, bestSeq) {
-			bestRaw, bestMod, bestVer, bestSeq, hasBest = raw, mod, ver, seq, true
-		}
-	}
-	if localHasData {
-		consider(localRaw)
-	}
-
-	outcomes := b.collectReclaimPeerOutcomes(bucket, key, consider)
-	found, certain := reclaimCertainty(localHasData, localUncertain, outcomes)
-	if !found || !certain {
-		return nil, found, certain
-	}
-	obj, _, derr := b.shardSvc.decodeQuorumMetaBlob(bestRaw)
-	if derr != nil {
-		return nil, false, false // can't decode the live blob → uncertain → keep
-	}
-	return obj, true, true
-}
-
-// collectReclaimPeerOutcomes fans a quorum-meta read out to every unique peer
-// across all shard groups (excluding self) and returns one peerReadOutcome per
-// contacted peer, feeding any returned blob to consider() for LWW winner selection.
-// It mirrors fetchQuorumMetaFromPeers' peer enumeration but PRESERVES the
-// not-found-vs-error distinction the reclaim decision needs. A nil shardGroup is the
-// legacy single-group / solo path (no peers): it returns no outcomes, so the local
-// read is authoritative (reclaimCertainty treats an empty set as complete).
-func (b *DistributedBackend) collectReclaimPeerOutcomes(bucket, key string, consider func([]byte)) []peerReadOutcome {
-	if b.shardSvc == nil || b.shardGroup == nil {
-		return nil
-	}
-	self := b.currentSelfAddr()
-	seen := map[string]bool{self: true}
-	var peers []string
-	for _, g := range b.shardGroup.ShardGroups() {
-		for _, p := range g.PeerIDs {
-			if !seen[p] {
-				seen[p] = true
-				peers = append(peers, p)
-			}
-		}
-	}
-	if len(peers) == 0 {
-		return nil
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), quorumMetaReadTimeout)
-	defer cancel()
-	type res struct {
-		outcome peerReadOutcome
-		data    []byte
-	}
-	ch := make(chan res, len(peers))
-	var wg sync.WaitGroup
-	for _, p := range peers {
-		p := p
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			addr, err := b.shardSvc.resolvePeerAddress(p)
-			if err != nil {
-				ch <- res{outcome: peerErrored}
-				return
-			}
-			data, err := b.shardSvc.ReadQuorumMetaRaw(ctx, addr, bucket, key)
-			switch {
-			case err != nil:
-				ch <- res{outcome: peerErrored}
-			case len(data) == 0:
-				ch <- res{outcome: peerNotFound}
-			default:
-				ch <- res{outcome: peerHasData, data: data}
-			}
-		}()
-	}
-	go func() { wg.Wait(); close(ch) }()
-	outcomes := make([]peerReadOutcome, 0, len(peers))
-	for r := range ch {
-		if r.outcome == peerHasData {
-			consider(r.data)
-		}
-		outcomes = append(outcomes, r.outcome)
-	}
-	return outcomes
+	return b.qmsOrBuild().readQuorumMetaForReclaim(bucket, key)
 }
 
 // fanOutQuorumMeta dispatches to every placement node concurrently and returns
@@ -1071,128 +724,12 @@ func (s *ShardService) ReadQuorumMetaVersions(ctx context.Context, addr, bucket,
 // peers + self, deduped by VersionID. Unconditional all-groups fan-out (mirrors
 // fetchQuorumMetaFromPeers) — NOT the multiGeneration-gated fast path.
 func (b *DistributedBackend) readQuorumMetaVersions(bucket, key string) ([]PutObjectMetaCmd, error) {
-	if b.shardSvc == nil {
-		return nil, nil
-	}
-	byVID := map[string]PutObjectMetaCmd{}
-	// Same-VID dedup by the full LWW comparator (quorumMetaCmdWins): higher
-	// ModTime wins, then higher VersionID, then higher MetaSeq, with the
-	// hard-delete tombstone as the top tiebreak. Deterministic regardless of
-	// fan-out iteration order (the old "MetaSeq >= keeps last-iterated" tiebreak
-	// was non-deterministic for same-MetaSeq replicas).
-	put := func(c PutObjectMetaCmd) {
-		if ex, ok := byVID[c.VersionID]; !ok || quorumMetaCmdWins(c, ex) {
-			byVID[c.VersionID] = c
-		}
-	}
-	// self
-	if local, err := b.shardSvc.readQuorumMetaVersionsLocal(bucket, key); err == nil {
-		for _, c := range local {
-			put(c)
-		}
-	}
-	self := b.currentSelfAddr()
-	seen := map[string]bool{self: true}
-	ctx, cancel := context.WithTimeout(context.Background(), quorumMetaReadTimeout)
-	defer cancel()
-	if b.shardGroup != nil {
-		for _, g := range b.shardGroup.ShardGroups() {
-			for _, p := range g.PeerIDs {
-				if seen[p] {
-					continue
-				}
-				seen[p] = true
-				addr, aerr := b.shardSvc.resolvePeerAddress(p)
-				if aerr != nil {
-					continue
-				}
-				remote, rerr := b.shardSvc.ReadQuorumMetaVersions(ctx, addr, bucket, key)
-				if rerr != nil {
-					continue // partial tolerated (see spec predicate boundary)
-				}
-				for _, c := range remote {
-					put(c)
-				}
-			}
-		}
-	}
-	out := make([]PutObjectMetaCmd, 0, len(byVID))
-	for _, c := range byVID {
-		out = append(out, c)
-	}
-	return out, nil
+	return b.qmsOrBuild().readQuorumMetaVersions(bucket, key)
 }
 
-// listObjectsPerVersion derives latest-per-key from per-version blobs across ALL
-// generation groups (unconditional ShardGroups fan-out, like readQuorumMetaVersions),
-// excluding keys whose global-max version is a delete marker. Returns sorted-by-key
-// cmds, same shape/contract as scatterGatherList (tombstone-excluded, key-sorted),
-// so the three LIST methods stay unchanged downstream. Orphan per-version blobs (a
-// node unreachable at hard-delete that rejoins later) could show a rare phantom;
-// reconciliation (scrubber removes blobs with no FSM record) is a separate slice.
+// listObjectsPerVersion delegates to the extracted QuorumMetaStore.
 func (b *DistributedBackend) listObjectsPerVersion(ctx context.Context, bucket, prefix string) ([]PutObjectMetaCmd, error) {
-	if b.shardSvc == nil {
-		return nil, nil
-	}
-	byKey := map[string]PutObjectMetaCmd{}
-	// Latest by the full ModTime-primary LWW comparator (quorumMetaCmdWins: higher
-	// ModTime; tie → higher VID; tie → higher MetaSeq; tombstone tier) so it matches
-	// deriveLatestVersion and is deterministic regardless of fan-out iteration order
-	// (mirrors readQuorumMetaVersions).
-	put := func(c PutObjectMetaCmd) {
-		if ex, ok := byKey[c.Key]; !ok || quorumMetaCmdWins(c, ex) {
-			byKey[c.Key] = c
-		}
-	}
-	if local, err := b.shardSvc.ScanQuorumMetaVersionsBucket(bucket, prefix); err == nil {
-		for _, c := range local {
-			put(c)
-		}
-	}
-	self := b.currentSelfAddr()
-	seen := map[string]bool{self: true}
-	rctx, cancel := context.WithTimeout(ctx, quorumMetaReadTimeout)
-	defer cancel()
-	if b.shardGroup != nil {
-		for _, g := range b.shardGroup.ShardGroups() {
-			for _, p := range g.PeerIDs {
-				if seen[p] {
-					continue
-				}
-				seen[p] = true
-				addr, aerr := b.shardSvc.resolvePeerAddress(p)
-				if aerr != nil {
-					continue
-				}
-				remote, rerr := b.shardSvc.ScanQuorumMetaVersions(rctx, addr, bucket, prefix)
-				if rerr != nil {
-					continue // partial-tolerant
-				}
-				for _, c := range remote {
-					put(c)
-				}
-			}
-		}
-	}
-	out := make([]PutObjectMetaCmd, 0, len(byKey))
-	for _, c := range byKey {
-		if c.IsHardDeleted {
-			// The per-key-max version was hard-deleted; the per-key-max scan
-			// collapsed the predecessor away, so re-derive the new latest from the
-			// full per-version set for this key (cluster-wide, tombstones/markers
-			// excluded). Omit the key entirely if nothing live remains.
-			if live, ok := b.latestLiveForKey(bucket, c.Key); ok {
-				out = append(out, live)
-			}
-			continue
-		}
-		if c.IsDeleteMarker {
-			continue // global-max is a marker → key deleted, omit from LIST
-		}
-		out = append(out, c)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
-	return out, nil
+	return b.qmsOrBuild().listObjectsPerVersion(ctx, bucket, prefix)
 }
 
 // scanQuorumMetaVersionsClusterAll unions EVERY per-version quorum-meta blob in
@@ -1204,63 +741,7 @@ func (b *DistributedBackend) listObjectsPerVersion(ctx context.Context, bucket, 
 // skipped) — under blob authority a silently-truncated set is data loss. When
 // shardGroup == nil (single-node) the result is the local STRICT scan.
 func (b *DistributedBackend) scanQuorumMetaVersionsClusterAll(bucket, prefix string) ([]PutObjectMetaCmd, error) {
-	if b.shardSvc == nil {
-		return nil, nil
-	}
-	type vkey struct{ key, vid string }
-	byKey := map[vkey]PutObjectMetaCmd{}
-	// Same-(Key,VID) dedup by the full LWW comparator (quorumMetaCmdWins) — higher
-	// ModTime/VID/MetaSeq with the tombstone tiebreak — so it is deterministic
-	// regardless of fan-out iteration order (mirrors readQuorumMetaVersions).
-	put := func(c PutObjectMetaCmd) {
-		k := vkey{c.Key, c.VersionID}
-		if ex, ok := byKey[k]; !ok || quorumMetaCmdWins(c, ex) {
-			byKey[k] = c
-		}
-	}
-	// self (STRICT, fail-closed)
-	local, lerr := b.shardSvc.scanQuorumMetaVersionsBucketAllStrict(bucket, prefix)
-	if lerr != nil {
-		return nil, lerr
-	}
-	for _, c := range local {
-		put(c)
-	}
-	if b.shardGroup == nil {
-		out := make([]PutObjectMetaCmd, 0, len(byKey))
-		for _, c := range byKey {
-			out = append(out, c)
-		}
-		return out, nil
-	}
-	self := b.currentSelfAddr()
-	seen := map[string]bool{self: true}
-	ctx, cancel := context.WithTimeout(context.Background(), quorumMetaReadTimeout)
-	defer cancel()
-	for _, g := range b.shardGroup.ShardGroups() {
-		for _, p := range g.PeerIDs {
-			if seen[p] {
-				continue
-			}
-			seen[p] = true
-			addr, aerr := b.shardSvc.resolvePeerAddress(p)
-			if aerr != nil {
-				return nil, aerr // fail-closed: cannot enumerate a peer → abort
-			}
-			remote, rerr := b.shardSvc.ScanQuorumMetaVersionsAll(ctx, addr, bucket, prefix)
-			if rerr != nil {
-				return nil, rerr // fail-closed: a partial set is silent data loss
-			}
-			for _, c := range remote {
-				put(c)
-			}
-		}
-	}
-	out := make([]PutObjectMetaCmd, 0, len(byKey))
-	for _, c := range byKey {
-		out = append(out, c)
-	}
-	return out, nil
+	return b.qmsOrBuild().scanQuorumMetaVersionsClusterAll(bucket, prefix)
 }
 
 // scanQuorumMetaClusterAll is the latest-only-tree twin of
@@ -1280,52 +761,7 @@ func (b *DistributedBackend) scanQuorumMetaVersionsClusterAll(bucket, prefix str
 // object is already unreadable. FOLLOW-UP before DEK-gen prune is enabled (S7): add
 // a strict latest-only peer RPC mirroring handleScanQuorumMetaVersionsAll.
 func (b *DistributedBackend) scanQuorumMetaClusterAll(bucket string) ([]PutObjectMetaCmd, error) {
-	if b.shardSvc == nil {
-		return nil, nil
-	}
-	byKey := map[string]PutObjectMetaCmd{}
-	put := func(c PutObjectMetaCmd) {
-		if ex, ok := byKey[c.Key]; !ok || quorumMetaCmdWins(c, ex) {
-			byKey[c.Key] = c
-		}
-	}
-	local, lerr := b.shardSvc.scanQuorumMetaBucketStrict(bucket)
-	if lerr != nil {
-		return nil, lerr
-	}
-	for _, c := range local {
-		put(c)
-	}
-	if b.shardGroup != nil {
-		self := b.currentSelfAddr()
-		seen := map[string]bool{self: true}
-		ctx, cancel := context.WithTimeout(context.Background(), quorumMetaReadTimeout)
-		defer cancel()
-		for _, g := range b.shardGroup.ShardGroups() {
-			for _, p := range g.PeerIDs {
-				if seen[p] {
-					continue
-				}
-				seen[p] = true
-				addr, aerr := b.shardSvc.resolvePeerAddress(p)
-				if aerr != nil {
-					return nil, aerr // fail-closed
-				}
-				remote, rerr := b.shardSvc.ScanQuorumMeta(ctx, addr, bucket, "")
-				if rerr != nil {
-					return nil, rerr // fail-closed: a partial set leaves shards un-rewrapped
-				}
-				for _, c := range remote {
-					put(c)
-				}
-			}
-		}
-	}
-	out := make([]PutObjectMetaCmd, 0, len(byKey))
-	for _, c := range byKey {
-		out = append(out, c)
-	}
-	return out, nil
+	return b.qmsOrBuild().scanQuorumMetaClusterAll(bucket)
 }
 
 // readQuorumMetaVersion returns the single per-version blob for (bucket, key,
@@ -1333,16 +769,7 @@ func (b *DistributedBackend) scanQuorumMetaClusterAll(bucket string) ([]PutObjec
 // replica is located even when the local node isn't a placement node. Returns
 // (cmd, true, nil) on a hit, (zero, false, nil) on a miss.
 func (b *DistributedBackend) readQuorumMetaVersion(bucket, key, versionID string) (PutObjectMetaCmd, bool, error) {
-	cmds, err := b.readQuorumMetaVersions(bucket, key)
-	if err != nil {
-		return PutObjectMetaCmd{}, false, err
-	}
-	for _, c := range cmds {
-		if c.VersionID == versionID {
-			return c, true, nil
-		}
-	}
-	return PutObjectMetaCmd{}, false, nil
+	return b.qmsOrBuild().readQuorumMetaVersion(bucket, key, versionID)
 }
 
 // readQuorumMetaVersionsDecodeStrict is the read1 blob-authoritative per-key reader:
@@ -1358,62 +785,7 @@ func (b *DistributedBackend) readQuorumMetaVersion(bucket, key, versionID string
 // Distinct from the tolerant readQuorumMetaVersions, which silently drops per-blob
 // decode failures and is correct for the off-path / non-blob-authority consumers.
 func (b *DistributedBackend) readQuorumMetaVersionsDecodeStrict(bucket, key string) ([]PutObjectMetaCmd, error) {
-	if b.shardSvc == nil {
-		return nil, nil
-	}
-	var rawBlobs [][]byte
-	// self — strict local read (a present-but-unreadable blob fails closed;
-	// decode happens once, strictly, in the loop below).
-	selfRaw, err := b.shardSvc.readQuorumMetaVersionsRawLocal(bucket, key)
-	if err != nil {
-		return nil, fmt.Errorf("decode-strict version read %s/%s: %w", bucket, key, err)
-	}
-	rawBlobs = append(rawBlobs, selfRaw...)
-	// peers — all-groups fan-out; tolerate an unreachable peer (a corrupt blob is
-	// caught wherever it IS served, below).
-	self := b.currentSelfAddr()
-	seen := map[string]bool{self: true}
-	ctx, cancel := context.WithTimeout(context.Background(), quorumMetaReadTimeout)
-	defer cancel()
-	if b.shardGroup != nil {
-		for _, g := range b.shardGroup.ShardGroups() {
-			for _, p := range g.PeerIDs {
-				if seen[p] {
-					continue
-				}
-				seen[p] = true
-				addr, aerr := b.shardSvc.resolvePeerAddress(p)
-				if aerr != nil {
-					continue // availability-tolerant
-				}
-				peerRaw, rerr := b.shardSvc.ReadQuorumMetaVersionsRaw(ctx, addr, bucket, key)
-				if rerr != nil {
-					continue // unreachable / un-upgraded / peer read error → tolerate
-				}
-				rawBlobs = append(rawBlobs, peerRaw...)
-			}
-		}
-	}
-	// strict decode + dedup. Same-VID replicas dedup by the full LWW comparator
-	// (quorumMetaCmdWins) so the winner is deterministic regardless of fan-out
-	// order, mirroring readQuorumMetaVersions.
-	byVID := map[string]PutObjectMetaCmd{}
-	for _, blob := range rawBlobs {
-		cmd, derr := b.shardSvc.decodeQuorumMetaCmdBlob(blob)
-		if derr != nil {
-			// A served blob we cannot decode: its VID is unknown, so we cannot rule
-			// out that it WAS the authoritative latest. Fail closed.
-			return nil, fmt.Errorf("decode-strict version read %s/%s: %w", bucket, key, derr)
-		}
-		if ex, ok := byVID[cmd.VersionID]; !ok || quorumMetaCmdWins(cmd, ex) {
-			byVID[cmd.VersionID] = cmd
-		}
-	}
-	out := make([]PutObjectMetaCmd, 0, len(byVID))
-	for _, c := range byVID {
-		out = append(out, c)
-	}
-	return out, nil
+	return b.qmsOrBuild().readQuorumMetaVersionsDecodeStrict(bucket, key)
 }
 
 // readQuorumMetaVersionDecodeStrict is the specific-version twin of
@@ -1421,16 +793,7 @@ func (b *DistributedBackend) readQuorumMetaVersionsDecodeStrict(bucket, key stri
 // version under the same key fails the read closed (the version set is
 // untrustworthy if any blob under the key is undecodable).
 func (b *DistributedBackend) readQuorumMetaVersionDecodeStrict(bucket, key, versionID string) (PutObjectMetaCmd, bool, error) {
-	cmds, err := b.readQuorumMetaVersionsDecodeStrict(bucket, key)
-	if err != nil {
-		return PutObjectMetaCmd{}, false, err
-	}
-	for _, c := range cmds {
-		if c.VersionID == versionID {
-			return c, true, nil
-		}
-	}
-	return PutObjectMetaCmd{}, false, nil
+	return b.qmsOrBuild().readQuorumMetaVersionDecodeStrict(bucket, key, versionID)
 }
 
 // deriveLatestVersion returns the max-VersionID blob and whether the object's
@@ -1478,18 +841,9 @@ func dropHardDeletedVersions(cmds []PutObjectMetaCmd) []PutObjectMetaCmd {
 	return out
 }
 
-// latestLiveForKey resolves the live latest version for a single key from the full
-// cluster-wide per-version set (tombstones and delete markers excluded via
-// deriveLatestVersion). Used by listObjectsPerVersion when a key's per-key-max scan
-// collapsed to a hard-delete tombstone: the predecessor was collapsed away, so the
-// new latest must be re-derived from all versions of that key.
-func (b *DistributedBackend) latestLiveForKey(bucket, key string) (PutObjectMetaCmd, bool) {
-	cmds, err := b.readQuorumMetaVersions(bucket, key)
-	if err != nil {
-		return PutObjectMetaCmd{}, false
-	}
-	return deriveLatestVersion(cmds)
-}
+// latestLiveForKey moved to QuorumMetaStore (quorum_meta_store.go): only
+// listObjectsPerVersion (now on the store) calls it, on itself, so the
+// DistributedBackend facade delegate would be dead code and was omitted.
 
 // isQuorumMetaTempName reports whether a directory entry is an in-flight
 // atomic-publish temp file (os.CreateTemp(dir, ".qmeta-*.tmp") above). Store
@@ -1992,27 +1346,7 @@ func (s *ShardService) DeleteQuorumMeta(ctx context.Context, addr, bucket, key s
 // placement node. FAIL-CLOSED: returns the first error encountered so a blob
 // left on a missed node cannot resurface the object via derive-by-scan.
 func (b *DistributedBackend) deleteQuorumMetaQuorum(ctx context.Context, bucket, key string, nodeIDs []string) error {
-	if b.shardSvc == nil {
-		return nil
-	}
-	self := b.currentSelfAddr()
-	dctx, cancel := context.WithTimeout(ctx, quorumMetaWriteTimeout)
-	defer cancel()
-	var firstErr error
-	for _, node := range nodeIDs {
-		var err error
-		if node == self {
-			err = b.shardSvc.deleteQuorumMetaLocal(bucket, key)
-		} else if addr, rerr := b.shardSvc.resolvePeerAddress(node); rerr == nil {
-			err = b.shardSvc.DeleteQuorumMeta(dctx, addr, bucket, key)
-		} else {
-			err = rerr
-		}
-		if err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	return firstErr
+	return b.qmsOrBuild().deleteQuorumMetaQuorum(ctx, bucket, key, nodeIDs)
 }
 
 // deleteShardsQuorum deletes EC shards on every placement node synchronously
@@ -2090,14 +1424,7 @@ func (s *ShardService) ReadQuorumMetaRaw(ctx context.Context, addr, bucket, key 
 // with peer fan-out fallback when the local quorum meta file is absent.
 // Used by SetObjectACLPropose, SetObjectTagsPropose, and AppendObject migration.
 func (b *DistributedBackend) readQuorumMetaCmd(bucket, key string) (PutObjectMetaCmd, error) {
-	if b.shardSvc == nil {
-		return PutObjectMetaCmd{}, storage.ErrObjectNotFound
-	}
-	raw, err := b.readQuorumMetaWinningRaw(bucket, key)
-	if err != nil {
-		return PutObjectMetaCmd{}, err
-	}
-	return b.shardSvc.decodeQuorumMetaCmdBlob(raw)
+	return b.qmsOrBuild().readQuorumMetaCmd(bucket, key)
 }
 
 // WriteQuorumMeta sends the quorum meta blob to a remote placement node via the
@@ -2339,97 +1666,11 @@ func (s *ShardService) ScanQuorumMeta(ctx context.Context, addr, bucket, prefix 
 // that ClassifyObjectLayout needs. S4-4d uses it to rebuild admin volume replica
 // facts from quorum meta now that the object index is gone.
 func (b *DistributedBackend) ScanObjectMetaEntries(ctx context.Context, bucket, prefix string) ([]ObjectIndexEntry, error) {
-	cmds, err := b.scatterGatherList(ctx, bucket, prefix)
-	if err != nil {
-		return nil, err
-	}
-	entries := make([]ObjectIndexEntry, 0, len(cmds))
-	for _, cmd := range cmds {
-		entries = append(entries, ObjectIndexEntry{
-			Bucket:           cmd.Bucket,
-			Key:              cmd.Key,
-			VersionID:        cmd.VersionID,
-			PlacementGroupID: cmd.PlacementGroupID,
-			Size:             cmd.Size,
-			ContentType:      cmd.ContentType,
-			ETag:             cmd.ETag,
-			ModTime:          cmd.ModTime,
-			ECData:           cmd.ECData,
-			ECParity:         cmd.ECParity,
-			NodeIDs:          cmd.NodeIDs,
-			IsDeleteMarker:   cmd.IsDeleteMarker,
-		})
-	}
-	return entries, nil
+	return b.qmsOrBuild().ScanObjectMetaEntries(ctx, bucket, prefix)
 }
 
 func (b *DistributedBackend) scatterGatherList(ctx context.Context, bucket, prefix string) ([]PutObjectMetaCmd, error) {
-	if b.shardSvc == nil {
-		return nil, nil
-	}
-	self := b.currentSelfAddr()
-	seen := map[string]bool{}
-	var peerIDs []string
-	if b.shardGroup != nil {
-		for _, g := range b.shardGroup.ShardGroups() {
-			for _, p := range g.PeerIDs {
-				if !seen[p] {
-					seen[p] = true
-					peerIDs = append(peerIDs, p)
-				}
-			}
-		}
-	}
-	if !seen[self] {
-		peerIDs = append(peerIDs, self)
-	}
-	if len(peerIDs) == 0 {
-		entries, err := b.shardSvc.ScanQuorumMetaBucket(bucket, prefix)
-		if err != nil {
-			return nil, err
-		}
-		return filterAndSortEntries(entries), nil
-	}
-
-	type nodeResult struct {
-		entries []PutObjectMetaCmd
-	}
-	rctx, cancel := context.WithTimeout(ctx, quorumMetaReadTimeout)
-	defer cancel()
-	ch := make(chan nodeResult, len(peerIDs))
-	for _, p := range peerIDs {
-		p := p
-		go func() {
-			if p == self {
-				entries, _ := b.shardSvc.ScanQuorumMetaBucket(bucket, prefix)
-				ch <- nodeResult{entries: entries}
-				return
-			}
-			addr, aerr := b.shardSvc.resolvePeerAddress(p)
-			if aerr != nil {
-				ch <- nodeResult{}
-				return
-			}
-			entries, _ := b.shardSvc.ScanQuorumMeta(rctx, addr, bucket, prefix)
-			ch <- nodeResult{entries: entries}
-		}()
-	}
-
-	lww := map[string]PutObjectMetaCmd{}
-	for range peerIDs {
-		r := <-ch
-		for _, e := range r.entries {
-			if cur, ok := lww[e.Key]; !ok || quorumMetaBlobWins(e.ModTime, e.VersionID, e.MetaSeq, cur.ModTime, cur.VersionID, cur.MetaSeq) {
-				lww[e.Key] = e
-			}
-		}
-	}
-
-	all := make([]PutObjectMetaCmd, 0, len(lww))
-	for _, e := range lww {
-		all = append(all, e)
-	}
-	return filterAndSortEntries(all), nil
+	return b.qmsOrBuild().scatterGatherList(ctx, bucket, prefix)
 }
 
 // filterAndSortEntries removes tombstones and sorts by key.
