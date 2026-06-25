@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.700.0] - 2026-06-25
+
+### Removed
+- **Internal dead-code removal, no user-facing behavior change.** Removed the unused
+  `config.Store.SetPostRestore` callback capability (the method, its `postRestore` field, and the
+  post-`Restore` callback fire-site). Its only caller was the proxy-CIDR snapshot reconcile removed
+  with the ProxyTrust subsystem, leaving zero production callers. `Restore`'s value
+  validation/install path is unchanged and reload hooks are still not fired during `Restore`.
+
 ## [0.0.699.0] - 2026-06-25
 
 ### Changed
