@@ -28,15 +28,6 @@ func (m *mockBlockSource) Iter(ctx context.Context, bucket, keyPrefix string) (<
 	return ch, nil
 }
 
-type mockBlockVerifier struct {
-	verifyResults map[string]BlockStatus
-}
-
-func (m *mockBlockVerifier) Verify(ctx context.Context, b Block) (BlockStatus, error) {
-	return m.verifyResults[b.Key], nil
-}
-func (m *mockBlockVerifier) Repair(ctx context.Context, b Block) error { return nil }
-
 func TestBlockSource_InterfaceContract(t *testing.T) {
 	src := &mockBlockSource{
 		name:   "mock",
