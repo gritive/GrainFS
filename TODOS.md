@@ -26,10 +26,6 @@ either bucket).
   source = safe logged no-op. Pre-existing (the old volumes branch was the only internal→"ec" path).
   "Should internal buckets be scrubbed at all, and via which source" is a design question, not a
   leftover fix — surfaced by the code-gate review.
-- **[P3][pre-existing] `internal/storage/local.go` legacy single-file read path.** Its only named
-  producer was `__grainfs_volumes` Volume Device blocks (now gone). Verify whether any non-segment
-  object can still reach this path; if none, the path itself may be removable (separate change — the
-  comment was fixed, the code kept).
 - **[P4][hygiene] Incidental `__grainfs_volumes` test fixtures kept (Minimal scope).** `spool_test.go`,
   `pullthrough_test.go`, `store_bench_test.go`, `backend_bucket_management_integration_test.go`, and
   the `bucket_test.go` `{"__grainfs_volumes", true}` case still use the string as an arbitrary
