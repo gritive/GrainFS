@@ -192,7 +192,7 @@ func TestBenchS3CompatUsesUniqueDefaultBenchDir(t *testing.T) {
 	}
 	for _, want := range []string{
 		`BENCH_DIR_PROVIDED=0`,
-		`BENCH_DIR="$(mktemp -d "${TMPDIR:-/tmp}/grainfs-s3-compat-compare.XXXXXX")"`,
+		`BENCH_DIR="$(mktemp -d "${bench_tmp_base%/}/grainfs-s3-compat-compare.XXXXXX")"`,
 		`if [[ "$BENCH_DIR_PROVIDED" == "1" ]]; then`,
 		`rm -rf "$BENCH_DIR"`,
 	} {

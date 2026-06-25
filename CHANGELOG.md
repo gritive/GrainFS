@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.687.0] - 2026-06-25
+
+### Changed
+- **Internal refactor, no user-facing behavior change.** Routed the AppendObject S3 handler
+  through `storage.Operations.AppendObject` so it no longer reaches the backend via a concrete
+  `s.backend.(storage.AppendObjecter)` capability assertion. The handler is now backend-blind like
+  every other object op (Get/Put/Multipart). Append capability is resolved on the outermost backend
+  only — byte-identical to the former assertion — so behavior is preserved (single-node and 4-node
+  cluster append e2e green).
+
+### Fixed
+- **Developer tooling.** Fixed `TestBenchS3CompatUsesUniqueDefaultBenchDir`, which asserted the
+  pre-`bench_tmp_base` mktemp form and had been failing since the macOS bench socket-path fix.
+
 ## [0.0.686.0] - 2026-06-25
 
 ### Fixed

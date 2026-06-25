@@ -73,12 +73,6 @@ func (s *Server) appendObject(ctx context.Context, c *app.RequestContext, bucket
 		return true
 	}
 
-	ap, ok := s.backend.(storage.AppendObjecter)
-	if !ok {
-		writeXMLError(c, consts.StatusNotImplemented, "NotImplemented", "backend does not support AppendObject")
-		return true
-	}
-
 	// Large aws-chunked/streaming appends are streamed rather than buffered whole
 	// in Hertz's bytebufferpool (the retained pool is the PUT-path RSS driver).
 	// The coordinator's appendObjectLocalWithRetry re-buffers a non-seekable
@@ -110,7 +104,8 @@ func (s *Server) appendObject(ctx context.Context, c *app.RequestContext, bucket
 		}
 		bodyReader = bytes.NewReader(body)
 	}
-	obj, err := ap.AppendObject(ctx, bucket, key, off, bodyReader)
+	obj, err := s.ops.AppendObject(ctx, bucket, key, off, bodyReader)
+	var unsupportedAppend storage.UnsupportedOperationError
 	switch {
 	case errors.Is(err, storage.ErrAppendOffsetMismatch):
 		writeXMLError(c, consts.StatusBadRequest, "InvalidWriteOffset", "the write offset does not match the object size")
@@ -124,6 +119,8 @@ func (s *Server) appendObject(ctx context.Context, c *app.RequestContext, bucket
 	case errors.Is(err, cluster.ErrForwardBufferFull):
 		c.Response.Header.Set("Retry-After", "1")
 		writeXMLError(c, consts.StatusServiceUnavailable, "SlowDown", "append forward buffer saturated")
+	case errors.As(err, &unsupportedAppend):
+		writeXMLError(c, consts.StatusNotImplemented, "NotImplemented", "backend does not support AppendObject")
 	case err != nil:
 		mapError(c, err)
 	default:
