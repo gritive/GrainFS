@@ -229,6 +229,22 @@ func TestWriteLocalShardStaged_AADIsFinalKey_PromoteReadable(t *testing.T) {
 	require.Equal(t, data, got)
 }
 
+func TestStagedPromotePairsCodec(t *testing.T) {
+	want := []stagedPromotePair{
+		{stagingKey: ".segstaging/txn/blob-a", finalKey: "obj/segments/blob-a"},
+		{stagingKey: ".segstaging/txn/blob-b", finalKey: "obj/segments/blob-b"},
+	}
+	data, err := encodeStagedPromotePairs(want)
+	require.NoError(t, err)
+
+	got, err := decodeStagedPromotePairs(data)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+
+	_, err = decodeStagedPromotePairs(data[:len(data)-1])
+	require.Error(t, err, "truncated batch payload must fail closed")
+}
+
 // PR2 Task (delete-time liveness rework): the orphan-shard walker AGES OUT abandoned
 // .segstaging/ staged shard leaves (crash / failed PUT / LWW loser) instead of
 // skipping them forever, while NEVER deleting a committed (live) object however it

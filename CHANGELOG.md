@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.732.0] - 2026-06-26
+
+### Fixed
+- **Batched segment-staging promote RPCs by target node.**
+  Chunked PUT commit now promotes all staged segment shards for the same node in
+  one RPC, reducing segment-staging promote fanout from segment-by-node calls to
+  one batch per placement node.
+
 ## [0.0.731.0] - 2026-06-26
 
 ### Fixed

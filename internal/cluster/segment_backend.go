@@ -42,12 +42,13 @@ type clusterSegmentBackend struct {
 	// through b.shardGroup / newECObjectWriter / b.shardSvc.DeleteShards /
 	// b.writeQuorumMeta. Tests inject these to exercise putObjectChunked without
 	// a full RaftNode + ShardService.
-	writeSegmentFn    func(ctx context.Context, idx int, in writeSegmentInput) (PlacementRecord, string, string, error)
-	groupSelectorFn   func(bucket, key string, idx int, blobID string) (ShardGroupEntry, error)
-	deleteShardsFn    func(ctx context.Context, peer, bucket, shardKey string) error
-	promoteStagedFn   func(ctx context.Context, node, bucket, stagingKey, finalKey string) error
-	writeQuorumMetaFn func(ctx context.Context, cmd PutObjectMetaCmd) error
-	ecConfigFn        func() ECConfig
+	writeSegmentFn       func(ctx context.Context, idx int, in writeSegmentInput) (PlacementRecord, string, string, error)
+	groupSelectorFn      func(bucket, key string, idx int, blobID string) (ShardGroupEntry, error)
+	deleteShardsFn       func(ctx context.Context, peer, bucket, shardKey string) error
+	promoteStagedFn      func(ctx context.Context, node, bucket, stagingKey, finalKey string) error
+	promoteStagedBatchFn func(ctx context.Context, node, bucket string, pairs []stagedPromotePair) error
+	writeQuorumMetaFn    func(ctx context.Context, cmd PutObjectMetaCmd) error
+	ecConfigFn           func() ECConfig
 	// peerWeightsFn returns the per-peer disk-capacity weight snapshot aligned
 	// 1:1 with peers and whether weighting is enabled. Production constructor
 	// leaves it nil; the default routes through b.nodeStatsStore + b.clusterCfg.
@@ -82,6 +83,11 @@ type segmentPlacement struct {
 	NodeIDs          []string
 	Config           ECConfig
 	ShardSize        int32
+}
+
+type stagedPromotePair struct {
+	stagingKey string
+	finalKey   string
 }
 
 // WriteSegment buffers the chunk, picks a PG for this (bucket,key,idx,blobID),
@@ -263,6 +269,35 @@ func (c *clusterSegmentBackend) promoteStagedShards(ctx context.Context, node, b
 		return c.b.shardSvc.PromoteLocalStagedShards(bucket, stagingKey, finalKey)
 	}
 	return c.b.shardSvc.PromoteStagedShards(ctx, node, bucket, stagingKey, finalKey)
+}
+
+func (c *clusterSegmentBackend) promoteStagedShardsBatch(ctx context.Context, node, bucket string, pairs []stagedPromotePair) error {
+	if len(pairs) == 0 {
+		return nil
+	}
+	if c.promoteStagedBatchFn != nil {
+		return c.promoteStagedBatchFn(ctx, node, bucket, pairs)
+	}
+	if c.promoteStagedFn != nil {
+		for _, pair := range pairs {
+			if err := c.promoteStagedFn(ctx, node, bucket, pair.stagingKey, pair.finalKey); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if c.b.shardSvc == nil {
+		return fmt.Errorf("shard service not wired")
+	}
+	if node == c.b.currentSelfAddr() {
+		for _, pair := range pairs {
+			if err := c.b.shardSvc.PromoteLocalStagedShards(bucket, pair.stagingKey, pair.finalKey); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return c.b.shardSvc.PromoteStagedShardsBatch(ctx, node, bucket, pairs)
 }
 
 // segmentStagingShardKey is the per-node STAGING physical shard key for a segment
@@ -514,6 +549,8 @@ func runChunkedPutWithParts(
 	// between promote and commit) leaves final-path shards no manifest references —
 	// a disk leak, not data loss; PR1 narrows the leak, it does not close the class.
 	if csb.stagingTxnID != "" {
+		promotes := make(map[string][]stagedPromotePair)
+		var nodeOrder []string
 		for _, p := range csb.placements {
 			if p.BlobID == "" {
 				continue
@@ -521,9 +558,15 @@ func runChunkedPutWithParts(
 			stagingKey := segmentStagingShardKey(csb.stagingTxnID, p.BlobID)
 			finalKey := key + "/segments/" + p.BlobID
 			for _, node := range p.NodeIDs {
-				if perr := csb.promoteStagedShards(ctx, node, bucket, stagingKey, finalKey); perr != nil {
-					return nil, fmt.Errorf("promote staged segment shards (blob %s, node %s): %w", p.BlobID, node, perr)
+				if _, ok := promotes[node]; !ok {
+					nodeOrder = append(nodeOrder, node)
 				}
+				promotes[node] = append(promotes[node], stagedPromotePair{stagingKey: stagingKey, finalKey: finalKey})
+			}
+		}
+		for _, node := range nodeOrder {
+			if perr := csb.promoteStagedShardsBatch(ctx, node, bucket, promotes[node]); perr != nil {
+				return nil, fmt.Errorf("promote staged segment shard batch (node %s, count %d): %w", node, len(promotes[node]), perr)
 			}
 		}
 	}
