@@ -163,9 +163,6 @@ Deferred items:
   edge-cache below becomes required.
 - **[P3] Short-TTL bucket-versioning edge-cache (fast-follow).** The shipped design's deferred "C2":
   only needed if the meta-raft versioning barrier regresses object-write throughput (above).
-- **[P3] Neutralize group-0 placement special-casing.** The demotion removed group-0's *control-plane*
-  role but it remains the placement legacy-fallback (router default / `object_placement` /
-  `object_write_placement` / `append`). Removing that makes group-0 a truly plain data group.
 - **[P3][minor] `CreateBucket` now unconditionally requires a non-empty groupID** (the FSM rejects
   `""`). Safe in production (the router is always wired so placement resolves a real group), but it
   tightens behavior for any future router-less `DistributedBackend` wiring. Note only.

@@ -53,9 +53,6 @@ func groupIDForObject(bucket, key string, sortedGroupIDs []string) string {
 }
 
 // SelectObjectPlacementGroup chooses the normal data group for a new object.
-// group-0 stays reserved for legacy/system paths when normal data groups are
-// present, but remains the fallback for bootstrap clusters that only have the
-// legacy group.
 func SelectObjectPlacementGroup(bucket, key string, groups []ShardGroupEntry, cfg ECConfig) (ShardGroupEntry, error) {
 	candidates, err := candidateGroupsFor(groups, cfg)
 	if err != nil {
@@ -76,9 +73,8 @@ func SelectObjectPlacementGroup(bucket, key string, groups []ShardGroupEntry, cf
 
 // SelectSegmentPlacementGroup picks the placement group for segment segmentIdx
 // of (bucket, key) with stable identity supplied by blobID (UUIDv7). Reuses
-// the candidate filter from SelectObjectPlacementGroup: EC-capable + group-0
-// excluded when non-legacy candidates exist + widest-set + alphabetical sort
-// for determinism.
+// the candidate filter from SelectObjectPlacementGroup: EC-capable +
+// widest-set + alphabetical sort for determinism.
 //
 // No versionID parameter: blobID is globally unique and supplies per-version
 // uniqueness via the hash; pulling versionID through here would couple
@@ -100,12 +96,10 @@ func SelectSegmentPlacementGroup(
 
 // candidateGroupsFor returns the EC-capable placement-group candidate set,
 // shared by object-level and segment-level placement. Filters out empty IDs
-// and EC-incapable groups, excludes group-0 when any non-legacy candidate is
-// available (falls back to group-0 otherwise), keeps only widest-topology
-// groups, and sorts alphabetically for deterministic hash indexing.
+// and EC-incapable groups, keeps only widest-topology groups, and sorts
+// alphabetically for deterministic hash indexing.
 func candidateGroupsFor(groups []ShardGroupEntry, cfg ECConfig) ([]ShardGroupEntry, error) {
 	candidates := make([]ShardGroupEntry, 0, len(groups))
-	legacyCandidates := make([]ShardGroupEntry, 0, 1)
 	maxPeerCount := 0
 	for _, group := range groups {
 		if group.ID == "" {
@@ -119,18 +113,10 @@ func candidateGroupsFor(groups []ShardGroupEntry, cfg ECConfig) ([]ShardGroupEnt
 			ID:      group.ID,
 			PeerIDs: cloneStringSlice(group.PeerIDs),
 		}
-		if group.ID == "group-0" {
-			legacyCandidates = append(legacyCandidates, candidate)
-			continue
-		}
 		candidates = append(candidates, candidate)
 		if len(candidate.PeerIDs) > maxPeerCount {
 			maxPeerCount = len(candidate.PeerIDs)
 		}
-	}
-	if len(candidates) == 0 && len(legacyCandidates) > 0 {
-		candidates = legacyCandidates
-		maxPeerCount = len(candidates[0].PeerIDs)
 	}
 	if len(candidates) == 0 {
 		return nil, fmt.Errorf("no candidate placement group")

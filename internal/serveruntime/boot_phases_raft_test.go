@@ -64,8 +64,6 @@ func TestBootRaftPhases_OrderingInvariant(t *testing.T) {
 	require.NoError(t, bootDataGroupRouter(state))
 	require.NotNil(t, state.dgMgr, "DataGroupManager after DataGroupRouter phase")
 	require.NotNil(t, state.clusterRouter, "Router after DataGroupRouter phase")
-	// SetDefault("group-0") was applied. ExplicitGroup returns false for
-	// unassigned buckets but the default keeps RouteKey from erroring.
 	if explicit, ok := state.clusterRouter.ExplicitGroup("any-bucket"); ok {
 		t.Errorf("brand-new bucket should not have explicit assignment, got %q", explicit)
 	}

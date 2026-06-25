@@ -629,7 +629,8 @@ func (b *DistributedBackend) readAtChunk(ctx context.Context, bucket, key string
 // the next appendable object manifest. Order:
 //  1. existing objectMeta's PG (anchors subsequent appends to the original PG).
 //  2. PlacementGroupFromContext (coordinator-provided).
-//  3. default "group-0" (single-node / test path).
+//  3. backend group / only placement candidate.
+//  4. default "group-0" (legacy single-node / test path).
 func (b *DistributedBackend) lookupPlacementGroupForAppend(ctx context.Context, existing *storage.Object) string {
 	// The object's own stored placement group is authoritative. The FSM
 	// stale-placement check (appendable_object.go) compares cmd.PlacementGroupID
@@ -646,6 +647,12 @@ func (b *DistributedBackend) lookupPlacementGroupForAppend(ctx context.Context, 
 	}
 	if pg, ok := PlacementGroupFromContext(ctx); ok {
 		return pg
+	}
+	if b.groupID != "" {
+		return b.groupID
+	}
+	if group, ok := b.onlyPlacementCandidate(); ok {
+		return group.ID
 	}
 	return "group-0"
 }
