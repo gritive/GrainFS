@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.716.0] - 2026-06-26
+
+### Changed
+- **Removed a stale follow-up for the old `__grainfs_nfs4` design note.** The referenced
+  `docs/superpowers` design tree is no longer present on `master`, and the remaining test fixture
+  comment already records that NFS support was removed.
+
 ## [0.0.715.0] - 2026-06-26
 
 ### Fixed
