@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.0.713.0] - 2026-06-26
+
+### Removed
+- **The balancer no longer proposes or executes Raft-backed shard migrations.** Disk and request-rate
+  gossip still run, the balancer status endpoint still reports skew and active hysteresis, and
+  load-based leader transfer remains gated off by default, but the old `CmdMigrateShard` /
+  `CmdMigrationDone` producer, executor, pending queue, retry helper, object picker, and apply hooks
+  are gone. Fresh clusters cannot enqueue new balancer data movement through meta-Raft.
+
+### Changed
+- **Old balancer migration log entries now replay as inert compatibility slots.** Command types 10
+  and 11 remain reserved so brownfield Raft logs can replay without decoding legacy payloads or
+  blocking on missing executors; replay does not create `pending-migration:` keys. Existing legacy
+  pending keys still survive snapshot/restore as inert state, and legacy Prometheus metric names
+  remain registered with help text that says they should stay at zero.
+- **Balancer operations docs now describe the current runtime.** The runbook explains that migration
+  flags are legacy inert knobs, how to spot stale binaries still emitting migration counters or
+  `pending-migration:` keys, and how to use the remaining gossip/skew metrics during incidents.
+
 ## [0.0.712.0] - 2026-06-26
 
 ### Removed
