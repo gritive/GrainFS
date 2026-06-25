@@ -110,6 +110,7 @@ func (b *DistributedBackend) relocateObjectToRedundantGroup(ctx context.Context,
 		acl:          cur.ACL,
 		placements:   make([]segmentPlacement, numSegments),
 		chunkSize:    int(chunkSize),
+		sizeHint:     obj.Size,
 	}
 
 	// The override does the authoritative meta commit via the SAME path a normal

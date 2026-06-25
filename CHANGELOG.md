@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.0.692.0] - 2026-06-25
+
+### Changed
+- **Performance: right-sized the object write-path buffers (much lower memory and GC pressure on
+  PUT).** The segment-writer pipeline allocated a fixed 16 MiB chunk buffer for every object whose
+  body it could not size-sniff — which is the common case in production: a streaming HTTP body and a
+  packed-blob passthrough both reach the writer without a measurable length, so even a 4 KiB PUT
+  allocated 16 MiB (and a large PUT held up to `16 MiB × (workers+1)`). The writer now sizes its
+  chunk buffers from two sources:
+  - an in-memory body that reports `Len() int` (authoritative) sizes the buffer exactly; and
+  - the request `Content-Length` (already plumbed as `SizeHint`) sizes the buffers for opaque
+    streams. The hint is advisory only — a body that outruns its hint is still written in full
+    (confirmed at the boundary with a 1-byte probe, no truncation), and a shorter body persists only
+    its real bytes.
+
+  Additionally, each encrypted object write allocated a fresh 1 MiB bufio buffer plus a 128 KiB
+  working buffer; both are now pooled (`sync.Pool`), so they no longer recur per write.
+
+  The same right-sizing applies to the cluster chunked-write path (`putObjectChunked`,
+  multipart-complete, and relocation all carry the known object size into the segment writer), so
+  cluster PUTs no longer allocate a 16 MiB chunk per object either.
+
+  Measured: a 4 KiB single-node PUT drops from ~16 MiB to ~60 KiB allocated (−99.6%); encrypted
+  small PUTs from ~17 MiB to ~170 KiB; a 256 KiB cluster chunked PUT from ~16 MiB to ~274 KiB
+  (−98.3%); geomean across the single-node PUT/COPY micro-benchmarks −88%. Output bytes are
+  byte-identical (encrypt/decrypt round-trip unchanged); no API, wire, or on-disk format change.
+  (Remaining follow-up: the encrypted server-side COPY re-encode still allocates a full chunk
+  because its source reader exposes neither a length nor a hint.)
+
 ## [0.0.691.0] - 2026-06-25
 
 ### Changed

@@ -112,6 +112,7 @@ func newCSBWithDeps(deps *fakeSegmentBackendDeps, blobIDs []string) *clusterSegm
 		deleteShardsFn:    deps.deleteShards,
 		writeQuorumMetaFn: deps.writeQuorumMeta,
 		ecConfigFn:        func() ECConfig { return ECConfig{DataShards: 4, ParityShards: 2} },
+		sizeHint:          -1, // no hint by default; tests that exercise hinting set it explicitly
 	}
 }
 

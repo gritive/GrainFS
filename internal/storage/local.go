@@ -329,7 +329,15 @@ func (b *LocalBackend) PutObjectWithRequest(ctx context.Context, req PutObjectRe
 	// error the partially-written segment blobs become orphans and are
 	// reclaimed by the scrubber.
 	w := NewSegmentWriter(localBackendAdapter{b})
-	obj, err := w.Write(ctx, bucket, key, req.ContentType, req.Body)
+	// SizeHint (request Content-Length) right-sizes the first/streaming chunk
+	// buffers when req.Body cannot be size-sniffed (opaque HTTP stream, packblob
+	// passthrough io.MultiReader). It is advisory — WriteSized still writes a
+	// body that outruns the hint in full.
+	sizeHint := int64(-1)
+	if req.SizeHint != nil {
+		sizeHint = *req.SizeHint
+	}
+	obj, err := w.WriteSized(ctx, bucket, key, req.ContentType, req.Body, sizeHint)
 	if err != nil {
 		return nil, fmt.Errorf("write segments: %w", err)
 	}

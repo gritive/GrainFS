@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
 )
@@ -17,6 +18,16 @@ const (
 	encryptedObjectMagic         = "GFOBJENC2"
 	encryptedObjectFormatVersion = uint16(1)
 	encryptedChunkSize           = 128 * 1024 // Balance write overhead with bounded ReadAt decrypt work.
+	encryptedObjectWriteBufSize  = 1 << 20    // bufio buffer for encrypted object materialization.
+)
+
+// Pools for the per-write fixed buffers in writeEncryptedObjectFile. Without
+// them, every encrypted object write — including tiny objects — allocates a
+// 1 MiB bufio buffer plus a 128 KiB working buffer. Pooling keeps steady-state
+// per-write allocation proportional to the object, not the buffer ceilings.
+var (
+	encObjectWriteBufioPool = sync.Pool{New: func() any { return bufio.NewWriterSize(nil, encryptedObjectWriteBufSize) }}
+	encObjectWriteChunkPool = sync.Pool{New: func() any { b := make([]byte, encryptedChunkSize); return &b }}
 )
 
 // writeEncryptedObjectHeader writes the GFOBJENC2 file header: magic,
@@ -70,7 +81,12 @@ func writeEncryptedObjectFile(path string, enc DataEncryptor, baseFields []encry
 		return 0, fmt.Errorf("create encrypted object: %w", err)
 	}
 	defer f.Close()
-	bw := bufio.NewWriterSize(f, 1<<20)
+	bw := encObjectWriteBufioPool.Get().(*bufio.Writer)
+	bw.Reset(f)
+	defer func() {
+		bw.Reset(nil) // drop the file reference before returning to the pool
+		encObjectWriteBufioPool.Put(bw)
+	}()
 
 	// fields is baseFields with one extra slot for the per-chunk ordinal,
 	// rewritten each iteration to avoid per-chunk allocation.
@@ -78,7 +94,9 @@ func writeEncryptedObjectFile(path string, enc DataEncryptor, baseFields []encry
 	copy(fields, baseFields)
 	ordinalIdx := len(baseFields)
 
-	buf := make([]byte, encryptedChunkSize)
+	bufp := encObjectWriteChunkPool.Get().(*[]byte)
+	defer encObjectWriteChunkPool.Put(bufp)
+	buf := *bufp
 	var size int64
 	var chunk uint64
 	var pinnedGen uint32
