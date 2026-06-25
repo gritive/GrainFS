@@ -539,6 +539,13 @@ func (b *DistributedBackend) GetObjectTags(bucket, key, versionID string) ([]sto
 	if err != nil {
 		return nil, err
 	}
+	// A soft-deleted non-versioned object leaves an IsDeleteMarker tombstone in
+	// the latest-only blob; it is gone → 404 (mirrors headObjectMeta, so HEAD/GET
+	// and tag reads agree). Without this a deleted object would return 200 + empty
+	// tags.
+	if obj.ETag == deleteMarkerETag {
+		return nil, storage.ErrObjectNotFound
+	}
 	// A specific-version request must match the single latest-only blob version;
 	// a mismatch means the requested version is not available → 404. Mirrors the
 	// per-version guard in headObjectMetaV (object_version.go).

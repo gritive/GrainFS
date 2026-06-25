@@ -187,6 +187,20 @@ func TestGetObjectTags_BlobAuthOff_LatestOnlyBlob(t *testing.T) {
 		require.Nil(t, tags)
 	})
 
+	t.Run("soft-deleted non-versioned object → 404 (not 200 + empty tags)", func(t *testing.T) {
+		b := newTestDistributedBackend(t)
+		require.NoError(t, b.CreateBucket(ctx, "offdel"))
+		// A delete-marker tombstone in the latest-only blob (what non-versioned
+		// DeleteObject writes). A tag read must 404, matching HeadObject.
+		seedLatestBlob(t, b, "offdel", "k", PutObjectMetaCmd{
+			ETag: deleteMarkerETag, IsDeleteMarker: true,
+			NodeIDs: []string{b.currentSelfAddr()},
+		})
+		tags, err := b.GetObjectTags("offdel", "k", "")
+		require.ErrorIs(t, err, storage.ErrObjectNotFound)
+		require.Nil(t, tags)
+	})
+
 	t.Run("specific-version request mismatching the latest-only blob → 404 (not latest tags)", func(t *testing.T) {
 		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "off3"))
