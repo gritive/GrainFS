@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.677.0] - 2026-06-25
+
+### Changed
+- **Internal refactor, no user-facing behavior change.** Hoisted the `errors.As` call out of the
+  multi-value return in the cluster-admin client's `asAdminError` helper. The previous
+  `return e, errors.As(err, &e)` relied on the Go spec leaving the evaluation order of the plain
+  `e` read versus the mutating call unspecified; the current compiler sequences the call first, so
+  behavior is unchanged, but the helper now binds the result explicitly before returning. This
+  removes a latent dependency on unspecified evaluation order in the `RemovePeer` / `TransferLeader`
+  error-classification path.
+
 ## [0.0.676.0] - 2026-06-25
 
 ### Changed
