@@ -65,8 +65,9 @@ func (s *Store) LookupSA(saID string) (*ServiceAccount, bool) {
 	return sa, ok
 }
 
-// IsEmpty returns true when no SAs are registered. Used by HandleSACreate
-// to decide whether to dispatch the bootstrap path.
+// IsEmpty returns true when no SAs are registered. Exercised by snapshot/
+// restore round-trip tests; the first-SA bootstrap pre-check that used it was
+// removed together with the anon-switch PostureChecker seam.
 func (s *Store) IsEmpty() bool { return len(s.snapshot().sas) == 0 }
 
 // Reset wipes all in-memory state to a fresh empty Store. Called by the
