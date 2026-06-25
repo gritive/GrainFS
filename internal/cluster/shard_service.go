@@ -1060,6 +1060,34 @@ func (s *ShardService) writeLocalShardStaged(ctx context.Context, bucket, stagin
 // encryption AAD is derived from aadKey. The two are equal for a normal write and differ for a staged
 // write (pathKey = staging path, aadKey = final logical key).
 func (s *ShardService) writeLocalShardAAD(ctx context.Context, bucket, key, aadKey string, shardIdx int, data []byte) error {
+	return s.writeLocalShardAADStream(ctx, bucket, key, aadKey, shardIdx, bytes.NewReader(data), int64(len(data)))
+}
+
+// shardCountingReader counts plaintext bytes consumed by the encoder so a short
+// body (a truncated shard) is detected and rejected instead of silently writing a
+// short shard. It restores the io.ReadFull guard the buffered readShardPayload
+// path gave us before the encode was switched to streaming.
+type shardCountingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *shardCountingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
+// writeLocalShardAADStream is the streaming core of writeLocalShardAAD: it encodes
+// the shard straight from body without first materializing the plaintext as a
+// []byte, which the sized streaming shard-write path uses to drop one whole-shard
+// buffer. The []byte entrypoint wraps its slice in a bytes.Reader so both paths
+// share this code and produce byte-equivalent output. When sizeHint >= 0 the body
+// is bounded to sizeHint and the consumed count is verified, so a short or
+// oversized body fails loudly (data-loss guard) — the same protection the
+// buffered io.ReadFull path provided. The ciphertext payload is still
+// materialized for writeEncryptedShardFile's []byte contract.
+func (s *ShardService) writeLocalShardAADStream(ctx context.Context, bucket, key, aadKey string, shardIdx int, body io.Reader, sizeHint int64) error {
 	dir, err := s.getShardDir(bucket, key, shardIdx)
 	if err != nil {
 		return err
@@ -1067,7 +1095,7 @@ func (s *ShardService) writeLocalShardAAD(ctx context.Context, bucket, key, aadK
 	mkdirStart := time.Now()
 	if err := s.ensureShardDir(dir); err != nil {
 		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalMkdir, mkdirStart, PutTraceStageFields{
-			Bytes:            int64(len(data)),
+			Bytes:            sizeHint,
 			ShardIndex:       shardIdx,
 			ShardTargetClass: "local",
 			Error:            err.Error(),
@@ -1075,16 +1103,23 @@ func (s *ShardService) writeLocalShardAAD(ctx context.Context, bucket, key, aadK
 		return fmt.Errorf("create shard dir: %w", err)
 	}
 	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalMkdir, mkdirStart, PutTraceStageFields{
-		Bytes:            int64(len(data)),
+		Bytes:            sizeHint,
 		ShardIndex:       shardIdx,
 		ShardTargetClass: "local",
 	})
 	path := filepath.Join(dir, fmt.Sprintf("shard_%d", shardIdx))
 	encodeStart := time.Now()
-	payload, err := eccodec.EncodeEncryptedShardToBuffer(data, s.segEnc, ShardAADFields(bucket, aadKey, shardIdx), eccodec.DefaultEncryptedChunkSize)
+	cr := &shardCountingReader{r: body}
+	if sizeHint >= 0 {
+		cr.r = io.LimitReader(body, sizeHint)
+	}
+	payload, err := eccodec.EncodeEncryptedShardStreamToBuffer(cr, sizeHint, s.segEnc, ShardAADFields(bucket, aadKey, shardIdx), eccodec.DefaultEncryptedChunkSize)
+	if err == nil && sizeHint >= 0 && cr.n != sizeHint {
+		err = fmt.Errorf("shard %d short read: encoded %d plaintext bytes, expected %d", shardIdx, cr.n, sizeHint)
+	}
 	if err != nil {
 		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncode, encodeStart, PutTraceStageFields{
-			Bytes:            int64(len(data)),
+			Bytes:            sizeHint,
 			ShardIndex:       shardIdx,
 			ShardTargetClass: "local",
 			Error:            err.Error(),
@@ -1092,7 +1127,7 @@ func (s *ShardService) writeLocalShardAAD(ctx context.Context, bucket, key, aadK
 		return err
 	}
 	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncode, encodeStart, PutTraceStageFields{
-		Bytes:            int64(len(data)),
+		Bytes:            sizeHint,
 		ShardIndex:       shardIdx,
 		ShardTargetClass: "local",
 	})
@@ -1490,12 +1525,23 @@ func (s *ShardService) WriteLocalShardStreamStagedContext(ctx context.Context, b
 }
 
 func (s *ShardService) writeLocalShardStreamContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader, streamSize int64) error {
-	// Buffer the body bounded by a 64 MiB memory cap (derived from
-	// datawal.MaxPayloadBytes; the value is retained purely as a memory bound,
-	// not a WAL record limit), then route through writeLocalShard. Durability no
-	// longer involves a WAL (S4): writeLocalShard fsyncs small / no-redundancy
-	// shards directly and relies on EC for large redundant shards.
 	rawCap := maxRawShardPayload(false)
+	// Sized path: the shard length is known, so stream the body straight into the
+	// encoder (writeLocalShardAADStream, which bounds + count-verifies it against
+	// streamSize) instead of buffering the whole plaintext shard as a []byte. This
+	// drops one whole-shard buffer on every sized EC shard write (large PUT,
+	// multipart, COPY). writeLocalShard == writeLocalShardAAD(key, key).
+	if streamSize >= 0 {
+		if streamSize > rawCap {
+			return fmt.Errorf("shard payload too large: %d", streamSize)
+		}
+		return s.writeLocalShardAADStream(ctx, bucket, key, key, shardIdx, body, streamSize)
+	}
+	// Unsized path: the length is unknown, so buffer the body bounded by a 64 MiB
+	// memory cap (the overflow check needs the full byte count) and route through
+	// writeLocalShard. Durability no longer involves a WAL (S4): writeLocalShard
+	// fsyncs small / no-redundancy shards directly and relies on EC for large
+	// redundant shards.
 	data, err := readShardPayload(body, rawCap, streamSize, false)
 	if err != nil {
 		return err

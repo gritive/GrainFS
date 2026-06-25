@@ -7,6 +7,30 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestEncodeEncryptedShardStreamToBuffer_RoundTrip guards the streaming encode
+// variant: encoding from an io.Reader (no plaintext []byte materialized) must
+// produce GFSENC3 output that decodes back to the original bytes — for both a
+// known sizeHint (pre-sized buffer) and an unknown one (-1, no pre-size). This is
+// the data-loss gate (write -> read-back -> compare). Byte-for-byte equality with
+// the []byte path is NOT asserted: the AEAD nonce differs per encode, so the
+// chunk layout matches but the ciphertext bytes do not — round-trip is the
+// correct correctness check.
+func TestEncodeEncryptedShardStreamToBuffer_RoundTrip(t *testing.T) {
+	f := newFakeShardEncryptor(t)
+	fields := shardBaseFields()
+	data := bytes.Repeat([]byte("shard-stream-payload-"), 500) // >>1 chunk at chunkSize=1024
+	const chunkSize = 1024
+
+	for _, sizeHint := range []int64{int64(len(data)), -1} {
+		payload, err := EncodeEncryptedShardStreamToBuffer(bytes.NewReader(data), sizeHint, f, fields, chunkSize)
+		require.NoError(t, err)
+
+		var got bytes.Buffer
+		require.NoError(t, DecodeEncryptedShard(&got, bytes.NewReader(payload), f, fields))
+		require.Equalf(t, data, got.Bytes(), "stream encode must round-trip (sizeHint=%d)", sizeHint)
+	}
+}
+
 // TestEncryptedShardUpperBound_NeverUnderestimates guards that
 // EncryptedShardUpperBound is a GUARANTEED upper bound on EncodeEncryptedShard's
 // output: callers Grow a bytes.Buffer to it so it never doubles. A bound even one

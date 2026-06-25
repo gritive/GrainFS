@@ -272,9 +272,25 @@ func EncryptedShardUpperBound(dataLen, chunkSize int) int {
 // callers use when they need the whole shard as []byte (to write a file or send
 // it on the wire); streaming callers should use EncodeEncryptedShard directly.
 func EncodeEncryptedShardToBuffer(data []byte, enc ShardEncryptor, baseFields []encrypt.AADField, chunkSize int) ([]byte, error) {
+	return EncodeEncryptedShardStreamToBuffer(bytes.NewReader(data), int64(len(data)), enc, baseFields, chunkSize)
+}
+
+// EncodeEncryptedShardStreamToBuffer is the streaming core of
+// EncodeEncryptedShardToBuffer: it encodes directly from r without first
+// materializing the plaintext as a []byte, so a caller that already has the
+// shard body as an io.Reader (the sized streaming shard-write path) avoids one
+// whole-shard buffer. sizeHint, when >= 0, pre-sizes the output buffer to a
+// guaranteed upper bound (no doubling); a negative sizeHint means unknown size,
+// so the buffer grows on demand. Output is byte-identical to the []byte path
+// (EncodeEncryptedShard reads via io.ReadFull regardless of reader kind). The
+// ciphertext is still materialized as the returned []byte — callers that need a
+// pure stream-to-file must use EncodeEncryptedShard directly.
+func EncodeEncryptedShardStreamToBuffer(r io.Reader, sizeHint int64, enc ShardEncryptor, baseFields []encrypt.AADField, chunkSize int) ([]byte, error) {
 	var buf bytes.Buffer
-	buf.Grow(EncryptedShardUpperBound(len(data), chunkSize))
-	if err := EncodeEncryptedShard(&buf, bytes.NewReader(data), enc, baseFields, chunkSize); err != nil {
+	if sizeHint >= 0 {
+		buf.Grow(EncryptedShardUpperBound(int(sizeHint), chunkSize))
+	}
+	if err := EncodeEncryptedShard(&buf, r, enc, baseFields, chunkSize); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
