@@ -27,19 +27,6 @@ facade stays the spine — see design `docs/superpowers/specs/2026-06-25-shard-s
   makes this visible/testable. Behavior change, so a separate PR; may relate to Quorum Meta Store
   data-loss ordering.
 
-### ProxyTrust removal follow-ups (2026-06-25)
-
-The orphaned ProxyTrust subsystem (`authoritativeClientIP` + `trusted-proxy.cidr` config +
-`OnTrustedProxyCIDR` hook + admin status `trusted_proxy` field + CLI example) was fully REMOVED, and
-the dead iceberg `MetaStateSnapshot` FBS slots (5/6/9 + the three `Iceberg*` table defs) were
-reserved/deleted (the last iceberg identifiers are now gone from the codebase). Residual dead code
-surfaced by that removal:
-
-- **[P3] `tls_posture.go` anon-switch no-op shims.** `enforceTLSPosture` / `bootTLSPostureGate` /
-  `iamPostureChecker` / `CheckAnonOff` remain as no-op compatibility shims orphaned by the
-  *anon-switch* removal (not iceberg). They are wired into the boot-phase list and AdminAPI, so
-  removing them is a separate dead-code cleanup touching boot sequencing + AdminAPI wiring.
-
 ### DeleteBucket non-Enabled emptiness follow-ups (2026-06-24)
 
 - **[P3][pre-existing] TOCTOU between the DeleteBucket emptiness scan and the
@@ -317,6 +304,17 @@ build-cache artifact: `go vet` referenced the deleted `internal/cluster/quorum_m
 clears it; 67/68 testable packages pass, 0 real failures. Standalone `staticcheck ./...` (broader than
 golangci's `make lint` subset, and it analyzes test files that golangci skips via `tests: false`)
 surfaced the items below. None block; tracked for cleanup.
+
+- **[P3] AdminAPI `PostureChecker` seam is now prod-dead (surfaced by the anon-switch tls_posture
+  shim removal).** Deleting `iamPostureChecker` (its only implementation) and the two
+  `SetPostureChecker(newIAMPostureChecker(...))` injection sites left the `internal/iam`
+  `PostureChecker` interface + `AdminAPI.posture` field + `SetPostureChecker` + the first-SA
+  `CheckAnonOff` call-site with **zero production callers** — only `admin_api_posture_test.go` (a test
+  double) exercises them. The "retained for compatibility" comment refers to the now-removed
+  anon-switch, so it is a relic, not a design intent. Decide: remove the whole seam (touches the
+  first-SA creation path — behavior-preserving since `posture` is now always nil) vs keep it as a
+  generic optional pre-check extension point. Left in place by the shim-removal PR to avoid touching
+  the SA-bootstrap path inside a dead-code cleanup.
 
 - **[P3] `internal/transport/transport_shared.go:224-225` uses Go-deprecated raw EC crypto (SA1019).**
   The deterministic-key derivation sets `priv.D` / `priv.PublicKey.X` / `priv.PublicKey.Y` via

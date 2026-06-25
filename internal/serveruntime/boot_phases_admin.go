@@ -16,7 +16,6 @@ import (
 	"github.com/gritive/GrainFS/internal/dashboard"
 	"github.com/gritive/GrainFS/internal/iam/pdp"
 	"github.com/gritive/GrainFS/internal/lifecycle"
-	"github.com/gritive/GrainFS/internal/nodeconfig"
 	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/server"
@@ -106,11 +105,6 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		return fmt.Errorf("dashboard token: %w", err)
 	}
 	state.tokenStore = tokenStore
-	if state.iamAdminAPI != nil && state.cfgStore != nil {
-		state.iamAdminAPI.SetPostureChecker(
-			newIAMPostureChecker(state.cfgStore, nodeconfig.New(state.cfg.DataDir)),
-		)
-	}
 	if state.protocolCredentials == nil {
 		if state.metaRaft != nil {
 			ensureProtocolCredentialStore(state)

@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.702.0] - 2026-06-25
+
+### Removed
+- **Internal dead-code removal, no user-facing behavior change.** Removed the dead anon-switch
+  TLS-posture compatibility shims (`enforceTLSPosture`, `bootTLSPostureGate`,
+  `iamPostureChecker`/`CheckAnonOff`, `newIAMPostureChecker`) and their boot wiring (the
+  `bootTLSPostureGate` boot phase and the two `SetPostureChecker` injection sites). All were no-ops
+  left over from the earlier anon-switch removal, so production first-SA creation behavior is
+  unchanged. The generic `AdminAPI` `PostureChecker` extension seam is left in place.
+
 ## [0.0.701.0] - 2026-06-25
 
 ### Changed
