@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.721.0] - 2026-06-26
+
+### Fixed
+- **Extended committed `DeleteBucket` physical cleanup to peer nodes.** After meta-Raft commits the
+  bucket delete, the coordinator now best-effort fan-outs an idempotent shard RPC so each peer removes
+  its local bucket data tree plus `.quorum_meta{,_versions}` bucket trees.
+
 ## [0.0.720.0] - 2026-06-26
 
 ### Changed

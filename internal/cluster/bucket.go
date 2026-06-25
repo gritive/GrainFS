@@ -183,8 +183,34 @@ func (b *DistributedBackend) DeleteBucket(ctx context.Context, bucket string) er
 		if err := b.shardSvc.RemoveBucketMetaTrees(bucket); err != nil {
 			log.Warn().Err(err).Str("bucket", bucket).Msg("delete bucket: quorum-meta tree removal failed after committed delete (inert residue left)")
 		}
+		if err := b.removeBucketPhysicalTreesOnPeers(ctx, bucket); err != nil {
+			log.Warn().Err(err).Str("bucket", bucket).Msg("delete bucket: peer physical cleanup failed after committed delete (inert residue left)")
+		}
 	}
 	return nil
+}
+
+func (b *DistributedBackend) removeBucketPhysicalTreesOnPeers(ctx context.Context, bucket string) error {
+	if b.shardSvc == nil || b.shardGroup == nil {
+		return nil
+	}
+	self := b.currentSelfAddr()
+	seen := map[string]bool{self: true}
+	cleanupCtx, cancel := context.WithTimeout(ctx, quorumMetaWriteTimeout)
+	defer cancel()
+	var errs []error
+	for _, g := range b.shardGroup.ShardGroups() {
+		for _, peer := range g.PeerIDs {
+			if seen[peer] {
+				continue
+			}
+			seen[peer] = true
+			if err := b.shardSvc.RemoveBucketPhysicalTreesRPC(cleanupCtx, peer, bucket); err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", peer, err))
+			}
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // ForceDeleteBucket deletes all objects in the bucket and then removes it.

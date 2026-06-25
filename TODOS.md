@@ -78,17 +78,8 @@ separate PR, facades stay the spine — see design
   `.quorum_meta_versions/{bucket}/` tombstone blobs, so they persisted as inert residue
   (dropped from reads via `dropHardDeletedVersions`, so no resurrection). Shared with the
   pre-existing Enabled force-delete path (`forceDeleteBucketBlobAuth`).
-  FIXED at the coordinator-local site: `DeleteBucket` now calls
-  `ShardService.RemoveBucketMetaTrees` to remove `.quorum_meta{,_versions}/{bucket}` after
-  `os.RemoveAll(bucketDir)`. Multi-node peer fan-out remains open (next item).
-
-- **[P3][pre-existing] Bucket-delete physical cleanup is coordinator-local in a cluster.**
-  `DistributedBackend.DeleteBucket` removes `bucketDir` AND (new) the
-  `.quorum_meta{,_versions}/{bucket}` trees only on the node that runs the call; the
-  meta-Raft DeleteBucket apply removes only the bucket record + `onBucketUnassigned`, with
-  no per-node physical-cleanup fan-out. So peer nodes leak `bucketDir` + the meta trees
-  (inert residue). Fix: a data-plane per-node bucket physical-cleanup fan-out (covers
-  bucketDir + meta trees together). Surfaced by the code-gate codex pass.
+  FIXED: `DeleteBucket` now removes `.quorum_meta{,_versions}/{bucket}` after
+  `os.RemoveAll(bucketDir)` and best-effort fan-outs the same physical cleanup to peer nodes.
 
 ### Bucket-delete config cascade follow-ups (PR: fix-bucket-delete-config-cascade)
 
