@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"sync"
 	"sync/atomic"
@@ -73,6 +74,34 @@ func (f *fakeLocalQuorumMeta) writeQuorumMetaLocal(bucket, key string, data []by
 	return nil
 }
 
+func (f *fakeLocalQuorumMeta) writeQuorumMetaLocalWithResult(bucket, key string, data []byte) (quorumMetaLocalWriteResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k := fakeKey(bucket, key)
+	result := quorumMetaLocalWriteResult{}
+	if before, ok := f.latest[k]; ok {
+		result.hadPrevious = true
+		result.previous = append([]byte(nil), before...)
+		if cand, derr := f.decodeQuorumMetaCmdBlob(data); derr == nil {
+			if quorumMetaBlobIsIdempotentReplay(before, data, cand.MetaSeqCAS) {
+				return quorumMetaLocalWriteResult{}, nil
+			}
+			if cur, derr2 := f.decodeQuorumMetaCmdBlob(before); derr2 == nil {
+				switch decideQuorumMetaWrite(cur, cand) {
+				case quorumMetaWriteRejectCAS:
+					return quorumMetaLocalWriteResult{}, errQuorumMetaCASReject
+				case quorumMetaWriteSkip:
+					return quorumMetaLocalWriteResult{}, nil
+				}
+			}
+		}
+	}
+	f.ops.record("latest-local")
+	f.latest[k] = append([]byte(nil), data...)
+	result.applied = true
+	return result, nil
+}
+
 func (f *fakeLocalQuorumMeta) writeQuorumMetaVersionLocal(bucket, versionSubpath string, data []byte) error {
 	f.ops.record("version-local")
 	f.mu.Lock()
@@ -136,6 +165,25 @@ func (f *fakeLocalQuorumMeta) deleteQuorumMetaLocal(bucket, key string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.latest, fakeKey(bucket, key))
+	return nil
+}
+
+func (f *fakeLocalQuorumMeta) rollbackQuorumMetaLocalIfMatch(bucket, key string, expected []byte, previous []byte, hadPrevious bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k := fakeKey(bucket, key)
+	cur, ok := f.latest[k]
+	if !ok {
+		return nil
+	}
+	if !bytes.Equal(cur, expected) {
+		return nil
+	}
+	if !hadPrevious {
+		delete(f.latest, k)
+		return nil
+	}
+	f.latest[k] = append([]byte(nil), previous...)
 	return nil
 }
 
