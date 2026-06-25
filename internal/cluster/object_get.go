@@ -225,19 +225,17 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 		return nil, PlacementMeta{}, err
 	}
 
-	// S4c-c-read1 T1: under blob-authoritative the per-version blob tree is the SOLE
-	// AUTHORITY for vid-bearing versioned objects. Unlike the availability-first
-	// path below, a blob MISS here never falls through to readQuorumMeta
-	// (latest-only) or a stale vid-bearing FSM record — blob absence for a
-	// versioned object is a 404. Only carve-out classes
-	// (appendable/coalesced/legacy bare-unversioned) stay FSM-authoritative.
+	// Under blob-authoritative the per-version blob tree is the SOLE AUTHORITY for
+	// vid-bearing versioned objects. Unlike the availability-first path below, a
+	// blob MISS here never falls through to readQuorumMeta (latest-only): blob
+	// absence for a versioned object is a 404.
 	if on, err := b.blobAuthReadOn(bucket); err != nil {
 		return nil, PlacementMeta{}, err // fail closed
 	} else if on {
 		// DECODE-STRICT: a corrupt/undecodable per-version blob must NOT be silently
 		// dropped (which would let deriveLatestVersion resurrect an older live version
 		// past a corrupt delete-marker-latest). On the reader error, fail closed — do
-		// NOT fall through to the carve-out / an older-live version.
+		// NOT fall through to an older-live version.
 		cmds, verr := b.readQuorumMetaVersionsDecodeStrict(bucket, key)
 		if verr != nil {
 			return nil, PlacementMeta{}, verr // fail closed
@@ -248,25 +246,16 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 				obj, pm := objectAndPlacementFromCmd(latest)
 				return obj, pm, nil
 			}
-			// derive found only delete-markers / not-live → object is gone (404),
-			// NOT a fallthrough to FSM.
+			// derive found only delete-markers / not-live → object is gone (404).
 			return nil, PlacementMeta{}, storage.ErrObjectNotFound
 		}
-		// per-version MISS under on → carve-out classes ONLY.
-		obj, pm, carve, cerr := b.fsmCarveoutObject(bucket, key, "")
-		if cerr != nil {
-			return nil, PlacementMeta{}, cerr
-		}
-		if carve {
-			return obj, pm, nil
-		}
-		// No vid-bearing-versioned FSM resurrection under blob authority.
+		// per-version MISS under blob authority → object is gone (404).
 		return nil, PlacementMeta{}, storage.ErrObjectNotFound
 	}
 
 	// S2a: per-version-authoritative latest derive. On a versioning-enabled
 	// bucket, derive latest by scanning the per-version blobs (all-groups
-	// fan-out, spanning generations). Zero blobs → legacy fallback below.
+	// fan-out, spanning generations). Zero blobs → latest-only fallback below.
 	if b.bucketVersioningEnabled(ctx, bucket) {
 		if cmds, verr := b.readQuorumMetaVersions(bucket, key); verr == nil && len(cmds) > 0 {
 			latest, live := deriveLatestVersion(cmds)
@@ -276,136 +265,26 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 			obj, pm := objectAndPlacementFromCmd(latest)
 			return obj, pm, nil
 		}
-		// zero per-version blobs → legacy fallback (existing readQuorumMeta + BadgerDB below)
+		// zero per-version blobs → latest-only fallback (readQuorumMeta below)
 	}
 
-	// Phase 3: user objects are stored in the quorum meta store.
+	// Non-versioned objects are served from the latest-only quorum-meta blob.
+	// Object metadata is written ONLY to the quorum-meta blob store (off-raft);
+	// the FSM keyspace holds no per-object records, so there is no further read
+	// fallback — a quorum-meta miss is a 404.
 	if obj, pm, err := b.readQuorumMeta(bucket, key); err == nil {
 		if obj.ETag == deleteMarkerETag {
 			return nil, PlacementMeta{}, storage.ErrObjectNotFound
 		}
 		return obj, pm, nil
 	}
-	// Fall through to BadgerDB for legacy-migrated objects only:
-	// MigrateLegacyMetaToCluster (bootAutoMigrate) re-proposes a pre-cluster
-	// local meta DB's plain obj: records through raft on a one-time migration
-	// boot; this fallback is their sole reader. NOTHING ELSE writes FSM object
-	// meta any more — appendable (Slice 1, AppendObject), coalesced (Slice 1,
-	// publishCoalesceBlob), multipart-complete, and every chunked PUT all commit
-	// to the quorum-meta blob (served above), not raft. The former
-	// appendable/coalesced FSM carve-out here is therefore DEAD and removed.
-
-	var obj storage.Object
-	var placement PlacementMeta
-	err := b.store.View(func(txn MetadataTxn) error {
-		decodeMeta := func(item MetaItem, versionID string) error {
-			val, err := b.itemValueCopy(item)
-			if err != nil {
-				return err
-			}
-			m, err := unmarshalObjectMeta(val)
-			if err != nil {
-				return err
-			}
-			// Tombstone markers aren't observable via HeadObject — callers use
-			// HeadObjectVersion / ListObjectVersions to see them explicitly.
-			if m.ETag == deleteMarkerETag {
-				return storage.ErrObjectNotFound
-			}
-			obj = storage.Object{
-				Key:              m.Key,
-				Size:             m.Size,
-				ContentType:      m.ContentType,
-				ETag:             m.ETag,
-				LastModified:     m.LastModified,
-				VersionID:        versionID,
-				ACL:              m.ACL,
-				UserMetadata:     cloneStringMap(m.UserMetadata),
-				SSEAlgorithm:     m.SSEAlgorithm,
-				PlacementGroupID: m.PlacementGroupID,
-				ECData:           m.ECData,
-				ECParity:         m.ECParity,
-				StripeBytes:      m.StripeBytes,
-				NodeIDs:          cloneStringSlice(m.NodeIDs),
-				Segments:         m.Segments,
-				Parts:            m.Parts,
-				Coalesced:        coalescedRefsToStorage(m.Coalesced),
-				IsAppendable:     m.IsAppendable,
-				// Tags copied (not aliased) — m's backing bytes are reused by
-				// badger once the View tx returns.
-				Tags: append([]storage.Tag(nil), m.Tags...),
-			}
-			placement = PlacementMeta{
-				VersionID:        versionID,
-				ECData:           m.ECData,
-				ECParity:         m.ECParity,
-				StripeBytes:      m.StripeBytes,
-				NodeIDs:          m.NodeIDs,
-				PlacementGroupID: m.PlacementGroupID,
-			}
-			return nil
-		}
-
-		// Resolve via latest-version pointer when present so callers see the
-		// most recent version. Falls back to the legacy single-key read when
-		// no lat: pointer exists (e.g., legacy replay).
-		metaKeyBytes := b.ks().ObjectMetaKey(bucket, key)
-		versionID := ""
-		if latItem, lerr := txn.Get(b.ks().LatestKey(bucket, key)); lerr == nil {
-			_ = latItem.Value(func(v []byte) error {
-				versionID = string(v)
-				return nil
-			})
-			if versionID != "" {
-				metaKeyBytes = b.ks().ObjectMetaKeyV(bucket, key, versionID)
-			}
-		} else if lerr != ErrMetaKeyNotFound {
-			return lerr
-		}
-
-		item, err := txn.Get(metaKeyBytes)
-		if err == ErrMetaKeyNotFound {
-			return storage.ErrObjectNotFound
-		}
-		if err != nil {
-			return err
-		}
-		return decodeMeta(item, versionID)
-	})
-	if err != nil {
-		return nil, PlacementMeta{}, err
-	}
-	return &obj, placement, nil
+	return nil, PlacementMeta{}, storage.ErrObjectNotFound
 }
 
 func (b *DistributedBackend) readPlacementMeta(bucket, key, versionID string) PlacementMeta {
-	// Phase 3: quorum meta is the primary source for user objects.
+	// The quorum-meta blob store is the sole source for user object placement.
 	if _, pm, err := b.readQuorumMeta(bucket, key); err == nil {
 		return pm
 	}
-	meta := PlacementMeta{VersionID: versionID}
-	_ = b.store.View(func(txn MetadataTxn) error {
-		dbKey := b.ks().ObjectMetaKey(bucket, key)
-		if versionID != "" {
-			dbKey = b.ks().ObjectMetaKeyV(bucket, key, versionID)
-		}
-		item, err := txn.Get(dbKey)
-		if err != nil {
-			return err
-		}
-		val, err := b.itemValueCopy(item)
-		if err != nil {
-			return err
-		}
-		m, err := unmarshalObjectMeta(val)
-		if err != nil {
-			return err
-		}
-		meta.ECData = m.ECData
-		meta.ECParity = m.ECParity
-		meta.StripeBytes = m.StripeBytes
-		meta.NodeIDs = m.NodeIDs
-		return nil
-	})
-	return meta
+	return PlacementMeta{VersionID: versionID}
 }

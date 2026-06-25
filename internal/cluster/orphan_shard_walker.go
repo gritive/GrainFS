@@ -139,122 +139,6 @@ func (b *DistributedBackend) allFrozenObjectVersionDirs() (map[string]bool, erro
 	return out, nil
 }
 
-// liveVersionedShardDirs forward-maps every live versioned object (FSM obj:
-// record) to its canonical (dataDirs[0]-rooted) shard dir. This is the ONLY
-// data-loss-safe way to protect versioned objects: shard writes use
-// filepath.Join, which CLEANS the key, so a logical key like "a/../b" lands in
-// the physical dir ".../bkt/b/<ver>". Reverse-parsing that cleaned path gives
-// the wrong logical key ("b"), so a per-candidate FSM lookup would MISS the real
-// obj: record "obj:bkt/a/../b/<ver>" and the walker would delete a live retained
-// version. Forward-mapping (logical key -> getShardDir, the same Join the writer
-// used) is bijective with the on-disk layout, so cleanable keys are protected.
-//
-// Fail-closed: a scan/decode error returns an error so the caller skips the
-// whole sweep (never sweeps against a partial live-set). Tombstones are skipped
-// (no shards). quorum-meta (regular-PUT) is NOT enumerated here — it is K-of-N
-// (a parity node lacks the local record) so it needs the peer-fallback
-// point-lookup in hasLiveShardRecord, and its storage path is itself cleaned so
-// the reverse-parsed key matches.
-func (b *DistributedBackend) liveVersionedShardDirs() (map[string]bool, error) {
-	if b.shardSvc == nil {
-		return nil, fmt.Errorf("no shard service")
-	}
-	// Phase 1 (inside the read txn): collect candidate FSM obj: records. The
-	// per-bucket versioning lookup (blobAuthReadOn) opens its OWN read txn, so it
-	// must run OUTSIDE this View — collect here, classify below.
-	type fsmRec struct {
-		bucket, key, versionID string
-		meta                   objectMeta
-	}
-	var recs []fsmRec
-	verr := b.store.View(func(txn MetadataTxn) error {
-		return b.ks().scanGroupPrefix(txn, []byte("obj:"), func(rawKey []byte, item MetaItem) error {
-			s := string(rawKey[len("obj:"):]) // <bucket>/<key>/<versionID>
-			slash := strings.IndexByte(s, '/')
-			if slash < 0 {
-				return nil
-			}
-			bucket := s[:slash]
-			rest := s[slash+1:]
-			last := strings.LastIndexByte(rest, '/')
-			if last < 0 {
-				return nil
-			}
-			versionID := rest[last+1:]
-			if bucket == "" || versionID == "" {
-				return nil
-			}
-			raw, cerr := b.itemValueCopy(item)
-			if cerr != nil {
-				return cerr // fail-closed
-			}
-			meta, merr := unmarshalObjectMeta(raw)
-			if merr != nil {
-				return merr // fail-closed
-			}
-			if meta.ETag == deleteMarkerETag {
-				return nil // tombstone — no shards
-			}
-			recs = append(recs, fsmRec{bucket: bucket, key: meta.Key, versionID: versionID, meta: meta})
-			return nil
-		})
-	})
-	if verr != nil {
-		return nil, verr
-	}
-	// Phase 2 (outside the txn): forward-map each record EXCEPT a plain (non-carve-out)
-	// versioned record under a versioning-enabled bucket — those are blob-authoritative
-	// under blob-primary (protected via hasLiveShardRecord's per-version blob lookup),
-	// and a lingering one (e.g. left by a hard delete) must NOT keep its now-tombstoned
-	// shards alive. Carve-outs (appendable/coalesced) and non-versioned records stay
-	// FSM-authoritative and need the bijective forward-map for cleanable keys.
-	out := make(map[string]bool)
-	verCache := make(map[string]bool)
-	for _, r := range recs {
-		ver, ok := verCache[r.bucket]
-		if !ok {
-			v, err := b.blobAuthReadOn(r.bucket)
-			if err != nil {
-				return nil, err // fail-closed
-			}
-			ver = v
-			verCache[r.bucket] = v
-		}
-		if ver && !isFsmCarveoutClass(r.meta, false) {
-			continue // plain versioned → blob-authoritative, not forward-mapped here
-		}
-		dir, derr := b.shardSvc.getShardDir(r.bucket, r.key+"/"+r.versionID, 0)
-		if derr != nil {
-			continue // escaping key cannot match a real on-disk dir
-		}
-		out[filepath.Clean(dir)] = true
-	}
-	return out, nil
-}
-
-// liveVersionedShardDirsAllHosted unions liveVersionedShardDirs across every
-// locally-hosted group backend. The shared ShardService dataDirs commingle all
-// hosted groups' shards, so a versioned object owned by ANY hosted group (its
-// obj: record lives under that group's ks prefix on the shared store) must be in
-// the known-set or the sweep would false-orphan it. Fail-closed: a nil backend or
-// any scan error returns an error so the caller skips the whole sweep.
-func (b *DistributedBackend) liveVersionedShardDirsAllHosted() (map[string]bool, error) {
-	out := make(map[string]bool)
-	for _, gb := range b.hostedGroupBackends() {
-		if gb == nil {
-			return nil, fmt.Errorf("hosted group backend is nil")
-		}
-		m, err := gb.liveVersionedShardDirs()
-		if err != nil {
-			return nil, err
-		}
-		for k := range m {
-			out[k] = true
-		}
-	}
-	return out, nil
-}
-
 // orphanShardSweepAllowed reports whether the feature gate + caught-up gate both
 // permit the sweep right now, re-evaluated on every call (membership and
 // replication lag change at runtime). The caught-up gate covers EVERY hosted
@@ -291,10 +175,6 @@ func (b *DistributedBackend) WalkOrphanShards(known map[string]bool, fn func(dir
 	if err != nil {
 		return nil // fail-closed: never sweep without the full snapshot known-set
 	}
-	live, err := b.liveVersionedShardDirsAllHosted()
-	if err != nil {
-		return nil // fail-closed: never sweep without the full live versioned-set
-	}
 
 	dataDirs := b.shardSvc.DataDirs()
 	if len(dataDirs) == 0 {
@@ -310,7 +190,7 @@ func (b *DistributedBackend) WalkOrphanShards(known map[string]bool, fn func(dir
 	seen := make(map[string]bool)
 
 	for _, dataDir := range dataDirs {
-		stopErr := b.walkOneShardRoot(dataDir, dataDirs[0], known, frozen, live, seen, cutoff, stagingCutoff, fn)
+		stopErr := b.walkOneShardRoot(dataDir, dataDirs[0], known, frozen, seen, cutoff, stagingCutoff, fn)
 		if stopErr != nil {
 			return stopErr
 		}
@@ -331,7 +211,7 @@ func (b *DistributedBackend) effectiveOrphanShardAge() time.Duration {
 
 func (b *DistributedBackend) walkOneShardRoot(
 	dataDir, canonRoot string,
-	known, frozen, live, seen map[string]bool,
+	known, frozen, seen map[string]bool,
 	cutoff, stagingCutoff time.Time,
 	fn func(dir string) error,
 ) error {
@@ -409,8 +289,8 @@ func (b *DistributedBackend) walkOneShardRoot(
 				return filepath.SkipDir // recent → could be a live in-flight PUT → keep
 			}
 			canonical := filepath.Clean(filepath.Join(canonRoot, rel))
-			if known[canonical] || frozen[canonical] || live[canonical] || seen[canonical] {
-				return filepath.SkipDir // latest-known, snapshot-pinned, or a live versioned object
+			if known[canonical] || frozen[canonical] || seen[canonical] {
+				return filepath.SkipDir // latest-known or snapshot-pinned
 			}
 			// LOAD-BEARING INVARIANT: this reclaim's liveness check is correct only
 			// because parseFullObjectRel's bucket (parts[0]) is the PHYSICAL owner of
@@ -457,8 +337,8 @@ func (b *DistributedBackend) walkOneShardRoot(
 			return filepath.SkipDir // age gate (minOrphanShardAge already covers the coalesce publish window)
 		}
 		canonical := filepath.Clean(filepath.Join(canonRoot, rel))
-		if known[canonical] || frozen[canonical] || live[canonical] || seen[canonical] {
-			return filepath.SkipDir // latest-known, snapshot-pinned, or a live versioned object
+		if known[canonical] || frozen[canonical] || seen[canonical] {
+			return filepath.SkipDir // latest-known or snapshot-pinned
 		}
 		seen[canonical] = true
 		// Route on a PARSE-validated coalesced shape (penultimate == "coalesced"), NOT
@@ -563,20 +443,13 @@ func parseCoalescedRel(rel string) (bucket, key, coalescedID string, ok bool) {
 }
 
 // hasLiveShardRecord reports whether (bucket,key,versionID) is backed by a live
-// metadata record, and whether that determination is CERTAIN. Fail-closed: any
-// read uncertainty returns (false, false) so the caller keeps the shards.
-//
-// Order: FSM obj: (covers versioned objects incl. PreserveLatest), then
-// peer-fallback quorum-meta (covers regular-PUT; K-of-N means a parity node may
-// hold shards without a LOCAL quorum-meta record, so the peer fan-out in
-// readQuorumMeta is mandatory — a local-only read would false-orphan it).
+// object record in the off-raft quorum-meta blob store, and whether that
+// determination is CERTAIN. Fail-closed: any read uncertainty returns
+// (false, false) so the caller keeps the shards.
 func (b *DistributedBackend) hasLiveShardRecord(bucket, key, versionID string) (live, certain bool) {
-	// Blob-primary: for a versioning-enabled bucket the per-version blob is the
-	// shard-liveness authority for plain versioned objects (live iff a blob exists
-	// that is neither a hard-delete tombstone nor a delete marker); carve-outs
-	// (appendable/coalesced) stay FSM-authoritative. A stale plain-versioned FSM
-	// record is NON-authoritative here, so a hard-deleted version's shards become
-	// orphan-eligible even while its FSM record lingers.
+	// Versioning-enabled: the per-version blob is the shard-liveness authority
+	// (live iff a blob exists that is neither a hard-delete tombstone nor a delete
+	// marker). A per-version MISS means the version is gone → orphan-eligible.
 	if on, serr := b.blobAuthReadOn(bucket); serr != nil {
 		return false, false // uncertain → keep
 	} else if on {
@@ -587,45 +460,16 @@ func (b *DistributedBackend) hasLiveShardRecord(bucket, key, versionID string) (
 		if ok {
 			return !cmd.IsHardDeleted && !cmd.IsDeleteMarker, true
 		}
-		return b.fsmCarveoutShardLive(bucket, key, versionID)
-	}
-	var fsmLive, fsmFound bool
-	verr := b.store.View(func(txn MetadataTxn) error {
-		item, gerr := txn.Get(b.ks().ObjectMetaKeyV(bucket, key, versionID))
-		if gerr != nil {
-			if errors.Is(gerr, ErrMetaKeyNotFound) {
-				return nil // not in FSM obj: → fall through to quorum-meta
-			}
-			return gerr // genuine read error
-		}
-		raw, cerr := b.itemValueCopy(item)
-		if cerr != nil {
-			return cerr
-		}
-		meta, merr := unmarshalObjectMeta(raw)
-		if merr != nil {
-			return merr
-		}
-		fsmFound = true
-		fsmLive = meta.ETag != deleteMarkerETag
-		return nil
-	})
-	if verr != nil {
-		return false, false // UNCERTAIN → keep
-	}
-	if fsmFound {
-		if fsmLive {
-			return true, true
-		}
-		// FSM tombstone: no shards expected; fall through to quorum-meta to be sure.
+		return false, true // no per-version blob → orphan-eligible
 	}
 
-	// Certainty-aware reclaim read: plain readQuorumMeta maps an exhausted peer
-	// fan-out to ErrObjectNotFound even when a metadata-holding peer was merely
-	// unreachable, so reclaiming on its NotFound could delete a live object whose
-	// quorum-meta sits on a briefly-down peer (K-of-N). readQuorumMetaForReclaim
-	// fails CLOSED on any peer-uncertainty; a negative (absent / different-version)
-	// claim is honored only when the responding set is complete.
+	// Non-versioned: certainty-aware reclaim read. Plain readQuorumMeta maps an
+	// exhausted peer fan-out to ErrObjectNotFound even when a metadata-holding peer
+	// was merely unreachable, so reclaiming on its NotFound could delete a live
+	// object whose quorum-meta sits on a briefly-down peer (K-of-N).
+	// readQuorumMetaForReclaim fails CLOSED on any peer-uncertainty; a negative
+	// (absent / different-version) claim is honored only when the responding set is
+	// complete.
 	obj, found, certain := b.readQuorumMetaForReclaim(bucket, key)
 	if !certain {
 		return false, false // peer-uncertainty or read error → keep
@@ -636,46 +480,7 @@ func (b *DistributedBackend) hasLiveShardRecord(bucket, key, versionID string) (
 		}
 		return false, true // a different/newer version won → this one is overwritten
 	}
-	return false, true // proven absent in FSM and quorum-meta → orphan-eligible
-}
-
-// fsmCarveoutShardLive judges shard liveness from the FSM obj: record for a
-// versioning-enabled bucket when no per-version blob exists: only a carve-out
-// (appendable/coalesced) record is authoritative and keeps its shards alive. A
-// plain versioned FSM record is non-authoritative under blob-primary (the blob is
-// the authority and already reported no live version), so it is orphan-eligible.
-// Fail-closed: a read error returns (false, false) so the caller keeps the shards.
-func (b *DistributedBackend) fsmCarveoutShardLive(bucket, key, versionID string) (live, certain bool) {
-	var found, carveLive bool
-	verr := b.store.View(func(txn MetadataTxn) error {
-		item, gerr := txn.Get(b.ks().ObjectMetaKeyV(bucket, key, versionID))
-		if gerr != nil {
-			if errors.Is(gerr, ErrMetaKeyNotFound) {
-				return nil
-			}
-			return gerr
-		}
-		raw, cerr := b.itemValueCopy(item)
-		if cerr != nil {
-			return cerr
-		}
-		meta, merr := unmarshalObjectMeta(raw)
-		if merr != nil {
-			return merr
-		}
-		// versionID != "" → bareLegacy=false; carve-out = appendable || coalesced.
-		if isFsmCarveoutClass(meta, false) && meta.ETag != deleteMarkerETag {
-			found, carveLive = true, true
-		}
-		return nil
-	})
-	if verr != nil {
-		return false, false // UNCERTAIN → keep
-	}
-	if found {
-		return carveLive, true
-	}
-	return false, true // no carve-out record → orphan-eligible (blob already said not-live)
+	return false, true // proven absent in quorum-meta → orphan-eligible
 }
 
 // DeleteOrphanDir removes one full-object EC shard dir across every dataDir
@@ -817,13 +622,9 @@ func (b *DistributedBackend) orphanShardSweepReconfirm(canonical string) bool {
 	if err != nil {
 		return false // fail-closed
 	}
-	live, err := b.liveVersionedShardDirsAllHosted()
-	if err != nil {
-		return false // fail-closed
-	}
 	c := filepath.Clean(canonical)
-	if frozen[c] || live[c] {
-		return false // now snapshot-pinned or a live versioned object (cleanable-key safe)
+	if frozen[c] {
+		return false // now snapshot-pinned
 	}
 	dataDirs := b.shardSvc.DataDirs()
 	if len(dataDirs) == 0 {

@@ -176,45 +176,13 @@ func (b *DistributedBackend) ShardTargetStillReferenced(ctx context.Context, t E
 	}
 }
 
-// readShardTargetMeta resolves the parent object-version meta for a shard target,
-// trying the FSM obj: record first and falling back to the quorum-meta blob (F5).
-// Returns (meta, found, err): found=false means the object-version genuinely does
-// not exist in either store (de-referenced); err is reserved for an unreadable
-// FSM record (conservative: don't act on uncertain state).
+// readShardTargetMeta resolves the parent object-version meta for a shard target
+// from the off-raft quorum-meta blob. Returns (meta, found, err): found=false
+// means the object-version genuinely does not exist (de-referenced).
 func (b *DistributedBackend) readShardTargetMeta(t ECShardScanTarget) (objectMeta, bool, error) {
-	var m objectMeta
-	found := false
-	err := b.store.View(func(txn MetadataTxn) error {
-		item, err := txn.Get(b.ks().ObjectMetaKeyV(t.Bucket, t.ObjectKey, t.VersionID))
-		if errors.Is(err, ErrMetaKeyNotFound) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		val, verr := b.itemValueCopy(item)
-		if verr != nil {
-			return verr
-		}
-		decoded, derr := unmarshalObjectMeta(val)
-		if derr != nil {
-			return derr
-		}
-		m = decoded
-		found = true
-		return nil
-	})
-	if err != nil {
-		return objectMeta{}, false, err
-	}
-	if found {
-		return m, true, nil
-	}
-
-	// FSM miss → fall back to the blob manifest. Prefer the specific per-version
-	// blob (matches the scanned version exactly); a blob-backed appendable on a
-	// non-versioned bucket has no per-version blob, so also try the latest-only
-	// blob whose VersionID matches the target.
+	// Prefer the specific per-version blob (matches the scanned version exactly);
+	// a blob-backed appendable on a non-versioned bucket has no per-version blob,
+	// so also try the latest-only blob whose VersionID matches the target.
 	if b.shardSvc == nil {
 		return objectMeta{}, false, nil
 	}

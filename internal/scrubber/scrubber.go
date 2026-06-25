@@ -90,21 +90,6 @@ type PlainRecord struct {
 	ContentType string
 }
 
-// AppendableRecord carries metadata for an appendable object so the scrubber
-// can build the known-segment set for orphan sweep.
-type AppendableRecord struct {
-	Bucket         string
-	Key            string
-	SegmentBlobIDs []string // raw segment blob IDs (bounded by coalesce threshold)
-}
-
-// AppendableScannable is an optional Scrubbable extension that streams
-// appendable objects for a bucket. Cluster backends implement this so the
-// scrubber can build the known-segment set for orphan sweep.
-type AppendableScannable interface {
-	ScanAppendableObjects(bucket string) (<-chan AppendableRecord, error)
-}
-
 // segmentManifestSource exposes the authoritative chunk-reference sources the
 // orphan-segment sweep must treat as "known": live object versions (all
 // versions, not just appendable) and snapshot-frozen chunks. Packed small
@@ -771,12 +756,10 @@ func (s *BackgroundScrubber) scrubOneObject(
 }
 
 // sweepOrphanSegments sweeps orphan raw segment files left by interrupted
-// appends. It is a no-op unless the backend implements both AppendableScannable
-// and OrphanSegmentWalkable.
+// appends. It is a no-op unless the backend implements OrphanSegmentWalkable.
 func (s *BackgroundScrubber) sweepOrphanSegments(ctx context.Context, buckets []string) {
-	segmentScanner, hasSegScanner := s.backend.(AppendableScannable)
 	segmentWalker, hasSegWalker := s.backend.(OrphanSegmentWalkable)
-	if !hasSegScanner || !hasSegWalker {
+	if !hasSegWalker {
 		return
 	}
 
@@ -826,19 +809,11 @@ func (s *BackgroundScrubber) sweepOrphanSegments(ctx context.Context, buckets []
 	}
 	segCapRemaining := maxSegmentsPerCycle
 	for _, bucket := range segBuckets {
-		knownSegmentsB := make(map[string]bool)
-		if appCh, appErr := segmentScanner.ScanAppendableObjects(bucket); appErr != nil {
-			log.Warn().Str("bucket", bucket).Err(appErr).Msg("scrub: scan appendable failed")
-		} else {
-			for rec := range appCh {
-				for _, blobID := range rec.SegmentBlobIDs {
-					knownSegmentsB[storage.SegmentKnownPath(rec.Bucket, rec.Key, blobID)] = true
-				}
-			}
-		}
-		for k, v := range buildKnownSegments(bucket, segByBucket, frozenByBucket) {
-			knownSegmentsB[k] = v
-		}
+		// The known-segment set is derived from the live object manifest
+		// (segByBucket, via ListAllObjectsStrict) unioned with snapshot-frozen
+		// segments. Appendable/coalesced objects appear in the manifest with their
+		// Segments, so the sweep never orphans a live segment.
+		knownSegmentsB := buildKnownSegments(bucket, segByBucket, frozenByBucket)
 		segCapRemaining = s.segmentSweepBucket(segmentWalker, bucket, knownSegmentsB, segCapRemaining)
 	}
 }

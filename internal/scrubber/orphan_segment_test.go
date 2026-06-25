@@ -12,6 +12,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/chunkref"
 	"github.com/gritive/GrainFS/internal/scrubber"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // fakeOrphanLog implements scrubber's segmentOrphanLog with optional error
@@ -55,19 +56,21 @@ func (f *fakeOrphanLog) TombstoneTime(c chunkref.ChunkID) (time.Time, bool, erro
 
 var errBoom = errors.New("boom")
 
-// segmentBackend embeds mockBackend and adds segment orphan support.
+// segmentBackend embeds mockBackend and adds segment orphan support. It also
+// implements segmentManifestSource (ListAllObjectsStrict / AllFrozenSegmentPaths)
+// so the known-segment set is built the same way production builds it — from the
+// live object manifest, not a dedicated appendable scan.
 type segmentBackend struct {
 	*mockBackend
 	orphanSegments  map[string]time.Time // path → creation time
 	deletedSegments []string
-	appendableRecs  map[string][]scrubber.AppendableRecord
+	liveObjects     []storage.SnapshotObject // manifest for the known-segment set
 }
 
 func newSegmentBackend() *segmentBackend {
 	return &segmentBackend{
 		mockBackend:    newMockBackend(),
 		orphanSegments: make(map[string]time.Time),
-		appendableRecs: make(map[string][]scrubber.AppendableRecord),
 	}
 }
 
@@ -105,14 +108,15 @@ func (b *segmentBackend) DeleteOrphanSegment(p string) error {
 	return nil
 }
 
-// ScanAppendableObjects implements AppendableScannable (mock).
-func (b *segmentBackend) ScanAppendableObjects(bucket string) (<-chan scrubber.AppendableRecord, error) {
-	ch := make(chan scrubber.AppendableRecord, len(b.appendableRecs[bucket]))
-	for _, rec := range b.appendableRecs[bucket] {
-		ch <- rec
-	}
-	close(ch)
-	return ch, nil
+// ListAllObjectsStrict implements segmentManifestSource (mock): the live object
+// manifest whose Segments form the known-segment set for the orphan sweep.
+func (b *segmentBackend) ListAllObjectsStrict() ([]storage.SnapshotObject, error) {
+	return b.liveObjects, nil
+}
+
+// AllFrozenSegmentPaths implements segmentManifestSource (mock): no snapshots.
+func (b *segmentBackend) AllFrozenSegmentPaths() (map[string][]string, error) {
+	return nil, nil
 }
 
 func TestSegmentSweep_Tombstone(t *testing.T) {
@@ -163,11 +167,12 @@ func TestSegmentSweep_RecoveredBetweenCycles(t *testing.T) {
 	s := scrubber.New(b, time.Hour, scrubber.WithNoRetry())
 	s.RunOnce(context.Background()) // tombstone
 
-	// Between cycles: segment becomes "known" (metadata commit caught up).
-	b.appendableRecs["bucket"] = []scrubber.AppendableRecord{{
-		Bucket:         "bucket",
-		Key:            "key",
-		SegmentBlobIDs: []string{"blob1"},
+	// Between cycles: segment becomes "known" (metadata commit caught up) — the
+	// live object manifest now references it via its Segments.
+	b.liveObjects = []storage.SnapshotObject{{
+		Bucket:   "bucket",
+		Key:      "key",
+		Segments: []storage.SegmentRef{{BlobID: "blob1"}},
 	}}
 
 	s.RunOnce(context.Background())
@@ -232,11 +237,12 @@ func TestSegmentSweep_ReReferenceForgets(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 
-	// Segment becomes known (metadata committed): appendable now references it.
-	b.appendableRecs["bucket"] = []scrubber.AppendableRecord{{
-		Bucket:         "bucket",
-		Key:            "key",
-		SegmentBlobIDs: []string{"blob1"},
+	// Segment becomes known (metadata committed): the live object manifest now
+	// references it via its Segments.
+	b.liveObjects = []storage.SnapshotObject{{
+		Bucket:   "bucket",
+		Key:      "key",
+		Segments: []storage.SegmentRef{{BlobID: "blob1"}},
 	}}
 
 	s.RunOnce(context.Background()) // cycle2: re-referenced -> not deleted + forgotten

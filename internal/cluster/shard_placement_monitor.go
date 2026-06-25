@@ -99,9 +99,9 @@ func (m *ShardPlacementMonitor) SetOnCorrupt(fn func(target ECShardScanTarget, s
 	m.onCorrupt = fn
 }
 
-// Scan enumerates every EC shard to verify via IterECShardScanTargets, checks
-// each shard assigned to this node exists on disk, and returns the number of
-// missing shards it found. Callers can hook repair logic via SetOnMissing.
+// Scan enumerates every EC shard to verify from the quorum-meta blob store,
+// checks each shard assigned to this node exists on disk, and returns the number
+// of missing shards it found. Callers can hook repair logic via SetOnMissing.
 //
 // Object-version targets carry the raw object EC fields and are resolved to a
 // shard key + placement via ResolvePlacement (non-EC objects are skipped).
@@ -111,9 +111,9 @@ func (m *ShardPlacementMonitor) SetOnCorrupt(fn func(target ECShardScanTarget, s
 // If resolver is nil, object-version targets are skipped individually;
 // segment/coalesced targets are unaffected.
 //
-// onMissing/onCorrupt callbacks are invoked AFTER the BadgerDB iterator closes
-// so the read transaction does not stay open during potentially long-running
-// network repair calls.
+// onMissing/onCorrupt callbacks are invoked AFTER enumeration completes so the
+// read transaction does not stay open during potentially long-running network
+// repair calls.
 func (m *ShardPlacementMonitor) Scan(ctx context.Context) (int, error) {
 	if m.shardSvc == nil {
 		return 0, errors.New("shard service not configured")
@@ -124,22 +124,14 @@ func (m *ShardPlacementMonitor) Scan(ctx context.Context) (int, error) {
 	var missing int64
 	seen := make(map[string]struct{})
 
+	// Object metadata lives only in the quorum-meta blob store (off-raft), so
+	// enumerate EC shard targets from there.
 	var targets []ECShardScanTarget
-	if err := m.fsm.IterECShardScanTargets(func(t ECShardScanTarget) error {
+	if err := m.shardSvc.IterQuorumMetaECShardTargets(func(t ECShardScanTarget) error {
 		targets = append(targets, t)
 		return nil
 	}); err != nil {
-		return 0, fmt.Errorf("scan ec shard targets: %w", err)
-	}
-	// Phase 3: also scan objects stored in quorum meta (filesystem), which bypass
-	// BadgerDB and are not covered by IterECShardScanTargets above.
-	if m.shardSvc != nil {
-		if err := m.shardSvc.IterQuorumMetaECShardTargets(func(t ECShardScanTarget) error {
-			targets = append(targets, t)
-			return nil
-		}); err != nil {
-			return 0, fmt.Errorf("scan quorum meta ec shard targets: %w", err)
-		}
+		return 0, fmt.Errorf("scan quorum meta ec shard targets: %w", err)
 	}
 
 	for _, t := range targets {

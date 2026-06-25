@@ -3,7 +3,6 @@ package cluster
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -47,18 +46,14 @@ func (b *DistributedBackend) listAllObjectsForGC() ([]storage.SnapshotObject, er
 	}
 	var result []storage.SnapshotObject
 	for _, bucket := range buckets {
-		// Blob-primary GC known-set authority by bucket class:
+		// Object metadata lives only in the off-raft quorum-meta blob store, so the
+		// GC known-set enumerates from there by bucket class:
 		//   - versioning-Enabled user bucket → the per-version blob tree
 		//     (listBlobAuthBucketObjectsForGC). blobAuthReadOn == versioning Enabled.
 		//   - non-versioned/Suspended user bucket → the latest-only blob tree
-		//     (listNonVersionedBucketObjectsForGC) for regular objects, UNION the FSM
-		//     obj: scan below for appendable/coalesced carve-outs (FSM-authoritative,
-		//     no blob) + any legacy records. A non-versioned regular PUT writes ONLY
-		//     the latest-only blob (writeQuorumMeta, no FSM obj: propose), so without
-		//     the blob scan the sweep would orphan its live segments.
-		//   - internal bucket → guarded: ErrInternalBucketNotObjectStore is returned
-		//     before any write reaches this path. The FSM obj: scan below retains
-		//     pre-existing internal-bucket objects for best-effort GC cleanup.
+		//     (listNonVersionedBucketObjectsForGC). This covers regular PUTs as well
+		//     as appendable/coalesced objects (all written via writeQuorumMeta with
+		//     their Segments), so the sweep never orphans a live segment.
 		on, saErr := b.blobAuthReadOn(bucket)
 		if saErr != nil {
 			return nil, fmt.Errorf("list objects blob-authority %s: %w", bucket, saErr)
@@ -72,76 +67,11 @@ func (b *DistributedBackend) listAllObjectsForGC() ([]storage.SnapshotObject, er
 			continue
 		}
 		if b.shardSvc != nil {
-			// Non-versioned/Suspended user bucket: regular objects on the latest-only
-			// blob tree. Falls through to the FSM scan for carve-outs/legacy (additive
-			// — a regular non-versioned object has no FSM obj: record, so no dup).
-			// shardSvc==nil (FSM-only test backends) → blobs are impossible, FSM only.
 			objs, oerr := b.listNonVersionedBucketObjectsForGC(bucket)
 			if oerr != nil {
 				return nil, oerr
 			}
 			result = append(result, objs...)
-		}
-		// FSM obj: scan — internal buckets, plus non-versioned appendable/coalesced
-		// carve-outs (FSM-authoritative) and any legacy FSM records.
-		if err := b.store.View(func(txn MetadataTxn) error {
-			latest := make(map[string]string)
-			rawLatPrefix := []byte("lat:" + bucket + "/")
-			if err := b.ks().scanGroupPrefix(txn, rawLatPrefix, func(raw []byte, item MetaItem) error {
-				key := string(raw[len(rawLatPrefix):])
-				_ = item.Value(func(v []byte) error {
-					latest[key] = string(v)
-					return nil
-				})
-				return nil
-			}); err != nil {
-				return err
-			}
-
-			rawObjPrefix := []byte("obj:" + bucket + "/")
-			return b.ks().scanGroupPrefix(txn, rawObjPrefix, func(raw []byte, item MetaItem) error {
-				rest := string(raw[len(rawObjPrefix):])
-				slash := strings.LastIndex(rest, "/")
-				if slash < 0 {
-					return nil
-				}
-				key := rest[:slash]
-				versionID := rest[slash+1:]
-				if key == "" || versionID == "" {
-					return nil
-				}
-				var meta objectMeta
-				v, err := b.itemValueCopy(item)
-				if err != nil {
-					return fmt.Errorf("gc known-set: read object meta %s/%s@%s: %w", bucket, key, versionID, err)
-				}
-				meta, err = unmarshalObjectMeta(v)
-				if err != nil {
-					return fmt.Errorf("gc known-set: decode object meta %s/%s@%s: %w", bucket, key, versionID, err)
-				}
-				result = append(result, storage.SnapshotObject{
-					Bucket:         bucket,
-					Key:            key,
-					ETag:           meta.ETag,
-					Size:           meta.Size,
-					ContentType:    meta.ContentType,
-					Modified:       meta.LastModified,
-					VersionID:      versionID,
-					IsDeleteMarker: meta.ETag == deleteMarkerETag,
-					IsLatest:       latest[key] == versionID,
-					ACL:            meta.ACL,
-					SSEAlgorithm:   meta.SSEAlgorithm,
-					// Tags copied (not aliased) — meta's backing bytes are reused
-					// by badger once the View tx returns. Mirror of LocalBackend
-					// fix in b64521bf so Tags survive the manifest enumeration.
-					Tags:      append([]storage.Tag(nil), meta.Tags...),
-					Segments:  append([]storage.SegmentRef(nil), meta.Segments...),
-					Coalesced: coalescedRefsFromMeta(meta.Coalesced),
-				})
-				return nil
-			})
-		}); err != nil {
-			return nil, fmt.Errorf("list objects in bucket %s: %w", bucket, err)
 		}
 	}
 	return result, nil

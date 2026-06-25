@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/gritive/GrainFS/internal/storage"
@@ -63,18 +62,15 @@ func (b *DistributedBackend) headObjectMetaV(ctx context.Context, bucket, key, v
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, PlacementMeta{}, err
 	}
-	// S4c-c-read1 T2: under blob authority the per-version blob is authoritative
-	// for the exact requested versionID of a vid-bearing versioned object. Unlike
-	// the availability-first path below, a blob MISS here never falls through to a
-	// stale vid-bearing FSM record — blob absence for a versioned object is a 404.
-	// Only carve-out classes (appendable/coalesced/legacy bare-unversioned) stay
-	// FSM-authoritative.
+	// Under blob authority the per-version blob is authoritative for the exact
+	// requested versionID of a vid-bearing versioned object. Unlike the
+	// availability-first path below, a blob MISS here is a 404 — blob absence for
+	// a versioned object means the version is gone.
 	if on, err := b.blobAuthReadOn(bucket); err != nil {
 		return nil, PlacementMeta{}, err // fail closed
 	} else if on {
 		// DECODE-STRICT: an undecodable blob anywhere under this key (incl. a corrupt
-		// sibling version) makes the version set untrustworthy → fail closed, do NOT
-		// fall through to the carve-out / a stale FSM record.
+		// sibling version) makes the version set untrustworthy → fail closed.
 		cmd, ok, verr := b.readQuorumMetaVersionDecodeStrict(bucket, key, versionID)
 		if verr != nil {
 			return nil, PlacementMeta{}, verr // fail closed
@@ -91,26 +87,15 @@ func (b *DistributedBackend) headObjectMetaV(ctx context.Context, bucket, key, v
 			obj, pm := objectAndPlacementFromCmd(cmd)
 			return obj, pm, nil
 		}
-		// per-version MISS under on → carve-out classes ONLY.
-		obj, pm, carve, cerr := b.fsmCarveoutObject(bucket, key, versionID)
-		if cerr != nil {
-			return nil, PlacementMeta{}, cerr
-		}
-		if carve {
-			return obj, pm, nil
-		}
-		// No vid-bearing-versioned FSM resurrection under blob authority.
+		// per-version MISS under blob authority → version is gone (404).
 		return nil, PlacementMeta{}, storage.ErrObjectNotFound
 	}
 	// S2a: per-version-authoritative specific-version read. On a versioning-enabled
 	// bucket the per-version store is the primary source: a hit returns/folds.
-	// On a MISS we fall through to the BadgerDB ObjectMetaKeyV FSM read ONLY,
-	// SKIPPING the stale latest-only readQuorumMeta block below — that step would
-	// resurrect a hard-deleted version from the latest-only blob (not maintained
-	// on hard-delete-of-latest). The FSM read is safe: the ObjectMetaKeyV record
-	// is absent for a hard-deleted version, so a hard-deleted version still 404s,
-	// while a mixed-era pre-S1 version (FSM record only, no per-version blob —
-	// S1's blob write is versioning+post-S1 gated) correctly resolves.
+	// On a MISS the version is gone (404) — object metadata is written ONLY to the
+	// quorum-meta blob store, so there is no FSM read fallback; skipping the stale
+	// latest-only readQuorumMeta block also prevents resurrecting a hard-deleted
+	// version from the latest-only blob (not maintained on hard-delete-of-latest).
 	versioningEnabled := b.bucketVersioningEnabled(ctx, bucket)
 	if versioningEnabled {
 		if cmds, verr := b.readQuorumMetaVersions(bucket, key); verr == nil {
@@ -128,83 +113,22 @@ func (b *DistributedBackend) headObjectMetaV(ctx context.Context, bucket, key, v
 				return obj, pm, nil
 			}
 		}
-		// per-version MISS → fall through to the FSM ObjectMetaKeyV read below,
-		// skipping the latest-only readQuorumMeta block.
+		// per-version MISS → version is gone (404), skipping the latest-only block.
+		return nil, PlacementMeta{}, storage.ErrObjectNotFound
 	}
-	// Phase 3: quorum meta is the primary source for non-internal user objects.
-	// Skipped for versioning-enabled buckets (handled above) so a per-version
-	// miss never resurrects a stale latest-only blob.
-	if !versioningEnabled {
-		if obj, pm, err := b.readQuorumMeta(bucket, key); err == nil && obj.VersionID == versionID {
-			// Fold delete markers to 405, mirroring the BadgerDB fallback below
-			// (deleteMarkerETag → ErrMethodNotAllowed) and this method's contract.
-			// After a soft-delete the latest quorum-meta record IS the marker
-			// tombstone, so without this a HEAD/GET of the marker version would
-			// return 200 instead of MethodNotAllowed.
-			if obj.IsDeleteMarker {
-				return nil, PlacementMeta{}, storage.ErrMethodNotAllowed
-			}
-			return obj, pm, nil
+	// Non-versioned: the latest-only quorum-meta blob is the sole source. A miss
+	// (or a version mismatch) is a 404 — there is no FSM read fallback.
+	if obj, pm, err := b.readQuorumMeta(bucket, key); err == nil && obj.VersionID == versionID {
+		// Fold delete markers to 405, matching this method's contract. After a
+		// soft-delete the latest quorum-meta record IS the marker tombstone, so
+		// without this a HEAD/GET of the marker version would return 200 instead
+		// of MethodNotAllowed.
+		if obj.IsDeleteMarker {
+			return nil, PlacementMeta{}, storage.ErrMethodNotAllowed
 		}
+		return obj, pm, nil
 	}
-	var obj storage.Object
-	var placement PlacementMeta
-	err := b.store.View(func(txn MetadataTxn) error {
-		item, err := txn.Get(b.ks().ObjectMetaKeyV(bucket, key, versionID))
-		if err == ErrMetaKeyNotFound {
-			return storage.ErrObjectNotFound
-		}
-		if err != nil {
-			return err
-		}
-		val, err := b.itemValueCopy(item)
-		if err != nil {
-			return err
-		}
-		m, err := unmarshalObjectMeta(val)
-		if err != nil {
-			return err
-		}
-		if m.ETag == deleteMarkerETag {
-			return storage.ErrMethodNotAllowed
-		}
-		obj = storage.Object{
-			Key:              m.Key,
-			Size:             m.Size,
-			ContentType:      m.ContentType,
-			ETag:             m.ETag,
-			LastModified:     m.LastModified,
-			VersionID:        versionID,
-			ACL:              m.ACL,
-			UserMetadata:     cloneStringMap(m.UserMetadata),
-			SSEAlgorithm:     m.SSEAlgorithm,
-			PlacementGroupID: m.PlacementGroupID,
-			ECData:           m.ECData,
-			ECParity:         m.ECParity,
-			StripeBytes:      m.StripeBytes,
-			NodeIDs:          cloneStringSlice(m.NodeIDs),
-			Segments:         m.Segments,
-			Parts:            m.Parts,
-			Coalesced:        coalescedRefsToStorage(m.Coalesced),
-			IsAppendable:     m.IsAppendable,
-			// Tags copied (not aliased) — m's backing bytes are reused by
-			// badger once the View tx returns. Mirror of headObjectMeta.
-			Tags: append([]storage.Tag(nil), m.Tags...),
-		}
-		placement = PlacementMeta{
-			VersionID:        versionID,
-			ECData:           m.ECData,
-			ECParity:         m.ECParity,
-			StripeBytes:      m.StripeBytes,
-			NodeIDs:          m.NodeIDs,
-			PlacementGroupID: m.PlacementGroupID,
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, PlacementMeta{}, err
-	}
-	return &obj, placement, nil
+	return nil, PlacementMeta{}, storage.ErrObjectNotFound
 }
 
 // GetObjectVersion reads a specific version's data. Returns
@@ -314,10 +238,10 @@ func (b *DistributedBackend) DeleteObjectVersion(bucket, key, versionID string) 
 			}
 			return nil
 		}
-		// blob-absent: this is a carve-out (appendable/coalesced/legacy-bare) that
-		// has no per-version blob. In a greenfield cluster, carve-out FSM records
-		// are left in place — the FSM-delete raft path is removed in data-plane
-		// raft-free Slice 2. The scrubber/orphan walker handles eventual cleanup.
+		// blob-absent: the version has no per-version blob (e.g. an appendable /
+		// coalesced object on a non-versioned bucket, served from the latest-only
+		// blob). There is no FSM object record to delete; the scrubber / orphan
+		// walker handles eventual on-disk cleanup.
 	}
 	return nil
 }
@@ -345,15 +269,13 @@ func (b *DistributedBackend) ListObjectVersions(ctx context.Context, bucket, pre
 		return b.listObjectVersionsBlobAuth(bucket, prefix, maxKeys)
 	}
 	var versions []*storage.ObjectVersion
-	// Non-versioned/Suspended regular objects are blob-only (latest-only blob, no
-	// FSM obj: record), so enumerate them from the latest-only blobs and present
-	// each as a single latest version — otherwise the S3 ?versions API and the
-	// lifecycle worker (ScanObjectsGrouped) would miss every blob-only object.
-	// scatterGatherList returns the cluster-wide, tombstone-filtered live view (so
-	// a deleted object is absent); each leaf returns the SAME view, deduped at the
-	// coordinator (dedupVersionsKeepFirst). Disjoint from the FSM carve-out scan
-	// below: an appendable/coalesced object has its latest-only blob deleted (it is
-	// FSM-authoritative), so no key appears in both.
+	// Non-versioned/Suspended regular objects are blob-only (latest-only blob),
+	// so enumerate them from the latest-only blobs and present each as a single
+	// latest version — otherwise the S3 ?versions API and the lifecycle worker
+	// (ScanObjectsGrouped) would miss every object. scatterGatherList returns the
+	// cluster-wide, tombstone-filtered live view (so a deleted object is absent);
+	// each leaf returns the SAME view, deduped at the coordinator
+	// (dedupVersionsKeepFirst).
 	if b.shardSvc != nil {
 		cmds, lerr := b.scatterGatherList(ctx, bucket, prefix)
 		if lerr != nil {
@@ -372,146 +294,9 @@ func (b *DistributedBackend) ListObjectVersions(ctx context.Context, bucket, pre
 			})
 		}
 	}
-	latestMap := map[string]string{} // key → latestVID
-	err := b.store.View(func(txn MetadataTxn) error {
-		// Pre-scan latest pointers for the prefix so each version can tag IsLatest.
-		rawLatSemanticPfx := []byte("lat:" + bucket + "/" + prefix)
-		latPrefix := b.ks().Prefix(rawLatSemanticPfx)
-		latIt := txn.NewIterator(MetaIteratorOptions{PrefetchValues: true})
-		for latIt.Seek(latPrefix); latIt.ValidForPrefix(latPrefix); latIt.Next() {
-			rawKey := b.ks().MustStrip(latIt.Item().Key())
-			key := strings.TrimPrefix(string(rawKey), "lat:"+bucket+"/")
-			_ = latIt.Item().Value(func(v []byte) error { latestMap[key] = string(v); return nil })
-		}
-		latIt.Close()
-
-		// Match any object key starting with `prefix` — iterate the per-bucket
-		// versioned store and filter in-memory. The version ID is the last
-		// path segment after the final `/`; everything before is the S3 key.
-		rawObjBucketPfx := []byte("obj:" + bucket + "/")
-		objPrefix := b.ks().Prefix(rawObjBucketPfx)
-		it := txn.NewIterator(MetaIteratorOptions{PrefetchValues: true})
-		defer it.Close()
-		for it.Seek(objPrefix); it.ValidForPrefix(objPrefix); it.Next() {
-			rawKey := b.ks().MustStrip(it.Item().Key())
-			rest := strings.TrimPrefix(string(rawKey), "obj:"+bucket+"/")
-			// Versioned format: {key}/{versionID}. Unversioned legacy: {key}.
-			slash := strings.LastIndex(rest, "/")
-			if slash < 0 {
-				if _, hasVersionedRecord := latestMap[rest]; hasVersionedRecord {
-					continue
-				}
-				val, err := b.itemValueCopy(it.Item())
-				if err != nil {
-					return err
-				}
-				m, err := unmarshalObjectMeta(val)
-				if err != nil {
-					return err
-				}
-				v := storage.ObjectVersion{
-					Key:            rest,
-					VersionID:      "",
-					IsLatest:       true,
-					IsDeleteMarker: m.ETag == deleteMarkerETag,
-					LastModified:   m.LastModified,
-					ETag:           m.ETag,
-					Size:           m.Size,
-					Tags:           append([]storage.Tag(nil), m.Tags...),
-				}
-				versions = append(versions, &v)
-				continue
-			}
-			key := rest[:slash]
-			vid := rest[slash+1:]
-			latestVID, hasVersionedRecord := latestMap[key]
-			if !hasVersionedRecord {
-				if !strings.HasPrefix(rest, prefix) {
-					continue
-				}
-				val, err := b.itemValueCopy(it.Item())
-				if err != nil {
-					return err
-				}
-				m, err := unmarshalObjectMeta(val)
-				if err != nil {
-					return err
-				}
-				// Split-key disambiguation: a versioned record
-				// obj:{bucket}/{key}/{vid} whose lat: pointer lives in ANOTHER
-				// group (cross-group key split, or a PreserveLatest write with
-				// no lat: at all) lands here with no local latestMap entry. The
-				// stored meta.Key holds the real S3 key (no version suffix), so
-				// meta.Key == the parsed key means this is a genuine versioned
-				// record, not a legacy slash-bearing key. Emit it as a non-latest
-				// version — the owning group flags the real latest, and the
-				// coordinator's reconcileVersionIsLatest picks the global winner.
-				if m.Key == key && vid != "" {
-					if !strings.HasPrefix(key, prefix) {
-						continue
-					}
-					v := storage.ObjectVersion{
-						Key:            key,
-						VersionID:      vid,
-						IsLatest:       false,
-						IsDeleteMarker: m.ETag == deleteMarkerETag,
-						LastModified:   m.LastModified,
-						ETag:           m.ETag,
-						Size:           m.Size,
-						Tags:           append([]storage.Tag(nil), m.Tags...),
-					}
-					versions = append(versions, &v)
-					continue
-				}
-				v := storage.ObjectVersion{
-					Key:            rest,
-					VersionID:      "",
-					IsLatest:       true,
-					IsDeleteMarker: m.ETag == deleteMarkerETag,
-					LastModified:   m.LastModified,
-					ETag:           m.ETag,
-					Size:           m.Size,
-					Tags:           append([]storage.Tag(nil), m.Tags...),
-				}
-				versions = append(versions, &v)
-				continue
-			}
-			if vid == "" || !strings.HasPrefix(key, prefix) {
-				continue
-			}
-			val, err := b.itemValueCopy(it.Item())
-			if err != nil {
-				return err
-			}
-			m, err := unmarshalObjectMeta(val)
-			if err != nil {
-				return err
-			}
-			v := storage.ObjectVersion{
-				Key:            key,
-				VersionID:      vid,
-				IsLatest:       vid == latestVID,
-				IsDeleteMarker: m.ETag == deleteMarkerETag,
-				LastModified:   m.LastModified,
-				ETag:           m.ETag,
-				Size:           m.Size,
-				Tags:           append([]storage.Tag(nil), m.Tags...), // Task 7 carry-over
-			}
-			versions = append(versions, &v)
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	// Dedup by (Key,VID): defensive dedup for any source overlap. After M3 the
-	// production path no longer writes FSM obj:/lat: records for multipart-complete
-	// (blob-only path), so the set is non-overlapping in practice. Keep-first
-	// prefers the blob entry (appended first) in the rare case duplicates appear
-	// (e.g. a crash-recovery replica of both sources, or a future code path that
-	// re-introduces overlap). Done at the leaf because the single-group path and the
-	// lifecycle worker (ScanObjectsGrouped) consume the leaf directly, bypassing the
-	// coordinator's dedup.
+	// Defensive (Key,VID) dedup: each leaf returns the same cluster-wide view, so
+	// the single-group path and the lifecycle worker (which consume the leaf
+	// directly, bypassing the coordinator's dedup) still see a deduped set.
 	versions = dedupVersionsKeepFirst(versions)
 	// Sort newest-first within each key by ModTime-primary (latestWins), so the
 	// IsLatest version sorts first — matching deriveLatestVersion / sortObjectVersions.
@@ -528,23 +313,16 @@ func (b *DistributedBackend) ListObjectVersions(ctx context.Context, bucket, pre
 	return versions, nil
 }
 
-// listObjectVersionsBlobAuth builds the on-branch (blob-authoritative) version list at
-// the leaf from TWO sources merged blob-wins:
+// listObjectVersionsBlobAuth builds the on-branch (blob-authoritative) version
+// list at the leaf from the cluster-wide all-version blob enumerator
+// (scanQuorumMetaVersionsClusterAll) — already (Key,VID)+MetaSeq deduped (T1).
+// One ObjectVersion per blob INCLUDING delete markers; the per-key ModTime-primary
+// winner is IsLatest EVEN when it is a delete marker (matching the off-path which
+// lists+flags a delete-marker-latest).
 //
-//  1. Versioned objects from the cluster-wide all-version blob enumerator
-//     (scanQuorumMetaVersionsClusterAll) — already (Key,VID)+MetaSeq deduped
-//     (T1). One ObjectVersion per blob INCLUDING delete markers; the per-key
-//     max VID is IsLatest EVEN when it is a delete marker (matching the off-path
-//     which lists+flags a delete-marker-latest).
-//  2. FSM carve-out records on THIS NODE's LOCAL group only (the coordinator's
-//     fan-out unions each group's locals): appendable / coalesced / legacy-bare.
-//     Plain vid-bearing versioned FSM records are DROPPED (blob-authoritative).
-//     A (Key,VID) collision with a blob is resolved blob-wins (carve-out skipped).
-//
-// The result is authority-resolved by construction; it is then sorted
-// (sortObjectVersions) and truncated to maxKeys as passed (maxKeys<=0 == no
-// limit) — identical to the off-path's tail handling. The coordinator passes
-// maxKeys=0 under on; a single-node/direct caller passes the real maxKeys.
+// The result is sorted (sortObjectVersions) and truncated to maxKeys as passed
+// (maxKeys<=0 == no limit). The coordinator passes maxKeys=0 under on; a
+// single-node/direct caller passes the real maxKeys.
 func (b *DistributedBackend) listObjectVersionsBlobAuth(bucket, prefix string, maxKeys int) ([]*storage.ObjectVersion, error) {
 	cmds, err := b.scanQuorumMetaVersionsClusterAll(bucket, prefix)
 	if err != nil {
@@ -564,9 +342,7 @@ func (b *DistributedBackend) listObjectVersionsBlobAuth(bucket, prefix string, m
 		}
 	}
 	var versions []*storage.ObjectVersion
-	seen := map[[2]string]bool{} // (Key,VID) emitted from blobs — blob wins collisions
 	for _, c := range cmds {
-		seen[[2]string{c.Key, c.VersionID}] = true
 		versions = append(versions, &storage.ObjectVersion{
 			Key:            c.Key,
 			VersionID:      c.VersionID,
@@ -578,148 +354,11 @@ func (b *DistributedBackend) listObjectVersionsBlobAuth(bucket, prefix string, m
 			Tags:           append([]storage.Tag(nil), c.Tags...),
 		})
 	}
-	// Keys that have a (live) blob version: blob authority owns IsLatest for them
-	// (HEAD resolves latest from the blob winner only — carve-outs are a
-	// per-version-MISS fallback). A coexisting carve-out at such a key must NOT also
-	// claim IsLatest, else LIST would flag two latests / disagree with HEAD.
-	blobKeys := make(map[string]bool, len(winnerVID))
-	for k := range winnerVID {
-		blobKeys[k] = true
-	}
-	carve, err := b.scanFsmCarveoutVersions(bucket, prefix, seen, blobKeys)
-	if err != nil {
-		return nil, err
-	}
-	versions = append(versions, carve...)
 	sortObjectVersions(versions)
 	if maxKeys > 0 && len(versions) > maxKeys {
 		versions = versions[:maxKeys]
 	}
 	return versions, nil
-}
-
-// scanFsmCarveoutVersions scans THIS NODE's LOCAL FSM obj:/lat: records under
-// prefix and returns ObjectVersions ONLY for carve-out classes
-// (appendable/coalesced/legacy-bare), per the shared isFsmCarveoutClass
-// predicate. Plain vid-bearing versioned records are dropped (blob-authoritative
-// under blob authority). A (Key,VID) already present in blobSeen is skipped
-// (blob wins). Legacy-bare records emit VersionID="" / IsLatest=true, matching
-// the off-path leaf and fsmCarveoutObject — EXCEPT when the key also has a blob
-// version (key ∈ blobKeys): blob authority owns IsLatest there (HEAD ignores the
-// carve-out), so such a carve-out is emitted as a non-latest version.
-func (b *DistributedBackend) scanFsmCarveoutVersions(bucket, prefix string, blobSeen map[[2]string]bool, blobKeys map[string]bool) ([]*storage.ObjectVersion, error) {
-	var out []*storage.ObjectVersion
-	err := b.forEachLocalCarveout(bucket, prefix, func(key, vid string, bareLegacy bool, latTarget string, m objectMeta) error {
-		if blobSeen[[2]string{key, vid}] {
-			return nil // blob wins the (Key,VID) collision
-		}
-		// A carve-out is its key's latest only if it IS the lat: target (the key's
-		// single latest) — a bare-legacy record has no version identity and is its own
-		// latest. Comparing vid==latTarget (not key-level "has a lat:") prevents a
-		// second appendable/coalesced version of the same key from also being flagged.
-		// And when the key has a blob version, blob authority owns IsLatest (HEAD =
-		// blob winner), so the carve-out is never latest there.
-		out = append(out, &storage.ObjectVersion{
-			Key:            key,
-			VersionID:      vid,
-			IsLatest:       (bareLegacy || vid == latTarget) && !blobKeys[key],
-			IsDeleteMarker: m.ETag == deleteMarkerETag,
-			LastModified:   m.LastModified,
-			ETag:           m.ETag,
-			Size:           m.Size,
-			Tags:           append([]storage.Tag(nil), m.Tags...),
-		})
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-// forEachLocalCarveout iterates THIS node's local FSM obj:/lat: records under
-// prefix and invokes visit for each CARVE-OUT-class record
-// (appendable/coalesced/legacy-bare per isFsmCarveoutClass). It resolves
-// (key, vid, bareLegacy) and whether the key has a lat: pointer the SAME way for
-// every consumer — the ListObjectVersions on-branch (scanFsmCarveoutVersions) and
-// the blob-authoritative scrubber scan — so the carve-out classification cannot drift.
-// Plain vid-bearing versioned records and the slashless MIRROR of a versioned key
-// are skipped: a versioned appendable/coalesced object persists both obj:{b}/{k}
-// (mirror, vid="") and obj:{b}/{k}/{vid} with lat:{b}/{k}→vid; the mirror resolves
-// to (vid="", bareLegacy=false) because a lat: pointer exists, and the
-// authoritative carve-out is the versioned record. A genuine legacy-bare record
-// (bareLegacy=true, no lat:) is kept.
-func (b *DistributedBackend) forEachLocalCarveout(bucket, prefix string, visit func(key, vid string, bareLegacy bool, latTarget string, m objectMeta) error) error {
-	return b.store.View(func(txn MetadataTxn) error {
-		hasLat := map[string]bool{}
-		latVID := map[string]string{} // key → lat: target vid (the key's single latest)
-		rawLatPfx := []byte("lat:" + bucket + "/" + prefix)
-		latPrefix := b.ks().Prefix(rawLatPfx)
-		latIt := txn.NewIterator(MetaIteratorOptions{PrefetchValues: true})
-		for latIt.Seek(latPrefix); latIt.ValidForPrefix(latPrefix); latIt.Next() {
-			rawKey := b.ks().MustStrip(latIt.Item().Key())
-			key := strings.TrimPrefix(string(rawKey), "lat:"+bucket+"/")
-			hasLat[key] = true
-			if v, verr := b.itemValueCopy(latIt.Item()); verr == nil {
-				latVID[key] = string(v)
-			}
-		}
-		latIt.Close()
-
-		rawObjPfx := []byte("obj:" + bucket + "/")
-		objPrefix := b.ks().Prefix(rawObjPfx)
-		it := txn.NewIterator(MetaIteratorOptions{PrefetchValues: true})
-		defer it.Close()
-		for it.Seek(objPrefix); it.ValidForPrefix(objPrefix); it.Next() {
-			rawKey := b.ks().MustStrip(it.Item().Key())
-			rest := strings.TrimPrefix(string(rawKey), "obj:"+bucket+"/")
-			val, verr := b.itemValueCopy(it.Item())
-			if verr != nil {
-				return verr
-			}
-			m, merr := unmarshalObjectMeta(val)
-			if merr != nil {
-				return merr
-			}
-			key, vid, bareLegacy := b.resolveFsmRecordIdentity(rest, m, hasLat)
-			if vid == "" && !bareLegacy {
-				continue // slashless mirror of a versioned key
-			}
-			if !strings.HasPrefix(key, prefix) {
-				continue
-			}
-			if !isFsmCarveoutClass(m, bareLegacy) {
-				continue
-			}
-			if verr := visit(key, vid, bareLegacy, latVID[key], m); verr != nil {
-				return verr
-			}
-		}
-		return nil
-	})
-}
-
-// resolveFsmRecordIdentity parses an FSM obj: record's rest-of-key into its S3
-// key, version ID, and whether it is a legacy-bare (unversioned, no lat:)
-// record — mirroring the off-path leaf's split-key disambiguation and
-// fsmCarveoutObject's bare-vs-versioned rule.
-//
-//   - slash-less rest: a bare obj:{bucket}/{key}. bare-legacy iff no lat: pointer.
-//   - {key}/{vid}: a versioned record. meta.Key == key confirms a genuine
-//     versioned record (vs. a legacy key that literally contains a slash);
-//     versioned records are never bare-legacy.
-func (b *DistributedBackend) resolveFsmRecordIdentity(rest string, m objectMeta, hasLat map[string]bool) (key, vid string, bareLegacy bool) {
-	slash := strings.LastIndex(rest, "/")
-	if slash < 0 {
-		return rest, "", !hasLat[rest]
-	}
-	k := rest[:slash]
-	v := rest[slash+1:]
-	if m.Key == k && v != "" {
-		return k, v, false
-	}
-	// Legacy slash-bearing key with no version identity.
-	return rest, "", !hasLat[rest]
 }
 
 // --- Path helpers ---

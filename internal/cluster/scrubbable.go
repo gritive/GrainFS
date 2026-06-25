@@ -221,9 +221,7 @@ func (b *DistributedBackend) scanObjectsBlobAuth(bucket string) ([]scrubber.Obje
 		}
 	}
 	var recs []scrubber.ObjectRecord
-	seen := map[string]struct{}{}
 	for _, c := range latest {
-		seen[c.Key] = struct{}{}
 		if c.IsDeleteMarker || c.ETag == deleteMarkerETag {
 			continue // delete-marker latest — no shards to scrub
 		}
@@ -239,30 +237,6 @@ func (b *DistributedBackend) scanObjectsBlobAuth(bucket string) ([]scrubber.Obje
 			ETag:         c.ETag,
 			LastModified: c.ModTime,
 		})
-	}
-	// Local EC carve-out FSM records (appendable/coalesced/legacy-bare), deduped
-	// by key against the blob latest set (blob wins). Reuse the shared carve-out
-	// walk so the classification matches ListObjectVersions exactly.
-	if err := b.forEachLocalCarveout(bucket, "", func(key, vid string, _ bool, _ string, m objectMeta) error {
-		if _, dup := seen[key]; dup {
-			return nil // blob latest already covers this key
-		}
-		if m.ECData == 0 {
-			return nil // no EC shards to scrub
-		}
-		seen[key] = struct{}{}
-		recs = append(recs, scrubber.ObjectRecord{
-			Bucket:       bucket,
-			Key:          key,
-			VersionID:    vid,
-			DataShards:   int(m.ECData),
-			ParityShards: int(m.ECParity),
-			ETag:         m.ETag,
-			LastModified: m.LastModified,
-		})
-		return nil
-	}); err != nil {
-		return nil, err
 	}
 	return recs, nil
 }
