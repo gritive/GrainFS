@@ -60,7 +60,6 @@ type operationsPlan struct {
 	deleteObjectVersionForUndo ObjectVersionDeleter
 	tagsSetter                 ObjectTagsSetter
 	tagsGetter                 ObjectTagsGetter
-	appender                   AppendObjecter
 }
 
 type BucketVersioner interface {
@@ -229,11 +228,6 @@ func assignFirstWinsCapabilities(p *operationsPlan, b Backend) {
 	if p.tagsGetter == nil {
 		if v, ok := b.(ObjectTagsGetter); ok {
 			p.tagsGetter = v
-		}
-	}
-	if p.appender == nil {
-		if v, ok := b.(AppendObjecter); ok {
-			p.appender = v
 		}
 	}
 }
