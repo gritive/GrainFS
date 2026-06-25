@@ -33,3 +33,16 @@ func TestWriteLocalShardStaged_AADIsFinalKey_PromoteReadable(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, data, got)
 }
+
+// PR1 Task 5: the orphan-shard walker must WHOLESALE-skip the .segstaging/ staging area, so an
+// in-flight / crashed staged segment shard is never parsed as a fake full-object orphan and deleted.
+// (Reclaim of abandoned staging is PR2's age-out walker, not the orphan-shard walker.)
+func TestWalkOrphanShards_SkipsSegStaging(t *testing.T) {
+	b := orphanWalkerBackend(t)
+	root := b.shardSvc.DataDirs()[0]
+	staging := writeShardLeaf(t, root, "bkt/.segstaging/txn1/blob1", []int{0}, oldEnough)
+
+	got := collectOrphans(t, b, map[string]bool{})
+	require.NotContains(t, got, staging,
+		".segstaging staging dir must be skipped, never yielded as an orphan-shard candidate")
+}

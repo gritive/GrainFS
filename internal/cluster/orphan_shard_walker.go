@@ -330,6 +330,14 @@ func (b *DistributedBackend) walkOneShardRoot(
 			return filepath.SkipDir
 		}
 		rel = filepath.ToSlash(rel)
+		if strings.Contains(rel, "/.segstaging/") {
+			// Segment staging area (PR1): in-flight / crashed staged segment shards live under
+			// <bucket>/.segstaging/<txn>/<blobID> until promoted to <key>/segments/<blobID> at commit.
+			// They are never referenced by a committed manifest, so the orphan-SHARD walker must NOT
+			// parse them as full-object orphans and delete them (that would corrupt a live in-flight
+			// chunked PUT). Abandoned staging is reclaimed by a dedicated age-out sweep (PR2), not here.
+			return filepath.SkipDir
+		}
 		if strings.Contains(rel, "/segments/") {
 			// Segments stay a WHOLESALE Contains-skip (NOT parse-routed like coalesced
 			// below): there is no parseSegmentRel, and a real segment shard falling
