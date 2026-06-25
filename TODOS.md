@@ -145,15 +145,6 @@ separate PR, facades stay the spine — see design
   let an append bypass the 501 gate. Fixed: the gate now resolves versioning via the linearized read
   (`GetBucketVersioningLinearized`, #839), matching the PUT/Copy/CompleteMultipart mutating-edge
   contract. Discriminating unit test (`TestAppendObjectGateUsesLinearizedRead`, call-count).
-- **[P3][follow-up] AppendObject 501-gate fails OPEN on a genuine versioning-read fault.** The gate is
-  `vErr == nil && state == "Enabled"`, so any non-`UnsupportedOperationError` resolve fault is treated
-  as not-Enabled and the append proceeds — diverging from `ctxWithBucketVersioningStrict`, which
-  fail-closes on a genuine fault. Pre-existing (predicate byte-identical to pre-#839). Practical risk
-  is near-nil: it requires an Enabled bucket AND the linearized read's barrier to fail AND the
-  degraded local read to itself error (a real BadgerDB fault), a state where the node can't read its
-  own metadata anyway. Fail-closing would also reduce append availability on the common non-versioned
-  bucket when versioning-read transiently faults. Decide strict-parity vs availability if it ever
-  matters; not worth a behavior change now.
 - **[P2][follow-up] AppendObject is O(N²) in segment count (single-node).** A micro-benchmark sweep
   (`BenchmarkS3Append`, allocs/op deterministic) showed per-append cost GROWS with the existing
   segment count: n=4 → 885 allocs, n=8 → 2,835, n=16 → 10,490 (doubling appends ≈ 3.5× allocs).

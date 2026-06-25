@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.717.0] - 2026-06-26
+
+### Fixed
+- **Removed a stale AppendObject follow-up after confirming the versioning-read fault gate already
+  fails closed.** `appendObject` maps genuine linearized versioning-read errors before appending, and
+  `TestAppendObjectGateFailsClosedOnVersioningReadFault` covers the regression.
+
 ## [0.0.716.0] - 2026-06-26
 
 ### Changed
