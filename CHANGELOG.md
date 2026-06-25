@@ -3,11 +3,13 @@
 ## [0.0.711.0] - 2026-06-26
 
 ### Fixed
-- **`GetObjectTags` with a `versionId` on a non-versioned (or version-Suspended) bucket now returns
-  `404 NoSuchKey` on a version mismatch instead of silently returning the latest version's tags.** A
-  specific-version tag read whose `versionId` did not match the object's stored version was answered
-  with the latest version's tags; it now 404s, matching the per-version behavior of `HEAD`/`GET` for
-  the same input. (Found in review while removing the dead metadata read path below.)
+- **`GetObjectTags` on a non-versioned (or version-Suspended) bucket now returns `404 NoSuchKey` for
+  a soft-deleted object and for a mismatched `versionId`, instead of returning `200` with empty tags
+  or the latest version's tags.** A tag read of a soft-deleted object (whose latest-only record is a
+  delete-marker tombstone) returned `200` + empty tags, and a specific-`versionId` read that did not
+  match the stored version returned the latest version's tags; both now `404`, matching the behavior
+  of `HEAD`/`GET` for the same input. (Found in review while removing the dead metadata read path
+  below.)
 
 ### Changed
 - **Removed the dead Raft/FSM object-metadata read scaffolding; object metadata is now served from a
