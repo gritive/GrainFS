@@ -452,8 +452,7 @@ func fanOutQuorumMetaOwnerLocalFirst(
 }
 
 // writeQuorumMetaLocal durably writes the encoded quorum meta blob for
-// (bucket, key) under {dataDirs[0]}/.quorum_meta/{bucket}/{key}. One fsync —
-// same durability cost as the shard write it co-locates with.
+// (bucket, key) under {dataDirs[0]}/.quorum_meta/{bucket}/{key}.
 func (m *LocalQuorumMetaStore) writeQuorumMetaLocal(bucket, key string, data []byte) error {
 	_, err := m.writeQuorumMetaLocalWithResult(bucket, key, data)
 	return err
@@ -549,6 +548,9 @@ func (m *LocalQuorumMetaStore) writeQuorumMetaLocalWithResult(bucket, key string
 	if err := os.Rename(tmpName, target); err != nil {
 		return quorumMetaLocalWriteResult{}, fmt.Errorf("quorum meta rename: %w", err)
 	}
+	if err := syncDirChainNoDedup(dir, root, m.fsyncDir); err != nil {
+		return quorumMetaLocalWriteResult{}, fmt.Errorf("quorum meta dir fsync: %w", err)
+	}
 	result.applied = true
 	return result, nil
 }
@@ -586,10 +588,10 @@ func (m *LocalQuorumMetaStore) rollbackQuorumMetaLocalIfMatch(bucket, key string
 		}
 		return nil
 	}
-	return m.writeQuorumMetaFileAtomic(target, previous, "quorum meta rollback")
+	return m.writeQuorumMetaFileAtomic(target, previous, "quorum meta rollback", root)
 }
 
-func (m *LocalQuorumMetaStore) writeQuorumMetaFileAtomic(target string, data []byte, label string) error {
+func (m *LocalQuorumMetaStore) writeQuorumMetaFileAtomic(target string, data []byte, label string, syncStop string) error {
 	dir := filepath.Dir(target)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("%s mkdir: %w", label, err)
@@ -614,6 +616,9 @@ func (m *LocalQuorumMetaStore) writeQuorumMetaFileAtomic(target string, data []b
 	if err := os.Rename(tmpName, target); err != nil {
 		return fmt.Errorf("%s rename: %w", label, err)
 	}
+	if err := syncDirChainNoDedup(dir, syncStop, m.fsyncDir); err != nil {
+		return fmt.Errorf("%s dir fsync: %w", label, err)
+	}
 	return nil
 }
 
@@ -621,8 +626,8 @@ func (m *LocalQuorumMetaStore) writeQuorumMetaFileAtomic(target string, data []b
 // per-version blob writes: mkdir + atomic temp+fsync+rename. It assumes the
 // caller has already validated the target path and holds the per-target lock
 // (the LWW-guard critical section in writeQuorumMetaVersionLocal).
-func (m *LocalQuorumMetaStore) writeQuorumMetaVersionLocalCore(target string, data []byte) error {
-	return m.writeQuorumMetaFileAtomic(target, data, "quorum meta version")
+func (m *LocalQuorumMetaStore) writeQuorumMetaVersionLocalCore(target string, data []byte, syncStop string) error {
+	return m.writeQuorumMetaFileAtomic(target, data, "quorum meta version", syncStop)
 }
 
 // writeQuorumMetaVersionLocal durably writes an immutable per-version quorum-meta
@@ -671,7 +676,7 @@ func (m *LocalQuorumMetaStore) writeQuorumMetaVersionLocal(bucket, versionSubpat
 			}
 		}
 	}
-	return m.writeQuorumMetaVersionLocalCore(target, data)
+	return m.writeQuorumMetaVersionLocalCore(target, data, root)
 }
 
 // readQuorumMetaVersionsLocal returns the decoded per-version blobs for one key

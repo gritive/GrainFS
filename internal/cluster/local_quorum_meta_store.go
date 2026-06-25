@@ -10,6 +10,7 @@ import (
 type LocalQuorumMetaStore struct {
 	dataDirs              []string
 	quorumMetaTargetLocks keyedRWMutex
+	syncDirHook           func(string) error
 }
 
 func NewLocalQuorumMetaStore(dataDirs []string) *LocalQuorumMetaStore {
@@ -22,6 +23,13 @@ func NewLocalQuorumMetaStore(dataDirs []string) *LocalQuorumMetaStore {
 // path, and the lock is reclaimed once the last holder releases.
 func (m *LocalQuorumMetaStore) quorumMetaTargetLock(target string) func() {
 	return m.quorumMetaTargetLocks.lockWrite(target)
+}
+
+func (m *LocalQuorumMetaStore) fsyncDir(dir string) error {
+	if m.syncDirHook != nil {
+		return m.syncDirHook(dir)
+	}
+	return syncDir(dir)
 }
 
 func (s *ShardService) writeQuorumMetaLocal(bucket, key string, data []byte) error {

@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.725.0] - 2026-06-26
+
+### Fixed
+- **Made local quorum-meta and multipart manifest publishes fsync their directory links after
+  rename.** Latest-only quorum-meta, per-version quorum-meta, rollback restores, and MPU manifest
+  writes now persist the target directory chain after atomic rename so a crash cannot lose the
+  namespace entry after the blob bytes were fsynced.
+
 ## [0.0.724.0] - 2026-06-26
 
 ### Changed

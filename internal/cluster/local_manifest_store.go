@@ -14,7 +14,8 @@ import (
 // {dataDirs[0]}/.qmeta_mpu/{bucket}/{uploadID}. ShardService keeps the RPC and
 // cluster fan-out facade; local file I/O is delegated here.
 type LocalManifestStore struct {
-	dataDirs []string
+	dataDirs    []string
+	syncDirHook func(string) error
 }
 
 // NewLocalManifestStore creates a node-local manifest store rooted at the
@@ -28,6 +29,13 @@ func (l *LocalManifestStore) root() (string, bool) {
 		return "", false
 	}
 	return filepath.Join(l.dataDirs[0], manifestMPUSubDir), true
+}
+
+func (l *LocalManifestStore) fsyncDir(dir string) error {
+	if l.syncDirHook != nil {
+		return l.syncDirHook(dir)
+	}
+	return syncDir(dir)
 }
 
 func manifestTarget(root, bucket, uploadID string) (string, error) {
@@ -72,6 +80,9 @@ func (l *LocalManifestStore) Write(bucket, uploadID string, data []byte) error {
 	}
 	if err := os.Rename(tmpName, target); err != nil {
 		return fmt.Errorf("manifest blob rename: %w", err)
+	}
+	if err := syncDirChainNoDedup(dir, root, l.fsyncDir); err != nil {
+		return fmt.Errorf("manifest blob dir fsync: %w", err)
 	}
 	return nil
 }

@@ -55,6 +55,23 @@ func TestLocalManifestStore_RoundTripAndStrictScan(t *testing.T) {
 	require.False(t, ok)
 }
 
+func TestLocalManifestStore_WriteFsyncsDirectoryAfterRename(t *testing.T) {
+	root := t.TempDir()
+	store := NewLocalManifestStore([]string{root})
+	var synced []string
+	store.syncDirHook = func(dir string) error {
+		synced = append(synced, dir)
+		return nil
+	}
+	meta := clusterMultipartMeta{Bucket: "bkt", Key: "k", ContentType: "text/plain", CreatedAt: 100}
+	raw, err := marshalClusterMultipartMeta(meta)
+	require.NoError(t, err)
+
+	require.NoError(t, store.Write("bkt", "up-1", raw))
+
+	require.Contains(t, synced, filepath.Join(root, manifestMPUSubDir, "bkt"))
+}
+
 // TestUnpackManifestEntries_CorruptLengthNoPanic verifies that unpackManifestEntries
 // returns an error (not a panic) when fed a truncated buffer or a length-prefix whose
 // high bit is set (which a signed-int decode would turn negative).
