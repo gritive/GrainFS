@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.680.0] - 2026-06-25
+
+### Changed
+- **Internal refactor, no user-facing behavior change.** Decomposed the storage decorator
+  capability resolver `buildOperationsPlan` (cognitive complexity 81) into a thin orchestrator plus
+  two named helpers (`assignFirstWinsCapabilities`, `resolveCopyCapability`), mirroring the sibling
+  `buildACLCapabilityPlan`. The two distinct resolution rules are preserved exactly: the 13
+  order-independent capabilities stay first-implementer-across-the-chain wins, and the copy fast
+  path (accelerator + copier) stays outermost-only so it cannot bypass inner decorators such as
+  encryption. Pinned by characterization tests and a 50k-iteration equivalence fuzz against the
+  prior implementation.
+
 ## [0.0.679.0] - 2026-06-25
 
 ### Changed
