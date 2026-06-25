@@ -23,7 +23,6 @@ type writeBlocker interface {
 
 var (
 	_ Backend      = (*RecoveryWriteGate)(nil)
-	_ Truncatable  = (*RecoveryWriteGate)(nil)
 	_ writeBlocker = (*RecoveryWriteGate)(nil)
 )
 

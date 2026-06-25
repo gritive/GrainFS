@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.678.0] - 2026-06-25
+
+### Removed
+- **Internal refactor, no user-facing behavior change.** Removed two dead optional storage
+  capability interfaces, `Truncatable` and `Syncable`, from `internal/storage`. Neither had any
+  runtime type-assertion probe; they survived only as compile-time `var _` assertions and doc
+  comments. `Truncate` is still reached through `PartialIO` (which embeds it) and `Sync` is still
+  called on the concrete `*LocalBackend`, so both method bodies and their behavior are retained. The
+  remaining split-by-design capability interfaces (intentionally granular for the recovery
+  write-gate and packblob partial implementations) are unchanged.
+
 ## [0.0.677.0] - 2026-06-25
 
 ### Changed

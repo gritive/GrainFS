@@ -263,12 +263,6 @@ type Backend interface {
 	ListParts(ctx context.Context, bucket, key, uploadID string, maxParts int) ([]Part, error)
 }
 
-// Truncatable is an optional interface for backends that can efficiently truncate an object.
-// Backends that do not implement this interface fall back to GetObject→slice→PutObject.
-type Truncatable interface {
-	Truncate(ctx context.Context, bucket, key string, size int64) error
-}
-
 // PartialIO is an optional interface for backends that can efficiently read and
 // write object ranges without rewriting the full object.
 type PartialIO interface {
@@ -281,12 +275,6 @@ type PartialIO interface {
 // current object metadata and want to avoid a second lookup before ReadAt.
 type PreparedReadAt interface {
 	ReadAtObject(ctx context.Context, bucket, key string, obj *Object, offset int64, buf []byte) (int, error)
-}
-
-// Syncable is an optional interface for backends that can fsync a specific object.
-// Backends that do not implement this interface skip the fsync in COMMIT.
-type Syncable interface {
-	Sync(bucket, key string) error
 }
 
 // TaggingDirective controls how tags are applied on CopyObject.

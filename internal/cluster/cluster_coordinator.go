@@ -2233,9 +2233,8 @@ func rejectIncompleteMultipartListing(op compat.Operation) error {
 }
 
 var (
-	_ storage.Backend     = (*ClusterCoordinator)(nil)
-	_ storage.PartialIO   = (*ClusterCoordinator)(nil)
-	_ storage.Truncatable = (*ClusterCoordinator)(nil)
+	_ storage.Backend   = (*ClusterCoordinator)(nil)
+	_ storage.PartialIO = (*ClusterCoordinator)(nil)
 )
 
 // ScanObjectsGrouped fans out to all locally-owned shard groups so that
