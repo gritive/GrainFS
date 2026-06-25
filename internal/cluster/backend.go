@@ -1024,6 +1024,12 @@ func proposeDeadlineSentinel(proposeCtx context.Context, where string) error {
 	return nil
 }
 
+// propose encodes the command and dispatches it down the raft commit path. It
+// is a thin orchestrator: leader nodes commit locally via proposeAsLeader,
+// followers/edge nodes forward via proposeViaForward. The two duplicated blocks
+// it used to inline — the leader-commit-then-apply-wait sequence and the
+// 1ms-sleep apply-wait loop — now live in exactly one place each
+// (proposeAsLeader / waitLocalApplied).
 func (b *DistributedBackend) propose(ctx context.Context, cmdType CommandType, payload any) error {
 	if b.groupID != "" {
 		if _, ok := PlacementGroupFromContext(ctx); !ok {
@@ -1036,73 +1042,95 @@ func (b *DistributedBackend) propose(ctx context.Context, cmdType CommandType, p
 	}
 
 	if b.node.IsLeader() {
+		// Leader fast-path: the orchestrator owns the deadline-bound proposeCtx
+		// (created + canceled here) and hands it to proposeAsLeader, which must
+		// NOT create its own timeout. proposeCtx is not referenced after
+		// proposeAsLeader returns, so defer-cancel at this scope is safe.
 		proposeCtx, cancel := context.WithTimeout(ctx, proposeForwardTimeout)
 		defer cancel()
-		idx, err := b.node.ProposeWait(proposeCtx, data)
-		if err != nil {
-			if sentinel := proposeDeadlineSentinel(proposeCtx, "leader commit"); sentinel != nil {
+		return b.proposeAsLeader(proposeCtx, data)
+	}
+	return b.proposeViaForward(ctx, data)
+}
+
+// waitLocalApplied blocks until this backend's FSM has applied at least idx,
+// then returns any FSM apply error recorded for idx (read-your-writes). The
+// where string is diagnostic-only (it appears in the ErrProposeTimeout sentinel
+// message, not in any test assertion). This is the single home for the
+// 1ms-sleep apply-wait loop that propose used to inline three times.
+//
+// CRITICAL: on proposeCtx.Done() it checks proposeDeadlineSentinel FIRST and,
+// only if that is nil (i.e. the context was canceled rather than deadline-
+// exceeded), returns the BARE proposeCtx.Err(). It must NOT collapse to
+// `return sentinel`: on a client cancellation the sentinel is nil, so returning
+// it would turn a context.Canceled into a false nil success.
+//
+// It uses a 1ms time.Sleep cadence, NOT the 5ms WaitApplied ticker — WaitApplied
+// lacks the sentinel/ApplyError semantics and is not interchangeable here.
+//
+// idx==0 is a natural no-op: the loop condition (lastApplied < 0) is never true.
+func (b *DistributedBackend) waitLocalApplied(proposeCtx context.Context, idx uint64, where string) error {
+	for b.lastApplied.Load() < idx {
+		select {
+		case <-proposeCtx.Done():
+			if sentinel := proposeDeadlineSentinel(proposeCtx, where); sentinel != nil {
 				return sentinel
 			}
-			return err
+			return proposeCtx.Err()
+		default:
+			time.Sleep(time.Millisecond)
 		}
-		for b.lastApplied.Load() < idx {
-			select {
-			case <-proposeCtx.Done():
-				if sentinel := proposeDeadlineSentinel(proposeCtx, "leader apply-wait"); sentinel != nil {
-					return sentinel
-				}
-				return proposeCtx.Err()
-			default:
-				time.Sleep(time.Millisecond)
-			}
-		}
-		// Phase A: surface FSM apply errors to the caller. recordApplyResult
-		// runs before lastApplied.Store in the apply loop, so by the time we
-		// observe lastApplied >= idx the entry (if any) is already set.
-		if applyErr := b.ApplyError(idx); applyErr != nil {
-			return applyErr
-		}
-		return nil
 	}
+	// Phase A: surface FSM apply errors to the caller. recordApplyResult runs
+	// before lastApplied.Store in the apply loop, so by the time we observe
+	// lastApplied >= idx the entry (if any) is already set.
+	return b.ApplyError(idx)
+}
 
-	// Follower / edge node: forward to the data-group leader. When the
-	// leader hint is known we forward only there; otherwise we fan out to
-	// the configured peer set (covers dynamic-join edge nodes that don't
-	// know the raft topology yet).
-	//
-	// A freshly-instantiated multi-voter data group may not have completed
-	// its first election by the time a write arrives (raft tick + heartbeat
-	// race the very first request to land on a non-leader). Retry on
-	// ErrNotLeader with bounded backoff so the propose converges as soon
-	// as the election settles rather than failing with a 500.
+// proposeAsLeader commits data on the local raft leader and waits for the local
+// apply to catch up, surfacing any FSM apply error.
+//
+// CRITICAL: the caller owns ctx deadline-bounding; this fn must NOT create a
+// timeout. The asymmetry is load-bearing: the leader fast-path passes a fresh
+// proposeCtx created by the orchestrator, while proposeViaForward's in-loop
+// follower-became-leader call passes the forward loop's SHARED proposeCtx (so
+// the election-settles-after-the-entry case stays inside the single bounded
+// retry window). A future edit that adds a timeout here would silently break
+// that shared-deadline contract.
+func (b *DistributedBackend) proposeAsLeader(proposeCtx context.Context, data []byte) error {
+	idx, err := b.node.ProposeWait(proposeCtx, data)
+	if err != nil {
+		if sentinel := proposeDeadlineSentinel(proposeCtx, "leader commit"); sentinel != nil {
+			return sentinel
+		}
+		return err
+	}
+	return b.waitLocalApplied(proposeCtx, idx, "leader apply-wait")
+}
+
+// proposeViaForward handles the follower / edge-node path: forward to the
+// data-group leader. When the leader hint is known we forward only there;
+// otherwise we fan out to the configured peer set (covers dynamic-join edge
+// nodes that don't know the raft topology yet).
+//
+// A freshly-instantiated multi-voter data group may not have completed its first
+// election by the time a write arrives (raft tick + heartbeat race the very
+// first request to land on a non-leader). We retry on ErrNotLeader with bounded
+// backoff so the propose converges as soon as the election settles rather than
+// failing with a 500. This function owns the deadline-bound proposeCtx for the
+// entire retry loop (created + canceled here).
+func (b *DistributedBackend) proposeViaForward(ctx context.Context, data []byte) error {
 	proposeCtx, cancel := context.WithTimeout(ctx, proposeForwardTimeout)
 	defer cancel()
 	const retryInterval = 50 * time.Millisecond
 	var lastErr error
 	for {
 		if b.node.IsLeader() {
-			idx, err := b.node.ProposeWait(proposeCtx, data)
-			if err != nil {
-				if sentinel := proposeDeadlineSentinel(proposeCtx, "leader commit"); sentinel != nil {
-					return sentinel
-				}
-				return err
-			}
-			for b.lastApplied.Load() < idx {
-				select {
-				case <-proposeCtx.Done():
-					if sentinel := proposeDeadlineSentinel(proposeCtx, "leader apply-wait"); sentinel != nil {
-						return sentinel
-					}
-					return proposeCtx.Err()
-				default:
-					time.Sleep(time.Millisecond)
-				}
-			}
-			if applyErr := b.ApplyError(idx); applyErr != nil {
-				return applyErr
-			}
-			return nil
+			// Election settled after the request landed on this node: commit
+			// directly, reusing the forward loop's shared proposeCtx (NOT a
+			// fresh one) so the leader commit stays inside the same bounded
+			// retry window.
+			return b.proposeAsLeader(proposeCtx, data)
 		}
 		peers := b.forwardPeersForPropose()
 		if len(peers) == 0 {
@@ -1124,21 +1152,7 @@ func (b *DistributedBackend) propose(ctx context.Context, cmdType CommandType, p
 					// idx is the global raft log index returned by the leader's
 					// ProposeWait; b.lastApplied tracks the same log, so the
 					// comparison is direct.
-					for b.lastApplied.Load() < idx {
-						select {
-						case <-proposeCtx.Done():
-							if sentinel := proposeDeadlineSentinel(proposeCtx, "follower apply-wait"); sentinel != nil {
-								return sentinel
-							}
-							return proposeCtx.Err()
-						default:
-							time.Sleep(time.Millisecond)
-						}
-					}
-					if applyErr := b.ApplyError(idx); applyErr != nil {
-						return applyErr
-					}
-					return nil
+					return b.waitLocalApplied(proposeCtx, idx, "follower apply-wait")
 				}
 				lastErr = err
 				if !errors.Is(err, raft.ErrNotLeader) {
