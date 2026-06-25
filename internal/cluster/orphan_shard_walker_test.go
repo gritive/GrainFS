@@ -56,14 +56,27 @@ func writeShardLeaf(t *testing.T, root, rel string, indices []int, backdate time
 	return filepath.Clean(dir)
 }
 
-// putObjMeta writes a live FSM obj: record for (bucket,key,versionID).
+// putObjMeta writes a live per-version quorum-meta blob for (bucket,key,versionID)
+// on a versioning-enabled bucket — the shard-liveness authority hasLiveShardRecord
+// reads. The bucket is created + versioning-enabled if not already, so the
+// blob-authoritative liveness path resolves it.
 func putObjMeta(t *testing.T, b *DistributedBackend, bucket, key, versionID, etag string) {
 	t.Helper()
-	raw, err := marshalObjectMeta(objectMeta{Key: key, ETag: etag, ECData: 1})
-	require.NoError(t, err)
-	require.NoError(t, b.store.Update(func(txn MetadataTxn) error {
-		return txn.Set(b.ks().ObjectMetaKeyV(bucket, key, versionID), raw)
-	}))
+	ctx := context.Background()
+	if err := b.HeadBucket(ctx, bucket); err != nil {
+		require.NoError(t, b.CreateBucket(ctx, bucket))
+		setVersioningForTest(t, b, bucket, "Enabled")
+	}
+	seedVersionBlob(t, b, bucket, key, versionID, PutObjectMetaCmd{
+		ETag: etag, ECData: 1, NodeIDs: []string{b.currentSelfAddr()},
+	})
+}
+
+// deleteVersionBlob removes the per-version quorum-meta blob seeded by putObjMeta
+// / seedVersionBlob, turning a previously-live version into a true orphan.
+func deleteVersionBlob(t *testing.T, b *DistributedBackend, bucket, key, versionID string) {
+	t.Helper()
+	require.NoError(t, b.shardSvc.deleteQuorumMetaVersionLocal(bucket, key, versionID))
 }
 
 func collectOrphans(t *testing.T, b *DistributedBackend, known map[string]bool) []string {
@@ -423,12 +436,13 @@ func TestDeleteOrphanDir_RevalidatesBeforeDelete(t *testing.T) {
 	require.DirExists(t, dir)
 }
 
-// TestWalkOrphanShards_CleanableKeyRetainedVersionProtected guards the P0 from
-// the code-gate: shard writes filepath.Join-clean the key, so a logical key like
-// "a/../b" lands in physical dir ".../bkt/b/<ver>". Reverse-parsing that path
-// gives the wrong logical key and would miss the real obj: record, deleting a
-// live retained version. The forward live-set (logical key -> getShardDir) must
-// protect it.
+// TestWalkOrphanShards_CleanableKeyRetainedVersionProtected guards a P0 data-loss
+// hole: shard writes filepath.Join-clean the key, so a logical key like "a/../b"
+// lands in physical dir ".../bkt/b/<ver>". The per-version quorum-meta blob is
+// written under the SAME cleaned path, so hasLiveShardRecord's reverse-parsed
+// lookup (key="b") finds the live blob and protects the shard. This verifies the
+// removal of the legacy FSM forward-map is safe: blob-backed cleanable-key
+// versions stay protected.
 func TestWalkOrphanShards_CleanableKeyRetainedVersionProtected(t *testing.T) {
 	for _, logicalKey := range []string{"a/../b", "dir/", "a//b", "a/./b"} {
 		t.Run(logicalKey, func(t *testing.T) {
@@ -453,12 +467,10 @@ func TestWalkOrphanShards_CleanableKeyRetainedVersionProtected(t *testing.T) {
 			require.Equal(t, 0, n, "DeleteOrphanDir must refuse a live cleanable-key version")
 			require.DirExists(t, physDir)
 
-			// Mutation: drop the obj: record => the same dir is now a true orphan.
-			require.NoError(t, b.store.Update(func(txn MetadataTxn) error {
-				return txn.Delete(b.ks().ObjectMetaKeyV("bkt", logicalKey, versionID))
-			}))
+			// Mutation: drop the per-version blob => the same dir is now a true orphan.
+			deleteVersionBlob(t, b, "bkt", logicalKey, versionID)
 			require.Equal(t, []string{canonical}, collectOrphans(t, b, nil),
-				"without the obj: record the cleanable-key dir is a true orphan")
+				"without the per-version blob the cleanable-key dir is a true orphan")
 		})
 	}
 }
@@ -516,10 +528,12 @@ func laggingGroupBackend(t *testing.T, b *DistributedBackend, groupID string) *D
 	return sib
 }
 
-// TestWalkOrphanShards_MultiGroup_SiblingLiveVersionProtected proves the union
-// live-set protects a versioned object owned by a SIBLING hosted group (its obj:
-// record lives under that group's ks prefix, which the group-0 walker alone would
-// not scan). Dropping the record turns the same dir into a true orphan.
+// TestWalkOrphanShards_MultiGroup_SiblingLiveVersionProtected proves the shard
+// sweep protects a live versioned object whose shard is co-located in the shared
+// ShardService dataDirs (the multi-group case). Object metadata lives in the
+// off-raft quorum-meta blob store (not a per-group ks prefix), so the per-version
+// blob — shared across hosted groups — is the liveness authority; dropping it
+// turns the same dir into a true orphan.
 func TestWalkOrphanShards_MultiGroup_SiblingLiveVersionProtected(t *testing.T) {
 	b := orphanWalkerBackend(t)
 	sib := siblingGroupBackend(t, b, "group-3")
@@ -528,16 +542,15 @@ func TestWalkOrphanShards_MultiGroup_SiblingLiveVersionProtected(t *testing.T) {
 
 	root := b.shardSvc.DataDirs()[0]
 	dir := writeShardLeaf(t, root, "bkt/key/v-sib", []int{0}, oldEnough)
-	putObjMeta(t, sib, "bkt", "key", "v-sib", "e1") // record under the sibling's ks prefix
+	// The per-version blob is shared across hosted groups (co-located with shards).
+	putObjMeta(t, b, "bkt", "key", "v-sib", "e1")
 
 	require.Empty(t, collectOrphans(t, b, nil),
-		"a live versioned object owned by a sibling hosted group must be protected by the union live-set")
+		"a live versioned object's shard must be protected by its per-version blob")
 
-	require.NoError(t, b.store.Update(func(txn MetadataTxn) error {
-		return txn.Delete(sib.ks().ObjectMetaKeyV("bkt", "key", "v-sib"))
-	}))
+	deleteVersionBlob(t, b, "bkt", "key", "v-sib")
 	require.Equal(t, []string{dir}, collectOrphans(t, b, nil),
-		"without the sibling's obj: record the dir is a true orphan")
+		"without the per-version blob the dir is a true orphan")
 }
 
 // TestWalkOrphanShards_MultiGroup_FloatedInShardKept proves a shard whose owning

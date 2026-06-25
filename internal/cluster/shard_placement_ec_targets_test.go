@@ -142,18 +142,25 @@ func TestBuildECShardTargets(t *testing.T) {
 		PlacementGroupID: "pg-1",
 	}, plainTargets[0])
 
-	// (c) A version-less ref (legacy unversioned object) still emits its
-	// object-version target but NO segment/coalesced targets (guarded on
-	// VersionID != "" to avoid a version-less misparse shard key).
+	// (c) A version-less ref for a plain (no segments/coalesced) legacy object
+	// still emits its object-version target, with an empty VersionID.
 	legacyTargets := buildTargets(t, backend, ObjectMetaRef{Bucket: "b", Key: "legacy", VersionID: ""}, objectMeta{
 		Key: "legacy", ECData: 2, ECParity: 1, NodeIDs: []string{"l1", "l2", "l3"},
-		Segments: []storage.SegmentRef{
-			{BlobID: "seg-x", ECData: 2, ECParity: 1, NodeIDs: []string{"l1", "l2", "l3"}},
-		},
 	})
 	require.Len(t, legacyTargets, 1)
 	require.Equal(t, ECShardObjectVersion, legacyTargets[0].Kind)
 	require.Equal(t, "", legacyTargets[0].VersionID)
+
+	// (d) A version-less ref WITH segments emits NO targets: object-version is
+	// suppressed (it has segments) and segment/coalesced targets are guarded on
+	// VersionID != "" to avoid a version-less misparse shard key.
+	guarded := buildTargets(t, backend, ObjectMetaRef{Bucket: "b", Key: "guarded", VersionID: ""}, objectMeta{
+		Key: "guarded", ECData: 2, ECParity: 1, NodeIDs: []string{"g1", "g2", "g3"},
+		Segments: []storage.SegmentRef{
+			{BlobID: "seg-x", ECData: 2, ECParity: 1, NodeIDs: []string{"g1", "g2", "g3"}},
+		},
+	})
+	require.Empty(t, guarded, "version-less ref with segments must emit no targets")
 }
 
 // TestBuildECShardTargets_CarryStripeBytes asserts the constructor propagates
