@@ -1034,11 +1034,11 @@ func (s *ShardService) WriteLocalShardContext(ctx context.Context, bucket, key s
 // (segEnc) is mandatory (NewShardService panics if absent), so there is no
 // plaintext branch.
 func (s *ShardService) EncodeEncryptedShardBuffer(bucket, key string, shardIdx int, data []byte) ([]byte, error) {
-	var buf bytes.Buffer
-	if err := eccodec.EncodeEncryptedShard(&buf, bytes.NewReader(data), s.segEnc, ShardAADFields(bucket, key, shardIdx), eccodec.DefaultEncryptedChunkSize); err != nil {
+	payload, err := eccodec.EncodeEncryptedShardToBuffer(data, s.segEnc, ShardAADFields(bucket, key, shardIdx), eccodec.DefaultEncryptedChunkSize)
+	if err != nil {
 		return nil, fmt.Errorf("encode encrypted shard: %w", err)
 	}
-	return buf.Bytes(), nil
+	return payload, nil
 }
 
 // writeLocalShard writes shard shardIdx of (bucket,key) to its final on-disk path,
@@ -1081,8 +1081,8 @@ func (s *ShardService) writeLocalShardAAD(ctx context.Context, bucket, key, aadK
 	})
 	path := filepath.Join(dir, fmt.Sprintf("shard_%d", shardIdx))
 	encodeStart := time.Now()
-	var encoded bytes.Buffer
-	if err := eccodec.EncodeEncryptedShard(&encoded, bytes.NewReader(data), s.segEnc, ShardAADFields(bucket, aadKey, shardIdx), eccodec.DefaultEncryptedChunkSize); err != nil {
+	payload, err := eccodec.EncodeEncryptedShardToBuffer(data, s.segEnc, ShardAADFields(bucket, aadKey, shardIdx), eccodec.DefaultEncryptedChunkSize)
+	if err != nil {
 		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncode, encodeStart, PutTraceStageFields{
 			Bytes:            int64(len(data)),
 			ShardIndex:       shardIdx,
@@ -1096,7 +1096,6 @@ func (s *ShardService) writeLocalShardAAD(ctx context.Context, bucket, key, aadK
 		ShardIndex:       shardIdx,
 		ShardTargetClass: "local",
 	})
-	payload := encoded.Bytes()
 	requireFsync := s.shardWriteRequiresFsync(len(payload))
 	fileStart := time.Now()
 	if err := s.writeEncryptedShardFile(ctx, dir, path, payload, shardIdx, requireFsync); err != nil {

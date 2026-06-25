@@ -14,6 +14,7 @@
 package eccodec
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -138,6 +139,11 @@ func EncryptedShardGen(raw []byte) (gen uint32, ok bool) {
 // the active gen and records it in the header, and chunks 1+ seal AT that
 // pinned gen, so a DEK rotation racing the encode cannot split the shard across
 // generations (the header's dek_gen describes every chunk).
+//
+// w MUST consume each Write before the next: the per-chunk ciphertext buffer is
+// reused across chunks (SealTo/SealAtGenTo), so a writer that retains the slice
+// would see it overwritten on the following chunk. All in-tree writers
+// (bytes.Buffer, *os.File) copy synchronously and are safe.
 func EncodeEncryptedShard(w io.Writer, r io.Reader, enc ShardEncryptor, baseFields []encrypt.AADField, chunkSize int) error {
 	if enc == nil {
 		return fmt.Errorf("encrypted shard encode requires encryptor")
@@ -166,6 +172,13 @@ func EncodeEncryptedShard(w io.Writer, r io.Reader, enc ShardEncryptor, baseFiel
 		pinnedGen     uint32
 		chunkOverhead uint16
 		headerWritten bool
+		// sealBuf is reused across chunks via SealTo/SealAtGenTo so the per-chunk
+		// ciphertext is not reallocated each iteration. Mirrors
+		// EncryptedShardChunkedWriter.emitChunk; the prior Seal/SealAtGen path
+		// allocated one buffer per chunk, scaling allocs with object size (the
+		// un-pooled class #893 fixed in storage.writeEncryptedObjectFile). Guarded
+		// by TestEncodeEncryptedShard_PoolsSealBuffer.
+		sealBuf []byte
 	)
 	for {
 		n, readErr := io.ReadFull(r, plain)
@@ -182,17 +195,18 @@ func EncodeEncryptedShard(w io.Writer, r io.Reader, enc ShardEncryptor, baseFiel
 		var err error
 		if chunkIdx == 0 {
 			var gen uint32
-			sealed, gen, err = enc.Seal(encrypt.DomainShard, chunkFields(baseFields, chunkIdx), plain[:n])
+			sealed, gen, err = enc.SealTo(sealBuf[:0], encrypt.DomainShard, chunkFields(baseFields, chunkIdx), plain[:n])
 			if err != nil {
 				return fmt.Errorf("encrypt shard chunk %d: %w", chunkIdx, err)
 			}
 			pinnedGen = gen
 		} else {
-			sealed, err = enc.SealAtGen(encrypt.DomainShard, chunkFields(baseFields, chunkIdx), plain[:n], pinnedGen)
+			sealed, err = enc.SealAtGenTo(sealBuf[:0], encrypt.DomainShard, chunkFields(baseFields, chunkIdx), plain[:n], pinnedGen)
 			if err != nil {
 				return fmt.Errorf("encrypt shard chunk %d: %w", chunkIdx, err)
 			}
 		}
+		sealBuf = sealed // retain the (possibly grown) backing for the next chunk
 		over := len(sealed) - n
 		if over < 0 || over > int(^uint16(0)) {
 			return fmt.Errorf("encrypt shard chunk %d: implausible overhead %d", chunkIdx, over)
@@ -230,6 +244,40 @@ func EncodeEncryptedShard(w io.Writer, r io.Reader, enc ShardEncryptor, baseFiel
 		}
 	}
 	return nil
+}
+
+// EncryptedShardUpperBound returns a guaranteed-not-smaller size for the GFSENC3
+// output EncodeEncryptedShard produces from dataLen plaintext bytes at chunkSize.
+// Callers that buffer the shard (EncodeEncryptedShardToBuffer / writeLocalShardAAD)
+// Grow a bytes.Buffer to this so it never doubles mid-encode. It over-estimates on
+// purpose — maxChunkOverhead bounds the per-chunk AEAD expansion, not the active
+// tag — because a bound one byte short would let the buffer grow and silently
+// undo the pre-size. Guarded by TestEncryptedShardUpperBound_NeverUnderestimates.
+func EncryptedShardUpperBound(dataLen, chunkSize int) int {
+	if chunkSize <= 0 {
+		chunkSize = DefaultEncryptedChunkSize
+	}
+	numChunks := dataLen / chunkSize
+	if dataLen%chunkSize != 0 {
+		numChunks++
+	}
+	// header is always written (even for empty data); each chunk adds its 8-byte
+	// header plus at most maxChunkOverhead of AEAD expansion over the plaintext.
+	return encryptedHeaderLen + dataLen + numChunks*(encryptedChunkHeaderLen+maxChunkOverhead)
+}
+
+// EncodeEncryptedShardToBuffer is EncodeEncryptedShard into a freshly allocated
+// byte slice, pre-sized via EncryptedShardUpperBound so the backing buffer is
+// allocated once instead of doubling per chunk. This is the buffered counterpart
+// callers use when they need the whole shard as []byte (to write a file or send
+// it on the wire); streaming callers should use EncodeEncryptedShard directly.
+func EncodeEncryptedShardToBuffer(data []byte, enc ShardEncryptor, baseFields []encrypt.AADField, chunkSize int) ([]byte, error) {
+	var buf bytes.Buffer
+	buf.Grow(EncryptedShardUpperBound(len(data), chunkSize))
+	if err := EncodeEncryptedShard(&buf, bytes.NewReader(data), enc, baseFields, chunkSize); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 // EncryptedShardChunkedWriter streams an encrypted shard in the GFSENC3
