@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.707.0] - 2026-06-26
+
+### Changed
+- **Performance: reuse the Reed-Solomon stream encoder across EC PUTs instead of
+  rebuilding it per request.** The chunked EC write path created a fresh
+  `reedsolomon.NewStream` encoder for every PUT; each encoder owns an internal
+  pool of aligned scratch buffers that never survived the call, so every encode
+  re-allocated that scratch — profiling showed it at ~22% of EC-write allocation,
+  the single largest reducible allocator on the path. The encoder is now cached
+  and shared per (EC config, block size), mirroring the existing non-stream
+  encoder cache, so its scratch pool is reused. Measured allocation on a 16 MiB EC
+  PUT drops ~6% (the pool is GC-cleared between collections, so steady production
+  traffic keeps it warmer); throughput is unchanged (the path is disk-I/O bound).
+  No protocol, API, CLI, or on-disk format change; EC output is byte-identical.
+
 ## [0.0.706.0] - 2026-06-26
 
 ### Removed
