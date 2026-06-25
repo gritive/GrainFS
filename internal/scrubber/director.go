@@ -3,7 +3,6 @@ package scrubber
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -100,7 +99,7 @@ func (c triggerCmd) apply(env *directorEnv) {
 	env.sessions[sess.id] = sess
 	env.dedup[dk] = sess.id
 
-	srcName := routeSourceFor(c.req.Bucket, c.req.KeyPrefix)
+	srcName := routeSourceFor(c.req.Bucket)
 	tr := triggerReq{sess: sess, src: env.sources[srcName], ver: env.verifiers[srcName]}
 	select {
 	case env.queue <- tr:
@@ -126,7 +125,7 @@ func (c applyFromFSMCmd) apply(env *directorEnv) {
 	if _, ok := env.dedup[dk]; !ok {
 		env.dedup[dk] = sess.id
 	}
-	srcName := routeSourceFor(c.entry.Bucket, c.entry.KeyPrefix)
+	srcName := routeSourceFor(c.entry.Bucket)
 	tr := triggerReq{sess: sess, src: env.sources[srcName], ver: env.verifiers[srcName]}
 	select {
 	case env.queue <- tr:
@@ -549,13 +548,10 @@ func (d *Director) markDone(sess *liveSession) {
 	}
 }
 
-// routeSourceFor는 (bucket, keyPrefix)를 source 이름으로 매핑한다. ctx-free.
-// Most internal buckets are still full-object replicated, but volume data
-// blocks are written through the EC data path and must be verified as shards.
-func routeSourceFor(bucket, keyPrefix string) string {
-	if bucket == "__grainfs_volumes" && strings.Contains(keyPrefix, "/blk_") {
-		return "ec"
-	}
+// routeSourceFor maps a bucket to its scrub source name. ctx-free.
+// Internal buckets are full-object replicated (replication source);
+// all other (S3-exposed) buckets ride the EC data path.
+func routeSourceFor(bucket string) string {
 	if storage.IsInternalBucket(bucket) {
 		return "replication"
 	}

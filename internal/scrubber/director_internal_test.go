@@ -54,7 +54,7 @@ func (b *blockingSource) close() {
 // 1. FSM apply 직후 LookupDedup이 같은 sessionID를 본다 — inbox FIFO 보장.
 func TestDirector_ApplyThenLookupDedup_Consistent(t *testing.T) {
 	d := NewDirector(DirectorOpts{Incident: &recordingIncident{}, QueueSize: 64})
-	d.Register("ec", &countingSource{name: "ec"}, noopVerifier{})
+	d.Register("replication", &countingSource{name: "replication"}, noopVerifier{})
 	d.Start(context.Background())
 	defer d.Stop()
 
@@ -75,7 +75,7 @@ func TestDirector_ApplyThenLookupDedup_Consistent(t *testing.T) {
 // 2. Trigger 직후 GetSession이 새 세션을 본다.
 func TestDirector_TriggerThenGetSession_Visible(t *testing.T) {
 	d := NewDirector(DirectorOpts{Incident: &recordingIncident{}, QueueSize: 64})
-	d.Register("ec", &countingSource{name: "ec"}, noopVerifier{})
+	d.Register("replication", &countingSource{name: "replication"}, noopVerifier{})
 	d.Start(context.Background())
 	defer d.Stop()
 
@@ -94,9 +94,9 @@ func TestDirector_TriggerThenGetSession_Visible(t *testing.T) {
 // 검증: cancel 후 push된 두 번째 블록은 *Verify 호출이 발생하지 않아야* 한다
 // (worker가 for-loop 최상단의 cancel-check에서 이탈하여 ch를 drain).
 func TestDirector_CancelStopsWorkerAtNextBoundary(t *testing.T) {
-	src := newBlockingSource("ec")
+	src := newBlockingSource("replication")
 	d := NewDirector(DirectorOpts{Incident: &recordingIncident{}, QueueSize: 4})
-	d.Register("ec", src, noopVerifier{})
+	d.Register("replication", src, noopVerifier{})
 	d.Start(context.Background())
 	defer d.Stop()
 
@@ -132,7 +132,7 @@ func TestDirector_CancelStopsWorkerAtNextBoundary(t *testing.T) {
 // 4. ApplyFromFSM이 같은 sessionID로 두 번 도착 — 두 번째는 no-op.
 func TestDirector_ApplyFromFSM_DuplicateSessionID_NoOp(t *testing.T) {
 	d := NewDirector(DirectorOpts{Incident: &recordingIncident{}, QueueSize: 64})
-	d.Register("ec", &countingSource{name: "ec"}, noopVerifier{})
+	d.Register("replication", &countingSource{name: "replication"}, noopVerifier{})
 	d.Start(context.Background())
 	defer d.Stop()
 
