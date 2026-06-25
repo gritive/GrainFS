@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.733.0] - 2026-06-26
+
+### Changed
+- **Made `group-0` participate in object placement as a normal data group.**
+  Object and segment placement no longer exclude `group-0` when other data
+  groups exist, production boot no longer installs an unassigned-bucket
+  `group-0` router default, and append/object-write fallbacks now prefer the
+  backend group or sole active placement candidate before legacy test fallback.
+
 ## [0.0.732.0] - 2026-06-26
 
 ### Fixed

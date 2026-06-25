@@ -36,14 +36,17 @@ func TestSelectECPlacement_WeightedFromDiskAvail(t *testing.T) {
 	}
 }
 
-func TestSelectObjectPlacementGroup_ExcludesGroup0(t *testing.T) {
+func TestCandidateGroupsFor_IncludesGroup0AsPlainDataGroup(t *testing.T) {
 	groups := []ShardGroupEntry{
 		{ID: "group-0", PeerIDs: []string{"n1", "n2", "n3"}},
 		{ID: "group-1", PeerIDs: []string{"n1", "n2", "n3"}},
 	}
-	got, err := SelectObjectPlacementGroup("b", "k", groups, ECConfig{DataShards: 2, ParityShards: 1})
+	got, err := candidateGroupsFor(groups, ECConfig{DataShards: 2, ParityShards: 1})
 	require.NoError(t, err)
-	require.Equal(t, "group-1", got.ID)
+	require.Equal(t, []ShardGroupEntry{
+		{ID: "group-0", PeerIDs: []string{"n1", "n2", "n3"}},
+		{ID: "group-1", PeerIDs: []string{"n1", "n2", "n3"}},
+	}, got)
 }
 
 func TestSelectObjectPlacementGroup_FiltersECIncapableGroups(t *testing.T) {
@@ -72,7 +75,7 @@ func TestSelectObjectPlacementGroup_UsesOnlyWidestTopologyGroups(t *testing.T) {
 	}
 }
 
-func TestSelectObjectPlacementGroup_FallsBackToGroup0WhenNoDataGroupsExist(t *testing.T) {
+func TestSelectObjectPlacementGroup_UsesGroup0WhenItIsTheOnlyCandidate(t *testing.T) {
 	got, err := SelectObjectPlacementGroup("b", "k", []ShardGroupEntry{
 		{ID: "group-0", PeerIDs: []string{"n1", "n2", "n3"}},
 	}, ECConfig{DataShards: 2, ParityShards: 1})
@@ -147,19 +150,26 @@ func TestSelectSegmentPlacementGroup_DifferentBlobIDsDifferentPGs(t *testing.T) 
 	require.True(t, found, "blobID should influence placement: never observed different PGs across 64 blobID pairs")
 }
 
-func TestSelectSegmentPlacementGroup_FiltersGroup0(t *testing.T) {
+func TestSelectSegmentPlacementGroup_CanUseGroup0AsPlainDataGroup(t *testing.T) {
 	groups := []ShardGroupEntry{
 		{ID: "group-0", PeerIDs: []string{"n1", "n2", "n3"}},
 		{ID: "group-1", PeerIDs: []string{"n1", "n2", "n3"}},
 	}
 	cfg := ECConfig{DataShards: 2, ParityShards: 1}
-	blobID := uuid.Must(uuid.NewV7()).String()
-	got, err := SelectSegmentPlacementGroup("b", "k", 0, blobID, groups, cfg)
-	require.NoError(t, err)
-	require.Equal(t, "group-1", got.ID)
+
+	found := false
+	for i := 0; i < 64 && !found; i++ {
+		blobID := uuid.Must(uuid.NewV7()).String()
+		got, err := SelectSegmentPlacementGroup("b", "k", i, blobID, groups, cfg)
+		require.NoError(t, err)
+		if got.ID == "group-0" {
+			found = true
+		}
+	}
+	require.True(t, found, "group-0 must participate in normal segment placement")
 }
 
-func TestSelectSegmentPlacementGroup_FallsBackToGroup0(t *testing.T) {
+func TestSelectSegmentPlacementGroup_UsesGroup0WhenItIsTheOnlyCandidate(t *testing.T) {
 	groups := []ShardGroupEntry{
 		{ID: "group-0", PeerIDs: []string{"n1", "n2", "n3"}},
 	}

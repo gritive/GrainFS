@@ -24,3 +24,13 @@ func TestLookupPlacementGroupForAppend_PrefersExistingObjectPG(t *testing.T) {
 	require.Equal(t, "pg-stored", b.lookupPlacementGroupForAppend(ctx, existing),
 		"append must use the object's own stored placement group, not the routed group")
 }
+
+func TestLookupPlacementGroupForAppend_UsesOnlyPlacementCandidate(t *testing.T) {
+	b := &DistributedBackend{clusterCfg: NewClusterConfig()}
+	b.SetECConfig(ECConfig{DataShards: 2, ParityShards: 1})
+	b.SetShardGroupSource(&fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"group-7": {ID: "group-7", PeerIDs: []string{"n1", "n2", "n3"}},
+	}})
+
+	require.Equal(t, "group-7", b.lookupPlacementGroupForAppend(context.Background(), nil))
+}

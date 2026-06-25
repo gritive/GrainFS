@@ -329,7 +329,6 @@ func capabilityEvidenceTTL(state *bootState) time.Duration {
 func bootDataGroupRouter(state *bootState) error {
 	state.dgMgr = cluster.NewDataGroupManager()
 	state.clusterRouter = cluster.NewRouter(state.dgMgr)
-	state.clusterRouter.SetDefault("group-0")
 
 	// SetOnBucketAssigned/SetOnBucketUnassigned use f.mu.Lock() internally; must be called
 	// before Start() (which is bootMetaRaftStart's job).
