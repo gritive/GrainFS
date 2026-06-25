@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestGetBucketObjectLockConfiguration_Enabled(t *testing.T) {
+func TestGetBucketObjectLockConfiguration_NotImplemented(t *testing.T) {
 	url, sign, backend := setupECAuthServer(t)
 	taggingPutBucket(t, backend, "b")
 
@@ -19,12 +19,12 @@ func TestGetBucketObjectLockConfiguration_Enabled(t *testing.T) {
 	resp := taggingDo(t, sign, req)
 	defer resp.Body.Close()
 
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, http.StatusNotImplemented, resp.StatusCode)
 	body, _ := io.ReadAll(resp.Body)
-	require.Contains(t, string(body), "<ObjectLockEnabled>Enabled</ObjectLockEnabled>")
+	require.Contains(t, string(body), "<Code>NotImplemented</Code>")
 }
 
-func TestPutObjectRetention_DoesNotOverwriteObject(t *testing.T) {
+func TestPutObjectRetention_NotImplemented_DoesNotOverwriteObject(t *testing.T) {
 	url, sign, backend := setupECAuthServer(t)
 	taggingPutBucket(t, backend, "b")
 	taggingPutObject(t, url, sign, "b", "k", "original")
@@ -35,8 +35,10 @@ func TestPutObjectRetention_DoesNotOverwriteObject(t *testing.T) {
 	require.NoError(t, err)
 	resp := taggingDo(t, sign, req)
 	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, http.StatusNotImplemented, resp.StatusCode)
 
+	// #4-class regression at unit level: the rejected retention PUT must not
+	// have clobbered the object body.
 	req, err = http.NewRequest(http.MethodGet, url+"/b/k", nil)
 	require.NoError(t, err)
 	resp = taggingDo(t, sign, req)

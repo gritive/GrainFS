@@ -171,11 +171,9 @@ func runBucketCases(getCtx func() context.Context, getTgt func() s3Target, getCl
 		}
 	})
 
-	ginkgo.PIt("[TODO:e2e] GetBucketObjectLockConfiguration returns the configured lock", func() {
-		// GET /:bucket?object-lock — Object Lock configuration retrieval.
-		// aws-sdk-go-v2: s3.GetObjectLockConfiguration. Verify response shape
-		// for both enabled and not-yet-configured buckets.
-	})
+	// GetObjectLockConfiguration is covered by the S3 Object Lock suite
+	// (s3_object_lock_test.go): Object Lock is not implemented and the op now
+	// returns 501 NotImplemented rather than a configured-lock document.
 }
 
 func createSpecBucket(tgt s3Target, caseName string) string {
