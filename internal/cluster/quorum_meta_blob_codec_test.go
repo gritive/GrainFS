@@ -38,7 +38,7 @@ func TestCommandTypeWireValuesStable(t *testing.T) {
 	require.Equal(t, CommandType(10), CmdMigrateShard)
 	require.Equal(t, CommandType(11), CmdMigrationDone)
 	require.Equal(t, CommandType(15), CmdSetBucketVersioning)
-	require.Equal(t, CommandType(17), CmdSetRing)
+	require.Equal(t, CommandType(17), retiredSetRingSlot, "slot 17 is reserved for retired CmdSetRing and must not be reused")
 	require.Equal(t, CommandType(41), CmdResealFSMValues)
 	require.Equal(t, CommandType(42), CmdFSMValueResealDone)
 }

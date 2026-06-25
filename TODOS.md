@@ -2,6 +2,21 @@
 
 ## Follow-ups
 
+### Data-group Raft cleanup follow-ups (CmdSetRing retirement, 2026-06-26)
+
+- **[P2][raft-removal] Remove balancer migration only after proving group-0/control-plane waiters
+  cannot hang.** The CmdSetRing cleanup deliberately did not touch `CmdMigrateShard` /
+  `CmdMigrationDone`: those still wire through `FSM.SetMigrationHooks`, `MigrationExecutor`, and
+  `docs/operators/balancer.md`. Before deleting them, prove that any group-0/control-plane scheduler
+  or inflight tracker will not wait forever for a migration ack, then retire the producer/apply paths
+  with replay-safe tombstones and read-after-migrate coverage.
+- **[P2][raft-removal] Remove reseal machinery only after proving brownfield DEK/off-raft rewrap
+  compatibility.** `CmdResealFSMValues` / `CmdFSMValueResealDone` are vestigial for greenfield
+  object metadata, but brownfield clusters may still depend on legacy sealed FSM values. Start in
+  `internal/cluster/fsm_value_rewrap.go`, `internal/serveruntime/fsm_value_rewrap_trigger.go`, and
+  the KEK/reseal tests; retire the raft commands only after the off-raft rewrap lane is proven to
+  cover legacy DEK generations.
+
 ### `__grainfs_volumes` / `__grainfs_nfs4` leftover removal follow-ups (2026-06-26)
 
 PR removed the dead `__grainfs_volumes` EC-routing branch (`routeSourceFor`) and the

@@ -83,8 +83,10 @@ func (f *FSM) ApplyTxn(txn MetadataTxn, raw []byte) error {
 		return f.applyMigrateShard(txn, cmd.Data)
 	case CmdMigrationDone:
 		return f.applyMigrationDone(txn, cmd.Data)
-	case CmdSetRing:
-		return f.applySetRing(txn, cmd.Data)
+	case CommandType(17):
+		// Retired CmdSetRing. The live proposer/encoder is gone, but brownfield
+		// logs may still replay type-17 entries with legacy payload bytes.
+		return nil
 	case CmdSetBucketVersioning:
 		// Bucket versioning moved to meta-raft (MetaBucketStore). Retired no-op;
 		// enum value kept reserved so old-log replay is safe.
@@ -397,7 +399,3 @@ func (f *FSM) Restore(meta raft.SnapshotMeta, data []byte) error {
 		return nil
 	})
 }
-
-// applySetRing is a no-op stub; ring-based placement has been removed.
-// The switch case and this function will be deleted in Task 7 along with ring.go.
-func (f *FSM) applySetRing(_ MetadataTxn, _ []byte) error { return nil }
