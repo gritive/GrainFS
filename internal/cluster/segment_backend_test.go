@@ -589,6 +589,50 @@ func TestPutObjectChunked_CommitsMultipartParts(t *testing.T) {
 	require.Equal(t, parts, cmd.Parts)
 }
 
+func TestPutObjectChunked_BatchesStagedPromotesByNode(t *testing.T) {
+	chunk := testChunkedPutChunkSize
+	payload := bytes.Repeat([]byte("S"), 2*chunk)
+	sp := makeSpool(t, payload)
+	deps := newFakeBackendWithGroups(fourPGFixture())
+	deps.writePeer = func(int) []string { return []string{"node-a", "node-b"} }
+
+	blobIDs := []string{
+		uuid.Must(uuid.NewV7()).String(),
+		uuid.Must(uuid.NewV7()).String(),
+	}
+	csb := newCSBWithTestChunks(deps, blobIDs)
+	csb.stagingTxnID = "txn-promote"
+
+	type batchCall struct {
+		node  string
+		pairs []stagedPromotePair
+	}
+	var calls []batchCall
+	csb.promoteStagedBatchFn = func(_ context.Context, node, _ string, pairs []stagedPromotePair) error {
+		calls = append(calls, batchCall{node: node, pairs: append([]stagedPromotePair(nil), pairs...)})
+		return nil
+	}
+
+	body, err := sp.Open()
+	require.NoError(t, err)
+	defer body.Close()
+	_, err = runChunkedPut(context.Background(), csb, body,
+		"bucket", "large.bin", "v1", "application/octet-stream",
+		nil, "", 0, false, "", nil, nil, nil)
+	require.NoError(t, err)
+
+	require.Len(t, calls, 2, "two placement nodes should produce two promote batches, not segment*node calls")
+	require.Equal(t, "node-a", calls[0].node)
+	require.Equal(t, "node-b", calls[1].node)
+	for _, call := range calls {
+		require.Len(t, call.pairs, 2, "each node batch should promote both segment blobs")
+		for i, pair := range call.pairs {
+			require.Equal(t, segmentStagingShardKey("txn-promote", blobIDs[i]), pair.stagingKey)
+			require.Equal(t, "large.bin/segments/"+blobIDs[i], pair.finalKey)
+		}
+	}
+}
+
 func TestPutObjectChunked_RejectsBelowChunkThreshold(t *testing.T) {
 	// putObjectChunked is internal; callers must route only objects
 	// > DefaultChunkSize. Direct call with smaller size returns an error.
