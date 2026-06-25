@@ -265,6 +265,27 @@ meta store.
 UUIDv7 version IDs provide natural monotone ordering per-node, mitigating
 clock-skew risk.
 
+**Module shape (orchestration deep module):** the quorum-meta *orchestration* —
+fan-out write (per-version-blob-before-latest), K-of-N peer read + LWW merge,
+version resolution, and cluster-wide scatter-gather LIST — lives in
+`internal/cluster.QuorumMetaStore`, a deep module carved out of the
+`DistributedBackend` god-struct. `DistributedBackend` keeps it as a `qms` field
+and is a facade that delegates; external callers keep calling `b.writeQuorumMeta`
+/ `b.readQuorumMetaCmd` / ... unchanged. The store touches no `DistributedBackend`
+state directly — its collaborators are injected as narrow adapters
+(`localQuorumMetaStore`, the local-fs primitive set that `*ShardService` satisfies
+today and a focused LocalQuorumMetaStore will later replace; `quorumMetaPeerRPC`,
+the addr-taking peer fan-out; `ShardGroupSource`, topology; a 1-method
+`versioningSource`) plus `selfAddr`/`multiGen` accessors, all live accessors over
+the backend. Conflict resolution stays as package-level pure functions
+(`latestWins`/`quorumMetaBlobWins`/`quorumMetaCmdWins`/`decideQuorumMetaWrite`),
+shared by the local write-accept and the orchestration merge — the interface is
+the test surface, so fan-out write ordering and LWW merge are unit-tested with
+fake adapters and no transport. The extracted orchestration is raft-free: it
+touches no `b.store`/FSM, and the BadgerDB-fallback path noted above is no longer
+present in the current `readQuorumMeta` code (it resolves purely from the local
+file plus peer fan-out).
+
 ### Shard Group Peer Identity
 
 Shard group peer identity is the node identifier stored in
