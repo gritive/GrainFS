@@ -977,7 +977,25 @@ func (s *ShardService) EncodeEncryptedShardBuffer(bucket, key string, shardIdx i
 	return buf.Bytes(), nil
 }
 
+// writeLocalShard writes shard shardIdx of (bucket,key) to its final on-disk path,
+// encrypted with (bucket,key,shardIdx) as AAD.
 func (s *ShardService) writeLocalShard(ctx context.Context, bucket, key string, shardIdx int, data []byte) error {
+	return s.writeLocalShardAAD(ctx, bucket, key, key, shardIdx, data)
+}
+
+// writeLocalShardStaged writes shard shardIdx to the STAGING physical path stagingKey but encrypts it
+// with the FINAL logical shard key (finalKey) as AAD, so a post-promote read of finalKey — which
+// decrypts with the final-key AAD — succeeds. PR1 segment staging: in-flight segment shards land in a
+// per-dataDir staging dir and are promoted (renamed) to finalKey only at commit. stagingKey MUST place
+// the shard on the SAME dataDir as finalKey (shardIdx%len(dataDirs)) so the promote rename is atomic.
+func (s *ShardService) writeLocalShardStaged(ctx context.Context, bucket, stagingKey, finalKey string, shardIdx int, data []byte) error {
+	return s.writeLocalShardAAD(ctx, bucket, stagingKey, finalKey, shardIdx, data)
+}
+
+// writeLocalShardAAD is the shared core: the shard FILE is written under pathKey's shard dir, but the
+// encryption AAD is derived from aadKey. The two are equal for a normal write and differ for a staged
+// write (pathKey = staging path, aadKey = final logical key).
+func (s *ShardService) writeLocalShardAAD(ctx context.Context, bucket, key, aadKey string, shardIdx int, data []byte) error {
 	dir, err := s.getShardDir(bucket, key, shardIdx)
 	if err != nil {
 		return err
@@ -1000,7 +1018,7 @@ func (s *ShardService) writeLocalShard(ctx context.Context, bucket, key string, 
 	path := filepath.Join(dir, fmt.Sprintf("shard_%d", shardIdx))
 	encodeStart := time.Now()
 	var encoded bytes.Buffer
-	if err := eccodec.EncodeEncryptedShard(&encoded, bytes.NewReader(data), s.segEnc, ShardAADFields(bucket, key, shardIdx), eccodec.DefaultEncryptedChunkSize); err != nil {
+	if err := eccodec.EncodeEncryptedShard(&encoded, bytes.NewReader(data), s.segEnc, ShardAADFields(bucket, aadKey, shardIdx), eccodec.DefaultEncryptedChunkSize); err != nil {
 		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncode, encodeStart, PutTraceStageFields{
 			Bytes:            int64(len(data)),
 			ShardIndex:       shardIdx,
@@ -1406,6 +1424,42 @@ func (s *ShardService) writeLocalShardStreamContext(ctx context.Context, bucket,
 		return err
 	}
 	return s.writeLocalShard(ctx, bucket, key, shardIdx, data)
+}
+
+// PromoteLocalStagedShards renames a segment's staged shard dirs (written under stagingKey by
+// writeLocalShardStaged) to their final path (finalKey), one intra-dataDir atomic dir-rename per
+// dataDir. stagingKey and finalKey map to the SAME dataDir per shard index (both via getShardDir), so
+// each rename stays within one device. Idempotent: a missing staging dir (already promoted / none on
+// this dataDir) is skipped, and a pre-existing destination (concurrent completer / retry) is treated as
+// done. The shard files keep their final-key AAD (set at staged-write time), so post-promote reads
+// decrypt correctly. PR1 segment staging.
+func (s *ShardService) PromoteLocalStagedShards(bucket, stagingKey, finalKey string) error {
+	for d := 0; d < len(s.dataDirs); d++ {
+		src, err := s.getShardDir(bucket, stagingKey, d)
+		if err != nil {
+			return err
+		}
+		if _, statErr := os.Stat(src); statErr != nil {
+			if os.IsNotExist(statErr) {
+				continue // no staged shards landed on this dataDir
+			}
+			return statErr
+		}
+		dst, err := s.getShardDir(bucket, finalKey, d)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return fmt.Errorf("promote staged segment: mkdir final parent: %w", err)
+		}
+		if err := os.Rename(src, dst); err != nil {
+			if _, derr := os.Stat(dst); derr == nil {
+				continue // destination already present (idempotent retry / concurrent completer)
+			}
+			return fmt.Errorf("promote staged segment rename %s -> %s: %w", src, dst, err)
+		}
+	}
+	return nil
 }
 
 func (s *ShardService) ensureShardDir(dir string) error {
