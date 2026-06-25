@@ -23,23 +23,16 @@ func collectScanObjectKeys(t *testing.T, b *DistributedBackend, bucket string) m
 	return got
 }
 
-// TestScanObjects_IncludesQuorumMetaOnlyObjects proves S0: a regular-PUT EC
-// object lives only in quorum-meta (never proposed to the FSM lat: index), and
-// ScanObjects — the EC scrubber's work-list source — must yield it so the
-// scrubber can repair it.
-//
-// RED before S0: only the FSM-indexed object appears; the quorum-meta-only
-// object is missing. Mutation: delete the quorum-meta merge block → RED.
+// TestScanObjects_IncludesQuorumMetaOnlyObjects proves a regular-PUT EC object
+// (which lives only in the off-raft quorum-meta blob) is yielded by ScanObjects —
+// the EC scrubber's work-list source — so the scrubber can repair it.
 func TestScanObjects_IncludesQuorumMetaOnlyObjects(t *testing.T) {
 	ctx := context.Background()
 	b := newTestDistributedBackend(t)
 	require.True(t, b.ECActive(), "test backend must be EC-active (1+0 single-node)")
 	require.NoError(t, b.CreateBucket(ctx, "bkt"))
 
-	// FSM-indexed object (internal/multipart-style): present in lat:.
-	seedPlacementMeta(t, b, "bkt", "fsm-only.bin", "v-fsm", []string{b.selfAddr}, 1, 0)
-
-	// Regular-PUT object: quorum-meta only, NOT in the FSM lat: index.
+	// Regular-PUT object: quorum-meta blob (the sole object-metadata store).
 	require.NoError(t, b.writeQuorumMeta(ctx, PutObjectMetaCmd{
 		Bucket: "bkt", Key: "quorum-only.bin", VersionID: "v-q",
 		Size: 1, ETag: "etag-q", ModTime: 1,
@@ -57,30 +50,7 @@ func TestScanObjects_IncludesQuorumMetaOnlyObjects(t *testing.T) {
 	require.True(t, sawSeed, "writeQuorumMeta seed must be visible to ScanQuorumMetaBucket")
 
 	got := collectScanObjectKeys(t, b, "bkt")
-	require.Equal(t, 1, got["fsm-only.bin"], "FSM lat: object must appear (regression guard)")
-	require.Equal(t, 1, got["quorum-only.bin"], "quorum-meta-only object must appear (S0 coverage)")
-}
-
-// TestScanObjects_DedupsFSMAndQuorumMeta proves a key in BOTH the FSM lat: index
-// and quorum-meta (e.g. a completed multipart object, which writes both) is
-// yielded exactly once — the FSM walk wins, the quorum-meta merge skips the dup.
-//
-// Mutation: drop the `seen` dedup guard in quorumMetaScrubRecords → yielded twice → RED.
-func TestScanObjects_DedupsFSMAndQuorumMeta(t *testing.T) {
-	ctx := context.Background()
-	b := newTestDistributedBackend(t)
-	require.True(t, b.ECActive())
-	require.NoError(t, b.CreateBucket(ctx, "bkt"))
-
-	seedPlacementMeta(t, b, "bkt", "both.bin", "v1", []string{b.selfAddr}, 1, 0)
-	require.NoError(t, b.writeQuorumMeta(ctx, PutObjectMetaCmd{
-		Bucket: "bkt", Key: "both.bin", VersionID: "v1",
-		Size: 1, ETag: "etag", ModTime: 1,
-		ECData: 1, ECParity: 0, NodeIDs: []string{b.selfAddr},
-	}))
-
-	got := collectScanObjectKeys(t, b, "bkt")
-	require.Equal(t, 1, got["both.bin"], "object in both sources must be yielded exactly once")
+	require.Equal(t, 1, got["quorum-only.bin"], "quorum-meta object must appear")
 }
 
 // TestScanObjects_SkipsQuorumMetaTombstonesAndNonEC proves the quorum-meta merge
@@ -156,32 +126,17 @@ func TestScanObjects_FSMTombstoneWinsOverStaleQuorumMeta(t *testing.T) {
 	require.Equal(t, 0, got["gone.bin"], "deleted object must not be scrubbed despite stale quorum-meta")
 }
 
-// TestScanObjects_FSMOnlyStillWorks guards that the pure FSM lat: path (an EC
-// object indexed in the FSM with NO quorum-meta entry — e.g. an internal-bucket
-// object) is unaffected by the S0 merge.
-func TestScanObjects_FSMOnlyStillWorks(t *testing.T) {
-	b := newTestDistributedBackend(t)
-	require.True(t, b.ECActive())
-	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
-
-	seedPlacementMeta(t, b, "bkt", "fsm.bin", "v1", []string{b.selfAddr}, 1, 0)
-
-	got := collectScanObjectKeys(t, b, "bkt")
-	require.Equal(t, 1, got["fsm.bin"], "FSM lat: object must still be scanned")
-}
-
-// TestScanObjects_NilShardSvcSafe guards that ScanObjects does not panic when the
-// shard service is absent (the quorum-meta merge degrades to the lat: walk only).
+// TestScanObjects_NilShardSvcSafe guards that ScanObjects does not panic and
+// yields no records when the shard service is absent (no quorum-meta store).
 func TestScanObjects_NilShardSvcSafe(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	require.True(t, b.ECActive())
 	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
-	seedPlacementMeta(t, b, "bkt", "fsm.bin", "v1", []string{b.selfAddr}, 1, 0)
 
 	b.shardSvc = nil // simulate missing shard service
 
 	got := collectScanObjectKeys(t, b, "bkt")
-	require.Equal(t, 1, got["fsm.bin"], "lat: walk must still work without shardSvc")
+	require.Equal(t, 0, len(got), "no shard service → no scrub records (no panic)")
 }
 
 // TestECScrubSource_SeesQuorumMetaObject proves the live scrubber source path

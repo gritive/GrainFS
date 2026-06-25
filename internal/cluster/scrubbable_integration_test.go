@@ -68,20 +68,14 @@ var _ = Describe("Scrubbable integration", func() {
 		It("reports a 1+0 object's own non-redundant EC profile (not the cluster config)", func() {
 			// Regression guard: a genesis single-node object is written 1+0; after the
 			// cluster grows to 2+1, ScanObjects must still emit ParityShards==0 so the
-			// EC-redundancy-upgrade sweep can detect it. Previously the FSM lat: branch
-			// reported the cluster config (2+1), silently hiding versioned 1+0 objects.
+			// EC-redundancy-upgrade sweep can detect it (the scrub record reports the
+			// object's OWN EC profile from its quorum-meta blob, not the cluster config).
 			Expect(b.CreateBucket(context.Background(), "bkt")).To(Succeed())
-			meta, err := marshalObjectMeta(objectMeta{
-				Key: "single.txt", Size: 5, ContentType: "application/octet-stream",
-				ETag: "etag-single", LastModified: time.Now().Unix(), ECData: 1, ECParity: 0,
+			writeScrubLatestBlob(b, "bkt", "single.txt", PutObjectMetaCmd{
+				VersionID: "01SINGLE", Size: 5, ContentType: "application/octet-stream",
+				ETag: "etag-single", ModTime: time.Now().Unix(), ECData: 1, ECParity: 0,
+				NodeIDs: []string{b.currentSelfAddr()},
 			})
-			Expect(err).NotTo(HaveOccurred())
-			Expect(db.Update(func(txn *badger.Txn) error {
-				if err := txn.Set(objectMetaKeyV("bkt", "single.txt", "01SINGLE"), meta); err != nil {
-					return err
-				}
-				return txn.Set(latestKey("bkt", "single.txt"), []byte("01SINGLE"))
-			})).To(Succeed())
 
 			ch, err := b.ScanObjects("bkt")
 			Expect(err).NotTo(HaveOccurred())
@@ -411,37 +405,29 @@ var _ = Describe("Scrubbable integration", func() {
 	})
 })
 
-func writeScrubVersionedObjectMeta(b *DistributedBackend, db *badger.DB, bucket, key, versionID, etag string, size int64, tags []storage.Tag) {
+func writeScrubVersionedObjectMeta(b *DistributedBackend, _ *badger.DB, bucket, key, versionID, etag string, size int64, tags []storage.Tag) {
 	GinkgoHelper()
-	// Record a real 2+1 EC profile on the meta: ScanObjects now reports the
-	// object's OWN EC profile (meta.ECData/ECParity), not the cluster config, so a
-	// synthetic fixture must carry it to represent an EC object (matches the
-	// enableECForSpec(b, 2, 1) used across these specs). A delete-marker keeps no
-	// shards, so leave its EC profile zero.
+	// Object metadata lives in the off-raft quorum-meta blob store. These specs use
+	// non-versioned buckets, so seed the latest-only blob (the off-path scrub
+	// source). Record a real 2+1 EC profile so the object represents an EC object
+	// (matches enableECForSpec(b, 2, 1)); a delete-marker keeps no shards, so leave
+	// its EC profile zero.
 	var ecData, ecParity uint8 = 2, 1
 	if etag == deleteMarkerETag {
 		ecData, ecParity = 0, 0
 	}
-	meta, err := marshalObjectMeta(objectMeta{
-		Key:          key,
-		Size:         size,
-		ContentType:  "application/octet-stream",
-		ETag:         etag,
-		LastModified: time.Now().Unix(),
-		Tags:         tags,
-		ECData:       ecData,
-		ECParity:     ecParity,
+	writeScrubLatestBlob(b, bucket, key, PutObjectMetaCmd{
+		VersionID:      versionID,
+		Size:           size,
+		ContentType:    "application/octet-stream",
+		ETag:           etag,
+		ModTime:        time.Now().Unix(),
+		Tags:           tags,
+		ECData:         ecData,
+		ECParity:       ecParity,
+		IsDeleteMarker: etag == deleteMarkerETag,
+		NodeIDs:        []string{b.currentSelfAddr()},
 	})
-	Expect(err).NotTo(HaveOccurred())
-	Expect(db.Update(func(txn *badger.Txn) error {
-		if err := txn.Set(objectMetaKey(bucket, key), meta); err != nil {
-			return err
-		}
-		if err := txn.Set(objectMetaKeyV(bucket, key, versionID), meta); err != nil {
-			return err
-		}
-		return txn.Set(latestKey(bucket, key), []byte(versionID))
-	})).To(Succeed())
 }
 
 // writeScrubVersionBlob seeds a per-version quorum-meta blob (the live

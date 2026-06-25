@@ -110,17 +110,21 @@ func TestScanObjectsBlobAuthOn(t *testing.T) {
 	})
 }
 
-// TestScanObjectsBlobAuthOffUnchanged confirms the off path still uses the FSM
-// lat: walk + quorum-meta merge.
+// TestScanObjectsBlobAuthOffUnchanged confirms the off (non-versioned) path
+// enumerates the EC scrub set from the latest-only quorum-meta blob store.
 func TestScanObjectsBlobAuthOffUnchanged(t *testing.T) {
 	ctx := context.Background()
 	b := newTestDistributedBackend(t)
 	require.True(t, b.ECActive())
 	require.NoError(t, b.CreateBucket(ctx, "b"))
-	// FSM lat:-indexed EC object (off-path source).
-	seedPlacementMeta(t, b, "b", "fsm.bin", "v1", []string{b.selfAddr}, 1, 0)
+	// Non-versioned regular-PUT EC object: latest-only quorum-meta blob.
+	require.NoError(t, b.writeQuorumMeta(ctx, PutObjectMetaCmd{
+		Bucket: "b", Key: "q.bin", VersionID: "v1",
+		Size: 1, ETag: "etag", ModTime: 1, ECData: 1, ECParity: 0,
+		NodeIDs: []string{b.selfAddr},
+	}))
 	// blob-authority off (default)
 
 	got := collectScanObjectRecs(t, b, "b")
-	require.Contains(t, got, "fsm.bin", "off path still reads the FSM lat: walk")
+	require.Contains(t, got, "q.bin", "off path reads the latest-only quorum-meta blob")
 }
