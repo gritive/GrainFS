@@ -35,10 +35,9 @@ type Entry struct {
 // is safe because no concurrent Set can race for the same key.
 // DO NOT call Set concurrently from multiple goroutines outside the FSM apply path.
 type Store struct {
-	mu          sync.RWMutex
-	specs       map[string]Spec
-	values      map[string]string // only keys with explicit (non-default) values
-	postRestore func(values map[string]string)
+	mu     sync.RWMutex
+	specs  map[string]Spec
+	values map[string]string // only keys with explicit (non-default) values
 }
 
 // NewStore returns an empty Store with no registered keys.
@@ -47,20 +46,6 @@ func NewStore() *Store {
 		specs:  make(map[string]Spec),
 		values: make(map[string]string),
 	}
-}
-
-// SetPostRestore registers a callback that fires after Restore commits the new
-// values map. The callback receives a copy of the restored values (already
-// filtered to valid, registered keys) and runs synchronously inside Restore's
-// write lock. Callers MUST NOT re-enter the store (e.g., call GetString) from
-// within the callback — doing so deadlocks.
-//
-// SetPostRestore must be called at most once, at boot time, before any
-// concurrent Restore calls.
-func (s *Store) SetPostRestore(fn func(values map[string]string)) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.postRestore = fn
 }
 
 // Register adds a key with its typed Spec. Must be called before the store is used.
@@ -220,9 +205,7 @@ func (s *Store) Snapshot() map[string]string {
 // Keys not present in values revert to their default. Unknown keys are silently ignored.
 // Invalid values (rejected by the spec's validate function) are also silently dropped — a
 // bit-flipped or tampered snapshot should not be able to install nonsense state. Reload
-// hooks are NOT fired during Restore: the postRestore callback (registered via
-// SetPostRestore) is the supported path for reconciling out-of-band atomic snapshots
-// (e.g., proxy CIDR set, banner anon-prev) that bypass the reload-hook plumbing.
+// hooks are NOT fired during Restore.
 func (s *Store) Restore(values map[string]string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -244,15 +227,5 @@ func (s *Store) Restore(values map[string]string) {
 			continue
 		}
 		s.values[k] = v
-	}
-
-	if s.postRestore != nil {
-		// Pass a snapshot of the validated values so the callback can read
-		// specific keys without holding or re-entering the store lock.
-		snap := make(map[string]string, len(s.values))
-		for k, v := range s.values {
-			snap[k] = v
-		}
-		s.postRestore(snap)
 	}
 }

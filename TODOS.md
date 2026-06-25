@@ -40,12 +40,6 @@ surfaced by that removal:
   *anon-switch* removal (not iceberg). They are wired into the boot-phase list and AdminAPI, so
   removing them is a separate dead-code cleanup touching boot sequencing + AdminAPI wiring.
 
-- **[P3] `config.Store.SetPostRestore` now has zero production callers.** Its only caller was the
-  proxy-CIDR snapshot reconcile, removed with ProxyTrust. The method + its registry remain a
-  supported config-store capability (with unit tests) but are currently dead on the production path.
-  Either re-use it for a future out-of-band snapshot reconcile, or remove it
-  (`internal/config/config.go`) + its tests.
-
 ### DeleteBucket non-Enabled emptiness follow-ups (2026-06-24)
 
 - **[P3][pre-existing] TOCTOU between the DeleteBucket emptiness scan and the
