@@ -454,8 +454,8 @@ func fanOutQuorumMetaOwnerLocalFirst(
 // writeQuorumMetaLocal durably writes the encoded quorum meta blob for
 // (bucket, key) under {dataDirs[0]}/.quorum_meta/{bucket}/{key}. One fsync —
 // same durability cost as the shard write it co-locates with.
-func (s *ShardService) writeQuorumMetaLocal(bucket, key string, data []byte) error {
-	_, err := s.writeQuorumMetaLocalWithResult(bucket, key, data)
+func (m *LocalQuorumMetaStore) writeQuorumMetaLocal(bucket, key string, data []byte) error {
+	_, err := m.writeQuorumMetaLocalWithResult(bucket, key, data)
 	return err
 }
 
@@ -469,11 +469,11 @@ type quorumMetaLocalWriteResult struct {
 // whether this call actually renamed the candidate over the target. A nil error
 // with applied=false means the write was a no-op: byte-identical CAS replay,
 // CAS/LWW guard skip, or another non-publish path.
-func (s *ShardService) writeQuorumMetaLocalWithResult(bucket, key string, data []byte) (quorumMetaLocalWriteResult, error) {
-	if len(s.dataDirs) == 0 {
+func (m *LocalQuorumMetaStore) writeQuorumMetaLocalWithResult(bucket, key string, data []byte) (quorumMetaLocalWriteResult, error) {
+	if len(m.dataDirs) == 0 {
 		return quorumMetaLocalWriteResult{}, fmt.Errorf("quorum meta: no data dir")
 	}
-	root := filepath.Join(s.dataDirs[0], quorumMetaSubDir)
+	root := filepath.Join(m.dataDirs[0], quorumMetaSubDir)
 	target := filepath.Join(root, bucket, key)
 	rel, err := filepath.Rel(root, target)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
@@ -515,7 +515,7 @@ func (s *ShardService) writeQuorumMetaLocalWithResult(bucket, key string, data [
 	// Temp create/write/fsync/close above are outside the lock (unique temp name;
 	// no contention there). The existing defer os.Remove(tmpName) still fires on
 	// the guard-skip path because it was registered before the lock is taken.
-	unlock := s.quorumMetaTargetLock(target)
+	unlock := m.quorumMetaTargetLock(target)
 	defer unlock()
 	// Write-time accept guard: a blind-writer (e.g. leaderless backfill) must not
 	// clobber a newer on-disk blob. Absent file → no-op accept (the common case).
@@ -530,13 +530,13 @@ func (s *ShardService) writeQuorumMetaLocalWithResult(bucket, key string, data [
 	if existing, rerr := os.ReadFile(target); rerr == nil {
 		result.hadPrevious = true
 		result.previous = append([]byte(nil), existing...)
-		if cand, derr := s.decodeQuorumMetaCmdBlob(data); derr == nil {
+		if cand, derr := m.decodeQuorumMetaCmdBlob(data); derr == nil {
 			// Byte-identical CAS re-delivery (same write to the same node twice) is a
 			// no-op, NOT a reject — checked before the +1 guard.
 			if quorumMetaBlobIsIdempotentReplay(existing, data, cand.MetaSeqCAS) {
 				return quorumMetaLocalWriteResult{}, nil
 			}
-			if cur, derr2 := s.decodeQuorumMetaCmdBlob(existing); derr2 == nil {
+			if cur, derr2 := m.decodeQuorumMetaCmdBlob(existing); derr2 == nil {
 				switch decideQuorumMetaWrite(cur, cand) {
 				case quorumMetaWriteRejectCAS:
 					return quorumMetaLocalWriteResult{}, errQuorumMetaCASReject // CAS base mismatch — caller retries
@@ -558,17 +558,17 @@ func (s *ShardService) writeQuorumMetaLocalWithResult(bucket, key string, data [
 // owner-local CAS publish after peer quorum failure without deleting a newer local
 // write or discarding the previously committed local blob that the failed publish
 // overwrote.
-func (s *ShardService) rollbackQuorumMetaLocalIfMatch(bucket, key string, expected []byte, previous []byte, hadPrevious bool) error {
-	if len(s.dataDirs) == 0 {
+func (m *LocalQuorumMetaStore) rollbackQuorumMetaLocalIfMatch(bucket, key string, expected []byte, previous []byte, hadPrevious bool) error {
+	if len(m.dataDirs) == 0 {
 		return fmt.Errorf("quorum meta rollback-if-match: no data dir")
 	}
-	root := filepath.Join(s.dataDirs[0], quorumMetaSubDir)
+	root := filepath.Join(m.dataDirs[0], quorumMetaSubDir)
 	target := filepath.Join(root, bucket, key)
 	rel, err := filepath.Rel(root, target)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return fmt.Errorf("quorum meta rollback-if-match: key %q escapes root", key)
 	}
-	unlock := s.quorumMetaTargetLock(target)
+	unlock := m.quorumMetaTargetLock(target)
 	defer unlock()
 	cur, err := os.ReadFile(target)
 	if err != nil {
@@ -586,10 +586,10 @@ func (s *ShardService) rollbackQuorumMetaLocalIfMatch(bucket, key string, expect
 		}
 		return nil
 	}
-	return s.writeQuorumMetaFileAtomic(target, previous, "quorum meta rollback")
+	return m.writeQuorumMetaFileAtomic(target, previous, "quorum meta rollback")
 }
 
-func (s *ShardService) writeQuorumMetaFileAtomic(target string, data []byte, label string) error {
+func (m *LocalQuorumMetaStore) writeQuorumMetaFileAtomic(target string, data []byte, label string) error {
 	dir := filepath.Dir(target)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("%s mkdir: %w", label, err)
@@ -621,8 +621,8 @@ func (s *ShardService) writeQuorumMetaFileAtomic(target string, data []byte, lab
 // per-version blob writes: mkdir + atomic temp+fsync+rename. It assumes the
 // caller has already validated the target path and holds the per-target lock
 // (the LWW-guard critical section in writeQuorumMetaVersionLocal).
-func (s *ShardService) writeQuorumMetaVersionLocalCore(target string, data []byte) error {
-	return s.writeQuorumMetaFileAtomic(target, data, "quorum meta version")
+func (m *LocalQuorumMetaStore) writeQuorumMetaVersionLocalCore(target string, data []byte) error {
+	return m.writeQuorumMetaFileAtomic(target, data, "quorum meta version")
 }
 
 // writeQuorumMetaVersionLocal durably writes an immutable per-version quorum-meta
@@ -631,11 +631,11 @@ func (s *ShardService) writeQuorumMetaVersionLocalCore(target string, data []byt
 // (path-traversal guard + atomic temp+fsync+rename) but uses the separate
 // per-version subtree, so {key} is always a directory (holding {vid} files) and
 // never collides with the latest-only leaf file in .quorum_meta.
-func (s *ShardService) writeQuorumMetaVersionLocal(bucket, versionSubpath string, data []byte) error {
-	if len(s.dataDirs) == 0 {
+func (m *LocalQuorumMetaStore) writeQuorumMetaVersionLocal(bucket, versionSubpath string, data []byte) error {
+	if len(m.dataDirs) == 0 {
 		return fmt.Errorf("quorum meta version: no data dir")
 	}
-	root := filepath.Join(s.dataDirs[0], quorumMetaVersionsSubDir)
+	root := filepath.Join(m.dataDirs[0], quorumMetaVersionsSubDir)
 	target := filepath.Join(root, bucket, versionSubpath)
 	rel, err := filepath.Rel(root, target)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
@@ -643,7 +643,7 @@ func (s *ShardService) writeQuorumMetaVersionLocal(bucket, versionSubpath string
 	}
 	// Per-target lock: serializes the (guard-read + rename) critical section.
 	// Mirrors writeQuorumMetaLocal — see that function for the full rationale.
-	unlock := s.quorumMetaTargetLock(target)
+	unlock := m.quorumMetaTargetLock(target)
 	defer unlock()
 	// Write-time accept guard: a blind-writer (e.g. leaderless backfill) must not
 	// clobber a newer on-disk blob. Absent file → no-op accept (the common case).
@@ -655,13 +655,13 @@ func (s *ShardService) writeQuorumMetaVersionLocal(bucket, versionSubpath string
 	// a decode failure of either blob keeps the legacy behavior (fall through and
 	// rename — do not regress the corruption path).
 	if existing, rerr := os.ReadFile(target); rerr == nil {
-		if cand, derr := s.decodeQuorumMetaCmdBlob(data); derr == nil {
+		if cand, derr := m.decodeQuorumMetaCmdBlob(data); derr == nil {
 			// Byte-identical CAS re-delivery (same write to the same node twice) is a
 			// no-op, NOT a reject — checked before the +1 guard.
 			if quorumMetaBlobIsIdempotentReplay(existing, data, cand.MetaSeqCAS) {
 				return nil
 			}
-			if cur, derr2 := s.decodeQuorumMetaCmdBlob(existing); derr2 == nil {
+			if cur, derr2 := m.decodeQuorumMetaCmdBlob(existing); derr2 == nil {
 				switch decideQuorumMetaWrite(cur, cand) {
 				case quorumMetaWriteRejectCAS:
 					return errQuorumMetaCASReject // CAS base mismatch — caller retries
@@ -671,16 +671,16 @@ func (s *ShardService) writeQuorumMetaVersionLocal(bucket, versionSubpath string
 			}
 		}
 	}
-	return s.writeQuorumMetaVersionLocalCore(target, data)
+	return m.writeQuorumMetaVersionLocalCore(target, data)
 }
 
 // readQuorumMetaVersionsLocal returns the decoded per-version blobs for one key
 // from .quorum_meta_versions/{bucket}/{key}/{vid}. Absent dir → empty, no error.
-func (s *ShardService) readQuorumMetaVersionsLocal(bucket, key string) ([]PutObjectMetaCmd, error) {
-	if len(s.dataDirs) == 0 {
+func (m *LocalQuorumMetaStore) readQuorumMetaVersionsLocal(bucket, key string) ([]PutObjectMetaCmd, error) {
+	if len(m.dataDirs) == 0 {
 		return nil, nil
 	}
-	root := filepath.Join(s.dataDirs[0], quorumMetaVersionsSubDir)
+	root := filepath.Join(m.dataDirs[0], quorumMetaVersionsSubDir)
 	dir := filepath.Join(root, bucket, key)
 	if rel, err := filepath.Rel(root, dir); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return nil, fmt.Errorf("quorum meta versions: key %q escapes root", key)
@@ -701,7 +701,7 @@ func (s *ShardService) readQuorumMetaVersionsLocal(bucket, key string) ([]PutObj
 		if rerr != nil {
 			continue // tolerate a transient unreadable blob
 		}
-		cmd, derr := s.decodeQuorumMetaCmdBlob(data)
+		cmd, derr := m.decodeQuorumMetaCmdBlob(data)
 		if derr != nil {
 			continue
 		}
@@ -717,11 +717,11 @@ func (s *ShardService) readQuorumMetaVersionsLocal(bucket, key string) ([]PutObj
 // fail closed, not be silently skipped); decoding (and its strictness) is the
 // caller's job. Absent dir → (nil, nil). Temp files + the key-escape guard are
 // handled identically to readQuorumMetaVersionsLocal.
-func (s *ShardService) readQuorumMetaVersionsRawLocal(bucket, key string) ([][]byte, error) {
-	if len(s.dataDirs) == 0 {
+func (m *LocalQuorumMetaStore) readQuorumMetaVersionsRawLocal(bucket, key string) ([][]byte, error) {
+	if len(m.dataDirs) == 0 {
 		return nil, nil
 	}
-	root := filepath.Join(s.dataDirs[0], quorumMetaVersionsSubDir)
+	root := filepath.Join(m.dataDirs[0], quorumMetaVersionsSubDir)
 	dir := filepath.Join(root, bucket, key)
 	if rel, err := filepath.Rel(root, dir); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return nil, fmt.Errorf("quorum meta versions: key %q escapes root", key)
@@ -952,11 +952,11 @@ func isQuorumMetaTempName(name string) bool {
 
 // readQuorumMetaRaw reads the raw quorum meta blob for (bucket, key) from the
 // local filesystem. Returns (nil, ErrObjectNotFound) when the file is absent.
-func (s *ShardService) readQuorumMetaRaw(bucket, key string) ([]byte, error) {
-	if len(s.dataDirs) == 0 {
+func (m *LocalQuorumMetaStore) readQuorumMetaRaw(bucket, key string) ([]byte, error) {
+	if len(m.dataDirs) == 0 {
 		return nil, storage.ErrObjectNotFound
 	}
-	root := filepath.Join(s.dataDirs[0], quorumMetaSubDir)
+	root := filepath.Join(m.dataDirs[0], quorumMetaSubDir)
 	target := filepath.Join(root, bucket, key)
 	rel, err := filepath.Rel(root, target)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
@@ -983,7 +983,7 @@ func (s *ShardService) readQuorumMetaRaw(bucket, key string) ([]byte, error) {
 
 // decodeQuorumMetaBlob decodes a raw quorum meta blob into storage.Object and
 // PlacementMeta. Used by both the local-read and peer-fallback paths.
-func (s *ShardService) decodeQuorumMetaBlob(data []byte) (*storage.Object, PlacementMeta, error) {
+func (m *LocalQuorumMetaStore) decodeQuorumMetaBlob(data []byte) (*storage.Object, PlacementMeta, error) {
 	putCmd, err := decodeQuorumMetaBlob(data)
 	if err != nil {
 		return nil, PlacementMeta{}, fmt.Errorf("quorum meta decode command: %w", err)
@@ -1037,23 +1037,23 @@ func objectAndPlacementFromCmd(putCmd PutObjectMetaCmd) (*storage.Object, Placem
 // readQuorumMetaLocalDecoded reads and decodes the quorum meta blob for
 // (bucket, key) from the local store. Returns storage.ErrObjectNotFound if the
 // file does not exist.
-func (s *ShardService) readQuorumMetaLocalDecoded(bucket, key string) (*storage.Object, PlacementMeta, error) {
-	data, err := s.readQuorumMetaRaw(bucket, key)
+func (m *LocalQuorumMetaStore) readQuorumMetaLocalDecoded(bucket, key string) (*storage.Object, PlacementMeta, error) {
+	data, err := m.readQuorumMetaRaw(bucket, key)
 	if err != nil {
 		return nil, PlacementMeta{}, err
 	}
-	return s.decodeQuorumMetaBlob(data)
+	return m.decodeQuorumMetaBlob(data)
 }
 
 // ScanQuorumMetaBucket returns all PutObjectMetaCmd entries (including
 // IsDeleteMarker tombstones) stored locally for bucket. prefix is an
 // optional key-prefix filter (empty string = return all). Unreadable entries
 // are silently skipped. Callers decide whether to filter tombstones.
-func (s *ShardService) ScanQuorumMetaBucket(bucket, prefix string) ([]PutObjectMetaCmd, error) {
-	if len(s.dataDirs) == 0 {
+func (m *LocalQuorumMetaStore) ScanQuorumMetaBucket(bucket, prefix string) ([]PutObjectMetaCmd, error) {
+	if len(m.dataDirs) == 0 {
 		return nil, nil
 	}
-	root := filepath.Join(s.dataDirs[0], quorumMetaSubDir)
+	root := filepath.Join(m.dataDirs[0], quorumMetaSubDir)
 	bucketRoot := filepath.Join(root, bucket)
 	if _, err := os.Stat(bucketRoot); os.IsNotExist(err) {
 		return nil, nil
@@ -1076,7 +1076,7 @@ func (s *ShardService) ScanQuorumMetaBucket(bucket, prefix string) ([]PutObjectM
 		if prefix != "" && !strings.HasPrefix(key, prefix) {
 			return nil
 		}
-		cmd, qerr := s.readQuorumMetaRawCmd(bucket, key)
+		cmd, qerr := m.readQuorumMetaRawCmd(bucket, key)
 		if qerr != nil {
 			return nil
 		}
@@ -1092,11 +1092,11 @@ func (s *ShardService) ScanQuorumMetaBucket(bucket, prefix string) ([]PutObjectM
 // dropped object would orphan-delete its live segments. Used by the non-versioned
 // GC known-set builder (listNonVersionedBucketObjectsForGC). No prefix filter (the
 // GC walks the whole bucket).
-func (s *ShardService) scanQuorumMetaBucketStrict(bucket string) ([]PutObjectMetaCmd, error) {
-	if len(s.dataDirs) == 0 {
+func (m *LocalQuorumMetaStore) scanQuorumMetaBucketStrict(bucket string) ([]PutObjectMetaCmd, error) {
+	if len(m.dataDirs) == 0 {
 		return nil, nil
 	}
-	root := filepath.Join(s.dataDirs[0], quorumMetaSubDir)
+	root := filepath.Join(m.dataDirs[0], quorumMetaSubDir)
 	bucketRoot := filepath.Join(root, bucket)
 	if _, err := os.Stat(bucketRoot); os.IsNotExist(err) {
 		return nil, nil
@@ -1116,7 +1116,7 @@ func (s *ShardService) scanQuorumMetaBucketStrict(bucket string) ([]PutObjectMet
 		if rerr != nil {
 			return rerr
 		}
-		cmd, qerr := s.readQuorumMetaRawCmd(bucket, key)
+		cmd, qerr := m.readQuorumMetaRawCmd(bucket, key)
 		if qerr != nil {
 			return fmt.Errorf("gc known-set: read latest blob %s/%s: %w", bucket, key, qerr)
 		}
@@ -1135,11 +1135,11 @@ func (s *ShardService) scanQuorumMetaBucketStrict(bucket string) ([]PutObjectMet
 // ScanQuorumMetaBucket, whose latest-only consumers (scatterGatherList /
 // ScanObjectMetaEntries facts, the ScanQuorumMeta RPC fan-in, scrubbable.go scrub
 // records) must keep the latest-only tree — do not reroute them through this.
-func (s *ShardService) ScanQuorumMetaVersionsBucket(bucket, prefix string) ([]PutObjectMetaCmd, error) {
-	if len(s.dataDirs) == 0 {
+func (m *LocalQuorumMetaStore) ScanQuorumMetaVersionsBucket(bucket, prefix string) ([]PutObjectMetaCmd, error) {
+	if len(m.dataDirs) == 0 {
 		return nil, nil
 	}
-	bucketRoot := filepath.Join(s.dataDirs[0], quorumMetaVersionsSubDir, bucket)
+	bucketRoot := filepath.Join(m.dataDirs[0], quorumMetaVersionsSubDir, bucket)
 	byKey := map[string]PutObjectMetaCmd{}
 	err := filepath.WalkDir(bucketRoot, func(path string, d fs.DirEntry, werr error) error {
 		if werr != nil {
@@ -1155,7 +1155,7 @@ func (s *ShardService) ScanQuorumMetaVersionsBucket(bucket, prefix string) ([]Pu
 		if rerr != nil {
 			return nil // tolerate a transient unreadable blob
 		}
-		cmd, derr := s.decodeQuorumMetaCmdBlob(data)
+		cmd, derr := m.decodeQuorumMetaCmdBlob(data)
 		if derr != nil {
 			return nil
 		}
@@ -1186,11 +1186,11 @@ func (s *ShardService) ScanQuorumMetaVersionsBucket(bucket, prefix string) ([]Pu
 // per-key max. Consumed by S4c-b snapshot absent-blob purge + S4c-c flag-on LIST
 // (NOT yet wired). Do NOT reroute the max-per-key consumers (listObjectsPerVersion)
 // through it.
-func (s *ShardService) ScanQuorumMetaVersionsBucketAll(bucket, prefix string) ([]PutObjectMetaCmd, error) {
-	if len(s.dataDirs) == 0 {
+func (m *LocalQuorumMetaStore) ScanQuorumMetaVersionsBucketAll(bucket, prefix string) ([]PutObjectMetaCmd, error) {
+	if len(m.dataDirs) == 0 {
 		return nil, nil
 	}
-	bucketRoot := filepath.Join(s.dataDirs[0], quorumMetaVersionsSubDir, bucket)
+	bucketRoot := filepath.Join(m.dataDirs[0], quorumMetaVersionsSubDir, bucket)
 	out := []PutObjectMetaCmd{}
 	err := filepath.WalkDir(bucketRoot, func(path string, d fs.DirEntry, werr error) error {
 		if werr != nil {
@@ -1206,7 +1206,7 @@ func (s *ShardService) ScanQuorumMetaVersionsBucketAll(bucket, prefix string) ([
 		if rerr != nil {
 			return nil // tolerate a transient unreadable blob
 		}
-		cmd, derr := s.decodeQuorumMetaCmdBlob(data)
+		cmd, derr := m.decodeQuorumMetaCmdBlob(data)
 		if derr != nil {
 			return nil
 		}
@@ -1227,11 +1227,11 @@ func (s *ShardService) ScanQuorumMetaVersionsBucketAll(bucket, prefix string) ([
 // and returns an error on the first unreadable or undecodable blob instead of
 // silently skipping it. Consumed by the blob-authoritative snapshot capture path
 // where a skipped-then-recovered blob would be captured-absent then purged.
-func (s *ShardService) scanQuorumMetaVersionsBucketAllStrict(bucket, prefix string) ([]PutObjectMetaCmd, error) {
-	if len(s.dataDirs) == 0 {
+func (m *LocalQuorumMetaStore) scanQuorumMetaVersionsBucketAllStrict(bucket, prefix string) ([]PutObjectMetaCmd, error) {
+	if len(m.dataDirs) == 0 {
 		return nil, nil
 	}
-	bucketRoot := filepath.Join(s.dataDirs[0], quorumMetaVersionsSubDir, bucket)
+	bucketRoot := filepath.Join(m.dataDirs[0], quorumMetaVersionsSubDir, bucket)
 	out := []PutObjectMetaCmd{}
 	err := filepath.WalkDir(bucketRoot, func(path string, d fs.DirEntry, werr error) error {
 		if werr != nil {
@@ -1247,7 +1247,7 @@ func (s *ShardService) scanQuorumMetaVersionsBucketAllStrict(bucket, prefix stri
 		if rerr != nil {
 			return fmt.Errorf("strict version scan: read %s: %w", path, rerr)
 		}
-		cmd, derr := s.decodeQuorumMetaCmdBlob(data)
+		cmd, derr := m.decodeQuorumMetaCmdBlob(data)
 		if derr != nil {
 			return fmt.Errorf("strict version scan: decode %s: %w", path, derr)
 		}
@@ -1349,7 +1349,7 @@ func (s *ShardService) ScanQuorumMetaVersionsAll(ctx context.Context, addr, buck
 // deleteQuorumMetaVersionLocalCore is the lock-free, epoch-free FS core for
 // per-version blob removal. Absent file is not an error (idempotent). The caller
 // is responsible for holding the appropriate lock before calling.
-func (s *ShardService) deleteQuorumMetaVersionLocalCore(target string) error {
+func (m *LocalQuorumMetaStore) deleteQuorumMetaVersionLocalCore(target string) error {
 	err := os.Remove(target)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("quorum meta version delete: %w", err)
@@ -1360,17 +1360,17 @@ func (s *ShardService) deleteQuorumMetaVersionLocalCore(target string) error {
 // deleteQuorumMetaVersionLocal removes the local per-version blob for
 // (bucket, key, versionID) under .quorum_meta_versions/{bucket}/{key}/{vid}.
 // Absent file is not an error (idempotent). Mirrors deleteQuorumMetaLocal.
-func (s *ShardService) deleteQuorumMetaVersionLocal(bucket, key, versionID string) error {
-	if len(s.dataDirs) == 0 {
+func (m *LocalQuorumMetaStore) deleteQuorumMetaVersionLocal(bucket, key, versionID string) error {
+	if len(m.dataDirs) == 0 {
 		return nil
 	}
-	root := filepath.Join(s.dataDirs[0], quorumMetaVersionsSubDir)
+	root := filepath.Join(m.dataDirs[0], quorumMetaVersionsSubDir)
 	target := filepath.Join(root, bucket, key, versionID)
 	rel, err := filepath.Rel(root, target)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return fmt.Errorf("quorum meta version delete: path %q/%q escapes root", key, versionID)
 	}
-	return s.deleteQuorumMetaVersionLocalCore(target)
+	return m.deleteQuorumMetaVersionLocalCore(target)
 }
 
 // DeleteQuorumMetaVersion removes a per-version blob on a remote placement node.
@@ -1399,17 +1399,17 @@ func (s *ShardService) DeleteQuorumMetaVersion(ctx context.Context, addr, bucket
 // deleteQuorumMetaLocal removes the local latest-only quorum-meta blob for
 // (bucket, key) under {dataDirs[0]}/.quorum_meta/{bucket}/{key}.
 // Absent file is not an error (idempotent). Mirrors deleteQuorumMetaVersionLocal.
-func (s *ShardService) deleteQuorumMetaLocal(bucket, key string) error {
-	if len(s.dataDirs) == 0 {
+func (m *LocalQuorumMetaStore) deleteQuorumMetaLocal(bucket, key string) error {
+	if len(m.dataDirs) == 0 {
 		return nil
 	}
-	root := filepath.Join(s.dataDirs[0], quorumMetaSubDir)
+	root := filepath.Join(m.dataDirs[0], quorumMetaSubDir)
 	target := filepath.Join(root, bucket, key)
 	rel, err := filepath.Rel(root, target)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return fmt.Errorf("quorum meta delete: key %q escapes root", key)
 	}
-	return s.deleteQuorumMetaVersionLocalCore(target)
+	return m.deleteQuorumMetaVersionLocalCore(target)
 }
 
 // DeleteQuorumMeta removes the latest-only quorum-meta blob on a remote
@@ -1471,7 +1471,7 @@ func (b *DistributedBackend) deleteShardsQuorum(ctx context.Context, bucket, sha
 
 // decodeQuorumMetaCmdBlob decodes a raw quorum meta blob to a PutObjectMetaCmd.
 // The blob is a bare PutObjectMetaCmd FlatBuffer (no raft Command envelope).
-func (s *ShardService) decodeQuorumMetaCmdBlob(data []byte) (PutObjectMetaCmd, error) {
+func (m *LocalQuorumMetaStore) decodeQuorumMetaCmdBlob(data []byte) (PutObjectMetaCmd, error) {
 	cmd, err := decodeQuorumMetaBlob(data)
 	if err != nil {
 		return PutObjectMetaCmd{}, fmt.Errorf("quorum meta decode raw: %w", err)
@@ -1482,12 +1482,12 @@ func (s *ShardService) decodeQuorumMetaCmdBlob(data []byte) (PutObjectMetaCmd, e
 // readQuorumMetaRawCmd reads and decodes the PutObjectMetaCmd from the local
 // quorum meta store. Returns storage.ErrObjectNotFound if the file is absent.
 // Use DistributedBackend.readQuorumMetaCmd when peer fallback is needed.
-func (s *ShardService) readQuorumMetaRawCmd(bucket, key string) (PutObjectMetaCmd, error) {
-	data, err := s.readQuorumMetaRaw(bucket, key)
+func (m *LocalQuorumMetaStore) readQuorumMetaRawCmd(bucket, key string) (PutObjectMetaCmd, error) {
+	data, err := m.readQuorumMetaRaw(bucket, key)
 	if err != nil {
 		return PutObjectMetaCmd{}, err
 	}
-	return s.decodeQuorumMetaCmdBlob(data)
+	return m.decodeQuorumMetaCmdBlob(data)
 }
 
 // ReadQuorumMetaRaw fetches the raw quorum meta blob from a remote peer via
@@ -1578,11 +1578,11 @@ func (s *ShardService) WriteQuorumMetaVersion(ctx context.Context, addr, bucket,
 // ShardPlacementMonitor.Scan to cover Phase 3 objects that bypass BadgerDB.
 //
 // fn returning a non-nil error stops iteration.
-func (s *ShardService) IterQuorumMetaECShardTargets(fn func(ECShardScanTarget) error) error {
-	if len(s.dataDirs) == 0 {
+func (m *LocalQuorumMetaStore) IterQuorumMetaECShardTargets(fn func(ECShardScanTarget) error) error {
+	if len(m.dataDirs) == 0 {
 		return nil
 	}
-	root := filepath.Join(s.dataDirs[0], quorumMetaSubDir)
+	root := filepath.Join(m.dataDirs[0], quorumMetaSubDir)
 	if _, err := os.Stat(root); os.IsNotExist(err) {
 		return nil
 	}
@@ -1606,7 +1606,7 @@ func (s *ShardService) IterQuorumMetaECShardTargets(fn func(ECShardScanTarget) e
 			return nil // not bucket/key shape
 		}
 		bucket, key := parts[0], parts[1]
-		obj, _, qerr := s.readQuorumMetaLocalDecoded(bucket, key)
+		obj, _, qerr := m.readQuorumMetaLocalDecoded(bucket, key)
 		if qerr != nil {
 			return nil // corrupt or not found; skip
 		}
