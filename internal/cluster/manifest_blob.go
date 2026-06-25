@@ -20,12 +20,6 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"io/fs"
-	"os"
-	"path/filepath"
-	"strings"
-
-	"github.com/gritive/GrainFS/internal/storage/directio"
 )
 
 // manifestMPUSubDir is the sibling-root sub-directory for multipart manifest blobs.
@@ -44,123 +38,26 @@ type manifestEntry struct {
 // Mirrors writeQuorumMetaLocal: atomic temp+fsync+rename, no LWW guard
 // (manifests are append-only: create writes once, delete removes).
 func (s *ShardService) writeManifestBlobLocal(bucket, uploadID string, data []byte) error {
-	if len(s.dataDirs) == 0 {
-		return fmt.Errorf("manifest blob write: no data dir")
-	}
-	root := filepath.Join(s.dataDirs[0], manifestMPUSubDir)
-	target := filepath.Join(root, bucket, uploadID)
-	rel, err := filepath.Rel(root, target)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("manifest blob write: uploadID %q escapes root", uploadID)
-	}
-	dir := filepath.Dir(target)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("manifest blob mkdir: %w", err)
-	}
-	// Atomic publish: temp + fsync + rename (same pattern as writeQuorumMetaLocal).
-	tmp, err := os.CreateTemp(dir, ".qmeta-*.tmp")
-	if err != nil {
-		return fmt.Errorf("manifest blob tmp create: %w", err)
-	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("manifest blob write: %w", err)
-	}
-	if err := directio.Sync(tmp); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("manifest blob fsync: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("manifest blob tmp close: %w", err)
-	}
-	if err := os.Rename(tmpName, target); err != nil {
-		return fmt.Errorf("manifest blob rename: %w", err)
-	}
-	return nil
+	return s.manifest.Write(bucket, uploadID, data)
 }
 
 // readManifestBlobLocal reads the raw manifest blob for (bucket, uploadID) from
 // the local filesystem. Returns (nil, false, nil) when the file is absent.
 func (s *ShardService) readManifestBlobLocal(bucket, uploadID string) ([]byte, bool, error) {
-	if len(s.dataDirs) == 0 {
-		return nil, false, nil
-	}
-	root := filepath.Join(s.dataDirs[0], manifestMPUSubDir)
-	target := filepath.Join(root, bucket, uploadID)
-	rel, err := filepath.Rel(root, target)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return nil, false, fmt.Errorf("manifest blob read: uploadID %q escapes root", uploadID)
-	}
-	data, err := os.ReadFile(target)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, false, nil
-		}
-		return nil, false, fmt.Errorf("manifest blob read: %w", err)
-	}
-	return data, true, nil
+	return s.manifest.Read(bucket, uploadID)
 }
 
 // deleteManifestBlobLocal removes the local manifest blob for (bucket, uploadID).
 // Absent file is not an error (idempotent).
 func (s *ShardService) deleteManifestBlobLocal(bucket, uploadID string) error {
-	if len(s.dataDirs) == 0 {
-		return nil
-	}
-	root := filepath.Join(s.dataDirs[0], manifestMPUSubDir)
-	target := filepath.Join(root, bucket, uploadID)
-	rel, err := filepath.Rel(root, target)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("manifest blob delete: uploadID %q escapes root", uploadID)
-	}
-	err = os.Remove(target)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("manifest blob delete: %w", err)
-	}
-	return nil
+	return s.manifest.Delete(bucket, uploadID)
 }
 
 // scanManifestBlobsLocalStrict walks .qmeta_mpu/{bucket}/ and returns one
 // manifestEntry per uploadID. Fail-closed: any read or decode error returns an
 // error rather than silently dropping an entry (mirrors scanQuorumMetaBucketStrict).
 func (s *ShardService) scanManifestBlobsLocalStrict(bucket string) ([]manifestEntry, error) {
-	if len(s.dataDirs) == 0 {
-		return nil, nil
-	}
-	root := filepath.Join(s.dataDirs[0], manifestMPUSubDir)
-	bucketRoot := filepath.Join(root, bucket)
-	if _, err := os.Stat(bucketRoot); os.IsNotExist(err) {
-		return nil, nil
-	}
-	var out []manifestEntry
-	err := filepath.WalkDir(bucketRoot, func(path string, d fs.DirEntry, werr error) error {
-		if werr != nil {
-			return werr // fail-closed
-		}
-		if d.IsDir() {
-			return nil
-		}
-		if isQuorumMetaTempName(d.Name()) {
-			return nil // in-flight temp, skip
-		}
-		uploadID, rerr := filepath.Rel(bucketRoot, path)
-		if rerr != nil {
-			return rerr // fail-closed
-		}
-		data, rerr := os.ReadFile(path)
-		if rerr != nil {
-			return fmt.Errorf("manifest blob scan: read %s/%s: %w", bucket, uploadID, rerr)
-		}
-		meta, derr := unmarshalClusterMultipartMeta(data)
-		if derr != nil {
-			return fmt.Errorf("manifest blob scan: decode %s/%s: %w", bucket, uploadID, derr)
-		}
-		out = append(out, manifestEntry{UploadID: uploadID, Meta: meta})
-		return nil
-	})
-	return out, err
+	return s.manifest.ScanStrict(bucket)
 }
 
 // --- RPC handlers (ShardService) ---

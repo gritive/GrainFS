@@ -59,8 +59,6 @@ separate PR, facades stay the spine — see design
   `decideQuorumMetaWrite` are already pure, co-located, zero-dep testable; 23 call sites = leverage,
   not scatter; a hypothetical `LWWResolver` module fails the deletion test. No module — shared by the
   local write-accept and the orchestration merge as free functions.
-- **[P3] PR3 — LocalManifestStore.** Carve the 12 manifest-blob `*ShardService` methods
-  (`manifest_blob.go`, `.qmeta_mpu/{bucket}/{uploadID}`) into a `LocalManifestStore`.
 - **[P3] parent-dir fsync gap (pre-existing, surfaced by the decomposition).** Quorum-meta
   (`quorum_meta.go` writeQuorumMetaLocal) and manifest (`manifest_blob.go`) writes fsync the temp
   file then rename but do **not** fsync the parent directory (no `syncDirChain`, unlike shard
