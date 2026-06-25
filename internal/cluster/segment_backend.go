@@ -61,6 +61,14 @@ type clusterSegmentBackend struct {
 	// direct-to-final write. Set once per PUT (uploadID for multipart, a fresh
 	// UUIDv7 for simple chunked PUT).
 	stagingTxnID string
+
+	// sizeHint is the known object size (production callers all have it: spool
+	// size / multipart total / relocated object size). It is threaded to
+	// SegmentWriter.WriteSized so a small object does not allocate a full
+	// DefaultChunkSize chunk buffer when the streamed body cannot be size-sniffed.
+	// Advisory: a body that outruns it is still written in full. Zero is a valid
+	// hint (empty object); test seams that leave it unset degrade to no benefit.
+	sizeHint int64
 }
 
 // segmentPlacement captures the post-write placement metadata for one
@@ -331,6 +339,7 @@ func (b *DistributedBackend) putObjectChunked(
 		// PR1 segment staging: a fresh per-PUT txn id isolates this write's in-flight
 		// segment shards under .segstaging until the commit-time promote.
 		stagingTxnID: uuidutil.MustNewV7(),
+		sizeHint:     sp.Size,
 	}
 	body, err := sp.Open()
 	if err != nil {
@@ -376,6 +385,7 @@ func (b *DistributedBackend) putMultipartObjectChunked(
 		// PR1 segment staging: the uploadID is the natural per-upload txn id, so
 		// concurrent/idempotent completers of the same upload share a staging dir.
 		stagingTxnID: uploadID,
+		sizeHint:     manifest.TotalSize,
 	}
 	body, err := manifest.Open()
 	if err != nil {
@@ -478,7 +488,7 @@ func runChunkedPutWithParts(
 		defer release()
 		sw = storage.NewSegmentWriterWithChunkSizeAndWorkers(csb, csb.chunkSize, 1)
 	}
-	obj, err := sw.Write(ctx, bucket, key, contentType, body)
+	obj, err := sw.WriteSized(ctx, bucket, key, contentType, body, csb.sizeHint)
 	if err != nil {
 		return nil, fmt.Errorf("segment write: %w", err)
 	}

@@ -9,7 +9,6 @@ import (
 	"errors"
 	"io"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 )
@@ -75,6 +74,18 @@ func NewSegmentWriterWithChunkSizeAndWorkers(b segmentWriterBackend, chunkSize, 
 // persist the returned Object (which is nil). Any segment blobs already
 // written to disk become orphans cleaned up by the scrubber.
 func (w *SegmentWriter) Write(ctx context.Context, bucket, key, contentType string, r io.Reader) (*Object, error) {
+	return w.WriteSized(ctx, bucket, key, contentType, r, -1)
+}
+
+// WriteSized is Write with an advisory object size (typically the request
+// Content-Length). The hint right-sizes the chunk buffers so a small object
+// does not allocate a full DefaultChunkSize buffer when the body cannot be
+// size-sniffed (an opaque HTTP stream, a packblob passthrough io.MultiReader).
+// The hint is NOT trusted as a hard length: a body longer than the hint is
+// still written in full, and a shorter body persists only its real bytes
+// (chunkLoop confirms the boundary with a 1-byte probe). Pass a negative hint
+// when the size is unknown.
+func (w *SegmentWriter) WriteSized(ctx context.Context, bucket, key, contentType string, r io.Reader, sizeHint int64) (*Object, error) {
 	// Bucket-aware whole-object ETag: MD5 for S3-exposed buckets, xxhash3 for
 	// internal __grainfs_* buckets (whose ETag is the EC-rewrap corruption
 	// oracle) — matches spoolHashForBucket so chunked PUTs keep ETag parity.
@@ -111,7 +122,7 @@ func (w *SegmentWriter) Write(ctx context.Context, bucket, key, contentType stri
 	chunkerErr := make(chan error, 1)
 	go func() {
 		firstChunkSize, exactFirstChunk := firstChunkBufferSize(r, w.chunkSize)
-		chunkerErr <- w.chunkLoop(cctx, tee, workCh, firstChunkSize, exactFirstChunk)
+		chunkerErr <- w.chunkLoop(cctx, tee, workCh, firstChunkSize, exactFirstChunk, sizeHint)
 		close(workCh)
 	}()
 
@@ -175,8 +186,29 @@ type chunkJob struct {
 // io.ErrUnexpectedEOF surfaced by the upstream, etc.). io.ReadFull would
 // rewrite EOF→ErrUnexpectedEOF mid-buffer, making real ErrUnexpectedEOF
 // errors from the source indistinguishable from a normal short final chunk.
-func (w *SegmentWriter) chunkLoop(ctx context.Context, r io.Reader, workCh chan<- chunkJob, firstChunkSize int, exactFirstChunk bool) error {
+func (w *SegmentWriter) chunkLoop(ctx context.Context, r io.Reader, workCh chan<- chunkJob, firstChunkSize int, exactFirstChunk bool, sizeHint int64) error {
+	emit := func(idx int, body []byte) error {
+		select {
+		case workCh <- chunkJob{idx: idx, body: body}:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
 	idx := 0
+	// hintRemaining sizes every chunk to the advisory Content-Length not yet
+	// read, so a small object never allocates a full DefaultChunkSize buffer.
+	// <0 disables hinting (unknown size, exact-Len reader, or the hint proved
+	// short). The exact-Len fast path owns idx 0 and keeps hinting off.
+	hintRemaining := int64(-1)
+	if sizeHint >= 0 && !exactFirstChunk {
+		hintRemaining = sizeHint
+	}
+	// carry holds bytes read by the EOF probe when the body outran its hint;
+	// they are prepended to the next full-size chunk rather than emitted as a
+	// tiny segment.
+	var carry []byte
 	for {
 		select {
 		case <-ctx.Done():
@@ -184,35 +216,67 @@ func (w *SegmentWriter) chunkLoop(ctx context.Context, r io.Reader, workCh chan<
 		default:
 		}
 		if idx == 0 && exactFirstChunk && firstChunkSize == 0 {
-			select {
-			case workCh <- chunkJob{idx: idx, body: nil}:
-			case <-ctx.Done():
-				return ctx.Err()
+			return emit(idx, nil) // empty object, exact
+		}
+
+		// Decide this chunk's read capacity (excluding any carried prefix).
+		capacity := w.chunkSize
+		probe := false
+		switch {
+		case idx == 0 && firstChunkSize > 0 && firstChunkSize < capacity:
+			capacity = firstChunkSize
+		case hintRemaining == 0:
+			// Exactly the hinted bytes have been read; confirm EOF with a 1-byte
+			// probe instead of a fresh DefaultChunkSize buffer.
+			capacity = 1
+			probe = true
+		case hintRemaining > 0 && hintRemaining < int64(capacity):
+			capacity = int(hintRemaining)
+		}
+
+		body := make([]byte, len(carry)+capacity)
+		copy(body, carry)
+		carried := len(carry)
+		carry = nil
+		n, readErr := fillChunk(r, body[carried:])
+		total := carried + n
+
+		if probe {
+			if total == 0 {
+				// Clean EOF exactly at the hinted length. A zero-length object
+				// (hint 0, nothing emitted yet) still owes its one empty segment.
+				if idx == 0 {
+					return emit(idx, nil)
+				}
+				return nil
 			}
-			return nil
+			// Body exceeds its hint: stop trusting it and carry the probed
+			// byte(s) into a real chunk rather than a 1-byte segment.
+			hintRemaining = -1
+			if errors.Is(readErr, io.EOF) {
+				return emit(idx, body[:total])
+			}
+			if readErr != nil {
+				return readErr
+			}
+			carry = append([]byte(nil), body[:total]...)
+			continue
 		}
-		chunkSize := w.chunkSize
-		if idx == 0 && firstChunkSize > 0 && firstChunkSize < chunkSize {
-			chunkSize = firstChunkSize
-		}
-		body := make([]byte, chunkSize)
-		n, readErr := fillChunk(r, body)
+
 		// Empty-object case: first iteration, no bytes, clean EOF.
-		if n == 0 && errors.Is(readErr, io.EOF) && idx == 0 {
-			select {
-			case workCh <- chunkJob{idx: idx, body: nil}:
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-			return nil
+		if total == 0 && errors.Is(readErr, io.EOF) && idx == 0 {
+			return emit(idx, nil)
 		}
-		if n > 0 {
-			select {
-			case workCh <- chunkJob{idx: idx, body: body[:n]}:
-			case <-ctx.Done():
-				return ctx.Err()
+		if total > 0 {
+			if err := emit(idx, body[:total]); err != nil {
+				return err
 			}
 			idx++
+			if hintRemaining > 0 {
+				if hintRemaining -= int64(total); hintRemaining < 0 {
+					hintRemaining = 0
+				}
+			}
 			if exactFirstChunk {
 				return nil
 			}
@@ -227,16 +291,17 @@ func (w *SegmentWriter) chunkLoop(ctx context.Context, r io.Reader, workCh chan<
 	}
 }
 
+// firstChunkBufferSize right-sizes the first chunk buffer to the object size
+// when the source reader reports an authoritative remaining length. Any reader
+// exposing `Len() int` with bytes-remaining semantics qualifies — the stdlib
+// in-memory readers (*bytes.Reader, *bytes.Buffer, *strings.Reader) and the
+// server's buffered PUT body (*putObjectBodyReader). Opaque streams (an HTTP
+// BodyStream, an aws-chunked decoder) have no Len() and fall back to the full
+// DefaultChunkSize. The length is only trusted from in-memory buffers where it
+// is exact, so this never truncates a stream whose real size differs.
 func firstChunkBufferSize(r io.Reader, defaultSize int) (int, bool) {
-	switch rr := r.(type) {
-	case *bytes.Reader:
-		n := rr.Len()
-		return n, n <= defaultSize
-	case *bytes.Buffer:
-		n := rr.Len()
-		return n, n <= defaultSize
-	case *strings.Reader:
-		n := rr.Len()
+	if lr, ok := r.(interface{ Len() int }); ok {
+		n := lr.Len()
 		return n, n <= defaultSize
 	}
 	return defaultSize, false
