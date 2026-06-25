@@ -105,34 +105,6 @@ func checkBucketExists(ctx context.Context, d *Deps, name string) error {
 	return nil
 }
 
-// observeLifecycleGen captures the current CAS generation of bucket's lifecycle
-// config. It returns 0 on a nil reader, not-found, or read error — fail-safe: a
-// CAS against 0 no-ops on a present record (never wipes) and deletes an absent
-// one (the desired cascade outcome).
-func observeLifecycleGen(ctx context.Context, d *Deps, bucket string) uint64 {
-	if d.LifecycleGenReader == nil {
-		return 0
-	}
-	gen, err := d.LifecycleGenReader.GetLifecycleGen(ctx, bucket)
-	if err != nil {
-		return 0 // fail-safe: a CAS against 0 no-ops on a present record, never wipes
-	}
-	return gen
-}
-
-// observeUpstreamGen captures the current CAS generation of bucket's IAM
-// upstream record, with the same fail-safe semantics as observeLifecycleGen.
-func observeUpstreamGen(ctx context.Context, d *Deps, bucket string) uint64 {
-	if d.IAM == nil {
-		return 0
-	}
-	item, err := d.IAM.GetBucketUpstream(ctx, bucket)
-	if err != nil {
-		return 0 // not_found or read error → 0 (fail-safe)
-	}
-	return item.Generation
-}
-
 // AdminDeleteBucket deletes a bucket. If force is true, all objects are
 // removed first; otherwise the bucket must be empty.
 func AdminDeleteBucket(ctx context.Context, d *Deps, name string, force bool) error {
@@ -142,13 +114,6 @@ func AdminDeleteBucket(ctx context.Context, d *Deps, name string, force bool) er
 	if reservedname.IsReservedBucketName(name) {
 		return NewInvalid(fmt.Sprintf("bucket name %q is reserved and cannot be deleted via public API", name))
 	}
-	// Capture observed config generations BEFORE the data-Raft delete. A
-	// concurrent recreate+config-write can only land AFTER the delete frees the
-	// name, so it bumps the stored generation beyond these captured values,
-	// making the cascade CAS-delete a no-op and preserving the recreated
-	// bucket's fresh config (TODOS #1 delete→recreate race).
-	obsLifecycleGen := observeLifecycleGen(ctx, d, name)
-	obsUpstreamGen := observeUpstreamGen(ctx, d, name)
 	var err error
 	if force {
 		err = d.Buckets.ForceDeleteBucket(ctx, name)
@@ -156,12 +121,9 @@ func AdminDeleteBucket(ctx context.Context, d *Deps, name string, force bool) er
 		err = d.Buckets.DeleteBucket(ctx, name)
 	}
 	if err == nil {
-		return cascadeBucketConfigAfterDelete(ctx, d, name, obsLifecycleGen, obsUpstreamGen)
+		return nil
 	}
 	if errors.Is(err, storage.ErrBucketNotFound) {
-		if cfgErr := cascadeBucketConfigAfterDelete(ctx, d, name, obsLifecycleGen, obsUpstreamGen); cfgErr != nil {
-			return cfgErr
-		}
 		return NewNotFound("bucket not found")
 	}
 	if errors.Is(err, storage.ErrBucketNotEmpty) {

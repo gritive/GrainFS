@@ -6,6 +6,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/iam"
+	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -232,4 +234,28 @@ func TestApplyDeleteBucketRemovesRecordIdempotent(t *testing.T) {
 
 	// Second delete: idempotent — no error.
 	require.NoError(t, f.applyCmd(makeDeleteBucketCmd(t, "b1")))
+}
+
+func TestApplyDeleteBucketCascadesLifecycleAndBucketUpstream(t *testing.T) {
+	f := NewMetaFSM()
+	lifecycleStore := lifecycle.NewStore(newTestLifecycleStore(t))
+	f.SetLifecycle(lifecycleStore)
+	iamStore := iam.NewStore()
+	f.SetIAM(iamStore, iam.NewApplier(iamStore, nil))
+
+	require.NoError(t, f.applyCmd(makeCreateBucketCmd(t, "b1", "group-1", false)))
+	require.NoError(t, lifecycleStore.PutRaw("b1", []byte(`<LifecycleConfiguration><Rule><ID>r1</ID></Rule></LifecycleConfiguration>`)))
+	iamStore.ApplyBucketUpstreamForTest(iam.BucketUpstream{
+		Bucket:    "b1",
+		Endpoint:  "http://upstream.example",
+		AccessKey: "AK",
+	})
+
+	require.NoError(t, f.applyCmd(makeDeleteBucketCmd(t, "b1")))
+
+	gotLifecycle, err := lifecycleStore.GetRaw("b1")
+	require.NoError(t, err)
+	require.Nil(t, gotLifecycle, "DeleteBucket apply must atomically remove lifecycle state")
+	_, ok := iamStore.LookupBucketUpstream("b1")
+	require.False(t, ok, "DeleteBucket apply must atomically remove IAM bucket-upstream state")
 }

@@ -166,9 +166,6 @@ Deferred items:
 - **[P3] Neutralize group-0 placement special-casing.** The demotion removed group-0's *control-plane*
   role but it remains the placement legacy-fallback (router default / `object_placement` /
   `object_write_placement` / `append`). Removing that makes group-0 a truly plain data group.
-- **[P3] Fold lifecycle + IAM-upstream delete into the meta `DeleteBucket` apply** for full delete
-  atomicity (today they remain separate gen-CAS'd meta cascade proposes — no cross-raft gap, but a
-  coordinator crash between them can orphan lifecycle/IAM entries).
 - **[P3][minor] `CreateBucket` now unconditionally requires a non-empty groupID** (the FSM rejects
   `""`). Safe in production (the router is always wired so placement resolves a real group), but it
   tightens behavior for any future router-less `DistributedBackend` wiring. Note only.
