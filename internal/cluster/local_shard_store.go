@@ -244,8 +244,9 @@ func (c *shardCountingReader) Read(p []byte) (int, error) {
 // share this code and produce byte-equivalent output. When sizeHint >= 0 the body
 // is bounded to sizeHint and the consumed count is verified, so a short or
 // oversized body fails loudly (data-loss guard) — the same protection the
-// buffered io.ReadFull path provided. The ciphertext payload is still
-// materialized for writeEncryptedShardFile's []byte contract.
+// buffered io.ReadFull path provided. The encoded ciphertext is streamed
+// straight into the shard temp file (atomicShardFileWrite), so no whole
+// encrypted shard is ever materialized as a []byte.
 func (l *LocalShardStore) writeLocalShardAADStream(ctx context.Context, bucket, key, aadKey string, shardIdx int, body io.Reader, sizeHint int64) error {
 	dir, err := l.getShardDir(bucket, key, shardIdx)
 	if err != nil {
@@ -272,43 +273,38 @@ func (l *LocalShardStore) writeLocalShardAADStream(ctx context.Context, bucket, 
 	if sizeHint >= 0 {
 		cr.r = io.LimitReader(body, sizeHint)
 	}
-	payload, err := eccodec.EncodeEncryptedShardStreamToBuffer(cr, sizeHint, l.segEnc, ShardAADFields(bucket, aadKey, shardIdx), eccodec.DefaultEncryptedChunkSize)
-	if err == nil && sizeHint >= 0 && cr.n != sizeHint {
-		err = fmt.Errorf("shard %d short read: encoded %d plaintext bytes, expected %d", shardIdx, cr.n, sizeHint)
-	}
-	if err != nil {
+	// Encode the shard ciphertext straight into the temp file: atomicShardFileWrite
+	// runs this callback writing directly to the file's fd, so the GFSENC3 bytes are
+	// never materialized as a whole-shard []byte. The short-read guard runs inside
+	// the callback (after the encode consumed body) so a body shorter than the
+	// committed sizeHint aborts the write — the helper removes the tmp, no truncated
+	// shard is published (data-loss guard). The helper emits the
+	// EncOpen/EncWrite/EncSync/EncClose/EncRename/DirSync stages and owns the
+	// fsync/dir-sync durability; the Encode stage below frames the whole operation
+	// for error attribution and overall timing.
+	werr := l.atomicShardFileWrite(ctx, dir, path, shardIdx, func(w io.Writer) error {
+		if err := eccodec.EncodeEncryptedShard(w, cr, l.segEnc, ShardAADFields(bucket, aadKey, shardIdx), eccodec.DefaultEncryptedChunkSize); err != nil {
+			return err
+		}
+		if sizeHint >= 0 && cr.n != sizeHint {
+			return fmt.Errorf("shard %d short read: encoded %d plaintext bytes, expected %d", shardIdx, cr.n, sizeHint)
+		}
+		return nil
+	})
+	if werr != nil {
 		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncode, encodeStart, PutTraceStageFields{
 			Bytes:            sizeHint,
 			ShardIndex:       shardIdx,
 			ShardTargetClass: "local",
-			Error:            err.Error(),
+			Error:            werr.Error(),
 		})
-		return err
+		return werr
 	}
 	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncode, encodeStart, PutTraceStageFields{
 		Bytes:            sizeHint,
 		ShardIndex:       shardIdx,
 		ShardTargetClass: "local",
 	})
-	requireFsync := l.shardWriteRequiresFsync(len(payload))
-	fileStart := time.Now()
-	if err := l.writeEncryptedShardFile(ctx, dir, path, payload, shardIdx, requireFsync); err != nil {
-		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalFile, fileStart, PutTraceStageFields{
-			Bytes:            int64(len(payload)),
-			ShardIndex:       shardIdx,
-			ShardTargetClass: "local",
-			Error:            err.Error(),
-		})
-		return err
-	}
-	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalFile, fileStart, PutTraceStageFields{
-		Bytes:            int64(len(payload)),
-		ShardIndex:       shardIdx,
-		ShardTargetClass: "local",
-	})
-	// Directory durability (the DirSync trace stage) now runs inside
-	// writeEncryptedShardFile, where requireFsync is known and the real
-	// syncDirChain fsync happens for the fsync classes (S2).
 	return nil
 }
 
@@ -331,8 +327,7 @@ func (l *LocalShardStore) writeLocalSealedShard(ctx context.Context, bucket, key
 		return fmt.Errorf("create shard dir: %w", err)
 	}
 	path := filepath.Join(dir, fmt.Sprintf("shard_%d", shardIdx))
-	requireFsync := l.shardWriteRequiresFsync(len(sealed))
-	return l.writeEncryptedShardFile(ctx, dir, path, sealed, shardIdx, requireFsync)
+	return l.writeEncryptedShardFile(ctx, dir, path, sealed, shardIdx)
 }
 
 // fsyncFile fsyncs an open shard tmp file (or the test seam when set).
@@ -417,27 +412,41 @@ func (l *LocalShardStore) syncDirChain(leaf, stop string) error {
 	}
 }
 
-// writeEncryptedShardFile materializes pre-encoded (chunked AEAD) shard bytes
-// to disk using the atomic tmp + rename recipe. Encoding happens in the
-// caller so the encrypted payload is computed before any shard file mutation;
-// this function only handles the on-disk I/O.
+// atomicShardFileWrite writes a shard file with the atomic tmp + rename recipe,
+// streaming whatever the writeBody callback produces straight into the temp file.
+// The callback writes directly to the *os.File (no intermediate buffer): the
+// AEAD encoder already emits in ~1 MiB units (an 8-byte chunk header + one
+// chunk-sized sealed body per chunk), so unbuffered writes cost ~2 syscalls per
+// MiB — a buffer would only add a full-shard memcpy and a per-write allocation
+// without cutting syscalls. The callback is the only producer of bytes; the
+// helper counts the ciphertext bytes it wrote (countingWriter) and derives the
+// fsync class from that count — identical to the old "caller computes requireFsync
+// from len(payload)" contract, because the bytes written ARE the payload. A
+// buffered ([]byte) caller passes a one-line w.Write(payload) callback; the sized
+// streaming caller runs the encode straight into w, so no whole encrypted shard
+// is ever materialized.
 //
-// Post-S2 durability is established at WRITE TIME for the fsync classes (small /
-// no-redundancy): when requireFsync the EncSync stage fsyncs the shard file and
-// the DirSync stage fsyncs the shard's directory CHAIN (leaf shard dir + each
-// newly-created ancestor up to the data dir) so a crash cannot lose the file or
-// its namespace link. Large redundant shards (requireFsync=false) skip both —
-// EC reconstruction + the scrubber own their durability (S1). Trace stages:
-//   - PutTraceStageShardWriteLocalEncWrite: file write of the encoded payload.
-//   - PutTraceStageShardWriteLocalEncSync: shard-file fsync (requireFsync only).
-//   - PutTraceStageShardWriteLocalDirSync: directory-chain fsync (requireFsync only).
-func (l *LocalShardStore) writeEncryptedShardFile(ctx context.Context, dir, path string, payload []byte, shardIdx int, requireFsync bool) error {
+// Durability — locked order, byte-for-byte preserved:
+//
+//	write(tmp) → Sync(tmp) → rename → syncDirChain(dir) → return.
+//
+// Writes go straight to the fd, so there is no buffered tail to flush — a short
+// write surfaces as an error from w.Write immediately, not at a deferred flush.
+// Any error (open / writeBody / fsync / close / rename) removes the tmp so no
+// partial shard is published and no orphan .tmp leaks.
+//
+// Post-S2 the fsync classes (small / no-redundancy) fsync the shard file + its
+// directory CHAIN at write time; large redundant shards (requireFsync=false)
+// skip both — EC reconstruction + the scrubber own their durability (S1). Trace
+// stages (EncOpen/EncWrite/EncSync/EncClose/EncRename/DirSync) report the
+// ciphertext bytes written (cw.n); EncOpen fires before any byte is written so it
+// reports 0 — the put-trace sink is a diagnostic-only no-op in production.
+func (l *LocalShardStore) atomicShardFileWrite(ctx context.Context, dir, path string, shardIdx int, writeBody func(w io.Writer) error) error {
 	tmp := fmt.Sprintf("%s.%d.%d.tmp", path, os.Getpid(), time.Now().UnixNano())
 	openStart := time.Now()
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncOpen, openStart, PutTraceStageFields{
-			Bytes:            int64(len(payload)),
 			ShardIndex:       shardIdx,
 			ShardTargetClass: "local",
 			Error:            err.Error(),
@@ -445,7 +454,6 @@ func (l *LocalShardStore) writeEncryptedShardFile(ctx context.Context, dir, path
 		return fmt.Errorf("create tmp shard: %w", err)
 	}
 	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncOpen, openStart, PutTraceStageFields{
-		Bytes:            int64(len(payload)),
 		ShardIndex:       shardIdx,
 		ShardTargetClass: "local",
 	})
@@ -454,10 +462,16 @@ func (l *LocalShardStore) writeEncryptedShardFile(ctx context.Context, dir, path
 		_ = os.Remove(tmp)
 	}
 
+	// Write the encoded ciphertext straight to the fd (no bufio): the AEAD encoder's
+	// native ~1 MiB write granularity already keeps syscalls low, and the tmp file
+	// has no O_DIRECT alignment constraint. countingWriter accumulates the ciphertext
+	// byte count that drives the fsync class below.
+	var written int64
+	cw := &countingWriter{w: f, n: &written}
 	writeStart := time.Now()
-	if _, err := f.Write(payload); err != nil {
+	if err := writeBody(cw); err != nil {
 		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncWrite, writeStart, PutTraceStageFields{
-			Bytes:            int64(len(payload)),
+			Bytes:            written,
 			ShardIndex:       shardIdx,
 			ShardTargetClass: "local",
 			Error:            err.Error(),
@@ -466,21 +480,24 @@ func (l *LocalShardStore) writeEncryptedShardFile(ctx context.Context, dir, path
 		return fmt.Errorf("write tmp shard: %w", err)
 	}
 	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncWrite, writeStart, PutTraceStageFields{
-		Bytes:            int64(len(payload)),
+		Bytes:            written,
 		ShardIndex:       shardIdx,
 		ShardTargetClass: "local",
 	})
 
+	// requireFsync is derived from the ciphertext bytes actually written — the same
+	// value the callers previously passed as shardWriteRequiresFsync(len(payload)).
+	requireFsync := l.shardWriteRequiresFsync(int(written))
+
 	// EncSync fsyncs the shard file only when requireFsync is set: for small
 	// shards and for large no-redundancy shards (no parity to reconstruct from).
 	// It is skipped for large redundant shards, which rely on EC reconstruction
-	// + the scrubber
-	// (S1 — no WAL record, no fsync).
+	// + the scrubber (S1 — no WAL record, no fsync).
 	encSyncStart := time.Now()
 	if requireFsync {
 		if err := l.fsyncFile(f); err != nil {
 			ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncSync, encSyncStart, PutTraceStageFields{
-				Bytes:            int64(len(payload)),
+				Bytes:            written,
 				ShardIndex:       shardIdx,
 				ShardTargetClass: "local",
 				Error:            err.Error(),
@@ -490,7 +507,7 @@ func (l *LocalShardStore) writeEncryptedShardFile(ctx context.Context, dir, path
 		}
 	}
 	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncSync, encSyncStart, PutTraceStageFields{
-		Bytes:            int64(len(payload)),
+		Bytes:            written,
 		ShardIndex:       shardIdx,
 		ShardTargetClass: "local",
 	})
@@ -498,7 +515,7 @@ func (l *LocalShardStore) writeEncryptedShardFile(ctx context.Context, dir, path
 	closeStart := time.Now()
 	if err := f.Close(); err != nil {
 		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncClose, closeStart, PutTraceStageFields{
-			Bytes:            int64(len(payload)),
+			Bytes:            written,
 			ShardIndex:       shardIdx,
 			ShardTargetClass: "local",
 			Error:            err.Error(),
@@ -507,7 +524,7 @@ func (l *LocalShardStore) writeEncryptedShardFile(ctx context.Context, dir, path
 		return fmt.Errorf("close tmp shard: %w", err)
 	}
 	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncClose, closeStart, PutTraceStageFields{
-		Bytes:            int64(len(payload)),
+		Bytes:            written,
 		ShardIndex:       shardIdx,
 		ShardTargetClass: "local",
 	})
@@ -515,7 +532,7 @@ func (l *LocalShardStore) writeEncryptedShardFile(ctx context.Context, dir, path
 	renameStart := time.Now()
 	if err := os.Rename(tmp, path); err != nil {
 		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncRename, renameStart, PutTraceStageFields{
-			Bytes:            int64(len(payload)),
+			Bytes:            written,
 			ShardIndex:       shardIdx,
 			ShardTargetClass: "local",
 			Error:            err.Error(),
@@ -524,7 +541,7 @@ func (l *LocalShardStore) writeEncryptedShardFile(ctx context.Context, dir, path
 		return fmt.Errorf("rename shard: %w", err)
 	}
 	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncRename, renameStart, PutTraceStageFields{
-		Bytes:            int64(len(payload)),
+		Bytes:            written,
 		ShardIndex:       shardIdx,
 		ShardTargetClass: "local",
 	})
@@ -541,7 +558,7 @@ func (l *LocalShardStore) writeEncryptedShardFile(ctx context.Context, dir, path
 		stop := l.dataDirs[shardIdx%len(l.dataDirs)]
 		if err := l.syncDirChain(dir, stop); err != nil {
 			ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalDirSync, dirSyncStart, PutTraceStageFields{
-				Bytes:            int64(len(payload)),
+				Bytes:            written,
 				ShardIndex:       shardIdx,
 				ShardTargetClass: "local",
 				Error:            err.Error(),
@@ -549,13 +566,25 @@ func (l *LocalShardStore) writeEncryptedShardFile(ctx context.Context, dir, path
 			return fmt.Errorf("fsync shard dir chain: %w", err)
 		}
 		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalDirSync, dirSyncStart, PutTraceStageFields{
-			Bytes:            int64(len(payload)),
+			Bytes:            written,
 			ShardIndex:       shardIdx,
 			ShardTargetClass: "local",
 		})
 	}
 
 	return nil
+}
+
+// writeEncryptedShardFile materializes a pre-encoded (chunked AEAD) shard
+// payload to disk via atomicShardFileWrite. The whole payload is already sealed
+// GFSENC3 (seal-at-source / EC-repair), so the callback is a single
+// w.Write(payload); the fsync class is derived from the bytes written, identical
+// to the old caller-passed requireFsync (== shardWriteRequiresFsync(len(payload))).
+func (l *LocalShardStore) writeEncryptedShardFile(ctx context.Context, dir, path string, payload []byte, shardIdx int) error {
+	return l.atomicShardFileWrite(ctx, dir, path, shardIdx, func(w io.Writer) error {
+		_, err := w.Write(payload)
+		return err
+	})
 }
 
 // shardWriteRequiresFsync reports whether a freshly written shard file (and its

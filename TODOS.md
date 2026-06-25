@@ -150,15 +150,19 @@ surfaced by that removal:
   coalesce-off) — same super-linear O(N²) (n=4 → 545 allocs, n=8 → 1,356, n=16 → 3,711), same
   meta-rewrite root cause (`readAppendBase` decode + manifest re-marshal + quorum-meta), softened in
   production by coalesce every 16 segments. The same storage-format redesign applies to both paths.
-- **[P3][follow-up] EC multipart-complete still materializes staged parts in memory (`readShardPayload`).**
-  #895 pooled the per-chunk seal and pre-sized the shard-encode buffer (`EncodeEncryptedShardToBuffer`
-  + `EncryptedShardUpperBound`), dropping EC multipart Complete from 231 → 142 MB/op at 32 MiB (−39%).
-  A re-memprofile shows the new alloc dominant is `readShardPayload` (~30%): each staged part is read
-  whole into memory (`io.ReadAll`/`make`) before re-encode. The other large piece is the pre-sized
-  encode buffer itself — the shard payload materialized as `[]byte`. Eliminating it needs streaming the
-  shard encode straight to the file, blocked today by `writeEncryptedShardFile`'s `[]byte` contract
-  (len-based fsync decision + tmp+rename). Wants a streaming-shard-write redesign of that contract;
-  re-measure via `BenchmarkClusterMultipart_Complete`.
+- **[P3][follow-up] EC multipart-complete READ-side staged-part buffering (`readShardPayload` /
+  `readSpoolEncryptedRecord`).** The WRITE side is now DONE: #895 pooled the per-chunk seal + pre-sized
+  the shard-encode buffer; #898 streamed sized EC shard writes; the `atomicShardFileWrite` PR removed the
+  last write-side buffer — the encrypted shard `[]byte` is no longer materialized. `LocalShardStore`'s
+  encode now writes straight to the shard fd via a callback (no bufio: the AEAD encoder's native ~1 MiB
+  write granularity keeps syscalls low), so `writeEncryptedShardFile`'s `[]byte` contract — the documented
+  blocker here — is gone, and the fsync decision now comes from the ciphertext bytes actually written.
+  Same-machine write-path B/op: COPY 16 MiB 56 → 29 MB/op (−48%), multipart Complete 32 MiB 91 → 40 MB/op
+  (−56%); wall-time unchanged (crypto-bound). RESIDUAL is now READ-side only and dominates the remaining
+  profile: each staged part / shard is still read whole into memory before re-encode/reconstruct
+  (`readShardPayload` `io.ReadAll`/`make` ~14%, `readSpoolEncryptedRecord` cum ~34%,
+  `reedsolomon.AllocAligned` ~16%) — a separate read path, separate plan. Re-measure via
+  `BenchmarkClusterMultipart_Complete` / `BenchmarkClusterCopy`.
 ### group-0 control-plane demotion follow-ups (2026-06-24, epic DONE)
 
 The demotion shipped: bucket existence/policy/versioning consolidated onto meta-raft as a unified

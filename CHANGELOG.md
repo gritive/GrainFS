@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.701.0] - 2026-06-25
+
+### Changed
+- **Performance: encode the sized EC shard ciphertext straight to the shard file — the last
+  whole-shard write buffer is gone.** The sized EC shard-write path (large PUT, multipart Complete,
+  server-side COPY) previously materialized each shard's GFSENC3 ciphertext as a `[]byte` before
+  writing it to disk. `LocalShardStore` now runs the AEAD encode directly against the shard file's
+  descriptor via a new `atomicShardFileWrite` helper, so no whole encrypted shard is ever held in
+  memory; writes are unbuffered because the encoder already emits in ~1 MiB units. Same-machine
+  write-path allocation drops: server-side COPY (16 MiB) 56 → 29 MB/op (−48%), multipart Complete
+  (32 MiB) 91 → 40 MB/op (−56%); throughput is unchanged (crypto-bound). The fsync durability class
+  is now derived from the ciphertext bytes actually written (identical to the prior length-based
+  decision); the locked write → fsync → rename → directory-fsync order and the data-loss guards
+  (partial-write cleanup, short-body reject) are preserved. No protocol, API, CLI, or on-disk format
+  change. Read-side staged-part buffering on GET/COPY-read remains a separate follow-up.
+
 ## [0.0.700.0] - 2026-06-25
 
 ### Removed
