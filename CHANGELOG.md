@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.688.0] - 2026-06-25
+
+### Changed
+- **Internal refactor, no user-facing behavior change.** Decomposed the ~365-line procedural
+  `(*MetaFSM).Snapshot()` encoder into per-section `build*Vector` helpers (one per snapshot
+  section), mirroring the existing `Restore()`-side `decode*` symmetry. The FlatBuffers wire
+  output is byte-identical to before — builder operation order is load-bearing, so the extraction
+  preserves the exact sequence and is guarded by a new byte-identity golden test
+  (`TestByteIdentity_MetaFSMSnapshot`) that freezes the deterministic snapshot root.
+
 ## [0.0.687.0] - 2026-06-25
 
 ### Changed
