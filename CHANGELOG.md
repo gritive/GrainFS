@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.695.0] - 2026-06-25
+
+### Changed
+- **Internal reliability change, no user-facing behavior change.** The orphan-shard scrubber now
+  reclaims abandoned segment-staging shard directories (`.segstaging`, introduced in 0.0.691.0), closing
+  the disk leak that a crash between a chunked PUT's promote and commit, a failed upload, or a
+  concurrent-completer last-writer-wins loser could otherwise leave behind forever. The walker decides
+  safety by delete-time liveness — it reclaims a staged directory only when it is older than a generous
+  24h floor (so a slow in-flight upload is never touched), is not referenced by live object metadata
+  (the same full-object liveness check the scrubber already applies to every object), and is not a
+  chunked object's segment data. Any committed object is kept regardless of how it was written, and
+  GET/PUT are unchanged. A new `grainfs_scrub_segstaging_reclaimed_total` metric counts reclaimed
+  staging directories.
+
 ## [0.0.694.0] - 2026-06-25
 
 ### Changed
