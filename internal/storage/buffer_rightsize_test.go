@@ -65,6 +65,9 @@ func TestFirstChunkBufferSize_OpaqueReaderFallsBack(t *testing.T) {
 // sizes. Measured in bytes (TotalAlloc) because the win is allocation volume,
 // not allocation count.
 func TestWriteEncryptedObjectFile_SmallObjectAllocBounded(t *testing.T) {
+	if raceDetectorEnabled {
+		t.Skip("race instrumentation inflates TotalAlloc, making the byte threshold meaningless")
+	}
 	enc := testSegEnc(t)
 	dir := t.TempDir()
 	plaintext := []byte("small-object-payload")
@@ -97,6 +100,9 @@ func TestWriteEncryptedObjectFile_SmallObjectAllocBounded(t *testing.T) {
 // read happens on a later iteration — the chunker must use a small probe there
 // instead of a fresh 16 MiB buffer, or the win evaporates.
 func TestSegmentWriter_SizeHintRightSizesChunks(t *testing.T) {
+	if raceDetectorEnabled {
+		t.Skip("race instrumentation inflates TotalAlloc, making the byte threshold meaningless")
+	}
 	const objSize = 256 << 10
 	w := NewSegmentWriter(&byteWriterBackend{})
 	perOp := allocBytesPerRunForStorageTest(t, 20, func() error {
