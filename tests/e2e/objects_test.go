@@ -383,10 +383,90 @@ func runObjectCases(getTgt func() s3Target) {
 		// reporting in the Deleted/Errors response shape.
 	})
 
-	ginkgo.PIt("[TODO:e2e] ListObjects V1 paginates with Marker (no list-type=2)", func() {
-		// GET /:bucket without list-type=2 → legacy V1 listing.
-		// aws-sdk-go-v2: s3.ListObjects. Cover Marker pagination + IsTruncated
-		// + NextMarker semantics distinct from V2's ContinuationToken.
+	ginkgo.It("paginates V1 listing with Marker (ListV1Marker)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		client := tgt.pickNode(0)
+		ctx := context.Background()
+		bucket := tgt.uniqueBucket(t, "obj-list-v1")
+
+		// Zero-padded keys sort lexicographically in PUT order.
+		keys := []string{"page/k0", "page/k1", "page/k2", "page/k3", "page/k4"}
+		for _, key := range keys {
+			_, err := client.PutObject(ctx, &s3.PutObjectInput{
+				Bucket: aws.String(bucket),
+				Key:    aws.String(key),
+				Body:   stringReader("v"),
+			})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		}
+
+		// Page through the V1 listing (no list-type=2) feeding NextMarker back
+		// as Marker. Guard against an infinite loop if truncation never clears.
+		var collected []string
+		var pageSizes []int
+		var marker *string
+		lastTruncated := true
+		for i := 0; i < len(keys)+2; i++ {
+			out, err := client.ListObjects(ctx, &s3.ListObjectsInput{
+				Bucket:  aws.String(bucket),
+				MaxKeys: aws.Int32(2),
+				Marker:  marker,
+			})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+			pageSizes = append(pageSizes, len(out.Contents))
+			for _, obj := range out.Contents {
+				collected = append(collected, aws.ToString(obj.Key))
+			}
+
+			lastTruncated = aws.ToBool(out.IsTruncated)
+			if !lastTruncated {
+				// NextMarker is omitted on the final (non-truncated) page.
+				gomega.Expect(aws.ToString(out.NextMarker)).To(gomega.BeEmpty())
+				break
+			}
+
+			// On a truncated page NextMarker is the last returned key.
+			gomega.Expect(out.Contents).NotTo(gomega.BeEmpty())
+			gomega.Expect(aws.ToString(out.NextMarker)).To(
+				gomega.Equal(aws.ToString(out.Contents[len(out.Contents)-1].Key)))
+			marker = out.NextMarker
+		}
+
+		gomega.Expect(lastTruncated).To(gomega.BeFalse(), "pagination did not terminate")
+		// MaxKeys=2 over 5 keys must split into exactly 3 pages of 2/2/1. Pinning
+		// the page sizes proves the server honored Marker pagination instead of
+		// returning everything in one untruncated page.
+		gomega.Expect(pageSizes).To(gomega.Equal([]int{2, 2, 1}))
+		// Union covers every key exactly once, in ascending lexicographic order.
+		gomega.Expect(collected).To(gomega.Equal(keys))
+	})
+
+	ginkgo.It("returns an empty V1 page for a marker past the last key (ListV1MarkerBeyond)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		client := tgt.pickNode(0)
+		ctx := context.Background()
+		bucket := tgt.uniqueBucket(t, "obj-list-v1-beyond")
+
+		for _, key := range []string{"page/k0", "page/k1", "page/k2"} {
+			_, err := client.PutObject(ctx, &s3.PutObjectInput{
+				Bucket: aws.String(bucket),
+				Key:    aws.String(key),
+				Body:   stringReader("v"),
+			})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		}
+
+		out, err := client.ListObjects(ctx, &s3.ListObjectsInput{
+			Bucket: aws.String(bucket),
+			Marker: aws.String("page/zzz"), // sorts after every stored key
+		})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(out.Contents).To(gomega.BeEmpty())
+		gomega.Expect(aws.ToBool(out.IsTruncated)).To(gomega.BeFalse())
+		gomega.Expect(aws.ToString(out.NextMarker)).To(gomega.BeEmpty())
 	})
 }
 
