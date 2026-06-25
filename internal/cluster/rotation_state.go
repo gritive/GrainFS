@@ -177,10 +177,10 @@ func (f *RotationFSM) applyBegin(c RotateKeyBegin) error {
 
 func (f *RotationFSM) applySwitch(c RotateKeySwitch) error {
 	if f.state.Phase != PhaseBegun {
-		return fmt.Errorf("Switch requires PhaseBegun, currently %d", f.state.Phase)
+		return fmt.Errorf("switch requires PhaseBegun, currently %d", f.state.Phase)
 	}
 	if f.state.RotationID != c.RotationID {
-		return errors.New("Switch RotationID mismatch")
+		return errors.New("switch RotationID mismatch")
 	}
 	f.state.Phase = PhaseSwitched
 	return nil
@@ -188,10 +188,10 @@ func (f *RotationFSM) applySwitch(c RotateKeySwitch) error {
 
 func (f *RotationFSM) applyDrop(c RotateKeyDrop) error {
 	if f.state.Phase != PhaseSwitched {
-		return fmt.Errorf("Drop requires PhaseSwitched, currently %d", f.state.Phase)
+		return fmt.Errorf("drop requires PhaseSwitched, currently %d", f.state.Phase)
 	}
 	if f.state.RotationID != c.RotationID {
-		return errors.New("Drop RotationID mismatch")
+		return errors.New("drop RotationID mismatch")
 	}
 	// Phase 4 → collapse to PhaseSteady on NEW key. NEW becomes the new OLD.
 	f.state.OldSPKI = f.state.NewSPKI
@@ -207,7 +207,7 @@ func (f *RotationFSM) applyAbort(c RotateKeyAbort) error {
 		return errors.New("no rotation in progress")
 	}
 	if f.state.RotationID != c.RotationID {
-		return errors.New("Abort RotationID mismatch")
+		return errors.New("abort RotationID mismatch")
 	}
 	switch f.state.Phase {
 	case PhaseBegun:
