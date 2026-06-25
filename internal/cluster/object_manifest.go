@@ -168,18 +168,21 @@ func (b *DistributedBackend) listBlobAuthBucketObjectsForGC(bucket string) ([]st
 	// unions all remaining live versions).
 	cmds = dropHardDeletedVersions(cmds)
 
-	// First pass: find the max VersionID per key (markers included).
-	maxVID := make(map[string]string, len(cmds))
+	// First pass: find the ModTime-primary latest version per key (markers
+	// included) via quorumMetaCmdWins, matching deriveLatestVersion / HEAD.
+	latestVID := make(map[string]string, len(cmds))
+	latest := make(map[string]PutObjectMetaCmd, len(cmds))
 	for _, cmd := range cmds {
-		if cur, ok := maxVID[cmd.Key]; !ok || cmd.VersionID > cur {
-			maxVID[cmd.Key] = cmd.VersionID
+		if ex, ok := latest[cmd.Key]; !ok || quorumMetaCmdWins(cmd, ex) {
+			latest[cmd.Key] = cmd
+			latestVID[cmd.Key] = cmd.VersionID
 		}
 	}
 
 	// Second pass: map each PutObjectMetaCmd to a SnapshotObject.
 	out := make([]storage.SnapshotObject, 0, len(cmds))
 	for _, cmd := range cmds {
-		out = append(out, snapshotObjectFromQuorumCmd(bucket, cmd, maxVID[cmd.Key] == cmd.VersionID))
+		out = append(out, snapshotObjectFromQuorumCmd(bucket, cmd, latestVID[cmd.Key] == cmd.VersionID))
 	}
 	return out, nil
 }

@@ -115,6 +115,74 @@ func runVersioningCases(getTgt func() s3Target, getClient func() *s3.Client) {
 		gomega.Expect(v1Body).To(gomega.Equal([]byte("content-v1")))
 	})
 
+	ginkgo.It("makes the later-completed multipart latest over an earlier PUT (ModTimePrimaryLatest)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		client := getClient()
+		ctx := context.Background()
+		bkt := tgt.uniqueBucket(t, "mtimelatest")
+		enableVersioning(bkt)
+		key := "edge.bin"
+
+		// CreateMultipartUpload first (its uploadID/derived VersionId predates the
+		// PUT), then upload one part.
+		init, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+			Bucket: aws.String(bkt), Key: aws.String(key),
+		})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		p1, err := client.UploadPart(ctx, &s3.UploadPartInput{
+			Bucket: aws.String(bkt), Key: aws.String(key), UploadId: init.UploadId,
+			PartNumber: aws.Int32(1), Body: strings.NewReader("multipart-wins-body"),
+		})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+		// PutObject on the SAME key while the multipart is still in flight: its
+		// VersionId is LARGER (minted later) but it is committed FIRST.
+		putVID := putVersion(bkt, key, "put-loses-body")
+
+		// Advance past the next whole second so the multipart's completion ModTime is
+		// strictly greater than the PUT's (ModTime is second-granular).
+		time.Sleep(1100 * time.Millisecond)
+
+		comp, err := client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+			Bucket: aws.String(bkt), Key: aws.String(key), UploadId: init.UploadId,
+			MultipartUpload: &types.CompletedMultipartUpload{
+				Parts: []types.CompletedPart{{PartNumber: aws.Int32(1), ETag: p1.ETag}},
+			},
+		})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		mpuVID := aws.ToString(comp.VersionId)
+		gomega.Expect(mpuVID).NotTo(gomega.BeEmpty())
+		gomega.Expect(mpuVID < putVID).To(gomega.BeTrue(),
+			"the multipart was created before the PUT, so its VersionId must be the smaller one")
+
+		// ModTime-primary: HEAD (no versionId) resolves to the later-completed
+		// multipart, even though its VersionId is smaller.
+		head, err := client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(bkt), Key: aws.String(key)})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(aws.ToString(head.VersionId)).To(gomega.Equal(mpuVID),
+			"HEAD must return the later-completed multipart (ModTime-primary latest), not the larger-VID PUT")
+
+		// GET (no versionId) returns the multipart's body.
+		got, err := client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bkt), Key: aws.String(key)})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		ginkgo.DeferCleanup(got.Body.Close)
+		body, _ := io.ReadAll(got.Body)
+		gomega.Expect(body).To(gomega.Equal([]byte("multipart-wins-body")))
+
+		// LIST IsLatest MUST AGREE with HEAD — exactly the multipart version is latest.
+		lv, err := client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{Bucket: aws.String(bkt)})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		var latestVIDs []string
+		for _, v := range lv.Versions {
+			if aws.ToString(v.Key) == key && aws.ToBool(v.IsLatest) {
+				latestVIDs = append(latestVIDs, aws.ToString(v.VersionId))
+			}
+		}
+		gomega.Expect(latestVIDs).To(gomega.Equal([]string{mpuVID}),
+			"exactly the multipart version must be flagged IsLatest, agreeing with HEAD")
+	})
+
 	ginkgo.It("heads by version ID (HeadByVersionID)", func() {
 		t := ginkgo.GinkgoTB()
 		tgt := getTgt()

@@ -126,6 +126,60 @@ func TestListObjectVersionsBlobAuthOn(t *testing.T) {
 		require.Equal(t, 1, akLatest, "exactly one IsLatest=true row for the key")
 	})
 
+	t.Run("blob winner + stale appendable carve-out (diff VID) → exactly one IsLatest, on the blob", func(t *testing.T) {
+		// codex code-gate / ModTime-primary: a key with live blob versions AND a stale
+		// appendable FSM carve-out at a DIFFERENT vid (lat: set) must NOT yield two
+		// IsLatest rows. HEAD resolves latest from the blob winner only (carve-outs are
+		// a per-version-MISS fallback), so LIST must agree — blob authority owns IsLatest.
+		b := newTestDistributedBackend(t)
+		require.NoError(t, b.CreateBucket(ctx, "bdual"))
+		setVersioningForTest(t, b, "bdual", "Enabled")
+		// Two live blob versions of key "k" (vidA2 wins by ModTime).
+		seedVersionBlob(t, b, "bdual", "k", vidA1, PutObjectMetaCmd{ETag: "e1", ModTime: 100})
+		seedVersionBlob(t, b, "bdual", "k", vidA2, PutObjectMetaCmd{ETag: "e2", ModTime: 200})
+		// Stale appendable carve-out at a different vid with lat: set.
+		seedFSMObject(t, b, "bdual", "k", "vapp", objectMeta{Key: "k", ETag: "app", IsAppendable: true}, true)
+
+		vs, err := b.ListObjectVersions(ctx, "bdual", "", 0)
+		require.NoError(t, err)
+		var latest []string
+		for _, v := range vs {
+			if v.Key == "k" && v.IsLatest {
+				latest = append(latest, v.VersionID)
+			}
+		}
+		require.Equal(t, []string{vidA2}, latest,
+			"exactly one IsLatest, and it is the blob winner (ModTime 200), not the carve-out")
+
+		// LIST IsLatest must agree with HEAD (blob winner).
+		head, herr := b.HeadObject(ctx, "bdual", "k")
+		require.NoError(t, herr)
+		require.Equal(t, vidA2, head.VersionID)
+	})
+
+	t.Run("multiple appendable carve-out versions, one lat: → only the lat: target is IsLatest", func(t *testing.T) {
+		// codex code-gate: hasLat is key-level, so a key with >1 appendable/coalesced
+		// FSM version record and one lat: pointer must flag IsLatest ONLY on the lat:
+		// target vid — not every carve-out row (HEAD resolves only the lat: vid).
+		b := newTestDistributedBackend(t)
+		require.NoError(t, b.CreateBucket(ctx, "bca"))
+		setVersioningForTest(t, b, "bca", "Enabled")
+		// Two appendable version records of key "k"; lat: → vidA2 only.
+		seedFSMObject(t, b, "bca", "k", vidA1, objectMeta{Key: "k", ETag: "app1", IsAppendable: true}, false)
+		seedFSMObject(t, b, "bca", "k", vidA2, objectMeta{Key: "k", ETag: "app2", IsAppendable: true}, true)
+
+		vs, err := b.ListObjectVersions(ctx, "bca", "", 0)
+		require.NoError(t, err)
+		var latest []string
+		for _, v := range vs {
+			if v.Key == "k" && v.IsLatest {
+				latest = append(latest, v.VersionID)
+			}
+		}
+		require.Equal(t, []string{vidA2}, latest,
+			"only the lat:-targeted appendable version is IsLatest, not every carve-out row")
+	})
+
 	t.Run("coalesced carve-out → appears", func(t *testing.T) {
 		b := newTestDistributedBackend(t)
 		require.NoError(t, b.CreateBucket(ctx, "bco"))
