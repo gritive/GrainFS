@@ -49,6 +49,26 @@ func TestOperationsAllowPullsCommittedPolicyOnColdCache(t *testing.T) {
 	require.True(t, store.Allow(context.Background(), in)) // no committed policy ⇒ allow (negative-cache)
 }
 
+func TestOperationsGetBucketPolicyCompileErrorDropsNegativeCache(t *testing.T) {
+	be := &mapPolicyBackend{policies: map[string][]byte{}}
+	store := policy.NewCompiledPolicyStore()
+	ops := NewOperations(be, WithPolicyStore(store)) // installs the pull-on-miss loader
+
+	in := s3auth.PermCheckInput{Action: s3auth.PutObject,
+		Principal: s3auth.Principal{AccessKey: "AKIA"},
+		Resource:  s3auth.ResourceRef{Bucket: "b", Key: "k"}}
+	require.True(t, store.Allow(context.Background(), in)) // no committed policy ⇒ allow (negative-cache)
+
+	malformed := []byte("{not json")
+	be.policies["b"] = malformed
+
+	got, err := ops.GetBucketPolicy("b")
+	require.NoError(t, err)
+	require.Equal(t, malformed, got)
+	require.False(t, store.Allow(context.Background(), in),
+		"admin GetBucketPolicy must drop stale negative cache when the committed policy cannot compile")
+}
+
 func TestOperationsBucketPolicyPersistsAndUpdatesCache(t *testing.T) {
 	backend := &policyBackendFake{}
 	store := policy.NewCompiledPolicyStore()

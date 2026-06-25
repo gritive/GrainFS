@@ -145,13 +145,6 @@ separate PR, facades stay the spine — see design
   `internal/storage` (loader injected as a plain func). Tests: policy unit (pull/negative/fault/
   malformed/tighten/loosen/flush/concurrency, race-clean), storage cold-cache, cluster apply-hook,
   in-process server cold-cache proof.
-- **[P3][follow-up, security-consistency] Admin GET ?policy on a malformed stored policy leaves the
-  negative cache stale.** `operations_policy.go:38` lazily `Set`s on the display read and ignores
-  compile errors; if a bucket was negative-cached and an admin GETs a malformed committed policy, the
-  `Set` fails and the negative entry survives → authz `Allow` returns allow, whereas the authz
-  pull-on-miss path correctly fail-closes a malformed policy to deny. Only affects already-malformed
-  stored policies (PutBucketPolicy rejects new ones); not a bypass of any valid Deny. Make the
-  GET-path `Set`-failure clear the negative entry (or call `Invalidate`) for parity.
 - **[DONE] AppendObject versioned-bucket feature-gate** read the PLAIN versioning state
   (`object_append.go`), so a stale group-0 follower could read Unversioned for an Enabled bucket and
   let an append bypass the 501 gate. Fixed: the gate now resolves versioning via the linearized read

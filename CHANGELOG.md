@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.715.0] - 2026-06-26
+
+### Fixed
+- **Admin bucket-policy display reads now have storage-level regression coverage for malformed
+  committed policies.** A `GetBucketPolicy` display read still returns malformed legacy bytes for
+  operators, but the test now proves that a compile failure drops any stale negative authz cache so
+  the next authorization check re-pulls the committed policy and fail-closes to deny.
+
 ## [0.0.714.0] - 2026-06-26
 
 ### Removed
