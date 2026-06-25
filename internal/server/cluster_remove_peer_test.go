@@ -225,6 +225,9 @@ func setupRemovePeerServer(t *testing.T, ci ClusterInfo, mem ClusterMembership) 
 	}
 
 	srv := New(addr, backend, opts...)
+	// Drain the event worker (Shutdown → stopEventWorker) BEFORE the db.Close cleanup
+	// above runs (t.Cleanup is LIFO) so a buffered Append never races the Badger close.
+	t.Cleanup(func() { servertest.ShutdownServer(t, srv) })
 	go srv.Run() //nolint:errcheck
 	for i := 0; i < 100; i++ {
 		conn, dialErr := net.Dial("tcp", addr)
