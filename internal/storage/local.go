@@ -406,7 +406,7 @@ func (b *LocalBackend) GetObject(ctx context.Context, bucket, key string) (io.Re
 		return io.NopCloser(NewSegmentReader(store, obj.Segments)), obj, nil
 	}
 
-	// Legacy single-file path for objects predating segments. Range GETs
+	// Legacy single-file path for WriteAt-created fixture objects. Range GETs
 	// keep using ReadAt directly.
 	if b.segEnc != nil {
 		rc, err := openEncryptedObjectFile(b.objectPath(bucket, key), b.segEnc, objectFileAADFields(bucket, key), obj.Size)
@@ -916,8 +916,8 @@ func writeZeros(w io.Writer, n int64) error {
 //
 // Segment-backed objects (every object produced by PutObject since Task 1.6)
 // walk obj.Segments and dispatch a per-segment pread for each overlapping
-// segment. Legacy single-file objects (Volume Device blocks via WriteAt) still
-// pread the flat backing file.
+// segment. Legacy single-file objects created through WriteAt still pread the
+// flat backing file.
 func (b *LocalBackend) ReadAt(ctx context.Context, bucket, key string, offset int64, buf []byte) (int, error) {
 	_ = ctx
 	if len(buf) == 0 {
@@ -935,7 +935,7 @@ func (b *LocalBackend) ReadAt(ctx context.Context, bucket, key string, offset in
 		return 0, err
 	}
 
-	// Legacy single-file path: pre-segment objects (Volume Device blocks).
+	// Legacy single-file path: WriteAt-created fixture objects.
 	if obj.Segments == nil {
 		objPath := b.objectPath(bucket, key)
 		if b.segEnc != nil {
@@ -1150,7 +1150,7 @@ func (b *LocalBackend) DeleteObject(ctx context.Context, bucket, key string) err
 		return err
 	}
 
-	// Legacy single-file blob (Volume Device / pre-segment objects).
+	// Legacy single-file blob (WriteAt-created fixture objects).
 	os.Remove(b.objectPath(bucket, key))
 	// Segment blobs from segmented PUTs live under <key>_segments/.
 	os.RemoveAll(b.objectPath(bucket, key) + "_segments")

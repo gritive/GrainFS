@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.720.0] - 2026-06-26
+
+### Changed
+- **Removed the stale legacy single-file read-path follow-up after verifying `WriteAt` still
+  produces that fixture shape.** Comments now name the live `WriteAt` producer instead of the
+  retired `__grainfs_volumes` path, and the non-actionable TODO is gone.
+
 ## [0.0.719.0] - 2026-06-26
 
 ### Changed
