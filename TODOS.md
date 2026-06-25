@@ -55,12 +55,6 @@ separate PR, facades stay the spine — see design
   `decideQuorumMetaWrite` are already pure, co-located, zero-dep testable; 23 call sites = leverage,
   not scatter; a hypothetical `LWWResolver` module fails the deletion test. No module — shared by the
   local write-accept and the orchestration merge as free functions.
-- **[P3] parent-dir fsync gap (pre-existing, surfaced by the decomposition).** Quorum-meta
-  (`quorum_meta.go` writeQuorumMetaLocal) and manifest (`manifest_blob.go`) writes fsync the temp
-  file then rename but do **not** fsync the parent directory (no `syncDirChain`, unlike shard
-  writes) — a crash can lose the rename even though bytes are durable. Extracting LocalQuorumMetaStore
-  makes this visible/testable. Behavior change, so a separate PR; may relate to Quorum Meta Store
-  data-loss ordering.
 
 ### DeleteBucket non-Enabled emptiness follow-ups (2026-06-24)
 
