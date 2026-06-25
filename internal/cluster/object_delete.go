@@ -73,9 +73,12 @@ func (b *DistributedBackend) deleteObjectWithMarker(ctx context.Context, bucket,
 			return "", fmt.Errorf("resolve per-version blobs for delete marker %s/%s: %w", bucket, key, verr)
 		}
 		if len(cmds) > 0 {
+			// Inherit placement from the ModTime-primary latest version
+			// (quorumMetaCmdWins), matching deriveLatestVersion, so the delete
+			// marker is co-located with what HEAD/LIST consider latest.
 			placement := cmds[0]
 			for i := range cmds {
-				if cmds[i].VersionID > placement.VersionID {
+				if quorumMetaCmdWins(cmds[i], placement) {
 					placement = cmds[i]
 				}
 			}

@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.684.0] - 2026-06-25
+
+### Changed
+- **The latest version of an object is now the LAST COMPLETED write, not the one with the newest
+  version ID.** Previously the "latest" version (what `GET`/`HEAD` without a version ID return, and
+  which version `ListObjectVersions` flags `IsLatest`) was decided by version-ID order, which is
+  creation-time order. A multipart upload created before a same-key `PutObject` but completed after it
+  therefore stayed non-latest even though it was written last. Latest is now resolved by modification
+  time (the completion time), with the version ID as a deterministic tiebreaker; `GET`/`HEAD` and
+  `ListObjectVersions` agree on the same winner. Note: modification time is second-granular, so a
+  multipart and a `PutObject` that complete within the same one-second window still tie-break by
+  version ID.
+
 ## [0.0.683.0] - 2026-06-25
 
 ### Changed

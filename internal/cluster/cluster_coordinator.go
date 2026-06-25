@@ -1446,7 +1446,7 @@ func reconcileVersionIsLatest(versions []*storage.ObjectVersion) {
 			latestByKey[v.Key] = v
 			continue
 		}
-		if v.VersionID > cur.VersionID {
+		if latestWins(v.LastModified, v.VersionID, cur.LastModified, cur.VersionID) {
 			cur.IsLatest = false
 			latestByKey[v.Key] = v
 		} else {
@@ -1455,14 +1455,16 @@ func reconcileVersionIsLatest(versions []*storage.ObjectVersion) {
 	}
 }
 
-// sortObjectVersions orders by (Key asc, VersionID desc) — newest version first
-// within each key (UUIDv7 is lex-ASC-by-time). Mirrors the per-group leaf sort.
+// sortObjectVersions orders by (Key asc, ModTime-primary desc) — newest version
+// first within each key (latestWins: higher ModTime, tie → higher VersionID), so
+// the IsLatest version sorts first. Mirrors the per-group leaf sort.
 func sortObjectVersions(versions []*storage.ObjectVersion) {
 	sort.Slice(versions, func(i, j int) bool {
 		if versions[i].Key != versions[j].Key {
 			return versions[i].Key < versions[j].Key
 		}
-		return versions[i].VersionID > versions[j].VersionID
+		return latestWins(versions[i].LastModified, versions[i].VersionID,
+			versions[j].LastModified, versions[j].VersionID)
 	})
 }
 

@@ -181,13 +181,24 @@ func (b *DistributedBackend) readQuorumMeta(bucket, key string) (*storage.Object
 // is behavior-neutral while every blob carries MetaSeq 0. None of these is a
 // recency guarantee at second granularity — only deterministic agreement.
 func quorumMetaBlobWins(modA int64, verA string, seqA uint64, modB int64, verB string, seqB uint64) bool {
+	if modA != modB || verA != verB {
+		return latestWins(modA, verA, modB, verB)
+	}
+	return seqA > seqB
+}
+
+// latestWins is the 2-tier ModTime-primary core shared by quorumMetaBlobWins
+// (which adds a MetaSeq tier) and the storage.ObjectVersion latest-deciding sites
+// that carry no MetaSeq (reconcileVersionIsLatest / sortObjectVersions / the leaf
+// version sort). It reports whether (modA, vidA) beats (modB, vidB): higher
+// ModTime wins; on an equal ModTime (second granularity) the lexicographically
+// greater VersionID wins. VersionIDs are unique per version, so distinct versions
+// always order strictly — a valid sort.Slice less function.
+func latestWins(modA int64, vidA string, modB int64, vidB string) bool {
 	if modA != modB {
 		return modA > modB
 	}
-	if verA != verB {
-		return verA > verB
-	}
-	return seqA > seqB
+	return vidA > vidB
 }
 
 // quorumMetaCmdWins reports whether candidate cand strictly beats cur in the
@@ -1124,12 +1135,12 @@ func (b *DistributedBackend) listObjectsPerVersion(ctx context.Context, bucket, 
 		return nil, nil
 	}
 	byKey := map[string]PutObjectMetaCmd{}
-	// Latest stays vid-primary (cross-vid max-VID wins); on a SAME-vid replica
-	// dedup by the full LWW comparator (quorumMetaCmdWins) so it is deterministic
-	// regardless of fan-out iteration order, mirroring readQuorumMetaVersions.
+	// Latest by the full ModTime-primary LWW comparator (quorumMetaCmdWins: higher
+	// ModTime; tie → higher VID; tie → higher MetaSeq; tombstone tier) so it matches
+	// deriveLatestVersion and is deterministic regardless of fan-out iteration order
+	// (mirrors readQuorumMetaVersions).
 	put := func(c PutObjectMetaCmd) {
-		if ex, ok := byKey[c.Key]; !ok || c.VersionID > ex.VersionID ||
-			(c.VersionID == ex.VersionID && quorumMetaCmdWins(c, ex)) {
+		if ex, ok := byKey[c.Key]; !ok || quorumMetaCmdWins(c, ex) {
 			byKey[c.Key] = c
 		}
 	}
@@ -1434,7 +1445,11 @@ func deriveLatestVersion(cmds []PutObjectMetaCmd) (PutObjectMetaCmd, bool) {
 		if c.IsHardDeleted {
 			continue // hard-delete tombstone: version is gone, never the latest
 		}
-		if !found || c.VersionID > latest.VersionID {
+		// ModTime-primary: the last-COMPLETED write is latest (quorumMetaCmdWins =
+		// higher ModTime; tie → higher VersionID; tie → higher MetaSeq), NOT the
+		// max create-time VersionID. A multipart created before but completed after a
+		// same-key PUT (lower VID, higher ModTime) is correctly latest.
+		if !found || quorumMetaCmdWins(c, latest) {
 			latest = c
 			found = true
 		}

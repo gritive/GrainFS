@@ -140,35 +140,26 @@ Deferred items:
 
 ### Multipart off-raft (M1-M5) follow-ups (2026-06-23)
 
-- **[P2][deferred] ModTime-primary latest rule — 7-site migration.** The current `deriveLatestVersion`
-  rule is max-VID (UUIDv7 lexicographic = create-time order). When a multipart upload is CREATED
-  (T1) before a concurrent PutObject (T2 > T1) but COMPLETED after, the PUT remains latest because
-  its vid is larger (T2 > T1). The intended long-term rule is ModTime-primary: the LAST COMPLETED
-  write is latest. Changing it requires a coordinated migration across ALL 7 sites:
-    • `deriveLatestVersion` (`quorum_meta.go`)
-    • `listObjectVersionsBlobAuth` maxVID loop (`object_version.go` ~line 551)
-    • `listBlobAuthBucketObjectsForGC` maxVID loop (`object_manifest.go` ~line 172)
-    • `scanObjectsBlobAuth` latest-collapse (`scrubbable.go` ~line 218)
-    • `reconcileVersionIsLatest` / `sortObjectVersions` (`cluster_coordinator.go`)
-    • latest-version resolution (`object_delete.go` ~line 78)
-    • `listObjectVersions` latestVID pre-scan (non-blob-auth path, `object_version.go` ~line 370)
-
-  Additional caveats before migration:
-    • GET (per-version blob) and LIST (version enumeration) must use the SAME latest rule — split
-      implementations are a trap (the listed `IsLatest` flag would disagree with HEAD).
-    • A concurrent regular PutObject with the same key can land at any ms; without a global
-      sequence tie-breaker, "last completed" is ambiguous when a multipart complete and a PutObject
-      complete within the same clock tick.
-  The regression-lock is `TestCompleteMultipart_VersionedLatestEdge` — it MUST FAIL (then be updated)
-  as part of the migration.
+- **[P3][pre-existing] Non-blob-auth Suspended cross-group `lat:` split can desync HEAD vs LIST.**
+  Surfaced while migrating to ModTime-primary latest. For versioning-Suspended (non-blob-auth)
+  buckets, HEAD resolves latest from the latest-only quorum-meta blob (`readQuorumMeta`,
+  last-write-wins) while LIST resolves it from the FSM `lat:` pointer + `reconcileVersionIsLatest`.
+  These are independent mechanisms (the `lat:` path is legacy-migration-only — "NOTHING ELSE writes
+  FSM object meta any more"), so a key split across groups with a divergent `lat:` pointer can make
+  LIST `IsLatest` disagree with HEAD. Pre-existing (the migration kept reconcile consistent with the
+  rest of LIST; it did not introduce this) and out of scope for the latest-rule change. Low impact
+  given the legacy-only `lat:` writer. Fix would unify the non-blob-auth HEAD and LIST resolvers.
 
 - **[P3][known-edge] Create-ordering is ms-granular only.** `deriveMultipartVID` encodes the
   uploadID's 48-bit UUIDv7 ms timestamp into the derived vid. Two uploads created in the SAME
   millisecond get a hash-arbitrary relative ordering (bytes [6:16] are sha256(rawUploadID), which
   differs per upload). Same-ms concurrent uploads are not ordered by wall clock; their relative
-  latest is hash-arbitrary. This is documented in `multipart_upload_id.go`. No action required;
-  the test `TestCompleteMultipart_VersionedLatestEdge` handles the same-ms case gracefully (logs
-  and skips the latest assertion).
+  latest is hash-arbitrary. This is documented in `multipart_upload_id.go`. No action required.
+  Now also the documented residual of the ModTime-primary latest rule: ModTime is second-granular,
+  so a multipart and a same-key PutObject that complete within the SAME second tie on ModTime and
+  fall back to the VID tiebreak (larger VID wins) — the original create-time edge still applies
+  within a one-second window. `TestCompleteMultipart_VersionedLatestEdge` forces a >1s gap to assert
+  the cross-second ModTime-primary behavior deterministically.
 
 - **[DONE] M4 stale comment + dead `MultipartDoneKey` cleanup (final-review batch).** Stale
   cross-reference comments (references to the removed `CmdCompleteMultipart` flow, removed

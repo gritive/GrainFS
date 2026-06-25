@@ -513,12 +513,14 @@ func (b *DistributedBackend) ListObjectVersions(ctx context.Context, bucket, pre
 	// lifecycle worker (ScanObjectsGrouped) consume the leaf directly, bypassing the
 	// coordinator's dedup.
 	versions = dedupVersionsKeepFirst(versions)
-	// Sort DESC by VersionID (UUIDv7 is lex-ASC-by-time, so reverse = newest-first).
+	// Sort newest-first within each key by ModTime-primary (latestWins), so the
+	// IsLatest version sorts first — matching deriveLatestVersion / sortObjectVersions.
 	sort.Slice(versions, func(i, j int) bool {
 		if versions[i].Key != versions[j].Key {
 			return versions[i].Key < versions[j].Key
 		}
-		return versions[i].VersionID > versions[j].VersionID
+		return latestWins(versions[i].LastModified, versions[i].VersionID,
+			versions[j].LastModified, versions[j].VersionID)
 	})
 	if maxKeys > 0 && len(versions) > maxKeys {
 		versions = versions[:maxKeys]
@@ -551,11 +553,14 @@ func (b *DistributedBackend) listObjectVersionsBlobAuth(bucket, prefix string, m
 	// Hard-delete tombstones are not versions: drop them before deriving IsLatest /
 	// emitting (a delete MARKER is kept — it IS a version in S3 ListObjectVersions).
 	cmds = dropHardDeletedVersions(cmds)
-	// Per-key max VID (UUIDv7 string max) so the max-VID blob is flagged IsLatest.
-	maxVID := map[string]string{}
+	// ModTime-primary winner per key (quorumMetaCmdWins) so the IsLatest flag
+	// matches HeadObject's deriveLatestVersion — both ModTime-primary, not max-VID.
+	winnerVID := map[string]string{}
+	winner := map[string]PutObjectMetaCmd{}
 	for _, c := range cmds {
-		if c.VersionID > maxVID[c.Key] {
-			maxVID[c.Key] = c.VersionID
+		if ex, ok := winner[c.Key]; !ok || quorumMetaCmdWins(c, ex) {
+			winner[c.Key] = c
+			winnerVID[c.Key] = c.VersionID
 		}
 	}
 	var versions []*storage.ObjectVersion
@@ -565,7 +570,7 @@ func (b *DistributedBackend) listObjectVersionsBlobAuth(bucket, prefix string, m
 		versions = append(versions, &storage.ObjectVersion{
 			Key:            c.Key,
 			VersionID:      c.VersionID,
-			IsLatest:       c.VersionID == maxVID[c.Key],
+			IsLatest:       c.VersionID == winnerVID[c.Key],
 			IsDeleteMarker: c.IsDeleteMarker,
 			LastModified:   c.ModTime,
 			ETag:           c.ETag,
@@ -573,7 +578,15 @@ func (b *DistributedBackend) listObjectVersionsBlobAuth(bucket, prefix string, m
 			Tags:           append([]storage.Tag(nil), c.Tags...),
 		})
 	}
-	carve, err := b.scanFsmCarveoutVersions(bucket, prefix, seen)
+	// Keys that have a (live) blob version: blob authority owns IsLatest for them
+	// (HEAD resolves latest from the blob winner only — carve-outs are a
+	// per-version-MISS fallback). A coexisting carve-out at such a key must NOT also
+	// claim IsLatest, else LIST would flag two latests / disagree with HEAD.
+	blobKeys := make(map[string]bool, len(winnerVID))
+	for k := range winnerVID {
+		blobKeys[k] = true
+	}
+	carve, err := b.scanFsmCarveoutVersions(bucket, prefix, seen, blobKeys)
 	if err != nil {
 		return nil, err
 	}
@@ -591,20 +604,25 @@ func (b *DistributedBackend) listObjectVersionsBlobAuth(bucket, prefix string, m
 // predicate. Plain vid-bearing versioned records are dropped (blob-authoritative
 // under blob authority). A (Key,VID) already present in blobSeen is skipped
 // (blob wins). Legacy-bare records emit VersionID="" / IsLatest=true, matching
-// the off-path leaf and fsmCarveoutObject.
-func (b *DistributedBackend) scanFsmCarveoutVersions(bucket, prefix string, blobSeen map[[2]string]bool) ([]*storage.ObjectVersion, error) {
+// the off-path leaf and fsmCarveoutObject — EXCEPT when the key also has a blob
+// version (key ∈ blobKeys): blob authority owns IsLatest there (HEAD ignores the
+// carve-out), so such a carve-out is emitted as a non-latest version.
+func (b *DistributedBackend) scanFsmCarveoutVersions(bucket, prefix string, blobSeen map[[2]string]bool, blobKeys map[string]bool) ([]*storage.ObjectVersion, error) {
 	var out []*storage.ObjectVersion
-	err := b.forEachLocalCarveout(bucket, prefix, func(key, vid string, bareLegacy, hasLat bool, m objectMeta) error {
+	err := b.forEachLocalCarveout(bucket, prefix, func(key, vid string, bareLegacy bool, latTarget string, m objectMeta) error {
 		if blobSeen[[2]string{key, vid}] {
 			return nil // blob wins the (Key,VID) collision
 		}
-		// A carve-out is its key's latest: bare-legacy has no version identity
-		// (IsLatest), and an appendable/coalesced record is stored as its key's
-		// single latest (lat: points at it). Mirrors the off-path leaf.
+		// A carve-out is its key's latest only if it IS the lat: target (the key's
+		// single latest) — a bare-legacy record has no version identity and is its own
+		// latest. Comparing vid==latTarget (not key-level "has a lat:") prevents a
+		// second appendable/coalesced version of the same key from also being flagged.
+		// And when the key has a blob version, blob authority owns IsLatest (HEAD =
+		// blob winner), so the carve-out is never latest there.
 		out = append(out, &storage.ObjectVersion{
 			Key:            key,
 			VersionID:      vid,
-			IsLatest:       bareLegacy || hasLat,
+			IsLatest:       (bareLegacy || vid == latTarget) && !blobKeys[key],
 			IsDeleteMarker: m.ETag == deleteMarkerETag,
 			LastModified:   m.LastModified,
 			ETag:           m.ETag,
@@ -631,16 +649,20 @@ func (b *DistributedBackend) scanFsmCarveoutVersions(bucket, prefix string, blob
 // to (vid="", bareLegacy=false) because a lat: pointer exists, and the
 // authoritative carve-out is the versioned record. A genuine legacy-bare record
 // (bareLegacy=true, no lat:) is kept.
-func (b *DistributedBackend) forEachLocalCarveout(bucket, prefix string, visit func(key, vid string, bareLegacy, hasLat bool, m objectMeta) error) error {
+func (b *DistributedBackend) forEachLocalCarveout(bucket, prefix string, visit func(key, vid string, bareLegacy bool, latTarget string, m objectMeta) error) error {
 	return b.store.View(func(txn MetadataTxn) error {
 		hasLat := map[string]bool{}
+		latVID := map[string]string{} // key → lat: target vid (the key's single latest)
 		rawLatPfx := []byte("lat:" + bucket + "/" + prefix)
 		latPrefix := b.ks().Prefix(rawLatPfx)
-		latIt := txn.NewIterator(MetaIteratorOptions{PrefetchValues: false})
+		latIt := txn.NewIterator(MetaIteratorOptions{PrefetchValues: true})
 		for latIt.Seek(latPrefix); latIt.ValidForPrefix(latPrefix); latIt.Next() {
 			rawKey := b.ks().MustStrip(latIt.Item().Key())
 			key := strings.TrimPrefix(string(rawKey), "lat:"+bucket+"/")
 			hasLat[key] = true
+			if v, verr := b.itemValueCopy(latIt.Item()); verr == nil {
+				latVID[key] = string(v)
+			}
 		}
 		latIt.Close()
 
@@ -669,7 +691,7 @@ func (b *DistributedBackend) forEachLocalCarveout(bucket, prefix string, visit f
 			if !isFsmCarveoutClass(m, bareLegacy) {
 				continue
 			}
-			if verr := visit(key, vid, bareLegacy, hasLat[key], m); verr != nil {
+			if verr := visit(key, vid, bareLegacy, latVID[key], m); verr != nil {
 				return verr
 			}
 		}

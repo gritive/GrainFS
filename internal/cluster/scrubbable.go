@@ -210,13 +210,13 @@ func (b *DistributedBackend) scanObjectsBlobAuth(bucket string) ([]scrubber.Obje
 	// Hard-delete tombstones have no live shards to scrub: drop them before the
 	// per-key collapse so a hard-deleted latest falls to its live predecessor.
 	cmds = dropHardDeletedVersions(cmds)
-	// Collapse to latest (max-VID) per key; same-VID replicas dedup by the full
-	// LWW comparator (quorumMetaCmdWins) so the winner is deterministic regardless
-	// of scan order (mirrors readQuorumMetaVersions).
+	// Collapse to latest per key by the full ModTime-primary LWW comparator
+	// (quorumMetaCmdWins: higher ModTime; tie → higher VID; tie → higher MetaSeq;
+	// tombstone tier) so the winner is deterministic regardless of scan order and
+	// matches deriveLatestVersion (mirrors readQuorumMetaVersions).
 	latest := map[string]PutObjectMetaCmd{}
 	for _, c := range cmds {
-		if ex, ok := latest[c.Key]; !ok || c.VersionID > ex.VersionID ||
-			(c.VersionID == ex.VersionID && quorumMetaCmdWins(c, ex)) {
+		if ex, ok := latest[c.Key]; !ok || quorumMetaCmdWins(c, ex) {
 			latest[c.Key] = c
 		}
 	}
@@ -243,7 +243,7 @@ func (b *DistributedBackend) scanObjectsBlobAuth(bucket string) ([]scrubber.Obje
 	// Local EC carve-out FSM records (appendable/coalesced/legacy-bare), deduped
 	// by key against the blob latest set (blob wins). Reuse the shared carve-out
 	// walk so the classification matches ListObjectVersions exactly.
-	if err := b.forEachLocalCarveout(bucket, "", func(key, vid string, _, _ bool, m objectMeta) error {
+	if err := b.forEachLocalCarveout(bucket, "", func(key, vid string, _ bool, _ string, m objectMeta) error {
 		if _, dup := seen[key]; dup {
 			return nil // blob latest already covers this key
 		}

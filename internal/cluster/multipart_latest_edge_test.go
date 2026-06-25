@@ -1,64 +1,46 @@
 package cluster
 
-// TestCompleteMultipart_VersionedLatestEdge is the documented-edge regression-lock
-// for the multipart-off-raft (M1-M5) epic.
+// TestCompleteMultipart_VersionedLatestEdge is the regression-lock for the
+// ModTime-primary latest-version rule (replaces the former max-VID create-time
+// rule).
 //
 // Scenario (spec §deriveLatestVersion):
 //
 //	(1) CreateMultipartUpload(k)   → uploadID minted at ms-timestamp T1
-//	(2) PutObject(k)               → vid minted at ms-timestamp T2 (T2 ≥ T1+1ms)
-//	(3) CompleteMultipartUpload(k) → finalised with det-vid derived from T1-epoch uploadID
+//	(2) PutObject(k)               → vid minted at ms-timestamp T2 (T2 ≥ T1+1ms),
+//	                                  object ModTime = floor(T2 seconds)
+//	(3) sleep ≥1s                  → guarantees the next ModTime second differs
+//	(4) CompleteMultipartUpload(k) → det-vid derived from the T1-epoch uploadID,
+//	                                  object ModTime = floor(T3 seconds) > floor(T2)
 //
-// Ordering invariant (ms-granular):
+// Ordering invariants:
 //
 //	mpuVID  = deriveMultipartVID(raw-uploadID)   ← UUIDv7 bytes[0:6] = T1 ms
 //	putVID  = newVersionID()                      ← UUIDv7 bytes[0:6] = T2 ms
+//	mpuVID < putVID                               (create-time order: upload first)
+//	ModTime(mpu) > ModTime(put)                   (multipart COMPLETED later, +1s)
 //
-//	Because the upload was CREATED (T1) BEFORE the PUT completed (T2):
-//	    mpuVID < putVID   (UUIDv7 lexicographic order = creation-time order)
+// Consequence (ModTime-primary IS the latest rule):
 //
-// Consequence (create-time ordering IS the current latest rule):
+//	deriveLatestVersion → mpuVID is LATEST even though its VID is smaller, because
+//	the multipart was the LAST COMPLETED write. HEAD and LIST must AGREE on this.
 //
-//	deriveLatestVersion(max-VID) → putVID is LATEST, even though the multipart
-//	COMPLETES after the PUT.  Both versions are retained; only the LATEST pointer
-//	changes.
-//
-// TODO (ModTime-primary latest — deferred, 2026-06-23):
-//
-//	This is a DOCUMENTED KNOWN EDGE.  The intended long-term behaviour is
-//	ModTime-primary latest (the LAST COMPLETED object is latest regardless of
-//	uploadID create order).  Changing it requires migrating ALL 7 sites that
-//	use the max-VID rule:
-//	  • deriveLatestVersion  (quorum_meta.go)
-//	  • object_version.go  listObjectVersionsBlobAuth maxVID loop (~line 551)
-//	  • object_manifest.go  listBlobAuthBucketObjectsForGC maxVID loop (~line 172)
-//	  • scrubbable.go  localBlobAuthScrubObjects latest collapse (~line 218)
-//	  • cluster_coordinator.go  reconcileVersionIsLatest / sortObjectVersions
-//	  • object_delete.go  latest-version resolution (~line 78)
-//	  • listObjectVersions (non-sole-auth path, latestVID pre-scan ~line 370)
-//
-//	Additional caveats for that migration:
-//	  • GET (per-version blob) and LIST (version enumeration) must agree on the
-//	    same latest rule — split implementations are a trap.
-//	  • A concurrent regular PutObject with the same key can land at any ms;
-//	    without a global sequence tie-breaker, "last completed" is ambiguous when
-//	    a multipart complete and a concurrent PUT complete within the same clock tick.
-//
-// Changing this assertion is the migration gate: the test MUST FAIL before the
-// migration and PASS after.
+// This is the migration gate: under the old max-VID rule HEAD returned putVID;
+// under ModTime-primary it returns mpuVID. The ≥1s sleep is required because
+// ModTime is second-granular (time.Now().Unix()) — without it the PUT and the
+// complete share a second and the VID tiebreak (putVID larger) would win, which
+// is the documented same-second residual (see TODOS / CHANGELOG).
 
 import (
 	"bytes"
 	"context"
 	"testing"
+	"time"
 
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/stretchr/testify/require"
 )
 
-// TestCompleteMultipart_VersionedLatestEdge locks the create-time ordering edge:
-// when a multipart is CREATED before a PutObject but COMPLETED after, the PUT is
-// the latest (its UUIDv7 vid is larger) and BOTH versions remain addressable.
 func TestCompleteMultipart_VersionedLatestEdge(t *testing.T) {
 	b := newSingleNode1Plus0ChunkCapable(t)
 	ctx := context.Background()
@@ -85,51 +67,59 @@ func TestCompleteMultipart_VersionedLatestEdge(t *testing.T) {
 	require.NoError(t, err)
 
 	// Step 2: PutObject on the SAME key while the multipart is still in flight.
-	// The PUT mints a fresh UUIDv7 at T2 ≥ T1+1ms (sequential newVersionID calls
-	// on the same node are monotonically non-decreasing; any elapsed real time since
-	// CreateMultipartUpload advances the ms clock further). The test does NOT rely
-	// on this being strictly T2>T1 in real time — it verifies the ordering property
-	// directly below.
 	putObj, err := b.PutObject(ctx, bkt, key, bytes.NewReader([]byte("put-body")), "text/plain")
 	require.NoError(t, err)
 	putVID := putObj.VersionID
 	require.NotEmpty(t, putVID)
 
-	// Step 3: Complete the multipart upload.
+	// The multipart was CREATED before the PUT, so its VID is the smaller one —
+	// the precondition that makes this test meaningful (a lower VID winning latest
+	// can ONLY happen under ModTime-primary, never under max-VID).
+	require.Less(t, mpuVID, putVID,
+		"multipart uploadID predates the PUT, so mpuVID must be the smaller VersionID")
+
+	// Step 3: Advance the wall clock past the next whole second so the multipart's
+	// completion ModTime is strictly greater than the PUT's (second granularity).
+	time.Sleep(1100 * time.Millisecond)
+
+	// Step 4: Complete the multipart upload — it commits LAST.
 	mpObj, err := b.CompleteMultipartUpload(ctx, bkt, key, up.UploadID, []storage.Part{*part})
 	require.NoError(t, err)
 	require.Equal(t, mpuVID, mpObj.VersionID,
 		"CompleteMultipartUpload must tag the object with the deterministic uploadID-derived vid")
+	require.Greater(t, mpObj.LastModified, putObj.LastModified,
+		"the later-completed multipart must carry a strictly greater ModTime than the PUT")
 
-	// Ordering invariant: mpuVID < putVID iff the upload was created before the PUT.
-	// If in an extremely unlikely sub-ms same-tick scenario the two UUIDs have the
-	// same ms prefix, the comparison is hash-arbitrary (documented ms-granular-only
-	// ordering). We only assert the well-known case here; same-ms is tested
-	// separately in TestDeriveMultipartVID_DeterministicAndMsOrdered.
-	if mpuVID >= putVID {
-		// Same-millisecond edge: ordering is hash-arbitrary. Both versions are still
-		// retained and addressable — the invariant we care about below still holds.
-		t.Logf("same-ms edge: mpuVID=%s putVID=%s (hash-arbitrary order, skipping latest assertion)", mpuVID, putVID)
-	} else {
-		// The EXPECTED path: mpuVID < putVID. HeadObject MUST return the PUT's vid
-		// (the larger one) because deriveLatestVersion picks max-VID.
-		//
-		// This is the documented edge: a late-completed multipart whose uploadID
-		// predates the PUT is NOT the latest even though it completed most recently.
-		// Changing this assertion is the ModTime-primary migration gate.
-		head, herr := b.HeadObject(ctx, bkt, key)
-		require.NoError(t, herr)
-		require.Equal(t, putVID, head.VersionID,
-			"HeadObject must return the PUT's vid (max-VID = latest), not the later-completed "+
-				"multipart's vid — create-time ordering is the current rule (ModTime-primary is a TODO)")
-		require.NotEqual(t, mpuVID, head.VersionID,
-			"HeadObject must NOT return the multipart's vid when the PUT's vid is larger")
+	// ModTime-primary: HeadObject MUST return the multipart's vid (latest because it
+	// COMPLETED last), NOT the PUT's larger vid.
+	head, herr := b.HeadObject(ctx, bkt, key)
+	require.NoError(t, herr)
+	require.Equal(t, mpuVID, head.VersionID,
+		"HeadObject must return the later-completed multipart's vid (ModTime-primary latest), "+
+			"not the PUT's larger vid")
+
+	// LIST IsLatest MUST AGREE with HEAD — the same ModTime-primary winner is flagged
+	// IsLatest, and it sorts first within the key.
+	versions, lerr := b.ListObjectVersions(ctx, bkt, "", 0)
+	require.NoError(t, lerr)
+	var latestVID string
+	var latestSeen bool
+	for _, v := range versions {
+		if v.Key == key && v.IsLatest {
+			require.False(t, latestSeen, "exactly one version may be IsLatest per key")
+			latestSeen = true
+			latestVID = v.VersionID
+		}
 	}
+	require.True(t, latestSeen, "LIST must flag a latest version")
+	require.Equal(t, mpuVID, latestVID,
+		"LIST IsLatest must agree with HeadObject (both ModTime-primary)")
+	require.Equal(t, mpuVID, versions[0].VersionID,
+		"the IsLatest (ModTime-primary winner) version must sort first within the key")
 
-	// Both versions must be individually addressable by vid — this holds regardless
-	// of which one is latest.
+	// Both versions must remain individually addressable by vid.
 	hvMPU, _, err := b.headObjectMetaV(ctx, bkt, key, mpuVID)
-	require.NoError(t, err, "multipart version must be addressable by its det-vid after a later PUT")
+	require.NoError(t, err, "multipart version must be addressable by its det-vid")
 	require.Equal(t, mpuVID, hvMPU.VersionID)
 
 	hvPUT, _, err := b.headObjectMetaV(ctx, bkt, key, putVID)
