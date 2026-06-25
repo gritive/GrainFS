@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.682.0] - 2026-06-25
+
+### Changed
+- **Internal refactor, no user-facing behavior change.** Decomposed the distributed
+  erasure-coding read path (`ecObjectReader.readShards`) into a small `ecShardCollector`
+  type with named methods, and removed a verified-dead branch. K-of-N shard collection,
+  parity failover, peer-health marking, and cache accounting are unchanged. Production
+  read behavior is identical.
+
 ## [0.0.681.0] - 2026-06-25
 
 ### Changed

@@ -598,6 +598,33 @@ func BenchmarkECObjectReaderOpenObject5MiB(b *testing.B) {
 	}
 }
 
+// BenchmarkECObjectReaderReadObject exercises the readShards path (object <=
+// maxECPooledReadObjectSize → buffered ReadObject → readShards), unlike the
+// 5 MiB OpenObject bench which streams and never enters readShards. Used to
+// confirm the collector decomposition adds no per-read heap allocations
+// (collector is built once per read, mirroring the captured closure frame the
+// refactor replaced).
+func BenchmarkECObjectReaderReadObject(b *testing.B) {
+	cfg := ECConfig{DataShards: 2, ParityShards: 2}
+	data := bytes.Repeat([]byte("y"), 64<<10) // well under maxECPooledReadObjectSize
+	fetcher := &fakeECObjectShardFetcher{}
+	buildFakeShards(b, fetcher, "bucket", "key", cfg, data)
+
+	r := ecObjectReader{selfID: "node-a", shards: fetcher, ecConfig: cfg}
+	rec := PlacementRecord{Nodes: []string{"node-a", "node-a", "node-a", "node-a"}}
+	rec.K = cfg.DataShards
+	rec.M = cfg.ParityShards
+
+	b.SetBytes(int64(len(data)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		got, err := r.ReadObject(context.Background(), "bucket", "key", rec)
+		require.NoError(b, err)
+		require.Len(b, got, len(data))
+	}
+}
+
 func TestECObjectReader_OpenObject_NilShardService_ReturnsError(t *testing.T) {
 	r := ecObjectReader{selfID: "node-a", shards: nil, ecConfig: ECConfig{DataShards: 2, ParityShards: 0}}
 	rec := PlacementRecord{Nodes: []string{"node-a", "node-a"}}
