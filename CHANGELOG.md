@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.689.0] - 2026-06-25
+
+### Fixed
+- **UploadPartCopy data loss (CRITICAL).** A multipart server-side copy request
+  (`PUT /b/k?partNumber=N&uploadId=ID` with `x-amz-copy-source`) was mis-routed to the plain
+  UploadPart handler, which read the empty request body and stored it as the part — the copy source
+  was silently dropped and the client received `200` + an ETag. CompleteMultipartUpload then assembled
+  an object missing the copied bytes. This is the standard large-object copy path used by the AWS SDK
+  (multipart copy uses UploadPartCopy), so the corruption was silent and data-losing. UploadPartCopy is
+  now handled correctly: it copies the source object (or a `x-amz-copy-source-range` byte range,
+  inclusive `bytes=START-END`, and an optional source `versionId`) into the part through the full
+  source GetObject authorization chain (pre-load IAM/bucket-policy + post-load ACL) and returns a
+  `CopyPartResult` XML body.
+
 ## [0.0.688.0] - 2026-06-25
 
 ### Changed
