@@ -1518,6 +1518,22 @@ func (s *ShardService) PromoteLocalStagedShards(bucket, stagingKey, finalKey str
 	// means the shards are gone (never written / over-eager cleanup race) — fail
 	// rather than silently report success.
 	promotedAny := false
+	// promote accepts dst as durable: it persists the final-path dir entries up to
+	// the dataDir BEFORE the manifest commit (data-before-meta), so a post-commit
+	// crash cannot lose the rename and strand an acknowledged object with no final
+	// shards. Called on EVERY promoted path — including when dst was already present
+	// (rename race / idempotent retry / concurrent completer): an earlier mover may
+	// have created dst but crashed/failed before ITS fsync, so this caller must not
+	// proceed to commit until it has personally made the link durable. fsync is
+	// idempotent (syncDirChain dedups once this process persisted it), so re-syncing
+	// an already-durable dst is cheap.
+	promote := func(dst string, d int) error {
+		if err := s.syncDirChain(dst, s.dataDirs[d]); err != nil {
+			return fmt.Errorf("promote staged segment fsync %s: %w", dst, err)
+		}
+		promotedAny = true
+		return nil
+	}
 	for d := 0; d < len(s.dataDirs); d++ {
 		src, err := s.getShardDir(bucket, stagingKey, d)
 		if err != nil {
@@ -1531,9 +1547,12 @@ func (s *ShardService) PromoteLocalStagedShards(bucket, stagingKey, finalKey str
 			if os.IsNotExist(statErr) {
 				// No staged dir on this dataDir: either it never held a shard for this
 				// blob, or a prior promote already moved it. A present destination means
-				// the latter (idempotent retry / concurrent completer) — count it.
+				// the latter (idempotent retry / concurrent completer) — accept it, but
+				// still fsync the final chain before counting it as promoted.
 				if _, derr := os.Stat(dst); derr == nil {
-					promotedAny = true
+					if err := promote(dst, d); err != nil {
+						return err
+					}
 				}
 				continue
 			}
@@ -1544,20 +1563,17 @@ func (s *ShardService) PromoteLocalStagedShards(bucket, stagingKey, finalKey str
 		}
 		if err := os.Rename(src, dst); err != nil {
 			if _, derr := os.Stat(dst); derr == nil {
-				promotedAny = true
-				continue // destination already present (idempotent retry / concurrent completer)
+				// destination already present (idempotent retry / concurrent completer)
+				if err := promote(dst, d); err != nil {
+					return err
+				}
+				continue
 			}
 			return fmt.Errorf("promote staged segment rename %s -> %s: %w", src, dst, err)
 		}
-		// Make the rename durable BEFORE the manifest commit (data-before-meta): the
-		// shard bytes are already fsynced, but the freshly created final-path dir
-		// entries are not, so a post-commit crash could lose the rename and strand an
-		// acknowledged object with no final shards. Persist the new link up to the
-		// dataDir, mirroring the write path's syncDirChain.
-		if err := s.syncDirChain(dst, s.dataDirs[d]); err != nil {
-			return fmt.Errorf("promote staged segment fsync %s: %w", dst, err)
+		if err := promote(dst, d); err != nil {
+			return err
 		}
-		promotedAny = true
 	}
 	if !promotedAny {
 		return fmt.Errorf("promote staged segment: no staged or promoted shards for %q -> %q", stagingKey, finalKey)

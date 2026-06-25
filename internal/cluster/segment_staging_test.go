@@ -10,6 +10,8 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -156,6 +158,38 @@ func TestPromoteLocalStagedShards_NothingStaged_Fails(t *testing.T) {
 	svc, _ := newTestShardService(t)
 	err := svc.PromoteLocalStagedShards("b", ".segstaging/txnX/blobX", "obj/segments/blobX")
 	require.Error(t, err, "promote with no staged or final shards must fail")
+}
+
+// TestPromoteLocalStagedShards_DstAlreadyPresent_StillFsyncs locks the second
+// code-gate fix: when the staged dir is gone but the final dst already exists (a
+// rename race / concurrent completer / idempotent retry), this caller must still
+// fsync the final dir chain before treating the promote as done — the earlier
+// mover may have created dst but crashed before ITS fsync, so proceeding to the
+// manifest commit without a personal fsync would leave a non-durable link.
+func TestPromoteLocalStagedShards_DstAlreadyPresent_StillFsyncs(t *testing.T) {
+	svc, root := newTestShardService(t)
+	var synced []string
+	svc.syncDirHook = func(dir string) error { synced = append(synced, dir); return nil }
+
+	const bucket = "b"
+	const finalKey = "obj/segments/blobP"
+	// Pre-create the final dst dir (no staged src) to simulate a prior mover.
+	dst, err := svc.getShardDir(bucket, finalKey, 0)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(dst, 0o755))
+
+	require.NoError(t, svc.PromoteLocalStagedShards(bucket, ".segstaging/txnP/blobP", finalKey))
+
+	// The dst chain must have been fsynced (durability before commit) even though
+	// nothing was renamed on this call.
+	require.NotEmpty(t, synced, "dst-already-present path must still fsync the final chain")
+	var sawDst bool
+	for _, d := range synced {
+		if strings.HasPrefix(d, root) && strings.Contains(d, finalKey) {
+			sawDst = true
+		}
+	}
+	require.True(t, sawDst, "fsync must cover the final dst path, got %v", synced)
 }
 
 // TestHandlePromoteStaged_Failure_ReturnsErrorEnvelope locks the receiver half of
