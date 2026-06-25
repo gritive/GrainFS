@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gritive/GrainFS/internal/scrubber"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // This file implements the per-version blob reconciliation sweep under blob-primary.
@@ -57,6 +59,13 @@ func (b *DistributedBackend) perVersionBlobReclaimable(cmd PutObjectMetaCmd) boo
 	return auth.IsHardDeleted // authoritative state is a tombstone → this data blob is stale
 }
 
+func (b *DistributedBackend) latestTombstoneReclaimable(cmd PutObjectMetaCmd) bool {
+	if !cmd.IsDeleteMarker && !cmd.IsHardDeleted {
+		return false
+	}
+	return b.latestTombstoneConverged(cmd.Bucket, cmd.Key, cmd.NodeIDs)
+}
+
 // tombstoneConverged reports whether a hard-delete tombstone has fully propagated:
 // EVERY placement node (nodeIDs) is reachable AND none still holds a live (non-
 // tombstone) data blob for the version. Only then is dropping the tombstone safe —
@@ -94,6 +103,49 @@ func (b *DistributedBackend) tombstoneConverged(bucket, key, versionID string, n
 	return true // all reachable, none holds a data blob → safe to GC the tombstone
 }
 
+// latestTombstoneConverged is the latest-only sibling of tombstoneConverged. A
+// non-versioned DeleteObject writes an IsDeleteMarker blob under .quorum_meta; it
+// is safe to drop a local marker only after every placement node is reachable and
+// none still holds a live latest-only data blob for the key.
+func (b *DistributedBackend) latestTombstoneConverged(bucket, key string, nodeIDs []string) bool {
+	if b.shardSvc == nil || len(nodeIDs) == 0 {
+		return false
+	}
+	self := b.currentSelfAddr()
+	ctx, cancel := context.WithTimeout(context.Background(), quorumMetaReadTimeout)
+	defer cancel()
+	for _, node := range nodeIDs {
+		var raw []byte
+		var err error
+		if node == self {
+			raw, err = b.shardSvc.readQuorumMetaRaw(bucket, key)
+			if errors.Is(err, storage.ErrObjectNotFound) {
+				continue
+			}
+		} else {
+			addr, aerr := b.shardSvc.resolvePeerAddress(node)
+			if aerr != nil {
+				return false
+			}
+			raw, err = b.shardSvc.ReadQuorumMetaRaw(ctx, addr, bucket, key)
+			if err == nil && len(raw) == 0 {
+				continue
+			}
+		}
+		if err != nil {
+			return false
+		}
+		cmd, derr := decodeQuorumMetaBlob(raw)
+		if derr != nil || cmd.Bucket != bucket || cmd.Key != key {
+			return false
+		}
+		if !cmd.IsDeleteMarker && !cmd.IsHardDeleted {
+			return false
+		}
+	}
+	return true
+}
+
 // WalkOrphanQuorumMetaVersions yields each per-version quorum-meta blob on this
 // node's dataDirs[0]/.quorum_meta_versions subtree that is reclaimable under
 // blob-primary tombstone reconciliation (perVersionBlobReclaimable: a stale data
@@ -116,6 +168,48 @@ func (b *DistributedBackend) WalkOrphanQuorumMetaVersions(
 	cutoff := time.Now().Add(-b.effectiveOrphanShardAge())
 
 	var stopErr error
+	walkLatest := func(p string, d fs.DirEntry, werr error) error {
+		if werr != nil {
+			if os.IsNotExist(werr) {
+				return nil
+			}
+			if d != nil && d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() || isQuorumMetaTempName(d.Name()) {
+			return nil
+		}
+		info, ierr := d.Info()
+		if ierr != nil || info.ModTime().After(cutoff) {
+			return nil
+		}
+		data, rerr := os.ReadFile(p)
+		if rerr != nil {
+			return nil
+		}
+		cmd, derr := b.shardSvc.decodeQuorumMetaCmdBlob(data)
+		if derr != nil || cmd.Bucket == "" || cmd.Key == "" {
+			return nil
+		}
+		if !b.owningGroupHosted(cmd.Bucket) || !b.latestTombstoneReclaimable(cmd) {
+			return nil
+		}
+		if ferr := fn(cmd.Bucket, cmd.Key, "", p); ferr != nil {
+			stopErr = ferr
+			return filepath.SkipAll
+		}
+		return nil
+	}
+	latestRoot := filepath.Join(dataDirs[0], quorumMetaSubDir)
+	if walkErr := filepath.WalkDir(latestRoot, walkLatest); walkErr != nil && !os.IsNotExist(walkErr) {
+		return fmt.Errorf("walk quorum-meta root %s: %w", latestRoot, walkErr)
+	}
+	if stopErr != nil {
+		return stopErr
+	}
+
 	walkErr := filepath.WalkDir(root, func(p string, d fs.DirEntry, werr error) error {
 		if werr != nil {
 			if os.IsNotExist(werr) {
@@ -171,6 +265,20 @@ func (b *DistributedBackend) DeleteOrphanQuorumMetaVersion(bucket, key, versionI
 	}
 	if !b.orphanShardSweepAllowed() || !b.owningGroupHosted(bucket) {
 		return nil // gate/ownership changed since the walk → do not delete
+	}
+	if versionID == "" {
+		raw, err := b.shardSvc.readQuorumMetaRaw(bucket, key)
+		if errors.Is(err, storage.ErrObjectNotFound) {
+			return nil
+		}
+		if err != nil {
+			return nil
+		}
+		cur, derr := b.shardSvc.decodeQuorumMetaCmdBlob(raw)
+		if derr != nil || !b.latestTombstoneReclaimable(cur) {
+			return nil
+		}
+		return b.shardSvc.deleteQuorumMetaLocal(bucket, key)
 	}
 	local, err := b.shardSvc.readQuorumMetaVersionsLocal(bucket, key)
 	if err != nil {
