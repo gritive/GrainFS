@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.676.0] - 2026-06-25
+
+### Changed
+- **Test-only, no user-facing behavior change.** Fixed a flaky `internal/server` test
+  teardown race: two test helpers closed the eventstore's Badger DB before draining the
+  event-worker goroutine, so a buffered event could `Append` to a closed DB and panic
+  (`send on closed channel`) under full-suite load. The helpers now shut the server
+  down (draining the worker) before the DB closes, matching the production shutdown
+  order. Production code is unchanged.
+
 ## [0.0.675.0] - 2026-06-25
 
 ### Fixed

@@ -21,18 +21,6 @@ surfaced by that removal:
   Either re-use it for a future out-of-band snapshot reconcile, or remove it
   (`internal/config/config.go`) + its tests.
 
-### Discovered during the followup-cleanup PR (2026-06-25, both pre-existing, unrelated to that PR)
-
-- **[P2][pre-existing][flaky-test] `internal/server` `eventWorker` teardown race.** Under full-suite
-  `make test-unit` load the `internal/server` package panics `send on closed channel`
-  (`badger.(*DB).sendToWriteCh` ← `eventstore.(*Store).Append` ← `eventWorker.start.func1`,
-  `internal/server/events_worker.go:42`): the eventstore Badger DB is closed before the worker
-  goroutine is drained via `eventWorker.stop()`. Flaky (passes 3/3 in isolation; failed 1 of 2
-  full-suite runs). Exposed when the iceberg-removal merge landed on master mid-session; unrelated to
-  followup-cleanup (which does not touch `internal/server`). Fix: enforce stop-before-close ordering
-  on the eventWorker (call `w.stop()` before closing the eventstore `*Store`) in the server lifecycle /
-  test teardown so the worker never `Append`s after Close.
-
 ### DeleteBucket non-Enabled emptiness follow-ups (2026-06-24)
 
 - **[P3][pre-existing] TOCTOU between the DeleteBucket emptiness scan and the
