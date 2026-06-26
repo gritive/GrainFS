@@ -436,13 +436,6 @@ func newTestLifecycleStore(t *testing.T) MetadataStore {
 	return badgermeta.Wrap(db)
 }
 
-func openTestBadgerAt(t *testing.T, dir string) *badger.DB {
-	t.Helper()
-	db, err := badger.Open(badgerutil.SmallOptions(dir))
-	require.NoError(t, err)
-	return db
-}
-
 func TestApplyBucketLifecyclePut_WritesStore(t *testing.T) {
 	f := NewMetaFSM()
 	store := lifecycle.NewStore(newTestLifecycleStore(t))

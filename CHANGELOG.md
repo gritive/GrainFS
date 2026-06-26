@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.751.0] - 2026-06-26
+
+### Changed
+- **Removed remaining unused cluster test helpers reported by staticcheck.**
+  Deleted dead `_test.go` helper symbols from cluster key, reseal, backend,
+  config, IAM snapshot, meta-FSM, meta-raft, and scrubber wiring tests. The
+  only remaining standalone `staticcheck` U1000 findings are the documented
+  intentional production scaffolding entries.
+
 ## [0.0.750.0] - 2026-06-26
 
 ### Changed

@@ -10,17 +10,6 @@ import (
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
-const (
-	testMetaRaftElectionTimeout  = 150 * time.Millisecond
-	testMetaRaftHeartbeatTimeout = 40 * time.Millisecond
-)
-
-func fastMetaRaftConfig(cfg MetaRaftConfig) MetaRaftConfig {
-	cfg.ElectionTimeout = testMetaRaftElectionTimeout
-	cfg.HeartbeatTimeout = testMetaRaftHeartbeatTimeout
-	return cfg
-}
-
 var _ = Describe("Meta-Raft integration", func() {
 	It("bootstraps three nodes and joins followers", func() {
 		t := GinkgoT()

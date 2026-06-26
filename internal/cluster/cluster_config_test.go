@@ -47,5 +47,3 @@ func TestClusterConfig_ResetKeyRestoresDefault(t *testing.T) {
 func ptrFloat(v float64) *float64 { return &v }
 func ptrString(v string) *string  { return &v }
 func ptrInt32(v int32) *int32     { return &v }
-func ptrInt64(v int64) *int64     { return &v }
-func ptrBool(v bool) *bool        { return &v }
