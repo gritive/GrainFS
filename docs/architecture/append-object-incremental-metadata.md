@@ -184,10 +184,10 @@ After coalesce:
 3. Coalesce integration.
    Consume side-record prefixes without ETag recompute and keep crash recovery
    idempotent.
-4. Benchmark gate.
-   `BenchmarkS3Append` and `BenchmarkClusterAppend` must show allocs/op per
-   append flattening across 4/8/16 segment sweeps, with no GET/range/read
-   regression.
+4. Benchmark gate shipped in v0.0.757.0.
+   `BenchmarkS3Append` and `BenchmarkClusterAppend` showed allocs/op per append
+   flattening across 4/8/16 segment sweeps, and non-race allocation slope tests
+   now guard the single-node and cluster append paths.
 
 ## Test Plan
 
