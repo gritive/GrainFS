@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.762.0] - 2026-06-27
+
+### Fixed
+- **Persisted local coalesced object metadata in the storage object codec.**
+  LocalBackend object records now round-trip `Coalesced` references through
+  `storagepb.Object`, preserving post-coalesce append/read metadata across
+  local metadata reloads.
+
 ## [0.0.761.0] - 2026-06-27
 
 ### Added

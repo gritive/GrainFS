@@ -106,6 +106,62 @@ func marshalObject(obj *Object) ([]byte, error) {
 		}
 		appendMD5sOff = b.EndVector(len(md5Offs))
 	}
+	var coalescedOff flatbuffers.UOffsetT
+	if len(obj.Coalesced) > 0 {
+		var coalOffs []flatbuffers.UOffsetT
+		var localCoalOffs [32]flatbuffers.UOffsetT
+		if len(obj.Coalesced) <= len(localCoalOffs) {
+			coalOffs = localCoalOffs[:len(obj.Coalesced)]
+		} else {
+			coalOffs = make([]flatbuffers.UOffsetT, len(obj.Coalesced))
+		}
+		for i := len(obj.Coalesced) - 1; i >= 0; i-- {
+			c := obj.Coalesced[i]
+			idOff := b.CreateString(c.CoalescedID)
+			etagOff := b.CreateString(c.ETag)
+			var shardKeyOff flatbuffers.UOffsetT
+			if c.ShardKey != "" {
+				shardKeyOff = b.CreateString(c.ShardKey)
+			}
+			var nodeIDsOff flatbuffers.UOffsetT
+			if len(c.NodeIDs) > 0 {
+				nodeOffs := make([]flatbuffers.UOffsetT, len(c.NodeIDs))
+				for j := len(c.NodeIDs) - 1; j >= 0; j-- {
+					nodeOffs[j] = b.CreateString(c.NodeIDs[j])
+				}
+				storagepb.CoalescedRefStartNodeIdsVector(b, len(nodeOffs))
+				for j := len(nodeOffs) - 1; j >= 0; j-- {
+					b.PrependUOffsetT(nodeOffs[j])
+				}
+				nodeIDsOff = b.EndVector(len(nodeOffs))
+			}
+			storagepb.CoalescedRefStart(b)
+			storagepb.CoalescedRefAddCoalescedId(b, idOff)
+			storagepb.CoalescedRefAddSize(b, c.Size)
+			storagepb.CoalescedRefAddEtag(b, etagOff)
+			if shardKeyOff != 0 {
+				storagepb.CoalescedRefAddShardKey(b, shardKeyOff)
+			}
+			if c.ECData != 0 {
+				storagepb.CoalescedRefAddEcData(b, c.ECData)
+			}
+			if c.ECParity != 0 {
+				storagepb.CoalescedRefAddEcParity(b, c.ECParity)
+			}
+			if c.StripeBytes != 0 {
+				storagepb.CoalescedRefAddStripeBytes(b, c.StripeBytes)
+			}
+			if nodeIDsOff != 0 {
+				storagepb.CoalescedRefAddNodeIds(b, nodeIDsOff)
+			}
+			coalOffs[i] = storagepb.CoalescedRefEnd(b)
+		}
+		storagepb.ObjectStartCoalescedVector(b, len(coalOffs))
+		for i := len(coalOffs) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(coalOffs[i])
+		}
+		coalescedOff = b.EndVector(len(coalOffs))
+	}
 	tagsOff := buildTagsVector(b, obj.Tags, storagepb.ObjectStartTagsVector)
 	storagepb.ObjectStart(b)
 	storagepb.ObjectAddKey(b, keyOff)
@@ -134,6 +190,9 @@ func marshalObject(obj *Object) ([]byte, error) {
 	}
 	if tagsOff != 0 {
 		storagepb.ObjectAddTags(b, tagsOff)
+	}
+	if coalescedOff != 0 {
+		storagepb.ObjectAddCoalesced(b, coalescedOff)
 	}
 	root := storagepb.ObjectEnd(b)
 	b.Finish(root)
@@ -218,6 +277,33 @@ func unmarshalObjectInto(data []byte, dst *Object) (err error) {
 			}
 		}
 		dst.AppendCallMD5s = md5s
+	}
+	if n := t.CoalescedLength(); n > 0 {
+		coalesced := make([]CoalescedRef, n)
+		var c storagepb.CoalescedRef
+		for i := 0; i < n; i++ {
+			if !t.Coalesced(&c, i) {
+				continue
+			}
+			var nodeIDs []string
+			if c.NodeIdsLength() > 0 {
+				nodeIDs = make([]string, c.NodeIdsLength())
+				for j := 0; j < c.NodeIdsLength(); j++ {
+					nodeIDs[j] = string(c.NodeIds(j))
+				}
+			}
+			coalesced[i] = CoalescedRef{
+				CoalescedID: string(c.CoalescedId()),
+				Size:        c.Size(),
+				ETag:        string(c.Etag()),
+				ShardKey:    string(c.ShardKey()),
+				ECData:      c.EcData(),
+				ECParity:    c.EcParity(),
+				StripeBytes: c.StripeBytes(),
+				NodeIDs:     nodeIDs,
+			}
+		}
+		dst.Coalesced = coalesced
 	}
 	if n := t.TagsLength(); n > 0 {
 		dst.Tags = readTagsVector(n, t.Tags)

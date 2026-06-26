@@ -24,6 +24,7 @@ table Object {
                                    // CompositeETag input. Empty for non-appendable.
                                    // (FlatBuffers has no [bytes]; wrapper table preserves list-of-blobs semantics.)
   tags:[Tag];
+  coalesced:[CoalescedRef];
 }
 
 table BytesValue {
@@ -37,6 +38,17 @@ table SegmentRef {
   checksum:[ubyte];               // new: xxhash3-128 of plaintext (16 bytes)
   placement_group_id:string;      // new: cluster PG ID, empty for single-node
   shard_size:int32;               // new: EC data-shard size; 0 for single-node
+}
+
+table CoalescedRef {
+  coalesced_id:string;
+  size:int64;
+  etag:string;
+  shard_key:string;
+  ec_data:ubyte;
+  ec_parity:ubyte;
+  stripe_bytes:uint32;
+  node_ids:[string];
 }
 
 table MultipartPartEntry {
