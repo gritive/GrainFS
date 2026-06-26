@@ -26,12 +26,6 @@ PR removed the dead `__grainfs_volumes` EC-routing branch (`routeSourceFor`) and
 `__grainfs_nfs4` `IsInternalBucket` carve-out (behavior-neutral; greenfield, nothing creates
 either bucket).
 
-- **[P3][pre-existing] Internal buckets get zero scrub coverage.** `routeSourceFor` now maps every
-  internal (`__grainfs_*`) bucket to the `"replication"` scrub source, but production registers only
-  the `"ec"` source (`boot_phases_scrubber.go`), so internal-bucket scrub requests resolve to a nil
-  source = safe logged no-op. Pre-existing (the old volumes branch was the only internal→"ec" path).
-  "Should internal buckets be scrubbed at all, and via which source" is a design question, not a
-  leftover fix — surfaced by the code-gate review.
 - **[P4][hygiene] Incidental `__grainfs_volumes` test fixtures kept (Minimal scope).** `spool_test.go`,
   `pullthrough_test.go`, `store_bench_test.go`, `backend_bucket_management_integration_test.go`, and
   the `bucket_test.go` `{"__grainfs_volumes", true}` case still use the string as an arbitrary
