@@ -253,24 +253,6 @@ func (c *clusterSegmentBackend) deleteShards(ctx context.Context, peer, bucket, 
 	return c.b.shardSvc.DeleteShards(ctx, peer, bucket, shardKey)
 }
 
-// promoteStagedShards renames a segment's staged shard dirs (stagingKey) to their
-// final path (finalKey) on node — the commit-time promote of PR1 segment staging.
-// Self is short-circuited to the local rename (no RPC to self); peers go through
-// the PromoteStagedShards RPC. The shards keep their final-key AAD (set at staged
-// write), so post-promote reads decrypt correctly.
-func (c *clusterSegmentBackend) promoteStagedShards(ctx context.Context, node, bucket, stagingKey, finalKey string) error {
-	if c.promoteStagedFn != nil {
-		return c.promoteStagedFn(ctx, node, bucket, stagingKey, finalKey)
-	}
-	if c.b.shardSvc == nil {
-		return fmt.Errorf("shard service not wired")
-	}
-	if node == c.b.currentSelfAddr() {
-		return c.b.shardSvc.PromoteLocalStagedShards(bucket, stagingKey, finalKey)
-	}
-	return c.b.shardSvc.PromoteStagedShards(ctx, node, bucket, stagingKey, finalKey)
-}
-
 func (c *clusterSegmentBackend) promoteStagedShardsBatch(ctx context.Context, node, bucket string, pairs []stagedPromotePair) error {
 	if len(pairs) == 0 {
 		return nil

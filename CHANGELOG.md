@@ -11,10 +11,11 @@
   unavailable.
 
 ### Fixed
-- **Closed GC gate wiring races and the latest quorum-meta lint blocker.**
+- **Closed GC gate wiring races and latest-base lint blockers.**
   GC freshness/singleton callbacks are stored through atomic holders, `DataGroupManager` serializes
   gate updates against new group registration, and stale `ShardService` quorum-meta decode forwarding
-  helpers were removed after the latest base merge exposed them as unused.
+  helpers plus a superseded segment-staging promote helper were removed after latest base merges
+  exposed them as unused.
 
 ## [0.0.733.0] - 2026-06-26
 
