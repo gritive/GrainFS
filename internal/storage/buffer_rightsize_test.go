@@ -82,9 +82,8 @@ func TestWriteEncryptedObjectFile_SmallObjectAllocBounded(t *testing.T) {
 	runtime.GC()
 	runtime.ReadMemStats(&m1)
 	for i := 0; i < iters; i++ {
-		if _, err := writeEncryptedObjectFile(filepath.Join(dir, "obj"), enc, fields, bytes.NewReader(plaintext), io.Discard); err != nil {
-			t.Fatal(err)
-		}
+		_, err := writeEncryptedObjectFile(filepath.Join(dir, "obj"), enc, fields, bytes.NewReader(plaintext), io.Discard)
+		require.NoError(t, err)
 	}
 	runtime.ReadMemStats(&m2)
 

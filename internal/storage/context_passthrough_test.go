@@ -5,6 +5,8 @@ import (
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 type contextRecorderBackend struct {
@@ -90,11 +92,9 @@ func TestSwappableBackend_ForwardsContext(t *testing.T) {
 	ctx := context.WithValue(context.Background(), testContextKey{}, "caller")
 
 	if _, err := sb.PutObject(ctx, "b", "k", strings.NewReader("x"), "text/plain"); err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
-	if rec.ctx != ctx {
-		t.Fatalf("wrapped backend got %p, want %p", rec.ctx, ctx)
-	}
+	require.Same(t, ctx, rec.ctx, "wrapped backend context")
 }
 
 type testContextKey struct{}
