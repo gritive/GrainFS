@@ -36,7 +36,7 @@ rules.
 | S3 API and client compatibility | [S3 compatibility](reference/s3-compatibility.md) |
 | Benchmark methodology | [Benchmarks](reference/benchmarks.md) |
 | Rolling upgrade compatibility | [Rolling upgrade compatibility](reference/rolling-upgrade-compatibility.md) |
-| Transport versioning | [Transport mux versioning](reference/transport-mux-versioning.md) |
+| Retired transport mux rationale | [Historical transport mux versioning](reference/transport-mux-versioning.md) |
 | Upgrade finalization design | [Upgrade finalize machinery](reference/upgrade-finalize-machinery-design.md) |
 
 ## Explanation
@@ -51,4 +51,4 @@ Use these when you need the design rationale behind the system.
 | Single/cluster request execution | [Request execution actor flow](architecture/request-single-cluster-flow.md) |
 | Durability and object placement | [Durability and placement](architecture/durability-and-placement.md) |
 | Storage operation boundaries | [Storage operations facade](architecture/storage-operations-facade.md) |
-| Raft RPC stream multiplexing | [Stream multiplexing + heartbeat coalescing](architecture/quic-stream-multiplex.md) |
+| Retired Raft RPC stream multiplexing | [Historical stream multiplexing + heartbeat coalescing](architecture/quic-stream-multiplex.md) |

@@ -75,18 +75,24 @@ func (t *HTTPTransport) handleAppendSegmentRead(c context.Context, ctx *app.Requ
 		return
 	}
 
-	// Inbound admission released when this handler returns — BEFORE Hertz
-	// streams the response body — mirroring handleShardRead/handleForwardRead.
-	// Inbound admission for this route runs in admissionMiddleware.
+	// Inbound admission is held until the streamed response body closes, matching
+	// handleShardRead/handleForwardRead.
+	release, aerr := t.acquireAdmission(c, StreamReadAppendSegment)
+	if aerr != nil {
+		ctx.SetStatusCode(consts.StatusServiceUnavailable)
+		ctx.SetBodyString("overloaded: " + aerr.Error())
+		return
+	}
 
 	t.nativeAppendSegReads.Add(1)
 	reply, rbody, herr := (*hp)(frame)
 	if herr != nil {
+		release()
 		ctx.SetStatusCode(consts.StatusInternalServerError)
 		ctx.SetBodyString(herr.Error())
 		return
 	}
-	writeFramedReply(ctx, hdrAppendReply, reply, rbody)
+	writeFramedReply(ctx, hdrAppendReply, reply, holdAdmissionUntilClose(rbody, release))
 }
 
 // AppendSegmentRead fetches one append-segment blob from addr. On success the

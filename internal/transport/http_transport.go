@@ -266,14 +266,13 @@ func (t *HTTPTransport) Listen(ctx context.Context, addr string) error {
 	srv.GET(httpPingPath, func(c context.Context, rc *app.RequestContext) {
 		rc.SetStatusCode(consts.StatusOK)
 	})
-	// Inbound admission (TrafficLimiter) runs as per-route middleware ahead of
-	// each handler — see admissionMiddleware. Each route's StreamType is its
-	// admission class.
+	// Upload-body routes use middleware admission. Streaming-response routes
+	// acquire inside the handler and release when Hertz closes the body.
 	srv.POST(httpShardWritePath, t.admissionMiddleware(StreamShardWriteBody), t.handleShardWrite)
-	srv.GET(httpShardReadPath, t.admissionMiddleware(StreamShardReadBody), t.handleShardRead)
+	srv.GET(httpShardReadPath, t.handleShardRead)
 	srv.POST(httpForwardWritePath, t.admissionMiddleware(StreamGroupForwardBody), t.handleForwardWrite)
-	srv.GET(httpForwardReadPath, t.admissionMiddleware(StreamGroupForwardRead), t.handleForwardRead)
-	srv.GET(httpAppendSegmentReadPath, t.admissionMiddleware(StreamReadAppendSegment), t.handleAppendSegmentRead)
+	srv.GET(httpForwardReadPath, t.handleForwardRead)
+	srv.GET(httpAppendSegmentReadPath, t.handleAppendSegmentRead)
 	// Generic native primitives (N7-3): EVERY declared buffered/gossip route is
 	// live from Listen; a family whose handler has not registered answers 503.
 	for path, rs := range t.bufferedByPath {
@@ -294,12 +293,9 @@ func (t *HTTPTransport) Listen(ctx context.Context, addr string) error {
 
 // admissionMiddleware applies inbound traffic admission for one StreamType
 // class ahead of the route handler, replacing the per-handler
-// limiter.Acquire/503/defer-release boilerplate the STREAMING routes (shard
-// read/write, forward, append-segment) used to repeat. Those routes already
-// acquired before reading their large request body, so middleware (acquire
-// before the handler) is equivalent. release fires after ctx.Next returns — the
-// same point the handlers' defer release() did (handler-return; for streaming
-// responses that is before-flush, unchanged). t.traffic is nil-safe.
+// limiter.Acquire/503/defer-release boilerplate the upload-body streaming routes
+// used to repeat. Those routes already acquired before reading their large
+// request body, so middleware (acquire before the handler) is equivalent.
 //
 // The buffered/gossip routes do NOT use this — they acquire in-handler AFTER
 // reading their bounded payload (acquireAdmission), preserving the property

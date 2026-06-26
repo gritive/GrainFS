@@ -102,7 +102,7 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 	require.Nil(t, cfg.IAMStore)
 	require.Nil(t, cfg.IAMApplier)
 
-	// Raft / QUIC.
+	// Raft / cluster transport.
 	require.Equal(t, opts.RaftLogGCInterval, cfg.RaftLogGCInterval)
 	require.Equal(t, opts.RaftHeartbeatInterval, cfg.RaftHeartbeatInterval)
 	require.Equal(t, opts.RaftElectionTimeout, cfg.RaftElectionTimeout)

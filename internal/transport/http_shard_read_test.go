@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cloudwego/hertz/pkg/app"
+	"github.com/cloudwego/hertz/pkg/protocol/consts"
 )
 
 func TestShardRead_WholeShardRoundTrip(t *testing.T) {
@@ -150,4 +153,37 @@ func TestShardRead_PartialCloseReleasesConn(t *testing.T) {
 			t.Fatalf("partial close %d: %v", i, err)
 		}
 	}
+}
+
+func TestShardRead_AdmissionHeldUntilBodyClose(t *testing.T) {
+	tr := &HTTPTransport{}
+	tr.SetTrafficLimits(TrafficLimits{Bulk: 1})
+	tr.RegisterShardReadHandler(func(req ShardReadRequest) (io.ReadCloser, error) {
+		return io.NopCloser(strings.NewReader("body")), nil
+	})
+
+	rc := app.NewContext(0)
+	rc.Request.SetRequestURI("https://peer" + httpShardReadPath + "?bucket=b&key=k&idx=0")
+	tr.handleShardRead(context.Background(), rc)
+	if rc.Response.StatusCode() != consts.StatusOK {
+		t.Fatalf("status = %d, want 200", rc.Response.StatusCode())
+	}
+
+	blockedCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	release, err := tr.traffic.Acquire(blockedCtx, StreamShardReadBody)
+	if err == nil {
+		release()
+		_ = rc.Response.CloseBodyStream()
+		t.Fatal("bulk slot was released when the handler returned; want it held until response body close")
+	}
+
+	if err := rc.Response.CloseBodyStream(); err != nil {
+		t.Fatalf("close response body: %v", err)
+	}
+	release, err = tr.traffic.Acquire(context.Background(), StreamShardReadBody)
+	if err != nil {
+		t.Fatalf("bulk slot was not released after response body close: %v", err)
+	}
+	release()
 }

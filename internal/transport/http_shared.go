@@ -69,3 +69,29 @@ func (b *httpRespBody) Close() error {
 	})
 	return err
 }
+
+type admissionReadCloser struct {
+	io.ReadCloser
+	release func()
+	once    sync.Once
+}
+
+func holdAdmissionUntilClose(rc io.ReadCloser, release func()) io.ReadCloser {
+	if release == nil {
+		return rc
+	}
+	if rc == nil {
+		release()
+		return nil
+	}
+	return &admissionReadCloser{ReadCloser: rc, release: release}
+}
+
+func (r *admissionReadCloser) Close() error {
+	var err error
+	r.once.Do(func() {
+		err = r.ReadCloser.Close()
+		r.release()
+	})
+	return err
+}

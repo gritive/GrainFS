@@ -342,7 +342,7 @@ func TestShardService_ResolvePeerAddress(t *testing.T) {
 }
 
 // TestShardService_RPCEncryptedWriteRead verifies that encryption works end-to-end
-// over the QUIC RPC path: write via handleWrite → WriteLocalShard (encrypt) and
+// over the cluster RPC path: write via handleWrite → WriteLocalShard (encrypt) and
 // read back via handleRead → ReadLocalShard (decrypt).
 func TestShardService_RPCEncryptedWriteRead(t *testing.T) {
 	ctx := context.Background()
@@ -454,7 +454,7 @@ func TestShardService_ReadShardRange_RejectsMediumSingleFrame(t *testing.T) {
 func TestShardService_RPCWriteReadDelete(t *testing.T) {
 	ctx := context.Background()
 
-	// Set up two QUIC transports to simulate two nodes
+	// Set up two HTTP transports to simulate two nodes.
 	tr1 := transport.MustNewHTTPTransport("test-cluster-psk")
 	tr2 := transport.MustNewHTTPTransport("test-cluster-psk")
 	require.NoError(t, tr1.Listen(ctx, "127.0.0.1:0"))

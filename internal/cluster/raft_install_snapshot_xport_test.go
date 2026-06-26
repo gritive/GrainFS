@@ -11,7 +11,7 @@ import (
 
 // TestRaftNode_SetInstallSnapshotTransport_V2 asserts the setter is reachable
 // through the cluster.RaftNode interface and persists no error on the v2
-// adapter. Behavioral coverage is in raftv2_meta_quic_test.go (M6.2.2).
+// adapter. Behavioral coverage lives with the raft v2 transport tests.
 func TestRaftNode_SetInstallSnapshotTransport_V2(t *testing.T) {
 	rcfg := raft.DefaultConfig("n1", nil)
 	node, closeFn, err := newRaftNode(rcfg, t.TempDir())

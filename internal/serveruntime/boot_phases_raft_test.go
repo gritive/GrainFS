@@ -10,7 +10,7 @@ import (
 )
 
 // raftPhasePrereqs runs every phase up to (but not including) the raft phases:
-// config validate, meta DB open, transport (QUIC + peers + mux).
+// config validate, meta DB open, and cluster transport setup.
 // Returns a state ready for the four raft phases under test.
 func raftPhasePrereqs(t *testing.T) (context.Context, *bootState) {
 	t.Helper()

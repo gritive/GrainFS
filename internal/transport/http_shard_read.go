@@ -109,20 +109,25 @@ func (t *HTTPTransport) handleShardRead(c context.Context, ctx *app.RequestConte
 	}
 
 	// Inbound admission: same class the tunnel used (StreamShardReadBody →
-	// bulk). Released when this handler returns — BEFORE Hertz streams the
-	// response body — which mirrors the tunnel dispatch()'s defer release()
-	// (its LookupRead branch also returns before the body is written).
-	// Inbound admission for this route runs in admissionMiddleware.
+	// bulk). For streaming responses, hold the slot until Hertz closes the body
+	// so the limit covers active egress, not only handler setup.
+	release, aerr := t.acquireAdmission(c, StreamShardReadBody)
+	if aerr != nil {
+		ctx.SetStatusCode(consts.StatusServiceUnavailable)
+		ctx.SetBodyString("overloaded: " + aerr.Error())
+		return
+	}
 
 	t.nativeShardReads.Add(1)
 	rc, herr := (*hp)(req)
 	if herr != nil {
+		release()
 		ctx.SetStatusCode(consts.StatusInternalServerError)
 		ctx.SetBodyString(herr.Error())
 		return
 	}
 	ctx.SetStatusCode(consts.StatusOK)
-	ctx.SetBodyStream(rc, -1) // Hertz closes the io.Closer after writing
+	ctx.SetBodyStream(holdAdmissionUntilClose(rc, release), -1) // Hertz closes the io.Closer after writing
 }
 
 // ShardRead fetches one shard (whole or bounded range) from addr over the
