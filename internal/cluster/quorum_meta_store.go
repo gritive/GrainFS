@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -73,6 +74,7 @@ type localQuorumMetaStore interface {
 	readQuorumMetaVersionsLocal(bucket, key string) ([]PutObjectMetaCmd, error)
 	readQuorumMetaVersionsRawLocal(bucket, key string) ([][]byte, error)
 	ScanQuorumMetaBucket(bucket, prefix string) ([]PutObjectMetaCmd, error)
+	ScanQuorumMetaBucketPage(bucket, prefix, marker string, maxKeys int) ([]PutObjectMetaCmd, bool, error)
 	scanQuorumMetaBucketStrict(bucket string) ([]PutObjectMetaCmd, error)
 	ScanQuorumMetaVersionsBucket(bucket, prefix string) ([]PutObjectMetaCmd, error)
 	scanQuorumMetaVersionsBucketAllStrict(bucket, prefix string) ([]PutObjectMetaCmd, error)
@@ -91,9 +93,11 @@ type quorumMetaPeerRPC interface {
 	WriteQuorumMeta(ctx context.Context, addr, bucket, key string, data []byte) error
 	WriteQuorumMetaVersion(ctx context.Context, addr, bucket, versionSubpath string, data []byte) error
 	ReadQuorumMetaRaw(ctx context.Context, addr, bucket, key string) ([]byte, error)
+	ReadQuorumMetaRawBatch(ctx context.Context, addr, bucket string, keys []string) (map[string][]byte, error)
 	ReadQuorumMetaVersions(ctx context.Context, addr, bucket, key string) ([]PutObjectMetaCmd, error)
 	ReadQuorumMetaVersionsRaw(ctx context.Context, addr, bucket, key string) ([][]byte, error)
 	ScanQuorumMeta(ctx context.Context, addr, bucket, prefix string) ([]PutObjectMetaCmd, error)
+	ScanQuorumMetaPage(ctx context.Context, addr, bucket, prefix, marker string, maxKeys int) ([]PutObjectMetaCmd, bool, error)
 	ScanQuorumMetaVersions(ctx context.Context, addr, bucket, prefix string) ([]PutObjectMetaCmd, error)
 	ScanQuorumMetaVersionsAll(ctx context.Context, addr, bucket, prefix string) ([]PutObjectMetaCmd, error)
 	DeleteQuorumMeta(ctx context.Context, addr, bucket, key string) error
@@ -349,6 +353,93 @@ func (s *QuorumMetaStore) readQuorumMetaWinningRaw(bucket, key string) ([]byte, 
 	default:
 		return nil, storage.ErrObjectNotFound
 	}
+}
+
+func (s *QuorumMetaStore) readQuorumMetaWinningRawAllPeers(bucket, key string) ([]byte, error) {
+	localRaw, localErr := s.local().readQuorumMetaRaw(bucket, key)
+	if localErr != nil && !errors.Is(localErr, storage.ErrObjectNotFound) {
+		return nil, localErr
+	}
+	peerRaw, peerOK := s.fetchQuorumMetaFromPeers(bucket, key)
+	switch {
+	case localErr == nil && peerOK:
+		return s.pickQuorumMetaWinner(localRaw, peerRaw), nil
+	case localErr == nil:
+		return localRaw, nil
+	case peerOK:
+		return peerRaw, nil
+	default:
+		return nil, storage.ErrObjectNotFound
+	}
+}
+
+func (s *QuorumMetaStore) readQuorumMetaWinningRawBatchAllPeers(bucket string, keys []string) map[string][]byte {
+	out := make(map[string][]byte, len(keys))
+	if len(keys) == 0 {
+		return out
+	}
+	for _, key := range keys {
+		raw, err := s.local().readQuorumMetaRaw(bucket, key)
+		if err != nil || len(raw) == 0 {
+			continue
+		}
+		out[key] = raw
+	}
+	if s.groups() == nil {
+		return out
+	}
+	self := s.selfAddr()
+	seen := map[string]bool{self: true}
+	var peers []string
+	for _, g := range s.groups().ShardGroups() {
+		for _, p := range g.PeerIDs {
+			if !seen[p] {
+				seen[p] = true
+				peers = append(peers, p)
+			}
+		}
+	}
+	if len(peers) == 0 {
+		return out
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), quorumMetaReadTimeout)
+	defer cancel()
+	type peerResult struct {
+		blobs map[string][]byte
+	}
+	ch := make(chan peerResult, len(peers))
+	var wg sync.WaitGroup
+	for _, p := range peers {
+		p := p
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			addr, err := s.peer().resolvePeerAddress(p)
+			if err != nil {
+				return
+			}
+			blobs, err := s.peer().ReadQuorumMetaRawBatch(ctx, addr, bucket, keys)
+			if err != nil || len(blobs) == 0 {
+				return
+			}
+			ch <- peerResult{blobs: blobs}
+		}()
+	}
+	go func() { wg.Wait(); close(ch) }()
+	for r := range ch {
+		for key, raw := range r.blobs {
+			if len(raw) == 0 {
+				continue
+			}
+			if cur, ok := out[key]; ok {
+				out[key] = s.pickQuorumMetaWinner(cur, raw)
+				continue
+			}
+			out[key] = raw
+		}
+	}
+	return out
 }
 
 // pickQuorumMetaWinner returns whichever of two raw quorum-meta blobs wins the
@@ -1075,4 +1166,128 @@ func (s *QuorumMetaStore) scatterGatherList(ctx context.Context, bucket, prefix 
 		all = append(all, e)
 	}
 	return filterAndSortEntries(all), nil
+}
+
+func (s *QuorumMetaStore) scatterGatherListPage(ctx context.Context, bucket, prefix, marker string, maxKeys int) ([]PutObjectMetaCmd, bool, error) {
+	if s.local() == nil {
+		return nil, false, nil
+	}
+	if maxKeys <= 0 {
+		entries, err := s.scatterGatherList(ctx, bucket, prefix)
+		if err != nil {
+			return nil, false, err
+		}
+		for _, e := range entries {
+			if marker == "" || e.Key > marker {
+				return nil, true, nil
+			}
+		}
+		return nil, false, nil
+	}
+	self := s.selfAddr()
+	seen := map[string]bool{}
+	var peerIDs []string
+	if s.groups() != nil {
+		for _, g := range s.groups().ShardGroups() {
+			for _, p := range g.PeerIDs {
+				if !seen[p] {
+					seen[p] = true
+					peerIDs = append(peerIDs, p)
+				}
+			}
+		}
+	}
+	if !seen[self] {
+		peerIDs = append(peerIDs, self)
+	}
+	if len(peerIDs) == 1 && peerIDs[0] == self {
+		return s.local().ScanQuorumMetaBucketPage(bucket, prefix, marker, maxKeys)
+	}
+
+	out := make([]PutObjectMetaCmd, 0, maxKeys+1)
+	scanMarker := marker
+	for {
+		candidates, more, err := s.scanQuorumMetaCandidatePage(ctx, bucket, prefix, scanMarker, maxKeys+1, peerIDs, self)
+		if err != nil {
+			return nil, false, err
+		}
+		if len(candidates) == 0 {
+			return out, false, nil
+		}
+		candidateKeys := make([]string, 0, len(candidates))
+		for _, cand := range candidates {
+			candidateKeys = append(candidateKeys, cand.Key)
+		}
+		winners := s.readQuorumMetaWinningRawBatchAllPeers(bucket, candidateKeys)
+		for _, cand := range candidates {
+			raw, ok := winners[cand.Key]
+			if !ok {
+				continue
+			}
+			winner, derr := s.local().decodeQuorumMetaCmdBlob(raw)
+			if derr != nil || winner.IsDeleteMarker || winner.IsHardDeleted || winner.Key <= marker || (prefix != "" && !strings.HasPrefix(winner.Key, prefix)) {
+				continue
+			}
+			if len(out) == maxKeys {
+				return out, true, nil
+			}
+			out = append(out, winner)
+		}
+		scanMarker = candidates[len(candidates)-1].Key
+		if !more {
+			return out, false, nil
+		}
+	}
+}
+
+func (s *QuorumMetaStore) scanQuorumMetaCandidatePage(ctx context.Context, bucket, prefix, marker string, maxKeys int, peerIDs []string, self string) ([]PutObjectMetaCmd, bool, error) {
+	type nodeResult struct {
+		entries   []PutObjectMetaCmd
+		truncated bool
+	}
+	rctx, cancel := context.WithTimeout(ctx, quorumMetaReadTimeout)
+	defer cancel()
+	ch := make(chan nodeResult, len(peerIDs))
+	for _, p := range peerIDs {
+		p := p
+		go func() {
+			if p == self {
+				entries, truncated, _ := s.local().ScanQuorumMetaBucketPage(bucket, prefix, marker, maxKeys)
+				ch <- nodeResult{entries: entries, truncated: truncated}
+				return
+			}
+			addr, aerr := s.peer().resolvePeerAddress(p)
+			if aerr != nil {
+				ch <- nodeResult{}
+				return
+			}
+			entries, truncated, _ := s.peer().ScanQuorumMetaPage(rctx, addr, bucket, prefix, marker, maxKeys)
+			ch <- nodeResult{entries: entries, truncated: truncated}
+		}()
+	}
+
+	byKey := map[string]PutObjectMetaCmd{}
+	more := false
+	for range peerIDs {
+		r := <-ch
+		more = more || r.truncated
+		for _, e := range r.entries {
+			if e.Key <= marker {
+				continue
+			}
+			if cur, ok := byKey[e.Key]; !ok || quorumMetaBlobWins(e.ModTime, e.VersionID, e.MetaSeq, cur.ModTime, cur.VersionID, cur.MetaSeq) {
+				byKey[e.Key] = e
+			}
+		}
+	}
+	out := make([]PutObjectMetaCmd, 0, len(byKey))
+	for _, e := range byKey {
+		out = append(out, e)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	if len(out) > maxKeys {
+		more = true
+		out = out[:maxKeys]
+	}
+	return out, more, nil
 }

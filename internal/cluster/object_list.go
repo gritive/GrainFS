@@ -10,24 +10,27 @@ import (
 // a storage.Object suitable for callers. Tombstones are pre-filtered by
 // scatterGatherList; this function is never called with IsDeleteMarker=true.
 func objectFromCmd(cmd PutObjectMetaCmd) *storage.Object {
-	m := buildPutObjectMeta(cmd)
+	etag := cmd.ETag
+	if cmd.IsDeleteMarker {
+		etag = deleteMarkerETag
+	}
 	return &storage.Object{
-		Key:              m.Key,
-		Size:             m.Size,
-		ContentType:      m.ContentType,
-		ETag:             m.ETag,
-		LastModified:     m.LastModified,
+		Key:              cmd.Key,
+		Size:             cmd.Size,
+		ContentType:      cmd.ContentType,
+		ETag:             etag,
+		LastModified:     cmd.ModTime,
 		VersionID:        cmd.VersionID,
-		ACL:              m.ACL,
-		UserMetadata:     cloneStringMap(m.UserMetadata),
-		SSEAlgorithm:     m.SSEAlgorithm,
-		PlacementGroupID: m.PlacementGroupID,
-		ECData:           m.ECData,
-		ECParity:         m.ECParity,
-		StripeBytes:      m.StripeBytes,
-		NodeIDs:          cloneStringSlice(m.NodeIDs),
-		Parts:            m.Parts,
-		Tags:             append([]storage.Tag(nil), m.Tags...),
+		ACL:              cmd.ACL,
+		UserMetadata:     cloneStringMap(cmd.UserMetadata),
+		SSEAlgorithm:     cmd.SSEAlgorithm,
+		PlacementGroupID: cmd.PlacementGroupID,
+		ECData:           cmd.ECData,
+		ECParity:         cmd.ECParity,
+		StripeBytes:      cmd.StripeBytes,
+		NodeIDs:          cloneStringSlice(cmd.NodeIDs),
+		Parts:            cmd.Parts,
+		Tags:             append([]storage.Tag(nil), cmd.Tags...),
 	}
 }
 
@@ -50,6 +53,35 @@ func (b *DistributedBackend) listLatestEntries(ctx context.Context, bucket, pref
 		return b.listObjectsPerVersion(ctx, bucket, prefix)
 	}
 	return b.scatterGatherList(ctx, bucket, prefix)
+}
+
+func pageSortedEntries(entries []PutObjectMetaCmd, marker string, maxKeys int) ([]PutObjectMetaCmd, bool) {
+	var page []PutObjectMetaCmd
+	if maxKeys > 0 {
+		page = make([]PutObjectMetaCmd, 0, min(len(entries), maxKeys))
+	}
+	for _, e := range entries {
+		if marker != "" && e.Key <= marker {
+			continue
+		}
+		if len(page) >= maxKeys {
+			return page, true
+		}
+		page = append(page, e)
+	}
+	return page, false
+}
+
+func (b *DistributedBackend) listLatestEntriesPage(ctx context.Context, bucket, prefix, marker string, maxKeys int) ([]PutObjectMetaCmd, bool, error) {
+	if enabled, resolved := bucketVersioningFromContext(ctx); resolved && enabled {
+		entries, err := b.listObjectsPerVersion(ctx, bucket, prefix)
+		if err != nil {
+			return nil, false, err
+		}
+		page, truncated := pageSortedEntries(entries, marker, maxKeys)
+		return page, truncated, nil
+	}
+	return b.qmsOrBuild().scatterGatherListPage(ctx, bucket, prefix, marker, maxKeys)
 }
 
 func (b *DistributedBackend) ListObjects(ctx context.Context, bucket, prefix string, maxKeys int) ([]*storage.Object, error) {
@@ -83,20 +115,12 @@ func (b *DistributedBackend) ListObjectsPage(ctx context.Context, bucket, prefix
 	if err := b.HeadBucket(ctx, bucket); err != nil {
 		return nil, false, err
 	}
-	entries, err := b.listLatestEntries(ctx, bucket, prefix)
+	entries, truncated, err := b.listLatestEntriesPage(ctx, bucket, prefix, marker, maxKeys)
 	if err != nil {
 		return nil, false, err
 	}
-	var objects []*storage.Object
-	truncated := false
+	objects := make([]*storage.Object, 0, len(entries))
 	for _, e := range entries {
-		if marker != "" && e.Key <= marker {
-			continue
-		}
-		if len(objects) >= maxKeys {
-			truncated = true
-			break
-		}
 		objects = append(objects, objectFromCmd(e))
 	}
 	return objects, truncated, nil

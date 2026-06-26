@@ -3,6 +3,8 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -50,10 +52,13 @@ func (r *opRecorder) snapshot() []string {
 // the REAL codec so LWW comparisons over the stored blobs are honest. ops records
 // the order of local writes so a test can assert per-version-before-latest ordering.
 type fakeLocalQuorumMeta struct {
-	mu      sync.Mutex
-	latest  map[string][]byte // bucket\x00key -> blob
-	version map[string][]byte // bucket\x00versionSubpath -> blob
-	ops     *opRecorder       // shared ordered write log (per-version vs latest)
+	mu                sync.Mutex
+	latest            map[string][]byte // bucket\x00key -> blob
+	version           map[string][]byte // bucket\x00versionSubpath -> blob
+	ops               *opRecorder       // shared ordered write log (per-version vs latest)
+	scanPageCalls     int
+	scanPageEntries   []PutObjectMetaCmd
+	scanPageTruncated bool
 }
 
 func newFakeLocalQuorumMeta(ops *opRecorder) *fakeLocalQuorumMeta {
@@ -149,7 +154,45 @@ func (f *fakeLocalQuorumMeta) readQuorumMetaVersionsRawLocal(bucket, key string)
 }
 
 func (f *fakeLocalQuorumMeta) ScanQuorumMetaBucket(bucket, prefix string) ([]PutObjectMetaCmd, error) {
-	return nil, nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]PutObjectMetaCmd, 0)
+	for k, blob := range f.latest {
+		b, key, ok := splitFakeLatestKey(k)
+		if !ok || b != bucket || (prefix != "" && !strings.HasPrefix(key, prefix)) {
+			continue
+		}
+		cmd, err := f.decodeQuorumMetaCmdBlob(blob)
+		if err == nil {
+			out = append(out, cmd)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out, nil
+}
+func (f *fakeLocalQuorumMeta) ScanQuorumMetaBucketPage(bucket, prefix, marker string, maxKeys int) ([]PutObjectMetaCmd, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.scanPageCalls++
+	if f.scanPageEntries != nil || f.scanPageTruncated {
+		return append([]PutObjectMetaCmd(nil), f.scanPageEntries...), f.scanPageTruncated, nil
+	}
+	var out []PutObjectMetaCmd
+	for k, blob := range f.latest {
+		b, key, ok := splitFakeLatestKey(k)
+		if !ok || b != bucket || (prefix != "" && !strings.HasPrefix(key, prefix)) || (marker != "" && key <= marker) {
+			continue
+		}
+		cmd, err := f.decodeQuorumMetaCmdBlob(blob)
+		if err == nil {
+			out = append(out, cmd)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	if len(out) > maxKeys {
+		return append([]PutObjectMetaCmd(nil), out[:maxKeys]...), true, nil
+	}
+	return out, false, nil
 }
 func (f *fakeLocalQuorumMeta) scanQuorumMetaBucketStrict(bucket string) ([]PutObjectMetaCmd, error) {
 	return nil, nil
@@ -204,9 +247,13 @@ func (f *fakeLocalQuorumMeta) decodeQuorumMetaCmdBlob(data []byte) (PutObjectMet
 // single remote replica's latest-only blob store. resolvePeerAddress is identity
 // (node ID == addr). Decode uses the real codec.
 type fakePeerQuorumMeta struct {
-	mu     sync.Mutex
-	latest map[string][]byte // addr\x00bucket\x00key -> blob
-	ops    *opRecorder
+	mu                sync.Mutex
+	latest            map[string][]byte // addr\x00bucket\x00key -> blob
+	ops               *opRecorder
+	readRawCalls      int
+	readRawBatchCalls int
+	scanFullCalls     int
+	scanPageCalls     int
 }
 
 func newFakePeerQuorumMeta(ops *opRecorder) *fakePeerQuorumMeta {
@@ -238,10 +285,24 @@ func (f *fakePeerQuorumMeta) putPeerLatest(addr, bucket, key string, data []byte
 func (f *fakePeerQuorumMeta) ReadQuorumMetaRaw(ctx context.Context, addr, bucket, key string) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.readRawCalls++
 	if blob, ok := f.latest[addr+"\x00"+fakeKey(bucket, key)]; ok {
 		return append([]byte(nil), blob...), nil
 	}
 	return nil, nil // OK + empty == definitive not-found on that peer
+}
+
+func (f *fakePeerQuorumMeta) ReadQuorumMetaRawBatch(ctx context.Context, addr, bucket string, keys []string) (map[string][]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.readRawBatchCalls++
+	out := make(map[string][]byte, len(keys))
+	for _, key := range keys {
+		if blob, ok := f.latest[addr+"\x00"+fakeKey(bucket, key)]; ok {
+			out[key] = append([]byte(nil), blob...)
+		}
+	}
+	return out, nil
 }
 
 func (f *fakePeerQuorumMeta) ReadQuorumMetaVersions(ctx context.Context, addr, bucket, key string) ([]PutObjectMetaCmd, error) {
@@ -251,7 +312,18 @@ func (f *fakePeerQuorumMeta) ReadQuorumMetaVersionsRaw(ctx context.Context, addr
 	return nil, nil
 }
 func (f *fakePeerQuorumMeta) ScanQuorumMeta(ctx context.Context, addr, bucket, prefix string) ([]PutObjectMetaCmd, error) {
-	return nil, nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.scanFullCalls++
+	return f.scanLocked(addr, bucket, prefix, "", 0), nil
+}
+func (f *fakePeerQuorumMeta) ScanQuorumMetaPage(ctx context.Context, addr, bucket, prefix, marker string, maxKeys int) ([]PutObjectMetaCmd, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.scanPageCalls++
+	out := f.scanLocked(addr, bucket, prefix, marker, maxKeys)
+	truncated := maxKeys > 0 && len(f.scanLocked(addr, bucket, prefix, marker, 0)) > maxKeys
+	return out, truncated, nil
 }
 func (f *fakePeerQuorumMeta) ScanQuorumMetaVersions(ctx context.Context, addr, bucket, prefix string) ([]PutObjectMetaCmd, error) {
 	return nil, nil
@@ -261,6 +333,41 @@ func (f *fakePeerQuorumMeta) ScanQuorumMetaVersionsAll(ctx context.Context, addr
 }
 func (f *fakePeerQuorumMeta) DeleteQuorumMeta(ctx context.Context, addr, bucket, key string) error {
 	return nil
+}
+
+func (f *fakePeerQuorumMeta) scanLocked(addr, bucket, prefix, marker string, maxKeys int) []PutObjectMetaCmd {
+	out := make([]PutObjectMetaCmd, 0)
+	for k, blob := range f.latest {
+		a, b, key, ok := splitFakePeerLatestKey(k)
+		if !ok || a != addr || b != bucket || (prefix != "" && !strings.HasPrefix(key, prefix)) || (marker != "" && key <= marker) {
+			continue
+		}
+		cmd, err := decodeQuorumMetaBlob(blob)
+		if err == nil {
+			out = append(out, cmd)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	if maxKeys > 0 && len(out) > maxKeys {
+		return append([]PutObjectMetaCmd(nil), out[:maxKeys]...)
+	}
+	return out
+}
+
+func splitFakeLatestKey(k string) (bucket, key string, ok bool) {
+	parts := strings.SplitN(k, "\x00", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
+}
+
+func splitFakePeerLatestKey(k string) (addr, bucket, key string, ok bool) {
+	parts := strings.SplitN(k, "\x00", 3)
+	if len(parts) != 3 {
+		return "", "", "", false
+	}
+	return parts[0], parts[1], parts[2], true
 }
 
 // fakeVersioning is a 1-method versioningSource.
@@ -343,6 +450,109 @@ func TestQuorumMetaStore_WriteOrdersPerVersionBeforeLatest(t *testing.T) {
 	got, err := s.local().decodeQuorumMetaCmdBlob(raw)
 	require.NoError(t, err)
 	require.Equal(t, "k", got.Key)
+}
+
+func TestQuorumMetaStoreScatterGatherListPage_UsesLocalPageForSinglePeer(t *testing.T) {
+	local := newFakeLocalQuorumMeta(nil)
+	local.scanPageEntries = []PutObjectMetaCmd{{Bucket: "bkt", Key: "obj/001"}}
+	qms := newFakeQuorumMetaStore(local, newFakePeerQuorumMeta(nil), nil, "", "self", false)
+
+	got, truncated, err := qms.scatterGatherListPage(context.Background(), "bkt", "obj/", "", 1)
+	require.NoError(t, err)
+	require.False(t, truncated)
+	require.Equal(t, []PutObjectMetaCmd{{Bucket: "bkt", Key: "obj/001"}}, got)
+	require.Equal(t, 1, local.scanPageCalls)
+}
+
+func TestQuorumMetaStoreScatterGatherListPage_UsesPeerPagesForMultiPeer(t *testing.T) {
+	local := newFakeLocalQuorumMeta(nil)
+	peer := newFakePeerQuorumMeta(nil)
+	const self, remote = "self", "peer-1"
+	groups := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"g": {ID: "g", PeerIDs: []string{self, remote}},
+	}}
+	qms := newFakeQuorumMetaStore(local, peer, groups, "", self, false)
+
+	encode := func(cmd PutObjectMetaCmd) []byte {
+		blob, err := encodeQuorumMetaBlob(cmd)
+		require.NoError(t, err)
+		return blob
+	}
+	require.NoError(t, local.writeQuorumMetaLocal("bkt", "obj/001", encode(PutObjectMetaCmd{
+		Bucket: "bkt", Key: "obj/001", ETag: "local-1", ModTime: 10,
+	})))
+	peer.putPeerLatest(remote, "bkt", "obj/002", encode(PutObjectMetaCmd{
+		Bucket: "bkt", Key: "obj/002", ETag: "remote-2", ModTime: 20,
+	}))
+
+	got, truncated, err := qms.scatterGatherListPage(context.Background(), "bkt", "obj/", "", 2)
+	require.NoError(t, err)
+	require.False(t, truncated)
+	require.Len(t, got, 2)
+	require.Equal(t, "obj/001", got[0].Key)
+	require.Equal(t, "obj/002", got[1].Key)
+	require.Equal(t, 0, peer.scanFullCalls, "multi-peer page path must not fall back to full prefix scan")
+	require.Greater(t, peer.scanPageCalls, 0, "multi-peer page path must scan remote peers by page")
+	require.Greater(t, local.scanPageCalls, 0, "multi-peer page path must scan local store by page")
+}
+
+func TestQuorumMetaStoreScatterGatherListPage_VerifiesCandidateWinnerAcrossPeers(t *testing.T) {
+	local := newFakeLocalQuorumMeta(nil)
+	peer := newFakePeerQuorumMeta(nil)
+	const self, remote = "self", "peer-1"
+	groups := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"g": {ID: "g", PeerIDs: []string{self, remote}},
+	}}
+	qms := newFakeQuorumMetaStore(local, peer, groups, "", self, false)
+
+	encode := func(cmd PutObjectMetaCmd) []byte {
+		blob, err := encodeQuorumMetaBlob(cmd)
+		require.NoError(t, err)
+		return blob
+	}
+	require.NoError(t, local.writeQuorumMetaLocal("bkt", "obj/001", encode(PutObjectMetaCmd{
+		Bucket: "bkt", Key: "obj/001", ETag: "deleted", ModTime: 20, IsDeleteMarker: true,
+	})))
+	peer.putPeerLatest(remote, "bkt", "obj/001", encode(PutObjectMetaCmd{
+		Bucket: "bkt", Key: "obj/001", ETag: "stale-live", ModTime: 10,
+	}))
+	peer.putPeerLatest(remote, "bkt", "obj/002", encode(PutObjectMetaCmd{
+		Bucket: "bkt", Key: "obj/002", ETag: "remote-2", ModTime: 30,
+	}))
+
+	got, truncated, err := qms.scatterGatherListPage(context.Background(), "bkt", "obj/", "", 1)
+	require.NoError(t, err)
+	require.False(t, truncated)
+	require.Len(t, got, 1)
+	require.Equal(t, "obj/002", got[0].Key)
+}
+
+func TestQuorumMetaStoreScatterGatherListPage_BatchesCandidateWinnerReads(t *testing.T) {
+	local := newFakeLocalQuorumMeta(nil)
+	peer := newFakePeerQuorumMeta(nil)
+	const self, remote = "self", "peer-1"
+	groups := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"g": {ID: "g", PeerIDs: []string{self, remote}},
+	}}
+	qms := newFakeQuorumMetaStore(local, peer, groups, "", self, false)
+
+	encode := func(cmd PutObjectMetaCmd) []byte {
+		blob, err := encodeQuorumMetaBlob(cmd)
+		require.NoError(t, err)
+		return blob
+	}
+	for i, key := range []string{"obj/001", "obj/002", "obj/003"} {
+		peer.putPeerLatest(remote, "bkt", key, encode(PutObjectMetaCmd{
+			Bucket: "bkt", Key: key, ETag: key, ModTime: int64(10 + i),
+		}))
+	}
+
+	got, truncated, err := qms.scatterGatherListPage(context.Background(), "bkt", "obj/", "", 2)
+	require.NoError(t, err)
+	require.True(t, truncated)
+	require.Len(t, got, 2)
+	require.Equal(t, 0, peer.readRawCalls, "candidate winner verification should not issue one raw read RPC per key")
+	require.Greater(t, peer.readRawBatchCalls, 0, "candidate winner verification should batch peer raw reads")
 }
 
 // TestQuorumMetaStore_NonVersionedSkipsPerVersionBlob proves the per-version blob

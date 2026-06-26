@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -42,6 +43,39 @@ func TestLocalQuorumMetaStore_SemanticCASAndLWW(t *testing.T) {
 	got, err := store.readQuorumMetaRawCmd("bkt", "obj")
 	require.NoError(t, err)
 	require.Equal(t, "base", got.ETag)
+}
+
+func TestLocalQuorumMetaStore_ScanQuorumMetaBucketPageHonorsMarkerLimitAndTombstones(t *testing.T) {
+	store := NewLocalQuorumMetaStore([]string{t.TempDir()})
+	for i := range 5 {
+		cmd := PutObjectMetaCmd{
+			Bucket:    "bkt",
+			Key:       fmt.Sprintf("obj/%03d", i),
+			ETag:      fmt.Sprintf("etag-%d", i),
+			VersionID: fmt.Sprintf("v%d", i),
+			ModTime:   int64(i + 1),
+		}
+		if i == 3 {
+			cmd.IsDeleteMarker = true
+		}
+		blob, err := encodeQuorumMetaBlob(cmd)
+		require.NoError(t, err)
+		require.NoError(t, store.writeQuorumMetaLocal("bkt", cmd.Key, blob))
+	}
+
+	got, truncated, err := store.ScanQuorumMetaBucketPage("bkt", "obj/", "obj/001", 2)
+	require.NoError(t, err)
+	require.False(t, truncated)
+	require.Len(t, got, 2)
+	require.Equal(t, "obj/002", got[0].Key)
+	require.Equal(t, "obj/004", got[1].Key)
+
+	got, truncated, err = store.ScanQuorumMetaBucketPage("bkt", "obj/", "", 2)
+	require.NoError(t, err)
+	require.True(t, truncated)
+	require.Len(t, got, 2)
+	require.Equal(t, "obj/000", got[0].Key)
+	require.Equal(t, "obj/001", got[1].Key)
 }
 
 func TestLocalQuorumMetaStore_WriteFsyncsDirectoryAfterRename(t *testing.T) {
