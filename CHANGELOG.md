@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.749.0] - 2026-06-26
+
+### Changed
+- **Finished converting storage raw test assertions to testify.**
+  Replaced the remaining raw `t.Fatal*` / `t.Error*` assertions in storage
+  datawal, eccodec shard I/O, and LocalBackend tests with `require`.
+
 ## [0.0.748.0] - 2026-06-26
 
 ### Changed

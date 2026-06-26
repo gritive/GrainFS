@@ -249,17 +249,6 @@ surfaced the items below. None block; tracked for cleanup.
   scaffolding; low risk. The remaining `internal/cluster` ones overlap the active decompose fleet —
   clear them once it drains. Enumerate with `staticcheck ./... | grep U1000`.
 
-- **[P4][test-style] Replace remaining `t.Fatal*` / `t.Error*` assertions in storage tests with
-  `require` / `assert`.** The AppendObject side-record writer slice converted the touched
-  append/chunkref tests plus small helper tests in `internal/storage`. v0.0.747.0 converted the
-  segment reader/writer, pullthrough resolver, directio, context passthrough, buffer right-sizing,
-  and small packblob seam/list/AAD tests. v0.0.748.0 converted data encryptor, encrypted object file,
-  encrypted object allocation, and range chunk-boundary tests. Residual files:
-  `internal/storage/datawal/wal_internal_test.go`, `internal/storage/eccodec/shardio_test.go`, and
-  `internal/storage/local_test.go`. Low-risk cleanup; keep it separate from behavior
-  changes so future diffs stay reviewable. Enumerate with
-  `rg '\\bt\\.(Fatal|Fatalf|Error|Errorf)\\(' internal/storage --glob '*_test.go'`.
-
 - **[P4][note, not a defect] staticcheck also flags 3 PRODUCTION U1000 that are INTENTIONAL
   `//nolint:unused` scaffolding** — `(*MetaFSM).incDEKRef` / `decDEKRef` (`meta_fsm_rotation.go`, kept
   wired for the S7 DEK-prune-safety predicate) and `metrics.bucketStates` (`operator_state.go`,

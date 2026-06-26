@@ -45,39 +45,25 @@ func (s *fakeSealer) Open(domain encrypt.AADDomain, fields []encrypt.AADField, _
 
 func TestHeaderV2RoundTrip(t *testing.T) {
 	var buf bytes.Buffer
-	if err := writeHeader(&buf, fileModeEncrypted, 7); err != nil {
-		t.Fatalf("writeHeader: %v", err)
-	}
-	if buf.Len() != fileHeaderBytes {
-		t.Fatalf("header len = %d, want %d", buf.Len(), fileHeaderBytes)
-	}
+	require.NoError(t, writeHeader(&buf, fileModeEncrypted, 7), "writeHeader")
+	require.Equal(t, fileHeaderBytes, buf.Len(), "header len")
 	mode, gen, err := readHeader(&buf)
-	if err != nil {
-		t.Fatalf("readHeader: %v", err)
-	}
-	if mode != fileModeEncrypted || gen != 7 {
-		t.Fatalf("got mode=%d gen=%d, want 2/7", mode, gen)
-	}
+	require.NoError(t, err, "readHeader")
+	require.Equal(t, fileModeEncrypted, mode)
+	require.Equal(t, uint32(7), gen)
 }
 
 func TestEncryptedRecordSeqBoundFrame(t *testing.T) {
 	s := newFakeSealer()
 	rec := Record{Op: OpObjectWriteAt, Seq: 42, Bucket: "b", Key: "k", Payload: []byte("hello")}
 	var buf bytes.Buffer
-	if err := EncodeEncryptedRecord(&buf, rec, s, "datawal"); err != nil {
-		t.Fatalf("encode: %v", err)
-	}
+	require.NoError(t, EncodeEncryptedRecord(&buf, rec, s, "datawal"), "encode")
 	// First 8 bytes are the plaintext seq.
-	if got := binary.BigEndian.Uint64(buf.Bytes()[:8]); got != 42 {
-		t.Fatalf("plaintext seq = %d, want 42", got)
-	}
+	require.Equal(t, uint64(42), binary.BigEndian.Uint64(buf.Bytes()[:8]), "plaintext seq")
 	got, err := DecodeEncryptedRecord(&buf, s, "datawal", 0)
-	if err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if got.Seq != 42 || string(got.Payload) != "hello" {
-		t.Fatalf("roundtrip mismatch: %+v", got)
-	}
+	require.NoError(t, err, "decode")
+	require.Equal(t, uint64(42), got.Seq)
+	require.Equal(t, "hello", string(got.Payload))
 }
 
 func TestReadEncryptedFramePrefixOnlyIsTorn(t *testing.T) {
@@ -87,25 +73,19 @@ func TestReadEncryptedFramePrefixOnlyIsTorn(t *testing.T) {
 	var prefix [8]byte
 	binary.BigEndian.PutUint64(prefix[:], 99)
 	_, _, err := readEncryptedFrame(bytes.NewReader(prefix[:]))
-	if err != io.ErrUnexpectedEOF {
-		t.Fatalf("got %v, want io.ErrUnexpectedEOF", err)
-	}
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
 	// Zero bytes = clean EOF.
-	if _, _, err := readEncryptedFrame(bytes.NewReader(nil)); err != io.EOF {
-		t.Fatalf("got %v, want io.EOF", err)
-	}
+	_, _, err = readEncryptedFrame(bytes.NewReader(nil))
+	require.ErrorIs(t, err, io.EOF)
 }
 
 func TestEncryptedRecordWrongNamespaceRejected(t *testing.T) {
 	s := newFakeSealer()
 	rec := Record{Op: OpObjectWriteAt, Seq: 1, Payload: []byte("x")}
 	var buf bytes.Buffer
-	if err := EncodeEncryptedRecord(&buf, rec, s, "datawal"); err != nil {
-		t.Fatalf("encode: %v", err)
-	}
-	if _, err := DecodeEncryptedRecord(&buf, s, "other-ns", 0); err == nil {
-		t.Fatal("expected decode failure under wrong namespace")
-	}
+	require.NoError(t, EncodeEncryptedRecord(&buf, rec, s, "datawal"), "encode")
+	_, err := DecodeEncryptedRecord(&buf, s, "other-ns", 0)
+	require.Error(t, err, "expected decode failure under wrong namespace")
 }
 
 func TestAppendRollbackAfterPartialWrite(t *testing.T) {
@@ -384,7 +364,7 @@ func TestRollSegmentOnRotationWaitsForInFlightSync(t *testing.T) {
 
 	select {
 	case <-done:
-		t.Fatal("RollSegmentOnRotation returned while a sync was in flight (missing isSyncing wait-guard)")
+		require.Fail(t, "RollSegmentOnRotation returned while a sync was in flight (missing isSyncing wait-guard)")
 	case <-time.After(100 * time.Millisecond):
 	}
 
@@ -396,6 +376,6 @@ func TestRollSegmentOnRotationWaitsForInFlightSync(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("RollSegmentOnRotation did not proceed after the sync cleared")
+		require.Fail(t, "RollSegmentOnRotation did not proceed after the sync cleared")
 	}
 }
