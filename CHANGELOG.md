@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.735.0] - 2026-06-26
+## [0.0.736.0] - 2026-06-26
 
 ### Changed
 - **Made data-group GC freshness and redundancy-upgrade relocation raft-free.**
@@ -16,6 +16,14 @@
   gate updates against new group registration, and stale `ShardService` quorum-meta decode forwarding
   helpers plus a superseded segment-staging promote helper were removed after latest base merges
   exposed them as unused.
+
+## [0.0.735.0] - 2026-06-26
+
+### Changed
+- **Renamed incidental `__grainfs_volumes` test fixtures.**
+  Tests that only needed an arbitrary internal bucket now use the neutral
+  `__grainfs_test_internal` name, leaving the removed historical volumes bucket
+  out of unrelated fixture data.
 
 ## [0.0.734.0] - 2026-06-26
 

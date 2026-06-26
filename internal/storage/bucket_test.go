@@ -13,7 +13,7 @@ func TestIsInternalBucket(t *testing.T) {
 		// __grainfs_nfs4 is a normal internal bucket — NFS support removed.
 		{"__grainfs_nfs4", true},
 		{"__grainfs_vfs_default", true},
-		{"__grainfs_volumes", true},
+		{"__grainfs_test_internal", true},
 		{"my-bucket", false},
 		{"", false},
 		{"__other_", false},

@@ -24,18 +24,6 @@
 - [ ] HRW-primary append/multipart owner.
 - [ ] per-group raft membership mirror removal.
 
-### `__grainfs_volumes` / `__grainfs_nfs4` leftover removal follow-ups (2026-06-26)
-
-PR removed the dead `__grainfs_volumes` EC-routing branch (`routeSourceFor`) and the
-`__grainfs_nfs4` `IsInternalBucket` carve-out (behavior-neutral; greenfield, nothing creates
-either bucket).
-
-- **[P4][hygiene] Incidental `__grainfs_volumes` test fixtures kept (Minimal scope).** `spool_test.go`,
-  `pullthrough_test.go`, `store_bench_test.go`, `backend_bucket_management_integration_test.go`, and
-  the `bucket_test.go` `{"__grainfs_volumes", true}` case still use the string as an arbitrary
-  internal-bucket name. Optional rename to a neutral name; the integration test's placement is
-  name-hash-coupled, so a rename must recompute its expected group.
-
 ### ShardService/DistributedBackend decomposition follow-ups (2026-06-25, PR1 LocalShardStore + Card1 QuorumMetaStore done)
 
 The `ShardService` (1,940 LOC) and `DistributedBackend` (54-field/300-method) god-structs are being
