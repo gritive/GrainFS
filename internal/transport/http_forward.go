@@ -163,18 +163,24 @@ func (t *HTTPTransport) handleForwardRead(c context.Context, ctx *app.RequestCon
 		return
 	}
 
-	// Inbound admission released when this handler returns — BEFORE Hertz
-	// streams the response body — mirroring handleShardRead.
-	// Inbound admission for this route runs in admissionMiddleware.
+	// Inbound admission is held until the streamed response body closes, so bulk
+	// limits cover active egress rather than only handler setup.
+	release, aerr := t.acquireAdmission(c, StreamGroupForwardRead)
+	if aerr != nil {
+		ctx.SetStatusCode(consts.StatusServiceUnavailable)
+		ctx.SetBodyString("overloaded: " + aerr.Error())
+		return
+	}
 
 	t.nativeForwardReads.Add(1)
 	reply, rbody, herr := (*hp)(frame)
 	if herr != nil {
+		release()
 		ctx.SetStatusCode(consts.StatusInternalServerError)
 		ctx.SetBodyString(herr.Error())
 		return
 	}
-	writeFramedReply(ctx, hdrForwardReply, reply, rbody)
+	writeFramedReply(ctx, hdrForwardReply, reply, holdAdmissionUntilClose(rbody, release))
 }
 
 // ForwardWrite streams one S3 write forward to addr. reply is the FB
