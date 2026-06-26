@@ -78,7 +78,7 @@ func (b *LocalBackend) AppendObject(ctx context.Context, bucket, key string, exp
 	}
 	segmentCount := len(existing.Segments)
 	if base.hasSummary {
-		segmentCount = base.summary.SegmentCount
+		segmentCount = appendSummaryLogicalAppendCount(base.summary)
 	}
 	if segmentCount >= MaxAppendSegments {
 		return nil, ErrAppendCapExceeded
@@ -129,11 +129,6 @@ func (b *LocalBackend) appendExisting(ctx context.Context, bucket, key string, b
 		return nil, fmt.Errorf("write segment: %w", err)
 	}
 	segs := append(existing.Segments, seg)
-	// TODO(Task 3.1): replace segment-checksum-as-MD5-proxy with the real
-	// AppendObject call payload MD5 captured via TeeReader at the API boundary.
-	// Stopgap mirrors the cluster path (internal/cluster/apply.go).
-	callMD5s := appendCallMD5History(existing)
-	callMD5s = append(callMD5s, append([]byte(nil), seg.Checksum...))
 	obj := *existing
 	obj.Segments = segs
 	obj.Size = existing.Size + seg.Size
@@ -141,7 +136,7 @@ func (b *LocalBackend) appendExisting(ctx context.Context, bucket, key string, b
 	obj.LastModified = time.Now().Unix()
 
 	var persistErr error
-	if len(obj.Coalesced) == 0 {
+	if base.hasSummary || len(obj.Coalesced) == 0 {
 		state, count, err := appendETagStateForAppend(base.summary, base.hasSummary, existing, seg.Checksum)
 		if err != nil {
 			return nil, err
@@ -153,16 +148,28 @@ func (b *LocalBackend) appendExisting(ctx context.Context, bucket, key string, b
 		}
 		summary := appendSummary{Size: obj.Size, SegmentCount: len(segs), ETagPartCount: count, ETagDigestState: state}
 		if base.hasSummary {
+			summary.Size = base.summary.Size + seg.Size
 			summary.SegmentCount = base.summary.SegmentCount + 1
+			summary.CompactedPrefixCount = base.summary.CompactedPrefixCount
 			persistErr = b.putAppendSideRecordAppend(ctx, bucket, key, &obj, summary, seg)
 		} else {
 			persistErr = b.putAppendSideRecordObject(ctx, bucket, key, &obj, summary, segs)
 		}
 	} else if len(existing.Segments) > 0 || len(existing.Coalesced) > 0 {
+		// TODO(Task 3.1): replace segment-checksum-as-MD5-proxy with the real
+		// AppendObject call payload MD5 captured via TeeReader at the API boundary.
+		// Stopgap mirrors the cluster path (internal/cluster/apply.go).
+		callMD5s := appendCallMD5History(existing)
+		callMD5s = append(callMD5s, append([]byte(nil), seg.Checksum...))
 		obj.AppendCallMD5s = callMD5s
 		obj.ETag = CompositeETag(callMD5s)
 		persistErr = b.putObjectRecordAppend(ctx, bucket, key, &obj, []string{ParseLocator(seg.BlobID).String()})
 	} else {
+		// TODO(Task 3.1): replace segment-checksum-as-MD5-proxy with the real
+		// AppendObject call payload MD5 captured via TeeReader at the API boundary.
+		// Stopgap mirrors the cluster path (internal/cluster/apply.go).
+		callMD5s := appendCallMD5History(existing)
+		callMD5s = append(callMD5s, append([]byte(nil), seg.Checksum...))
 		obj.AppendCallMD5s = callMD5s
 		obj.ETag = CompositeETag(callMD5s)
 		persistErr = b.PutObjectRecord(ctx, bucket, key, &obj)
@@ -179,21 +186,18 @@ func (b *LocalBackend) readAppendBase(ctx context.Context, bucket, key string) (
 	err := b.db.View(func(txn *badger.Txn) error {
 		raw, err := b.readObjectInTxn(txn, b.objectMetaKey(bucket, key))
 		if err == nil {
-			if raw.IsAppendable && raw.Size > 0 && len(raw.Segments) == 0 && len(raw.Coalesced) == 0 {
-				summary, err := b.readAppendSummaryInTxn(txn, bucket, key, raw.VersionID)
+			if raw.IsAppendable && raw.Size > 0 && len(raw.Segments) == 0 {
+				summary, hasSummary, err := b.readAppendSummaryForObjectInTxn(txn, bucket, key, raw)
 				if err != nil {
 					return err
 				}
-				if summary.Size != raw.Size {
-					return fmt.Errorf("append side summary size %d does not match object size %d", summary.Size, raw.Size)
-				}
-				if summary.SegmentCount > 0 && summary.ETagPartCount == 0 && len(summary.ETagDigestState) == 0 {
+				if hasSummary && summary.SegmentCount > 0 && summary.ETagPartCount == 0 && len(summary.ETagDigestState) == 0 {
 					if err := b.loadAppendSideSegmentsInTxn(txn, bucket, key, raw); err != nil {
 						return err
 					}
 				}
 				base.summary = summary
-				base.hasSummary = true
+				base.hasSummary = hasSummary
 			}
 			base.object = raw
 			return nil

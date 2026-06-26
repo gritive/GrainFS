@@ -64,6 +64,17 @@ func TestPlanAppendObjectAdmission(t *testing.T) {
 			want: storage.ErrAppendCapExceeded,
 		},
 		{
+			name: "existing side summary count rejects segment cap",
+			in: appendObjectAdmissionInput{
+				Existing:             &storage.Object{Size: 10},
+				ExistingSegmentCount: storage.MaxAppendSegments,
+				ExpectedOffset:       10,
+				ChunkSize:            1,
+				SizeCapBytes:         0,
+			},
+			want: storage.ErrAppendCapExceeded,
+		},
+		{
 			name: "existing rejects conservative size cap",
 			in: appendObjectAdmissionInput{
 				Existing:       existing,
@@ -166,6 +177,47 @@ func TestPlanAppendObjectBlobRMWCoalescedPrefixUsesSideRecords(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, computedETag, next.ETag)
 	require.Greater(t, nextSummary.SegmentCount, summary.SegmentCount)
+}
+
+func TestPlanAppendObjectBlobRMWCoalescedPrefixUsesLogicalAppendCap(t *testing.T) {
+	orig := storage.MaxAppendSegments
+	t.Cleanup(func() { storage.MaxAppendSegments = orig })
+	storage.MaxAppendSegments = 2
+
+	baseState, count, err := storage.AppendETagStateFromDigests([][]byte{
+		[]byte("base-segment-md5"),
+		[]byte("tail-segment-md5"),
+	})
+	require.NoError(t, err)
+	etag, err := storage.CompositeETagFromState(baseState, count)
+	require.NoError(t, err)
+
+	base := PutObjectMetaCmd{
+		Bucket:           "b",
+		Key:              "k",
+		Size:             12,
+		IsAppendable:     true,
+		Coalesced:        []CoalescedShardRef{{CoalescedID: "c1", Size: 4, ShardKey: "k/coalesced/c1"}},
+		MetaSeq:          3,
+		NodeIDs:          []string{"n1"},
+		ETag:             etag,
+		PlacementGroupID: "g0",
+		ECData:           1,
+	}
+	_, _, _, err = planAppendObjectBlobRMWWithSide(appendBlobRMWInput{
+		Bucket:           "b",
+		Key:              "k",
+		ExpectedOffset:   12,
+		Segment:          storage.SegmentRef{Size: 2, Checksum: []byte("new-segment-md5")},
+		Base:             base,
+		BaseExists:       true,
+		ModifiedUnixSec:  1,
+		UseSideRecords:   true,
+		BaseSummary:      storage.AppendSummary{Size: 8, SegmentCount: 1, CompactedPrefixCount: 1, ETagPartCount: count, ETagDigestState: baseState},
+		BaseHasSummary:   true,
+		PlacementGroupID: "g0",
+	})
+	require.ErrorIs(t, err, storage.ErrAppendCapExceeded)
 }
 
 func TestPlanAppendSeedsAppendCallMD5sOnFirstCall(t *testing.T) {

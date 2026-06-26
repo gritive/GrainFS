@@ -191,6 +191,50 @@ func TestAppendObject_ClusterCoalescedPrefix_TailSideRecords(t *testing.T) {
 	require.Len(t, headAfter.Segments, 2)
 }
 
+func TestAppendObject_ClusterFullyCoalescedUsesSummaryForLogicalAppendCap(t *testing.T) {
+	orig := storage.MaxAppendSegments
+	t.Cleanup(func() { storage.MaxAppendSegments = orig })
+	storage.MaxAppendSegments = 2
+
+	b := newTestBackendWithQuorumMeta(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "bk"))
+
+	baseVersion := "v-fully-coalesced"
+	base := PutObjectMetaCmd{
+		Bucket:           "bk",
+		Key:              "k",
+		Size:             10,
+		ContentType:      "application/octet-stream",
+		ETag:             "etag-fully-coalesced",
+		ModTime:          1_000_000,
+		VersionID:        baseVersion,
+		PlacementGroupID: "group-0",
+		NodeIDs:          []string{b.currentSelfAddr()},
+		ECData:           1,
+		ECParity:         0,
+		IsAppendable:     true,
+		MetaSeqCAS:       true,
+		MetaSeq:          1,
+		Coalesced: []CoalescedShardRef{{
+			CoalescedID: "coal-full-1",
+			Size:        10,
+			ETag:        "etag-coal-full-1",
+			ShardKey:    "k/coalesced/coal-full-1",
+		}},
+	}
+	summary := storage.AppendSummary{
+		Size:                 0,
+		SegmentCount:         0,
+		CompactedPrefixCount: storage.MaxAppendSegments,
+	}
+	require.NoError(t, b.writeClusterAppendSideRecords(ctx, "bk", "k", baseVersion, base.NodeIDs, 1, summary, nil))
+	require.NoError(t, b.writeQuorumMeta(ctx, base))
+
+	_, err := b.AppendObject(ctx, "bk", "k", base.Size, bytes.NewReader([]byte("x")))
+	require.ErrorIs(t, err, storage.ErrAppendCapExceeded)
+}
+
 func TestPublishCoalesce_ClusterSideRecordsAdvancesTailSummary(t *testing.T) {
 	b := newTestBackendWithQuorumMeta(t)
 	ctx := context.Background()

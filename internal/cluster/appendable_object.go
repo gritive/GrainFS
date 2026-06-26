@@ -8,10 +8,11 @@ import (
 )
 
 type appendObjectAdmissionInput struct {
-	Existing       *storage.Object
-	ExpectedOffset int64
-	ChunkSize      int64
-	SizeCapBytes   int64
+	Existing             *storage.Object
+	ExistingSegmentCount int
+	ExpectedOffset       int64
+	ChunkSize            int64
+	SizeCapBytes         int64
 }
 
 func planAppendObjectAdmission(in appendObjectAdmissionInput) error {
@@ -24,7 +25,11 @@ func planAppendObjectAdmission(in appendObjectAdmissionInput) error {
 	if in.Existing.Size != in.ExpectedOffset {
 		return storage.ErrAppendOffsetMismatch
 	}
-	if len(in.Existing.Segments) >= storage.MaxAppendSegments {
+	segmentCount := len(in.Existing.Segments)
+	if in.ExistingSegmentCount > 0 {
+		segmentCount = in.ExistingSegmentCount
+	}
+	if segmentCount >= storage.MaxAppendSegments {
 		return storage.ErrAppendCapExceeded
 	}
 	if in.ChunkSize > 0 && in.SizeCapBytes > 0 && in.Existing.Size+in.ChunkSize > in.SizeCapBytes {
@@ -162,7 +167,7 @@ func planAppendObjectBlobRMWWithSide(in appendBlobRMWInput) (PutObjectMetaCmd, s
 		if in.BaseSummary.Size != tailSize {
 			return PutObjectMetaCmd{}, storage.AppendSummary{}, false, fmt.Errorf("append side summary size %d does not match object tail size %d", in.BaseSummary.Size, tailSize)
 		}
-		if in.BaseSummary.SegmentCount >= storage.MaxAppendSegments {
+		if storage.AppendSummaryLogicalAppendCount(in.BaseSummary) >= storage.MaxAppendSegments {
 			return PutObjectMetaCmd{}, storage.AppendSummary{}, false, storage.ErrAppendCapExceeded
 		}
 	} else if len(base.Segments) >= storage.MaxAppendSegments {

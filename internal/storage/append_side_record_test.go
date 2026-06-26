@@ -97,6 +97,32 @@ func TestAppendSummaryRoundTripsETagStateWithCompactedPrefix(t *testing.T) {
 	require.Equal(t, want, got)
 }
 
+func TestAppendSummaryLogicalAppendCountUsesETagPartCount(t *testing.T) {
+	summary := appendSummary{
+		SegmentCount:         1,
+		CompactedPrefixCount: 15,
+		ETagPartCount:        20,
+	}
+	require.Equal(t, 20, appendSummaryLogicalAppendCount(summary))
+}
+
+func TestAppendSummaryLogicalAppendCountFallsBackToPrefixPlusTail(t *testing.T) {
+	summary := appendSummary{
+		SegmentCount:         3,
+		CompactedPrefixCount: 2,
+	}
+	require.Equal(t, 5, appendSummaryLogicalAppendCount(summary))
+}
+
+func TestAppendSummaryLogicalAppendCountPreservesPrefixWhenETagPartCountIsPartial(t *testing.T) {
+	summary := appendSummary{
+		SegmentCount:         2,
+		CompactedPrefixCount: 7,
+		ETagPartCount:        2,
+	}
+	require.Equal(t, 9, appendSummaryLogicalAppendCount(summary))
+}
+
 func seedAppendSideRecordObject(t *testing.T, parts []string) (*LocalBackend, *Object) {
 	t.Helper()
 	b := newTestLocalBackend(t)
