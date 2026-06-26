@@ -150,6 +150,9 @@ func (l *LocalManifestStore) ScanStrict(bucket string) ([]manifestEntry, error) 
 		if rerr != nil {
 			return rerr
 		}
+		if strings.HasPrefix(uploadID, completedMultipartUploadPrefix) {
+			return nil
+		}
 		data, rerr := os.ReadFile(path)
 		if rerr != nil {
 			return fmt.Errorf("manifest blob scan: read %s/%s: %w", bucket, uploadID, rerr)

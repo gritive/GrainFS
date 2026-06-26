@@ -54,10 +54,25 @@ func TestOrphanVersionSweep_RecoveredBeforeSecondCycle(t *testing.T) {
 	}
 }
 
+func TestOrphanVersionSweep_LatestOnlyTombstoneUsesEmptyVersionID(t *testing.T) {
+	w := &fakeQMetaVersionWalker{candidates: [][3]string{{"bkt", "k", ""}}}
+	s := newSweepScrubber()
+
+	s.orphanVersionSweep(w)
+	s.orphanVersionSweep(w)
+	if len(w.deleted) != 1 || w.deleted[0] != [3]string{"bkt", "k", ""} {
+		t.Fatalf("latest-only tombstone must be deleted with empty versionID, got %v", w.deleted)
+	}
+}
+
 func TestVersionTombstoneKeyRoundTrip(t *testing.T) {
 	// keys containing '/' must round-trip (the \x00 separator is unambiguous).
 	b, k, v := splitVersionTombstoneKey(versionTombstoneKey("bkt", "a/b/c.txt", "vid-1"))
 	if b != "bkt" || k != "a/b/c.txt" || v != "vid-1" {
 		t.Fatalf("round-trip mismatch: %q %q %q", b, k, v)
+	}
+	b, k, v = splitVersionTombstoneKey(versionTombstoneKey("bkt", "deleted", ""))
+	if b != "bkt" || k != "deleted" || v != "" {
+		t.Fatalf("latest-only round-trip mismatch: %q %q %q", b, k, v)
 	}
 }

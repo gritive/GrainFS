@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
@@ -48,6 +49,36 @@ func TestPlanObjectWritePlacement_UsesFallbackPlacementWithoutFullGroup(t *testi
 	require.Equal(t, "group-1", plan.PlacementGroupID)
 	require.Equal(t, ECConfig{DataShards: 2, ParityShards: 1}, plan.Config)
 	require.Equal(t, hrw.PlaceShards("k/v1", liveNodes, nil, 3), plan.NodeIDs)
+}
+
+func TestPlanObjectWritePlacement_RejectsMissingPlacementGroup(t *testing.T) {
+	_, err := PlanObjectWritePlacement(ObjectWritePlacementInput{
+		Operation:       "put_object",
+		LiveNodes:       []string{"n1", "n2", "n3"},
+		CurrentECConfig: ECConfig{DataShards: 2, ParityShards: 1},
+		ShardKey:        "k/v1",
+	})
+	require.ErrorContains(t, err, "missing placement_group_id")
+}
+
+func TestBackendPlanObjectWritePlacement_UsesOnlyPlacementCandidate(t *testing.T) {
+	b := &DistributedBackend{
+		clusterCfg: NewClusterConfig(),
+		allNodes:   []string{"n1", "n2", "n3"},
+	}
+	b.SetECConfig(ECConfig{DataShards: 2, ParityShards: 1})
+	b.SetShardGroupSource(&fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"group-7": {ID: "group-7", PeerIDs: []string{"n1", "n2", "n3"}},
+	}})
+
+	plan, err := b.planObjectWritePlacement(context.Background(), ObjectWritePlacementInput{
+		Operation: "put_object",
+		ShardKey:  "k/v1",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "group-7", plan.PlacementGroupID)
+	require.True(t, plan.TopologyWrite)
+	require.Equal(t, []string{"n1", "n2", "n3"}, plan.NodeIDs)
 }
 
 func TestPlanObjectWritePlacement_UsesNodeStateSnapshotForWeightedFallback(t *testing.T) {

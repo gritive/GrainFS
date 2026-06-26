@@ -227,6 +227,32 @@ func TestListObjects_CtxFlagFalseForcesLegacy(t *testing.T) {
 	require.Equal(t, vid2, objs[0].VersionID, "unstamped (not resolved) forces legacy even when bucket is Enabled (data-loss guard pinned)")
 }
 
+func TestListObjects_SuspendedIgnoresStaleLatPointer(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	const bkt, key = "sus-bkt", "obj"
+	ctx := ContextWithBucketVersioning(context.Background(), false)
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Suspended"))
+
+	seedFSMObject(t, b, bkt, key, "stale-lat-version", objectMeta{Key: key, ETag: "stale-lat"}, true)
+	seedLatestBlob(t, b, bkt, key, PutObjectMetaCmd{
+		VersionID: "blob-winner",
+		ETag:      "blob-etag",
+		ECData:    1,
+		NodeIDs:   []string{b.currentSelfAddr()},
+	})
+
+	head, err := b.HeadObject(ctx, bkt, key)
+	require.NoError(t, err)
+	require.Equal(t, "blob-winner", head.VersionID)
+
+	objs, err := b.ListObjects(ctx, bkt, "", 1000)
+	require.NoError(t, err)
+	require.Len(t, objs, 1)
+	require.Equal(t, key, objs[0].Key)
+	require.Equal(t, "blob-winner", objs[0].VersionID, "Suspended LIST must agree with HEAD and ignore stale lat:")
+}
+
 // TestListObjectsPerVersion_GenerationUnion proves the derive's all-groups
 // fan-out unions a key whose versions live on DIFFERENT generation groups: v1 on
 // group g1/node A, v2 on group g2/node B → LIST shows the key once with v2's

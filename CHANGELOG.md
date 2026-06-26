@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.727.0] - 2026-06-26
+## [0.0.734.0] - 2026-06-26
 
 ### Changed
 - **Made data-group GC freshness and redundancy-upgrade relocation raft-free.**
@@ -15,6 +15,60 @@
   GC freshness/singleton callbacks are stored through atomic holders, `DataGroupManager` serializes
   gate updates against new group registration, and stale `ShardService` quorum-meta decode forwarding
   helpers were removed after the latest base merge exposed them as unused.
+
+## [0.0.733.0] - 2026-06-26
+
+### Changed
+- **Made `group-0` participate in object placement as a normal data group.**
+  Object and segment placement no longer exclude `group-0` when other data
+  groups exist, production boot no longer installs an unassigned-bucket
+  `group-0` router default, and append/object-write fallbacks now prefer the
+  backend group or sole active placement candidate before legacy test fallback.
+
+## [0.0.732.0] - 2026-06-26
+
+### Fixed
+- **Batched segment-staging promote RPCs by target node.**
+  Chunked PUT commit now promotes all staged segment shards for the same node in
+  one RPC, reducing segment-staging promote fanout from segment-by-node calls to
+  one batch per placement node.
+
+## [0.0.731.0] - 2026-06-26
+
+### Fixed
+- **Pruned empty segment-staging transaction directories.**
+  The orphan-shard walker now removes an empty `.segstaging/<txn>` parent after
+  reclaiming its last abandoned staged shard leaf, avoiding residual empty
+  transaction directories.
+
+## [0.0.730.0] - 2026-06-26
+
+### Tests
+- **Pinned Suspended HEAD/LIST agreement against stale `lat:` pointers.**
+  Suspended LIST already follows the latest-only quorum-meta path, matching HEAD;
+  the new regression test records that stale legacy `lat:` metadata is ignored.
+
+## [0.0.729.0] - 2026-06-26
+
+### Fixed
+- **Added convergence-gated GC for non-versioned delete tombstones.**
+  The scrubber's quorum-meta tombstone reconciler now also reclaims latest-only
+  delete markers once every placement node is reachable and none still holds a
+  live latest-only data blob, preventing unbounded marker growth in churny buckets.
+
+## [0.0.728.0] - 2026-06-26
+
+### Fixed
+- **Restored non-versioned multipart-complete retry idempotency after intervening PUTs.**
+  Completed multipart uploads now leave a hidden uploadID-keyed completion sentinel, so a retry can
+  return the original completed object even after a later same-key PUT replaces the latest-only blob.
+
+## [0.0.727.0] - 2026-06-26
+
+### Fixed
+- **Made tag/ACL quorum-meta RMWs honor versioned per-version blobs.**
+  Versioning-enabled object tag writes now target the requested version blob, latest tag/ACL writes
+  mutate the derived latest live version, and non-versioned buckets keep the latest-only blob path.
 
 ## [0.0.726.0] - 2026-06-26
 

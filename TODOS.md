@@ -167,24 +167,11 @@ Deferred items:
   edge-cache below becomes required.
 - **[P3] Short-TTL bucket-versioning edge-cache (fast-follow).** The shipped design's deferred "C2":
   only needed if the meta-raft versioning barrier regresses object-write throughput (above).
-- **[P3] Neutralize group-0 placement special-casing.** The demotion removed group-0's *control-plane*
-  role but it remains the placement legacy-fallback (router default / `object_placement` /
-  `object_write_placement` / `append`). Removing that makes group-0 a truly plain data group.
 - **[P3][minor] `CreateBucket` now unconditionally requires a non-empty groupID** (the FSM rejects
   `""`). Safe in production (the router is always wired so placement resolves a real group), but it
   tightens behavior for any future router-less `DistributedBackend` wiring. Note only.
 
 ### Multipart off-raft (M1-M5) follow-ups (2026-06-23)
-
-- **[P3][pre-existing] Non-blob-auth Suspended cross-group `lat:` split can desync HEAD vs LIST.**
-  Surfaced while migrating to ModTime-primary latest. For versioning-Suspended (non-blob-auth)
-  buckets, HEAD resolves latest from the latest-only quorum-meta blob (`readQuorumMeta`,
-  last-write-wins) while LIST resolves it from the FSM `lat:` pointer + `reconcileVersionIsLatest`.
-  These are independent mechanisms (the `lat:` path is legacy-migration-only — "NOTHING ELSE writes
-  FSM object meta any more"), so a key split across groups with a divergent `lat:` pointer can make
-  LIST `IsLatest` disagree with HEAD. Pre-existing (the migration kept reconcile consistent with the
-  rest of LIST; it did not introduce this) and out of scope for the latest-rule change. Low impact
-  given the legacy-only `lat:` writer. Fix would unify the non-blob-auth HEAD and LIST resolvers.
 
 - **[P3][known-edge] Create-ordering is ms-granular only.** `deriveMultipartVID` encodes the
   uploadID's 48-bit UUIDv7 ms timestamp into the derived vid. Two uploads created in the SAME
@@ -202,37 +189,11 @@ Deferred items:
   `readDoneMarker` / `MultipartDoneKey` usage sites, stale `//nolint:unused` directives) cleaned
   up; `MultipartDoneKey` (zero callers after M4) removed.
 
-- **[P3][follow-up] Non-versioned multipart-complete idempotency fence weakened vs the removed done-marker.**
-  The deterministic-vid existence short-circuit is keyed on the latest-only blob's current VID, so for a
-  NON-VERSIONED bucket a client retry of an already-succeeded CompleteMultipartUpload that is preceded by
-  an intervening same-key PutObject no longer returns an idempotent 200 — it returns InvalidPart (if a
-  leaked manifest replica survives) or NoSuchUpload. NOT data loss (parts are deleted on the first
-  successful complete at multipart.go:317 BEFORE the best-effort manifest delete, so re-assembly fails
-  closed and never overwrites the newer object — codex final-review P0 'stale overwrite' REFUTED on this
-  linchpin). Narrow reachability: non-versioned + lost original 200 + concurrent same-key PUT. A proper
-  fix re-introduces the uploadID-keyed completion fence the done-marker provided (e.g. a short-lived
-  completion sentinel on the blob, or return NoSuchUpload not InvalidPart when parts are gone). Deferred
-  — disproportionate to the narrow non-data-loss impact.
-
 ### Data-plane raft-free Slice 2 follow-ups (2026-06-24)
 
 - **[DONE] Retire remaining per-object FSM commands (Slice 2).** `CmdSetObjectTags`,
   `CmdSetObjectACL`, `CmdPutObjectMeta` apply, `CmdPutObjectQuarantine`, `CmdDeleteObject`,
   `CmdDeleteObjectVersion` all retired. FSM is pure control-plane. See CHANGELOG Unreleased entry.
-
-- **[P3][design] Normal non-versioned `DeleteObject` leaves a latest-only tombstone blob
-  (the `IsHardDeleted` marker in the quorum-meta blob) that persists indefinitely.** EC shards
-  are reclaimed by the orphan-shard walker (which sees no live qmeta referencing them). The
-  tombstone blob itself is not reclaimed — confirm there is no unbounded growth path in
-  long-lived buckets with high churn, or add a tombstone GC sweep (age-gated, similar to the
-  per-version hard-delete tombstone GC already planned).
-
-- **[P3][pre-existing] Per-version tags/acl are latest-only.** `SetObjectTags` / `SetObjectACL`
-  blob RMW reads/writes the latest-only quorum-meta blob; the `versionID` parameter is accepted
-  but ignored. The only versionID-aware path was the retired `CmdSetObjectTags/ACL` raft command.
-  To implement version-scoped tag/acl, wire the RMW through `readQuorumMetaVersion` +
-  per-version write. Verified pre-existing (the blob path ignored versionID before Slice 2 too);
-  not a Slice 2 regression.
 
 - **[DONE] `deleteShardsQuorum` empty-placement guard.** Fixed in the Slice 2 code-gate: both
   `ForceDeleteBucket` non-versioned loops now fail closed with a descriptive error when
@@ -247,26 +208,6 @@ Deferred items:
 
 - **[DONE] Slice 2 — retire remaining per-object FSM commands.** See Slice 2 section above.
 
-- **[P3] EC-sharded chunked segment orphan reclaim — staging-write redesign (PR1+PR2 DONE; only PR3
-  perf left).** The dangerous cluster-wide live-segment ORACLE (3-axis data-loss) was ABANDONED in
-  favor of fixing the WRITE path (stage + promote-on-commit), prior-art aligned (MinIO/Ceph-RGW/S3).
-  - **PR1 DONE (#889, v0.0.691.0):** chunked-PUT segments write EC shards to `.segstaging/<txn>/<blobID>`
-    (AAD = final key) and **promote (atomic rename) to the final path only at commit** (data-before-meta,
-    all-or-fail, fsynced) — NARROWS the orphan window (mid-write/crash strands shards under `.segstaging`,
-    not the final namespace).
-  - **PR2 DONE (#895? — segment staging PR2):** the orphan-shard walker AGES OUT abandoned `.segstaging`
-    leaves (crash promote↔commit / failed PUT / LWW loser) — closing the residual disk leak. NOT a trivial
-    age-out: a user object key can collide with the `.segstaging` namespace, so the walker decides by
-    **delete-time full-object LIVENESS** (mirrors the regular orphan path: known/frozen/live/seen,
-    parseFullObjectRel, owningGroupHosted, hasLiveShardRecord certainty-aware; `!okF`/uncertain/non-hosted
-    → keep) + a structural `/segments/` exclusion (chunked user objects under `.segstaging` are skipped, so
-    the abandoned SEGMENT oracle is never consulted) + a 24h age floor (in-flight protection). A
-    write-edge `.segstaging` key RESERVATION was tried and ABANDONED — pull-through cache + path-
-    normalizing keys kept bypassing it; delete-time liveness makes all write-path holes moot. ★Safety
-    relies on getShardDir/ShardPathUnderDataDir per-bucket containment (parsed bucket == physical owner ==
-    liveness lookup target). new metric `grainfs_scrub_segstaging_reclaimed_total`.
-  - **PR3 (this item, P3):** gap/perf — promote-fanout RPC count, empty `.segstaging/<txn>` parent-dir
-    cleanup after leaf reclaim.
 - **[P3][known-tradeoff] Coalesced orphans in a bucket switched to versioning-Enabled are not
   reclaimed.** `hasLiveCoalescedRef` gates on `blobAuthReadOn` and fails closed (keep) for Enabled
   buckets, so coalesced orphans created during a bucket's prior Unversioned/Suspended life leak after

@@ -427,10 +427,68 @@ func (b *DistributedBackend) DeleteBucketPolicyPropose(bucket string) error {
 	return mbs.DeletePolicy(ctx, bucket)
 }
 
+func (b *DistributedBackend) readObjectMetaForRMW(bucket, key, versionID string) (PutObjectMetaCmd, bool, error) {
+	if on, err := b.blobAuthReadOn(bucket); err != nil {
+		return PutObjectMetaCmd{}, false, err
+	} else if on {
+		cmds, err := b.readQuorumMetaVersionsDecodeStrict(bucket, key)
+		if err != nil {
+			return PutObjectMetaCmd{}, false, err
+		}
+		if versionID == "" {
+			cmd, live := deriveLatestVersion(cmds)
+			if !live {
+				return PutObjectMetaCmd{}, false, storage.ErrObjectNotFound
+			}
+			return cmd, true, nil
+		}
+		for _, cmd := range cmds {
+			if cmd.VersionID != versionID {
+				continue
+			}
+			if cmd.IsHardDeleted {
+				return PutObjectMetaCmd{}, false, storage.ErrObjectNotFound
+			}
+			if cmd.IsDeleteMarker {
+				return PutObjectMetaCmd{}, false, storage.ErrMethodNotAllowed
+			}
+			return cmd, true, nil
+		}
+		return PutObjectMetaCmd{}, false, storage.ErrObjectNotFound
+	}
+
+	cmd, err := b.readQuorumMetaCmd(bucket, key)
+	if err != nil {
+		if errors.Is(err, storage.ErrObjectNotFound) {
+			return PutObjectMetaCmd{}, false, storage.ErrObjectNotFound
+		}
+		return PutObjectMetaCmd{}, false, err
+	}
+	if versionID != "" && cmd.VersionID != versionID {
+		return PutObjectMetaCmd{}, false, storage.ErrObjectNotFound
+	}
+	if cmd.IsHardDeleted || cmd.IsDeleteMarker || cmd.ETag == deleteMarkerETag {
+		return PutObjectMetaCmd{}, false, storage.ErrObjectNotFound
+	}
+	return cmd, false, nil
+}
+
+func (b *DistributedBackend) writeObjectMetaRMW(ctx context.Context, cmd PutObjectMetaCmd, perVersion bool) error {
+	if !perVersion {
+		return b.writeQuorumMeta(ctx, cmd)
+	}
+	blob, err := encodeQuorumMetaBlob(cmd)
+	if err != nil {
+		return fmt.Errorf("per-version quorum meta RMW encode: %w", err)
+	}
+	return b.fanOutPerVersionBlob(ctx, cmd, blob)
+}
+
 // SetObjectACL satisfies storage.ACLSetter. Updates the ACL via the quorum-meta
-// blob RMW on the object's latest-only quorum-meta blob (blob authority — no
-// raft path). HeadObject pre-check guarantees existence; a blob miss in the
-// propose path is a real not-found or a race.
+// blob RMW. Versioning-enabled buckets mutate the derived latest per-version
+// blob; non-versioned buckets mutate the latest-only blob. HeadObject pre-check
+// guarantees existence; a blob miss in the propose path is a real not-found or
+// a race.
 func (b *DistributedBackend) SetObjectACL(bucket, key string, acl uint8) error {
 	ctx := context.Background()
 	// Pre-check: verify object exists locally before proposing.
@@ -452,7 +510,7 @@ func (b *DistributedBackend) SetObjectACLPropose(bucket, key string, acl uint8) 
 	// CmdSetObjectACL is retired; no raft fallback.
 	unlock := b.objectMetaRMWLock(bucket, key)
 	defer unlock()
-	cmd, err := b.readQuorumMetaCmd(bucket, key)
+	cmd, perVersion, err := b.readObjectMetaForRMW(bucket, key, "")
 	if err != nil {
 		// ErrObjectNotFound here covers two legitimate cases: (1) a real
 		// not-found or a race after the HeadObject pre-check, and (2) this node
@@ -465,22 +523,17 @@ func (b *DistributedBackend) SetObjectACLPropose(bucket, key string, acl uint8) 
 	}
 	cmd.ACL = acl
 	cmd.MetaSeq++ // strictly win the (ModTime,VersionID) LWW tie; serialized by the lock
-	if werr := b.writeQuorumMeta(ctx, cmd); werr != nil {
+	if werr := b.writeObjectMetaRMW(ctx, cmd, perVersion); werr != nil {
 		return fmt.Errorf("set object acl quorum: %w", werr)
 	}
 	return nil
 }
 
 // SetObjectTags satisfies storage.ObjectTagsSetter. Mutates tags via the
-// quorum-meta blob RMW on the object's latest-only quorum-meta blob (sole
-// authority — no raft path). Passing nil tags clears the tag set. Does not
-// modify ETag, LastModified, ACL, or blob bytes.
-//
-// versionID is currently NOT version-scoped: the RMW reads and writes the
-// latest-only blob via readQuorumMetaCmd(bucket, key), which ignores versionID.
-// The only versionID-aware path was the now-retired CmdSetObjectTags raft
-// command (data-plane raft-free Slice 2). Per-version tag targeting is a
-// follow-up, not implemented here.
+// quorum-meta blob RMW. Passing nil tags clears the tag set. Does not modify
+// ETag, LastModified, ACL, or blob bytes. On versioning-enabled buckets,
+// versionID targets that per-version blob; versionID="" targets the derived
+// latest live version. Non-versioned buckets retain the latest-only blob path.
 func (b *DistributedBackend) SetObjectTags(bucket, key, versionID string, tags []storage.Tag) error {
 	ctx := context.Background()
 	// Pre-check: object must exist locally before we propose. Mirrors SetObjectACL.
@@ -504,7 +557,7 @@ func (b *DistributedBackend) SetObjectTagsPropose(bucket, key, versionID string,
 	// ClusterCoordinator always forwards to the OWNING peer.
 	unlock := b.objectMetaRMWLock(bucket, key)
 	defer unlock()
-	cmd, err := b.readQuorumMetaCmd(bucket, key)
+	cmd, perVersion, err := b.readObjectMetaForRMW(bucket, key, versionID)
 	if err != nil {
 		// ErrObjectNotFound here covers two legitimate cases: (1) a real
 		// not-found or a race after the HeadObject pre-check, and (2) this node
@@ -517,7 +570,7 @@ func (b *DistributedBackend) SetObjectTagsPropose(bucket, key, versionID string,
 	}
 	cmd.Tags = append([]storage.Tag(nil), tags...)
 	cmd.MetaSeq++ // strictly win the (ModTime,VersionID) LWW tie; serialized by the lock
-	if werr := b.writeQuorumMeta(ctx, cmd); werr != nil {
+	if werr := b.writeObjectMetaRMW(ctx, cmd, perVersion); werr != nil {
 		return fmt.Errorf("set object tags quorum: %w", werr)
 	}
 	return nil

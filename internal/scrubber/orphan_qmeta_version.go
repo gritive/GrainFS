@@ -9,11 +9,12 @@ import (
 )
 
 // OrphanQuorumMetaVersionWalkable is an optional Scrubbable extension for
-// reclaiming dangling per-version quorum-meta blobs. DistributedBackend
-// implements it; the scrubber detects it via type assertion.
+// reclaiming dangling quorum-meta blobs. DistributedBackend implements it; the
+// scrubber detects it via type assertion. versionID is empty for latest-only
+// non-versioned delete tombstones under .quorum_meta.
 type OrphanQuorumMetaVersionWalkable interface {
-	// WalkOrphanQuorumMetaVersions calls fn for each per-version blob whose FSM
-	// record is certainly absent and which is older than the age gate.
+	// WalkOrphanQuorumMetaVersions calls fn for each reclaimable blob older than
+	// the age gate.
 	WalkOrphanQuorumMetaVersions(fn func(bucket, key, versionID, path string) error) error
 	// DeleteOrphanQuorumMetaVersion re-confirms then removes the local blob copy.
 	DeleteOrphanQuorumMetaVersion(bucket, key, versionID string) error
@@ -21,7 +22,8 @@ type OrphanQuorumMetaVersionWalkable interface {
 
 // versionTombstoneKey identifies a candidate across cycles. Blob paths are not
 // stable across nodes, so key on the logical identity. \x00 is a safe separator:
-// S3 keys, bucket names, and UUIDv7 version IDs never contain a NUL byte.
+// S3 keys, bucket names, and UUIDv7 version IDs never contain a NUL byte. An
+// empty versionID identifies a latest-only tombstone.
 func versionTombstoneKey(bucket, key, versionID string) string {
 	return bucket + "\x00" + key + "\x00" + versionID
 }
@@ -35,7 +37,7 @@ func splitVersionTombstoneKey(tk string) (bucket, key, versionID string) {
 	return tk[:first], tk[first+1 : last], tk[last+1:]
 }
 
-// orphanVersionSweep reclaims dangling per-version blobs with a two-cycle
+// orphanVersionSweep reclaims dangling quorum-meta blobs with a two-cycle
 // tombstone delay, mirroring orphanSweep. A candidate must appear orphan in two
 // consecutive cycles before deletion, capped at maxOrphansPerCycle per cycle.
 func (s *BackgroundScrubber) orphanVersionSweep(walker OrphanQuorumMetaVersionWalkable) {

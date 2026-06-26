@@ -51,6 +51,17 @@ func writeTombstoneBlob(t *testing.T, b *DistributedBackend, bucket, key, versio
 	return target
 }
 
+func writeLatestBlob(t *testing.T, b *DistributedBackend, cmd PutObjectMetaCmd, backdate time.Duration) string {
+	t.Helper()
+	blob, err := encodeQuorumMetaBlob(cmd)
+	require.NoError(t, err)
+	require.NoError(t, b.shardSvc.writeQuorumMetaLocal(cmd.Bucket, cmd.Key, blob))
+	target := filepath.Join(b.shardSvc.DataDirs()[0], quorumMetaSubDir, cmd.Bucket, cmd.Key)
+	past := time.Now().Add(-backdate)
+	require.NoError(t, os.Chtimes(target, past, past))
+	return target
+}
+
 func collectOrphanVersions(t *testing.T, b *DistributedBackend) []string {
 	t.Helper()
 	var got []string
@@ -143,6 +154,86 @@ func TestDeleteOrphanQuorumMetaVersion_KeepsLiveDataBlob(t *testing.T) {
 
 	require.NoError(t, b.DeleteOrphanQuorumMetaVersion("bkt", "k", "vA"))
 	require.FileExists(t, target, "a live data blob with no superseding tombstone must be kept")
+}
+
+func TestWalkOrphanQuorumMetaVersions_IncludesConvergedLatestOnlyTombstone(t *testing.T) {
+	b := orphanWalkerBackend(t)
+	self := b.currentSelfAddr()
+
+	writeLatestBlob(t, b, PutObjectMetaCmd{
+		Bucket:         "bkt",
+		Key:            "deleted",
+		VersionID:      "delete-marker",
+		IsDeleteMarker: true,
+		ECData:         1,
+		NodeIDs:        []string{self},
+	}, oldEnough)
+	writeLatestBlob(t, b, PutObjectMetaCmd{
+		Bucket:    "bkt",
+		Key:       "live",
+		VersionID: "live-version",
+		ECData:    1,
+		NodeIDs:   []string{self},
+	}, oldEnough)
+
+	var got [][2]string
+	require.NoError(t, b.WalkOrphanQuorumMetaVersions(func(_, key, versionID, _ string) error {
+		got = append(got, [2]string{key, versionID})
+		return nil
+	}))
+	require.Equal(t, [][2]string{{"deleted", ""}}, got)
+}
+
+func TestWalkOrphanQuorumMetaVersions_KeepsUnconvergedLatestOnlyTombstone(t *testing.T) {
+	b := orphanWalkerBackend(t)
+	self := b.currentSelfAddr()
+
+	writeLatestBlob(t, b, PutObjectMetaCmd{
+		Bucket:         "bkt",
+		Key:            "deleted",
+		VersionID:      "delete-marker",
+		IsDeleteMarker: true,
+		ECData:         1,
+		NodeIDs:        []string{self, "bogus-unreachable-peer"},
+	}, oldEnough)
+
+	var got [][2]string
+	require.NoError(t, b.WalkOrphanQuorumMetaVersions(func(_, key, versionID, _ string) error {
+		got = append(got, [2]string{key, versionID})
+		return nil
+	}))
+	require.Empty(t, got, "an unreachable placement node keeps the tombstone fail-closed")
+}
+
+func TestDeleteOrphanQuorumMetaVersion_GCsConvergedLatestOnlyTombstone(t *testing.T) {
+	b := orphanWalkerBackend(t)
+	target := writeLatestBlob(t, b, PutObjectMetaCmd{
+		Bucket:         "bkt",
+		Key:            "deleted",
+		VersionID:      "delete-marker",
+		IsDeleteMarker: true,
+		ECData:         1,
+		NodeIDs:        []string{b.currentSelfAddr()},
+	}, oldEnough)
+	require.FileExists(t, target)
+
+	require.NoError(t, b.DeleteOrphanQuorumMetaVersion("bkt", "deleted", ""))
+	_, err := os.Stat(target)
+	require.True(t, os.IsNotExist(err), "converged latest-only tombstone should be GC'd")
+}
+
+func TestDeleteOrphanQuorumMetaVersion_KeepsLatestOnlyLiveBlob(t *testing.T) {
+	b := orphanWalkerBackend(t)
+	target := writeLatestBlob(t, b, PutObjectMetaCmd{
+		Bucket:    "bkt",
+		Key:       "live",
+		VersionID: "live-version",
+		ECData:    1,
+		NodeIDs:   []string{b.currentSelfAddr()},
+	}, oldEnough)
+
+	require.NoError(t, b.DeleteOrphanQuorumMetaVersion("bkt", "live", ""))
+	require.FileExists(t, target, "latest-only live blob must not be reclaimed")
 }
 
 // TestPerVersionReconcile_ReclaimsStaleDataBlob proves the reconciler removes a

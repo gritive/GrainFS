@@ -562,6 +562,106 @@ func (s *ShardService) PromoteStagedShards(ctx context.Context, peer, bucket, st
 	return nil
 }
 
+// PromoteStagedShardsBatch renames multiple staged segment shard dirs on one
+// remote node in one RPC. It is the batched counterpart of PromoteStagedShards.
+func (s *ShardService) PromoteStagedShardsBatch(ctx context.Context, peer, bucket string, pairs []stagedPromotePair) error {
+	if len(pairs) == 0 {
+		return nil
+	}
+	peerAddr, err := s.resolvePeerAddress(peer)
+	if err != nil {
+		return err
+	}
+	if s.transport == nil {
+		return fmt.Errorf("shard service: no transport")
+	}
+	data, err := encodeStagedPromotePairs(pairs)
+	if err != nil {
+		return err
+	}
+	envb := buildShardEnvelope("PromoteStagedShardsBatch", bucket, "", 0, data)
+	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
+	respEnvelope, err := s.callShardRPC(ctx, peerAddr, envb)
+	if err != nil {
+		return fmt.Errorf("promote staged shard batch on %s: %w", peerAddr, err)
+	}
+	rpcType, body, err := unmarshalEnvelope(respEnvelope)
+	if err != nil {
+		return fmt.Errorf("promote staged shard batch on %s: unmarshal response: %w", peerAddr, err)
+	}
+	if rpcType == "Error" {
+		return fmt.Errorf("promote staged shard batch on %s: %s", peer, body)
+	}
+	return nil
+}
+
+func encodeStagedPromotePairs(pairs []stagedPromotePair) ([]byte, error) {
+	if uint64(len(pairs)) > uint64(^uint32(0)) {
+		return nil, fmt.Errorf("too many staged promote pairs: %d", len(pairs))
+	}
+	out := make([]byte, 4)
+	binary.BigEndian.PutUint32(out, uint32(len(pairs)))
+	for _, pair := range pairs {
+		var err error
+		out, err = appendPromoteString(out, pair.stagingKey)
+		if err != nil {
+			return nil, err
+		}
+		out, err = appendPromoteString(out, pair.finalKey)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func appendPromoteString(out []byte, s string) ([]byte, error) {
+	if uint64(len(s)) > uint64(^uint32(0)) {
+		return nil, fmt.Errorf("staged promote key too long: %d", len(s))
+	}
+	var lenBuf [4]byte
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(s)))
+	out = append(out, lenBuf[:]...)
+	return append(out, s...), nil
+}
+
+func decodeStagedPromotePairs(data []byte) ([]stagedPromotePair, error) {
+	if len(data) < 4 {
+		return nil, fmt.Errorf("staged promote batch: truncated pair count")
+	}
+	count := int(binary.BigEndian.Uint32(data[:4]))
+	off := 4
+	pairs := make([]stagedPromotePair, 0, count)
+	for i := 0; i < count; i++ {
+		stagingKey, next, err := readPromoteString(data, off)
+		if err != nil {
+			return nil, fmt.Errorf("staged promote batch pair %d staging key: %w", i, err)
+		}
+		finalKey, next, err := readPromoteString(data, next)
+		if err != nil {
+			return nil, fmt.Errorf("staged promote batch pair %d final key: %w", i, err)
+		}
+		pairs = append(pairs, stagedPromotePair{stagingKey: stagingKey, finalKey: finalKey})
+		off = next
+	}
+	if off != len(data) {
+		return nil, fmt.Errorf("staged promote batch: trailing bytes")
+	}
+	return pairs, nil
+}
+
+func readPromoteString(data []byte, off int) (string, int, error) {
+	if off+4 > len(data) {
+		return "", off, fmt.Errorf("truncated length")
+	}
+	n := int(binary.BigEndian.Uint32(data[off : off+4]))
+	off += 4
+	if off+n > len(data) {
+		return "", off, fmt.Errorf("truncated string")
+	}
+	return string(data[off : off+n]), off + n, nil
+}
+
 // buildShardEnvelope builds an RPCMessage FlatBuffer wrapping a ShardRequest without make+copy.
 // Returns a Builder that MUST be Reset()+Put() to shardBuilderPool after use.
 func buildShardEnvelope(msgType, bucket, key string, shardIdx int32, data []byte) *flatbuffers.Builder {
@@ -626,6 +726,8 @@ func (s *ShardService) handleRPC(payload []byte) []byte {
 		return s.handleRemoveBucketPhysicalTrees(sr)
 	case "PromoteStagedShards":
 		return s.handlePromoteStaged(sr)
+	case "PromoteStagedShardsBatch":
+		return s.handlePromoteStagedBatch(sr)
 	case "WriteQuorumMeta":
 		return s.handleQuorumMetaWrite(sr)
 	case "WriteQuorumMetaVersion":
@@ -1206,6 +1308,19 @@ func (s *ShardService) handleRemoveBucketPhysicalTrees(sr *shardRequest) []byte 
 func (s *ShardService) handlePromoteStaged(sr *shardRequest) []byte {
 	if err := s.PromoteLocalStagedShards(sr.Bucket, sr.Key, string(sr.Data)); err != nil {
 		return s.errorResponse(err.Error())
+	}
+	return s.okResponse(nil)
+}
+
+func (s *ShardService) handlePromoteStagedBatch(sr *shardRequest) []byte {
+	pairs, err := decodeStagedPromotePairs(sr.Data)
+	if err != nil {
+		return s.errorResponse(err.Error())
+	}
+	for _, pair := range pairs {
+		if err := s.PromoteLocalStagedShards(sr.Bucket, pair.stagingKey, pair.finalKey); err != nil {
+			return s.errorResponse(err.Error())
+		}
 	}
 	return s.okResponse(nil)
 }
