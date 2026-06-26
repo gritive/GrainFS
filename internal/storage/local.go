@@ -1178,6 +1178,9 @@ func (b *LocalBackend) DeleteObject(ctx context.Context, bucket, key string) err
 				return err
 			}
 		}
+		if err := b.deleteAppendSideRecordsInTxn(txn, bucket, key, prev.VersionID, now); err != nil {
+			return err
+		}
 		return txn.Delete(mk)
 	})
 }

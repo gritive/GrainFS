@@ -125,9 +125,13 @@ separate PR, facades stay the spine — see design
   re-hashes all N+1 call-MD5s, so true O(1)/append needs incremental metadata persistence
   (append-only segment log + running ETag state). Design and the single-node side-record read
   foundation shipped in v0.0.742.0/v0.0.743.0: Head/Get can now fail-closed or expand appendable
-  object summaries from side segment records. Remaining ordered slices: single-node append writer +
-  brownfield conversion/delete+chunkref cleanup, cluster quorum-meta side records, coalesce
-  integration, benchmark gate.
+  object summaries from side segment records. The single-node writer slice shipped in v0.0.745.0:
+  non-coalesced LocalBackend appends persist segment lists through side records, convert brownfield
+  embedded append manifests on the next append, append only the new side segment record, and remove
+  side-record chunk refs/metadata on overwrite/delete. Residual single-node cost: AppendObject still
+  expands side segments through HeadObject for offset/cap checks and still re-hashes all call-MD5s
+  because running ETag state is not yet persisted. Remaining ordered slices: running ETag state +
+  append-base summary path, cluster quorum-meta side records, coalesce integration, benchmark gate.
   Cluster append: #895 measured it (`BenchmarkClusterAppend`, EC 4+2,
   coalesce-off) — same super-linear O(N²) (n=4 → 545 allocs, n=8 → 1,356, n=16 → 3,711), same
   meta-rewrite root cause (`readAppendBase` decode + manifest re-marshal + quorum-meta), softened in
@@ -243,6 +247,13 @@ surfaced the items below. None block; tracked for cleanup.
   golangci `unused` skips them (`tests: false`) so `make lint` stays green. Batch-removable dead test
   scaffolding; low risk. The remaining `internal/cluster` ones overlap the active decompose fleet —
   clear them once it drains. Enumerate with `staticcheck ./... | grep U1000`.
+
+- **[P4][test-style] Replace remaining `t.Fatal*` / `t.Error*` assertions in storage tests with
+  `require` / `assert`.** The AppendObject side-record writer slice converted the touched
+  append/chunkref tests plus small helper tests in `internal/storage`, but larger reader/writer,
+  encryption, and storage subpackage tests still use raw testing assertions. Low-risk cleanup; keep
+  it separate from behavior changes so future diffs stay reviewable. Enumerate with
+  `rg 't\\.(Fatal|Fatalf|Error|Errorf)\\(' internal/storage --glob '*_test.go'`.
 
 - **[P4][note, not a defect] staticcheck also flags 3 PRODUCTION U1000 that are INTENTIONAL
   `//nolint:unused` scaffolding** — `(*MetaFSM).incDEKRef` / `decDEKRef` (`meta_fsm_rotation.go`, kept

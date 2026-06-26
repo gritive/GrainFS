@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/gritive/GrainFS/internal/chunkref"
@@ -162,33 +164,10 @@ func decodeAppendSegment(data []byte) (SegmentRef, error) {
 	}, nil
 }
 
-func (b *LocalBackend) writeAppendSideRecords(ctx context.Context, bucket, key, versionID string, summary appendSummary, segments []SegmentRef) error { //nolint:unused // referenced by append_side_record_test.go until the writer path lands.
-	_ = ctx
-	return b.db.Update(func(txn *badger.Txn) error {
-		if err := txn.Set(appendSummaryKey(bucket, key, versionID), encodeAppendSummary(summary)); err != nil {
-			return err
-		}
-		store := NewChunkRefStore(txn)
-		m := chunkref.ObjectVersionID(bucket, key, versionID)
-		for i, seg := range segments {
-			if err := txn.Set(appendSegmentKey(bucket, key, versionID, i+1), encodeAppendSegment(seg)); err != nil {
-				return err
-			}
-			if err := store.AddRef(m, chunkref.ChunkID(ParseLocator(seg.BlobID).String())); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-}
-
-func (b *LocalBackend) loadAppendSideSegmentsInTxn(txn *badger.Txn, bucket, key string, obj *Object) error {
-	item, err := txn.Get(appendSummaryKey(bucket, key, obj.VersionID))
+func (b *LocalBackend) readAppendSummaryInTxn(txn *badger.Txn, bucket, key, versionID string) (appendSummary, error) {
+	item, err := txn.Get(appendSummaryKey(bucket, key, versionID))
 	if err != nil {
-		if err == badger.ErrKeyNotFound {
-			return fmt.Errorf("append side summary missing for %s/%s", bucket, key)
-		}
-		return err
+		return appendSummary{}, err
 	}
 	var summary appendSummary
 	if err := item.Value(func(v []byte) error {
@@ -196,6 +175,130 @@ func (b *LocalBackend) loadAppendSideSegmentsInTxn(txn *badger.Txn, bucket, key 
 		summary, derr = decodeAppendSummary(v)
 		return derr
 	}); err != nil {
+		return appendSummary{}, err
+	}
+	return summary, nil
+}
+
+func (b *LocalBackend) writeAppendSideRecordsInTxn(txn *badger.Txn, bucket, key, versionID string, summary appendSummary, segments []SegmentRef) error {
+	if err := txn.Set(appendSummaryKey(bucket, key, versionID), encodeAppendSummary(summary)); err != nil {
+		return err
+	}
+	store := NewChunkRefStore(txn)
+	m := chunkref.ObjectVersionID(bucket, key, versionID)
+	for i, seg := range segments {
+		if err := txn.Set(appendSegmentKey(bucket, key, versionID, i+1), encodeAppendSegment(seg)); err != nil {
+			return err
+		}
+		if err := store.AddRef(m, chunkref.ChunkID(ParseLocator(seg.BlobID).String())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (b *LocalBackend) appendSideRecordSegmentCount(ctx context.Context, bucket, key string) (int, bool, error) {
+	_ = ctx
+	var (
+		count int
+		ok    bool
+	)
+	err := b.db.View(func(txn *badger.Txn) error {
+		raw, err := b.readObjectInTxn(txn, b.objectMetaKey(bucket, key))
+		if err != nil {
+			return err
+		}
+		if !raw.IsAppendable || len(raw.Segments) != 0 || len(raw.Coalesced) != 0 {
+			return nil
+		}
+		summary, err := b.readAppendSummaryInTxn(txn, bucket, key, raw.VersionID)
+		if err != nil {
+			return err
+		}
+		count = summary.SegmentCount
+		ok = true
+		return nil
+	})
+	if errors.Is(err, badger.ErrKeyNotFound) {
+		return 0, false, nil
+	}
+	return count, ok, err
+}
+
+func (b *LocalBackend) putAppendSideRecordAppend(ctx context.Context, bucket, key string, obj *Object, seq int, seg SegmentRef) error {
+	_ = ctx
+	return b.db.Update(func(txn *badger.Txn) error {
+		record := *obj
+		record.Segments = nil
+		data, err := marshalObject(&record)
+		if err != nil {
+			return err
+		}
+		if err := setBadgerValue(txn, b.objectMetaKey(bucket, key), data); err != nil {
+			return err
+		}
+		if err := txn.Set(appendSummaryKey(bucket, key, obj.VersionID), encodeAppendSummary(appendSummary{Size: obj.Size, SegmentCount: seq})); err != nil {
+			return err
+		}
+		if err := txn.Set(appendSegmentKey(bucket, key, obj.VersionID, seq), encodeAppendSegment(seg)); err != nil {
+			return err
+		}
+		store := NewChunkRefStore(txn)
+		return store.AddRef(chunkref.ObjectVersionID(bucket, key, obj.VersionID), chunkref.ChunkID(ParseLocator(seg.BlobID).String()))
+	})
+}
+
+func (b *LocalBackend) putAppendSideRecordObject(ctx context.Context, bucket, key string, obj *Object, segments []SegmentRef) error {
+	_ = ctx
+	return b.db.Update(func(txn *badger.Txn) error {
+		record := *obj
+		record.Segments = nil
+		if err := b.PutObjectRecordInTxn(txn, bucket, key, &record); err != nil {
+			return err
+		}
+		return b.writeAppendSideRecordsInTxn(txn, bucket, key, obj.VersionID, appendSummary{Size: obj.Size, SegmentCount: len(segments)}, segments)
+	})
+}
+
+func (b *LocalBackend) deleteAppendSideRecordsInTxn(txn *badger.Txn, bucket, key, versionID string, now time.Time) error {
+	summary, err := b.readAppendSummaryInTxn(txn, bucket, key, versionID)
+	if errors.Is(err, badger.ErrKeyNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	store := NewChunkRefStore(txn)
+	m := chunkref.ObjectVersionID(bucket, key, versionID)
+	for seq := 1; seq <= summary.SegmentCount; seq++ {
+		item, err := txn.Get(appendSegmentKey(bucket, key, versionID, seq))
+		if err != nil {
+			return err
+		}
+		var seg SegmentRef
+		if err := item.Value(func(v []byte) error {
+			var derr error
+			seg, derr = decodeAppendSegment(v)
+			return derr
+		}); err != nil {
+			return err
+		}
+		if err := store.RemoveRef(m, chunkref.ChunkID(ParseLocator(seg.BlobID).String()), now); err != nil {
+			return err
+		}
+		if err := txn.Delete(appendSegmentKey(bucket, key, versionID, seq)); err != nil {
+			return err
+		}
+	}
+	return txn.Delete(appendSummaryKey(bucket, key, versionID))
+}
+
+func (b *LocalBackend) loadAppendSideSegmentsInTxn(txn *badger.Txn, bucket, key string, obj *Object) error {
+	summary, err := b.readAppendSummaryInTxn(txn, bucket, key, obj.VersionID)
+	if err != nil {
+		if err == badger.ErrKeyNotFound {
+			return fmt.Errorf("append side summary missing for %s/%s", bucket, key)
+		}
 		return err
 	}
 	if summary.Size != obj.Size {
