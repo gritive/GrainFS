@@ -142,9 +142,30 @@ func (c *Client) ExpandPlacement(ctx context.Context) (*ExpandPlacementResult, e
 	return &out, nil
 }
 
+type RetirePlacementGenerationResult struct {
+	Epoch   uint64 `json:"epoch"`
+	Retired bool   `json:"retired"`
+}
+
+func (c *Client) RetirePlacementGeneration(ctx context.Context, epoch uint64) (*RetirePlacementGenerationResult, error) {
+	var out RetirePlacementGenerationResult
+	if err := c.Post(ctx, "/v1/cluster/retire-placement-generation", struct {
+		Epoch uint64 `json:"epoch"`
+	}{Epoch: epoch}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // ExpandPlacementOptions configures RunExpandPlacement.
 type ExpandPlacementOptions struct {
 	Endpoint string
+	Out      io.Writer
+}
+
+type RetirePlacementGenerationOptions struct {
+	Endpoint string
+	Epoch    uint64
 	Out      io.Writer
 }
 
@@ -168,6 +189,17 @@ func RunExpandPlacement(ctx context.Context, opts ExpandPlacementOptions) error 
 		fmt.Fprintln(opts.Out, "  these groups stop receiving new writes; their existing objects stay readable.")
 	}
 	fmt.Fprintln(opts.Out, "existing objects stay readable via the generation-probe read path.")
+	return nil
+}
+
+func RunRetirePlacementGeneration(ctx context.Context, opts RetirePlacementGenerationOptions) error {
+	res, err := NewClient(opts.Endpoint).RetirePlacementGeneration(ctx, opts.Epoch)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(opts.Out, "placement generation retired:\n")
+	fmt.Fprintf(opts.Out, "  epoch: %d\n", res.Epoch)
+	fmt.Fprintln(opts.Out, "future reads no longer probe this generation; use only after object drain has completed.")
 	return nil
 }
 

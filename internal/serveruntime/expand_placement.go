@@ -18,6 +18,10 @@ type generationRecorder interface {
 	AddTopologyGeneration(ctx context.Context, base, expanded []string) error
 }
 
+type placementGenerationRetirer interface {
+	ProposeRetirePlacementGeneration(ctx context.Context, epoch uint64) error
+}
+
 // makeExpandPlacementFunc builds the server-injected closure that activates a
 // running cluster's currently-formed shard groups as a new placement generation
 // (S7-7). It holds the coordinator (the only authoritative source of the
@@ -30,6 +34,13 @@ func makeExpandPlacementFunc(coord *cluster.ClusterCoordinator, metaRaft *cluste
 		return nil
 	}
 	return expandPlacementClosure(coord, metaRaft)
+}
+
+func makeRetirePlacementGenerationFunc(metaRaft *cluster.MetaRaft) server.RetirePlacementGenerationFunc {
+	if metaRaft == nil {
+		return nil
+	}
+	return retirePlacementGenerationClosure(metaRaft)
 }
 
 // expandPlacementClosure is the testable core: the coordinator plans the growth
@@ -56,5 +67,14 @@ func expandPlacementClosure(planner placementPlanner, recorder generationRecorde
 			return res, fmt.Errorf("record placement generation: %w", err)
 		}
 		return res, nil
+	}
+}
+
+func retirePlacementGenerationClosure(retirer placementGenerationRetirer) server.RetirePlacementGenerationFunc {
+	return func(ctx context.Context, epoch uint64) (server.RetirePlacementGenerationResult, error) {
+		if err := retirer.ProposeRetirePlacementGeneration(ctx, epoch); err != nil {
+			return server.RetirePlacementGenerationResult{}, fmt.Errorf("retire placement generation: %w", err)
+		}
+		return server.RetirePlacementGenerationResult{Epoch: epoch, Retired: true}, nil
 	}
 }

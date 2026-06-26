@@ -443,9 +443,19 @@ grainfs cluster expand-placement --endpoint <data>/admin.sock
 
 The command reports `previous groups`, `new groups`, and the `active set`. It is a no-op when no new groups are present. If a newly-joined group is *wider* (more peers) than the existing groups, narrower groups drop out of the active set (the command prints a `WARNING` with the dropped groups — they stop receiving new writes but their existing objects stay readable).
 
+3. **Retire a drained old generation if groups were removed from the active set.** After
+   every object that lived on the old groups has been rewritten to the active placement
+   set, stop probing that generation:
+
+```bash
+grainfs cluster retire-placement-generation --endpoint <data>/admin.sock --epoch <n>
+```
+
 Notes:
 
-- **Irreversible:** a placement generation, once recorded, is never removed. There is no group-*removal* path.
+- **Drain first:** retiring a generation removes it from future read probes. Do this only
+  after object drain has completed; the generation record remains in meta-raft snapshots
+  for audit/replay.
 - **Run on the leader.** The command proposes through the meta-raft; on a follower it returns an error — target the current leader (`grainfs cluster status`).
 - **Reads stay correct** during and after growth: existing objects are found via the older generation; the cross-generation last-writer-wins fence resolves the brief add-window.
 - **Not yet validated:** multi-node concurrent growth under heavy load and throughput parity were not benchmarked (the fence arms per-node on the generation-count transition). Grow during a maintenance window for the first time.

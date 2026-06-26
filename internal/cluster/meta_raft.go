@@ -484,6 +484,22 @@ func (m *MetaRaft) ProposeAddPlacementGenerationForwarding(ctx context.Context, 
 	return m.proposeOrForward(ctx, m.node, data)
 }
 
+// ProposeRetirePlacementGeneration marks a drained placement generation retired,
+// blocking until applied locally. Retired generations stay in the registry for
+// replay/snapshot audit but are removed from object read probes.
+func (m *MetaRaft) ProposeRetirePlacementGeneration(ctx context.Context, epoch uint64) error {
+	payload := encodeMetaRetirePlacementGenerationCmd(epoch)
+	data, err := encodeMetaCmd(MetaCmdTypeRetirePlacementGeneration, payload)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
+	}
+	idx, err := m.node.ProposeWait(ctx, data)
+	if err != nil {
+		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
+	}
+	return m.waitAppliedResult(ctx, idx)
+}
+
 // AddTopologyGeneration records a new topology generation that grows the object→
 // group placement set from baseGroupIDs to expandedGroupIDs (S7-6 add-protocol,
 // must-solve ②). The new groups must already be formed and registered

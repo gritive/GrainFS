@@ -90,6 +90,7 @@ const (
 	MetaCmdTypeSetBucketVersioning          MetaCmdType = 93
 	MetaCmdTypeSetBucketPolicy              MetaCmdType = 94
 	MetaCmdTypeDeleteBucketPolicy           MetaCmdType = 95
+	MetaCmdTypeRetirePlacementGeneration    MetaCmdType = 96
 )
 
 var EnumNamesMetaCmdType = map[MetaCmdType]string{
@@ -176,6 +177,7 @@ var EnumNamesMetaCmdType = map[MetaCmdType]string{
 	MetaCmdTypeSetBucketVersioning:          "SetBucketVersioning",
 	MetaCmdTypeSetBucketPolicy:              "SetBucketPolicy",
 	MetaCmdTypeDeleteBucketPolicy:           "DeleteBucketPolicy",
+	MetaCmdTypeRetirePlacementGeneration:    "RetirePlacementGeneration",
 }
 
 var EnumValuesMetaCmdType = map[string]MetaCmdType{
@@ -262,6 +264,7 @@ var EnumValuesMetaCmdType = map[string]MetaCmdType{
 	"SetBucketVersioning":          MetaCmdTypeSetBucketVersioning,
 	"SetBucketPolicy":              MetaCmdTypeSetBucketPolicy,
 	"DeleteBucketPolicy":           MetaCmdTypeDeleteBucketPolicy,
+	"RetirePlacementGeneration":    MetaCmdTypeRetirePlacementGeneration,
 }
 
 func (v MetaCmdType) String() string {

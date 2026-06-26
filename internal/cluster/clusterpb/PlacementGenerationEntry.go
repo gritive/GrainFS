@@ -70,8 +70,20 @@ func (rcv *PlacementGenerationEntry) GroupIdsLength() int {
 	return 0
 }
 
+func (rcv *PlacementGenerationEntry) Retired() bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(8))
+	if o != 0 {
+		return rcv._tab.GetBool(o + rcv._tab.Pos)
+	}
+	return false
+}
+
+func (rcv *PlacementGenerationEntry) MutateRetired(n bool) bool {
+	return rcv._tab.MutateBoolSlot(8, n)
+}
+
 func PlacementGenerationEntryStart(builder *flatbuffers.Builder) {
-	builder.StartObject(2)
+	builder.StartObject(3)
 }
 func PlacementGenerationEntryAddEpoch(builder *flatbuffers.Builder, epoch uint64) {
 	builder.PrependUint64Slot(0, epoch, 0)
@@ -81,6 +93,9 @@ func PlacementGenerationEntryAddGroupIds(builder *flatbuffers.Builder, groupIds 
 }
 func PlacementGenerationEntryStartGroupIdsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
+}
+func PlacementGenerationEntryAddRetired(builder *flatbuffers.Builder, retired bool) {
+	builder.PrependBoolSlot(2, retired, false)
 }
 func PlacementGenerationEntryEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

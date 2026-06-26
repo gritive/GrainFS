@@ -3,6 +3,8 @@ package cluster
 import (
 	"sort"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // TestGenerationPlacement_CurrentGroupIDs covers the single-generation seam:
@@ -31,6 +33,16 @@ func TestGenerationPlacement_CurrentGroupIDs(t *testing.T) {
 	if got := nilGP.currentGroupIDs(); got != nil {
 		t.Fatalf("nil receiver currentGroupIDs = %v, want nil", got)
 	}
+}
+
+func TestGenerationPlacement_ReadGenerationGroupIDsSkipsRetired(t *testing.T) {
+	gp := newGenerationPlacementFromList([]placementGeneration{
+		{epoch: 0, groupIDs: []string{"group-old"}, retired: true},
+		{epoch: 1, groupIDs: []string{"group-current"}},
+	})
+
+	require.Equal(t, [][]string{{"group-current"}}, gp.readGenerationGroupIDs())
+	require.Equal(t, []string{"group-current"}, gp.currentGroupIDs())
 }
 
 // TestGenerationPlacement_ByteIdentical is the S7-2 neutrality anchor: at a

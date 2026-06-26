@@ -128,11 +128,6 @@ items it carried are preserved below so they are not lost.
   S7-1, generation-probe chosen over migration). Needs its own spec + plan-gate. Trigger: when probe
   fan-out cost (∝ #generations) after many expansions becomes a real operational drag.
 
-- **[P3][known-limitation] numGroups reduction (group 감소) is unsupported.** Phase 7 unlocked
-  group *addition* on a running cluster (`grainfs cluster expand-placement`); group *removal* was left
-  out of scope (nodes-in-group still shrink/heal via EC). A safe reduction needs object drain off the
-  retired group + generation retirement semantics.
-
 - **[P2][validation-gap] Multinode concurrent topology expansion under load — NOT validated.** S7-6
   shipped the add-protocol + cross-generation LWW fence machinery but validated only correctness +
   default-byte-identical (single-flip), not multinode concurrent expansion under load or throughput

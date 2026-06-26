@@ -7,6 +7,7 @@ package cluster
 type placementGeneration struct {
 	epoch    uint64
 	groupIDs []string
+	retired  bool
 }
 
 // GenerationPlacement owns the ordered (ascending-epoch) list of topology
@@ -57,7 +58,12 @@ func (g *GenerationPlacement) currentGroupIDs() []string {
 	if g == nil || len(g.generations) == 0 {
 		return nil
 	}
-	return g.generations[len(g.generations)-1].groupIDs
+	for i := len(g.generations) - 1; i >= 0; i-- {
+		if !g.generations[i].retired {
+			return g.generations[i].groupIDs
+		}
+	}
+	return nil
 }
 
 // generationCount returns the number of recorded topology generations. The
@@ -83,6 +89,9 @@ func (g *GenerationPlacement) readGenerationGroupIDs() [][]string {
 	}
 	out := make([][]string, 0, len(g.generations))
 	for i := len(g.generations) - 1; i >= 0; i-- {
+		if g.generations[i].retired {
+			continue
+		}
 		out = append(out, g.generations[i].groupIDs)
 	}
 	return out

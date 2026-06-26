@@ -28,7 +28,7 @@ func (f *MetaFSM) Snapshot() ([]byte, error) {
 	for i, g := range f.placementGenerations {
 		ids := make([]string, len(g.groupIDs))
 		copy(ids, g.groupIDs)
-		placementGenerations[i] = placementGeneration{epoch: g.epoch, groupIDs: ids}
+		placementGenerations[i] = placementGeneration{epoch: g.epoch, groupIDs: ids, retired: g.retired}
 	}
 	buckets := make([]bucketSnapshotKV, 0, len(f.bucketRecords))
 	for bucket, rec := range f.bucketRecords {

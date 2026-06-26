@@ -171,7 +171,11 @@ func decodeCoreTopology(snap *clusterpb.MetaStateSnapshot, st *restoredMetaState
 			for j := 0; j < pgEntry.GroupIdsLength(); j++ {
 				ids[j] = string(pgEntry.GroupIds(j))
 			}
-			newPlacementGenerations = append(newPlacementGenerations, placementGeneration{epoch: pgEntry.Epoch(), groupIDs: ids})
+			newPlacementGenerations = append(newPlacementGenerations, placementGeneration{
+				epoch:    pgEntry.Epoch(),
+				groupIDs: ids,
+				retired:  pgEntry.Retired(),
+			})
 		}
 	}
 

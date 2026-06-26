@@ -188,7 +188,8 @@ func (c *ClusterCoordinator) registerTopologyRebuildHook() {
 		return
 	}
 	reg.RegisterPostCommit(func(cmdType clusterpb.MetaCmdType, _ []byte) {
-		if cmdType == clusterpb.MetaCmdTypeAddPlacementGeneration {
+		if cmdType == clusterpb.MetaCmdTypeAddPlacementGeneration ||
+			cmdType == clusterpb.MetaCmdTypeRetirePlacementGeneration {
 			c.rebuild()
 		}
 	})

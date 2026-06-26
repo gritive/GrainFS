@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.761.0] - 2026-06-27
+
+### Added
+- **Added placement-generation retirement after group drain.** Operators can now
+  run `grainfs cluster retire-placement-generation --epoch <n>` after drained
+  groups leave the active placement set, so future reads stop probing that
+  generation while the meta-raft registry keeps the retired record for replay
+  and audit.
+
 ## [0.0.760.0] - 2026-06-27
 
 ### Fixed

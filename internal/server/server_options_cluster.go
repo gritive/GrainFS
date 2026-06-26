@@ -40,6 +40,12 @@ func WithExpandPlacement(fn ExpandPlacementFunc) Option {
 	}
 }
 
+func WithRetirePlacementGeneration(fn RetirePlacementGenerationFunc) Option {
+	return func(s *Server) {
+		s.retirePlacementGeneration = fn
+	}
+}
+
 func WithReadIndexer(ri ReadIndexer) Option {
 	return func(s *Server) {
 		s.readIndexer = ri

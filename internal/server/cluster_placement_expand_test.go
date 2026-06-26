@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -70,4 +71,37 @@ func TestExpandPlacementHandler_NoOp(t *testing.T) {
 	var out ExpandPlacementResult
 	require.NoError(t, json.Unmarshal(body, &out))
 	require.True(t, out.NoOp)
+}
+
+func TestRetirePlacementGenerationHandler_NotWired(t *testing.T) {
+	sock := udsTestSocket(t)
+	cli := startUDSAdminTestServerWithSrv(t, sock, &Server{})
+
+	resp, err := cli.Post("http://unix/v1/cluster/retire-placement-generation", "application/json", nil)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+}
+
+func TestRetirePlacementGenerationHandler_RetiresEpoch(t *testing.T) {
+	sock := udsTestSocket(t)
+	var gotEpoch uint64
+	s := &Server{retirePlacementGeneration: func(_ context.Context, epoch uint64) (RetirePlacementGenerationResult, error) {
+		gotEpoch = epoch
+		return RetirePlacementGenerationResult{Epoch: epoch, Retired: true}, nil
+	}}
+	cli := startUDSAdminTestServerWithSrv(t, sock, s)
+
+	resp, err := cli.Post("http://unix/v1/cluster/retire-placement-generation", "application/json",
+		strings.NewReader(`{"epoch":7}`))
+	require.NoError(t, err)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode, "body: %s", body)
+	require.Equal(t, uint64(7), gotEpoch)
+
+	var out RetirePlacementGenerationResult
+	require.NoError(t, json.Unmarshal(body, &out))
+	require.True(t, out.Retired)
+	require.Equal(t, uint64(7), out.Epoch)
 }

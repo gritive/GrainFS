@@ -33,6 +33,18 @@ func (f *fakeRecorder) AddTopologyGeneration(_ context.Context, base, expanded [
 	return f.returnErr
 }
 
+type fakePlacementGenerationRetirer struct {
+	calls     int
+	gotEpoch  uint64
+	returnErr error
+}
+
+func (f *fakePlacementGenerationRetirer) ProposeRetirePlacementGeneration(_ context.Context, epoch uint64) error {
+	f.calls++
+	f.gotEpoch = epoch
+	return f.returnErr
+}
+
 // TestExpandPlacementClosure_RecordsOnGrowth proves a non-no-op plan records the
 // generation with the planned Base/Expanded and surfaces the plan in the result.
 func TestExpandPlacementClosure_RecordsOnGrowth(t *testing.T) {
@@ -83,4 +95,16 @@ func TestExpandPlacementClosure_PlanErrorPropagates(t *testing.T) {
 // a nil func (handler → 503) rather than a non-nil closure that would panic.
 func TestMakeExpandPlacementFunc_NilDeps(t *testing.T) {
 	require.Nil(t, makeExpandPlacementFunc(nil, nil))
+}
+
+func TestRetirePlacementGenerationClosure_ProposesEpoch(t *testing.T) {
+	retirer := &fakePlacementGenerationRetirer{}
+	fn := retirePlacementGenerationClosure(retirer)
+
+	res, err := fn(context.Background(), 7)
+	require.NoError(t, err)
+	require.Equal(t, 1, retirer.calls)
+	require.Equal(t, uint64(7), retirer.gotEpoch)
+	require.True(t, res.Retired)
+	require.Equal(t, uint64(7), res.Epoch)
 }

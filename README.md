@@ -156,6 +156,7 @@ Use the compatibility docs for protocol-specific limits.
 | Revoke a zero-CA node identity | `grainfs cluster --endpoint <data>/admin.sock revoke-node <node-id>` |
 | Inspect object placement | `grainfs cluster --endpoint <data>/admin.sock placement [bucket] [key]` |
 | Grow placement groups on a running cluster | `grainfs cluster expand-placement --endpoint <data>/admin.sock` |
+| Retire a drained placement generation | `grainfs cluster retire-placement-generation --endpoint <data>/admin.sock --epoch <n>` |
 | Configure cluster policy | `grainfs cluster config --endpoint <data>/admin.sock ...` |
 | Rotate / inspect the cluster encryption key (KEK) | `grainfs encrypt kek status\|rotate\|retire\|prune --endpoint <data>/admin.sock` |
 | Check balancer status | `curl http://localhost:9000/api/cluster/balancer/status` |
