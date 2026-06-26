@@ -3,6 +3,7 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
 	"io"
 	"os"
 	"path/filepath"
@@ -110,6 +111,118 @@ func TestAppendObject_ClusterSideRecordsKeepManifestSummarySmall(t *testing.T) {
 	require.NoError(t, os.Remove(filepath.Join(sideRoot, "summary")))
 	_, err = b.HeadObject(ctx, "bk", "k")
 	require.Error(t, err, "side-record manifest without summary must fail closed")
+}
+
+func TestAppendObject_ClusterCoalescedPrefix_TailSideRecords(t *testing.T) {
+	b := newTestBackendWithQuorumMeta(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "bk"))
+
+	coalescedPayload := []byte("coal")
+	tailPayload := []byte("tail")
+	coalescedChecksum := md5.Sum(coalescedPayload)
+	tailChecksum := md5.Sum(tailPayload)
+
+	baseState, count, err := storage.AppendETagStateAppend(nil, 0, tailChecksum[:])
+	require.NoError(t, err)
+	baseETag, err := storage.CompositeETagFromState(baseState, count)
+	require.NoError(t, err)
+	baseVersion := "v-coalesced-tail"
+
+	coalescedSize := int64(len(coalescedPayload))
+	manifestSize := coalescedSize + int64(len(tailPayload))
+
+	sideSummary := storage.AppendSummary{
+		Size:            int64(len(tailPayload)),
+		SegmentCount:    1,
+		ETagPartCount:   count,
+		ETagDigestState: baseState,
+	}
+	baseTailSegment := storage.SegmentRef{
+		BlobID:   "tail-seg-1",
+		Size:     int64(len(tailPayload)),
+		Checksum: tailChecksum[:],
+	}
+
+	base := PutObjectMetaCmd{
+		Bucket:           "bk",
+		Key:              "k",
+		Size:             manifestSize,
+		ContentType:      "application/octet-stream",
+		ETag:             baseETag,
+		ModTime:          1_000_000,
+		VersionID:        baseVersion,
+		PlacementGroupID: "group-0",
+		NodeIDs:          []string{b.currentSelfAddr()},
+		ECData:           1,
+		ECParity:         0,
+		IsAppendable:     true,
+		MetaSeqCAS:       true,
+		MetaSeq:          1,
+		Coalesced: []CoalescedShardRef{{
+			CoalescedID: "coal-1",
+			Size:        coalescedSize,
+			ETag:        storage.CompositeETag([][]byte{coalescedChecksum[:]}),
+			ShardKey:    "k/coalesced/coal-1",
+		}},
+	}
+	require.NoError(t, b.writeClusterAppendSideRecords(ctx, "bk", "k", baseVersion, base.NodeIDs, 1, sideSummary, map[int]storage.SegmentRef{sideSummary.SegmentCount: baseTailSegment}))
+	require.NoError(t, b.writeQuorumMeta(ctx, base))
+
+	headBefore, err := b.HeadObject(ctx, "bk", "k")
+	require.NoError(t, err)
+	require.NotNil(t, headBefore)
+	require.Len(t, headBefore.Coalesced, 1)
+	require.Len(t, headBefore.Segments, 1)
+
+	appended, err := b.AppendObject(ctx, "bk", "k", manifestSize, bytes.NewReader([]byte("x")))
+	require.NoError(t, err)
+	require.Equal(t, manifestSize+1, appended.Size)
+	require.Empty(t, appended.Segments)
+
+	summary, err := b.readClusterAppendSummary(ctx, "bk", "k", baseVersion, base.NodeIDs)
+	require.NoError(t, err)
+	require.Equal(t, manifestSize+1-coalescedSize, summary.Size)
+	require.Equal(t, 2, summary.SegmentCount)
+
+	headAfter, err := b.HeadObject(ctx, "bk", "k")
+	require.NoError(t, err)
+	require.Len(t, headAfter.Coalesced, 1)
+	require.Len(t, headAfter.Segments, 2)
+}
+
+func TestHeadObject_ClusterCoalescedPrefixNoTailSideSummaryFallsThrough(t *testing.T) {
+	b := newTestBackendWithQuorumMeta(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "bk"))
+
+	bucketObj := PutObjectMetaCmd{
+		Bucket:           "bk",
+		Key:              "k2",
+		Size:             4,
+		ContentType:      "application/octet-stream",
+		ETag:             "0000",
+		ModTime:          1_000_001,
+		VersionID:        "v-coalesced-no-tail",
+		PlacementGroupID: "group-0",
+		NodeIDs:          []string{b.currentSelfAddr()},
+		ECData:           1,
+		ECParity:         0,
+		IsAppendable:     true,
+		MetaSeqCAS:       true,
+		MetaSeq:          1,
+		Coalesced: []CoalescedShardRef{{
+			CoalescedID: "coal-2",
+			Size:        4,
+			ShardKey:    "k2/coalesced/coal-2",
+		}},
+	}
+	require.NoError(t, b.writeQuorumMeta(ctx, bucketObj))
+
+	head, err := b.HeadObject(ctx, "bk", "k2")
+	require.NoError(t, err)
+	require.Len(t, head.Coalesced, 1)
+	require.Len(t, head.Segments, 0)
 }
 
 // TestAppendObject_SkewImmune_CASNotModTime proves that an append whose

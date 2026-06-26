@@ -87,7 +87,7 @@ type appendBlobRMWInput struct {
 // silently deduped.
 func planAppendObjectBlobRMWWithSide(in appendBlobRMWInput) (PutObjectMetaCmd, storage.AppendSummary, bool, error) {
 	seg := in.Segment
-	useSide := in.UseSideRecords && len(in.Base.Coalesced) == 0
+	useSide := in.UseSideRecords
 
 	if !in.BaseExists {
 		if in.ExpectedOffset != 0 {
@@ -151,8 +151,16 @@ func planAppendObjectBlobRMWWithSide(in appendBlobRMWInput) (PutObjectMetaCmd, s
 		return PutObjectMetaCmd{}, storage.AppendSummary{}, false, storage.ErrAppendOffsetMismatch
 	}
 	if useSide && in.BaseHasSummary {
-		if in.BaseSummary.Size != base.Size {
-			return PutObjectMetaCmd{}, storage.AppendSummary{}, false, fmt.Errorf("append side summary size %d does not match object size %d", in.BaseSummary.Size, base.Size)
+		baseCoalescedSize := int64(0)
+		for _, c := range in.Base.Coalesced {
+			baseCoalescedSize += c.Size
+		}
+		tailSize := base.Size - baseCoalescedSize
+		if tailSize < 0 {
+			return PutObjectMetaCmd{}, storage.AppendSummary{}, false, fmt.Errorf("append object: invalid manifest with coalesced size %d larger than object size %d", baseCoalescedSize, base.Size)
+		}
+		if in.BaseSummary.Size != tailSize {
+			return PutObjectMetaCmd{}, storage.AppendSummary{}, false, fmt.Errorf("append side summary size %d does not match object tail size %d", in.BaseSummary.Size, tailSize)
 		}
 		if in.BaseSummary.SegmentCount >= storage.MaxAppendSegments {
 			return PutObjectMetaCmd{}, storage.AppendSummary{}, false, storage.ErrAppendCapExceeded
@@ -207,7 +215,12 @@ func planAppendObjectBlobRMWWithSide(in appendBlobRMWInput) (PutObjectMetaCmd, s
 		next.IsHardDeleted = false
 		next.ExpectedETag = ""
 		next.PreserveLatest = false
-		return next, storage.AppendSummary{Size: next.Size, SegmentCount: in.BaseSummary.SegmentCount + 1, ETagPartCount: count, ETagDigestState: state}, true, nil
+		return next, storage.AppendSummary{
+			Size:            in.BaseSummary.Size + seg.Size,
+			SegmentCount:    in.BaseSummary.SegmentCount + 1,
+			ETagPartCount:   count,
+			ETagDigestState: state,
+		}, true, nil
 	}
 
 	// Append the new segment and recompute Size.

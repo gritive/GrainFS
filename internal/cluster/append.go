@@ -161,7 +161,7 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 	cur, curExists, curSummary, curHasSummary := base, baseExists, baseSummary, baseHasSummary
 	for attempt := 0; ; attempt++ {
 		modifiedUnixSec := time.Now().Unix()
-		useSideRecords := !b.appendSideRecordsDisabled && (!curExists || (cur.IsAppendable && len(cur.Segments) == 0 && len(cur.Coalesced) == 0 && curHasSummary))
+		useSideRecords := !b.appendSideRecordsDisabled && (!curExists || (cur.IsAppendable && len(cur.Segments) == 0 && curHasSummary))
 		cmd, summary, sideMode, perr := planAppendObjectBlobRMWWithSide(appendBlobRMWInput{
 			Bucket:            bucket,
 			Key:               key,
@@ -203,7 +203,9 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 			// crosses a count/size/idle threshold gets enqueued. The worker's
 			// owner-gate + objectMetaRMWLock serialize the publish against this append.
 			if obj != nil {
-				b.maybeTriggerCoalesce(bucket, key, segmentMetaEntriesToRefs(cmd.Segments))
+				if len(cmd.Coalesced) == 0 {
+					b.maybeTriggerCoalesce(bucket, key, segmentMetaEntriesToRefs(cmd.Segments))
+				}
 				metrics.AppendCoalescedDepth.Observe(float64(len(obj.Coalesced)))
 				metrics.AppendCoalescedTotalBytes.Observe(float64(obj.Size))
 			}
@@ -232,13 +234,24 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 func (b *DistributedBackend) readAppendBaseWithSide(ctx context.Context, bucket, key string) (PutObjectMetaCmd, bool, storage.AppendSummary, bool, error) {
 	cmd, err := b.readQuorumMetaCmd(bucket, key)
 	if err == nil {
-		if cmd.IsAppendable && cmd.Size > 0 && len(cmd.Segments) == 0 && len(cmd.Coalesced) == 0 {
+		if cmd.IsAppendable && cmd.Size > 0 && len(cmd.Segments) == 0 {
+			coalescedSize := int64(0)
+			for _, c := range cmd.Coalesced {
+				coalescedSize += c.Size
+			}
+			tailSize := cmd.Size - coalescedSize
+			if tailSize < 0 {
+				return PutObjectMetaCmd{}, false, storage.AppendSummary{}, false, fmt.Errorf("append object: invalid manifest with coalesced size %d larger than object size %d", coalescedSize, cmd.Size)
+			}
 			summary, serr := b.readClusterAppendSummary(ctx, bucket, key, cmd.VersionID, cmd.NodeIDs)
 			if serr != nil {
+				if errors.Is(serr, storage.ErrObjectNotFound) && tailSize == 0 {
+					return cmd, true, storage.AppendSummary{}, false, nil
+				}
 				return PutObjectMetaCmd{}, false, storage.AppendSummary{}, false, fmt.Errorf("append object: read side summary: %w", serr)
 			}
-			if summary.Size != cmd.Size {
-				return PutObjectMetaCmd{}, false, storage.AppendSummary{}, false, fmt.Errorf("append side summary size %d does not match object size %d", summary.Size, cmd.Size)
+			if summary.Size != tailSize {
+				return PutObjectMetaCmd{}, false, storage.AppendSummary{}, false, fmt.Errorf("append side summary size %d does not match object tail size %d", summary.Size, tailSize)
 			}
 			return cmd, true, summary, true, nil
 		}

@@ -115,6 +115,59 @@ func TestPlanAppendCompositeETagSurvivesCoalesce(t *testing.T) {
 	require.Equal(t, [][]byte{c1, c2, c3, seg.Checksum}, next.AppendCallMD5s)
 }
 
+func TestPlanAppendObjectBlobRMWCoalescedPrefixUsesSideRecords(t *testing.T) {
+	baseState, count, err := storage.AppendETagStateAppend(nil, 0, []byte("base-segment-md5"))
+	require.NoError(t, err)
+	etag, err := storage.CompositeETagFromState(baseState, count)
+	require.NoError(t, err)
+
+	base := PutObjectMetaCmd{
+		Bucket:           "b",
+		Key:              "k",
+		Size:             12,
+		IsAppendable:     true,
+		Segments:         nil,
+		Coalesced:        []CoalescedShardRef{{CoalescedID: "c1", Size: 4, ShardKey: "k/coalesced/c1"}},
+		MetaSeq:          3,
+		NodeIDs:          []string{"n1"},
+		ETag:             etag,
+		PlacementGroupID: "g0",
+		ECData:           1,
+		ECParity:         0,
+	}
+	seg := storage.SegmentRef{Size: 2, Checksum: []byte("new-segment-md5")}
+	summary := storage.AppendSummary{
+		Size:            8,
+		SegmentCount:    1,
+		ETagPartCount:   count,
+		ETagDigestState: baseState,
+	}
+	next, nextSummary, sideMode, err := planAppendObjectBlobRMWWithSide(appendBlobRMWInput{
+		Bucket:           "b",
+		Key:              "k",
+		ExpectedOffset:   12,
+		Segment:          seg,
+		Base:             base,
+		BaseExists:       true,
+		ModifiedUnixSec:  1,
+		UseSideRecords:   true,
+		BaseSummary:      summary,
+		BaseHasSummary:   true,
+		PlacementGroupID: "g0",
+		SizeCapBytes:     0,
+	})
+	require.NoError(t, err)
+	require.True(t, sideMode)
+	require.Len(t, next.Coalesced, 1)
+	require.Empty(t, next.Segments)
+	require.Equal(t, int64(14), next.Size)
+	require.Empty(t, next.AppendCallMD5s)
+	computedETag, err := storage.CompositeETagFromState(nextSummary.ETagDigestState, nextSummary.ETagPartCount)
+	require.NoError(t, err)
+	require.Equal(t, computedETag, next.ETag)
+	require.Greater(t, nextSummary.SegmentCount, summary.SegmentCount)
+}
+
 func TestPlanAppendSeedsAppendCallMD5sOnFirstCall(t *testing.T) {
 	seg := storage.SegmentRef{Size: 5, Checksum: []byte("0123456789abcdef")}
 	next, _, _, err := planAppendObjectBlobRMWWithSide(appendBlobRMWInput{Bucket: "b", Key: "k", ExpectedOffset: 0, Segment: seg, BaseExists: false, ModifiedUnixSec: 1})
