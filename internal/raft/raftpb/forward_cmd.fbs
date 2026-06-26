@@ -250,8 +250,8 @@ table ListMultipartUploadsArgs {
 }
 
 // AppendObjectForwardArgs carries the header for an AppendObject forward.
-// Body bytes are streamed on the same QUIC stream after the FBS args frame
-// (multi-stream forward path) — not embedded inline.
+// Body bytes are streamed on the same HTTP request body after the FBS args frame
+// (streaming forward path) — not embedded inline.
 table AppendObjectForwardArgs {
   bucket:string;
   key:string;

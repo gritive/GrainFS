@@ -974,7 +974,7 @@ func TestApplyConflictHint_BoundedScanOnLargeLog(t *testing.T) {
 
 // blockingAETransport wraps a Transport and blocks SendAppendEntries calls to a
 // specific peer on a channel held by the test. This simulates a hung/partitioned
-// transport (QUIC keepalive delay) to trigger the goroutine-accumulation scenario
+// transport to trigger the goroutine-accumulation scenario
 // that the per-peer single-flight gate prevents.
 type blockingAETransport struct {
 	inner       Transport

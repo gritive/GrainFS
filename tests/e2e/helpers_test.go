@@ -171,15 +171,15 @@ func freePort() int {
 		defer unlock()
 	}
 	leases := readE2EPortLeases()
-	// Avoid the OS ephemeral range for listeners. The cluster e2e tests open
-	// many outbound UDP/QUIC sockets; using :0 for a future UDP listener can
-	// race with an ephemeral source port after the probe socket is closed.
+	// Avoid the OS ephemeral range for listeners. Cluster e2e tests open many
+	// outbound sockets; using :0 for a future listener can race with an
+	// ephemeral source port after the probe socket is closed.
 	for i := 0; i < 25000; i++ {
 		port := 20000 + int(atomic.AddUint32(&freePortCursor, 7919)%25000)
 		if _, reserved := leases[strconv.Itoa(port)]; reserved {
 			continue
 		}
-		if portAvailableForTCPAndUDP(port) {
+		if portAvailableForTCP(port) {
 			leases[strconv.Itoa(port)] = e2ePortLease{PID: os.Getpid()}
 			writeE2EPortLeases(leases)
 			return port
@@ -196,17 +196,12 @@ func freePort() int {
 			_ = l.Close()
 			continue
 		}
-		udp, err := net.ListenPacket("udp", fmt.Sprintf(":%d", port))
-		if err == nil {
-			_ = udp.Close()
-			_ = l.Close()
-			leases[strconv.Itoa(port)] = e2ePortLease{PID: os.Getpid()}
-			writeE2EPortLeases(leases)
-			return port
-		}
 		_ = l.Close()
+		leases[strconv.Itoa(port)] = e2ePortLease{PID: os.Getpid()}
+		writeE2EPortLeases(leases)
+		return port
 	}
-	panic("cannot allocate port available for both tcp and udp")
+	panic("cannot allocate free TCP port")
 }
 
 func lockE2EPortRegistry() (bool, func()) {
@@ -260,17 +255,12 @@ func processExists(pid int) bool {
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
-func portAvailableForTCPAndUDP(port int) bool {
+func portAvailableForTCP(port int) bool {
 	l, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		return false
 	}
 	defer l.Close()
-	udp, err := net.ListenPacket("udp", fmt.Sprintf(":%d", port))
-	if err != nil {
-		return false
-	}
-	_ = udp.Close()
 	return true
 }
 

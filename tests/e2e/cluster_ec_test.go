@@ -342,7 +342,7 @@ func runClusterEC3NodeActiveKM21(t testing.TB) {
 
 	// Poll until the surviving nodes serve the object. No fixed sleep —
 	// getObjectEC uses a 3s per-shard timeout, so each poll completes quickly
-	// even while the dead peer's QUIC connection is timing out. 30s covers
+	// even while the dead peer's cluster transport call is timing out. 30s covers
 	// both the per-shard timeout (3s) and any Raft re-election (~5-10s).
 	var gotAfterKill []byte
 	gomega.Eventually(func() bool {
@@ -577,8 +577,8 @@ func runClusterECTopologyChange(t testing.TB) {
 	// Old objects: FSM placement records are immutable. GET must reconstruct
 	// using the original 6-node placement even though one shard node is gone
 	// (k=3 data shards needed; the victim held 1 of 5 shards, so 4 remain ≥ 3).
-	// Use Eventually — dead node's QUIC connection takes up to 3s per shard
-	// to time out before the remaining shards are fetched.
+	// Use Eventually — the dead node's cluster transport call can take up to
+	// 3s per shard to time out before the remaining shards are fetched.
 	for _, obj := range preObjects {
 		obj := obj
 		deadline := time.Now().Add(60 * time.Second)

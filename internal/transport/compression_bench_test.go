@@ -14,7 +14,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 )
 
-// Phase 2 #2: QUIC 내부 통신 압축 검토 — measure compression ratio and CPU
+// Phase 2 #2: internal transport compression review — measure compression ratio and CPU
 // cost on representative payloads of every StreamType except StreamData
 // (EC shards are random bytes, excluded by the design doc).
 //

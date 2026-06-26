@@ -15,7 +15,7 @@
 
 ## ALPN
 
-- `grainfs-mux-v1` is the current ALPN. It uses capability exchange and
+- Historical ALPN: `grainfs-mux-v1`. It used capability exchange and
   BinaryCodec framing.
 
 ## Capability Exchange Wire Format

@@ -40,8 +40,8 @@ import (
 // the host, so colima VM clients can reach them via 192.168.5.2:<port>.
 type Cluster struct {
 	HTTPPorts []int    // S3/admin HTTP ports (bind :%d on host)
-	RaftPorts []int    // QUIC raft ports
-	JoinPorts []int    // Zero-CA QUIC join-listener ports
+	RaftPorts []int    // cluster transport HTTP ports
+	JoinPorts []int    // Zero-CA HTTP join-listener ports
 	DataDirs  []string // per-node data directories (temp)
 
 	LeaderIdx int    // 0 — seed is always the initial leader at boot
@@ -259,13 +259,11 @@ func (c *Cluster) spawn(t testing.TB, binary string, i int, extraEnv []string) (
 	return cmd, logFile
 }
 
-// uniqueFreePorts picks n ports where both TCP and UDP are free. The fixture
-// uses TCP for HTTP and UDP for QUIC raft, so checking TCP alone can
-// choose a port that later fails the raft listener with EADDRINUSE.
+// uniqueFreePorts picks n TCP ports and keeps listeners open until the full set
+// is reserved, so concurrent fixtures cannot claim the same port.
 func uniqueFreePorts(t testing.TB, n int) []int {
 	t.Helper()
 	tcpListeners := make([]net.Listener, 0, n)
-	udpListeners := make([]net.PacketConn, 0, n)
 	ports := make([]int, 0, n)
 	for len(ports) < n {
 		ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -273,26 +271,14 @@ func uniqueFreePorts(t testing.TB, n int) []int {
 			for _, prev := range tcpListeners {
 				_ = prev.Close()
 			}
-			for _, prev := range udpListeners {
-				_ = prev.Close()
-			}
 			t.Fatalf("listen :0: %v", err)
 		}
 		port := ln.Addr().(*net.TCPAddr).Port
-		pc, err := net.ListenPacket("udp", fmt.Sprintf("127.0.0.1:%d", port))
-		if err != nil {
-			_ = ln.Close()
-			continue
-		}
 		tcpListeners = append(tcpListeners, ln)
-		udpListeners = append(udpListeners, pc)
 		ports = append(ports, port)
 	}
 	for _, ln := range tcpListeners {
 		_ = ln.Close()
-	}
-	for _, pc := range udpListeners {
-		_ = pc.Close()
 	}
 	return ports
 }

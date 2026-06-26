@@ -9,7 +9,7 @@ import (
 )
 
 // fakeIdentitySwapper captures identity-swap calls so we can assert on them
-// without spinning a real QUIC transport. The worker now routes phase changes
+// without spinning a real cluster transport. The worker now routes phase changes
 // through ApplyRotation (composer path); the fake synthesizes the equivalent
 // snapshot (accept = rotation window, present = supplied cert/SPKI) so existing
 // assertions on AcceptSPKIs/PresentSPKI keep holding.
