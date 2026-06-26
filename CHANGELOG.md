@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.757.0] - 2026-06-27
+
+### Added
+- **Added AppendObject allocation slope gates for incremental metadata.**
+  Single-node and cluster append tests now assert per-append allocations stay
+  flat across 4/8/16 sequential append sweeps, protecting the side-record
+  metadata path from regressing back to O(N) manifest growth per append.
+
 ## [0.0.756.0] - 2026-06-26
 
 ### Changed
