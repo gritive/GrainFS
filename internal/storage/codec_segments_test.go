@@ -25,6 +25,32 @@ func TestObjectCodecRoundTripWithSegments(t *testing.T) {
 	require.Equal(t, orig.IsAppendable, got.IsAppendable)
 }
 
+func TestObjectCodecRoundTripWithCoalesced(t *testing.T) {
+	orig := &Object{
+		Key: "k", Size: 30 * 1024 * 1024, ETag: "cafef00d-3",
+		Coalesced: []CoalescedRef{
+			{
+				CoalescedID: "c1",
+				Size:        20 << 20,
+				ETag:        "etag-c1",
+				ShardKey:    "k/coalesced/c1",
+				ECData:      2,
+				ECParity:    1,
+				StripeBytes: 1 << 20,
+				NodeIDs:     []string{"n1", "n2", "n3"},
+			},
+			{CoalescedID: "c2", Size: 10 << 20, ETag: "etag-c2"},
+		},
+		IsAppendable: true,
+	}
+	data, err := marshalObject(orig)
+	require.NoError(t, err, "marshal")
+	got, err := unmarshalObject(data)
+	require.NoError(t, err, "unmarshal")
+	require.Equal(t, orig.Coalesced, got.Coalesced)
+	require.Equal(t, orig.IsAppendable, got.IsAppendable)
+}
+
 func TestObjectCodecLegacyHasNoSegments(t *testing.T) {
 	orig := &Object{Key: "legacy", Size: 100, ETag: "x"}
 	data, err := marshalObject(orig)
