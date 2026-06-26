@@ -24,7 +24,9 @@ type ScrubSessionLookup interface {
 }
 
 type ForwardReceiver struct {
-	groups *DataGroupManager
+	groups      *DataGroupManager
+	selfID      string
+	selfAliases []string
 	// scrubLookup is wired via WithScrubSessionLookup; reads happen on every
 	// inbound forward and writes only at startup, but we use atomic.Pointer
 	// so -race is clean even if rewiring ever lands.
@@ -119,6 +121,20 @@ func NewForwardReceiver(groups *DataGroupManager) *ForwardReceiver {
 	return &ForwardReceiver{groups: groups}
 }
 
+func (r *ForwardReceiver) WithLocalIdentity(selfID string, aliases ...string) *ForwardReceiver {
+	r.selfID = selfID
+	r.selfAliases = append([]string(nil), aliases...)
+	return r
+}
+
+func (r *ForwardReceiver) canHandleOwnerRouted(groupID string, dg *DataGroup) bool {
+	if dg == nil || r.selfID == "" {
+		return false
+	}
+	entry := ShardGroupEntry{ID: groupID, PeerIDs: dg.PeerIDs()}
+	return NewShardGroupPeerSet(entry).OwnerMatchesLocal(groupID, r.selfID, r.selfAliases...)
+}
+
 func (r *ForwardReceiver) forwardReplyBytesLimit() int64 {
 	if r.maxForwardReplyBytes > 0 {
 		return r.maxForwardReplyBytes
@@ -205,16 +221,24 @@ func (r *ForwardReceiver) Handle(payload []byte) ([]byte, error) {
 		return errReply(raftpb.ForwardStatusNotVoter, ""), nil
 	}
 
-	node := dg.Backend().Node()
-	if node == nil || !node.IsLeader() {
-		hint := ""
-		if node != nil {
-			hint = node.LeaderID()
+	if spec.ownerRouted {
+		if !r.canHandleOwnerRouted(groupID, dg) {
+			log.Debug().Str("group_id", groupID).Str("op", op.String()).Msg("forward: not owner")
+			return errReply(raftpb.ForwardStatusNotLeader, ""), nil
 		}
-		log.Debug().Str("group_id", groupID).Str("op", op.String()).Str("leader_hint", hint).Msg("forward: not leader")
-		return errReply(raftpb.ForwardStatusNotLeader, hint), nil
+		log.Debug().Str("group_id", groupID).Str("op", op.String()).Msg("forward: dispatch owner")
+	} else {
+		node := dg.Backend().Node()
+		if node == nil || !node.IsLeader() {
+			hint := ""
+			if node != nil {
+				hint = node.LeaderID()
+			}
+			log.Debug().Str("group_id", groupID).Str("op", op.String()).Str("leader_hint", hint).Msg("forward: not leader")
+			return errReply(raftpb.ForwardStatusNotLeader, hint), nil
+		}
+		log.Debug().Str("group_id", groupID).Str("op", op.String()).Msg("forward: dispatch leader")
 	}
-	log.Debug().Str("group_id", groupID).Str("op", op.String()).Msg("forward: dispatch leader")
 
 	if spec.handleFrame == nil {
 		return errReply(raftpb.ForwardStatusInternal, ""), nil
@@ -249,17 +273,26 @@ func (r *ForwardReceiver) HandleBody(frame []byte, body io.Reader) ([]byte, erro
 		return errReply(raftpb.ForwardStatusNotVoter, ""), nil
 	}
 
-	node := dg.Backend().Node()
-	if node == nil || !node.IsLeader() {
-		drainForwardBody(body)
-		hint := ""
-		if node != nil {
-			hint = node.LeaderID()
+	if spec.ownerRouted {
+		if !r.canHandleOwnerRouted(groupID, dg) {
+			drainForwardBody(body)
+			log.Debug().Str("group_id", groupID).Str("op", op.String()).Msg("forward body: not owner")
+			return errReply(raftpb.ForwardStatusNotLeader, ""), nil
 		}
-		log.Debug().Str("group_id", groupID).Str("op", op.String()).Str("leader_hint", hint).Msg("forward body: not leader")
-		return errReply(raftpb.ForwardStatusNotLeader, hint), nil
+		log.Debug().Str("group_id", groupID).Str("op", op.String()).Msg("forward body: dispatch owner")
+	} else {
+		node := dg.Backend().Node()
+		if node == nil || !node.IsLeader() {
+			drainForwardBody(body)
+			hint := ""
+			if node != nil {
+				hint = node.LeaderID()
+			}
+			log.Debug().Str("group_id", groupID).Str("op", op.String()).Str("leader_hint", hint).Msg("forward body: not leader")
+			return errReply(raftpb.ForwardStatusNotLeader, hint), nil
+		}
+		log.Debug().Str("group_id", groupID).Str("op", op.String()).Msg("forward body: dispatch leader")
 	}
-	log.Debug().Str("group_id", groupID).Str("op", op.String()).Msg("forward body: dispatch leader")
 
 	if spec.handleBody == nil {
 		drainForwardBody(body)

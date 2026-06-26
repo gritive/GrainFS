@@ -1,6 +1,11 @@
 package cluster
 
-import "net"
+import (
+	"bytes"
+	"crypto/sha256"
+	"net"
+	"sort"
+)
 
 // ShardGroupPeerSet centralizes the identity rules for ShardGroupEntry.PeerIDs.
 // New entries should store node IDs. Legacy/static entries may still store
@@ -66,6 +71,62 @@ func (s ShardGroupPeerSet) AllMatchLocal(localID string, aliases ...string) bool
 		}
 	}
 	return true
+}
+
+// OwnerPeer returns the deterministic single writer for group-scoped RMW
+// operations. It uses rendezvous hashing over the group ID and peer identity,
+// deduping repeated single-node placement slots before ranking them.
+func (s ShardGroupPeerSet) OwnerPeer(groupID string) (string, bool) {
+	if groupID == "" || len(s.peers) == 0 {
+		return "", false
+	}
+	type ranked struct {
+		peer  string
+		score [32]byte
+	}
+	seen := make(map[string]struct{}, len(s.peers))
+	items := make([]ranked, 0, len(s.peers))
+	for _, peer := range s.peers {
+		if peer == "" {
+			continue
+		}
+		if _, ok := seen[peer]; ok {
+			continue
+		}
+		seen[peer] = struct{}{}
+		items = append(items, ranked{
+			peer:  peer,
+			score: sha256.Sum256([]byte(groupID + "/" + peer)),
+		})
+	}
+	if len(items) == 0 {
+		return "", false
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if cmp := bytes.Compare(items[i].score[:], items[j].score[:]); cmp != 0 {
+			return cmp < 0
+		}
+		return items[i].peer < items[j].peer
+	})
+	return items[0].peer, true
+}
+
+// OwnerMatchesLocal reports whether the deterministic owner identifies this
+// process. aliases cover legacy shard-group PeerIDs that stored raft addresses.
+func (s ShardGroupPeerSet) OwnerMatchesLocal(groupID, localID string, aliases ...string) bool {
+	owner, ok := s.OwnerPeer(groupID)
+	if !ok {
+		return false
+	}
+	if owner == localID {
+		return true
+	}
+	for _, alias := range aliases {
+		if alias != "" && owner == alias {
+			return true
+		}
+	}
+	return false
 }
 
 // ForwardOrder returns peer IDs with any local identity moved to the end.

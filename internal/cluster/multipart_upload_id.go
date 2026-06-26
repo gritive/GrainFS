@@ -140,10 +140,10 @@ func deriveMultipartVID(rawUploadID string) (string, error) {
 func (c *ClusterCoordinator) routeMultipartSession(bucket, key, uploadID string) (RouteTarget, ShardGroupEntry, string, error) {
 	groupID, raw, ok := parseMultipartUploadID(uploadID)
 	if !ok {
-		target, group, err := c.routeWriteOrBucket(bucket, key)
+		target, group, err := c.routeOwnerWriteOrBucket(bucket, key)
 		return target, group, uploadID, err
 	}
-	target, group, err := c.runtimeState().opRouter.RouteObjectWriteGroup(groupID)
+	target, group, err := c.runtimeState().opRouter.RouteObjectOwnerWriteGroup(groupID)
 	if err != nil {
 		if errors.Is(err, ErrUnknownGroup) {
 			// The owning group left the topology; the session is gone. Surface

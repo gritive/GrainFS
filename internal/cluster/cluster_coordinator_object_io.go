@@ -778,7 +778,7 @@ func (c *ClusterCoordinator) AppendObject(ctx context.Context, bucket, key strin
 	// cluster-aware pre-check (offset/cap/non-appendable). We add a bounded
 	// retry on ErrStalePlacement so a placement rebalance window doesn't
 	// surface as a 503 to the caller.
-	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
+	if gb, err := c.runtimeState().localExec.ResolveOwnerWrite(ctx, target); err != nil {
 		return nil, err
 	} else if gb != nil {
 		return c.appendObjectLocalWithRetry(ctx, gb, bucket, key, expectedOffset, r)

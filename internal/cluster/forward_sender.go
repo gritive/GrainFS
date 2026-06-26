@@ -176,6 +176,24 @@ func (s *ForwardSender) Send(
 	ctx context.Context, peers []string, groupID string,
 	op raftpb.ForwardOp, fbsArgs []byte,
 ) ([]byte, error) {
+	return s.sendFrame(ctx, peers, groupID, op, fbsArgs, true)
+}
+
+// SendOwner delivers an owner-routed forward call. It deliberately does not
+// follow Raft leader hints or update the cached leader, because owner-routed
+// RMWs must execute only on the deterministic owner.
+func (s *ForwardSender) SendOwner(
+	ctx context.Context, peers []string, groupID string,
+	op raftpb.ForwardOp, fbsArgs []byte,
+) ([]byte, error) {
+	return s.sendFrame(ctx, peers, groupID, op, fbsArgs, false)
+}
+
+func (s *ForwardSender) sendFrame(
+	ctx context.Context, peers []string, groupID string,
+	op raftpb.ForwardOp, fbsArgs []byte,
+	followLeaderHints bool,
+) ([]byte, error) {
 	_, callerHasDeadline := ctx.Deadline()
 	if !callerHasDeadline && s.readinessRetry > 0 {
 		var cancel context.CancelFunc
@@ -234,6 +252,10 @@ func (s *ForwardSender) Send(
 				ObservePutTraceStage(ctx, PutTraceStageForwardNotLeaderRetry, time.Now(), PutTraceStageFields{
 					NotLeaderRetries: notLeaderRetries,
 				})
+				if !followLeaderHints {
+					replyStatus = forwardReplyStatusString(op, reply)
+					return reply, nil
+				}
 				if hint := s.resolveLeaderHint(extractLeaderHint(reply)); hint != "" {
 					s.rememberLeader(groupID, hint)
 					leaderHintUsed = true
@@ -265,7 +287,9 @@ func (s *ForwardSender) Send(
 					continue
 				}
 			}
-			s.rememberLeader(groupID, peer)
+			if followLeaderHints {
+				s.rememberLeader(groupID, peer)
+			}
 			replyStatus = forwardReplyStatusString(op, reply)
 			return reply, nil
 		}
@@ -376,6 +400,24 @@ func (s *ForwardSender) SendStream(
 	ctx context.Context, peers []string, groupID string,
 	op raftpb.ForwardOp, fbsArgs []byte, body io.Reader,
 ) ([]byte, error) {
+	return s.sendStream(ctx, peers, groupID, op, fbsArgs, body, true)
+}
+
+// SendStreamOwner delivers a streamed owner-routed forward call. It never
+// retries a Raft leader hint, so a non-owner cannot receive a consumed RMW body
+// after the deterministic owner rejects or fails.
+func (s *ForwardSender) SendStreamOwner(
+	ctx context.Context, peers []string, groupID string,
+	op raftpb.ForwardOp, fbsArgs []byte, body io.Reader,
+) ([]byte, error) {
+	return s.sendStream(ctx, peers, groupID, op, fbsArgs, body, false)
+}
+
+func (s *ForwardSender) sendStream(
+	ctx context.Context, peers []string, groupID string,
+	op raftpb.ForwardOp, fbsArgs []byte, body io.Reader,
+	followLeaderHints bool,
+) ([]byte, error) {
 	if s.streamDialer == nil {
 		return nil, ErrNoReachablePeer
 	}
@@ -446,6 +488,9 @@ func (s *ForwardSender) SendStream(
 				ObservePutTraceStage(ctx, PutTraceStageForwardNotLeaderRetry, time.Now(), PutTraceStageFields{
 					NotLeaderRetries: notLeaderRetries,
 				})
+				if !followLeaderHints {
+					return reply, nil
+				}
 				if hint := s.resolveLeaderHint(extractLeaderHint(reply)); hint != "" {
 					if err := rewindForwardBody(body); err != nil {
 						return nil, err
@@ -471,7 +516,9 @@ func (s *ForwardSender) SendStream(
 					continue
 				}
 			}
-			s.rememberLeader(groupID, peer)
+			if followLeaderHints {
+				s.rememberLeader(groupID, peer)
+			}
 			return reply, nil
 		}
 		if lastDialErr == nil && !retryableNotLeader {

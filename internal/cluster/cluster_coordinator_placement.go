@@ -173,8 +173,33 @@ func (c *ClusterCoordinator) routeWriteOrBucket(bucket, key string) (RouteTarget
 	return state.opRouter.RouteObjectWrite(bucket, key)
 }
 
+// routeOwnerWriteOrBucket falls back to RouteBucket for single-node wiring
+// but still stamps a deterministic owner so append/multipart RMWs do not
+// depend on data-group Raft leadership.
+func (c *ClusterCoordinator) routeOwnerWriteOrBucket(bucket, key string) (RouteTarget, ShardGroupEntry, error) {
+	state := c.runtimeState()
+	if state.ecConfig.NumShards() == 0 {
+		target, err := state.opRouter.RouteBucket(bucket)
+		if err != nil {
+			return RouteTarget{}, ShardGroupEntry{}, err
+		}
+		group := ShardGroupEntry{ID: target.GroupID}
+		if c.meta != nil {
+			if g, ok := c.meta.ShardGroup(target.GroupID); ok {
+				group = g
+			}
+		}
+		if len(group.PeerIDs) == 0 {
+			group.PeerIDs = []string{c.selfID}
+		}
+		return state.opRouter.ownerWriteTarget(target, group)
+	}
+	return state.opRouter.RouteObjectOwnerWrite(bucket, key)
+}
+
 func (c *ClusterCoordinator) routeAppendOrBucket(bucket, key string, expectedOffset int64) (RouteTarget, ShardGroupEntry, error) {
-	return c.routeWriteOrBucket(bucket, key)
+	_ = expectedOffset
+	return c.routeOwnerWriteOrBucket(bucket, key)
 }
 
 // liveCandidateGroupIDs returns the candidate placement group-ID set derived

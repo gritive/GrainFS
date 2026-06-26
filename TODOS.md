@@ -21,7 +21,9 @@
   to existing and future owned data-group backends, while redundancy-upgrade relocation
   keeps a deterministic per-group singleton owner and fails closed when the owner/peers
   are not reachable.
-- [ ] HRW-primary append/multipart owner.
+- [x] HRW-primary append/multipart owner — append and multipart session writes now
+  route to a deterministic per-group owner instead of the data-group Raft leader; owner-local
+  execution skips Raft leadership checks, and forwarded owner writes target only that owner peer.
 - [ ] per-group raft membership mirror removal.
 
 ### ShardService/DistributedBackend decomposition follow-ups (2026-06-25, PR1 LocalShardStore + Card1 QuorumMetaStore done)

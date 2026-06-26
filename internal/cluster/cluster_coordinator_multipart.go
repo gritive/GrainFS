@@ -101,7 +101,7 @@ func (c *ClusterCoordinator) ListParts(ctx context.Context, bucket, key, uploadI
 	if err != nil {
 		return nil, err
 	}
-	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
+	if gb, err := c.runtimeState().localExec.ResolveOwnerWrite(ctx, target); err != nil {
 		return nil, err
 	} else if gb != nil {
 		return gb.ListParts(ctx, bucket, key, rawID, maxParts)

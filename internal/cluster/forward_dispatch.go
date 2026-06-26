@@ -19,6 +19,7 @@ type bucketForwardOpSpec struct {
 	name        string
 	transport   forwardTransportKind
 	mutates     bool
+	ownerRouted bool
 	handleFrame func(*ForwardReceiver, *DataGroup, []byte) []byte
 	handleBody  func(*ForwardReceiver, *DataGroup, []byte, io.Reader) []byte
 	handleRead  func(*ForwardReceiver, *DataGroup, []byte) ([]byte, io.ReadCloser)
@@ -98,6 +99,7 @@ var bucketForwardOpSpecs = map[raftpb.ForwardOp]bucketForwardOpSpec{
 		name:        raftpb.ForwardOpCreateMultipartUpload.String(),
 		transport:   forwardFrameOnly,
 		mutates:     true,
+		ownerRouted: true,
 		handleFrame: (*ForwardReceiver).handleCreateMultipartUpload,
 	},
 	raftpb.ForwardOpUploadPart: {
@@ -105,6 +107,7 @@ var bucketForwardOpSpecs = map[raftpb.ForwardOp]bucketForwardOpSpec{
 		name:        raftpb.ForwardOpUploadPart.String(),
 		transport:   forwardBodyStream,
 		mutates:     true,
+		ownerRouted: true,
 		handleFrame: (*ForwardReceiver).handleUploadPart,
 		handleBody:  (*ForwardReceiver).handleUploadPartStream,
 	},
@@ -113,6 +116,7 @@ var bucketForwardOpSpecs = map[raftpb.ForwardOp]bucketForwardOpSpec{
 		name:        raftpb.ForwardOpCompleteMultipartUpload.String(),
 		transport:   forwardFrameOnly,
 		mutates:     true,
+		ownerRouted: true,
 		handleFrame: (*ForwardReceiver).handleCompleteMultipartUpload,
 	},
 	raftpb.ForwardOpAbortMultipartUpload: {
@@ -120,12 +124,14 @@ var bucketForwardOpSpecs = map[raftpb.ForwardOp]bucketForwardOpSpec{
 		name:        raftpb.ForwardOpAbortMultipartUpload.String(),
 		transport:   forwardFrameOnly,
 		mutates:     true,
+		ownerRouted: true,
 		handleFrame: (*ForwardReceiver).handleAbortMultipartUpload,
 	},
 	raftpb.ForwardOpListParts: {
 		op:          raftpb.ForwardOpListParts,
 		name:        raftpb.ForwardOpListParts.String(),
 		transport:   forwardFrameOnly,
+		ownerRouted: true,
 		handleFrame: (*ForwardReceiver).handleListParts,
 	},
 	raftpb.ForwardOpListMultipartUploads: {
@@ -175,11 +181,12 @@ var bucketForwardOpSpecs = map[raftpb.ForwardOp]bucketForwardOpSpec{
 		handleRead:  (*ForwardReceiver).handleReadAtRead,
 	},
 	raftpb.ForwardOpAppendObject: {
-		op:         raftpb.ForwardOpAppendObject,
-		name:       raftpb.ForwardOpAppendObject.String(),
-		transport:  forwardBodyStream,
-		mutates:    true,
-		handleBody: (*ForwardReceiver).handleAppendObjectStream,
+		op:          raftpb.ForwardOpAppendObject,
+		name:        raftpb.ForwardOpAppendObject.String(),
+		transport:   forwardBodyStream,
+		mutates:     true,
+		ownerRouted: true,
+		handleBody:  (*ForwardReceiver).handleAppendObjectStream,
 	},
 	raftpb.ForwardOpSetObjectQuarantine: {
 		op:          raftpb.ForwardOpSetObjectQuarantine,

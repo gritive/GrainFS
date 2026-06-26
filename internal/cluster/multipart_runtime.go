@@ -26,7 +26,7 @@ func (r multipartRuntime) createMultipartUpload(ctx context.Context, bucket, key
 		return nil, err
 	}
 	var upload *storage.MultipartUpload
-	if gb, err := r.c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
+	if gb, err := r.c.runtimeState().localExec.ResolveOwnerWrite(ctx, target); err != nil {
 		return nil, err
 	} else if gb != nil {
 		upload, err = gb.CreateMultipartUpload(ctx, bucket, key, contentType)
@@ -47,7 +47,7 @@ func (r multipartRuntime) createMultipartUploadWithTags(ctx context.Context, buc
 	if err != nil {
 		return "", err
 	}
-	if gb, err := r.c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
+	if gb, err := r.c.runtimeState().localExec.ResolveOwnerWrite(ctx, target); err != nil {
 		return "", err
 	} else if gb != nil {
 		uploadID, err := gb.CreateMultipartUploadWithTags(ctx, bucket, key, contentType, tags)
@@ -69,7 +69,7 @@ func (r multipartRuntime) completeMultipartUpload(ctx context.Context, bucket, k
 		return nil, err
 	}
 	ctx = contextWithObjectWritePlacement(ctx, group)
-	if gb, err := r.c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
+	if gb, err := r.c.runtimeState().localExec.ResolveOwnerWrite(ctx, target); err != nil {
 		return nil, err
 	} else if gb != nil {
 		return gb.CompleteMultipartUpload(ctx, bucket, key, rawID, parts)
@@ -83,7 +83,7 @@ func (r multipartRuntime) uploadPart(ctx context.Context, bucket, key, uploadID 
 		return nil, err
 	}
 	ctx = ContextWithPlacementGroup(ctx, target.GroupID)
-	if gb, err := r.c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
+	if gb, err := r.c.runtimeState().localExec.ResolveOwnerWrite(ctx, target); err != nil {
 		return nil, err
 	} else if gb != nil {
 		return gb.UploadPart(ctx, bucket, key, rawID, partNumber, body, contentMD5Hex)
@@ -97,7 +97,7 @@ func (r multipartRuntime) abortMultipartUpload(ctx context.Context, bucket, key,
 		return err
 	}
 	ctx = ContextWithPlacementGroup(ctx, target.GroupID)
-	if gb, err := r.c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
+	if gb, err := r.c.runtimeState().localExec.ResolveOwnerWrite(ctx, target); err != nil {
 		return err
 	} else if gb != nil {
 		return gb.AbortMultipartUpload(ctx, bucket, key, rawID)
@@ -121,7 +121,7 @@ func (r multipartRuntime) prepareMutation(ctx context.Context, bucket, key strin
 	if err := r.c.requireObjectBucket(ctx, bucket); err != nil {
 		return ctx, RouteTarget{}, ShardGroupEntry{}, err
 	}
-	target, group, err := r.c.routeWriteOrBucket(bucket, key)
+	target, group, err := r.c.routeOwnerWriteOrBucket(bucket, key)
 	if err != nil {
 		return ctx, RouteTarget{}, ShardGroupEntry{}, err
 	}
