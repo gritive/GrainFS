@@ -6,6 +6,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/stretchr/testify/require"
 )
 
 // fakeSeam seals via a real Encryptor so AEAD round-trips, and reports a gen
@@ -18,9 +19,7 @@ type fakeSeam struct {
 func newFakeSeam(t *testing.T) *fakeSeam {
 	t.Helper()
 	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x07}, 32))
-	if err != nil {
-		t.Fatalf("NewEncryptor: %v", err)
-	}
+	require.NoError(t, err, "NewEncryptor")
 	return &fakeSeam{enc: enc, gen: 3}
 }
 
@@ -59,41 +58,28 @@ var _ storage.DataEncryptor = (*fakeSeam)(nil)
 
 func TestBlobStore_SeamRoundTrip(t *testing.T) {
 	bs, err := newBlobStore(t.TempDir(), 1<<20)
-	if err != nil {
-		t.Fatalf("newBlobStore: %v", err)
-	}
+	require.NoError(t, err, "newBlobStore")
 	defer bs.Close()
 	bs.segEnc = newFakeSeam(t)
 
 	loc, err := bs.Append("bucket/key", []byte("hello world"))
-	if err != nil {
-		t.Fatalf("Append: %v", err)
-	}
+	require.NoError(t, err, "Append")
 	got, err := bs.Read(loc)
-	if err != nil {
-		t.Fatalf("Read: %v", err)
-	}
-	if string(got) != "hello world" {
-		t.Fatalf("round-trip mismatch: %q", got)
-	}
+	require.NoError(t, err, "Read")
+	require.Equal(t, "hello world", string(got))
 }
 
 func TestBlobStore_SeamRejectsWrongLocationAAD(t *testing.T) {
 	bs, err := newBlobStore(t.TempDir(), 1<<20)
-	if err != nil {
-		t.Fatalf("newBlobStore: %v", err)
-	}
+	require.NoError(t, err, "newBlobStore")
 	defer bs.Close()
 	bs.segEnc = newFakeSeam(t)
 
 	loc, err := bs.Append("bucket/key", []byte("payload"))
-	if err != nil {
-		t.Fatalf("Append: %v", err)
-	}
+	require.NoError(t, err, "Append")
 	// Tamper the recorded offset: the positional AAD must fail to open.
 	bad := loc
 	bad.Offset = loc.Offset + 1
-	if _, err := bs.Read(bad); err == nil {
-		t.Fatal("expected open to fail when offset AAD does not match")
-	}
+	_, err = bs.Read(bad)
+	require.Error(t, err, "expected open to fail when offset AAD does not match")
 }

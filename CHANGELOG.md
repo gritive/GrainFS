@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.747.0] - 2026-06-26
+
+### Changed
+- **Converted a storage test assertion batch to testify.**
+  Replaced raw `t.Fatal*` / `t.Error*` assertions with `require` / `assert`
+  in segment reader/writer, pullthrough resolver, directio, context
+  passthrough, buffer right-sizing, and small packblob seam/list/AAD tests.
+
 ## [0.0.746.0] - 2026-06-26
 
 ### Changed

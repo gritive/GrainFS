@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestSegmentReader_ReassemblesInOrder(t *testing.T) {
@@ -18,12 +20,8 @@ func TestSegmentReader_ReassemblesInOrder(t *testing.T) {
 	r := NewSegmentReader(fakeStore, segs.refs)
 
 	got, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if !bytes.Equal(got, segs.flat) {
-		t.Fatalf("reassembled bytes differ at offset %d", firstDiff(got, segs.flat))
-	}
+	require.NoError(t, err, "read")
+	require.True(t, bytes.Equal(got, segs.flat), "reassembled bytes differ at offset %d", firstDiff(got, segs.flat))
 }
 
 func TestSegmentReader_OutOfOrderArrivalStillInOrderOutput(t *testing.T) {
@@ -40,12 +38,8 @@ func TestSegmentReader_OutOfOrderArrivalStillInOrderOutput(t *testing.T) {
 
 	r := NewSegmentReader(store, segs.refs)
 	got, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if !bytes.Equal(got, segs.flat) {
-		t.Fatal("output not in order")
-	}
+	require.NoError(t, err, "read")
+	require.True(t, bytes.Equal(got, segs.flat), "output not in order")
 }
 
 func TestSegmentReader_OneSegmentFailsAbortsCleanly(t *testing.T) {
@@ -56,9 +50,7 @@ func TestSegmentReader_OneSegmentFailsAbortsCleanly(t *testing.T) {
 
 	r := NewSegmentReader(store, segs.refs)
 	_, err := io.ReadAll(r)
-	if !errors.Is(err, io.ErrUnexpectedEOF) {
-		t.Fatalf("want ErrUnexpectedEOF, got %v", err)
-	}
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
 }
 
 func TestSegmentReader_ReleasesBackingArrayAfterConsumption(t *testing.T) {
@@ -73,9 +65,7 @@ func TestSegmentReader_ReleasesBackingArrayAfterConsumption(t *testing.T) {
 	consumed := 0
 	for consumed < len(segs.flat) {
 		n, err := r.Read(buf)
-		if err != nil && err != io.EOF {
-			t.Fatalf("read: %v", err)
-		}
+		require.True(t, err == nil || err == io.EOF, "read: %v", err)
 		consumed += n
 		if n == 0 {
 			break
@@ -83,9 +73,7 @@ func TestSegmentReader_ReleasesBackingArrayAfterConsumption(t *testing.T) {
 	}
 	// After full drain, every pending slot must be nil.
 	for i, p := range r.pending {
-		if p != nil {
-			t.Fatalf("pending[%d] not released after consumption", i)
-		}
+		require.Nil(t, p, "pending[%d] not released after consumption", i)
 	}
 }
 
@@ -100,17 +88,15 @@ func TestSegmentReader_CloseCancelsWorkers(t *testing.T) {
 	select {
 	case <-store.entered:
 	case <-time.After(time.Second):
-		t.Fatal("worker did not enter OpenSegment")
+		require.Fail(t, "worker did not enter OpenSegment")
 	}
 
-	if err := r.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
+	require.NoError(t, r.Close(), "close")
 
 	select {
 	case <-store.exited:
 	case <-time.After(time.Second):
-		t.Fatal("worker did not exit after Close")
+		require.Fail(t, "worker did not exit after Close")
 	}
 }
 
@@ -131,23 +117,19 @@ func TestSegmentReader_CloseDoesNotScheduleRemainingSegments(t *testing.T) {
 		select {
 		case <-store.entered:
 		case <-time.After(time.Second):
-			t.Fatalf("worker %d did not enter OpenSegment", i)
+			require.Failf(t, "worker did not enter OpenSegment", "worker %d did not enter OpenSegment", i)
 		}
 	}
-	if err := r.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
+	require.NoError(t, r.Close(), "close")
 	for i := 0; i < DefaultGetWorkers; i++ {
 		select {
 		case <-store.exited:
 		case <-time.After(time.Second):
-			t.Fatalf("worker %d did not exit after Close", i)
+			require.Failf(t, "worker did not exit after Close", "worker %d did not exit after Close", i)
 		}
 	}
 	time.Sleep(100 * time.Millisecond)
-	if got := len(store.entered); got != 0 {
-		t.Fatalf("Close scheduled %d extra segments after cancellation", got)
-	}
+	require.Zero(t, len(store.entered), "Close scheduled extra segments after cancellation")
 }
 
 func TestSegmentReader_LegacyConstructorStillWorks(t *testing.T) {
@@ -157,12 +139,8 @@ func TestSegmentReader_LegacyConstructorStillWorks(t *testing.T) {
 	r := NewSegmentReader(store, segs.refs)
 
 	got, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if !bytes.Equal(got, segs.flat) {
-		t.Fatalf("reassembled bytes differ at offset %d", firstDiff(got, segs.flat))
-	}
+	require.NoError(t, err, "read")
+	require.True(t, bytes.Equal(got, segs.flat), "reassembled bytes differ at offset %d", firstDiff(got, segs.flat))
 }
 
 func TestSegmentReader_UsesProvidedSegmentBytesWithoutSecondReadAll(t *testing.T) {
@@ -172,15 +150,9 @@ func TestSegmentReader_UsesProvidedSegmentBytesWithoutSecondReadAll(t *testing.T
 	r := NewSegmentReader(store, []SegmentRef{{BlobID: "materialized", Size: int64(len(want))}})
 
 	got, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if !bytes.Equal(got, want) {
-		t.Fatalf("got %q want %q", got, want)
-	}
-	if !store.closed {
-		t.Fatal("materialized reader was not closed")
-	}
+	require.NoError(t, err, "read")
+	require.Equal(t, want, got)
+	require.True(t, store.closed, "materialized reader was not closed")
 }
 
 // --- helpers ---

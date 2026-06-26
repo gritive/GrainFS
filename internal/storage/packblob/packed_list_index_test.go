@@ -1,8 +1,9 @@
 package packblob
 
 import (
-	"reflect"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestPackedListIndexPageUsesBucketPrefixAndMarker(t *testing.T) {
@@ -14,12 +15,8 @@ func TestPackedListIndexPageUsesBucketPrefixAndMarker(t *testing.T) {
 	idx.add(packedKey{bucket: "bench", key: "docs/002"})
 
 	keys, truncated := idx.page("bench", "docs/", "docs/001", 2)
-	if truncated {
-		t.Fatalf("truncated = true, want false")
-	}
-	if want := []string{"docs/002", "docs/003"}; !reflect.DeepEqual(keys, want) {
-		t.Fatalf("keys = %v, want %v", keys, want)
-	}
+	require.False(t, truncated)
+	require.Equal(t, []string{"docs/002", "docs/003"}, keys)
 }
 
 func TestPackedListIndexAddRemoveIsIdempotent(t *testing.T) {
@@ -32,10 +29,6 @@ func TestPackedListIndexAddRemoveIsIdempotent(t *testing.T) {
 	idx.remove(pk)
 
 	keys, truncated := idx.page("bench", "docs/", "", 10)
-	if truncated {
-		t.Fatalf("truncated = true, want false")
-	}
-	if len(keys) != 0 {
-		t.Fatalf("keys = %v, want empty", keys)
-	}
+	require.False(t, truncated)
+	require.Empty(t, keys)
 }
