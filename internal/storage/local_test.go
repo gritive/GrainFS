@@ -97,13 +97,9 @@ func TestListBuckets(t *testing.T) {
 
 func TestLocalBackend_DEKKeeperSegEnc_RoundTrip(t *testing.T) {
 	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x88}, encrypt.KEKSize), bytes.Repeat([]byte{0x99}, 16))
-	if err != nil {
-		t.Fatalf("NewDEKKeeper: %v", err)
-	}
+	require.NoError(t, err, "NewDEKKeeper")
 	b, err := NewLocalBackendWithDEKKeeper(t.TempDir(), keeper, bytes.Repeat([]byte{0x99}, 16))
-	if err != nil {
-		t.Fatalf("NewLocalBackendWithDEKKeeper: %v", err)
-	}
+	require.NoError(t, err, "NewLocalBackendWithDEKKeeper")
 	defer b.Close()
 
 	require.NoError(t, b.CreateBucket(context.Background(), "test-bucket"), "CreateBucket")
@@ -157,22 +153,14 @@ func TestPutObject_AlwaysProducesSegments(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			b := newTestLocalBackend(t)
 			obj, err := b.PutObject(context.Background(), "test", "key-"+tc.name, newPatternReader(tc.size), "application/octet-stream")
-			if err != nil {
-				t.Fatalf("put: %v", err)
-			}
-			if len(obj.Segments) < 1 {
-				t.Fatalf("segments must be >=1, got %d", len(obj.Segments))
-			}
-			if obj.Size != int64(tc.size) {
-				t.Fatalf("size: want %d, got %d", tc.size, obj.Size)
-			}
+			require.NoError(t, err, "put")
+			require.NotEmpty(t, obj.Segments, "segments")
+			require.Equal(t, int64(tc.size), obj.Size)
 			rc, _, err := b.GetObject(context.Background(), "test", "key-"+tc.name)
-			if err != nil {
-				t.Fatalf("get: %v", err)
-			}
+			require.NoError(t, err, "get")
 			if err := requireReaderEqualPattern(rc, tc.size); err != nil {
 				rc.Close()
-				t.Fatal(err)
+				require.NoError(t, err)
 			}
 			rc.Close()
 		})

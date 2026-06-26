@@ -267,9 +267,7 @@ func BenchmarkEncryptedShardReaderRead5MiB(b *testing.B) {
 func shardChunkOverhead(t *testing.T, enc ShardEncryptor) int {
 	t.Helper()
 	ct, _, err := enc.Seal(encrypt.DomainShard, shardBaseFields(), []byte("x"))
-	if err != nil {
-		t.Fatalf("seal probe for overhead: %v", err)
-	}
+	require.NoError(t, err, "seal probe for overhead")
 	return len(ct) - 1
 }
 
@@ -470,9 +468,7 @@ type fakeShardEncryptor struct {
 func newFakeShardEncryptor(t *testing.T) *fakeShardEncryptor {
 	t.Helper()
 	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x09}, 32))
-	if err != nil {
-		t.Fatalf("NewEncryptor: %v", err)
-	}
+	require.NoError(t, err, "NewEncryptor")
 	return &fakeShardEncryptor{enc: enc}
 }
 
@@ -530,19 +526,11 @@ func TestEncodeEncryptedShard_RoundTrip(t *testing.T) {
 	f := newFakeShardEncryptor(t)
 	plain := bytes.Repeat([]byte("z"), DefaultEncryptedChunkSize+777)
 	var buf bytes.Buffer
-	if err := EncodeEncryptedShard(&buf, bytes.NewReader(plain), f, shardBaseFields(), DefaultEncryptedChunkSize); err != nil {
-		t.Fatalf("encode: %v", err)
-	}
-	if !IsEncryptedShard(buf.Bytes()) {
-		t.Fatal("expected GFSENC3 magic")
-	}
+	require.NoError(t, EncodeEncryptedShard(&buf, bytes.NewReader(plain), f, shardBaseFields(), DefaultEncryptedChunkSize), "encode")
+	require.True(t, IsEncryptedShard(buf.Bytes()), "expected GFSENC3 magic")
 	var out bytes.Buffer
-	if err := DecodeEncryptedShard(&out, bytes.NewReader(buf.Bytes()), f, shardBaseFields()); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if !bytes.Equal(out.Bytes(), plain) {
-		t.Fatal("round-trip mismatch")
-	}
+	require.NoError(t, DecodeEncryptedShard(&out, bytes.NewReader(buf.Bytes()), f, shardBaseFields()), "decode")
+	require.Equal(t, plain, out.Bytes())
 }
 
 // A DEK rotation racing the encode (gen drifts after chunk 0) must NOT fail the
@@ -597,24 +585,18 @@ func TestEncryptedShardChunkedWriter_PinsGenAcrossMidStreamDrift(t *testing.T) {
 
 func TestEncryptedShardHeader_RoundTrip(t *testing.T) {
 	var buf bytes.Buffer
-	if err := writeEncryptedShardHeader(&buf, 7, DefaultEncryptedChunkSize, 31); err != nil {
-		t.Fatalf("writeEncryptedShardHeader: %v", err)
-	}
+	require.NoError(t, writeEncryptedShardHeader(&buf, 7, DefaultEncryptedChunkSize, 31), "writeEncryptedShardHeader")
 	gen, chunkSize, overhead, err := readEncryptedShardHeader(&buf)
-	if err != nil {
-		t.Fatalf("readEncryptedShardHeader: %v", err)
-	}
-	if gen != 7 || chunkSize != DefaultEncryptedChunkSize || overhead != 31 {
-		t.Fatalf("header mismatch: gen=%d size=%d overhead=%d", gen, chunkSize, overhead)
-	}
+	require.NoError(t, err, "readEncryptedShardHeader")
+	require.Equal(t, uint32(7), gen)
+	require.Equal(t, uint32(DefaultEncryptedChunkSize), chunkSize)
+	require.Equal(t, uint16(31), overhead)
 }
 
 func TestEncryptedShardHeader_RejectsLegacyGFSENC2(t *testing.T) {
 	legacy := append([]byte("GFSENC2\x00"), make([]byte, 12)...) // old magic + old header bytes
 	_, _, _, err := readEncryptedShardHeader(bytes.NewReader(legacy))
-	if err == nil {
-		t.Fatal("expected legacy GFSENC2 magic to be rejected")
-	}
+	require.Error(t, err, "expected legacy GFSENC2 magic to be rejected")
 }
 
 func TestReadEncryptedShardRangeAt_RoundTrip(t *testing.T) {
@@ -624,34 +606,24 @@ func TestReadEncryptedShardRangeAt_RoundTrip(t *testing.T) {
 		plain[i] = byte(i)
 	}
 	var buf bytes.Buffer
-	if err := EncodeEncryptedShard(&buf, bytes.NewReader(plain), f, shardBaseFields(), DefaultEncryptedChunkSize); err != nil {
-		t.Fatalf("encode: %v", err)
-	}
+	require.NoError(t, EncodeEncryptedShard(&buf, bytes.NewReader(plain), f, shardBaseFields(), DefaultEncryptedChunkSize), "encode")
 	ra := bytes.NewReader(buf.Bytes())
 	off := int64(DefaultEncryptedChunkSize + 100)
 	dst := make([]byte, 5000)
 	n, err := ReadEncryptedShardRangeAt(ra, f, shardBaseFields(), off, dst)
-	if err != nil {
-		t.Fatalf("range read: %v", err)
-	}
-	if !bytes.Equal(dst[:n], plain[off:off+int64(n)]) {
-		t.Fatal("range round-trip mismatch")
-	}
+	require.NoError(t, err, "range read")
+	require.Equal(t, plain[off:off+int64(n)], dst[:n])
 }
 
 func TestEncryptedShard_ChunkSwap_FailsDecrypt(t *testing.T) {
 	f := newFakeShardEncryptor(t)
 	plain := bytes.Repeat([]byte("R"), 2*DefaultEncryptedChunkSize)
 	var buf bytes.Buffer
-	if err := EncodeEncryptedShard(&buf, bytes.NewReader(plain), f, shardBaseFields(), DefaultEncryptedChunkSize); err != nil {
-		t.Fatalf("encode: %v", err)
-	}
+	require.NoError(t, EncodeEncryptedShard(&buf, bytes.NewReader(plain), f, shardBaseFields(), DefaultEncryptedChunkSize), "encode")
 	raw := swapFirstTwoEncryptedShardChunks(t, buf.Bytes())
 	var out bytes.Buffer
 	err := DecodeEncryptedShard(&out, bytes.NewReader(raw), f, shardBaseFields())
-	if err == nil {
-		t.Fatal("expected chunk-swap to fail AEAD (ordinal AAD is load-bearing)")
-	}
+	require.Error(t, err, "expected chunk-swap to fail AEAD (ordinal AAD is load-bearing)")
 }
 
 // swapFirstTwoEncryptedShardChunks parses the GFSENC3 header then swaps the
@@ -662,45 +634,37 @@ func TestEncryptedShard_ChunkSwap_FailsDecrypt(t *testing.T) {
 func swapFirstTwoEncryptedShardChunks(t *testing.T, raw []byte) []byte {
 	t.Helper()
 	if len(raw) < encryptedHeaderLen {
-		t.Fatal("too short for GFSENC3 header")
+		require.Fail(t, "too short for GFSENC3 header")
 	}
 	hdr := raw[:encryptedHeaderLen]
 	_, _, overhead, err := parseEncryptedShardHeader(hdr)
-	if err != nil {
-		t.Fatalf("parse header: %v", err)
-	}
+	require.NoError(t, err, "parse header")
 
 	out := append([]byte(nil), raw...)
 	pos := encryptedHeaderLen
 
 	// Parse chunk 0.
 	if pos+encryptedChunkHeaderLen > len(out) {
-		t.Fatal("no chunk 0 header")
+		require.Fail(t, "no chunk 0 header")
 	}
 	plain0 := binary.LittleEndian.Uint32(out[pos : pos+4])
 	cipher0 := binary.LittleEndian.Uint32(out[pos+4 : pos+8])
-	if cipher0 != plain0+uint32(overhead) {
-		t.Fatalf("chunk 0 cipher_len mismatch: %d != %d+%d", cipher0, plain0, overhead)
-	}
+	require.Equal(t, plain0+uint32(overhead), cipher0, "chunk 0 cipher_len mismatch")
 	sealed0Start := pos + encryptedChunkHeaderLen
 	sealed0End := sealed0Start + int(cipher0)
 
 	// Parse chunk 1.
 	pos1 := sealed0End
 	if pos1+encryptedChunkHeaderLen > len(out) {
-		t.Fatal("no chunk 1 header")
+		require.Fail(t, "no chunk 1 header")
 	}
 	plain1 := binary.LittleEndian.Uint32(out[pos1 : pos1+4])
 	cipher1 := binary.LittleEndian.Uint32(out[pos1+4 : pos1+8])
-	if cipher1 != plain1+uint32(overhead) {
-		t.Fatalf("chunk 1 cipher_len mismatch: %d != %d+%d", cipher1, plain1, overhead)
-	}
+	require.Equal(t, plain1+uint32(overhead), cipher1, "chunk 1 cipher_len mismatch")
 	sealed1Start := pos1 + encryptedChunkHeaderLen
 	_ = sealed1Start + int(cipher1) // sealed1End unused; swap uses sealed1Start directly
 
-	if cipher0 != cipher1 {
-		t.Fatalf("chunk 0 and chunk 1 cipher lengths differ (%d vs %d); swap helper requires equal-length sealed blobs", cipher0, cipher1)
-	}
+	require.Equal(t, cipher0, cipher1, "swap helper requires equal-length sealed blobs")
 
 	// Swap the sealed payloads.
 	for i := 0; i < int(cipher0); i++ {
@@ -757,49 +721,39 @@ func TestEncryptedShardReader_DEKGenUnknown_IsNotCorruption(t *testing.T) {
 	real := newFakeShardEncryptor(t)
 	plain := bytes.Repeat([]byte("g"), DefaultEncryptedChunkSize+5) // 2 chunks
 	var buf bytes.Buffer
-	if err := EncodeEncryptedShard(&buf, bytes.NewReader(plain), real, shardBaseFields(), DefaultEncryptedChunkSize); err != nil {
-		t.Fatalf("encode: %v", err)
-	}
+	require.NoError(t, EncodeEncryptedShard(&buf, bytes.NewReader(plain), real, shardBaseFields(), DefaultEncryptedChunkSize), "encode")
 	genUnknown := &errInjectShardEncryptor{inner: real, openErr: encrypt.ErrDEKGenUnknown}
 
 	// Streaming reader path.
 	var out bytes.Buffer
 	err := DecodeEncryptedShard(&out, bytes.NewReader(buf.Bytes()), genUnknown, shardBaseFields())
-	if err == nil || IsCorruption(err) || !errors.Is(err, encrypt.ErrDEKGenUnknown) {
-		t.Fatalf("streaming: want transient+unwrapped, got %v (corrupt=%v)", err, IsCorruption(err))
-	}
+	require.ErrorIs(t, err, encrypt.ErrDEKGenUnknown)
+	require.False(t, IsCorruption(err), "streaming should not classify transient DEK miss as corruption")
 
 	// Range function path.
 	dst := make([]byte, 100)
 	_, rerr := ReadEncryptedShardRangeAt(bytes.NewReader(buf.Bytes()), genUnknown, shardBaseFields(), 0, dst)
-	if rerr == nil || IsCorruption(rerr) || !errors.Is(rerr, encrypt.ErrDEKGenUnknown) {
-		t.Fatalf("range func: got %v (corrupt=%v)", rerr, IsCorruption(rerr))
-	}
+	require.ErrorIs(t, rerr, encrypt.ErrDEKGenUnknown)
+	require.False(t, IsCorruption(rerr), "range func should not classify transient DEK miss as corruption")
 
 	// Range reader struct path (readEncryptedShardChunkAt) via NewEncryptedShardRangeReader.
 	rr, nerr := NewEncryptedShardRangeReader(bytes.NewReader(buf.Bytes()), genUnknown, shardBaseFields(), 0, int64(len(plain)))
-	if nerr != nil {
-		t.Fatalf("NewEncryptedShardRangeReader (header read should succeed): %v", nerr)
-	}
+	require.NoError(t, nerr, "NewEncryptedShardRangeReader")
 	_, rrerr := io.ReadAll(rr)
-	if rrerr == nil || IsCorruption(rrerr) || !errors.Is(rrerr, encrypt.ErrDEKGenUnknown) {
-		t.Fatalf("range reader struct: got %v (corrupt=%v)", rrerr, IsCorruption(rrerr))
-	}
+	require.ErrorIs(t, rrerr, encrypt.ErrDEKGenUnknown)
+	require.False(t, IsCorruption(rrerr), "range reader struct should not classify transient DEK miss as corruption")
 }
 
 func TestEncryptedShardReader_AEADFailure_IsCorruption(t *testing.T) {
 	real := newFakeShardEncryptor(t)
 	plain := bytes.Repeat([]byte("a"), DefaultEncryptedChunkSize+5)
 	var buf bytes.Buffer
-	if err := EncodeEncryptedShard(&buf, bytes.NewReader(plain), real, shardBaseFields(), DefaultEncryptedChunkSize); err != nil {
-		t.Fatalf("encode: %v", err)
-	}
+	require.NoError(t, EncodeEncryptedShard(&buf, bytes.NewReader(plain), real, shardBaseFields(), DefaultEncryptedChunkSize), "encode")
 	aeadFail := &errInjectShardEncryptor{inner: real, openErr: errors.New("cipher: message authentication failed")}
 	var out bytes.Buffer
 	err := DecodeEncryptedShard(&out, bytes.NewReader(buf.Bytes()), aeadFail, shardBaseFields())
-	if err == nil || !IsCorruption(err) {
-		t.Fatalf("AEAD failure must be corruption, got %v (corrupt=%v)", err, IsCorruption(err))
-	}
+	require.Error(t, err)
+	require.True(t, IsCorruption(err), "AEAD failure must be corruption")
 }
 
 // recordingShardEncryptor wraps a real fakeShardEncryptor and records, per
