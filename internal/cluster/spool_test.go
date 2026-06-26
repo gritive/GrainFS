@@ -28,7 +28,7 @@ func (r failingReader) Read([]byte) (int, error) {
 
 func TestSpoolObjectComputesSizeAndETag(t *testing.T) {
 	data := []byte("hello")
-	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader(data), "__grainfs_volumes")
+	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader(data), "__grainfs_test_internal")
 	require.NoError(t, err)
 	defer sp.Cleanup()
 	require.Equal(t, int64(5), sp.Size)
@@ -63,7 +63,7 @@ func TestSpoolObjectNoBucketSkipsHashing(t *testing.T) {
 
 func TestSpoolObjectCleansTempOnReadError(t *testing.T) {
 	dir := t.TempDir()
-	_, err := spoolObject(context.Background(), dir, failingReader{err: errors.New("boom")}, "__grainfs_volumes")
+	_, err := spoolObject(context.Background(), dir, failingReader{err: errors.New("boom")}, "__grainfs_test_internal")
 	require.ErrorContains(t, err, "spool object")
 	entries, readErr := os.ReadDir(dir)
 	require.NoError(t, readErr)
@@ -203,7 +203,7 @@ func TestEncryptedSpoolObjectRejectsOversizedRecordHeader(t *testing.T) {
 }
 
 func TestSpoolECShardsReconstructsOriginal(t *testing.T) {
-	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader([]byte("hello erasure coding")), "__grainfs_volumes")
+	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader([]byte("hello erasure coding")), "__grainfs_test_internal")
 	require.NoError(t, err)
 	defer sp.Cleanup()
 
@@ -226,7 +226,7 @@ func TestSpoolECShardsReconstructsOriginal(t *testing.T) {
 }
 
 func TestSpoolECShardsReconstructsEmptyObject(t *testing.T) {
-	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader(nil), "__grainfs_volumes")
+	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader(nil), "__grainfs_test_internal")
 	require.NoError(t, err)
 	defer sp.Cleanup()
 

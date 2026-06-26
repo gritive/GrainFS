@@ -118,7 +118,7 @@ var _ = Describe("Backend bucket management integration", func() {
 			},
 		})
 
-		Expect(b.CreateBucket(ctx, "__grainfs_volumes")).To(Succeed())
+		Expect(b.CreateBucket(ctx, "__grainfs_test_internal")).To(Succeed())
 		Expect(capturedGroup).To(Equal("group-8"))
 	})
 
