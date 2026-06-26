@@ -76,7 +76,14 @@ const (
 	ecShardBufferedLimit = 256 * 1024
 	ecShardWriteAttempts = 3
 	ecShardWriteBackoff  = 250 * time.Millisecond
+
+	bucketVersioningCacheTTL = 200 * time.Millisecond
 )
+
+type bucketVersioningCacheEntry struct {
+	expiresAt time.Time
+	state     string
+}
 
 type readerWithoutWriterTo struct {
 	io.Reader
@@ -133,6 +140,7 @@ type DistributedBackend struct {
 	multipartLocks                   sync.Map                  // map[uploadID]*sync.RWMutex; serializes part writes against complete/abort cleanup
 	incidentRecorder                 IncidentRecorder          // nil disables zero-ops incident recording
 	quarantineRouter                 QuarantineRouter          // nil → leaf-local quarantine SET; set on group backends to route the SET to the owner
+	bucketVersioningCache            sync.Map                  // bucket → bucketVersioningCacheEntry
 	testBeforeChunkedMultipartCommit func() error              // test-only hook for chunked multipart commit preflight
 	testBeforeAppendSegmentWrite     func()                    // test-only hook after append pre-check before segment write
 	testOnListObjectVersionsCtx      func(ctx context.Context) // test-only hook: called with the ctx passed to ListObjectVersions
@@ -384,6 +392,35 @@ func shardRangeCacheKey(bucket, shardKey string, idx int, offset, length int64) 
 
 func shardRangeCachePrefix(bucket, shardKey string, idx int) string {
 	return fmt.Sprintf("%s/%s/%d:", bucket, shardKey, idx)
+}
+
+func (b *DistributedBackend) bucketVersioningCacheGet(bucket string) (string, bool) {
+	raw, ok := b.bucketVersioningCache.Load(bucket)
+	if !ok {
+		return "", false
+	}
+
+	entry, ok := raw.(bucketVersioningCacheEntry)
+	if !ok {
+		b.bucketVersioningCache.Delete(bucket)
+		return "", false
+	}
+	if time.Now().After(entry.expiresAt) {
+		b.bucketVersioningCache.Delete(bucket)
+		return "", false
+	}
+	return entry.state, true
+}
+
+func (b *DistributedBackend) bucketVersioningCacheSet(bucket, state string) {
+	b.bucketVersioningCache.Store(bucket, bucketVersioningCacheEntry{
+		expiresAt: time.Now().Add(bucketVersioningCacheTTL),
+		state:     state,
+	})
+}
+
+func (b *DistributedBackend) bucketVersioningCacheDelete(bucket string) {
+	b.bucketVersioningCache.Delete(bucket)
 }
 
 // invalidateShardCache drops every shard slot for one shardKey. Used by
