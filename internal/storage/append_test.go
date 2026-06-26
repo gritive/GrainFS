@@ -7,6 +7,9 @@ import (
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/dgraph-io/badger/v4"
+	"github.com/gritive/GrainFS/internal/chunkref"
 )
 
 func newTestLocalBackend(t *testing.T) *LocalBackend {
@@ -164,6 +167,38 @@ func TestAppendObjectConvertsPlainPutAtCurrentOffset(t *testing.T) {
 	}
 	if string(got) != "helloworld" {
 		t.Fatalf("body=%q, want helloworld", string(got))
+	}
+}
+
+func TestAppendObjectConvertsPlainPutAddsBaseAndAppendRefs(t *testing.T) {
+	b := newTestLocalBackend(t)
+	ctx := context.Background()
+
+	if _, err := b.PutObject(ctx, "test", "k", strings.NewReader("hello"), "text/plain"); err != nil {
+		t.Fatalf("PutObject: %v", err)
+	}
+	obj, err := b.AppendObject(ctx, "test", "k", 5, bytes.NewReader([]byte("world")))
+	if err != nil {
+		t.Fatalf("AppendObject: %v", err)
+	}
+	if len(obj.Segments) != 2 {
+		t.Fatalf("segments=%d, want 2", len(obj.Segments))
+	}
+	m := chunkref.ObjectVersionID("test", "k", obj.VersionID)
+	if err := b.db.View(func(txn *badger.Txn) error {
+		s := NewChunkRefStore(txn)
+		for _, seg := range obj.Segments {
+			c := chunkref.ChunkID(ParseLocator(seg.BlobID).String())
+			if n, _ := s.RefCount(c); n != 1 {
+				t.Fatalf("RefCount(%s) = %d, want 1", c, n)
+			}
+			if _, err := txn.Get(refMembershipKey(m, c)); err != nil {
+				t.Fatalf("missing ref (%v, %s): %v", m, c, err)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("view: %v", err)
 	}
 }
 

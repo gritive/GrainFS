@@ -100,6 +100,7 @@ func (b *LocalBackend) appendNew(ctx context.Context, bucket, key string, r io.R
 }
 
 func (b *LocalBackend) appendExisting(ctx context.Context, bucket, key string, existing *Object, r io.Reader) (*Object, error) {
+	hadChunkRefs := len(existing.Segments) > 0 || len(existing.Coalesced) > 0
 	existing, err := b.ensureAppendableBase(ctx, bucket, key, existing)
 	if err != nil {
 		return nil, err
@@ -120,8 +121,14 @@ func (b *LocalBackend) appendExisting(ctx context.Context, bucket, key string, e
 	obj.AppendCallMD5s = callMD5s
 	obj.ETag = CompositeETag(callMD5s)
 	obj.LastModified = time.Now().Unix()
-	if err := b.PutObjectRecord(ctx, bucket, key, &obj); err != nil {
-		return nil, fmt.Errorf("persist: %w", err)
+	var persistErr error
+	if hadChunkRefs {
+		persistErr = b.putObjectRecordAppend(ctx, bucket, key, &obj, []string{ParseLocator(seg.BlobID).String()})
+	} else {
+		persistErr = b.PutObjectRecord(ctx, bucket, key, &obj)
+	}
+	if persistErr != nil {
+		return nil, fmt.Errorf("persist: %w", persistErr)
 	}
 	return &obj, nil
 }
@@ -247,6 +254,36 @@ func (b *LocalBackend) PutObjectRecord(ctx context.Context, bucket, key string, 
 	return b.db.Update(func(txn *badger.Txn) error {
 		return b.PutObjectRecordInTxn(txn, bucket, key, obj)
 	})
+}
+
+func (b *LocalBackend) putObjectRecordAppend(ctx context.Context, bucket, key string, obj *Object, newChunkLocators []string) error {
+	return b.db.Update(func(txn *badger.Txn) error {
+		return b.putObjectRecordAppendInTxn(txn, bucket, key, obj, newChunkLocators)
+	})
+}
+
+func (b *LocalBackend) putObjectRecordAppendInTxn(txn *badger.Txn, bucket, key string, obj *Object, newChunkLocators []string) error {
+	mk := b.objectMetaKey(bucket, key)
+	if _, err := txn.Get(mk); errors.Is(err, badger.ErrKeyNotFound) {
+		newChunkLocators = obj.ChunkLocators()
+	} else if err != nil {
+		return err
+	}
+	data, err := marshalObject(obj)
+	if err != nil {
+		return err
+	}
+	if err := setBadgerValue(txn, mk, data); err != nil {
+		return err
+	}
+	store := NewChunkRefStore(txn)
+	m := chunkref.ObjectVersionID(bucket, key, obj.VersionID)
+	for _, c := range newChunkLocators {
+		if err := store.AddRef(m, chunkref.ChunkID(c)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // PutObjectRecordInTxn persists Object within a caller-provided txn and

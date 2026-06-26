@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.741.0] - 2026-06-26
+## [0.0.744.0] - 2026-06-26
 
 ### Changed
 - **Removed per-group raft membership mirroring.**
@@ -9,6 +9,31 @@
   reconciles the meta-FSM shard-group roster directly, and delete/version-delete,
   ACL, tags, and quarantine RMW paths now use deterministic owner routing instead
   of data-group raft leadership.
+
+## [0.0.743.0] - 2026-06-26
+
+### Changed
+- **Added the single-node AppendObject side-record read foundation.**
+  LocalBackend can now expand appendable object summaries from append side
+  segment records for Head/Get, and fails closed when a side-record summary is
+  missing instead of silently returning an unreadable object.
+
+## [0.0.742.0] - 2026-06-26
+
+### Changed
+- **Documented the AppendObject incremental metadata design.**
+  Added the side-record format, migration strategy, chunkref/GC implications,
+  coalesce handling, and implementation slices needed to remove the remaining
+  full-manifest rewrite and ETag rehash cost.
+
+## [0.0.741.0] - 2026-06-26
+
+### Fixed
+- **Reduced single-node AppendObject metadata churn.**
+  Already chunk-referenced appendable objects now persist appends without
+  re-decoding the previous object record or remove/add churning every existing
+  chunk ref; legacy plain-PUT conversion keeps the full path so its base
+  segment remains referenced.
 
 ## [0.0.740.0] - 2026-06-26
 

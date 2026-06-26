@@ -109,7 +109,8 @@ separate PR, facades stay the spine — see design
   let an append bypass the 501 gate. Fixed: the gate now resolves versioning via the linearized read
   (`GetBucketVersioningLinearized`, #839), matching the PUT/Copy/CompleteMultipart mutating-edge
   contract. Discriminating unit test (`TestAppendObjectGateUsesLinearizedRead`, call-count).
-- **[P2][follow-up] AppendObject is O(N²) in segment count (single-node).** A micro-benchmark sweep
+- **[P2][design-ready] AppendObject incremental metadata implementation.** Design:
+  `docs/architecture/append-object-incremental-metadata.md`. A micro-benchmark sweep
   (`BenchmarkS3Append`, allocs/op deterministic) showed per-append cost GROWS with the existing
   segment count: n=4 → 885 allocs, n=8 → 2,835, n=16 → 10,490 (doubling appends ≈ 3.5× allocs).
   Root cause (memprofile): every `appendExisting` → `PutObjectRecordInTxn` (a) re-reads + decodes the
@@ -117,12 +118,17 @@ separate PR, facades stay the spine — see design
   membership (O(N) pure churn; only 1 chunk actually changed), (c) re-marshals the whole object, and
   (d) `CompositeETag` re-hashes all N+1 call-MD5s. So N sequential appends = O(N²) metadata work;
   with `MaxAppendSegments=10000` the worst case is severe, and AppendObject's whole point is repeated
-  append. A bounded win (skip the prev-read on the append path — `existing` is already in hand — and
-  AddRef only the NEW segment's chunks instead of remove-all/add-all) removes 3 of the O(N) factors
-  but leaves marshal+ETag O(N) (still O(N²), smaller constant). True O(1)/append needs incremental
-  metadata persistence (append-only segment log + running ETag state) — a storage-format redesign in
-  the chunkref/object-meta area (data-loss-sensitive), so it wants its own design pass (office-hours/
-  spec) before implementation. Cluster append: #895 measured it (`BenchmarkClusterAppend`, EC 4+2,
+  append. Bounded single-node persist win shipped in v0.0.741.0: already chunk-referenced appendable
+  objects now skip the previous-record decode and add only the new segment's chunk ref instead of
+  remove-all/add-all churn; legacy plain-PUT conversion keeps the full path so its newly materialized
+  base segment is referenced. Residual: every append still marshals the full N-segment object and
+  re-hashes all N+1 call-MD5s, so true O(1)/append needs incremental metadata persistence
+  (append-only segment log + running ETag state). Design and the single-node side-record read
+  foundation shipped in v0.0.742.0/v0.0.743.0: Head/Get can now fail-closed or expand appendable
+  object summaries from side segment records. Remaining ordered slices: single-node append writer +
+  brownfield conversion/delete+chunkref cleanup, cluster quorum-meta side records, coalesce
+  integration, benchmark gate.
+  Cluster append: #895 measured it (`BenchmarkClusterAppend`, EC 4+2,
   coalesce-off) — same super-linear O(N²) (n=4 → 545 allocs, n=8 → 1,356, n=16 → 3,711), same
   meta-rewrite root cause (`readAppendBase` decode + manifest re-marshal + quorum-meta), softened in
   production by coalesce every 16 segments. The same storage-format redesign applies to both paths.
