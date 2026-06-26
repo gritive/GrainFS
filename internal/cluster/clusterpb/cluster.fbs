@@ -3,11 +3,6 @@
 
 namespace clusterpb;
 
-table Command {
-  type:uint32;
-  data:[ubyte];
-}
-
 // BytesValue wraps a single [ubyte] so a parent table can carry a
 // vector-of-vectors (FlatBuffers forbids a direct nested-vector field). Mirrors
 // storagepb.BytesValue. Used by PutObjectMetaCmd.append_call_md5s.
@@ -327,8 +322,6 @@ table ReceiptQueryResponseMsg {
   found:bool;
   receipt:[ubyte];
 }
-
-root_type Command;
 
 // PR-B: meta-Raft FSM commands — cluster control plane
 enum MetaCmdType : uint8 {

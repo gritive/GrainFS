@@ -17,6 +17,9 @@
   `lastAppliedTerm` and preserves snapshot restore barriers without decoding retired command
   envelopes or invoking apply callbacks. Legacy command envelope builders/validators and
   callback-only tests were removed from the cluster package.
+- **[DONE][raft-removal] data-group propose wire and command schema retired.** Removed the
+  dead `/forward/propose/data-group` buffered route, its raw raft-command payload/reply codecs,
+  and the retired `clusterpb.Command` envelope schema.
 - [x] **phantom-on-CAS-reject cleanup** — owner-local-first CAS quorum-meta writes now
   compare-delete a freshly published owner-local latest-only blob if the peer quorum later
   fails, preventing failed append/coalesce RMW attempts from leaving a readable phantom manifest.
