@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.741.0] - 2026-06-26
+
+### Fixed
+- **Reduced single-node AppendObject metadata churn.**
+  Already chunk-referenced appendable objects now persist appends without
+  re-decoding the previous object record or remove/add churning every existing
+  chunk ref; legacy plain-PUT conversion keeps the full path so its base
+  segment remains referenced.
+
 ## [0.0.740.0] - 2026-06-26
 
 ### Changed
