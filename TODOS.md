@@ -128,10 +128,11 @@ separate PR, facades stay the spine — see design
   object summaries from side segment records. The single-node writer slice shipped in v0.0.745.0:
   non-coalesced LocalBackend appends persist segment lists through side records, convert brownfield
   embedded append manifests on the next append, append only the new side segment record, and remove
-  side-record chunk refs/metadata on overwrite/delete. Residual single-node cost: AppendObject still
-  expands side segments through HeadObject for offset/cap checks and still re-hashes all call-MD5s
-  because running ETag state is not yet persisted. Remaining ordered slices: running ETag state +
-  append-base summary path, cluster quorum-meta side records, coalesce integration, benchmark gate.
+  side-record chunk refs/metadata on overwrite/delete. The running ETag state + append-base summary
+  path shipped in v0.0.746.0: steady-state single-node side-record appends validate offset/cap from
+  the append summary and update the composite ETag from stored running MD5 state, so raw object
+  records no longer carry growing `Segments[]` or `AppendCallMD5s[]` histories. Remaining ordered
+  slices: cluster quorum-meta side records, coalesce integration, benchmark gate.
   Cluster append: #895 measured it (`BenchmarkClusterAppend`, EC 4+2,
   coalesce-off) — same super-linear O(N²) (n=4 → 545 allocs, n=8 → 1,356, n=16 → 3,711), same
   meta-rewrite root cause (`readAppendBase` decode + manifest re-marshal + quorum-meta), softened in

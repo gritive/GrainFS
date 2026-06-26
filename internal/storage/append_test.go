@@ -56,7 +56,9 @@ func TestAppendObjectSequentialThreeSegments(t *testing.T) {
 		off = obj.Size
 	}
 	require.Equal(t, int64(30<<20), obj.Size)
-	require.Len(t, obj.Segments, 3)
+	head, err := b.HeadObject(context.Background(), "test", "k")
+	require.NoError(t, err, "HeadObject")
+	require.Len(t, head.Segments, 3)
 	// Until Task 3.1 wires real per-call MD5s, the prefix is an MD5 of segment-checksum bytes — assert structure only.
 	require.True(t, strings.HasSuffix(obj.ETag, "-3"), "etag=%q, want suffix -3", obj.ETag)
 	require.Equal(t, 32, strings.IndexByte(obj.ETag, '-'), "etag=%q, want 32 hex chars before '-'", obj.ETag)
@@ -70,7 +72,9 @@ func TestAppendObjectStoresSegmentsInSideRecords(t *testing.T) {
 	require.NoError(t, err, "initial append")
 	obj, err = b.AppendObject(ctx, "test", "k", obj.Size, strings.NewReader(" world"))
 	require.NoError(t, err, "second append")
-	require.Len(t, obj.Segments, 2)
+	head, err := b.HeadObject(ctx, "test", "k")
+	require.NoError(t, err, "HeadObject")
+	require.Len(t, head.Segments, 2)
 
 	if err := b.db.View(func(txn *badger.Txn) error {
 		raw, err := b.readObjectInTxn(txn, b.objectMetaKey("test", "k"))
@@ -82,7 +86,8 @@ func TestAppendObjectStoresSegmentsInSideRecords(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		require.Equal(t, appendSummary{Size: obj.Size, SegmentCount: len(obj.Segments)}, summary)
+		require.Equal(t, obj.Size, summary.Size)
+		require.Equal(t, len(head.Segments), summary.SegmentCount)
 		return nil
 	}); err != nil {
 		require.NoError(t, err, "view")
@@ -126,11 +131,124 @@ func TestAppendObjectConvertsBrownfieldAppendManifestToSideRecords(t *testing.T)
 		if err != nil {
 			return err
 		}
-		require.Equal(t, appendSummary{Size: obj.Size, SegmentCount: len(obj.Segments)}, summary)
+		require.Equal(t, obj.Size, summary.Size)
+		require.Equal(t, 2, summary.SegmentCount)
 		return nil
 	}); err != nil {
 		require.NoError(t, err, "view")
 	}
+}
+
+func TestAppendSummaryETagStateMatchesCompositeETag(t *testing.T) {
+	digests := [][]byte{
+		bytes.Repeat([]byte{0x11}, 16),
+		bytes.Repeat([]byte{0x22}, 16),
+		bytes.Repeat([]byte{0x33}, 16),
+	}
+	var (
+		state []byte
+		count int
+		err   error
+	)
+	for i, digest := range digests {
+		state, count, err = appendETagStateAppend(state, count, digest)
+		require.NoError(t, err, "append state %d", i)
+		got, err := compositeETagFromState(state, count)
+		require.NoError(t, err, "etag from state %d", i)
+		require.Equal(t, CompositeETag(digests[:i+1]), got)
+	}
+}
+
+func TestAppendObjectUsesSummaryForOffsetAndCapChecks(t *testing.T) {
+	orig := MaxAppendSegments
+	t.Cleanup(func() { MaxAppendSegments = orig })
+	MaxAppendSegments = 3
+
+	b := newTestLocalBackend(t)
+	ctx := context.Background()
+	obj, err := b.AppendObject(ctx, "test", "k", 0, strings.NewReader("aa"))
+	require.NoError(t, err, "append 1")
+	obj, err = b.AppendObject(ctx, "test", "k", obj.Size, strings.NewReader("bb"))
+	require.NoError(t, err, "append 2")
+
+	err = b.db.Update(func(txn *badger.Txn) error {
+		raw, err := b.readObjectInTxn(txn, b.objectMetaKey("test", "k"))
+		if err != nil {
+			return err
+		}
+		return txn.Delete(appendSegmentKey("test", "k", raw.VersionID, 1))
+	})
+	require.NoError(t, err, "delete side segment")
+
+	obj, err = b.AppendObject(ctx, "test", "k", obj.Size, strings.NewReader("cc"))
+	require.NoError(t, err, "append should use summary without reading old segments")
+	_, err = b.AppendObject(ctx, "test", "k", obj.Size, strings.NewReader("dd"))
+	require.ErrorIs(t, err, ErrAppendCapExceeded)
+}
+
+func TestAppendObjectStoresRunningETagState(t *testing.T) {
+	b := newTestLocalBackend(t)
+	ctx := context.Background()
+
+	obj, err := b.AppendObject(ctx, "test", "k", 0, strings.NewReader("aa"))
+	require.NoError(t, err, "append 1")
+	obj, err = b.AppendObject(ctx, "test", "k", obj.Size, strings.NewReader("bb"))
+	require.NoError(t, err, "append 2")
+	obj, err = b.AppendObject(ctx, "test", "k", obj.Size, strings.NewReader("cc"))
+	require.NoError(t, err, "append 3")
+
+	err = b.db.View(func(txn *badger.Txn) error {
+		raw, err := b.readObjectInTxn(txn, b.objectMetaKey("test", "k"))
+		if err != nil {
+			return err
+		}
+		require.Empty(t, raw.Segments, "raw manifest segments")
+		require.Empty(t, raw.AppendCallMD5s, "raw manifest append md5 history")
+		summary, err := b.readAppendSummaryInTxn(txn, "test", "k", raw.VersionID)
+		if err != nil {
+			return err
+		}
+		require.Equal(t, 3, summary.SegmentCount)
+		require.Equal(t, 3, summary.ETagPartCount)
+		require.NotEmpty(t, summary.ETagDigestState)
+		etag, err := compositeETagFromState(summary.ETagDigestState, summary.ETagPartCount)
+		require.NoError(t, err)
+		require.Equal(t, obj.ETag, etag)
+		return nil
+	})
+	require.NoError(t, err, "view")
+}
+
+func TestAppendObjectUpgradesLegacySideSummaryToRunningETagState(t *testing.T) {
+	b, base := seedAppendSideRecordObject(t, []string{"aa", "bb"})
+	ctx := context.Background()
+
+	obj, err := b.AppendObject(ctx, "test", "k", base.Size, strings.NewReader("cc"))
+	require.NoError(t, err, "AppendObject")
+	require.Len(t, obj.Segments, 3)
+
+	digests := make([][]byte, 0, len(obj.Segments))
+	for _, seg := range obj.Segments {
+		digests = append(digests, seg.Checksum)
+	}
+	require.Equal(t, CompositeETag(digests), obj.ETag)
+
+	err = b.db.View(func(txn *badger.Txn) error {
+		raw, err := b.readObjectInTxn(txn, b.objectMetaKey("test", "k"))
+		if err != nil {
+			return err
+		}
+		require.Empty(t, raw.Segments, "raw manifest segments")
+		summary, err := b.readAppendSummaryInTxn(txn, "test", "k", raw.VersionID)
+		if err != nil {
+			return err
+		}
+		require.Equal(t, 3, summary.SegmentCount)
+		require.Equal(t, 3, summary.ETagPartCount)
+		require.NotEmpty(t, summary.ETagDigestState)
+		return nil
+	})
+	require.NoError(t, err, "view")
 }
 
 type repeatByteReader struct {
