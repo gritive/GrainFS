@@ -168,11 +168,6 @@ The demotion shipped: bucket existence/policy/versioning consolidated onto meta-
 bucket writes forward to the meta leader; policy invalidation lossless; versioning barrier best-effort.
 Deferred items:
 
-- **[P3][test/CI] Run the object-write throughput bench against master.** The per-mutation versioning
-  linearizing read retargeted from the group-0 raft to meta-raft. `make bench` (warp + colima/cluster)
-  was unavailable in the dev env. In CI, compare PUT/Copy/CompleteMultipart throughput master vs this
-  change; expect neutral-to-slight-improvement. If a regression appears, the short-TTL versioning
-  edge-cache below becomes required.
 - **[P3] Short-TTL bucket-versioning edge-cache (fast-follow).** The shipped design's deferred "C2":
   only needed if the meta-raft versioning barrier regresses object-write throughput (above).
 - **[P3][minor] `CreateBucket` now unconditionally requires a non-empty groupID** (the FSM rejects
