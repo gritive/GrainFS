@@ -66,6 +66,19 @@ type ExpandPlacementResult struct {
 // (S7-7). Injected by serveruntime, which holds the coordinator + meta-raft.
 type ExpandPlacementFunc func(ctx context.Context) (ExpandPlacementResult, error)
 
+type RetirePlacementGenerationRequest struct {
+	Epoch uint64 `json:"epoch"`
+}
+
+type RetirePlacementGenerationResult struct {
+	Epoch   uint64 `json:"epoch"`
+	Retired bool   `json:"retired"`
+}
+
+// RetirePlacementGenerationFunc marks a previously drained placement generation
+// retired so future object reads stop probing it.
+type RetirePlacementGenerationFunc func(ctx context.Context, epoch uint64) (RetirePlacementGenerationResult, error)
+
 type ReadIndexer interface {
 	ReadIndex(ctx context.Context) (uint64, error)
 	WaitApplied(ctx context.Context, index uint64) error
@@ -108,20 +121,21 @@ type Server struct {
 
 	lifecycle *lifecycle.Service
 
-	cluster         ClusterInfo
-	membership      ClusterMembership
-	joinCluster     JoinClusterFunc
-	expandPlacement ExpandPlacementFunc
-	balancer        BalancerInfo
-	evStore         *eventstore.Store
-	alerts          *alertssvc.State
-	receiptAPI      *receipt.API
-	incidentStore   incident.StateStore
-	mutationGate    *MutationGate
-	degradedFlag    atomic.Bool
-	shardCache      *shardcache.Cache
-	receipt         *receiptsvc.Handler
-	incidentH       *incidentsvc.Handler
+	cluster                   ClusterInfo
+	membership                ClusterMembership
+	joinCluster               JoinClusterFunc
+	expandPlacement           ExpandPlacementFunc
+	retirePlacementGeneration RetirePlacementGenerationFunc
+	balancer                  BalancerInfo
+	evStore                   *eventstore.Store
+	alerts                    *alertssvc.State
+	receiptAPI                *receipt.API
+	incidentStore             incident.StateStore
+	mutationGate              *MutationGate
+	degradedFlag              atomic.Bool
+	shardCache                *shardcache.Cache
+	receipt                   *receiptsvc.Handler
+	incidentH                 *incidentsvc.Handler
 
 	readAfterWriteRetryTimeout  time.Duration
 	readAfterWriteRetryInterval time.Duration

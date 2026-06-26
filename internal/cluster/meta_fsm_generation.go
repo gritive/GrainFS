@@ -70,6 +70,44 @@ func (f *MetaFSM) applyAddPlacementGeneration(data []byte) error {
 	return nil
 }
 
+func (f *MetaFSM) applyRetirePlacementGeneration(data []byte) error {
+	if len(data) == 0 {
+		return fmt.Errorf("meta_fsm: RetirePlacementGeneration: empty payload")
+	}
+	var (
+		c      *clusterpb.MetaRetirePlacementGenerationCmd
+		decErr error
+	)
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				decErr = fmt.Errorf("meta_fsm: invalid MetaRetirePlacementGenerationCmd flatbuffer: %v", r)
+			}
+		}()
+		c = clusterpb.GetRootAsMetaRetirePlacementGenerationCmd(data, 0)
+	}()
+	if decErr != nil {
+		return decErr
+	}
+	epoch := c.Epoch()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.placementGenerations) == 0 || epoch >= uint64(len(f.placementGenerations)) {
+		return fmt.Errorf("meta_fsm: RetirePlacementGeneration: unknown epoch %d", epoch)
+	}
+	latest := f.placementGenerations[len(f.placementGenerations)-1].epoch
+	if epoch == latest {
+		return fmt.Errorf("meta_fsm: RetirePlacementGeneration: cannot retire latest generation %d", epoch)
+	}
+	for i := range f.placementGenerations {
+		if f.placementGenerations[i].epoch == epoch {
+			f.placementGenerations[i].retired = true
+			return nil
+		}
+	}
+	return fmt.Errorf("meta_fsm: RetirePlacementGeneration: unknown epoch %d", epoch)
+}
+
 // PlacementGenerations returns a deep copy of the ordered placement-generation
 // list (ascending epoch). Empty for single-generation legacy clusters. groupIDs
 // slices are copied so callers cannot mutate FSM state.
@@ -80,7 +118,7 @@ func (f *MetaFSM) PlacementGenerations() []placementGeneration {
 	for i, g := range f.placementGenerations {
 		ids := make([]string, len(g.groupIDs))
 		copy(ids, g.groupIDs)
-		out[i] = placementGeneration{epoch: g.epoch, groupIDs: ids}
+		out[i] = placementGeneration{epoch: g.epoch, groupIDs: ids, retired: g.retired}
 	}
 	return out
 }
@@ -102,4 +140,11 @@ func encodeMetaAddPlacementGenerationCmd(groupIDs []string) []byte {
 	clusterpb.MetaAddPlacementGenerationCmdStart(b)
 	clusterpb.MetaAddPlacementGenerationCmdAddGroupIds(b, gidVec)
 	return fbFinish(b, clusterpb.MetaAddPlacementGenerationCmdEnd(b))
+}
+
+func encodeMetaRetirePlacementGenerationCmd(epoch uint64) []byte {
+	b := clusterBuilderPool.Get()
+	clusterpb.MetaRetirePlacementGenerationCmdStart(b)
+	clusterpb.MetaRetirePlacementGenerationCmdAddEpoch(b, epoch)
+	return fbFinish(b, clusterpb.MetaRetirePlacementGenerationCmdEnd(b))
 }

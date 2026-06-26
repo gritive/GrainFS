@@ -52,4 +52,5 @@ const (
 	routePathAdminUDSBalancerStatus  = "/balancer/status"
 	routePathAdminUDSCapabilities    = "/capabilities"
 	routePathAdminUDSExpandPlacement = "/expand-placement"
+	routePathAdminUDSRetirePlacement = "/retire-placement-generation"
 )

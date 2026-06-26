@@ -40,3 +40,31 @@ func (s *Server) expandPlacementHandler(ctx context.Context, c *app.RequestConte
 	data, _ := json.Marshal(result)
 	c.Data(consts.StatusOK, "application/json", data)
 }
+
+func (s *Server) retirePlacementGenerationHandler(ctx context.Context, c *app.RequestContext) {
+	if s.blockIfMutationDisabled(c, "cluster_retire_placement_generation") {
+		return
+	}
+	if s.retirePlacementGeneration == nil {
+		c.JSON(consts.StatusServiceUnavailable, map[string]string{
+			"error": "retire-placement-generation not available (cluster mode not configured)",
+		})
+		return
+	}
+	var req RetirePlacementGenerationRequest
+	if err := json.Unmarshal(c.Request.Body(), &req); err != nil {
+		c.JSON(consts.StatusBadRequest, map[string]string{
+			"error": "invalid retire-placement-generation request",
+		})
+		return
+	}
+	result, err := s.retirePlacementGeneration(ctx, req.Epoch)
+	if err != nil {
+		c.JSON(consts.StatusInternalServerError, map[string]string{
+			"error": err.Error(),
+		})
+		return
+	}
+	data, _ := json.Marshal(result)
+	c.Data(consts.StatusOK, "application/json", data)
+}

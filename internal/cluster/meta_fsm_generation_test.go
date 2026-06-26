@@ -20,6 +20,13 @@ func makeAddPlacementGenerationCmd(t *testing.T, groupIDs []string) []byte {
 	return cmd
 }
 
+func makeRetirePlacementGenerationCmd(t *testing.T, epoch uint64) []byte {
+	t.Helper()
+	cmd, err := encodeMetaCmd(MetaCmdTypeRetirePlacementGeneration, encodeMetaRetirePlacementGenerationCmd(epoch))
+	require.NoError(t, err)
+	return cmd
+}
+
 // TestApplyAddPlacementGeneration_AppendsMonotonic proves the command appends
 // generations with monotonically-assigned epochs through the real apply
 // dispatch, and rejects empty group_ids.
@@ -110,6 +117,7 @@ func TestPlacementGenerations_SnapshotRestore(t *testing.T) {
 	wireTestKEK(t, f)
 	require.NoError(t, f.applyCmd(makeAddPlacementGenerationCmd(t, []string{"group-1", "group-2"})))
 	require.NoError(t, f.applyCmd(makeAddPlacementGenerationCmd(t, []string{"group-1", "group-2", "group-3", "group-4"})))
+	require.NoError(t, f.applyCmd(makeRetirePlacementGenerationCmd(t, 0)))
 
 	snap, err := f.Snapshot()
 	require.NoError(t, err)
@@ -122,8 +130,25 @@ func TestPlacementGenerations_SnapshotRestore(t *testing.T) {
 	require.Len(t, got, 2)
 	require.Equal(t, uint64(0), got[0].epoch)
 	require.Equal(t, []string{"group-1", "group-2"}, got[0].groupIDs)
+	require.True(t, got[0].retired)
 	require.Equal(t, uint64(1), got[1].epoch)
 	require.Equal(t, []string{"group-1", "group-2", "group-3", "group-4"}, got[1].groupIDs)
+	require.False(t, got[1].retired)
+}
+
+func TestApplyRetirePlacementGeneration(t *testing.T) {
+	f := NewMetaFSM()
+	require.NoError(t, f.applyCmd(makeAddPlacementGenerationCmd(t, []string{"group-1", "group-2"})))
+	require.NoError(t, f.applyCmd(makeAddPlacementGenerationCmd(t, []string{"group-3", "group-4"})))
+
+	require.NoError(t, f.applyCmd(makeRetirePlacementGenerationCmd(t, 0)))
+	gens := f.PlacementGenerations()
+	require.True(t, gens[0].retired)
+	require.False(t, gens[1].retired)
+
+	require.NoError(t, f.applyCmd(makeRetirePlacementGenerationCmd(t, 0)), "retire is idempotent")
+	require.ErrorContains(t, f.applyCmd(makeRetirePlacementGenerationCmd(t, 1)), "latest generation")
+	require.ErrorContains(t, f.applyCmd(makeRetirePlacementGenerationCmd(t, 99)), "unknown epoch")
 }
 
 // TestPlacementGenerations_LegacySnapshotMissingSlot proves a snapshot built

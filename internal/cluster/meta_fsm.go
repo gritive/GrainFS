@@ -34,13 +34,14 @@ import (
 type MetaCmdType = clusterpb.MetaCmdType
 
 const (
-	MetaCmdTypeNoOp                   = clusterpb.MetaCmdTypeNoOp
-	MetaCmdTypeAddNode                = clusterpb.MetaCmdTypeAddNode
-	MetaCmdTypeRemoveNode             = clusterpb.MetaCmdTypeRemoveNode
-	MetaCmdTypePutShardGroup          = clusterpb.MetaCmdTypePutShardGroup          // PR-C
-	MetaCmdTypeAddPlacementGeneration = clusterpb.MetaCmdTypeAddPlacementGeneration // Phase 7
-	MetaCmdTypePutBucketAssignment    = clusterpb.MetaCmdTypePutBucketAssignment    // PR-D
-	MetaCmdTypeSetLoadSnapshot        = clusterpb.MetaCmdTypeSetLoadSnapshot        // PR-D
+	MetaCmdTypeNoOp                      = clusterpb.MetaCmdTypeNoOp
+	MetaCmdTypeAddNode                   = clusterpb.MetaCmdTypeAddNode
+	MetaCmdTypeRemoveNode                = clusterpb.MetaCmdTypeRemoveNode
+	MetaCmdTypePutShardGroup             = clusterpb.MetaCmdTypePutShardGroup             // PR-C
+	MetaCmdTypeAddPlacementGeneration    = clusterpb.MetaCmdTypeAddPlacementGeneration    // Phase 7
+	MetaCmdTypeRetirePlacementGeneration = clusterpb.MetaCmdTypeRetirePlacementGeneration // Phase 7 follow-up
+	MetaCmdTypePutBucketAssignment       = clusterpb.MetaCmdTypePutBucketAssignment       // PR-D
+	MetaCmdTypeSetLoadSnapshot           = clusterpb.MetaCmdTypeSetLoadSnapshot           // PR-D
 	// 9-13 reserved — do not reuse (no renumber).
 	MetaCmdTypeRotateKeyBegin            = clusterpb.MetaCmdTypeRotateKeyBegin
 	MetaCmdTypeRotateKeySwitch           = clusterpb.MetaCmdTypeRotateKeySwitch
@@ -705,6 +706,8 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		return f.applyPutShardGroup(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeAddPlacementGeneration:
 		return f.applyAddPlacementGeneration(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeRetirePlacementGeneration:
+		return f.applyRetirePlacementGeneration(cmd.DataBytes())
 	case clusterpb.MetaCmdTypePutBucketAssignment:
 		return f.applyPutBucketAssignment(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeSetLoadSnapshot:

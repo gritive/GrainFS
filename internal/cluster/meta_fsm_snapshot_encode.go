@@ -83,6 +83,7 @@ func buildPlacementGenerationsVector(b *flatbuffers.Builder, placementGeneration
 		clusterpb.PlacementGenerationEntryStart(b)
 		clusterpb.PlacementGenerationEntryAddEpoch(b, pg.epoch)
 		clusterpb.PlacementGenerationEntryAddGroupIds(b, gidVec)
+		clusterpb.PlacementGenerationEntryAddRetired(b, pg.retired)
 		pgOffs[i] = clusterpb.PlacementGenerationEntryEnd(b)
 	}
 	clusterpb.MetaStateSnapshotStartPlacementGenerationsVector(b, len(pgOffs))

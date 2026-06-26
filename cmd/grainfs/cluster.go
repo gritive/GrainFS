@@ -83,6 +83,27 @@ No-op when no new candidate groups are present.`,
 	},
 }
 
+var clusterRetirePlacementGenerationCmd = &cobra.Command{
+	Use:   "retire-placement-generation",
+	Short: "Stop probing a drained placement generation",
+	Long: `Mark a previously drained topology placement generation as retired.
+Retired generations remain in the replicated registry for audit/replay, but
+future object reads no longer probe them. Use only after every object that lived
+on the generation's groups has been rewritten to the active placement set.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		endpoint, err := clusterEndpointFromCmd(cmd)
+		if err != nil {
+			return err
+		}
+		epoch, _ := cmd.Flags().GetUint64("epoch")
+		return clusteradmin.RunRetirePlacementGeneration(cmd.Context(), clusteradmin.RetirePlacementGenerationOptions{
+			Endpoint: endpoint,
+			Epoch:    epoch,
+			Out:      cmd.OutOrStdout(),
+		})
+	},
+}
+
 func init() {
 	registerAdminEndpointFlag(clusterCmd, "admin Unix socket path (required, e.g. ./tmp/admin.sock)")
 	clusterCmd.PersistentFlags().String("format", "text",
@@ -98,6 +119,9 @@ func init() {
 	clusterCmd.AddCommand(clusterHealthCmd())
 	clusterCmd.AddCommand(clusterPlacementCmd())
 	clusterCmd.AddCommand(clusterExpandPlacementCmd)
+	clusterRetirePlacementGenerationCmd.Flags().Uint64("epoch", 0, "placement generation epoch to retire")
+	_ = clusterRetirePlacementGenerationCmd.MarkFlagRequired("epoch")
+	clusterCmd.AddCommand(clusterRetirePlacementGenerationCmd)
 	clusterCmd.AddCommand(clusterBalancerCmd)
 
 	// Task 12: read-only cluster config inspection.
