@@ -107,7 +107,8 @@ separate PR, facades stay the spine — see design
   let an append bypass the 501 gate. Fixed: the gate now resolves versioning via the linearized read
   (`GetBucketVersioningLinearized`, #839), matching the PUT/Copy/CompleteMultipart mutating-edge
   contract. Discriminating unit test (`TestAppendObjectGateUsesLinearizedRead`, call-count).
-- **[P2][follow-up] AppendObject still has O(N²) residual from full manifest rewrite/ETag.** A micro-benchmark sweep
+- **[P2][design-ready] AppendObject incremental metadata implementation.** Design:
+  `docs/architecture/append-object-incremental-metadata.md`. A micro-benchmark sweep
   (`BenchmarkS3Append`, allocs/op deterministic) showed per-append cost GROWS with the existing
   segment count: n=4 → 885 allocs, n=8 → 2,835, n=16 → 10,490 (doubling appends ≈ 3.5× allocs).
   Root cause (memprofile): every `appendExisting` → `PutObjectRecordInTxn` (a) re-reads + decodes the
@@ -120,8 +121,9 @@ separate PR, facades stay the spine — see design
   remove-all/add-all churn; legacy plain-PUT conversion keeps the full path so its newly materialized
   base segment is referenced. Residual: every append still marshals the full N-segment object and
   re-hashes all N+1 call-MD5s, so true O(1)/append needs incremental metadata persistence
-  (append-only segment log + running ETag state) — a storage-format redesign in the chunkref/object-meta
-  area (data-loss-sensitive), so it wants its own design pass (office-hours/spec) before implementation.
+  (append-only segment log + running ETag state). Implement in the design's ordered slices:
+  single-node side-record format/read path, brownfield conversion/delete+chunkref cleanup, cluster
+  quorum-meta side records, coalesce integration, benchmark gate.
   Cluster append: #895 measured it (`BenchmarkClusterAppend`, EC 4+2,
   coalesce-off) — same super-linear O(N²) (n=4 → 545 allocs, n=8 → 1,356, n=16 → 3,711), same
   meta-rewrite root cause (`readAppendBase` decode + manifest re-marshal + quorum-meta), softened in

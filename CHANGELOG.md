@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.742.0] - 2026-06-26
+
+### Changed
+- **Documented the AppendObject incremental metadata design.**
+  Added the side-record format, migration strategy, chunkref/GC implications,
+  coalesce handling, and implementation slices needed to remove the remaining
+  full-manifest rewrite and ETag rehash cost.
+
 ## [0.0.741.0] - 2026-06-26
 
 ### Fixed
