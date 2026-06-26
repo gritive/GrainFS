@@ -7,13 +7,11 @@ import (
 	"testing"
 
 	"github.com/dgraph-io/badger/v4"
-	flatbuffers "github.com/google/flatbuffers/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/badgerutil"
-	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -37,33 +35,6 @@ func newTestDB(t *testing.T) *badger.DB {
 func newTestStore(t *testing.T) MetadataStore {
 	t.Helper()
 	return badgermeta.Wrap(newTestDB(t))
-}
-
-// buildNoDataCommand constructs a minimal FlatBuffer Command with the given
-// type and no payload data. Used by retirement tests to simulate stale
-// raft-log replay without a live proposer.
-func buildNoDataCommand(cmdType uint32) ([]byte, error) {
-	return buildRawCommand(cmdType, nil)
-}
-
-// buildRawCommand builds a FlatBuffer Command with the given type and raw payload.
-func buildRawCommand(cmdType uint32, data []byte) ([]byte, error) {
-	b := flatbuffers.NewBuilder(len(data) + 16)
-	var dataOff flatbuffers.UOffsetT
-	if len(data) > 0 {
-		dataOff = b.CreateByteVector(data)
-	}
-	clusterpb.CommandStart(b)
-	clusterpb.CommandAddType(b, cmdType)
-	if len(data) > 0 {
-		clusterpb.CommandAddData(b, dataOff)
-	}
-	root := clusterpb.CommandEnd(b)
-	b.Finish(root)
-	raw := b.FinishedBytes()
-	out := make([]byte, len(raw))
-	copy(out, raw)
-	return out, nil
 }
 
 func TestFSM_EncryptedValuesHideObjectMultipartAndPolicyPayloads(t *testing.T) {
@@ -124,7 +95,7 @@ func TestFSM_EncryptedValuesHideObjectMultipartAndPolicyPayloads(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestApplyActor_UnknownCommandReplayNoOp(t *testing.T) {
+func TestApplyActor_OpaqueCommandReplayNoOp(t *testing.T) {
 	db := newTestDB(t)
 	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
@@ -134,13 +105,13 @@ func TestApplyActor_UnknownCommandReplayNoOp(t *testing.T) {
 		return fsm.persistPutObjectMetaUpdate(txn, seedCmd, buildPutObjectMeta(seedCmd))
 	}))
 
-	raw, err := buildNoDataCommand(250)
-	require.NoError(t, err)
+	raw := []byte("opaque retired command entry")
 	a := &applyActor{fsm: fsm}
 	b := &DistributedBackend{fsm: fsm}
 	a.batch = append(a.batch[:0], raft.LogEntry{Index: 1, Term: 1, Type: raft.LogEntryCommand, Command: raw})
 	a.commitBatch(b)
-	require.Empty(t, b.applyErrs)
+	require.Equal(t, uint64(1), b.lastApplied.Load())
+	require.Equal(t, uint64(1), b.lastAppliedTerm.Load())
 
 	metaKey := fsm.keys.ObjectMetaKey("b", "obj.txt")
 	require.NoError(t, db.View(func(txn *badger.Txn) error {
