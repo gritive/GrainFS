@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -37,6 +38,20 @@ func TestOperationsCopyObjectFallsBackStreamingAndPreservesContentType(t *testin
 	require.NoError(t, err)
 	require.Equal(t, "fallback", result.Object.ETag)
 	require.Equal(t, []string{"head:src/k", "head:dst/k2", "get:src/k", "put:dst/k2:text/plain:data"}, backend.calls)
+}
+
+func TestOperationsCopyObjectFallbackPassesSourceSizeHint(t *testing.T) {
+	backend := &copyFallbackRequestBackend{}
+	ops := NewOperations(backend)
+
+	result, err := ops.CopyObject(context.Background(), CopyObjectRequest{
+		Source:      ObjectRef{Bucket: "src", Key: "k"},
+		Destination: ObjectRef{Bucket: "dst", Key: "k2"},
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, "fallback-request", result.Object.ETag)
+	require.Equal(t, []string{"head:src/k", "head:dst/k2", "get:src/k", "putreq:dst/k2:text/plain:hint=4:data"}, backend.calls)
 }
 
 func TestOperationsCopyObjectFallbackPropagatesPutError(t *testing.T) {
@@ -366,7 +381,7 @@ type copyFallbackBackend struct {
 
 func (b *copyFallbackBackend) HeadObject(_ context.Context, bucket, key string) (*Object, error) {
 	b.calls = append(b.calls, "head:"+bucket+"/"+key)
-	return &Object{Key: key, ContentType: "text/plain", ETag: "src-etag", LastModified: 100}, nil
+	return &Object{Key: key, Size: 4, ContentType: "text/plain", ETag: "src-etag", LastModified: 100}, nil
 }
 
 func (b *copyFallbackBackend) GetObject(_ context.Context, bucket, key string) (io.ReadCloser, *Object, error) {
@@ -384,6 +399,26 @@ func (b *copyFallbackBackend) PutObject(_ context.Context, bucket, key string, r
 		return nil, b.putErr
 	}
 	return &Object{Key: key, ETag: "fallback"}, nil
+}
+
+type copyFallbackRequestBackend struct {
+	copyFallbackBackend
+}
+
+func (b *copyFallbackRequestBackend) PutObjectWithRequest(_ context.Context, req PutObjectRequest) (*Object, error) {
+	data, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, err
+	}
+	hint := "nil"
+	if req.SizeHint != nil {
+		hint = fmt.Sprintf("%d", *req.SizeHint)
+	}
+	b.calls = append(b.calls, "putreq:"+req.Bucket+"/"+req.Key+":"+req.ContentType+":hint="+hint+":"+string(data))
+	if b.putErr != nil {
+		return nil, b.putErr
+	}
+	return &Object{Key: req.Key, ETag: "fallback-request"}, nil
 }
 
 func (b *copyFallbackBackend) PutObjectWithACL(bucket, key string, r io.Reader, contentType string, acl uint8) (*Object, error) {

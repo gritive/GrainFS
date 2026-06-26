@@ -430,6 +430,54 @@ func TestEncryptedSpoolWriter_ReusesCipherBufViaSealTo(t *testing.T) {
 		"second SealTo dst must reuse the first call's returned backing array (cipherBuf reuse)")
 }
 
+type spoolAADAllocProbeSeam struct{}
+
+func (spoolAADAllocProbeSeam) Seal(_ encrypt.AADDomain, _ []encrypt.AADField, plain []byte) ([]byte, uint32, error) {
+	return append([]byte(nil), plain...), 0, nil
+}
+
+func (spoolAADAllocProbeSeam) SealTo(dst []byte, _ encrypt.AADDomain, _ []encrypt.AADField, plain []byte) ([]byte, uint32, error) {
+	return append(dst, plain...), 0, nil
+}
+
+func (spoolAADAllocProbeSeam) SealAtGen(_ encrypt.AADDomain, _ []encrypt.AADField, plain []byte, _ uint32) ([]byte, error) {
+	return append([]byte(nil), plain...), nil
+}
+
+func (spoolAADAllocProbeSeam) SealAtGenTo(dst []byte, _ encrypt.AADDomain, _ []encrypt.AADField, plain []byte, _ uint32) ([]byte, error) {
+	return append(dst, plain...), nil
+}
+
+func (spoolAADAllocProbeSeam) Open(_ encrypt.AADDomain, _ []encrypt.AADField, _ uint32, ct []byte) ([]byte, error) {
+	return append([]byte(nil), ct...), nil
+}
+
+func (spoolAADAllocProbeSeam) OpenTo(dst []byte, _ encrypt.AADDomain, _ []encrypt.AADField, _ uint32, ct []byte) ([]byte, error) {
+	return append(dst, ct...), nil
+}
+
+type recordingAADFieldsSeam struct {
+	spoolAADAllocProbeSeam
+	fieldsBacking []*encrypt.AADField
+}
+
+func (s *recordingAADFieldsSeam) SealTo(dst []byte, domain encrypt.AADDomain, fields []encrypt.AADField, plain []byte) ([]byte, uint32, error) {
+	s.fieldsBacking = append(s.fieldsBacking, unsafe.SliceData(fields[:cap(fields)]))
+	return s.spoolAADAllocProbeSeam.SealTo(dst, domain, fields, plain)
+}
+
+func TestEncryptedSpoolWriter_ReusesAADFields(t *testing.T) {
+	data := []byte("abcd")
+	seam := &recordingAADFieldsSeam{}
+	w := &encryptedSpoolRecordWriter{w: io.Discard, seam: seam, domain: "spool:aad-reuse"}
+	_, err := w.Write(data)
+	require.NoError(t, err)
+	_, err = w.Write(data)
+	require.NoError(t, err)
+	require.Len(t, seam.fieldsBacking, 2)
+	require.Equal(t, seam.fieldsBacking[0], seam.fieldsBacking[1], "writer must reuse AAD fields backing across records")
+}
+
 // spool unit tests exercise the real seam-backed write/read path. clusterID is
 // fixed (16 bytes); the same seam instance seals and opens within a test.
 func newClusterTestSeam(t *testing.T) storage.DataEncryptor {

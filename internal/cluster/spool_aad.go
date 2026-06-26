@@ -11,5 +11,16 @@ import "github.com/gritive/GrainFS/internal/encrypt"
 // spool callers carry it on the in-memory spooledObject or recompute it
 // deterministically from IDs — never from a filesystem path.
 func spoolRecordAADFields(domain string, record uint64) []encrypt.AADField {
-	return []encrypt.AADField{encrypt.FieldString(domain), encrypt.FieldUint64(record)}
+	return spoolRecordAADFieldsInto(nil, domain, record)
+}
+
+func spoolRecordAADFieldsInto(dst []encrypt.AADField, domain string, record uint64) []encrypt.AADField {
+	if cap(dst) < 2 {
+		dst = make([]encrypt.AADField, 2)
+	} else {
+		dst = dst[:2]
+	}
+	dst[0] = encrypt.FieldString(domain)
+	dst[1] = encrypt.FieldUint64(record)
+	return dst
 }

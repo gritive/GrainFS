@@ -1470,6 +1470,7 @@ func (b *LocalBackend) CopyObject(srcBucket, srcKey, dstBucket, dstKey string) (
 		Bucket:         dstBucket,
 		Key:            dstKey,
 		Body:           rc,
+		SizeHint:       &obj.Size,
 		ContentType:    obj.ContentType,
 		UserMetadata:   obj.UserMetadata,
 		SystemMetadata: ObjectSystemMetadata{SSEAlgorithm: obj.SSEAlgorithm},

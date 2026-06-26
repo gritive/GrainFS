@@ -101,3 +101,23 @@ func TestEncodeEncryptedShard_PoolsSealBuffer(t *testing.T) {
 		"EncodeEncryptedShard allocated %d B/op for %d chunks (limit %d) — sealed buffer not pooled across chunks",
 		bpo, numChunks, limit)
 }
+
+func TestEncodeEncryptedShard_UsesPooledInitialSealBuffer(t *testing.T) {
+	enc := sealProbeEncryptor{}
+	fields := shardBaseFields()
+	const chunkSize = 4096
+	data := bytes.Repeat([]byte("x"), chunkSize)
+
+	res := testing.Benchmark(func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if err := EncodeEncryptedShard(io.Discard, bytes.NewReader(data), enc, fields, chunkSize); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	bpo := res.AllocedBytesPerOp()
+
+	require.Lessf(t, bpo, int64(chunkSize/2),
+		"EncodeEncryptedShard allocated %d B/op for one chunk; first seal buffer should come from pool", bpo)
+}
