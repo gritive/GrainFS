@@ -1081,7 +1081,11 @@ func (m *LocalQuorumMetaStore) ScanQuorumMetaBucket(bucket, prefix string) ([]Pu
 		if prefix != "" && !strings.HasPrefix(key, prefix) {
 			return nil
 		}
-		cmd, qerr := m.readQuorumMetaRawCmd(bucket, key)
+		data, qerr := os.ReadFile(path)
+		if qerr != nil {
+			return nil
+		}
+		cmd, qerr := m.decodeQuorumMetaCmdBlob(data)
 		if qerr != nil {
 			return nil
 		}
@@ -1089,6 +1093,67 @@ func (m *LocalQuorumMetaStore) ScanQuorumMetaBucket(bucket, prefix string) ([]Pu
 		return nil
 	})
 	return results, err
+}
+
+// ScanQuorumMetaBucketPage returns one latest-only quorum-meta page from the
+// local store. The walk is lexicographic, so it can stop after maxKeys live
+// entries plus one truncation probe instead of reading the whole prefix.
+func (m *LocalQuorumMetaStore) ScanQuorumMetaBucketPage(bucket, prefix, marker string, maxKeys int) ([]PutObjectMetaCmd, bool, error) {
+	if len(m.dataDirs) == 0 {
+		return nil, false, nil
+	}
+	root := filepath.Join(m.dataDirs[0], quorumMetaSubDir)
+	bucketRoot := filepath.Join(root, bucket)
+	if _, err := os.Stat(bucketRoot); os.IsNotExist(err) {
+		return nil, false, nil
+	}
+	var (
+		results   []PutObjectMetaCmd
+		truncated bool
+	)
+	if maxKeys > 0 {
+		results = make([]PutObjectMetaCmd, 0, maxKeys)
+	}
+	err := filepath.WalkDir(bucketRoot, func(path string, d fs.DirEntry, werr error) error {
+		if werr != nil {
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if isQuorumMetaTempName(d.Name()) {
+			return nil
+		}
+		key, rerr := filepath.Rel(bucketRoot, path)
+		if rerr != nil {
+			return nil
+		}
+		key = filepath.ToSlash(key)
+		if prefix != "" && !strings.HasPrefix(key, prefix) {
+			return nil
+		}
+		if marker != "" && key <= marker {
+			return nil
+		}
+		data, qerr := os.ReadFile(path)
+		if qerr != nil {
+			return nil
+		}
+		cmd, qerr := m.decodeQuorumMetaCmdBlob(data)
+		if qerr != nil {
+			return nil
+		}
+		if cmd.IsDeleteMarker || cmd.IsHardDeleted {
+			return nil
+		}
+		if len(results) >= maxKeys {
+			truncated = true
+			return filepath.SkipAll
+		}
+		results = append(results, cmd)
+		return nil
+	})
+	return results, truncated, err
 }
 
 // scanQuorumMetaBucketStrict is the FAIL-CLOSED twin of ScanQuorumMetaBucket: a
@@ -1518,6 +1583,35 @@ func (s *ShardService) ReadQuorumMetaRaw(ctx context.Context, addr, bucket, key 
 	return data, nil
 }
 
+// ReadQuorumMetaRawBatch fetches raw quorum meta blobs for several keys from one
+// remote peer. Missing keys are omitted from the returned map.
+func (s *ShardService) ReadQuorumMetaRawBatch(ctx context.Context, addr, bucket string, keys []string) (map[string][]byte, error) {
+	if s.transport == nil {
+		return nil, fmt.Errorf("quorum meta batch read: no transport")
+	}
+	envb := buildShardEnvelope("ReadQuorumMetaBatch", bucket, "", 0, packStringList(keys))
+	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
+	respEnvelope, err := s.callShardRPC(ctx, addr, envb)
+	if err != nil {
+		return nil, fmt.Errorf("batch read quorum meta from %s: %w", addr, err)
+	}
+	rpcType, data, err := unmarshalEnvelope(respEnvelope)
+	if err != nil {
+		return nil, fmt.Errorf("unmarshal quorum meta batch read response: %w", err)
+	}
+	if rpcType == "Error" {
+		return nil, fmt.Errorf("remote quorum meta batch read error from %s", addr)
+	}
+	if len(data) == 0 {
+		return nil, nil
+	}
+	blobs, err := unpackKeyBlobMap(data)
+	if err != nil {
+		return nil, fmt.Errorf("unpack quorum meta batch read response: %w", err)
+	}
+	return blobs, nil
+}
+
 // readQuorumMetaCmd is the DistributedBackend-level read for PutObjectMetaCmd,
 // with peer fan-out fallback when the local quorum meta file is absent.
 // Used by SetObjectACLPropose, SetObjectTagsPropose, and AppendObject migration.
@@ -1719,6 +1813,67 @@ func unpackBlobList(data []byte) ([][]byte, error) {
 	return out, nil
 }
 
+func packStringList(items []string) []byte {
+	blobs := make([][]byte, 0, len(items))
+	for _, item := range items {
+		blobs = append(blobs, []byte(item))
+	}
+	return packBlobList(blobs)
+}
+
+func unpackStringList(data []byte) ([]string, error) {
+	blobs, err := unpackBlobList(data)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(blobs))
+	for _, blob := range blobs {
+		out = append(out, string(blob))
+	}
+	return out, nil
+}
+
+func packKeyBlobMap(blobs map[string][]byte) []byte {
+	pairs := make([][]byte, 0, len(blobs)*2)
+	for key, blob := range blobs {
+		pairs = append(pairs, []byte(key), blob)
+	}
+	return packBlobList(pairs)
+}
+
+func unpackKeyBlobMap(data []byte) (map[string][]byte, error) {
+	pairs, err := unpackBlobList(data)
+	if err != nil {
+		return nil, err
+	}
+	if len(pairs)%2 != 0 {
+		return nil, fmt.Errorf("unpack key blob map: odd pair count")
+	}
+	out := make(map[string][]byte, len(pairs)/2)
+	for i := 0; i < len(pairs); i += 2 {
+		out[string(pairs[i])] = append([]byte(nil), pairs[i+1]...)
+	}
+	return out, nil
+}
+
+func packScanQuorumMetaPageArgs(marker string, maxKeys int) []byte {
+	if maxKeys < 0 {
+		maxKeys = 0
+	}
+	data := make([]byte, 4+len(marker))
+	binary.BigEndian.PutUint32(data[:4], uint32(maxKeys))
+	copy(data[4:], marker)
+	return data
+}
+
+func unpackScanQuorumMetaPageArgs(data []byte) (string, int, error) {
+	if len(data) < 4 {
+		return "", 0, fmt.Errorf("scan quorum meta page args: truncated")
+	}
+	maxKeys := int(binary.BigEndian.Uint32(data[:4]))
+	return string(data[4:]), maxKeys, nil
+}
+
 // ScanQuorumMeta fans out a ScanQuorumMeta RPC to a remote node and returns
 // all PutObjectMetaCmds (including tombstones) for the given bucket and prefix.
 func (s *ShardService) ScanQuorumMeta(ctx context.Context, addr, bucket, prefix string) ([]PutObjectMetaCmd, error) {
@@ -1753,6 +1908,49 @@ func (s *ShardService) ScanQuorumMeta(ctx context.Context, addr, bucket, prefix 
 		}
 	}
 	return cmds, nil
+}
+
+// ScanQuorumMetaPage returns one lexicographic page of live quorum-meta entries
+// from a remote node.
+func (s *ShardService) ScanQuorumMetaPage(ctx context.Context, addr, bucket, prefix, marker string, maxKeys int) ([]PutObjectMetaCmd, bool, error) {
+	if s.transport == nil {
+		return nil, false, fmt.Errorf("scan quorum meta page: no transport")
+	}
+	if maxKeys < 0 {
+		maxKeys = 0
+	}
+	envb := buildShardEnvelope("ScanQuorumMetaPage", bucket, prefix, 0, packScanQuorumMetaPageArgs(marker, maxKeys+1))
+	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
+	respEnvelope, err := s.callShardRPC(ctx, addr, envb)
+	if err != nil {
+		return nil, false, fmt.Errorf("scan quorum meta page from %s: %w", addr, err)
+	}
+	rpcType, data, err := unmarshalEnvelope(respEnvelope)
+	if err != nil {
+		return nil, false, fmt.Errorf("unmarshal scan quorum meta page response: %w", err)
+	}
+	if rpcType == "Error" {
+		return nil, false, fmt.Errorf("remote scan quorum meta page error from %s", addr)
+	}
+	if len(data) == 0 {
+		return nil, false, nil
+	}
+	blobs, err := unpackBlobList(data)
+	if err != nil {
+		return nil, false, fmt.Errorf("unpack scan quorum meta page response: %w", err)
+	}
+	truncated := len(blobs) > maxKeys
+	if truncated {
+		blobs = blobs[:maxKeys]
+	}
+	cmds := make([]PutObjectMetaCmd, 0, len(blobs))
+	for _, blob := range blobs {
+		cmd, qerr := s.decodeQuorumMetaCmdBlob(blob)
+		if qerr == nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	return cmds, truncated, nil
 }
 
 // scatterGatherList fans out ScanQuorumMeta calls to all shard group peers

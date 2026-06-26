@@ -60,6 +60,10 @@ func (s *ShardService) ScanQuorumMetaBucket(bucket, prefix string) ([]PutObjectM
 	return s.qmeta.ScanQuorumMetaBucket(bucket, prefix)
 }
 
+func (s *ShardService) ScanQuorumMetaBucketPage(bucket, prefix, marker string, maxKeys int) ([]PutObjectMetaCmd, bool, error) {
+	return s.qmeta.ScanQuorumMetaBucketPage(bucket, prefix, marker, maxKeys)
+}
+
 func (s *ShardService) scanQuorumMetaBucketStrict(bucket string) ([]PutObjectMetaCmd, error) {
 	return s.qmeta.scanQuorumMetaBucketStrict(bucket)
 }

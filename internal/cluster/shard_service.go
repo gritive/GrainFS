@@ -736,10 +736,14 @@ func (s *ShardService) handleRPC(payload []byte) []byte {
 		return s.handleQuorumMetaAppendWrite(sr)
 	case "ReadQuorumMeta":
 		return s.handleQuorumMetaRead(sr)
+	case "ReadQuorumMetaBatch":
+		return s.handleQuorumMetaBatchRead(sr)
 	case "ReadQuorumMetaAppend":
 		return s.handleQuorumMetaAppendRead(sr)
 	case "ScanQuorumMeta":
 		return s.handleScanQuorumMeta(sr)
+	case "ScanQuorumMetaPage":
+		return s.handleScanQuorumMetaPage(sr)
 	case "ScanQuorumMetaVersions":
 		return s.handleScanQuorumMetaVersions(sr)
 	case "ScanQuorumMetaVersionsAll":
@@ -810,6 +814,27 @@ func (s *ShardService) handleQuorumMetaRead(sr *shardRequest) []byte {
 	return s.okResponse(data)
 }
 
+func (s *ShardService) handleQuorumMetaBatchRead(sr *shardRequest) []byte {
+	keys, err := unpackStringList(sr.Data)
+	if err != nil {
+		return s.errorResponse(err.Error())
+	}
+	blobs := make(map[string][]byte, len(keys))
+	for _, key := range keys {
+		data, rerr := s.readQuorumMetaRaw(sr.Bucket, key)
+		if rerr != nil {
+			if errors.Is(rerr, storage.ErrObjectNotFound) {
+				continue
+			}
+			return s.errorResponse(rerr.Error())
+		}
+		if len(data) > 0 {
+			blobs[key] = data
+		}
+	}
+	return s.okResponse(packKeyBlobMap(blobs))
+}
+
 func (s *ShardService) handleQuorumMetaAppendRead(sr *shardRequest) []byte {
 	data, err := s.qmeta.readQuorumMetaAppendRawLocal(sr.Bucket, sr.Key)
 	if err != nil {
@@ -826,6 +851,27 @@ func (s *ShardService) handleQuorumMetaAppendRead(sr *shardRequest) []byte {
 // as a packBlobList-encoded payload.
 func (s *ShardService) handleScanQuorumMeta(sr *shardRequest) []byte {
 	entries, err := s.ScanQuorumMetaBucket(sr.Bucket, sr.Key) // Key field = prefix
+	if err != nil {
+		return s.errorResponse(err.Error())
+	}
+	blobs := make([][]byte, 0, len(entries))
+	for i := range entries {
+		blob, eerr := encodeQuorumMetaBlob(entries[i])
+		if eerr == nil {
+			blobs = append(blobs, blob)
+		}
+	}
+	return s.okResponse(packBlobList(blobs))
+}
+
+// handleScanQuorumMetaPage serves one local latest-only quorum-meta page.
+// sr.Key carries prefix and sr.Data carries marker/maxKeys.
+func (s *ShardService) handleScanQuorumMetaPage(sr *shardRequest) []byte {
+	marker, maxKeys, err := unpackScanQuorumMetaPageArgs(sr.Data)
+	if err != nil {
+		return s.errorResponse(err.Error())
+	}
+	entries, _, err := s.ScanQuorumMetaBucketPage(sr.Bucket, sr.Key, marker, maxKeys) // Key field = prefix
 	if err != nil {
 		return s.errorResponse(err.Error())
 	}

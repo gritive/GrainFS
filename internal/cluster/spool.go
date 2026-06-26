@@ -247,13 +247,15 @@ type encryptedSpoolRecordWriter struct {
 	domain    string
 	record    uint64
 	cipherBuf []byte // writer-owned ciphertext buffer, reused across records
+	aadFields []encrypt.AADField
 }
 
 func (w *encryptedSpoolRecordWriter) Write(p []byte) (int, error) {
 	if uint64(len(p)) > uint64(^uint32(0)) {
 		return 0, fmt.Errorf("encrypted spool record too large: %d", len(p))
 	}
-	blob, gen, err := w.seam.SealTo(w.cipherBuf[:0], encrypt.DomainSpool, spoolRecordAADFields(w.domain, w.record), p)
+	w.aadFields = spoolRecordAADFieldsInto(w.aadFields, w.domain, w.record)
+	blob, gen, err := w.seam.SealTo(w.cipherBuf[:0], encrypt.DomainSpool, w.aadFields, p)
 	if err != nil {
 		return 0, err
 	}

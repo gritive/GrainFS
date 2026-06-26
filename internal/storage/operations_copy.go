@@ -168,6 +168,7 @@ func (o *Operations) copyObject(ctx context.Context, req CopyObjectRequest) (*Co
 		Bucket:         req.Destination.Bucket,
 		Key:            req.Destination.Key,
 		Body:           rc,
+		SizeHint:       &srcObj.Size,
 		ContentType:    contentType,
 		ACL:            req.ACL,
 		UserMetadata:   userMetadata,

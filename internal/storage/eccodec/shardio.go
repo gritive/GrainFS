@@ -180,6 +180,15 @@ func EncodeEncryptedShard(w io.Writer, r io.Reader, enc ShardEncryptor, baseFiel
 		// by TestEncodeEncryptedShard_PoolsSealBuffer.
 		sealBuf []byte
 	)
+	sealPtr := encryptedCipherChunkPool.Get().(*[]byte)
+	sealBuf = (*sealPtr)[:0]
+	defer func() {
+		if cap(sealBuf) > 0 {
+			clear(sealBuf[:cap(sealBuf)])
+		}
+		*sealPtr = sealBuf
+		encryptedCipherChunkPool.Put(sealPtr)
+	}()
 	for {
 		n, readErr := io.ReadFull(r, plain)
 		if readErr != nil && !errors.Is(readErr, io.ErrUnexpectedEOF) && !errors.Is(readErr, io.EOF) {
