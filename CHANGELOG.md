@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.763.0] - 2026-06-27
+
+### Fixed
+- **Kept HTTP streaming-read bulk admission active until response bodies close.**
+  Shard, forward-read, and append-segment read handlers now hold their bulk
+  admission slot for the lifetime of the streamed Hertz response body, so large
+  internal reads cannot bypass the configured concurrency limit after handler
+  setup returns.
+
+### Changed
+- **Retired stale QUIC/mux wording from current transport paths.** Operator docs,
+  FlatBuffer comments, and e2e port helpers now describe the current HTTP/TCP
+  cluster transport instead of reserving UDP ports or presenting historical
+  `grainfs-mux-v1` material as live behavior.
+
 ## [0.0.762.0] - 2026-06-27
 
 ### Fixed
