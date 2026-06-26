@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.0.754.0] - 2026-06-26
+
+### Added
+- **Added short-lived bucket-versioning caching on the cluster mutating edge.**
+  `GetBucketVersioning` now caches stable states for a short window and reuses
+  that cache on subsequent calls to avoid repeated linearization reads during
+  burst writes.
+
+### Changed
+- **Retired legacy data-group proposal/command paths and advanced append metadata
+  sequencing for cluster-side processing.**
+  Removed obsolete proposal forwarding and decode branches, and landed the
+  coalesced-prefix append side-record flow that keeps append metadata moving
+  efficiently through side records.
+
+### Fixed
+- **Fixed mutating read/write consistency around bucket versioning and tombstone
+  handling.**
+  Bucket versioning state is now refreshed on writes and purged on delete, and
+  delete/versioning paths now rely on completed state transitions.
+
+### Removed
+- **Cleaned up dead follow-up items and test debt in implementation and test
+  suites.**
+  Removed completed items from `TODOS.md`, dropped finished test-helper scaffolding
+  where covered by coverage/testing, and migrated raw `t.Fatal`/`t.Error` assertions
+  to testify `require`/`assert` in the storage and cluster test slices.
+
 ## [0.0.753.0] - 2026-06-26
 
 ### Changed

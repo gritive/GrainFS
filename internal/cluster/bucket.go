@@ -175,6 +175,7 @@ func (b *DistributedBackend) DeleteBucket(ctx context.Context, bucket string) er
 	if err := mbs.DeleteBucket(ctx, bucket); err != nil {
 		return err
 	}
+	b.bucketVersioningCacheDelete(bucket)
 
 	// Physical remove only after consensus has committed. The delete is now
 	// COMMITTED, so physical cleanup is best-effort: a transient FS error must not
@@ -359,7 +360,11 @@ func (b *DistributedBackend) SetBucketVersioningPropose(bucket, state string) er
 	if mbs == nil {
 		return fmt.Errorf("set bucket versioning %q: MetaBucketStore not wired", bucket)
 	}
-	return mbs.SetVersioning(ctx, bucket, state)
+	if err := mbs.SetVersioning(ctx, bucket, state); err != nil {
+		return err
+	}
+	b.bucketVersioningCacheSet(bucket, state)
+	return nil
 }
 
 // SetBucketPolicy satisfies storage.PolicyBackend. The policy document is
@@ -659,15 +664,21 @@ func (b *DistributedBackend) GetObjectTags(bucket, key, versionID string) ([]sto
 // GetBucketVersioningLinearized instead: a stale read there silently mis-versions
 // the written object.
 func (b *DistributedBackend) GetBucketVersioning(bucket string) (string, error) {
+	if state, ok := b.bucketVersioningCacheGet(bucket); ok {
+		return state, nil
+	}
+
 	mbs := b.MetaBucketStore()
 	if mbs == nil {
 		return "", fmt.Errorf("get bucket versioning %q: MetaBucketStore not wired", bucket)
 	}
 	rec, _ := mbs.Record(bucket)
+	state := rec.Versioning
 	if rec.Versioning == "" {
-		return "Unversioned", nil
+		state = "Unversioned"
 	}
-	return rec.Versioning, nil
+	b.bucketVersioningCacheSet(bucket, state)
+	return state, nil
 }
 
 // GetBucketVersioningLinearized is the LINEARIZABLE read for the MUTATING S3

@@ -24,6 +24,7 @@ type fakeMetaBucketStore struct {
 	setCalls    []fakeSetVersioningCall
 	setPolicies []fakeSetPolicyCall
 	delPolicies []string
+	recordCalls int
 
 	// configurable errors
 	deleteErr  error
@@ -34,6 +35,7 @@ type fakeMetaBucketStore struct {
 
 	// knownBuckets: populated by CreateBucket; Record() returns true for these.
 	knownBuckets map[string]struct{}
+	records      map[string]BucketRecord
 }
 
 type fakeCreateCall struct {
@@ -59,7 +61,11 @@ func (f *fakeMetaBucketStore) CreateBucket(_ context.Context, bucket, groupID st
 	if f.knownBuckets == nil {
 		f.knownBuckets = make(map[string]struct{})
 	}
+	if f.records == nil {
+		f.records = make(map[string]BucketRecord)
+	}
 	f.knownBuckets[bucket] = struct{}{}
+	f.records[bucket] = BucketRecord{}
 	return nil
 }
 
@@ -76,6 +82,7 @@ func (f *fakeMetaBucketStore) DeleteBucket(_ context.Context, bucket string) err
 	f.mu.Lock()
 	if f.knownBuckets != nil && err == nil {
 		delete(f.knownBuckets, bucket)
+		delete(f.records, bucket)
 	}
 	f.mu.Unlock()
 	return err
@@ -84,6 +91,16 @@ func (f *fakeMetaBucketStore) DeleteBucket(_ context.Context, bucket string) err
 func (f *fakeMetaBucketStore) SetVersioning(_ context.Context, bucket, state string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.knownBuckets == nil {
+		f.knownBuckets = make(map[string]struct{})
+	}
+	if f.records == nil {
+		f.records = make(map[string]BucketRecord)
+	}
+	rec := f.records[bucket]
+	rec.Versioning = state
+	f.records[bucket] = rec
+	f.knownBuckets[bucket] = struct{}{}
 	f.setCalls = append(f.setCalls, fakeSetVersioningCall{bucket: bucket, state: state})
 	return nil
 }
@@ -105,11 +122,24 @@ func (f *fakeMetaBucketStore) DeletePolicy(_ context.Context, bucket string) err
 func (f *fakeMetaBucketStore) Record(bucket string) (BucketRecord, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.recordCalls++
 	if f.knownBuckets != nil {
 		_, ok := f.knownBuckets[bucket]
-		return BucketRecord{}, ok
+		if !ok {
+			return BucketRecord{}, false
+		}
 	}
-	return BucketRecord{}, false
+	if f.records == nil {
+		return BucketRecord{}, false
+	}
+	rec, ok := f.records[bucket]
+	return rec, ok
+}
+
+func (f *fakeMetaBucketStore) recordCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.recordCalls
 }
 
 func (f *fakeMetaBucketStore) RecordLinearized(_ context.Context, bucket string) (BucketRecord, bool, error) {
@@ -119,7 +149,11 @@ func (f *fakeMetaBucketStore) RecordLinearized(_ context.Context, bucket string)
 func (f *fakeMetaBucketStore) AllRecords() map[string]BucketRecord {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return nil
+	copied := make(map[string]BucketRecord, len(f.records))
+	for bucket, rec := range f.records {
+		copied[bucket] = rec
+	}
+	return copied
 }
 
 // --- Create tests ---
@@ -274,7 +308,7 @@ func TestBucketWrite_Delete_FencesPutAfterEmptyScan(t *testing.T) {
 	case err := <-putDone:
 		require.ErrorIs(t, err, storage.ErrBucketNotFound)
 	case <-time.After(time.Second):
-		t.Fatal("PUT remained blocked after DeleteBucket released the bucket fence")
+		require.Fail(t, "PUT remained blocked after DeleteBucket released the bucket fence")
 	}
 }
 
@@ -296,6 +330,103 @@ func TestBucketWrite_SetVersioning_GoesToMetaBucketStore(t *testing.T) {
 	require.Len(t, fake.setCalls, 1)
 	assert.Equal(t, "ver-bucket", fake.setCalls[0].bucket)
 	assert.Equal(t, "Enabled", fake.setCalls[0].state)
+}
+
+// TestBucketWrite_GetVersioning_CacheHitReusesRecentRead verifies that once
+// GetBucketVersioning returns a value it is cached for the TTL window.
+func TestBucketWrite_GetVersioning_CacheHitReusesRecentRead(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	fake := &fakeMetaBucketStore{}
+	b.SetMetaBucketStore(fake)
+
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "ver-bucket"))
+	require.Equal(t, 1, fake.recordCallCount(), "CreateBucket checks Record for existence")
+
+	state, err := b.GetBucketVersioning("ver-bucket")
+	require.NoError(t, err)
+	assert.Equal(t, "Unversioned", state)
+	require.Equal(t, 2, fake.recordCallCount(), "first GetBucketVersioning should read Record")
+
+	state, err = b.GetBucketVersioning("ver-bucket")
+	require.NoError(t, err)
+	assert.Equal(t, "Unversioned", state)
+	require.Equal(t, 2, fake.recordCallCount(), "second read inside TTL must use cache")
+}
+
+// TestBucketWrite_GetVersioning_CacheExpiryRefreshesFromStore verifies cache expiry
+// after the short TTL and re-reads MetaBucketStore.
+func TestBucketWrite_GetVersioning_CacheExpiryRefreshesFromStore(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	fake := &fakeMetaBucketStore{}
+	b.SetMetaBucketStore(fake)
+
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "ver-bucket"))
+	require.Equal(t, 1, fake.recordCallCount(), "CreateBucket checks Record for existence")
+
+	state, err := b.GetBucketVersioning("ver-bucket")
+	require.NoError(t, err)
+	assert.Equal(t, "Unversioned", state)
+	require.Equal(t, 2, fake.recordCallCount(), "initial GetBucketVersioning should read Record")
+
+	time.Sleep(bucketVersioningCacheTTL + 20*time.Millisecond)
+
+	state, err = b.GetBucketVersioning("ver-bucket")
+	require.NoError(t, err)
+	assert.Equal(t, "Unversioned", state)
+	require.Equal(t, 3, fake.recordCallCount(), "expired cache must be refreshed from store")
+}
+
+// TestBucketWrite_SetVersioning_UpdatesCachedVersioningState verifies that
+// SetBucketVersioningPropose updates cache so an immediate read does not hit
+// the store.
+func TestBucketWrite_SetVersioning_UpdatesCachedVersioningState(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	fake := &fakeMetaBucketStore{}
+	b.SetMetaBucketStore(fake)
+
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "ver-bucket"))
+	require.Equal(t, 1, fake.recordCallCount(), "CreateBucket checks Record for existence")
+
+	state, err := b.GetBucketVersioning("ver-bucket")
+	require.NoError(t, err)
+	assert.Equal(t, "Unversioned", state)
+	require.Equal(t, 2, fake.recordCallCount(), "initial read should miss cache")
+
+	require.NoError(t, b.SetBucketVersioningPropose("ver-bucket", "Enabled"))
+	require.Equal(t, 2, fake.recordCallCount(), "set should not require a new Record read")
+
+	state, err = b.GetBucketVersioning("ver-bucket")
+	require.NoError(t, err)
+	assert.Equal(t, "Enabled", state)
+	require.Equal(t, 2, fake.recordCallCount(), "cache should now hold updated state")
+}
+
+// TestBucketWrite_DeleteBucket_DeletesVersioningCache verifies that DeleteBucket clears
+// the cached versioning state and subsequent reads re-check Record.
+func TestBucketWrite_DeleteBucket_DeletesVersioningCache(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	fake := &fakeMetaBucketStore{}
+	b.SetMetaBucketStore(fake)
+
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "ver-bucket"))
+	require.NoError(t, b.SetBucketVersioningPropose("ver-bucket", "Enabled"))
+
+	state, err := b.GetBucketVersioning("ver-bucket")
+	require.NoError(t, err)
+	assert.Equal(t, "Enabled", state)
+	readsBeforeDelete := fake.recordCallCount()
+	require.GreaterOrEqual(t, readsBeforeDelete, 1)
+
+	require.NoError(t, b.DeleteBucket(ctx, "ver-bucket"))
+
+	state, err = b.GetBucketVersioning("ver-bucket")
+	require.NoError(t, err)
+	assert.Equal(t, "Unversioned", state)
+	require.Greater(t, fake.recordCallCount(), readsBeforeDelete, "cache should be invalidated by DeleteBucket")
 }
 
 // --- SetBucketPolicyPropose tests ---

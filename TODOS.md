@@ -88,8 +88,6 @@ The demotion shipped: bucket existence/policy/versioning consolidated onto meta-
 bucket writes forward to the meta leader; policy invalidation lossless; versioning barrier best-effort.
 Deferred items:
 
-- **[P3] Short-TTL bucket-versioning edge-cache (fast-follow).** The shipped design's deferred "C2":
-  only needed if the meta-raft versioning barrier regresses object-write throughput (above).
 - **[P3][minor] `CreateBucket` now unconditionally requires a non-empty groupID** (the FSM rejects
   `""`). Safe in production (the router is always wired so placement resolves a real group), but it
   tightens behavior for any future router-less `DistributedBackend` wiring. Note only.
@@ -226,3 +224,26 @@ analysis forward is a trap:
   needs a fresh spec.
 - **Versioned tag/ACL RMW holds the meta-RMW lock across a raft propose** — moot: versioned
   `writeQuorumMeta` is raft-free for versioning-enabled buckets.
+
+## Completed
+
+- **[DONE] Reseal machinery retired after proving node-local FSM-value rewrap compatibility.**
+  **Completed:** v0.0.754.0 (2026-06-26)
+- **[DONE] GC singleton/freshness raft-free replacement complete.**
+  **Completed:** v0.0.754.0 (2026-06-26)
+- **[DONE] HRW owner routing for append/multipart writes and stale quorum membership migration cleanup.**
+  **Completed:** v0.0.754.0 (2026-06-26)
+- **[DONE] DeleteBucket per-version blob cleanup.**
+  **Completed:** v0.0.754.0 (2026-06-26)
+- **[DONE] Follower-stale bucket-versioning and bucket-policy authz cache fixes shipped.**
+  **Completed:** v0.0.754.0 (2026-06-26)
+- **[DONE] AppendObject versioned-bucket read gate linearization and SetBucketVersioning cache updates.**
+  **Completed:** v0.0.754.0 (2026-06-26)
+- **[DONE] Throughput TODO and short-TTL edge-cache validation for versioned writes.**
+  **Completed:** v0.0.754.0 (2026-06-26)
+- **[DONE] Slice 2 and per-object FSM cleanup work.**
+  **Completed:** v0.0.754.0 (2026-06-26)
+- **[DONE] deleteShardsQuorum empty-placement guard and stale comment cleanup.**
+  **Completed:** v0.0.754.0 (2026-06-26)
+- **[DONE] Staticcheck U1000 removal in cluster/storage tests.**
+  **Completed:** v0.0.754.0 (2026-06-26)
