@@ -250,6 +250,9 @@ func (b *DistributedBackend) readAppendBaseWithSide(ctx context.Context, bucket,
 				}
 				return PutObjectMetaCmd{}, false, storage.AppendSummary{}, false, fmt.Errorf("append object: read side summary: %w", serr)
 			}
+			if tailSize == 0 {
+				return cmd, true, storage.AppendSummary{}, false, nil
+			}
 			if summary.Size != tailSize {
 				return PutObjectMetaCmd{}, false, storage.AppendSummary{}, false, fmt.Errorf("append side summary size %d does not match object tail size %d", summary.Size, tailSize)
 			}
