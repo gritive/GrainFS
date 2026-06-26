@@ -424,8 +424,7 @@ func (a *raftNodeAdapter) TransferLeadership() error {
 // --- PeerMatchIndex: v2 does not expose per-peer replication state ---
 
 // PeerMatchIndex returns (0, false) for v2. v2 does not expose per-peer
-// matchIndex; callers (DataGroupPlanExecutor.peerCaughtUp) must treat (0, false)
-// as "not caught up" and either time out or skip the wait.
+// matchIndex.
 func (a *raftNodeAdapter) PeerMatchIndex(_ string) (uint64, bool) { return 0, false }
 
 // --- Membership: sequenced bridge (v2 has no atomic ChangeMembership) ---

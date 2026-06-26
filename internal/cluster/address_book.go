@@ -7,6 +7,12 @@ import (
 	"github.com/gritive/GrainFS/internal/gossip"
 )
 
+// NodeAddressBook resolves cluster node IDs to their transport addresses.
+// *MetaFSM implements this interface.
+type NodeAddressBook interface {
+	Nodes() []MetaNodeEntry
+}
+
 // NodeAddressBookResolver adapts a NodeAddressBook to the gossip package's
 // AddressResolver (gossip must not import cluster). Resolution semantics are
 // exactly ResolveNodeAddress's.

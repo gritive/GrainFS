@@ -238,21 +238,17 @@ func runRevokeNode(t testing.TB, leaderDataDir, nodeID string) {
 	}
 }
 
-// dataGroupHasVoter reports whether nodeID appears in ANY data-group's REAL raft
-// voter set (raft_voters), aggregated across every supplied admin socket.
-// raft_voters is admin-UDS-only (the `cluster health` route), so we shell out to
-// the CLI per node (mirrors runRevokeNode). Aggregation is required because a
-// node's health only carries REAL config for groups where it has an instantiated
-// raft member; a group led purely by joiners reads empty on the leader.
+// dataGroupHasPeer reports whether nodeID appears in any data-group placement
+// roster (peer_ids), aggregated across every supplied admin socket.
 //
 // We use .Output() (stdout only): the daemon logs to stderr, and merging it would
 // corrupt the JSON and silently turn this into a constant false.
-func dataGroupHasVoter(t testing.TB, adminSocks []string, nodeID string) bool {
+func dataGroupHasPeer(t testing.TB, adminSocks []string, nodeID string) bool {
 	t.Helper()
 	type dgHealth struct {
 		DataGroups *struct {
 			Groups []struct {
-				RaftVoters []string `json:"raft_voters"`
+				PeerIDs []string `json:"peer_ids"`
 			} `json:"groups"`
 		} `json:"data_groups"`
 	}
@@ -266,7 +262,7 @@ func dataGroupHasVoter(t testing.TB, adminSocks []string, nodeID string) bool {
 			continue
 		}
 		for _, g := range h.DataGroups.Groups {
-			if containsString(g.RaftVoters, nodeID) {
+			if containsString(g.PeerIDs, nodeID) {
 				return true
 			}
 		}
@@ -285,68 +281,8 @@ func dumpDataGroupHealth(adminSocks []string) string {
 	return b.String()
 }
 
-// dgRow is the aggregated REAL-config view of one data group: its elected
-// leader (node id) and voter set (node ids).
-type dgRow struct {
-	groupID  string
-	leaderID string
-	voters   []string
-}
-
-// dataGroupRows aggregates each data group's REAL raft config across every admin
-// socket, keyed by group id. Only the group LEADER's health row carries an
-// authoritative leader_id + full voter set, so for each group we keep the row
-// that names a leader (preferring the one with the most voters). raft_voters is
-// normalized to node ids at the surface; leader_id is the data-group raft
-// LeaderID, which is itself a node id (data-group Server.ID IS the node id).
-func dataGroupRows(t testing.TB, adminSocks []string) map[string]dgRow {
-	t.Helper()
-	type wire struct {
-		GroupID    string   `json:"group_id"`
-		RaftVoters []string `json:"raft_voters"`
-		LeaderID   string   `json:"leader_id"`
-	}
-	type dgHealth struct {
-		DataGroups *struct {
-			Groups []wire `json:"groups"`
-		} `json:"data_groups"`
-	}
-	best := map[string]dgRow{}
-	for _, sock := range adminSocks {
-		out, err := exec.Command(getBinary(), "cluster", "--endpoint", sock, "--format", "json", "health").Output()
-		if err != nil {
-			continue
-		}
-		var h dgHealth
-		if json.Unmarshal(out, &h) != nil || h.DataGroups == nil {
-			continue
-		}
-		for _, g := range h.DataGroups.Groups {
-			cand := dgRow{groupID: g.GroupID, leaderID: g.LeaderID, voters: g.RaftVoters}
-			cur, ok := best[g.GroupID]
-			switch {
-			case !ok:
-			case cand.leaderID != "" && cur.leaderID == "":
-			case cand.leaderID == "" && cur.leaderID != "":
-				continue // never downgrade a leader-bearing row to a leaderless one
-			case len(cand.voters) <= len(cur.voters):
-				continue
-			}
-			best[g.GroupID] = cand
-		}
-	}
-	return best
-}
-
-// logHasLine reports whether the daemon log file at path contains substr. Used
-// to confirm from a node's OWN log that a specific evacuation code path fired.
-func logHasLine(path, substr string) bool {
-	b, err := os.ReadFile(path)
-	return err == nil && strings.Contains(string(b), substr)
-}
-
 // shardGroupPeersContain reports whether nodeID appears in any shard-group's
-// peer_ids mirror, read from the public /api/cluster/status of the given node.
+// peer_ids roster, read from the public /api/cluster/status of the given node.
 func shardGroupPeersContain(t testing.TB, base, nodeID string) bool {
 	t.Helper()
 	s := getStatusJSON(t, base)
@@ -753,11 +689,10 @@ var _ = ginkgo.Describe("Zero-CA invite-join", func() {
 				"revoked node must not rejoin")
 		})
 
-		// Proves the data-group evacuation feature (Tasks 1-7): revoking a node
-		// EVICTS it from the REAL data-group raft voter sets (raft_voters), not just
-		// the peer_ids mirror. raft_voters is admin-UDS-only, so dataGroupHasVoter
-		// shells out to `cluster --format json health` on each node's admin socket.
-		ginkgo.It("evicts a revoked node from data-group voter sets", func() {
+		// Proves the data-group evacuation feature: revoking a node evicts it from
+		// shard-group placement rosters (peer_ids), the source of truth for EC shard
+		// fan-out after per-group raft membership mirroring was removed.
+		ginkgo.It("evicts a revoked node from data-group placement rosters", func() {
 			t := ginkgo.GinkgoTB()
 			leader := startInviteLeader(t, inviteJoinClusterKey)
 			admin, err := bootstrapAdminResultViaUDSForTestMain(leader.dataDir, 30*time.Second)
@@ -802,134 +737,27 @@ var _ = ginkgo.Describe("Zero-CA invite-join", func() {
 				return tryPutObject(ctx, cli, bucket, "evac.txt", []byte("evac payload"))
 			}, 60*time.Second, time.Second).Should(gomega.Succeed())
 
-			// LOAD-BEARING PRECONDITION: evac-joiner-1 IS a REAL data-group voter
+			// LOAD-BEARING PRECONDITION: evac-joiner-1 is in a data-group roster
 			// before revoke (else the post-revoke BeFalse is vacuous). On a miss,
 			// dump every socket's health so a placement skew is diagnosable in one run.
 			gomega.Eventually(func() bool {
-				return dataGroupHasVoter(t, adminSocks, "evac-joiner-1")
+				return dataGroupHasPeer(t, adminSocks, "evac-joiner-1")
 			}, 90*time.Second, time.Second).Should(gomega.BeTrue(),
-				"PRECONDITION: evac-joiner-1 must be a REAL data-group voter before revoke; health dump:\n"+dumpDataGroupHealth(adminSocks))
+				"PRECONDITION: evac-joiner-1 must be a data-group placement peer before revoke; health dump:\n"+dumpDataGroupHealth(adminSocks))
 
 			runRevokeNode(t, leader.dataDir, "evac-joiner-1")
 
-			// THE FIX: evac-joiner-1 disappears from every REAL data-group voter set
-			// across the survivors (its own stale local view is excluded).
+			// THE FIX: evac-joiner-1 disappears from every survivor-visible
+			// data-group placement roster.
 			gomega.Eventually(func() bool {
-				return dataGroupHasVoter(t, survivorSocks, "evac-joiner-1")
+				return dataGroupHasPeer(t, survivorSocks, "evac-joiner-1")
 			}, 120*time.Second, time.Second).Should(gomega.BeFalse(),
-				"revoked node must be evicted from all data-group REAL voter sets; survivor health dump:\n"+dumpDataGroupHealth(survivorSocks))
+				"revoked node must be evicted from all survivor data-group placement rosters; survivor health dump:\n"+dumpDataGroupHealth(survivorSocks))
 
-			// And the persisted peer_ids mirror converges (consequence of the real
-			// ChangeMembership the evacuation controller drives).
+			// And the public status view converges to the same roster.
 			gomega.Eventually(func() bool {
 				return shardGroupPeersContain(t, leader.httpURL, "evac-joiner-1")
 			}, 120*time.Second, time.Second).Should(gomega.BeFalse())
-		})
-
-		// Regression guard for the revoked-data-group-LEADER self-eviction path.
-		// The eviction test above revokes a FOLLOWER, so it never exercises
-		// EvacuateVoter's `revokedID == localNodeID` branch. That branch calls
-		// node.TransferLeadership() DIRECTLY: v2 PeerMatchIndex is unobservable
-		// ((0,false)), so the old pre-wait would time out and strand a revoked
-		// leader in raft_voters forever (the bug #652 fixed). Here we read the
-		// seeded group's elected leader and revoke THAT node, deterministically
-		// forcing the self-transfer path regardless of who won the election.
-		ginkgo.It("evicts a revoked node that LEADS its data group (leadership self-transfer)", func() {
-			t := ginkgo.GinkgoTB()
-			leader := startInviteLeader(t, inviteJoinClusterKey)
-			admin, err := bootstrapAdminResultViaUDSForTestMain(leader.dataDir, 30*time.Second)
-			gomega.Expect(err).NotTo(gomega.HaveOccurred(), "bootstrap admin SA")
-			ak, sk, saID := admin.AccessKey, admin.SecretKey, admin.SAID
-
-			// nodeID -> node so we can reach each node's admin socket and its
-			// daemon log (to confirm the self-transfer path from the leader's log).
-			nodeByID := map[string]*inviteJoinNode{"leader": leader}
-			adminSocks := []string{filepath.Join(leader.dataDir, "admin.sock")}
-			// Three joiners → the seeded group can reach RF≥3, so revoking its
-			// leader exercises leadership-transfer, NOT the 2-voter quorum-strand
-			// limitation ([P3], a different failure mode).
-			for _, id := range []string{"evac-joiner-1", "evac-joiner-2", "evac-spare"} {
-				b := mintInvite(t, leader.dataDir)
-				jd := shortTempDir(t)
-				j := startInviteJoiner(t, id, jd, b)
-				waitForVoter(t, leader.httpURL, id, 90*time.Second)
-				waitForPort(t, j.httpPort, 60*time.Second)
-				nodeByID[id] = j
-				adminSocks = append(adminSocks, filepath.Join(jd, "admin.sock"))
-			}
-
-			// PUT an object so the bucket's data group gains real raft membership.
-			bucket := "evac-leader-bucket"
-			gomega.Expect(adminCreateBucketWithPolicyAttachAny(
-				[]string{leader.dataDir}, saID, bucket, 60*time.Second)).To(gomega.Succeed())
-			cli := s3ClientFor(leader.httpURL, ak, sk)
-			gomega.Expect(waitForIAMReady(cli, 60*time.Second)).To(gomega.Succeed())
-			gomega.Eventually(func() error {
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				defer cancel()
-				return tryPutObject(ctx, cli, bucket, "evac.txt", []byte("evac payload"))
-			}, 60*time.Second, time.Second).Should(gomega.Succeed())
-
-			// PRECONDITION: the seeded group has an elected leader and ≥3 voters.
-			// We target whichever node is the leader (read, don't force).
-			var groupID, leaderID string
-			gomega.Eventually(func() bool {
-				for gid, row := range dataGroupRows(t, adminSocks) {
-					if row.leaderID != "" && len(row.voters) >= 3 &&
-						containsString(row.voters, "evac-joiner-1") {
-						groupID, leaderID = gid, row.leaderID
-						return true
-					}
-				}
-				return false
-			}, 90*time.Second, time.Second).Should(gomega.BeTrue(),
-				"PRECONDITION: seeded data group needs an elected leader + ≥3 voters; health:\n"+dumpDataGroupHealth(adminSocks))
-			ginkgo.GinkgoWriter.Printf("seeded group=%s elected leader=%s\n", groupID, leaderID)
-			gomega.Expect(nodeByID).To(gomega.HaveKey(leaderID),
-				"leader_id %q must be a known node id (not an unresolved address)", leaderID)
-			revokedNode := nodeByID[leaderID]
-
-			// revoke-node removes the target from meta-Raft (RemoveVoter), which is
-			// leader-only, so it MUST be issued against the meta-Raft leader — the
-			// genesis node here. The data-group leader we target is usually genesis
-			// itself; a Raft leader can remove itself (commit a config excluding
-			// self, then step down), so this is uniform whether the target is the
-			// genesis node or a joiner.
-			issuerDir := leader.dataDir
-			revokedSock := filepath.Join(revokedNode.dataDir, "admin.sock")
-			survivorSocks := make([]string, 0, len(adminSocks))
-			for _, s := range adminSocks {
-				if s != revokedSock {
-					survivorSocks = append(survivorSocks, s)
-				}
-			}
-
-			runRevokeNode(t, issuerDir, leaderID)
-
-			// THE FIX: the revoked leader steps down via direct TransferLeadership,
-			// a survivor takes over and removes it. Assert it leaves every
-			// survivor's REAL voter set. (Reverting the fix strands it here.)
-			gomega.Eventually(func() bool {
-				return dataGroupHasVoter(t, survivorSocks, leaderID)
-			}, 120*time.Second, time.Second).Should(gomega.BeFalse(),
-				"revoked data-group LEADER must be evicted from all survivor voter sets; health:\n"+dumpDataGroupHealth(survivorSocks))
-
-			// And the group is not left leaderless: a new, non-revoked leader
-			// emerges (intent: leadership actually transferred).
-			gomega.Eventually(func() bool {
-				row, ok := dataGroupRows(t, survivorSocks)[groupID]
-				return ok && row.leaderID != "" && row.leaderID != leaderID
-			}, 120*time.Second, time.Second).Should(gomega.BeTrue(),
-				"seeded group must elect a new non-revoked leader; health:\n"+dumpDataGroupHealth(survivorSocks))
-
-			// Direct path evidence: the revoked node's OWN daemon log shows its
-			// evacuator hit the self-eviction branch (revokedID == localNodeID →
-			// TransferLeadership). This pins the test to the exact code path, not
-			// just its black-box outcome above.
-			gomega.Eventually(func() bool {
-				return logHasLine(revokedNode.logPath, "evacuator: leadership transferred")
-			}, 120*time.Second, time.Second).Should(gomega.BeTrue(),
-				"revoked leader's evacuator must log the self-transfer (revokedID==localNodeID branch)")
 		})
 	})
 

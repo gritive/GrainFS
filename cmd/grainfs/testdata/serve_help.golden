@@ -66,8 +66,8 @@ Flags:
       --pprof-port int                                      expose net/http/pprof on this port (0 = disabled, for profiling e2e/load tests)
       --public-url grainfs dashboard                        public dashboard base URL (e.g. https://node1:9000); defaults to localhost in grainfs dashboard output
       --raft-addr string                                    Raft listen address for cluster communication (required in cluster mode)
-      --raft-election-timeout duration                      per-group raft election timeout (must be >= 3 * heartbeat-interval). Higher = fewer spurious elections under load. (default 1s)
-      --raft-heartbeat-interval duration                    per-group raft heartbeat interval. Lower = faster failure detection, higher CPU/network. Default 200ms balances detection latency with transport stream-open cost. (default 200ms)
+      --raft-election-timeout duration                      local data-group raft election timeout (must be >= 3 * heartbeat-interval). (default 1s)
+      --raft-heartbeat-interval duration                    local data-group raft heartbeat interval. Default 200ms. (default 200ms)
       --raft-log-gc-interval duration                       how often Raft log GC runs (default 30s)
       --scrub-interval duration                             EC shard scrub interval (always on; 0 resets to default 24h) (default 24h0m0s)
       --scrub-orphan-age duration                           minimum filesystem mtime age before an orphan raw segment is eligible for sweep (default 5m0s)

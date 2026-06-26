@@ -197,6 +197,17 @@ func (c *ClusterCoordinator) routeOwnerWriteOrBucket(bucket, key string) (RouteT
 	return state.opRouter.RouteObjectOwnerWrite(bucket, key)
 }
 
+func (c *ClusterCoordinator) ownerWriteTargetFor(target RouteTarget) (RouteTarget, ShardGroupEntry, error) {
+	if c.meta == nil {
+		return RouteTarget{}, ShardGroupEntry{}, ErrUnknownGroup
+	}
+	group, ok := c.meta.ShardGroup(target.GroupID)
+	if !ok {
+		return RouteTarget{}, ShardGroupEntry{}, ErrUnknownGroup
+	}
+	return c.runtimeState().opRouter.ownerWriteTarget(target, group)
+}
+
 func (c *ClusterCoordinator) routeAppendOrBucket(bucket, key string, expectedOffset int64) (RouteTarget, ShardGroupEntry, error) {
 	_ = expectedOffset
 	return c.routeOwnerWriteOrBucket(bucket, key)
