@@ -98,8 +98,8 @@ func registerAllServeFlags(cmd *cobra.Command) {
 	cmd.Flags().String("otel-endpoint", "", "OTLP HTTP endpoint for trace export (empty disables OTel, e.g. localhost:4318)")
 	cmd.Flags().Float64("otel-sample-rate", 0.01, "head-based OTel trace sample rate [0.0, 1.0] (default 1%)")
 	cmd.Flags().Int("pprof-port", 0, "expose net/http/pprof on this port (0 = disabled, for profiling e2e/load tests)")
-	cmd.Flags().Duration("raft-heartbeat-interval", 200*time.Millisecond, "per-group raft heartbeat interval. Lower = faster failure detection, higher CPU/network. Default 200ms balances detection latency with transport stream-open cost.")
-	cmd.Flags().Duration("raft-election-timeout", 1000*time.Millisecond, "per-group raft election timeout (must be >= 3 * heartbeat-interval). Higher = fewer spurious elections under load.")
+	cmd.Flags().Duration("raft-heartbeat-interval", 200*time.Millisecond, "local data-group raft heartbeat interval. Default 200ms.")
+	cmd.Flags().Duration("raft-election-timeout", 1000*time.Millisecond, "local data-group raft election timeout (must be >= 3 * heartbeat-interval).")
 }
 
 func init() {

@@ -223,13 +223,17 @@ func (c *ClusterCoordinator) DeleteObjectReturningMarker(bucket, key string) (st
 	if err != nil {
 		return "", err
 	}
-	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
+	target, _, err = c.ownerWriteTargetFor(target)
+	if err != nil {
+		return "", err
+	}
+	if gb, err := c.runtimeState().localExec.ResolveOwnerWrite(ctx, target); err != nil {
 		return "", err
 	} else if gb != nil {
 		return gb.DeleteObjectReturningMarker(bucket, key)
 	}
 	args := buildDeleteObjectArgs(bucket, key)
-	return c.forwardRuntime().deleteObject(ctx, target, args)
+	return c.forwardRuntime().deleteObjectOwner(ctx, target, args)
 }
 
 func (c *ClusterCoordinator) DeleteObjectVersion(bucket, key, versionID string) error {
@@ -266,13 +270,17 @@ func (c *ClusterCoordinator) DeleteObjectVersion(bucket, key, versionID string) 
 }
 
 func (c *ClusterCoordinator) deleteObjectVersionOnTarget(ctx context.Context, target RouteTarget, bucket, key, versionID string) error {
-	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
+	target, _, err := c.ownerWriteTargetFor(target)
+	if err != nil {
+		return err
+	}
+	if gb, err := c.runtimeState().localExec.ResolveOwnerWrite(ctx, target); err != nil {
 		return err
 	} else if gb != nil {
 		return gb.DeleteObjectVersion(bucket, key, versionID)
 	}
 	args := buildDeleteObjectVersionArgs(bucket, key, versionID)
-	return c.forwardRuntime().mutateFrame(ctx, target, raftpb.ForwardOpDeleteObjectVersion, args)
+	return c.forwardRuntime().mutateOwnerFrame(ctx, target, raftpb.ForwardOpDeleteObjectVersion, args)
 }
 
 func (c *ClusterCoordinator) ListObjects(ctx context.Context, bucket, prefix string, maxKeys int) ([]*storage.Object, error) {
@@ -495,7 +503,11 @@ func (c *ClusterCoordinator) SetObjectACL(bucket, key string, acl uint8) error {
 	if err != nil {
 		return err
 	}
-	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
+	target, _, err = c.ownerWriteTargetFor(target)
+	if err != nil {
+		return err
+	}
+	if gb, err := c.runtimeState().localExec.ResolveOwnerWrite(ctx, target); err != nil {
 		return err
 	} else if gb != nil {
 		// S4-4c: index-free. The ACL change is a read-modify-write against the
@@ -503,7 +515,7 @@ func (c *ClusterCoordinator) SetObjectACL(bucket, key string, acl uint8) error {
 		return gb.SetObjectACL(bucket, key, acl)
 	}
 	args := buildSetObjectACLArgs(bucket, key, acl)
-	return c.forwardRuntime().mutateFrame(ctx, target, raftpb.ForwardOpSetObjectACL, args)
+	return c.forwardRuntime().mutateOwnerFrame(ctx, target, raftpb.ForwardOpSetObjectACL, args)
 }
 
 // SetObjectTags satisfies storage.ObjectTagsSetter. Routes the tag write
@@ -515,7 +527,11 @@ func (c *ClusterCoordinator) SetObjectTags(bucket, key, versionID string, tags [
 	if err != nil {
 		return err
 	}
-	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
+	target, _, err = c.ownerWriteTargetFor(target)
+	if err != nil {
+		return err
+	}
+	if gb, err := c.runtimeState().localExec.ResolveOwnerWrite(ctx, target); err != nil {
 		return err
 	} else if gb != nil {
 		// S4-4c: index-free. Tag write is a read-modify-write against the
@@ -523,7 +539,7 @@ func (c *ClusterCoordinator) SetObjectTags(bucket, key, versionID string, tags [
 		return gb.SetObjectTags(bucket, key, versionID, tags)
 	}
 	args := buildSetObjectTagsArgs(bucket, key, versionID, tags)
-	return c.forwardRuntime().mutateFrame(ctx, target, raftpb.ForwardOpSetObjectTags, args)
+	return c.forwardRuntime().mutateOwnerFrame(ctx, target, raftpb.ForwardOpSetObjectTags, args)
 }
 
 // QuarantineObject routes the quarantine operation to the owning group backend
@@ -533,13 +549,17 @@ func (c *ClusterCoordinator) QuarantineObject(ctx context.Context, bucket, key, 
 	if err != nil {
 		return err
 	}
-	if gb, err := c.runtimeState().localExec.ResolveWrite(ctx, target); err != nil {
+	target, _, err = c.ownerWriteTargetFor(target)
+	if err != nil {
+		return err
+	}
+	if gb, err := c.runtimeState().localExec.ResolveOwnerWrite(ctx, target); err != nil {
 		return err
 	} else if gb != nil {
 		return gb.QuarantineObject(ctx, bucket, key, versionID, cause, reason)
 	}
 	args := buildSetObjectQuarantineArgs(bucket, key, versionID, cause, reason)
-	return c.forwardRuntime().mutateFrame(ctx, target, raftpb.ForwardOpSetObjectQuarantine, args)
+	return c.forwardRuntime().mutateOwnerFrame(ctx, target, raftpb.ForwardOpSetObjectQuarantine, args)
 }
 
 // GetObjectTags satisfies storage.ObjectTagsGetter. Routes the tag read to

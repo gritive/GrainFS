@@ -96,7 +96,7 @@ func (a dataGroupManagerLocalBackend) Backend(groupID string) *GroupBackend {
 var ErrForwardBodySizeMismatch = errors.New("coordinator: forwarded body size mismatch")
 
 // ClusterCoordinator implements storage.Backend by routing bucket-scoped ops
-// to the per-group raft leader and delegating cluster-wide ops to the base
+// to data-group backends and delegating cluster-wide ops to the base
 // (meta-FSM-backed) backend.
 //
 // Wiring (set in serve.go):

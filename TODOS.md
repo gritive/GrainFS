@@ -11,8 +11,7 @@
   The retired data-group reseal command API is removed; brownfield data-group command envelopes
   replay through the generic no-op path. Epoch-1 progress no longer depends on a data-group raft
   marker; `newRewrapScrubberKick` has bounded retry for transient lane failures. The automatic
-  data-group `Rebalancer` / `GroupRebalancer` plan surface is also removed, while revoked-node
-  evacuation keeps the live membership executor path.
+  data-group `Rebalancer` / `GroupRebalancer` plan surface is also removed.
 - [x] **phantom-on-CAS-reject cleanup** — owner-local-first CAS quorum-meta writes now
   compare-delete a freshly published owner-local latest-only blob if the peer quorum later
   fails, preventing failed append/coalesce RMW attempts from leaving a readable phantom manifest.
@@ -24,7 +23,10 @@
 - [x] HRW-primary append/multipart owner — append and multipart session writes now
   route to a deterministic per-group owner instead of the data-group Raft leader; owner-local
   execution skips Raft leadership checks, and forwarded owner writes target only that owner peer.
-- [ ] per-group raft membership mirror removal.
+- [x] per-group raft membership mirror removal — per-group raft now boots as a local
+  singleton and no longer mirrors or mutates shard-group placement membership. Revoked-node
+  evacuation updates the meta-FSM `ShardGroupEntry.PeerIDs` roster directly, and the remaining
+  object RMW paths route through deterministic owner writes instead of data-group raft leadership.
 
 ### ShardService/DistributedBackend decomposition follow-ups (2026-06-25, PR1 LocalShardStore + Card1 QuorumMetaStore done)
 

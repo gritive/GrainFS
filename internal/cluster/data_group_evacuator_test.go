@@ -10,20 +10,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fakeEvacuator records EvacuateVoter calls and returns scripted errors.
-type fakeEvacuator struct {
-	mu    sync.Mutex
-	calls []evacCall
-	errs  map[string]error // key: groupID
+type fakeRosterUpdater struct {
+	mu       sync.Mutex
+	proposed []ShardGroupEntry
+	errs     map[string]error
 }
-type evacCall struct{ groupID, revoked, replacement string }
 
-func (m *fakeEvacuator) EvacuateVoter(_ context.Context, groupID, revoked, replacement string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.calls = append(m.calls, evacCall{groupID, revoked, replacement})
-	if m.errs != nil {
-		if err, ok := m.errs[groupID]; ok {
+func (u *fakeRosterUpdater) ProposeShardGroupForwarding(_ context.Context, sg ShardGroupEntry) error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.proposed = append(u.proposed, sg)
+	if u.errs != nil {
+		if err, ok := u.errs[sg.ID]; ok {
 			return err
 		}
 	}
@@ -38,47 +36,52 @@ func revokedSet(ids ...string) map[string]struct{} {
 	return m
 }
 
-func TestEvacuator_MovesRevokedVoterToHealthyPeer_OnLedGroup(t *testing.T) {
-	ev := newDataGroupEvacuatorForTest("node-a", revokedSet("node-b"), &fakeEvacuator{},
-		func() []evacTarget {
-			return []evacTarget{{groupID: "group-7", revokedNode: "node-b", peerIDs: []string{"node-a", "node-b", "node-c"}}}
-		},
-		func(string, map[string]struct{}) (string, bool) { return "node-d", true },
-	)
+func TestEvacuator_MovesRevokedPeerToHealthyPeer(t *testing.T) {
+	updater := &fakeRosterUpdater{}
+	ev := newDataGroupEvacuatorForTest(revokedSet("node-b"), []ShardGroupEntry{
+		{ID: "group-7", PeerIDs: []string{"node-a", "node-b", "node-c"}},
+	}, updater, func(string, map[string]struct{}) (string, bool) { return "node-d", true })
+
 	ev.reconcileOnce(context.Background())
-	require.Equal(t, []evacCall{{"group-7", "node-b", "node-d"}}, ev.mover.(*fakeEvacuator).calls)
+
+	require.Equal(t, []ShardGroupEntry{
+		{ID: "group-7", PeerIDs: []string{"node-a", "node-c", "node-d"}},
+	}, updater.proposed)
 }
 
 func TestEvacuator_ShrinksWhenNoHealthyCandidate(t *testing.T) {
-	ev := newDataGroupEvacuatorForTest("node-a", revokedSet("node-b"), &fakeEvacuator{},
-		func() []evacTarget {
-			return []evacTarget{{groupID: "group-7", revokedNode: "node-b", peerIDs: []string{"node-a", "node-b"}}}
-		},
-		func(string, map[string]struct{}) (string, bool) { return "", false },
-	)
+	updater := &fakeRosterUpdater{}
+	ev := newDataGroupEvacuatorForTest(revokedSet("node-b"), []ShardGroupEntry{
+		{ID: "group-7", PeerIDs: []string{"node-a", "node-b"}},
+	}, updater, func(string, map[string]struct{}) (string, bool) { return "", false })
+
 	ev.reconcileOnce(context.Background())
-	require.Equal(t, []evacCall{{"group-7", "node-b", ""}}, ev.mover.(*fakeEvacuator).calls)
+
+	require.Equal(t, []ShardGroupEntry{
+		{ID: "group-7", PeerIDs: []string{"node-a"}},
+	}, updater.proposed)
 }
 
-func TestEvacuator_NoLedTargets_NoOp(t *testing.T) {
-	ev := newDataGroupEvacuatorForTest("node-a", revokedSet("node-b"), &fakeEvacuator{},
-		func() []evacTarget { return nil },
-		func(string, map[string]struct{}) (string, bool) { return "", false },
-	)
+func TestEvacuator_NoTargets_NoOp(t *testing.T) {
+	updater := &fakeRosterUpdater{}
+	ev := newDataGroupEvacuatorForTest(revokedSet("node-b"), []ShardGroupEntry{
+		{ID: "group-7", PeerIDs: []string{"node-a", "node-c"}},
+	}, updater, func(string, map[string]struct{}) (string, bool) { return "", false })
+
 	ev.reconcileOnce(context.Background())
-	require.Empty(t, ev.mover.(*fakeEvacuator).calls)
+
+	require.Empty(t, updater.proposed)
 }
 
-func TestEvacuator_LeadershipTransferred_IsNotFatal(t *testing.T) {
-	ev := newDataGroupEvacuatorForTest("node-a", revokedSet("node-b"),
-		&fakeEvacuator{errs: map[string]error{"group-7": ErrLeadershipTransferred}},
-		func() []evacTarget {
-			return []evacTarget{{groupID: "group-7", revokedNode: "node-b", peerIDs: []string{"node-a", "node-b", "node-c"}}}
-		},
-		func(string, map[string]struct{}) (string, bool) { return "node-d", true },
-	)
+func TestEvacuator_ProposalErrorIsNotFatal(t *testing.T) {
+	updater := &fakeRosterUpdater{errs: map[string]error{"group-7": context.DeadlineExceeded}}
+	ev := newDataGroupEvacuatorForTest(revokedSet("node-b"), []ShardGroupEntry{
+		{ID: "group-7", PeerIDs: []string{"node-a", "node-b", "node-c"}},
+	}, updater, func(string, map[string]struct{}) (string, bool) { return "node-d", true })
+
 	ev.reconcileOnce(context.Background())
-	require.Len(t, ev.mover.(*fakeEvacuator).calls, 1)
+
+	require.Len(t, updater.proposed, 1)
 }
 
 func TestPickHealthyExcluding_SkipsExcludedAndPicksLightest(t *testing.T) {
@@ -89,67 +92,83 @@ func TestPickHealthyExcluding_SkipsExcludedAndPicksLightest(t *testing.T) {
 	}
 	candidates := []string{"a", "b", "c", "d"}
 
-	// "d" is the lightest (5) but excluded; "b" (10) is the lightest non-excluded.
 	got, ok := PickHealthyExcluding(candidates, loadFn, revokedSet("d"))
 	require.True(t, ok)
 	require.Equal(t, "b", got)
 
-	// All excluded → ("", false) to signal a shrink.
 	_, ok = PickHealthyExcluding(candidates, loadFn, revokedSet("a", "b", "c", "d"))
 	require.False(t, ok)
 
-	// "e" has NO load signal (down/non-reporting). It must be skipped, not treated
-	// as load 0 and picked over the live "b" — otherwise the evacuator loops adding
-	// a dead replacement.
 	got, ok = PickHealthyExcluding(append(candidates, "e"), loadFn, revokedSet("d"))
 	require.True(t, ok)
 	require.Equal(t, "b", got)
 
-	// Only an unknown-load candidate remains → shrink, never place on it.
 	_, ok = PickHealthyExcluding([]string{"e"}, loadFn, map[string]struct{}{})
 	require.False(t, ok)
 }
 
 func TestEvacuator_DoesNotMoveToAnotherRevokedNode(t *testing.T) {
 	var capturedExclude map[string]struct{}
-	ev := newDataGroupEvacuatorForTest("node-a", revokedSet("node-b", "node-d"), &fakeEvacuator{},
-		func() []evacTarget {
-			return []evacTarget{{groupID: "group-7", revokedNode: "node-b", peerIDs: []string{"node-a", "node-b", "node-c"}}}
-		},
-		func(_ string, exclude map[string]struct{}) (string, bool) {
-			capturedExclude = exclude
-			return "", false
-		},
-	)
+	updater := &fakeRosterUpdater{}
+	ev := newDataGroupEvacuatorForTest(revokedSet("node-b", "node-d"), []ShardGroupEntry{
+		{ID: "group-7", PeerIDs: []string{"node-a", "node-b", "node-c"}},
+	}, updater, func(_ string, exclude map[string]struct{}) (string, bool) {
+		capturedExclude = exclude
+		return "", false
+	})
+
 	ev.reconcileOnce(context.Background())
+
 	_, hasB := capturedExclude["node-b"]
 	_, hasD := capturedExclude["node-d"]
 	require.True(t, hasB, "revoked target must be excluded")
 	require.True(t, hasD, "other revoked nodes must be excluded as candidates")
 }
 
-// newDataGroupEvacuatorForTest builds an evacuator with injected derivation
-// functions and a tiny tick. Test-only.
 func newDataGroupEvacuatorForTest(
-	localNodeID string,
 	revoked map[string]struct{},
-	mover voterMover,
-	ledTargets func() []evacTarget,
+	groups []ShardGroupEntry,
+	updater shardGroupRosterUpdater,
 	pickHealthy func(string, map[string]struct{}) (string, bool),
 ) *DataGroupEvacuator {
 	return &DataGroupEvacuator{
-		localNodeID: localNodeID,
-		src:         staticRevocationSource{revoked: revoked},
-		mover:       mover,
+		src:         staticRosterSource{revoked: revoked, groups: groups},
+		updater:     updater,
 		logger:      log.With().Str("component", "evacuator-test").Logger(),
-		ledTargets:  ledTargets,
 		pickHealthy: pickHealthy,
 		tick:        time.Millisecond,
 		wakeCh:      make(chan struct{}, 1),
 		stopCh:      make(chan struct{}),
+		ledTargets: func() []evacTarget {
+			var out []evacTarget
+			for _, sg := range groups {
+				for _, p := range sg.PeerIDs {
+					if _, ok := revoked[p]; ok {
+						out = append(out, evacTarget{groupID: sg.ID, revokedNode: p, peerIDs: sg.PeerIDs})
+					}
+				}
+			}
+			return out
+		},
 	}
 }
 
-type staticRevocationSource struct{ revoked map[string]struct{} }
+type staticRosterSource struct {
+	revoked map[string]struct{}
+	groups  []ShardGroupEntry
+}
 
-func (s staticRevocationSource) RevokedNodeIDs() map[string]struct{} { return s.revoked }
+func (s staticRosterSource) RevokedNodeIDs() map[string]struct{} { return s.revoked }
+
+func (s staticRosterSource) ShardGroups() []ShardGroupEntry {
+	return append([]ShardGroupEntry(nil), s.groups...)
+}
+
+func (s staticRosterSource) ShardGroup(id string) (ShardGroupEntry, bool) {
+	for _, sg := range s.groups {
+		if sg.ID == id {
+			return sg, true
+		}
+	}
+	return ShardGroupEntry{}, false
+}

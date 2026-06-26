@@ -92,22 +92,22 @@ func (r forwardRuntime) readAt(ctx context.Context, target RouteTarget, args []b
 	return io.ReadFull(body, buf)
 }
 
-func (r forwardRuntime) mutateFrame(ctx context.Context, target RouteTarget, op raftpb.ForwardOp, args []byte) error {
+func (r forwardRuntime) mutateOwnerFrame(ctx context.Context, target RouteTarget, op raftpb.ForwardOp, args []byte) error {
 	if r.sender == nil {
 		return ErrCoordinatorNoRouter
 	}
-	reply, err := r.sender.Send(ctx, target.Peers, target.GroupID, op, args)
+	reply, err := r.sender.SendOwner(ctx, target.Peers, target.GroupID, op, args)
 	if err != nil {
 		return err
 	}
 	return parseReplyStatus(reply)
 }
 
-func (r forwardRuntime) deleteObject(ctx context.Context, target RouteTarget, args []byte) (string, error) {
+func (r forwardRuntime) deleteObjectOwner(ctx context.Context, target RouteTarget, args []byte) (string, error) {
 	if r.sender == nil {
 		return "", ErrCoordinatorNoRouter
 	}
-	reply, err := r.sender.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpDeleteObject, args)
+	reply, err := r.sender.SendOwner(ctx, target.Peers, target.GroupID, raftpb.ForwardOpDeleteObject, args)
 	if err != nil {
 		return "", err
 	}

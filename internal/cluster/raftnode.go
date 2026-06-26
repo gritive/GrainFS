@@ -36,8 +36,8 @@ type RaftNode interface {
 	Peers() []string
 
 	// PeerMatchIndex returns the last known replicated index for the given
-	// peerKey (address or nodeID). Used by DataGroupPlanExecutor to wait for
-	// catch-up before leadership transfer.
+	// peerKey (address or nodeID). Implementations may return (0, false) when
+	// per-peer replication state is unavailable.
 	PeerMatchIndex(peerKey string) (uint64, bool)
 
 	// Bootstrapping.

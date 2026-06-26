@@ -286,7 +286,7 @@ func refreshRuntimeTopologyFromMetaNodes(state *bootState, nodes []cluster.MetaN
 	}
 }
 
-// ownedGroupsState is the per-group multi-raft tracking struct. Held outside
+// ownedGroupsState tracks locally instantiated shard groups. Held outside
 // bootOwnedGroupsAndEC because the shutdown hook (registered via AddCleanup
 // inside the phase) needs to access it after the phase returns.
 type ownedGroupsState struct {
@@ -299,7 +299,7 @@ type ownedGroupsState struct {
 
 // bootOwnedGroupsAndEC is the largest storage runtime phase. It wires the
 // distributed backend, the legacy group-0 wrapper, the shard cache, the
-// revoked-node evacuator, the per-group multi-raft instantiation loop, and the
+// revoked-node roster reconciler, the per-group local instantiation loop, and the
 // shutdown hook that drains every owned group on cleanup.
 //
 // Phase ordering is critical here:
@@ -307,7 +307,7 @@ type ownedGroupsState struct {
 //     wrap → dgMgr.Add. group-0 has the legacy single-backend semantics.
 //  2. distBackend.SetRouter + SetShardGroupSource. Routing wired before
 //     any per-group instantiation can fire.
-//  3. Revoked-node evacuator + SetOnNodeRevoked callback.
+//  3. Revoked-node roster reconciler + SetOnNodeRevoked callback.
 //  4. ownedGroups loop: synchronous cold-start instantiation for entries
 //     already in FSM (records startup decisions on Badger role failures
 //     before the server accepts traffic), then SetOnShardGroupAdded
@@ -373,11 +373,10 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState) error {
 	distBackend.SetRouter(state.clusterRouter)
 	distBackend.SetShardGroupSource(state.metaRaft.FSM())
 
-	evacExec := cluster.NewDataGroupPlanExecutor(state.nodeID, state.dgMgr, state.metaRaft.FSM(), state.metaRaft)
 	loadPick := func(groupID string, exclude map[string]struct{}) (string, bool) {
 		members := map[string]struct{}{}
-		if dg := state.dgMgr.Get(groupID); dg != nil {
-			for _, p := range dg.PeerIDs() {
+		if sg, ok := state.metaRaft.FSM().ShardGroup(groupID); ok {
+			for _, p := range sg.PeerIDs {
 				members[p] = struct{}{}
 			}
 		}
@@ -395,13 +394,11 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState) error {
 			return 0, false
 		}, exclude)
 	}
-	evacuator := cluster.NewDataGroupEvacuator(state.nodeID, state.metaRaft.FSM(), state.dgMgr, evacExec, loadPick, 30*time.Second)
+	evacuator := cluster.NewDataGroupEvacuator(state.metaRaft.FSM(), state.metaRaft, loadPick, 30*time.Second)
 	state.metaRaft.FSM().SetOnNodeRevoked(func(string) { evacuator.Wake() })
-	// Run UNCONDITIONALLY on every node. LOAD-BEARING: data groups are led by
-	// invite-JOINED nodes, and only that group's leader can issue the data-raft
-	// ChangeMembership that evicts a revoked voter.
-	// Gating on joinMode would make joiner-led groups never evict. The single-node /
-	// leads-no-foreign-group case is a true no-op via empty led-targets, not a boot gate.
+	// Run unconditionally on every node. The reconciler proposes meta-FSM roster
+	// updates through ProposeShardGroupForwarding, so it does not depend on
+	// per-group raft leadership or on the local node hosting a target group.
 	go evacuator.Run(ctx)
 	state.evacuator = evacuator
 
@@ -445,8 +442,6 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState) error {
 			NodeID:           groupNodeID,
 			DataDir:          state.cfg.DataDir,
 			ShardSvc:         state.shardSvc,
-			Transport:        state.groupRaftMux.ForGroup(entry.ID),
-			AddrBook:         state.metaRaft.FSM(),
 			EC:               ecConfigForShardGroup(entry, state.effectiveEC),
 			ElectionTimeout:  state.cfg.RaftElectionTimeout,
 			HeartbeatTimeout: state.cfg.RaftHeartbeatInterval,
@@ -457,10 +452,6 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState) error {
 			return fmt.Errorf("group %s: instantiate local group: %w", entry.ID, err)
 		}
 		gb.SetShardCache(state.shardCache)
-		// Register the group's raft handler on the per-server mux. As of M5
-		// PR 29 the v1 dispatch is gone — the group's raft node is always
-		// the cluster-layer v2 adapter, satisfying raft.RaftV2Handler.
-		state.groupRaftMux.Register(entry.ID, gb.Node())
 		state.dgMgr.Add(cluster.NewDataGroupWithBackend(entry.ID, entry.PeerIDs, gb))
 		go gb.RunApplyLoop(state.stopApply)
 		owned.mu.Lock()

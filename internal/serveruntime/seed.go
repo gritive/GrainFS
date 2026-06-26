@@ -98,8 +98,7 @@ func SeedInitialShardGroups(
 // deployment) and replicationFactor > 1 (multi-drive EC width), the single
 // peer is replicated to fill the slot list. The EC pipeline then produces
 // replicationFactor shards and ShardService routes shardIdx across the local
-// drives, while instantiateLocalGroup filters duplicated self entries so the
-// per-group raft still starts as a single-voter quorum.
+// drives, while instantiateLocalGroup keeps only a local singleton raft node.
 func SeedShardGroupVoters(
 	selfNodeID string,
 	selfAddr string,

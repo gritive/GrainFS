@@ -521,11 +521,9 @@ func (m *MetaRaft) AddTopologyGeneration(ctx context.Context, baseGroupIDs, expa
 }
 
 // ProposeShardGroupForwarding is ProposeShardGroup that forwards to the meta
-// leader when this node is a follower (P1-1 convergence). proposeOrForward waits
-// for apply equivalently (leader applies locally; follower forwards), so a
-// non-meta-leader group leader can converge ITS group's PeerIDs mirror after a
-// real data-raft ChangeMembership. The shared ProposeShardGroup hot path is left
-// unchanged (minimal blast radius).
+// leader when this node is a follower. proposeOrForward waits for apply
+// equivalently (leader applies locally; follower forwards), so any node can
+// reconcile shard-group placement rosters without owning meta leadership.
 func (m *MetaRaft) ProposeShardGroupForwarding(ctx context.Context, sg ShardGroupEntry) error {
 	if err := raft.ValidateGroupID(sg.ID); err != nil {
 		return fmt.Errorf("meta_raft: ProposeShardGroupForwarding: %w", err)

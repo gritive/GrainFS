@@ -22,12 +22,12 @@ import (
 	"github.com/onsi/gomega"
 )
 
-// multiraft_sharding_test.go — e2e validation for live multi-raft sharding
+// multiraft_sharding_test.go — e2e validation for shard-group placement
 // (v0.0.7.0). Scope:
 //
-//   ✓ per-group raft.Node + BadgerDB instantiation on owned voters
+//   ✓ per-group local backend + BadgerDB instantiation on owned peers
 //   ✓ bucket→group hash assignment recorded in meta-Raft
-//   ✓ group leader elections + restart recovery
+//   ✓ restart recovery
 //
 // Out of scope (deferred to v0.0.7.1):
 //   ✗ data-plane routing — PUT/GET still goes to legacy shared distBackend.

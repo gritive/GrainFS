@@ -30,7 +30,7 @@ func appendSegmentKey(bucket, key, versionID string, seq int) []byte {
 	return []byte(fmt.Sprintf("%s%s/%s/%s/%0*d", appendSegmentPrefix, bucket, key, versionID, appendSideSeqWidth, seq))
 }
 
-func encodeAppendSummary(s appendSummary) []byte {
+func encodeAppendSummary(s appendSummary) []byte { //nolint:unused // referenced by append_side_record_test.go until the writer path lands.
 	var buf [16]byte
 	binary.BigEndian.PutUint64(buf[0:8], uint64(s.Size))
 	binary.BigEndian.PutUint64(buf[8:16], uint64(s.SegmentCount))
@@ -47,7 +47,7 @@ func decodeAppendSummary(data []byte) (appendSummary, error) {
 	}, nil
 }
 
-func encodeAppendSegment(seg SegmentRef) []byte {
+func encodeAppendSegment(seg SegmentRef) []byte { //nolint:unused // referenced by append_side_record_test.go until the writer path lands.
 	var buf bytes.Buffer
 	writeString := func(s string) {
 		_ = binary.Write(&buf, binary.BigEndian, uint32(len(s)))
@@ -162,7 +162,7 @@ func decodeAppendSegment(data []byte) (SegmentRef, error) {
 	}, nil
 }
 
-func (b *LocalBackend) writeAppendSideRecords(ctx context.Context, bucket, key, versionID string, summary appendSummary, segments []SegmentRef) error {
+func (b *LocalBackend) writeAppendSideRecords(ctx context.Context, bucket, key, versionID string, summary appendSummary, segments []SegmentRef) error { //nolint:unused // referenced by append_side_record_test.go until the writer path lands.
 	_ = ctx
 	return b.db.Update(func(txn *badger.Txn) error {
 		if err := txn.Set(appendSummaryKey(bucket, key, versionID), encodeAppendSummary(summary)); err != nil {

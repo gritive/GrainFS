@@ -179,9 +179,8 @@ func (f *MetaFSM) applyRevokePeer(data []byte) error {
 	}
 
 	// Record the durable revoked node-ID so the DataGroupEvacuator can evict it
-	// from data-group voter sets, including after a restart/snapshot-restore, and
-	// so candidate-selection excludes it. ID only — the address is resolved live
-	// from f.nodes (revoke does not remove meta membership).
+	// from shard-group placement rosters, including after restart/snapshot
+	// restore, and so candidate-selection excludes it.
 	f.mu.Lock()
 	f.recordRevokedNodeLocked(nodeID)
 	cb := f.onNodeRevoked

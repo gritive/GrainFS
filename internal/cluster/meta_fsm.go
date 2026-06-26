@@ -226,10 +226,9 @@ type MetaFSM struct {
 	// revokedNodeIDs is the durable Zero-CA revoked-node set (node IDs only).
 	// Captured in applyRevokePeer. Survives snapshots so the DataGroupEvacuator
 	// can re-derive eviction targets after restart/replay (req #4) and so
-	// candidate-selection can exclude revoked nodes. Address is NOT stored: the
-	// revoked node remains in f.nodes (revoke never removes meta membership), so
-	// EvacuateVoter resolves its removal address live via resolveAddr. Mirrors
-	// the revoked_peer_spkis denylist vector.
+	// candidate-selection can exclude revoked nodes. Address is not stored; shard
+	// group rosters are node-ID based and older address-shaped PeerIDs are
+	// normalized during applyPutShardGroup/Restore.
 	revokedNodeIDs map[string]struct{}
 
 	onNodeRevoked func(string) // fired after a node is recorded revoked; must not block; set before Start()

@@ -12,7 +12,6 @@ import (
 
 	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/badgerutil"
-	"github.com/gritive/GrainFS/internal/raft"
 )
 
 // openTestFSMStore opens the per-node shared FSM-state BadgerDB at
@@ -25,21 +24,6 @@ func openTestFSMStore(t *testing.T, dataDir string) MetadataStore {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	return badgermeta.Wrap(db)
-}
-
-type recordingGroupTransport struct {
-	votePeers   []string
-	appendPeers []string
-}
-
-func (r *recordingGroupTransport) RequestVote(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
-	r.votePeers = append(r.votePeers, peer)
-	return &raft.RequestVoteReply{}, nil
-}
-
-func (r *recordingGroupTransport) AppendEntries(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error) {
-	r.appendPeers = append(r.appendPeers, peer)
-	return &raft.AppendEntriesReply{}, nil
 }
 
 func TestInstantiateLocalGroup_Success(t *testing.T) {
@@ -165,18 +149,3 @@ func TestInstantiateLocalGroup_SelfAddrFirst(t *testing.T) {
 // accessor; v2 has no equivalent accessor on cluster.RaftNode. The factory
 // still threads rcfg.ElectionPriorityKey through to v2 under the hood (see
 // raftfactory.go::newRaftNodeV2). PR 30 will delete v1 entirely.
-
-func TestResolvingGroupTransport_ResolvesNodeIDBeforeDial(t *testing.T) {
-	f := NewMetaFSM()
-	require.NoError(t, f.applyCmd(makeAddNodeCmd(t, "node-a", "10.0.0.1:7001", 0)))
-	inner := &recordingGroupTransport{}
-	tr := resolvingGroupTransport{inner: inner, addrBook: f}
-
-	_, err := tr.RequestVote("node-a", &raft.RequestVoteArgs{})
-	require.NoError(t, err)
-	_, err = tr.AppendEntries("node-a", &raft.AppendEntriesArgs{})
-	require.NoError(t, err)
-
-	require.Equal(t, []string{"10.0.0.1:7001"}, inner.votePeers)
-	require.Equal(t, []string{"10.0.0.1:7001"}, inner.appendPeers)
-}

@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.744.0] - 2026-06-26
+
+### Changed
+- **Removed per-group raft membership mirroring.**
+  Local data-group raft nodes now start as single-node local logs instead of
+  mirroring `ShardGroupEntry.PeerIDs` as raft voters. Revoked-node evacuation
+  reconciles the meta-FSM shard-group roster directly, and delete/version-delete,
+  ACL, tags, and quarantine RMW paths now use deterministic owner routing instead
+  of data-group raft leadership.
+
 ## [0.0.743.0] - 2026-06-26
 
 ### Changed
