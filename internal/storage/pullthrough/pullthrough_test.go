@@ -94,16 +94,16 @@ func TestPullThrough_GetObject_NotFound(t *testing.T) {
 
 func TestPullThrough_ForwardsPartialIOCapabilities(t *testing.T) {
 	local := newLocalBackend(t)
-	require.NoError(t, local.CreateBucket(context.Background(), "__grainfs_volumes"))
+	require.NoError(t, local.CreateBucket(context.Background(), "__grainfs_test_internal"))
 
 	pt := pullthrough.NewBackend(local, &staticResolver{})
-	require.True(t, pt.PreferWriteAt("__grainfs_volumes"))
+	require.True(t, pt.PreferWriteAt("__grainfs_test_internal"))
 
-	_, err := pt.WriteAt(context.Background(), "__grainfs_volumes", "vol/blk", 0, []byte("abcd"))
+	_, err := pt.WriteAt(context.Background(), "__grainfs_test_internal", "vol/blk", 0, []byte("abcd"))
 	require.NoError(t, err)
 
 	buf := make([]byte, 2)
-	n, err := pt.ReadAt(context.Background(), "__grainfs_volumes", "vol/blk", 1, buf)
+	n, err := pt.ReadAt(context.Background(), "__grainfs_test_internal", "vol/blk", 1, buf)
 	require.NoError(t, err)
 	require.Equal(t, 2, n)
 	require.Equal(t, []byte("bc"), buf)

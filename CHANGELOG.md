@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.735.0] - 2026-06-26
+
+### Changed
+- **Renamed incidental `__grainfs_volumes` test fixtures.**
+  Tests that only needed an arbitrary internal bucket now use the neutral
+  `__grainfs_test_internal` name, leaving the removed historical volumes bucket
+  out of unrelated fixture data.
+
 ## [0.0.734.0] - 2026-06-26
 
 ### Fixed
