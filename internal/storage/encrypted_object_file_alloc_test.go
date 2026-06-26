@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/stretchr/testify/require"
 )
 
 // identityDataEncryptor is a non-allocating-on-read stub DataEncryptor used to
@@ -60,18 +61,13 @@ func TestEncryptedObjectReaderReusesAADAcrossChunks(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "obj.enc")
 
 	size, err := writeEncryptedObjectFile(path, enc, fields, bytes.NewReader(plaintext), io.Discard)
-	if err != nil {
-		t.Fatalf("write encrypted object: %v", err)
-	}
+	require.NoError(t, err, "write encrypted object")
 
 	readAll := func() {
 		rc, err := openEncryptedObjectFile(path, enc, fields, size)
-		if err != nil {
-			t.Fatalf("open encrypted object: %v", err)
-		}
-		if _, err := io.Copy(io.Discard, rc); err != nil {
-			t.Fatalf("read encrypted object: %v", err)
-		}
+		require.NoError(t, err, "open encrypted object")
+		_, err = io.Copy(io.Discard, rc)
+		require.NoError(t, err, "read encrypted object")
 		_ = rc.Close()
 	}
 
@@ -80,7 +76,6 @@ func TestEncryptedObjectReaderReusesAADAcrossChunks(t *testing.T) {
 	// copy buffer) — a handful, far below chunkCount. The pre-fix per-chunk AAD
 	// allocation would push this to ≥ chunkCount. The threshold sits well below
 	// chunkCount so a regression to per-chunk allocation fails loudly.
-	if allocs >= chunkCount {
-		t.Fatalf("reading a %d-chunk object allocated %.0f times; expected O(1) (per-chunk AAD allocation regressed)", chunkCount, allocs)
-	}
+	require.Less(t, allocs, float64(chunkCount),
+		"reading a %d-chunk object allocated %.0f times; expected O(1) (per-chunk AAD allocation regressed)", chunkCount, allocs)
 }

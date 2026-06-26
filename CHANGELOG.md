@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.748.0] - 2026-06-26
+
+### Changed
+- **Converted a second storage assertion batch to testify.**
+  Replaced raw `t.Fatal*` / `t.Error*` assertions with `require` in data
+  encryptor, encrypted object file, encrypted object allocation, and range
+  chunk-boundary tests.
+
 ## [0.0.747.0] - 2026-06-26
 
 ### Changed

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // TestRangeGet_ChunkBoundaries locks the segment-aware Range GET contract at
@@ -45,9 +47,7 @@ func TestRangeGet_ChunkBoundaries(t *testing.T) {
 			name: "encrypted",
 			make: func(t *testing.T) *LocalBackend {
 				b := newDEKLocalBackend(t)
-				if err := b.CreateBucket(context.Background(), "test"); err != nil {
-					t.Fatalf("CreateBucket: %v", err)
-				}
+				require.NoError(t, b.CreateBucket(context.Background(), "test"), "CreateBucket")
 				return b
 			},
 		},
@@ -60,21 +60,13 @@ func TestRangeGet_ChunkBoundaries(t *testing.T) {
 			b := be.make(t)
 			w := NewSegmentWriterWithChunkSize(localBackendAdapter{b}, chunk)
 			obj, err := w.Write(context.Background(), "test", "k", "application/octet-stream", bytes.NewReader(data))
-			if err != nil {
-				t.Fatalf("segment write: %v", err)
-			}
-			if err := b.PutObjectRecord(context.Background(), "test", "k", obj); err != nil {
-				t.Fatalf("PutObjectRecord: %v", err)
-			}
+			require.NoError(t, err, "segment write")
+			require.NoError(t, b.PutObjectRecord(context.Background(), "test", "k", obj), "PutObjectRecord")
 			// Sanity: the object should have produced multiple segments so
 			// the boundary cases below actually cross chunk boundaries.
 			head, err := b.HeadObject(context.Background(), "test", "k")
-			if err != nil {
-				t.Fatalf("HeadObject: %v", err)
-			}
-			if len(head.Segments) < 4 {
-				t.Fatalf("expected >=4 segments, got %d", len(head.Segments))
-			}
+			require.NoError(t, err, "HeadObject")
+			require.GreaterOrEqual(t, len(head.Segments), 4)
 
 			for _, tc := range cases {
 				tc := tc
@@ -83,16 +75,10 @@ func TestRangeGet_ChunkBoundaries(t *testing.T) {
 					length := tc.to - tc.from + 1
 					got := make([]byte, length)
 					n, err := b.ReadAt(context.Background(), "test", "k", tc.from, got)
-					if err != nil {
-						t.Fatalf("ReadAt(%d, len=%d): n=%d err=%v", tc.from, length, n, err)
-					}
-					if int64(n) != length {
-						t.Fatalf("ReadAt(%d, len=%d) short read: n=%d", tc.from, length, n)
-					}
+					require.NoError(t, err, "ReadAt(%d, len=%d): n=%d", tc.from, length, n)
+					require.Equal(t, length, int64(n), "ReadAt(%d, len=%d) short read", tc.from, length)
 					want := data[tc.from : tc.to+1]
-					if !bytes.Equal(got, want) {
-						t.Fatalf("range %d-%d differs at offset %d", tc.from, tc.to, firstDiff(got, want))
-					}
+					require.True(t, bytes.Equal(got, want), "range %d-%d differs at offset %d", tc.from, tc.to, firstDiff(got, want))
 				})
 			}
 		})
