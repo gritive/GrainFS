@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.746.0] - 2026-06-26
+
+### Changed
+- **Persisted running AppendObject ETag state in single-node side records.**
+  LocalBackend side-record appends now update the composite ETag from stored
+  running MD5 state and validate append offset/cap from the append summary,
+  avoiding full side-segment expansion and raw manifest digest-history growth
+  on the steady-state append path.
+
 ## [0.0.745.0] - 2026-06-26
 
 ### Changed

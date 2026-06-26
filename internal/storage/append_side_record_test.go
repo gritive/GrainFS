@@ -43,6 +43,30 @@ func TestHeadObjectAppendSideRecordMissingSummaryFailsClosed(t *testing.T) {
 	require.Error(t, err, "HeadObject succeeded for side-record object with missing append summary")
 }
 
+func TestAppendSummaryRoundTripsLegacyHeaderOnlyEncoding(t *testing.T) {
+	encoded := encodeAppendSummary(appendSummary{Size: 123, SegmentCount: 4})
+	require.Len(t, encoded, 16)
+
+	got, err := decodeAppendSummary(encoded)
+	require.NoError(t, err)
+	require.Equal(t, appendSummary{Size: 123, SegmentCount: 4}, got)
+}
+
+func TestAppendSummaryRoundTripsETagState(t *testing.T) {
+	want := appendSummary{
+		Size:            123,
+		SegmentCount:    4,
+		ETagPartCount:   4,
+		ETagDigestState: []byte("md5-state"),
+	}
+	encoded := encodeAppendSummary(want)
+	require.Len(t, encoded, 28+len(want.ETagDigestState))
+
+	got, err := decodeAppendSummary(encoded)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+}
+
 func seedAppendSideRecordObject(t *testing.T, parts []string) (*LocalBackend, *Object) {
 	t.Helper()
 	b := newTestLocalBackend(t)

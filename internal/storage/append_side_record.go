@@ -20,8 +20,10 @@ const (
 )
 
 type appendSummary struct {
-	Size         int64
-	SegmentCount int
+	Size            int64
+	SegmentCount    int
+	ETagPartCount   int
+	ETagDigestState []byte
 }
 
 func appendSummaryKey(bucket, key, versionID string) []byte {
@@ -33,20 +35,39 @@ func appendSegmentKey(bucket, key, versionID string, seq int) []byte {
 }
 
 func encodeAppendSummary(s appendSummary) []byte { //nolint:unused // referenced by append_side_record_test.go until the writer path lands.
-	var buf [16]byte
+	if s.ETagPartCount == 0 && len(s.ETagDigestState) == 0 {
+		var buf [16]byte
+		binary.BigEndian.PutUint64(buf[0:8], uint64(s.Size))
+		binary.BigEndian.PutUint64(buf[8:16], uint64(s.SegmentCount))
+		return buf[:]
+	}
+	buf := make([]byte, 28+len(s.ETagDigestState))
 	binary.BigEndian.PutUint64(buf[0:8], uint64(s.Size))
 	binary.BigEndian.PutUint64(buf[8:16], uint64(s.SegmentCount))
-	return buf[:]
+	binary.BigEndian.PutUint64(buf[16:24], uint64(s.ETagPartCount))
+	binary.BigEndian.PutUint32(buf[24:28], uint32(len(s.ETagDigestState)))
+	copy(buf[28:], s.ETagDigestState)
+	return buf
 }
 
 func decodeAppendSummary(data []byte) (appendSummary, error) {
-	if len(data) != 16 {
+	if len(data) != 16 && len(data) < 28 {
 		return appendSummary{}, fmt.Errorf("append summary: invalid length %d", len(data))
 	}
-	return appendSummary{
+	summary := appendSummary{
 		Size:         int64(binary.BigEndian.Uint64(data[0:8])),
 		SegmentCount: int(binary.BigEndian.Uint64(data[8:16])),
-	}, nil
+	}
+	if len(data) == 16 {
+		return summary, nil
+	}
+	stateLen := int(binary.BigEndian.Uint32(data[24:28]))
+	if len(data) != 28+stateLen {
+		return appendSummary{}, fmt.Errorf("append summary: invalid etag state length %d for %d bytes", stateLen, len(data))
+	}
+	summary.ETagPartCount = int(binary.BigEndian.Uint64(data[16:24]))
+	summary.ETagDigestState = append([]byte(nil), data[28:]...)
+	return summary, nil
 }
 
 func encodeAppendSegment(seg SegmentRef) []byte { //nolint:unused // referenced by append_side_record_test.go until the writer path lands.
@@ -197,39 +218,12 @@ func (b *LocalBackend) writeAppendSideRecordsInTxn(txn *badger.Txn, bucket, key,
 	return nil
 }
 
-func (b *LocalBackend) appendSideRecordSegmentCount(ctx context.Context, bucket, key string) (int, bool, error) {
-	_ = ctx
-	var (
-		count int
-		ok    bool
-	)
-	err := b.db.View(func(txn *badger.Txn) error {
-		raw, err := b.readObjectInTxn(txn, b.objectMetaKey(bucket, key))
-		if err != nil {
-			return err
-		}
-		if !raw.IsAppendable || len(raw.Segments) != 0 || len(raw.Coalesced) != 0 {
-			return nil
-		}
-		summary, err := b.readAppendSummaryInTxn(txn, bucket, key, raw.VersionID)
-		if err != nil {
-			return err
-		}
-		count = summary.SegmentCount
-		ok = true
-		return nil
-	})
-	if errors.Is(err, badger.ErrKeyNotFound) {
-		return 0, false, nil
-	}
-	return count, ok, err
-}
-
-func (b *LocalBackend) putAppendSideRecordAppend(ctx context.Context, bucket, key string, obj *Object, seq int, seg SegmentRef) error {
+func (b *LocalBackend) putAppendSideRecordAppend(ctx context.Context, bucket, key string, obj *Object, summary appendSummary, seg SegmentRef) error {
 	_ = ctx
 	return b.db.Update(func(txn *badger.Txn) error {
 		record := *obj
 		record.Segments = nil
+		record.AppendCallMD5s = nil
 		data, err := marshalObject(&record)
 		if err != nil {
 			return err
@@ -237,10 +231,10 @@ func (b *LocalBackend) putAppendSideRecordAppend(ctx context.Context, bucket, ke
 		if err := setBadgerValue(txn, b.objectMetaKey(bucket, key), data); err != nil {
 			return err
 		}
-		if err := txn.Set(appendSummaryKey(bucket, key, obj.VersionID), encodeAppendSummary(appendSummary{Size: obj.Size, SegmentCount: seq})); err != nil {
+		if err := txn.Set(appendSummaryKey(bucket, key, obj.VersionID), encodeAppendSummary(summary)); err != nil {
 			return err
 		}
-		if err := txn.Set(appendSegmentKey(bucket, key, obj.VersionID, seq), encodeAppendSegment(seg)); err != nil {
+		if err := txn.Set(appendSegmentKey(bucket, key, obj.VersionID, summary.SegmentCount), encodeAppendSegment(seg)); err != nil {
 			return err
 		}
 		store := NewChunkRefStore(txn)
@@ -248,15 +242,16 @@ func (b *LocalBackend) putAppendSideRecordAppend(ctx context.Context, bucket, ke
 	})
 }
 
-func (b *LocalBackend) putAppendSideRecordObject(ctx context.Context, bucket, key string, obj *Object, segments []SegmentRef) error {
+func (b *LocalBackend) putAppendSideRecordObject(ctx context.Context, bucket, key string, obj *Object, summary appendSummary, segments []SegmentRef) error {
 	_ = ctx
 	return b.db.Update(func(txn *badger.Txn) error {
 		record := *obj
 		record.Segments = nil
+		record.AppendCallMD5s = nil
 		if err := b.PutObjectRecordInTxn(txn, bucket, key, &record); err != nil {
 			return err
 		}
-		return b.writeAppendSideRecordsInTxn(txn, bucket, key, obj.VersionID, appendSummary{Size: obj.Size, SegmentCount: len(segments)}, segments)
+		return b.writeAppendSideRecordsInTxn(txn, bucket, key, obj.VersionID, summary, segments)
 	})
 }
 

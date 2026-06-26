@@ -93,9 +93,10 @@ etag_part_count++
 ETag = hex(MD5StateSum(etag_digest_state)) + "-" + etag_part_count
 ```
 
-Go's standard `crypto/md5` does not expose a stable portable state API, so the
-implementation should add a tiny internal MD5-state codec only for the composite
-ETag accumulator, covered by golden tests against `CompositeETag`.
+The single-node implementation stores Go's `crypto/md5` binary-marshaled state
+for the composite ETag accumulator, covered by tests against `CompositeETag`.
+Cluster side records must use the same state representation or add an explicit
+portable codec before cross-version quorum-meta rollout.
 
 ## Append Algorithm
 
@@ -174,19 +175,16 @@ After coalesce:
 
 ## Implementation Slices
 
-1. Single-node side-record format and read path.
-   Add Badger key codecs, append summary state, MD5 accumulator golden tests,
-   and new-object append writes. Keep embedded brownfield reads.
-2. Single-node brownfield conversion and delete/GC integration.
-   Convert existing appendables on first append and include side records in
-   chunkref rebuild/delete cleanup.
-3. Cluster quorum-meta append side records.
+1. Single-node side-record format, read path, writer path, brownfield appendable
+   conversion, delete cleanup, append-base summary validation, and running ETag
+   state are shipped in v0.0.743.0/v0.0.745.0/v0.0.746.0.
+2. Cluster quorum-meta append side records.
    Add `.quorum_meta_append` local/peer primitives, owner CAS, read merge, and
    orphan walker coverage.
-4. Coalesce integration.
+3. Coalesce integration.
    Consume side-record prefixes without ETag recompute and keep crash recovery
    idempotent.
-5. Benchmark gate.
+4. Benchmark gate.
    `BenchmarkS3Append` and `BenchmarkClusterAppend` must show allocs/op per
    append flattening across 4/8/16 segment sweeps, with no GET/range/read
    regression.

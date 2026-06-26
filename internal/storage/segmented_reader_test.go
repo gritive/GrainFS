@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func setupThreeSegmentObject(t *testing.T) (*LocalBackend, *Object) {
@@ -16,33 +18,26 @@ func setupThreeSegmentObject(t *testing.T) (*LocalBackend, *Object) {
 	off := int64(0)
 	for i := 0; i < 3; i++ {
 		o, err := b.AppendObject(context.Background(), "test", "k", off, bytes.NewReader(body))
-		if err != nil {
-			t.Fatalf("append %d: %v", i, err)
-		}
+		require.NoError(t, err, "append %d", i)
 		obj = o
 		off = o.Size
 	}
+	var err error
+	obj, err = b.HeadObject(context.Background(), "test", "k")
+	require.NoError(t, err, "HeadObject")
 	return b, obj
 }
 
 func TestSegmentedReaderFullStitch(t *testing.T) {
 	b, obj := setupThreeSegmentObject(t)
 	r, err := b.OpenSegmentedReader("test", "k", obj, 0, obj.Size-1)
-	if err != nil {
-		t.Fatalf("OpenSegmentedReader: %v", err)
-	}
+	require.NoError(t, err, "OpenSegmentedReader")
 	defer r.Close()
 	got, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatalf("ReadAll: %v", err)
-	}
-	if int64(len(got)) != obj.Size {
-		t.Fatalf("read %d, want %d", len(got), obj.Size)
-	}
+	require.NoError(t, err, "ReadAll")
+	require.Equal(t, obj.Size, int64(len(got)))
 	for i, c := range got {
-		if c != 'S' {
-			t.Fatalf("byte %d = %c", i, c)
-		}
+		require.Equal(t, byte('S'), c, "byte %d", i)
 	}
 }
 
@@ -50,17 +45,11 @@ func TestSegmentedReaderRangeWithinSingleSegment(t *testing.T) {
 	b, obj := setupThreeSegmentObject(t)
 	// Range: bytes=100-200 (within seg1)
 	r, err := b.OpenSegmentedReader("test", "k", obj, 100, 200)
-	if err != nil {
-		t.Fatalf("OpenSegmentedReader: %v", err)
-	}
+	require.NoError(t, err, "OpenSegmentedReader")
 	defer r.Close()
 	got, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatalf("ReadAll: %v", err)
-	}
-	if len(got) != 101 {
-		t.Fatalf("read %d bytes, want 101", len(got))
-	}
+	require.NoError(t, err, "ReadAll")
+	require.Len(t, got, 101)
 }
 
 func TestSegmentedReaderRangeAcrossSegments(t *testing.T) {
@@ -69,18 +58,12 @@ func TestSegmentedReaderRangeAcrossSegments(t *testing.T) {
 	start := int64(5 << 20)
 	end := int64(15<<20) - 1
 	r, err := b.OpenSegmentedReader("test", "k", obj, start, end)
-	if err != nil {
-		t.Fatalf("OpenSegmentedReader: %v", err)
-	}
+	require.NoError(t, err, "OpenSegmentedReader")
 	defer r.Close()
 	got, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatalf("ReadAll: %v", err)
-	}
+	require.NoError(t, err, "ReadAll")
 	want := end - start + 1
-	if int64(len(got)) != want {
-		t.Fatalf("read %d, want %d", len(got), want)
-	}
+	require.Equal(t, want, int64(len(got)))
 }
 
 func TestSegmentedReaderRangeAtBoundary(t *testing.T) {
@@ -89,34 +72,21 @@ func TestSegmentedReaderRangeAtBoundary(t *testing.T) {
 	start := int64(10<<20) - 1
 	end := int64(10 << 20)
 	r, err := b.OpenSegmentedReader("test", "k", obj, start, end)
-	if err != nil {
-		t.Fatalf("OpenSegmentedReader: %v", err)
-	}
+	require.NoError(t, err, "OpenSegmentedReader")
 	defer r.Close()
 	got, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatalf("ReadAll: %v", err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("read %d, want 2", len(got))
-	}
-	if got[0] != 'S' || got[1] != 'S' {
-		t.Fatalf("bytes=%v, want [S S]", got)
-	}
+	require.NoError(t, err, "ReadAll")
+	require.Equal(t, []byte{'S', 'S'}, got)
 }
 
 func TestSegmentedReaderEncryptedTamperRejected(t *testing.T) {
 	b := newDEKLocalBackend(t)
 	ctx := context.Background()
-	if err := b.CreateBucket(ctx, "test"); err != nil {
-		t.Fatalf("CreateBucket: %v", err)
-	}
+	require.NoError(t, b.CreateBucket(ctx, "test"), "CreateBucket")
 
 	body := bytes.Repeat([]byte("Z"), 1<<20)
 	obj, err := b.AppendObject(ctx, "test", "k", 0, bytes.NewReader(body))
-	if err != nil {
-		t.Fatalf("append: %v", err)
-	}
+	require.NoError(t, err, "append")
 
 	// segment blob 1바이트 tamper → AES-GCM tag mismatch.
 	// Flip the existing byte (XOR 0xff) rather than overwriting with a fixed
@@ -124,26 +94,17 @@ func TestSegmentedReaderEncryptedTamperRejected(t *testing.T) {
 	// ciphertext already holds 0xff at this offset, making the test flaky.
 	path := b.segmentPath("test", "k", obj.Segments[0].BlobID)
 	f, err := os.OpenFile(path, os.O_RDWR, 0)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
+	require.NoError(t, err, "open")
 	var orig [1]byte
-	if _, err := f.ReadAt(orig[:], 100); err != nil {
-		t.Fatalf("read tamper byte: %v", err)
-	}
-	if _, err := f.WriteAt([]byte{orig[0] ^ 0xff}, 100); err != nil {
-		t.Fatalf("tamper: %v", err)
-	}
-	if err := f.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
+	_, err = f.ReadAt(orig[:], 100)
+	require.NoError(t, err, "read tamper byte")
+	_, err = f.WriteAt([]byte{orig[0] ^ 0xff}, 100)
+	require.NoError(t, err, "tamper")
+	require.NoError(t, f.Close(), "close")
 
 	r, err := b.OpenSegmentedReader("test", "k", obj, 0, obj.Size-1)
-	if err != nil {
-		t.Fatalf("OpenSegmentedReader: %v", err)
-	}
+	require.NoError(t, err, "OpenSegmentedReader")
 	defer r.Close()
-	if _, err := io.ReadAll(r); err == nil {
-		t.Fatal("expected decrypt error, got nil")
-	}
+	_, err = io.ReadAll(r)
+	require.Error(t, err, "expected decrypt error")
 }
