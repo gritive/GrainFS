@@ -732,8 +732,12 @@ func (s *ShardService) handleRPC(payload []byte) []byte {
 		return s.handleQuorumMetaWrite(sr)
 	case "WriteQuorumMetaVersion":
 		return s.handleQuorumMetaVersionWrite(sr)
+	case "WriteQuorumMetaAppend":
+		return s.handleQuorumMetaAppendWrite(sr)
 	case "ReadQuorumMeta":
 		return s.handleQuorumMetaRead(sr)
+	case "ReadQuorumMetaAppend":
+		return s.handleQuorumMetaAppendRead(sr)
 	case "ScanQuorumMeta":
 		return s.handleScanQuorumMeta(sr)
 	case "ScanQuorumMetaVersions":
@@ -786,6 +790,13 @@ func (s *ShardService) handleQuorumMetaVersionWrite(sr *shardRequest) []byte {
 	return s.okResponse(nil)
 }
 
+func (s *ShardService) handleQuorumMetaAppendWrite(sr *shardRequest) []byte {
+	if err := s.qmeta.writeQuorumMetaAppendLocal(sr.Bucket, sr.Key, sr.Data); err != nil {
+		return s.errorResponse(err.Error())
+	}
+	return s.okResponse(nil)
+}
+
 // handleQuorumMetaRead serves a ReadQuorumMeta RPC: reads the local quorum
 // meta file and returns its raw bytes, or OK with empty payload when absent.
 func (s *ShardService) handleQuorumMetaRead(sr *shardRequest) []byte {
@@ -793,6 +804,17 @@ func (s *ShardService) handleQuorumMetaRead(sr *shardRequest) []byte {
 	if err != nil {
 		if errors.Is(err, storage.ErrObjectNotFound) {
 			return s.okResponse(nil) // empty payload = not found on this node
+		}
+		return s.errorResponse(err.Error())
+	}
+	return s.okResponse(data)
+}
+
+func (s *ShardService) handleQuorumMetaAppendRead(sr *shardRequest) []byte {
+	data, err := s.qmeta.readQuorumMetaAppendRawLocal(sr.Bucket, sr.Key)
+	if err != nil {
+		if errors.Is(err, storage.ErrObjectNotFound) {
+			return s.okResponse(nil)
 		}
 		return s.errorResponse(err.Error())
 	}

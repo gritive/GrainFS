@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"fmt"
 	"io"
 
 	"github.com/gritive/GrainFS/internal/storage"
@@ -69,9 +70,12 @@ type appendBlobRMWInput struct {
 	NewObjectNodeIDs  []string
 	NewObjectECData   uint8
 	NewObjectECParity uint8
+	UseSideRecords    bool
+	BaseSummary       storage.AppendSummary
+	BaseHasSummary    bool
 }
 
-// planAppendObjectBlobRMW validates an append against the base manifest and
+// planAppendObjectBlobRMWWithSide validates an append against the base manifest and
 // builds the next-generation PutObjectMetaCmd (MetaSeqCAS, MetaSeq=base+1).
 // It lifts the offset/segment-cap/size-cap/placement/composite-ETag/ModTime
 // checks that previously lived in the FSM apply (applyAppendObjectTransition)
@@ -81,12 +85,40 @@ type appendBlobRMWInput struct {
 // BlobID is a fresh UUIDv7 per call (not content-addressed), so a retried
 // append at a stale offset correctly fails the offset check rather than being
 // silently deduped.
-func planAppendObjectBlobRMW(in appendBlobRMWInput) (PutObjectMetaCmd, error) {
+func planAppendObjectBlobRMWWithSide(in appendBlobRMWInput) (PutObjectMetaCmd, storage.AppendSummary, bool, error) {
 	seg := in.Segment
+	useSide := in.UseSideRecords && len(in.Base.Coalesced) == 0
 
 	if !in.BaseExists {
 		if in.ExpectedOffset != 0 {
-			return PutObjectMetaCmd{}, storage.ErrAppendOffsetMismatch
+			return PutObjectMetaCmd{}, storage.AppendSummary{}, false, storage.ErrAppendOffsetMismatch
+		}
+		if useSide {
+			state, count, err := storage.AppendETagStateAppend(nil, 0, seg.Checksum)
+			if err != nil {
+				return PutObjectMetaCmd{}, storage.AppendSummary{}, false, err
+			}
+			etag, err := storage.CompositeETagFromState(state, count)
+			if err != nil {
+				return PutObjectMetaCmd{}, storage.AppendSummary{}, false, err
+			}
+			cmd := PutObjectMetaCmd{
+				Bucket:           in.Bucket,
+				Key:              in.Key,
+				Size:             seg.Size,
+				ContentType:      "application/octet-stream",
+				ETag:             etag,
+				ModTime:          in.ModifiedUnixSec,
+				VersionID:        in.VersionID,
+				PlacementGroupID: in.PlacementGroupID,
+				NodeIDs:          cloneStringSlice(in.NewObjectNodeIDs),
+				ECData:           in.NewObjectECData,
+				ECParity:         in.NewObjectECParity,
+				IsAppendable:     true,
+				MetaSeqCAS:       true,
+				MetaSeq:          in.Base.MetaSeq + 1,
+			}
+			return cmd, storage.AppendSummary{Size: cmd.Size, SegmentCount: 1, ETagPartCount: count, ETagDigestState: state}, true, nil
 		}
 		return PutObjectMetaCmd{
 			Bucket:           in.Bucket,
@@ -105,7 +137,7 @@ func planAppendObjectBlobRMW(in appendBlobRMWInput) (PutObjectMetaCmd, error) {
 			IsAppendable:     true,
 			MetaSeqCAS:       true,
 			MetaSeq:          in.Base.MetaSeq + 1, // base absent → 0, so MetaSeq=1
-		}, nil
+		}, storage.AppendSummary{}, false, nil
 	}
 
 	base := in.Base
@@ -113,16 +145,23 @@ func planAppendObjectBlobRMW(in appendBlobRMWInput) (PutObjectMetaCmd, error) {
 	// FSM stale-placement gate in applyAppendObjectTransition).
 	if in.PlacementGroupID != "" && base.PlacementGroupID != "" &&
 		in.PlacementGroupID != base.PlacementGroupID {
-		return PutObjectMetaCmd{}, ErrStalePlacement
+		return PutObjectMetaCmd{}, storage.AppendSummary{}, false, ErrStalePlacement
 	}
 	if base.Size != in.ExpectedOffset {
-		return PutObjectMetaCmd{}, storage.ErrAppendOffsetMismatch
+		return PutObjectMetaCmd{}, storage.AppendSummary{}, false, storage.ErrAppendOffsetMismatch
 	}
-	if len(base.Segments) >= storage.MaxAppendSegments {
-		return PutObjectMetaCmd{}, storage.ErrAppendCapExceeded
+	if useSide && in.BaseHasSummary {
+		if in.BaseSummary.Size != base.Size {
+			return PutObjectMetaCmd{}, storage.AppendSummary{}, false, fmt.Errorf("append side summary size %d does not match object size %d", in.BaseSummary.Size, base.Size)
+		}
+		if in.BaseSummary.SegmentCount >= storage.MaxAppendSegments {
+			return PutObjectMetaCmd{}, storage.AppendSummary{}, false, storage.ErrAppendCapExceeded
+		}
+	} else if len(base.Segments) >= storage.MaxAppendSegments {
+		return PutObjectMetaCmd{}, storage.AppendSummary{}, false, storage.ErrAppendCapExceeded
 	}
 	if in.SizeCapBytes > 0 && base.Size+seg.Size > in.SizeCapBytes {
-		return PutObjectMetaCmd{}, storage.ErrAppendObjectTooLarge
+		return PutObjectMetaCmd{}, storage.AppendSummary{}, false, storage.ErrAppendObjectTooLarge
 	}
 
 	next := base
@@ -146,6 +185,30 @@ func planAppendObjectBlobRMW(in appendBlobRMWInput) (PutObjectMetaCmd, error) {
 		}
 	}
 	next.IsAppendable = true
+
+	if useSide && in.BaseHasSummary {
+		state, count, err := storage.AppendETagStateAppend(in.BaseSummary.ETagDigestState, in.BaseSummary.ETagPartCount, seg.Checksum)
+		if err != nil {
+			return PutObjectMetaCmd{}, storage.AppendSummary{}, false, err
+		}
+		next.Segments = nil
+		next.Size = base.Size + seg.Size
+		next.AppendCallMD5s = nil
+		next.ETag, err = storage.CompositeETagFromState(state, count)
+		if err != nil {
+			return PutObjectMetaCmd{}, storage.AppendSummary{}, false, err
+		}
+		next.ModTime = in.ModifiedUnixSec
+		next.VersionID = in.VersionID
+		next.PlacementGroupID = in.PlacementGroupID
+		next.MetaSeqCAS = true
+		next.MetaSeq = base.MetaSeq + 1
+		next.IsDeleteMarker = false
+		next.IsHardDeleted = false
+		next.ExpectedETag = ""
+		next.PreserveLatest = false
+		return next, storage.AppendSummary{Size: next.Size, SegmentCount: in.BaseSummary.SegmentCount + 1, ETagPartCount: count, ETagDigestState: state}, true, nil
+	}
 
 	// Append the new segment and recompute Size.
 	segs := append(segmentMetaEntriesToRefs(base.Segments), seg)
@@ -182,5 +245,5 @@ func planAppendObjectBlobRMW(in appendBlobRMWInput) (PutObjectMetaCmd, error) {
 	next.IsHardDeleted = false
 	next.ExpectedETag = ""
 	next.PreserveLatest = false
-	return next, nil
+	return next, storage.AppendSummary{}, false, nil
 }

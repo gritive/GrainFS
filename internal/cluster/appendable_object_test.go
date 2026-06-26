@@ -109,7 +109,7 @@ func TestPlanAppendCompositeETagSurvivesCoalesce(t *testing.T) {
 	c3 := []byte("cccccccccccccccc")
 	base := PutObjectMetaCmd{Bucket: "b", Key: "k", Size: 48, IsAppendable: true, Segments: nil, Coalesced: []CoalescedShardRef{{CoalescedID: "x", Size: 48, ShardKey: "k/coalesced/x"}}, AppendCallMD5s: [][]byte{c1, c2, c3}, MetaSeq: 5}
 	seg := storage.SegmentRef{Size: 16, Checksum: []byte("dddddddddddddddd")}
-	next, err := planAppendObjectBlobRMW(appendBlobRMWInput{Bucket: "b", Key: "k", ExpectedOffset: 48, Segment: seg, Base: base, BaseExists: true, ModifiedUnixSec: 1})
+	next, _, _, err := planAppendObjectBlobRMWWithSide(appendBlobRMWInput{Bucket: "b", Key: "k", ExpectedOffset: 48, Segment: seg, Base: base, BaseExists: true, ModifiedUnixSec: 1})
 	require.NoError(t, err)
 	require.Equal(t, storage.CompositeETag([][]byte{c1, c2, c3, seg.Checksum}), next.ETag, "composite ETag must include the pre-coalesce per-call digests")
 	require.Equal(t, [][]byte{c1, c2, c3, seg.Checksum}, next.AppendCallMD5s)
@@ -117,7 +117,7 @@ func TestPlanAppendCompositeETagSurvivesCoalesce(t *testing.T) {
 
 func TestPlanAppendSeedsAppendCallMD5sOnFirstCall(t *testing.T) {
 	seg := storage.SegmentRef{Size: 5, Checksum: []byte("0123456789abcdef")}
-	next, err := planAppendObjectBlobRMW(appendBlobRMWInput{Bucket: "b", Key: "k", ExpectedOffset: 0, Segment: seg, BaseExists: false, ModifiedUnixSec: 1})
+	next, _, _, err := planAppendObjectBlobRMWWithSide(appendBlobRMWInput{Bucket: "b", Key: "k", ExpectedOffset: 0, Segment: seg, BaseExists: false, ModifiedUnixSec: 1})
 	require.NoError(t, err)
 	require.Equal(t, [][]byte{seg.Checksum}, next.AppendCallMD5s)
 	require.Equal(t, storage.CompositeETag([][]byte{seg.Checksum}), next.ETag)
@@ -139,7 +139,7 @@ func TestPlanAppendFirstAppendOntoChunkedPutPreservesETag(t *testing.T) {
 	s2 := []byte("2222222222222222")
 	base := PutObjectMetaCmd{Bucket: "b", Key: "k", Size: 32, IsAppendable: false, Segments: []SegmentMetaEntry{{BlobID: "s1", Size: 16, Checksum: s1}, {BlobID: "s2", Size: 16, Checksum: s2}}, AppendCallMD5s: nil, MetaSeq: 2}
 	seg := storage.SegmentRef{Size: 16, Checksum: []byte("3333333333333333")}
-	next, err := planAppendObjectBlobRMW(appendBlobRMWInput{Bucket: "b", Key: "k", ExpectedOffset: 32, Segment: seg, Base: base, BaseExists: true, ModifiedUnixSec: 1})
+	next, _, _, err := planAppendObjectBlobRMWWithSide(appendBlobRMWInput{Bucket: "b", Key: "k", ExpectedOffset: 32, Segment: seg, Base: base, BaseExists: true, ModifiedUnixSec: 1})
 	require.NoError(t, err)
 	require.Equal(t, storage.CompositeETag([][]byte{s1, s2, seg.Checksum}), next.ETag, "first append onto a chunked PUT must seed history from base.Segments")
 	require.Equal(t, [][]byte{s1, s2, seg.Checksum}, next.AppendCallMD5s)

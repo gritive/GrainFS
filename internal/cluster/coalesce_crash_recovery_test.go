@@ -13,6 +13,7 @@ import (
 // appendForCrashTest appends one chunk at the current object size.
 func appendForCrashTest(t *testing.T, b *DistributedBackend, bucket, key, data string) {
 	t.Helper()
+	b.appendSideRecordsDisabled = true
 	off := currentSize(t, b, bucket, key)
 	_, err := b.AppendObject(context.Background(), bucket, key, off, bytes.NewReader([]byte(data)))
 	require.NoError(t, err)

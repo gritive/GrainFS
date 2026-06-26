@@ -24,6 +24,7 @@ var _ = Describe("Coalesce recovery integration", func() {
 
 	BeforeEach(func() {
 		b = newTestDistributedBackend(GinkgoT())
+		b.appendSideRecordsDisabled = true
 		ctx = context.Background()
 		bucket, key = "b", "k"
 		Expect(b.CreateBucket(ctx, bucket)).To(Succeed())

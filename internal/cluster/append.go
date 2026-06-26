@@ -74,7 +74,7 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 
 	// Step 1: read the base manifest (owner-local authoritative). Absent → a
 	// brand-new appendable object (base MetaSeq=0).
-	base, baseExists, err := b.readAppendBase(bucket, key)
+	base, baseExists, baseSummary, baseHasSummary, err := b.readAppendBaseWithSide(ctx, bucket, key)
 	if err != nil {
 		return nil, err
 	}
@@ -82,6 +82,9 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 	var existing *storage.Object
 	if baseExists {
 		existing, _ = objectAndPlacementFromCmd(base)
+		if baseHasSummary && len(existing.Segments) == 0 && len(existing.Coalesced) == 0 {
+			existing.Segments = make([]storage.SegmentRef, baseSummary.SegmentCount)
+		}
 	}
 
 	// Size-cap fast-reject hint (design § Follow-up 2). Body is not yet read;
@@ -155,10 +158,11 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 	// CAS base mismatch (concurrent writer advanced the blob). On retry re-read
 	// the owner-local base and re-validate the offset (F4) — a concurrent append
 	// at the same offset turns the retry into a correct ErrAppendOffsetMismatch.
-	cur, curExists := base, baseExists
+	cur, curExists, curSummary, curHasSummary := base, baseExists, baseSummary, baseHasSummary
 	for attempt := 0; ; attempt++ {
 		modifiedUnixSec := time.Now().Unix()
-		cmd, perr := planAppendObjectBlobRMW(appendBlobRMWInput{
+		useSideRecords := !b.appendSideRecordsDisabled && (!curExists || (cur.IsAppendable && len(cur.Segments) == 0 && len(cur.Coalesced) == 0 && curHasSummary))
+		cmd, summary, sideMode, perr := planAppendObjectBlobRMWWithSide(appendBlobRMWInput{
 			Bucket:            bucket,
 			Key:               key,
 			ExpectedOffset:    expectedOffset,
@@ -172,6 +176,9 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 			NewObjectNodeIDs:  newNodeIDs,
 			NewObjectECData:   newECData,
 			NewObjectECParity: newECParity,
+			UseSideRecords:    useSideRecords,
+			BaseSummary:       curSummary,
+			BaseHasSummary:    curHasSummary,
 		})
 		if perr != nil {
 			// Mirror the FSM apply path's size-cap metric (apply.go): the off-raft
@@ -183,6 +190,11 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 		}
 		werr := b.writeQuorumMeta(ctx, cmd)
 		if werr == nil {
+			if sideMode {
+				if err := b.writeClusterAppendSideRecords(ctx, bucket, key, versionID, cmd.NodeIDs, int(cmd.ECData), summary, map[int]storage.SegmentRef{summary.SegmentCount: seg}); err != nil {
+					return nil, fmt.Errorf("append side record commit: %w", err)
+				}
+			}
 			obj, _ := objectAndPlacementFromCmd(cmd)
 			// Re-enable coalesce over the blob (Task 4): the manifest now lives in
 			// the quorum-meta blob and the coalesce worker publishes via blob CAS
@@ -206,26 +218,36 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 			return nil, fmt.Errorf("append object commit: %w", werr)
 		}
 		// CAS reject: re-read the owner-local base and loop (re-validate offset).
-		cur, curExists, err = b.readAppendBase(bucket, key)
+		cur, curExists, curSummary, curHasSummary, err = b.readAppendBaseWithSide(ctx, bucket, key)
 		if err != nil {
 			return nil, err
 		}
 	}
 }
 
-// readAppendBase reads the latest-only quorum-meta manifest for (bucket, key)
+// readAppendBaseWithSide reads the latest-only quorum-meta manifest for (bucket, key)
 // from the owner-local authoritative store. Returns (cmd, true, nil) on a hit,
 // (zero, false, nil) when the object does not yet exist (a brand-new append),
 // and a non-nil error on any other read failure.
-func (b *DistributedBackend) readAppendBase(bucket, key string) (PutObjectMetaCmd, bool, error) {
+func (b *DistributedBackend) readAppendBaseWithSide(ctx context.Context, bucket, key string) (PutObjectMetaCmd, bool, storage.AppendSummary, bool, error) {
 	cmd, err := b.readQuorumMetaCmd(bucket, key)
 	if err == nil {
-		return cmd, true, nil
+		if cmd.IsAppendable && cmd.Size > 0 && len(cmd.Segments) == 0 && len(cmd.Coalesced) == 0 {
+			summary, serr := b.readClusterAppendSummary(ctx, bucket, key, cmd.VersionID, cmd.NodeIDs)
+			if serr != nil {
+				return PutObjectMetaCmd{}, false, storage.AppendSummary{}, false, fmt.Errorf("append object: read side summary: %w", serr)
+			}
+			if summary.Size != cmd.Size {
+				return PutObjectMetaCmd{}, false, storage.AppendSummary{}, false, fmt.Errorf("append side summary size %d does not match object size %d", summary.Size, cmd.Size)
+			}
+			return cmd, true, summary, true, nil
+		}
+		return cmd, true, storage.AppendSummary{}, false, nil
 	}
 	if errors.Is(err, storage.ErrObjectNotFound) {
-		return PutObjectMetaCmd{}, false, nil
+		return PutObjectMetaCmd{}, false, storage.AppendSummary{}, false, nil
 	}
-	return PutObjectMetaCmd{}, false, fmt.Errorf("append object: read base manifest: %w", err)
+	return PutObjectMetaCmd{}, false, storage.AppendSummary{}, false, fmt.Errorf("append object: read base manifest: %w", err)
 }
 
 func cloneSegmentRef(in storage.SegmentRef) storage.SegmentRef {

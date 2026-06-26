@@ -191,11 +191,12 @@ func TestGetObject_AppendableNotRoutedToChunked(t *testing.T) {
 	obj, err := b.AppendObject(ctx, bucket, key, 6, bytes.NewReader([]byte("world")))
 	require.NoError(t, err)
 	require.True(t, obj.IsAppendable)
-	require.Len(t, obj.Segments, 2)
+	require.Empty(t, obj.Segments)
 
 	rc, gotObj, err := b.GetObject(ctx, bucket, key)
 	require.NoError(t, err)
 	require.True(t, gotObj.IsAppendable)
+	require.Len(t, gotObj.Segments, 2)
 	defer rc.Close()
 
 	got, err := io.ReadAll(rc)

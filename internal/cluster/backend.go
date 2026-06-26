@@ -246,6 +246,11 @@ type DistributedBackend struct {
 	// leave this nil.
 	coalesceFaultAfterECWrite func() error
 
+	// appendSideRecordsDisabled is a test seam for legacy coalesce unit tests
+	// that intentionally exercise raw Segments in the quorum-meta manifest. The
+	// production default is side-record mode enabled.
+	appendSideRecordsDisabled bool
+
 	// scrubOrphanAge is the age gate for WalkOrphanSegments. Set via SetScrubOrphanAge.
 	scrubOrphanAge time.Duration
 
