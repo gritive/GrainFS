@@ -277,32 +277,6 @@ func (w *countingDataWAL) Dir() string {
 	return w.dir
 }
 
-func requireReaderEqualBytes(r io.Reader, want []byte) error {
-	buf := make([]byte, 32*1024)
-	off := 0
-	for {
-		n, err := r.Read(buf)
-		if n > 0 {
-			if off+n > len(want) {
-				return fmt.Errorf("round-trip produced too many bytes: got at least %d, want %d", off+n, len(want))
-			}
-			if !bytes.Equal(buf[:n], want[off:off+n]) {
-				return fmt.Errorf("round-trip differs at offset %d", off+firstDiff(buf[:n], want[off:off+n]))
-			}
-			off += n
-		}
-		if err == io.EOF {
-			if off != len(want) {
-				return fmt.Errorf("round-trip ended early: got %d bytes, want %d", off, len(want))
-			}
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-	}
-}
-
 func requireReaderEqualPattern(r io.Reader, size int) error {
 	buf := make([]byte, 32*1024)
 	off := 0
