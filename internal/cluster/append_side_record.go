@@ -176,18 +176,33 @@ func (b *DistributedBackend) writeClusterAppendSideRecords(ctx context.Context, 
 }
 
 func (b *DistributedBackend) hydrateClusterAppendSideSegments(ctx context.Context, bucket, key string, obj *storage.Object) error {
-	if obj == nil || !obj.IsAppendable || obj.Size == 0 || len(obj.Segments) > 0 || len(obj.Coalesced) > 0 {
+	if obj == nil || !obj.IsAppendable || obj.Size == 0 || len(obj.Segments) > 0 {
 		return nil
 	}
 	summary, err := b.readClusterAppendSummary(ctx, bucket, key, obj.VersionID, obj.NodeIDs)
 	if err != nil {
 		if errors.Is(err, storage.ErrObjectNotFound) {
+			coalescedSize := int64(0)
+			for _, c := range obj.Coalesced {
+				coalescedSize += c.Size
+			}
+			if obj.Size == coalescedSize {
+				return nil
+			}
 			return fmt.Errorf("append side summary missing for %s/%s", bucket, key)
 		}
 		return err
 	}
-	if summary.Size != obj.Size {
-		return fmt.Errorf("append side summary size %d does not match object size %d", summary.Size, obj.Size)
+	objCoalescedSize := int64(0)
+	for _, c := range obj.Coalesced {
+		objCoalescedSize += c.Size
+	}
+	tailSize := obj.Size - objCoalescedSize
+	if tailSize < 0 {
+		return fmt.Errorf("append side summary size check: invalid coalesced size %d exceeds object size %d", objCoalescedSize, obj.Size)
+	}
+	if summary.Size != tailSize {
+		return fmt.Errorf("append side summary size %d does not match object tail size %d", summary.Size, tailSize)
 	}
 	segments := make([]storage.SegmentRef, 0, summary.SegmentCount)
 	var total int64
@@ -206,8 +221,8 @@ func (b *DistributedBackend) hydrateClusterAppendSideSegments(ctx context.Contex
 		total += seg.Size
 		segments = append(segments, seg)
 	}
-	if total != obj.Size {
-		return fmt.Errorf("append side segment size %d does not match object size %d", total, obj.Size)
+	if total != tailSize {
+		return fmt.Errorf("append side segment size %d does not match object tail size %d", total, tailSize)
 	}
 	obj.Segments = segments
 	return nil
