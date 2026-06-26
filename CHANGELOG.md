@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.752.0] - 2026-06-26
+
+### Changed
+- **Retired the dead data-group propose wire and command schema.**
+  Removed the unused `/forward/propose/data-group` buffered route, its private
+  raft-command payload/reply codecs, and the obsolete `clusterpb.Command`
+  envelope so the remaining forwarding surface only carries live owner and
+  meta-raft operations.
+
 ## [0.0.751.0] - 2026-06-26
 
 ### Changed

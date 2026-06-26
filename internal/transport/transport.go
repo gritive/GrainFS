@@ -27,8 +27,8 @@ const (
 	StreamShardReadBody    StreamType = 0x11 // ShardService read metadata reply followed by raw shard bytes
 	// 0x12 retired: was StreamCapabilityExchange (mux-era protocol version handshake).
 	// 0x13 retired: was StreamAuditShip (follower → leader S3 audit event push).
-	StreamDataGroupProposeForward StreamType = 0x14 // Follower → data-group leader metadata proposal forwarding
-	StreamReadAppendSegment       StreamType = 0x15 // Non-owner → owner append-segment blob read (request frame + raw segment bytes reply)
+	// 0x14 retired.
+	StreamReadAppendSegment StreamType = 0x15 // Non-owner → owner append-segment blob read (request frame + raw segment bytes reply)
 	// 0x16 retired: was StreamMetaJoinChallenge (legacy KEK-challenge nonce request).
 	StreamCapabilityProbe       StreamType = 0x17 // Peer → peer signed-assertion capability query (Task 1b)
 	StreamKEKDiskSpaceProbe     StreamType = 0x18 // Leader → peer keystore-directory free-bytes probe (KEK rotation Task 5)
@@ -51,7 +51,7 @@ func ClassOf(st StreamType) StreamClass {
 	switch st {
 	case StreamMetaRaft, StreamMetaProposeForward, StreamReadIndex, StreamMetaReadIndex:
 		return StreamClassMeta
-	case StreamData, StreamProposeForward, StreamProposeGroupForward, StreamGroupRaft, StreamDataGroupProposeForward:
+	case StreamData, StreamProposeForward, StreamProposeGroupForward, StreamGroupRaft:
 		return StreamClassData
 	case StreamGroupForwardBody, StreamGroupForwardRead, StreamShardWriteBody, StreamShardReadBody, StreamReadAppendSegment:
 		return StreamClassBulk

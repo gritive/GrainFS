@@ -94,6 +94,14 @@ func TestBufferedRoute_AllRoutesRegistered503(t *testing.T) {
 	}
 }
 
+func TestBufferedRouteTable_DataGroupProposeRouteRetired(t *testing.T) {
+	for _, rt := range bufferedRouteTable {
+		if rt.path == "/forward/propose/data-group" {
+			t.Fatalf("retired data-group propose route is still declared")
+		}
+	}
+}
+
 func TestBufferedRoute_UnregisterRevertsTo503(t *testing.T) {
 	srv, cli, addr := httpPair(t)
 	srv.RegisterBufferedRoute(RouteReceiptQuery, func(payload []byte) ([]byte, error) { return payload, nil })

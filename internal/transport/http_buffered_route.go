@@ -29,21 +29,20 @@ import (
 // taxonomy centralized in transport; handlers are consumer-registered per path
 // from the same domain sites that register tunnel handlers today.
 const (
-	RouteRaftDataRPC             = "/raft/data/rpc"
-	RouteRaftMetaRPC             = "/raft/meta/rpc"
-	RouteRaftGroupRPC            = "/raft/group/rpc"
-	RouteShardRPC                = "/shard/rpc"
-	RouteForwardProposeLegacy    = "/forward/propose/legacy"
-	RouteForwardProposeGroup     = "/forward/propose/group"
-	RouteForwardProposeDataGroup = "/forward/propose/data-group"
-	RouteForwardReadIndex        = "/forward/read-index"
-	RouteRaftMetaPropose         = "/raft/meta/propose"
-	RouteForwardMetaReadIndex    = "/raft/meta/read-index"
-	RouteReceiptQuery            = "/receipt/query"
-	RouteProbeCapability         = "/probe/capability"
-	RouteProbeKEKDisk            = "/probe/kek-disk"
-	RouteProbeKEKLease           = "/probe/kek-lease"
-	RouteProbeAppliedIndex       = "/probe/applied-index"
+	RouteRaftDataRPC          = "/raft/data/rpc"
+	RouteRaftMetaRPC          = "/raft/meta/rpc"
+	RouteRaftGroupRPC         = "/raft/group/rpc"
+	RouteShardRPC             = "/shard/rpc"
+	RouteForwardProposeLegacy = "/forward/propose/legacy"
+	RouteForwardProposeGroup  = "/forward/propose/group"
+	RouteForwardReadIndex     = "/forward/read-index"
+	RouteRaftMetaPropose      = "/raft/meta/propose"
+	RouteForwardMetaReadIndex = "/raft/meta/read-index"
+	RouteReceiptQuery         = "/receipt/query"
+	RouteProbeCapability      = "/probe/capability"
+	RouteProbeKEKDisk         = "/probe/kek-disk"
+	RouteProbeKEKLease        = "/probe/kek-lease"
+	RouteProbeAppliedIndex    = "/probe/applied-index"
 )
 
 // bufferedErrCap bounds how much of a non-200 response body the client reads
@@ -65,7 +64,6 @@ var bufferedRouteTable = []struct {
 	{RouteShardRPC, StreamData},
 	{RouteForwardProposeLegacy, StreamProposeForward},
 	{RouteForwardProposeGroup, StreamProposeGroupForward},
-	{RouteForwardProposeDataGroup, StreamDataGroupProposeForward},
 	{RouteForwardReadIndex, StreamReadIndex},
 	{RouteRaftMetaPropose, StreamMetaProposeForward},
 	{RouteForwardMetaReadIndex, StreamMetaReadIndex},

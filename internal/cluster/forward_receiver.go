@@ -155,40 +155,10 @@ func (r *ForwardReceiver) WithScrubSessionLookup(lookup ScrubSessionLookup) *For
 }
 
 // Register installs this ForwardReceiver's buffered-route handlers on shardSvc's
-// transport: /forward/propose/group (bucket-scoped operation forwarding) and
-// /forward/propose/data-group (metadata proposal forwarding). Every forward
-// outcome (NotVoter/NotLeader+hint/OK/...) is in-band in the FB reply.
+// transport: /forward/propose/group (bucket-scoped operation forwarding). Every
+// forward outcome (NotVoter/NotLeader+hint/OK/...) is in-band in the FB reply.
 func (r *ForwardReceiver) Register(shardSvc *ShardService) {
 	shardSvc.RegisterBufferedRoute(transport.RouteForwardProposeGroup, r.Handle)
-	shardSvc.RegisterBufferedRoute(transport.RouteForwardProposeDataGroup, r.HandleGroupPropose)
-}
-
-// HandleGroupPropose forwards a raw DistributedBackend metadata command to the
-// matching local data-group raft node. The propose outcome is in-band via
-// encodeProposeForwardReply.
-func (r *ForwardReceiver) HandleGroupPropose(payload []byte) ([]byte, error) {
-	groupID, data, err := decodeGroupForwardPayload(payload)
-	if err != nil {
-		return groupProposeReply(0, err)
-	}
-	dg := r.groups.Get(groupID)
-	if dg == nil || dg.Backend() == nil || dg.Backend().Node() == nil {
-		return groupProposeReply(0, errors.New("group propose: not voter"))
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), proposeForwardTimeout)
-	defer cancel()
-	idx, err := dg.Backend().Node().ProposeWait(ctx, data)
-	if err == nil {
-		if waitErr := dg.Backend().WaitApplied(ctx, idx); waitErr != nil {
-			err = waitErr
-		}
-	}
-	return groupProposeReply(idx, err)
-}
-
-func groupProposeReply(index uint64, err error) ([]byte, error) {
-	// Phase A (Task 16): wire-compatible with decodeProposeForwardReply.
-	return encodeProposeForwardReply(index, err), nil
 }
 
 // Handle serves one buffered /forward/propose/group request. Every outcome is
