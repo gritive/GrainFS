@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.737.0] - 2026-06-26
+
+### Fixed
+- **Removed storage/lifecycle unused test scaffolding.**
+  Deleted the remaining non-conflicting `staticcheck` U1000 findings in
+  `internal/storage` and `internal/lifecycle`; the remaining tracked dead
+  test helpers are in cluster/e2e files that overlap the active PR fleet.
+
 ## [0.0.736.0] - 2026-06-26
 
 ### Changed

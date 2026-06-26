@@ -67,7 +67,6 @@ func (b *fakeMPUBackend) ScanLocalMultipartUploads(bucket string) (<-chan storag
 type fakeMPUDeleter struct {
 	aborted   []string
 	partCount int // returned by MultipartUploadPartCount; 0 means "unknown"
-	waitN     []int
 }
 
 func (d *fakeMPUDeleter) DeleteObject(_ context.Context, _, _ string) error { return nil }
