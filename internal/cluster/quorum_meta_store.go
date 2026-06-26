@@ -355,24 +355,6 @@ func (s *QuorumMetaStore) readQuorumMetaWinningRaw(bucket, key string) ([]byte, 
 	}
 }
 
-func (s *QuorumMetaStore) readQuorumMetaWinningRawAllPeers(bucket, key string) ([]byte, error) {
-	localRaw, localErr := s.local().readQuorumMetaRaw(bucket, key)
-	if localErr != nil && !errors.Is(localErr, storage.ErrObjectNotFound) {
-		return nil, localErr
-	}
-	peerRaw, peerOK := s.fetchQuorumMetaFromPeers(bucket, key)
-	switch {
-	case localErr == nil && peerOK:
-		return s.pickQuorumMetaWinner(localRaw, peerRaw), nil
-	case localErr == nil:
-		return localRaw, nil
-	case peerOK:
-		return peerRaw, nil
-	default:
-		return nil, storage.ErrObjectNotFound
-	}
-}
-
 func (s *QuorumMetaStore) readQuorumMetaWinningRawBatchAllPeers(bucket string, keys []string) map[string][]byte {
 	out := make(map[string][]byte, len(keys))
 	if len(keys) == 0 {

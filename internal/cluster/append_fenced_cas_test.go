@@ -191,6 +191,76 @@ func TestAppendObject_ClusterCoalescedPrefix_TailSideRecords(t *testing.T) {
 	require.Len(t, headAfter.Segments, 2)
 }
 
+func TestPublishCoalesce_ClusterSideRecordsAdvancesTailSummary(t *testing.T) {
+	b := newTestBackendWithQuorumMeta(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "bk"))
+
+	_, err := b.AppendObject(ctx, "bk", "k", 0, bytes.NewReader([]byte("aaa")))
+	require.NoError(t, err)
+	_, err = b.AppendObject(ctx, "bk", "k", 3, bytes.NewReader([]byte("bbbb")))
+	require.NoError(t, err)
+	_, err = b.AppendObject(ctx, "bk", "k", 7, bytes.NewReader([]byte("cc")))
+	require.NoError(t, err)
+
+	headBefore, err := b.HeadObject(ctx, "bk", "k")
+	require.NoError(t, err)
+	require.Len(t, headBefore.Segments, 3)
+
+	baseBefore, err := b.readQuorumMetaCmd("bk", "k")
+	require.NoError(t, err)
+	summaryBefore, err := b.readClusterAppendSummary(ctx, "bk", "k", baseBefore.VersionID, baseBefore.NodeIDs)
+	require.NoError(t, err)
+	require.Equal(t, 3, summaryBefore.SegmentCount)
+	require.Equal(t, 0, summaryBefore.CompactedPrefixCount)
+
+	consumedSize := headBefore.Segments[0].Size + headBefore.Segments[1].Size
+	cmd := CoalesceSegmentsPlan{
+		Bucket:      "bk",
+		Key:         "k",
+		CoalescedID: "coal-side-1",
+		ShardKey:    "k/coalesced/coal-side-1",
+		Size:        consumedSize,
+		ETag:        "etag-coal-side-1",
+		ConsumedSegmentIDs: []string{
+			headBefore.Segments[0].BlobID,
+			headBefore.Segments[1].BlobID,
+		},
+		Placement: baseBefore.NodeIDs,
+		ECData:    baseBefore.ECData,
+		ECParity:  baseBefore.ECParity,
+	}
+	require.NoError(t, b.publishCoalesceBlob(ctx, cmd))
+
+	headAfter, err := b.HeadObject(ctx, "bk", "k")
+	require.NoError(t, err)
+	require.Len(t, headAfter.Coalesced, 1)
+	require.Len(t, headAfter.Segments, 1)
+	require.Equal(t, headBefore.Segments[2].BlobID, headAfter.Segments[0].BlobID)
+
+	baseAfter, err := b.readQuorumMetaCmd("bk", "k")
+	require.NoError(t, err)
+	summaryAfter, err := b.readClusterAppendSummary(ctx, "bk", "k", baseAfter.VersionID, baseAfter.NodeIDs)
+	require.NoError(t, err)
+	require.Equal(t, headBefore.Segments[2].Size, summaryAfter.Size)
+	require.Equal(t, 1, summaryAfter.SegmentCount)
+	require.Equal(t, 2, summaryAfter.CompactedPrefixCount)
+
+	require.NoError(t, b.writeClusterAppendSideRecords(ctx, "bk", "k", baseAfter.VersionID, baseAfter.NodeIDs, int(baseAfter.ECData), summaryBefore, nil))
+	require.NoError(t, b.publishCoalesceBlob(ctx, cmd))
+	summaryRepaired, err := b.readClusterAppendSummary(ctx, "bk", "k", baseAfter.VersionID, baseAfter.NodeIDs)
+	require.NoError(t, err)
+	require.Equal(t, summaryAfter, summaryRepaired)
+
+	_, err = b.AppendObject(ctx, "bk", "k", 9, bytes.NewReader([]byte("d")))
+	require.NoError(t, err)
+	headFinal, err := b.HeadObject(ctx, "bk", "k")
+	require.NoError(t, err)
+	require.Len(t, headFinal.Coalesced, 1)
+	require.Len(t, headFinal.Segments, 2)
+	require.Equal(t, headBefore.Segments[2].BlobID, headFinal.Segments[0].BlobID)
+}
+
 func TestHeadObject_ClusterCoalescedPrefixNoTailSideSummaryFallsThrough(t *testing.T) {
 	b := newTestBackendWithQuorumMeta(t)
 	ctx := context.Background()

@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.756.0] - 2026-06-26
+
+### Changed
+- **Integrated coalesce publish with cluster append side-record summaries.**
+  Coalescing a side-record-backed appendable object now advances the side-record
+  summary tail and compacted-prefix cursor, so Head/Get and later appends
+  continue from the remaining non-coalesced tail instead of re-reading consumed
+  side records.
+- Removed a stale quorum-meta raw-read helper that was left unused after the
+  paged LIST read-path optimization.
+
 ## [0.0.755.0] - 2026-06-26
 
 ### Added

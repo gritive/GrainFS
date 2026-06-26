@@ -2,6 +2,8 @@ package cluster
 
 import (
 	"fmt"
+
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 var errCoalescedEntriesAtCap = fmt.Errorf("coalesce: max coalesced entries (%d) reached", MaxCoalescedEntries)
@@ -36,14 +38,14 @@ func coalescedRefFromPlan(cmd CoalesceSegmentsPlan) CoalescedShardRef {
 //   - the published cmd is a CAS candidate: MetaSeqCAS=true, MetaSeq=base+1.
 //     Size/ETag are unchanged (coalesce is a reorganization, not a content
 //     change).
-func planCoalesceBlobRMW(base PutObjectMetaCmd, cmd CoalesceSegmentsPlan) (PutObjectMetaCmd, coalesceSegmentsTransitionResult, error) {
+func planCoalesceBlobRMWWithSideSummary(base PutObjectMetaCmd, summary storage.AppendSummary, hasSummary bool, cmd CoalesceSegmentsPlan) (PutObjectMetaCmd, storage.AppendSummary, coalesceSegmentsTransitionResult, error) {
 	for _, c := range base.Coalesced {
 		if c.CoalescedID == cmd.CoalescedID {
-			return PutObjectMetaCmd{}, coalesceSegmentsTransitionResult{Noop: true}, nil
+			return PutObjectMetaCmd{}, storage.AppendSummary{}, coalesceSegmentsTransitionResult{Noop: true}, nil
 		}
 	}
 	if len(base.Coalesced) >= MaxCoalescedEntries {
-		return PutObjectMetaCmd{}, coalesceSegmentsTransitionResult{CoalescedEntriesAtCap: true}, errCoalescedEntriesAtCap
+		return PutObjectMetaCmd{}, storage.AppendSummary{}, coalesceSegmentsTransitionResult{CoalescedEntriesAtCap: true}, errCoalescedEntriesAtCap
 	}
 
 	consumed := make(map[string]bool, len(cmd.ConsumedSegmentIDs))
@@ -71,5 +73,27 @@ func planCoalesceBlobRMW(base PutObjectMetaCmd, cmd CoalesceSegmentsPlan) (PutOb
 	next.IsHardDeleted = false
 	next.ExpectedETag = ""
 	next.PreserveLatest = false
-	return next, coalesceSegmentsTransitionResult{}, nil
+	if !hasSummary {
+		return next, storage.AppendSummary{}, coalesceSegmentsTransitionResult{}, nil
+	}
+	nextSummary, err := advanceAppendSummaryForCoalesce(summary, cmd)
+	if err != nil {
+		return PutObjectMetaCmd{}, storage.AppendSummary{}, coalesceSegmentsTransitionResult{}, err
+	}
+	return next, nextSummary, coalesceSegmentsTransitionResult{}, nil
+}
+
+func advanceAppendSummaryForCoalesce(summary storage.AppendSummary, cmd CoalesceSegmentsPlan) (storage.AppendSummary, error) {
+	consumedCount := len(cmd.ConsumedSegmentIDs)
+	if consumedCount > summary.SegmentCount {
+		return storage.AppendSummary{}, fmt.Errorf("coalesce append summary: consumed %d exceeds tail segment count %d", consumedCount, summary.SegmentCount)
+	}
+	if cmd.Size > summary.Size {
+		return storage.AppendSummary{}, fmt.Errorf("coalesce append summary: consumed size %d exceeds tail size %d", cmd.Size, summary.Size)
+	}
+	nextSummary := summary
+	nextSummary.Size -= cmd.Size
+	nextSummary.SegmentCount -= consumedCount
+	nextSummary.CompactedPrefixCount += consumedCount
+	return nextSummary, nil
 }

@@ -20,10 +20,13 @@ const (
 )
 
 type appendSummary struct {
-	Size            int64
-	SegmentCount    int
-	ETagPartCount   int
-	ETagDigestState []byte
+	Size         int64
+	SegmentCount int
+	// CompactedPrefixCount is the count of earlier append side segments that were
+	// consumed into Coalesced refs. Live tail segments start at this prefix + 1.
+	CompactedPrefixCount int
+	ETagPartCount        int
+	ETagDigestState      []byte
 }
 
 type AppendSummary = appendSummary
@@ -37,18 +40,35 @@ func appendSegmentKey(bucket, key, versionID string, seq int) []byte {
 }
 
 func encodeAppendSummary(s appendSummary) []byte { //nolint:unused // referenced by append_side_record_test.go until the writer path lands.
-	if s.ETagPartCount == 0 && len(s.ETagDigestState) == 0 {
+	if s.ETagPartCount == 0 && len(s.ETagDigestState) == 0 && s.CompactedPrefixCount == 0 {
 		var buf [16]byte
 		binary.BigEndian.PutUint64(buf[0:8], uint64(s.Size))
 		binary.BigEndian.PutUint64(buf[8:16], uint64(s.SegmentCount))
 		return buf[:]
 	}
-	buf := make([]byte, 28+len(s.ETagDigestState))
+	if s.ETagPartCount == 0 && len(s.ETagDigestState) == 0 {
+		var buf [24]byte
+		binary.BigEndian.PutUint64(buf[0:8], uint64(s.Size))
+		binary.BigEndian.PutUint64(buf[8:16], uint64(s.SegmentCount))
+		binary.BigEndian.PutUint64(buf[16:24], uint64(s.CompactedPrefixCount))
+		return buf[:]
+	}
+	if s.CompactedPrefixCount == 0 {
+		buf := make([]byte, 28+len(s.ETagDigestState))
+		binary.BigEndian.PutUint64(buf[0:8], uint64(s.Size))
+		binary.BigEndian.PutUint64(buf[8:16], uint64(s.SegmentCount))
+		binary.BigEndian.PutUint64(buf[16:24], uint64(s.ETagPartCount))
+		binary.BigEndian.PutUint32(buf[24:28], uint32(len(s.ETagDigestState)))
+		copy(buf[28:], s.ETagDigestState)
+		return buf
+	}
+	buf := make([]byte, 36+len(s.ETagDigestState))
 	binary.BigEndian.PutUint64(buf[0:8], uint64(s.Size))
 	binary.BigEndian.PutUint64(buf[8:16], uint64(s.SegmentCount))
 	binary.BigEndian.PutUint64(buf[16:24], uint64(s.ETagPartCount))
 	binary.BigEndian.PutUint32(buf[24:28], uint32(len(s.ETagDigestState)))
 	copy(buf[28:], s.ETagDigestState)
+	binary.BigEndian.PutUint64(buf[28+len(s.ETagDigestState):36+len(s.ETagDigestState)], uint64(s.CompactedPrefixCount))
 	return buf
 }
 
@@ -57,7 +77,7 @@ func EncodeAppendSummary(s AppendSummary) []byte {
 }
 
 func decodeAppendSummary(data []byte) (appendSummary, error) {
-	if len(data) != 16 && len(data) < 28 {
+	if len(data) != 16 && len(data) != 24 && len(data) < 28 {
 		return appendSummary{}, fmt.Errorf("append summary: invalid length %d", len(data))
 	}
 	summary := appendSummary{
@@ -67,12 +87,20 @@ func decodeAppendSummary(data []byte) (appendSummary, error) {
 	if len(data) == 16 {
 		return summary, nil
 	}
+	if len(data) == 24 {
+		summary.CompactedPrefixCount = int(binary.BigEndian.Uint64(data[16:24]))
+		return summary, nil
+	}
 	stateLen := int(binary.BigEndian.Uint32(data[24:28]))
-	if len(data) != 28+stateLen {
+	if len(data) != 28+stateLen && len(data) != 36+stateLen {
 		return appendSummary{}, fmt.Errorf("append summary: invalid etag state length %d for %d bytes", stateLen, len(data))
 	}
 	summary.ETagPartCount = int(binary.BigEndian.Uint64(data[16:24]))
 	summary.ETagDigestState = append([]byte(nil), data[28:]...)
+	if len(data) == 36+stateLen {
+		summary.ETagDigestState = append([]byte(nil), data[28:28+stateLen]...)
+		summary.CompactedPrefixCount = int(binary.BigEndian.Uint64(data[28+stateLen : 36+stateLen]))
+	}
 	return summary, nil
 }
 

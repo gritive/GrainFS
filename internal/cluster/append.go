@@ -191,7 +191,8 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 		werr := b.writeQuorumMeta(ctx, cmd)
 		if werr == nil {
 			if sideMode {
-				if err := b.writeClusterAppendSideRecords(ctx, bucket, key, versionID, cmd.NodeIDs, int(cmd.ECData), summary, map[int]storage.SegmentRef{summary.SegmentCount: seg}); err != nil {
+				seq := summary.CompactedPrefixCount + summary.SegmentCount
+				if err := b.writeClusterAppendSideRecords(ctx, bucket, key, versionID, cmd.NodeIDs, int(cmd.ECData), summary, map[int]storage.SegmentRef{seq: seg}); err != nil {
 					return nil, fmt.Errorf("append side record commit: %w", err)
 				}
 			}

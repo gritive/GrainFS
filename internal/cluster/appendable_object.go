@@ -216,10 +216,11 @@ func planAppendObjectBlobRMWWithSide(in appendBlobRMWInput) (PutObjectMetaCmd, s
 		next.ExpectedETag = ""
 		next.PreserveLatest = false
 		return next, storage.AppendSummary{
-			Size:            in.BaseSummary.Size + seg.Size,
-			SegmentCount:    in.BaseSummary.SegmentCount + 1,
-			ETagPartCount:   count,
-			ETagDigestState: state,
+			Size:                 in.BaseSummary.Size + seg.Size,
+			SegmentCount:         in.BaseSummary.SegmentCount + 1,
+			CompactedPrefixCount: in.BaseSummary.CompactedPrefixCount,
+			ETagPartCount:        count,
+			ETagDigestState:      state,
 		}, true, nil
 	}
 
