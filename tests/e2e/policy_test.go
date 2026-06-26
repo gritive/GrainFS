@@ -14,7 +14,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/gritive/GrainFS/internal/bucketadmin"
-	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 )
@@ -190,13 +189,4 @@ func adminPolicySetRaw(t testing.TB, tgt s3Target, bucket string, body []byte) (
 	respBody, err := io.ReadAll(resp.Body)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	return resp.StatusCode, respBody
-}
-
-func signedPolicyRequest(t testing.TB, tgt s3Target, method, bucket string, body io.Reader) *http.Request {
-	t.Helper()
-	req, err := http.NewRequest(method, tgt.endpoint(0)+"/"+bucket+"?policy", body)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	req.Host = req.URL.Host
-	s3auth.SignRequest(req, tgt.accessKey, tgt.secretKey, "us-east-1")
-	return req
 }

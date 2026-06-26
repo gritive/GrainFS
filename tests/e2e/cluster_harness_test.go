@@ -22,9 +22,6 @@ type ClusterMode string
 const (
 	ClusterModeDynamicJoin ClusterMode = "dynamic-join"
 	ClusterModeStaticPeers ClusterMode = "static-peers"
-
-	// joinPendingFile mirrors serveruntime.JoinPendingFile to avoid an import cycle.
-	joinPendingFile = ".join-pending"
 )
 
 type e2eClusterOptions struct {

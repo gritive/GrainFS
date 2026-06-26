@@ -23,18 +23,6 @@ var _ = ginkgo.Describe("IAM bucket", ginkgo.Label("bucket"), func() {
 	})
 })
 
-// validBucketPolicyDoc is a minimal S3 bucket policy accepted by
-// policy.ParsePolicy (requires Effect="Allow"|"Deny").
-const validBucketPolicyDoc = `{
-	"Version":"2012-10-17",
-	"Statement":[{
-		"Effect":"Allow",
-		"Principal":"*",
-		"Action":["s3:GetObject"],
-		"Resource":["arn:aws:s3:::test-bucket/*"]
-	}]
-}`
-
 // runIAMBucketCases exercises bucket CRUD, policy put/delete, and the
 // data-plane create-denied invariant (D#8) against the given target.
 //
