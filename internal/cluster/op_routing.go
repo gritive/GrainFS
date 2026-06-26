@@ -8,11 +8,13 @@ import (
 // Peer addresses are dial-ready (resolved through the address book at route
 // time per Q5).
 type RouteTarget struct {
-	GroupID         string
-	Peers           []string
-	SelfIsLeader    bool
-	SelfIsVoter     bool
-	SelfIsOnlyVoter bool
+	GroupID          string
+	Peers            []string
+	SelfIsLeader     bool
+	SelfIsVoter      bool
+	SelfIsOnlyVoter  bool
+	SelfIsWriteOwner bool
+	OwnerPeer        string
 }
 
 // CanReadLocal reports whether self can answer a read without coordinating
@@ -280,6 +282,51 @@ func (r *OpRouter) RouteObjectWriteGroup(groupID string) (RouteTarget, ShardGrou
 		return RouteTarget{}, ShardGroupEntry{}, err
 	}
 	r.fillWriteForwardPeers(&target, group)
+	return target, group, nil
+}
+
+// RouteObjectOwnerWrite resolves a write-shaped target whose execution must be
+// serialized by the deterministic group owner instead of the data-group leader.
+func (r *OpRouter) RouteObjectOwnerWrite(bucket, key string) (RouteTarget, ShardGroupEntry, error) {
+	target, group, err := r.RouteObjectWrite(bucket, key)
+	if err != nil {
+		return RouteTarget{}, ShardGroupEntry{}, err
+	}
+	return r.ownerWriteTarget(target, group)
+}
+
+// RouteObjectOwnerWriteGroup resolves an owner-write target for a known
+// placement group. Multipart session ops use this because the upload ID stores
+// the create-time group.
+func (r *OpRouter) RouteObjectOwnerWriteGroup(groupID string) (RouteTarget, ShardGroupEntry, error) {
+	target, group, err := r.RouteObjectWriteGroup(groupID)
+	if err != nil {
+		return RouteTarget{}, ShardGroupEntry{}, err
+	}
+	return r.ownerWriteTarget(target, group)
+}
+
+func (r *OpRouter) ownerWriteTarget(target RouteTarget, group ShardGroupEntry) (RouteTarget, ShardGroupEntry, error) {
+	peers := NewShardGroupPeerSet(group)
+	owner, ok := peers.OwnerPeer(group.ID)
+	if !ok {
+		return RouteTarget{}, ShardGroupEntry{}, ErrUnknownGroup
+	}
+	target.OwnerPeer = owner
+	target.SelfIsWriteOwner = peers.OwnerMatchesLocal(group.ID, r.selfID, r.selfAliases...)
+	if target.SelfIsWriteOwner {
+		target.Peers = nil
+		return target, group, nil
+	}
+	forward := []string{owner}
+	if r.addr != nil {
+		resolved, err := ResolveNodeAddresses(r.addr, forward)
+		if err != nil {
+			return RouteTarget{}, ShardGroupEntry{}, err
+		}
+		forward = resolved
+	}
+	target.Peers = forward
 	return target, group, nil
 }
 

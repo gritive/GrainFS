@@ -166,6 +166,45 @@ func TestOpRouter_RouteObjectWrite_PreservesForwardPeersWhenSelfIsLeader(t *test
 	require.NotContains(t, target.Peers[:len(target.Peers)-1], "10.0.0.2:7000")
 }
 
+func TestOpRouter_RouteObjectOwnerWriteGroup_UsesOwnerOnlyPeer(t *testing.T) {
+	groups := &fakeShardGroupSource{
+		groups: map[string]ShardGroupEntry{
+			"g1": {ID: "g1", PeerIDs: []string{"node-1"}},
+		},
+	}
+	addr := &fakeNodeAddressBook{nodes: []MetaNodeEntry{
+		{ID: "node-1", Address: "10.0.0.1:7000"},
+		{ID: "node-2", Address: "10.0.0.2:7000"},
+	}}
+	r := NewOpRouter(nil, groups, addr, &fakeLeaderProbe{}, ECConfig{}, "node-2", nil)
+
+	target, group, err := r.RouteObjectOwnerWriteGroup("g1")
+
+	require.NoError(t, err)
+	require.Equal(t, target.GroupID, group.ID)
+	require.False(t, target.SelfIsWriteOwner)
+	require.Equal(t, "node-1", target.OwnerPeer)
+	require.Equal(t, []string{"10.0.0.1:7000"}, target.Peers)
+}
+
+func TestOpRouter_RouteObjectOwnerWriteGroup_LocalOwnerDoesNotRequireLeader(t *testing.T) {
+	groups := &fakeShardGroupSource{
+		groups: map[string]ShardGroupEntry{
+			"g1": {ID: "g1", PeerIDs: []string{"node-1"}},
+		},
+	}
+	r := NewOpRouter(nil, groups, nil, &fakeLeaderProbe{}, ECConfig{}, "node-1", nil)
+
+	target, group, err := r.RouteObjectOwnerWriteGroup("g1")
+
+	require.NoError(t, err)
+	require.Equal(t, group.ID, target.GroupID)
+	require.True(t, target.SelfIsWriteOwner)
+	require.True(t, target.SelfIsVoter)
+	require.False(t, target.SelfIsLeader)
+	require.Empty(t, target.Peers)
+}
+
 func TestRouteObjectRead_IndexFree(t *testing.T) {
 	groups := &fakeShardGroupSource{
 		groups: map[string]ShardGroupEntry{

@@ -38,6 +38,40 @@ func TestShardGroupPeerSet_ForwardOrderMovesLocalAliasesLast(t *testing.T) {
 	require.Equal(t, []string{"node-b", "node-c", "127.0.0.1:7001"}, got)
 }
 
+func TestShardGroupPeerSet_OwnerPeerDeterministic(t *testing.T) {
+	peers := NewShardGroupPeerSet(ShardGroupEntry{
+		ID:      "group-7",
+		PeerIDs: []string{"node-c", "node-a", "node-b"},
+	})
+
+	a, okA := peers.OwnerPeer("group-7")
+	b, okB := peers.OwnerPeer("group-7")
+	require.True(t, okA)
+	require.True(t, okB)
+	require.Equal(t, a, b)
+	require.Contains(t, []string{"node-a", "node-b", "node-c"}, a)
+}
+
+func TestShardGroupPeerSet_OwnerPeerSingleNodeDuplicate(t *testing.T) {
+	peers := NewShardGroupPeerSet(ShardGroupEntry{
+		ID:      "group-0",
+		PeerIDs: []string{"node-a", "node-a", "node-a"},
+	})
+
+	got, ok := peers.OwnerPeer("group-0")
+	require.True(t, ok)
+	require.Equal(t, "node-a", got)
+}
+
+func TestShardGroupPeerSet_OwnerMatchesLocalAlias(t *testing.T) {
+	peers := NewShardGroupPeerSet(ShardGroupEntry{
+		ID:      "group-legacy",
+		PeerIDs: []string{"127.0.0.1:7001"},
+	})
+
+	require.True(t, peers.OwnerMatchesLocal("group-legacy", "node-a", "127.0.0.1:7001"))
+}
+
 func TestResolveShardGroupPeers_PreservesLegacyAndUnresolvedState(t *testing.T) {
 	f := NewMetaFSM()
 	require.NoError(t, f.applyCmd(makeAddNodeCmd(t, "node-a", "127.0.0.1:7001", 0)))

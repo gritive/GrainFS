@@ -213,6 +213,26 @@ func TestForwardSender_NotLeaderRedirect_OnceOnly(t *testing.T) {
 	require.Equal(t, raftpb.ForwardStatusOK, fr.Status())
 }
 
+func TestForwardSender_SendOwner_IgnoresLeaderHint(t *testing.T) {
+	var connected []string
+	dialer := func(ctx context.Context, peer string, payload []byte) ([]byte, error) {
+		connected = append(connected, peer)
+		require.Equal(t, "owner-peer", peer)
+		return notLeaderReplyBytes(t, "raft-leader"), nil
+	}
+	s := NewForwardSender(dialer)
+
+	reply, err := s.SendOwner(context.Background(),
+		[]string{"owner-peer"}, "group-1",
+		raftpb.ForwardOpCreateMultipartUpload, buildCreateMultipartUploadArgs("b", "k", "text/plain", nil))
+
+	require.NoError(t, err)
+	require.Equal(t, []string{"owner-peer"}, connected)
+	fr := raftpb.GetRootAsForwardReply(reply, 0)
+	require.Equal(t, raftpb.ForwardStatusNotLeader, fr.Status())
+	require.Empty(t, s.cachedLeader("group-1"))
+}
+
 func TestForwardSender_NotLeaderMalformedHintDoesNotPanic(t *testing.T) {
 	replyWithBadHint := notLeaderReplyBytes(t, "peer-B")
 	replyWithBadHint[10] = 0x01
@@ -358,6 +378,32 @@ func TestForwardSender_NotLeaderHintFails_FallthroughOriginalReply(t *testing.T)
 	fr := raftpb.GetRootAsForwardReply(reply, 0)
 	// Caller sees NotLeader status — they will retry from a fresh node.
 	require.Equal(t, raftpb.ForwardStatusNotLeader, fr.Status())
+}
+
+func TestForwardSender_SendStreamOwner_IgnoresLeaderHint(t *testing.T) {
+	var connected []string
+	streamDialer := func(ctx context.Context, peer string, payload []byte, body io.Reader) ([]byte, error) {
+		connected = append(connected, peer)
+		require.Equal(t, "owner-peer", peer)
+		got, err := io.ReadAll(body)
+		require.NoError(t, err)
+		require.Equal(t, []byte("payload"), got)
+		return notLeaderReplyBytes(t, "raft-leader"), nil
+	}
+	s := NewForwardSender(func(context.Context, string, []byte) ([]byte, error) {
+		t.Fatal("single-message dialer must not be used for streamed body")
+		return nil, nil
+	}).WithStreamDialer(streamDialer)
+
+	reply, err := s.SendStreamOwner(context.Background(),
+		[]string{"owner-peer"}, "group-1",
+		raftpb.ForwardOpAppendObject, buildAppendObjectForwardArgs("b", "k", 0), bytes.NewReader([]byte("payload")))
+
+	require.NoError(t, err)
+	require.Equal(t, []string{"owner-peer"}, connected)
+	fr := raftpb.GetRootAsForwardReply(reply, 0)
+	require.Equal(t, raftpb.ForwardStatusNotLeader, fr.Status())
+	require.Empty(t, s.cachedLeader("group-1"))
 }
 
 // TestForwardSender_ContextCanceled_StopsImmediately verifies caller context

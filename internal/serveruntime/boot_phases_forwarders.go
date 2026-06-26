@@ -97,7 +97,8 @@ func bootWALAndForwardersPart1(ctx context.Context, state *bootState) error {
 			}
 			return hint
 		})
-	state.forwardReceiver = cluster.NewForwardReceiver(state.dgMgr)
+	state.forwardReceiver = cluster.NewForwardReceiver(state.dgMgr).
+		WithLocalIdentity(state.nodeID, state.raftAddr)
 
 	metaForwardDialer := func(callCtx context.Context, peer string, payload []byte) ([]byte, error) {
 		// Native /raft/meta/propose buffered route (Phase 8 N7-3); pooled HTTP

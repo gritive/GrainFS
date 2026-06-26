@@ -255,7 +255,7 @@ func TestForwardReceiver_HandleCompleteMultipartUpload_ReturnsOK(t *testing.T) {
 	mgr := NewDataGroupManager()
 	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
 
-	rcv := NewForwardReceiver(mgr)
+	rcv := NewForwardReceiver(mgr).WithLocalIdentity("test-node")
 
 	args := buildCompleteMultipartUploadArgs("bucket", "mpu-key", up.UploadID, []storage.Part{*part}, versioningStateUnknown)
 	payload := encodeForwardPayload("group-1", raftpb.ForwardOpCompleteMultipartUpload, args)
@@ -269,6 +269,42 @@ func TestForwardReceiver_HandleCompleteMultipartUpload_ReturnsOK(t *testing.T) {
 	require.NotEmpty(t, head.VersionID)
 }
 
+func TestForwardReceiver_OwnerRoutedRejectsNonOwnerEvenWhenRaftLeader(t *testing.T) {
+	gb := newTestGroupBackend(t, "group-1")
+	require.True(t, gb.Node().IsLeader(), "test backend must start as raft leader")
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"owner-node"}, gb))
+	rcv := NewForwardReceiver(mgr).WithLocalIdentity("test-node")
+
+	args := buildCreateMultipartUploadArgs("bucket", "mpu-key", "text/plain", nil)
+	payload := encodeForwardPayload("group-1", raftpb.ForwardOpCreateMultipartUpload, args)
+
+	reply, _ := rcv.Handle(payload)
+
+	require.NotNil(t, reply)
+	fr := raftpb.GetRootAsForwardReply(reply, 0)
+	require.Equal(t, raftpb.ForwardStatusNotLeader, fr.Status())
+}
+
+func TestForwardReceiver_OwnerRoutedAllowsLocalOwnerWithoutRaftGate(t *testing.T) {
+	gb := newTestGroupBackend(t, "group-1")
+	require.NoError(t, gb.CreateBucket(context.Background(), "bucket"))
+
+	mgr := NewDataGroupManager()
+	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
+	rcv := NewForwardReceiver(mgr).WithLocalIdentity("test-node")
+
+	args := buildCreateMultipartUploadArgs("bucket", "mpu-key", "text/plain", nil)
+	payload := encodeForwardPayload("group-1", raftpb.ForwardOpCreateMultipartUpload, args)
+
+	reply, _ := rcv.Handle(payload)
+
+	require.NotNil(t, reply)
+	fr := raftpb.GetRootAsForwardReply(reply, 0)
+	require.Equal(t, raftpb.ForwardStatusOK, fr.Status())
+}
+
 func TestForwardReceiver_HandleListParts_CallsBackend(t *testing.T) {
 	gb := newTestGroupBackend(t, "group-1")
 	require.NoError(t, gb.CreateBucket(context.Background(), "bucket"))
@@ -279,7 +315,7 @@ func TestForwardReceiver_HandleListParts_CallsBackend(t *testing.T) {
 
 	mgr := NewDataGroupManager()
 	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
-	rcv := NewForwardReceiver(mgr)
+	rcv := NewForwardReceiver(mgr).WithLocalIdentity("test-node")
 
 	payload := encodeForwardPayload("group-1", raftpb.ForwardOpListParts, buildListPartsArgs("bucket", "mpu-key", up.UploadID, 100))
 	reply, _ := rcv.Handle(payload)
@@ -296,7 +332,7 @@ func TestForwardReceiver_HandleListParts_MissingUploadReturnsNoSuchUpload(t *tes
 
 	mgr := NewDataGroupManager()
 	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
-	rcv := NewForwardReceiver(mgr)
+	rcv := NewForwardReceiver(mgr).WithLocalIdentity("test-node")
 
 	payload := encodeForwardPayload("group-1", raftpb.ForwardOpListParts, buildListPartsArgs("bucket", "mpu-key", "missing", 100))
 	reply, _ := rcv.Handle(payload)

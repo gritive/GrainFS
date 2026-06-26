@@ -206,8 +206,7 @@ func (r forwardRuntime) uploadPart(
 	}
 	if r.sender.streamDialer != nil && shouldStreamForwardBody(bodyReader, r.maxBody) {
 		args := buildUploadPartArgs(bucket, key, uploadID, int32(partNumber), nil, contentMD5Hex)
-		peers := r.sender.ResolveLeaderPeers(ctx, target.Peers, target.GroupID, bucket, key)
-		reply, err := r.sender.SendStream(ctx, peers, target.GroupID, raftpb.ForwardOpUploadPart, args, bodyReader)
+		reply, err := r.sender.SendStreamOwner(ctx, target.Peers, target.GroupID, raftpb.ForwardOpUploadPart, args, bodyReader)
 		if err != nil {
 			return nil, err
 		}
@@ -219,7 +218,7 @@ func (r forwardRuntime) uploadPart(
 		return nil, err
 	}
 	args := buildUploadPartArgs(bucket, key, uploadID, int32(partNumber), body, contentMD5Hex)
-	reply, err := r.sender.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpUploadPart, args)
+	reply, err := r.sender.SendOwner(ctx, target.Peers, target.GroupID, raftpb.ForwardOpUploadPart, args)
 	if err != nil {
 		return nil, err
 	}
@@ -332,7 +331,7 @@ func (r forwardRuntime) createMultipartUpload(
 		return nil, ErrCoordinatorNoRouter
 	}
 	args := buildCreateMultipartUploadArgs(bucket, key, contentType, tags)
-	reply, err := r.sender.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpCreateMultipartUpload, args)
+	reply, err := r.sender.SendOwner(ctx, target.Peers, target.GroupID, raftpb.ForwardOpCreateMultipartUpload, args)
 	if err != nil {
 		return nil, err
 	}
@@ -344,7 +343,7 @@ func (r forwardRuntime) completeMultipartUpload(ctx context.Context, target Rout
 		return nil, ErrCoordinatorNoRouter
 	}
 	args := buildCompleteMultipartUploadArgs(bucket, key, uploadID, parts, versioningStateFromContext(ctx))
-	reply, err := r.sender.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpCompleteMultipartUpload, args)
+	reply, err := r.sender.SendOwner(ctx, target.Peers, target.GroupID, raftpb.ForwardOpCompleteMultipartUpload, args)
 	if err != nil {
 		return nil, err
 	}
@@ -356,7 +355,11 @@ func (r forwardRuntime) abortMultipartUpload(ctx context.Context, target RouteTa
 		return ErrCoordinatorNoRouter
 	}
 	args := buildAbortMultipartUploadArgs(bucket, key, uploadID)
-	return r.mutateFrame(ctx, target, raftpb.ForwardOpAbortMultipartUpload, args)
+	reply, err := r.sender.SendOwner(ctx, target.Peers, target.GroupID, raftpb.ForwardOpAbortMultipartUpload, args)
+	if err != nil {
+		return err
+	}
+	return parseReplyStatus(reply)
 }
 
 func (r forwardRuntime) listMultipartUploads(ctx context.Context, target RouteTarget, bucket, prefix string, maxUploads int) ([]*storage.MultipartUpload, error) {
@@ -376,7 +379,7 @@ func (r forwardRuntime) listParts(ctx context.Context, target RouteTarget, bucke
 		return nil, ErrCoordinatorNoRouter
 	}
 	args := buildListPartsArgs(bucket, key, uploadID, int32(maxParts))
-	reply, err := r.sender.Send(ctx, target.Peers, target.GroupID, raftpb.ForwardOpListParts, args)
+	reply, err := r.sender.SendOwner(ctx, target.Peers, target.GroupID, raftpb.ForwardOpListParts, args)
 	if err != nil {
 		return nil, err
 	}
@@ -407,8 +410,7 @@ func (r forwardRuntime) appendObject(
 		defer r.appendBuf.Release(bodyLen)
 	}
 	args := buildAppendObjectForwardArgs(bucket, key, expectedOffset)
-	peers := r.sender.ResolveLeaderPeers(ctx, target.Peers, target.GroupID, bucket, key)
-	reply, err := r.sender.SendStream(ctx, peers, target.GroupID, raftpb.ForwardOpAppendObject, args, bytes.NewReader(forwardBody))
+	reply, err := r.sender.SendStreamOwner(ctx, target.Peers, target.GroupID, raftpb.ForwardOpAppendObject, args, bytes.NewReader(forwardBody))
 	if err != nil {
 		return nil, topologyForwardWriteError(group, err)
 	}
