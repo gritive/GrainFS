@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.758.0] - 2026-06-27
+
+### Changed
+- **Reduced encrypted spool read-side buffering for multipart complete and copy.**
+  Encrypted spool readers now reuse pooled plaintext/ciphertext buffers and
+  per-record AAD scratch across records, cutting read-side allocation pressure
+  in EC multipart Complete and Copy benchmarks.
+
 ## [0.0.757.0] - 2026-06-27
 
 ### Added

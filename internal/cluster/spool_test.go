@@ -368,13 +368,58 @@ func TestReadSpoolEncryptedRecord_WipesPlaintextOnOpenError(t *testing.T) {
 	frame := append(append([]byte{}, hdr[:]...), blob...)
 
 	plainDst := make([]byte, 0, 256) // reusable buffer the fake will dirty
-	_, _, _, err := readSpoolEncryptedRecord(bytes.NewReader(frame), residueOpenSeam{}, "d", 0, plainDst, nil)
+	_, _, _, _, err := readSpoolEncryptedRecord(bytes.NewReader(frame), residueOpenSeam{}, "d", 0, plainDst, nil, nil)
 	require.Error(t, err)
 
 	full := plainDst[:cap(plainDst)]
 	for i, b := range full {
 		require.Zerof(t, b, "plainDst[%d]=%#x not wiped on Open error", i, b)
 	}
+}
+
+type recordingOpenSeam struct {
+	storage.DataEncryptor
+	dstBacking    []*byte
+	retBacking    []*byte
+	fieldsBacking []*encrypt.AADField
+}
+
+func (s *recordingOpenSeam) OpenTo(dst []byte, domain encrypt.AADDomain, fields []encrypt.AADField, gen uint32, ct []byte) ([]byte, error) {
+	s.dstBacking = append(s.dstBacking, unsafe.SliceData(dst[:cap(dst)]))
+	s.fieldsBacking = append(s.fieldsBacking, unsafe.SliceData(fields[:cap(fields)]))
+	out, err := s.DataEncryptor.OpenTo(dst, domain, fields, gen, ct)
+	s.retBacking = append(s.retBacking, unsafe.SliceData(out))
+	return out, err
+}
+
+func TestEncryptedSpoolReader_ReusesPooledBuffersAndAADFields(t *testing.T) {
+	seam := &recordingOpenSeam{DataEncryptor: newClusterTestSeam(t)}
+	payload := append(bytes.Repeat([]byte("A"), spoolCopyBufferSize), bytes.Repeat([]byte("b"), 512)...)
+	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", seam, "cluster-spool:reader-reuse")
+	require.NoError(t, err)
+	defer sp.Cleanup()
+
+	rc, err := sp.Open()
+	require.NoError(t, err)
+	r, ok := rc.(*encryptedSpoolRecordReader)
+	require.True(t, ok, "expected *encryptedSpoolRecordReader")
+	require.NotNil(t, r.plainRef, "reader must acquire a pooled plaintext buffer")
+	require.NotNil(t, r.cipherRef, "reader must acquire a pooled ciphertext buffer")
+	require.GreaterOrEqual(t, cap(*r.plainRef), spoolCopyBufferSize)
+	require.GreaterOrEqual(t, cap(*r.cipherRef), encryptedSpoolCipherBufferSize)
+
+	got, err := io.ReadAll(r)
+	require.NoError(t, err)
+	require.NoError(t, r.Close())
+	require.Equal(t, payload, got)
+
+	require.Len(t, seam.dstBacking, 2, "expected one OpenTo call per encrypted spool record")
+	require.Len(t, seam.retBacking, 2)
+	require.Len(t, seam.fieldsBacking, 2)
+	require.Equal(t, seam.retBacking[0], seam.dstBacking[1],
+		"second OpenTo dst must reuse the first record's plaintext backing array")
+	require.Equal(t, seam.fieldsBacking[0], seam.fieldsBacking[1],
+		"reader must reuse AAD fields backing across records")
 }
 
 // recordingSealSeam wraps a real seam, recording whether Seal (the
