@@ -352,6 +352,10 @@ func appendETagStateAppend(state []byte, count int, digest []byte) ([]byte, int,
 	return next, count + 1, nil
 }
 
+func AppendETagStateAppend(state []byte, count int, digest []byte) ([]byte, int, error) {
+	return appendETagStateAppend(state, count, digest)
+}
+
 func compositeETagFromState(state []byte, count int) (string, error) {
 	h := md5.New()
 	if len(state) > 0 {
@@ -364,6 +368,10 @@ func compositeETagFromState(state []byte, count int) (string, error) {
 		}
 	}
 	return fmt.Sprintf("%s-%d", hex.EncodeToString(h.Sum(nil)), count), nil
+}
+
+func CompositeETagFromState(state []byte, count int) (string, error) {
+	return compositeETagFromState(state, count)
 }
 
 func appendETagStateForAppend(summary appendSummary, hasSummary bool, existing *Object, digest []byte) ([]byte, int, error) {
@@ -390,6 +398,10 @@ func appendETagStateFromDigests(digests [][]byte) ([]byte, int, error) {
 		}
 	}
 	return state, count, nil
+}
+
+func AppendETagStateFromDigests(digests [][]byte) ([]byte, int, error) {
+	return appendETagStateFromDigests(digests)
 }
 
 func appendCallMD5History(obj *Object) [][]byte {

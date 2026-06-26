@@ -3,6 +3,9 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"io"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -45,7 +48,10 @@ func TestAppendObject_BlobRMW_AccumulatesAndRejectsStaleOffset(t *testing.T) {
 	require.Equal(t, uint64(2), cmd.MetaSeq)
 	require.True(t, cmd.IsAppendable && cmd.MetaSeqCAS)
 	require.Equal(t, int64(7), cmd.Size)
-	require.Len(t, cmd.Segments, 2)
+	require.Empty(t, cmd.Segments)
+	head, err := b.HeadObject(ctx, "bk", "k")
+	require.NoError(t, err)
+	require.Len(t, head.Segments, 2)
 
 	// At-most-once: a retried append issued at the stale offset (3, which is now
 	// behind the current size of 7) must be rejected and must NOT change the
@@ -57,8 +63,53 @@ func TestAppendObject_BlobRMW_AccumulatesAndRejectsStaleOffset(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(7), after.Size,
 		"object size must not change after stale-offset rejection")
-	require.Len(t, after.Segments, 2,
-		"segment count must not change after stale-offset rejection")
+	require.Empty(t, after.Segments,
+		"quorum manifest must stay summary-only after stale-offset rejection")
+	headAfter, err := b.HeadObject(ctx, "bk", "k")
+	require.NoError(t, err)
+	require.Len(t, headAfter.Segments, 2,
+		"hydrated segment count must not change after stale-offset rejection")
+}
+
+func TestAppendObject_ClusterSideRecordsKeepManifestSummarySmall(t *testing.T) {
+	b := newTestBackendWithQuorumMeta(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "bk"))
+
+	first, err := b.AppendObject(ctx, "bk", "k", 0, bytes.NewReader([]byte("aaa")))
+	require.NoError(t, err)
+	obj, err := b.AppendObject(ctx, "bk", "k", 3, bytes.NewReader([]byte("bbbb")))
+	require.NoError(t, err)
+	require.Equal(t, first.VersionID, obj.VersionID)
+	require.Equal(t, int64(7), obj.Size)
+	require.True(t, obj.IsAppendable)
+
+	cmd, err := b.readQuorumMetaCmd("bk", "k")
+	require.NoError(t, err)
+	require.True(t, cmd.IsAppendable)
+	require.Empty(t, cmd.Segments, "cluster append side-record mode must not grow manifest Segments")
+	require.Empty(t, cmd.AppendCallMD5s, "cluster append side-record mode must not grow manifest digest history")
+
+	root := b.shardSvc.dataDirs[0]
+	sideRoot := filepath.Join(root, quorumMetaAppendSubDir, "bk", "k", obj.VersionID)
+	require.FileExists(t, filepath.Join(sideRoot, "summary"))
+	require.FileExists(t, filepath.Join(sideRoot, "segments", "00000000000000000001"))
+	require.FileExists(t, filepath.Join(sideRoot, "segments", "00000000000000000002"))
+
+	head, err := b.HeadObject(ctx, "bk", "k")
+	require.NoError(t, err)
+	require.Len(t, head.Segments, 2, "HeadObject must hydrate append side segments for readers")
+
+	rc, _, err := b.GetObject(ctx, "bk", "k")
+	require.NoError(t, err)
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.NoError(t, rc.Close())
+	require.Equal(t, []byte("aaabbbb"), got)
+
+	require.NoError(t, os.Remove(filepath.Join(sideRoot, "summary")))
+	_, err = b.HeadObject(ctx, "bk", "k")
+	require.Error(t, err, "side-record manifest without summary must fail closed")
 }
 
 // TestAppendObject_SkewImmune_CASNotModTime proves that an append whose
@@ -101,7 +152,10 @@ func TestAppendObject_SkewImmune_CASNotModTime(t *testing.T) {
 	seg, err := b.writeSegmentBlobForAppend("bk", "skew", bytes.NewReader(secondBody))
 	require.NoError(t, err)
 
-	cmd, perr := planAppendObjectBlobRMW(appendBlobRMWInput{
+	summary, serr := b.readClusterAppendSummary(ctx, "bk", "skew", base.VersionID, base.NodeIDs)
+	require.NoError(t, serr)
+
+	cmd, summary, sideMode, perr := planAppendObjectBlobRMWWithSide(appendBlobRMWInput{
 		Bucket:           "bk",
 		Key:              "skew",
 		ExpectedOffset:   int64(len(firstBody)),
@@ -111,8 +165,12 @@ func TestAppendObject_SkewImmune_CASNotModTime(t *testing.T) {
 		ModifiedUnixSec:  pastUnixSec, // skewed OLDER than base.ModTime
 		Base:             base,
 		BaseExists:       true,
+		UseSideRecords:   true,
+		BaseSummary:      summary,
+		BaseHasSummary:   true,
 	})
 	require.NoError(t, perr, "planAppendObjectBlobRMW must succeed even when ModTime < base.ModTime")
+	require.True(t, sideMode)
 	require.Equal(t, uint64(2), cmd.MetaSeq, "MetaSeq must advance to base+1 regardless of ModTime")
 	require.True(t, cmd.MetaSeqCAS, "MetaSeqCAS flag must be set")
 	require.Equal(t, pastUnixSec, cmd.ModTime, "ModTime is stored as-is (caller's clock, not compared)")
@@ -120,6 +178,7 @@ func TestAppendObject_SkewImmune_CASNotModTime(t *testing.T) {
 	// Write via the real CAS path — must succeed even with a stale ModTime.
 	require.NoError(t, b.writeQuorumMeta(ctx, cmd),
 		"writeQuorumMeta must commit when MetaSeq==base+1 even if new ModTime < existing ModTime")
+	require.NoError(t, b.writeClusterAppendSideRecords(ctx, "bk", "skew", base.VersionID, cmd.NodeIDs, int(cmd.ECData), summary, map[int]storage.SegmentRef{summary.SegmentCount: seg}))
 
 	// Verify the committed state: both segments present, total size correct.
 	after, err := b.readQuorumMetaCmd("bk", "skew")
@@ -128,8 +187,12 @@ func TestAppendObject_SkewImmune_CASNotModTime(t *testing.T) {
 		"blob MetaSeq must be 2 after the skewed-clock append commits")
 	require.Equal(t, int64(len(firstBody)+len(secondBody)), after.Size,
 		"object size must reflect both appended segments even with a skewed ModTime")
-	require.Len(t, after.Segments, 2,
-		"both segments must be present in the committed manifest")
+	require.Empty(t, after.Segments,
+		"side-record manifest must stay summary-only")
+	head, err := b.HeadObject(ctx, "bk", "skew")
+	require.NoError(t, err)
+	require.Len(t, head.Segments, 2,
+		"both segments must hydrate from side records")
 }
 
 // TestAppendObject_CASRejectsStaleOwnerWrite proves the failover lost-update

@@ -26,6 +26,8 @@ type appendSummary struct {
 	ETagDigestState []byte
 }
 
+type AppendSummary = appendSummary
+
 func appendSummaryKey(bucket, key, versionID string) []byte {
 	return []byte(appendSummaryPrefix + bucket + "/" + key + "/" + versionID)
 }
@@ -50,6 +52,10 @@ func encodeAppendSummary(s appendSummary) []byte { //nolint:unused // referenced
 	return buf
 }
 
+func EncodeAppendSummary(s AppendSummary) []byte {
+	return encodeAppendSummary(s)
+}
+
 func decodeAppendSummary(data []byte) (appendSummary, error) {
 	if len(data) != 16 && len(data) < 28 {
 		return appendSummary{}, fmt.Errorf("append summary: invalid length %d", len(data))
@@ -68,6 +74,10 @@ func decodeAppendSummary(data []byte) (appendSummary, error) {
 	summary.ETagPartCount = int(binary.BigEndian.Uint64(data[16:24]))
 	summary.ETagDigestState = append([]byte(nil), data[28:]...)
 	return summary, nil
+}
+
+func DecodeAppendSummary(data []byte) (AppendSummary, error) {
+	return decodeAppendSummary(data)
 }
 
 func encodeAppendSegment(seg SegmentRef) []byte { //nolint:unused // referenced by append_side_record_test.go until the writer path lands.
@@ -93,6 +103,10 @@ func encodeAppendSegment(seg SegmentRef) []byte { //nolint:unused // referenced 
 		writeString(nodeID)
 	}
 	return buf.Bytes()
+}
+
+func EncodeAppendSegment(seg SegmentRef) []byte {
+	return encodeAppendSegment(seg)
 }
 
 func decodeAppendSegment(data []byte) (SegmentRef, error) {
@@ -183,6 +197,10 @@ func decodeAppendSegment(data []byte) (SegmentRef, error) {
 		StripeBytes:      stripeBytes,
 		NodeIDs:          nodeIDs,
 	}, nil
+}
+
+func DecodeAppendSegment(data []byte) (SegmentRef, error) {
+	return decodeAppendSegment(data)
 }
 
 func (b *LocalBackend) readAppendSummaryInTxn(txn *badger.Txn, bucket, key, versionID string) (appendSummary, error) {

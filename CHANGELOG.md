@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.753.0] - 2026-06-26
+
+### Changed
+- **Persisted cluster AppendObject manifests through quorum-meta side records.**
+  Distributed append now stores non-coalesced segment refs and running ETag
+  state outside the growing quorum-meta manifest, hydrates them for Head/Get,
+  and fails closed when a summary side record is missing.
+
 ## [0.0.752.0] - 2026-06-26
 
 ### Changed

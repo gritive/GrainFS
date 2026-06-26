@@ -276,6 +276,9 @@ func (b *DistributedBackend) headObjectMeta(ctx context.Context, bucket, key str
 		if obj.ETag == deleteMarkerETag {
 			return nil, PlacementMeta{}, storage.ErrObjectNotFound
 		}
+		if err := b.hydrateClusterAppendSideSegments(ctx, bucket, key, obj); err != nil {
+			return nil, PlacementMeta{}, err
+		}
 		return obj, pm, nil
 	}
 	return nil, PlacementMeta{}, storage.ErrObjectNotFound

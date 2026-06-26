@@ -139,8 +139,11 @@ separate PR, facades stay the spine — see design
   side-record chunk refs/metadata on overwrite/delete. The running ETag state + append-base summary
   path shipped in v0.0.746.0: steady-state single-node side-record appends validate offset/cap from
   the append summary and update the composite ETag from stored running MD5 state, so raw object
-  records no longer carry growing `Segments[]` or `AppendCallMD5s[]` histories. Remaining ordered
-  slices: cluster quorum-meta side records, coalesce integration, benchmark gate.
+  records no longer carry growing `Segments[]` or `AppendCallMD5s[]` histories. The cluster
+  quorum-meta side-record writer/read foundation shipped in v0.0.753.0: non-coalesced distributed
+  appends now keep the hot manifest summary-only while persisting side segments + running ETag state
+  through the quorum-meta replica set and hydrating Head/Get from those side records. Remaining
+  ordered slices: coalesce integration, benchmark gate.
   Cluster append: #895 measured it (`BenchmarkClusterAppend`, EC 4+2,
   coalesce-off) — same super-linear O(N²) (n=4 → 545 allocs, n=8 → 1,356, n=16 → 3,711), same
   meta-rewrite root cause (`readAppendBase` decode + manifest re-marshal + quorum-meta), softened in
