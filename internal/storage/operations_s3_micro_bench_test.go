@@ -26,6 +26,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
@@ -47,20 +50,55 @@ var s3BenchSizes = []struct {
 // encrypted (production default), with a ready bucket.
 func newS3BenchOps(b *testing.B, encrypted bool) (*Operations, *LocalBackend) {
 	b.Helper()
+	drives := s3BenchDriveCount(b)
 	var backend *LocalBackend
 	var err error
 	if encrypted {
 		cid := bytes.Repeat([]byte{0x88}, 16)
 		keeper, kerr := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x88}, encrypt.KEKSize), cid)
 		require.NoError(b, kerr)
-		backend, err = NewLocalBackendWithDEKKeeper(b.TempDir(), keeper, cid)
+		if drives == 1 {
+			backend, err = NewLocalBackendWithDEKKeeper(b.TempDir(), keeper, cid)
+		} else {
+			backend, err = newS3BenchMultiRootBackend(b, drives)
+			if err == nil {
+				copy(backend.clusterID[:], cid)
+				backend.segEnc = NewDEKKeeperAdapter(keeper, backend.clusterID[:])
+			}
+		}
 	} else {
-		backend, err = NewLocalBackend(b.TempDir())
+		if drives == 1 {
+			backend, err = NewLocalBackend(b.TempDir())
+		} else {
+			backend, err = newS3BenchMultiRootBackend(b, drives)
+		}
 	}
 	require.NoError(b, err)
 	b.Cleanup(func() { require.NoError(b, backend.Close()) })
 	require.NoError(b, backend.CreateBucket(context.Background(), s3BenchBucket))
 	return NewOperations(backend), backend
+}
+
+func s3BenchDriveCount(b *testing.B) int {
+	b.Helper()
+	raw := os.Getenv("GRAINFS_S3_BENCH_DRIVES")
+	if raw == "" {
+		return 1
+	}
+	n, err := strconv.Atoi(raw)
+	require.NoError(b, err, "GRAINFS_S3_BENCH_DRIVES must be an integer")
+	require.GreaterOrEqual(b, n, 1, "GRAINFS_S3_BENCH_DRIVES must be >= 1")
+	return n
+}
+
+func newS3BenchMultiRootBackend(b *testing.B, drives int) (*LocalBackend, error) {
+	b.Helper()
+	root := b.TempDir()
+	dataRoots := make([]string, 0, drives)
+	for i := 0; i < drives; i++ {
+		dataRoots = append(dataRoots, filepath.Join(root, fmt.Sprintf("d%d", i+1)))
+	}
+	return NewMultiRootLocalBackend(filepath.Join(root, "meta"), dataRoots)
 }
 
 func s3BenchPayload(n int) []byte { return bytes.Repeat([]byte("x"), n) }

@@ -70,17 +70,6 @@ RUSTFS_ACCESS_KEY="${RUSTFS_ACCESS_KEY:-rustfsadmin}"
 RUSTFS_SECRET_KEY="${RUSTFS_SECRET_KEY:-rustfsadmin}"
 RUSTFS_RPC_SECRET="${RUSTFS_RPC_SECRET:-grainfs-bench-rustfs-rpc-secret}"
 
-if [[ -z "$WARP_BIN" ]]; then
-  echo "[error] warp is required for S3-compatible comparison benchmarks. Install minio/warp or set WARP_BIN." >&2
-  exit 1
-fi
-
-mkdir -p "$PROFILE_ROOT"
-if [[ "$BENCH_DIR_PROVIDED" == "1" ]]; then
-  rm -rf "$BENCH_DIR"
-fi
-mkdir -p "$BENCH_DIR"
-
 PIDS=()
 TARGET_DATA_DIRS=()
 START_BASE_URL=""
@@ -89,6 +78,7 @@ START_SECRET_KEY=""
 START_MODE=""
 STOP_GRACE_SECONDS="${STOP_GRACE_SECONDS:-5}"
 BACKENDS_STARTED=0
+CLEANED_UP=0
 
 set_start_info() {
   START_BASE_URL="$1"
@@ -184,18 +174,39 @@ PY
 }
 
 cleanup() {
+  if [[ "$CLEANED_UP" == "1" ]]; then
+    return 0
+  fi
+  CLEANED_UP=1
   if [[ "$BACKENDS_STARTED" == "1" ]]; then
     echo "[bench] stopping comparison backends..."
   fi
-  stop_pids "${PIDS[@]:-}"
-  stop_child_backends
+  if declare -F stop_pids >/dev/null; then
+    stop_pids "${PIDS[@]:-}"
+  fi
+  if declare -F stop_child_backends >/dev/null; then
+    stop_child_backends
+  fi
   if [[ "${KEEP_BENCH_DIR:-0}" != "1" ]]; then
     rm -rf "$BENCH_DIR" 2>/dev/null || true
   else
     echo "[bench] bench data dir saved to $BENCH_DIR"
   fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+
+if [[ -z "$WARP_BIN" ]]; then
+  echo "[error] warp is required for S3-compatible comparison benchmarks. Install minio/warp or set WARP_BIN." >&2
+  exit 1
+fi
+
+mkdir -p "$PROFILE_ROOT"
+if [[ "$BENCH_DIR_PROVIDED" == "1" ]]; then
+  rm -rf "$BENCH_DIR"
+fi
+mkdir -p "$BENCH_DIR"
 
 stop_pids() {
   local pids=("$@")

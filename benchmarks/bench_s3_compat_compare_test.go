@@ -202,6 +202,36 @@ func TestBenchS3CompatUsesUniqueDefaultBenchDir(t *testing.T) {
 	}
 }
 
+func TestBenchS3CompatInstallsCleanupTrapBeforeEarlyExitChecks(t *testing.T) {
+	body, err := os.ReadFile("bench_s3_compat_compare.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(body)
+
+	trap := strings.Index(script, `trap cleanup EXIT`)
+	warpRequired := strings.Index(script, `if [[ -z "$WARP_BIN" ]]; then`)
+	if trap < 0 {
+		t.Fatalf("bench_s3_compat_compare.sh must install cleanup trap")
+	}
+	if warpRequired < 0 {
+		t.Fatalf("bench_s3_compat_compare.sh must still validate WARP_BIN")
+	}
+	if trap > warpRequired {
+		t.Fatalf("cleanup trap must be installed before early WARP_BIN exit so mktemp BENCH_DIR is removed")
+	}
+	for _, want := range []string{
+		`trap 'cleanup; exit 130' INT`,
+		`trap 'cleanup; exit 143' TERM`,
+		`CLEANED_UP=0`,
+		`CLEANED_UP=1`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("bench_s3_compat_compare.sh cleanup trap must contain %q", want)
+		}
+	}
+}
+
 func TestBenchS3CompatDoesNotAcceptArbitraryServeFlags(t *testing.T) {
 	body, err := os.ReadFile("bench_s3_compat_compare.sh")
 	if err != nil {
