@@ -1,8 +1,15 @@
 package cluster
 
 import (
-	"errors"
+	"bytes"
+	"context"
+	"crypto/md5"
+	"io"
 	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 func TestRelocationStillEligible(t *testing.T) {
@@ -69,22 +76,32 @@ func TestRelocationStillEligible(t *testing.T) {
 			wantErr:          true,
 		},
 		{
-			// Relocation re-encodes via runChunkedPut, which produces a plain chunked
-			// manifest with no IsAppendable/Coalesced/AppendCallMD5s — relocating an
-			// appendable object would drop the append-call digest history (resetting the
-			// composite ETag) and the coalesced refs. Skip them; they stay 1+0.
-			name:             "appendable object not relocatable",
+			name:             "appendable object with embedded digest history is relocatable",
+			cur:              PutObjectMetaCmd{ECData: 1, ECParity: 0, ETag: etag, VersionID: ver, IsAppendable: true, AppendCallMD5s: [][]byte{[]byte("aaaaaaaaaaaaaaaa")}},
+			in:               base,
+			clusterRedundant: true,
+			wantErr:          false,
+		},
+		{
+			name:             "coalesced appendable object with embedded digest history is relocatable",
+			cur:              PutObjectMetaCmd{ECData: 1, ECParity: 0, ETag: etag, VersionID: ver, IsAppendable: true, Coalesced: []CoalescedShardRef{{CoalescedID: "x"}}, AppendCallMD5s: [][]byte{[]byte("aaaaaaaaaaaaaaaa")}},
+			in:               base,
+			clusterRedundant: true,
+			wantErr:          false,
+		},
+		{
+			name:             "side-record-only appendable object is relocatable",
 			cur:              PutObjectMetaCmd{ECData: 1, ECParity: 0, ETag: etag, VersionID: ver, IsAppendable: true},
 			in:               base,
 			clusterRedundant: true,
-			wantErr:          true,
+			wantErr:          false,
 		},
 		{
-			name:             "coalesced object not relocatable",
-			cur:              PutObjectMetaCmd{ECData: 1, ECParity: 0, ETag: etag, VersionID: ver, Coalesced: []CoalescedShardRef{{CoalescedID: "x"}}},
+			name:             "coalesced appendable object without embedded digest history is relocatable",
+			cur:              PutObjectMetaCmd{ECData: 1, ECParity: 0, ETag: etag, VersionID: ver, IsAppendable: true, Coalesced: []CoalescedShardRef{{CoalescedID: "x"}}},
 			in:               base,
 			clusterRedundant: true,
-			wantErr:          true,
+			wantErr:          false,
 		},
 	}
 
@@ -92,14 +109,171 @@ func TestRelocationStillEligible(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			err := relocationStillEligible(tt.cur, tt.in, tt.clusterRedundant)
 			if tt.wantErr {
-				if !errors.Is(err, ErrRelocateSkipped) {
-					t.Fatalf("want ErrRelocateSkipped, got %v", err)
-				}
+				require.ErrorIs(t, err, ErrRelocateSkipped)
 				return
 			}
-			if err != nil {
-				t.Fatalf("want nil, got %v", err)
-			}
+			require.NoError(t, err)
 		})
 	}
+}
+
+func TestRelocatedMetaPreservesAppendIdentity(t *testing.T) {
+	cur := PutObjectMetaCmd{
+		IsAppendable:   true,
+		AppendCallMD5s: [][]byte{[]byte("aaaaaaaaaaaaaaaa"), []byte("bbbbbbbbbbbbbbbb")},
+		ETag:           "composite-etag-2",
+		MetaSeq:        7,
+	}
+	cmd := PutObjectMetaCmd{
+		ExpectedETag: "old-etag",
+		ETag:         "whole-body-md5",
+		Segments:     []SegmentMetaEntry{{BlobID: "new-seg", Size: 32}},
+		ECData:       4,
+		ECParity:     2,
+	}
+
+	got := relocatedMetaCmd(cur, cmd)
+
+	require.True(t, got.IsAppendable)
+	require.Equal(t, cur.ETag, got.ETag)
+	require.Equal(t, cur.AppendCallMD5s, got.AppendCallMD5s)
+	require.Empty(t, got.ExpectedETag)
+	require.Equal(t, uint64(8), got.MetaSeq)
+
+	got.AppendCallMD5s[0][0] = 'z'
+	require.Equal(t, byte('a'), cur.AppendCallMD5s[0][0], "relocated metadata must clone digest history")
+}
+
+func TestRelocateAppendableEmbeddedHistoryPreservesFutureAppendETag(t *testing.T) {
+	ctx := context.Background()
+	b := newSingleNode1Plus0ChunkCapable(t)
+	b.appendSideRecordsDisabled = true
+	require.NoError(t, b.CreateBucket(ctx, "bk"))
+
+	_, err := b.AppendObject(ctx, "bk", "k", 0, bytes.NewReader([]byte("aaa")))
+	require.NoError(t, err)
+	obj, err := b.AppendObject(ctx, "bk", "k", 3, bytes.NewReader([]byte("bbbb")))
+	require.NoError(t, err)
+	require.Equal(t, int64(7), obj.Size)
+
+	before, err := b.readQuorumMetaCmd("bk", "k")
+	require.NoError(t, err)
+	require.True(t, before.IsAppendable)
+	require.Equal(t, uint8(0), before.ECParity)
+	require.Len(t, before.AppendCallMD5s, 2)
+	require.NotEmpty(t, before.Segments)
+
+	configureRelocationRedundantCapacity(t, b)
+	err = b.relocateObjectToRedundantGroup(ctx, relocateInput{
+		Bucket:       "bk",
+		Key:          "k",
+		VersionID:    before.VersionID,
+		ExpectedETag: before.ETag,
+	})
+	require.NoError(t, err)
+
+	relocated, err := b.readQuorumMetaCmd("bk", "k")
+	require.NoError(t, err)
+	require.True(t, relocated.IsAppendable)
+	require.Equal(t, uint8(1), relocated.ECParity)
+	require.Equal(t, before.ETag, relocated.ETag)
+	require.Equal(t, before.VersionID, relocated.VersionID)
+	require.Equal(t, before.AppendCallMD5s, relocated.AppendCallMD5s)
+	require.NotEmpty(t, relocated.Segments)
+	require.Empty(t, relocated.Coalesced)
+
+	rc, gotObj, err := b.GetObject(ctx, "bk", "k")
+	require.NoError(t, err)
+	got, readErr := io.ReadAll(rc)
+	closeErr := rc.Close()
+	require.NoError(t, readErr)
+	require.NoError(t, closeErr)
+	require.Equal(t, []byte("aaabbbb"), got)
+	require.True(t, gotObj.IsAppendable)
+
+	appended, err := b.AppendObject(ctx, "bk", "k", 7, bytes.NewReader([]byte("cc")))
+	require.NoError(t, err)
+	wantETag := storage.CompositeETag([][]byte{
+		before.AppendCallMD5s[0],
+		before.AppendCallMD5s[1],
+		md5Bytes([]byte("cc")),
+	})
+	require.Equal(t, wantETag, appended.ETag)
+}
+
+func TestRelocateAppendSideRecordObjectPreservesFutureAppendETag(t *testing.T) {
+	ctx := context.Background()
+	b := newSingleNode1Plus0ChunkCapable(t)
+	require.NoError(t, b.CreateBucket(ctx, "bk"))
+
+	_, err := b.AppendObject(ctx, "bk", "k", 0, bytes.NewReader([]byte("aaa")))
+	require.NoError(t, err)
+	obj, err := b.AppendObject(ctx, "bk", "k", 3, bytes.NewReader([]byte("bbbb")))
+	require.NoError(t, err)
+	require.Equal(t, int64(7), obj.Size)
+
+	before, err := b.readQuorumMetaCmd("bk", "k")
+	require.NoError(t, err)
+	require.True(t, before.IsAppendable)
+	require.Equal(t, uint8(0), before.ECParity)
+	require.Empty(t, before.AppendCallMD5s)
+	require.Empty(t, before.Segments)
+	beforeSummary, err := b.readClusterAppendSummary(ctx, "bk", "k", before.VersionID, before.NodeIDs)
+	require.NoError(t, err)
+
+	configureRelocationRedundantCapacity(t, b)
+	err = b.relocateObjectToRedundantGroup(ctx, relocateInput{
+		Bucket:       "bk",
+		Key:          "k",
+		VersionID:    before.VersionID,
+		ExpectedETag: before.ETag,
+	})
+	require.NoError(t, err)
+
+	relocated, err := b.readQuorumMetaCmd("bk", "k")
+	require.NoError(t, err)
+	require.True(t, relocated.IsAppendable)
+	require.Equal(t, uint8(1), relocated.ECParity)
+	require.Equal(t, before.ETag, relocated.ETag)
+	require.Empty(t, relocated.Segments)
+	require.Len(t, relocated.Coalesced, 1)
+	relocatedSummary, err := b.readClusterAppendSummary(ctx, "bk", "k", relocated.VersionID, relocated.NodeIDs)
+	require.NoError(t, err)
+	require.Zero(t, relocatedSummary.Size)
+	require.Zero(t, relocatedSummary.SegmentCount)
+	require.Equal(t, beforeSummary.ETagDigestState, relocatedSummary.ETagDigestState)
+	require.Equal(t, beforeSummary.ETagPartCount, relocatedSummary.ETagPartCount)
+
+	rc, _, err := b.GetObject(ctx, "bk", "k")
+	require.NoError(t, err)
+	got, readErr := io.ReadAll(rc)
+	closeErr := rc.Close()
+	require.NoError(t, readErr)
+	require.NoError(t, closeErr)
+	require.Equal(t, []byte("aaabbbb"), got)
+
+	appended, err := b.AppendObject(ctx, "bk", "k", 7, bytes.NewReader([]byte("cc")))
+	require.NoError(t, err)
+	state, count, err := storage.AppendETagStateAppend(beforeSummary.ETagDigestState, beforeSummary.ETagPartCount, md5Bytes([]byte("cc")))
+	require.NoError(t, err)
+	wantETag, err := storage.CompositeETagFromState(state, count)
+	require.NoError(t, err)
+	require.Equal(t, wantETag, appended.ETag)
+}
+
+func configureRelocationRedundantCapacity(t *testing.T, b *DistributedBackend) {
+	t.Helper()
+	self := b.currentSelfAddr()
+	b.SetECConfig(ECConfig{DataShards: 2, ParityShards: 1})
+	b.SetShardGroupSource(&fakeGenShardSource{
+		groups: map[string]ShardGroupEntry{
+			"group-0": {ID: "group-0", PeerIDs: []string{self, self, self}},
+		},
+		nodeCount: 3,
+	})
+}
+
+func md5Bytes(data []byte) []byte {
+	sum := md5.Sum(data)
+	return sum[:]
 }

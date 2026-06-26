@@ -70,13 +70,6 @@ Deferred items:
   buckets, so coalesced orphans created during a bucket's prior Unversioned/Suspended life leak after
   it is Enabled. Safe (no data loss), bounded residual; documented deliberate tradeoff.
 
-- **[P3] Appendable/coalesced objects do not get EC redundancy upgrade.** The redundancy-upgrade
-  relocation (`relocate_object.go`) now SKIPS `IsAppendable`/`Coalesced` objects (they would be
-  corrupted by the chunked re-encode — drops IsAppendable/Coalesced/AppendCallMD5s). So an
-  appendable object written 1+0 on a single node stays 1+0 after the cluster grows (no parity).
-  A proper appendable-aware relocation that preserves the append manifest shape + digest history
-  is a separate feature. Surfaced by the 2026-06-25 AppendCallMD5s code-gate.
-
 - **[P2] off-raft append fencing-lease** *(only if the accepted failover-safety risk must
   later be closed).* A proper single-writer lease (leader-term fencing token +
   quorum-intersecting read) to make off-raft append/coalesce failover-safe across a

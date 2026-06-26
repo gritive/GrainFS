@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.759.0] - 2026-06-27
+
+### Changed
+- **Enabled EC redundancy relocation for appendable and coalesced objects.**
+  The redundancy-upgrade path now preserves append composite ETag state for
+  embedded-history objects and relocates side-record appendables as redundant
+  coalesced prefixes while keeping future appends consistent.
+
 ## [0.0.758.0] - 2026-06-27
 
 ### Changed
