@@ -97,6 +97,34 @@ func TestOverwritePartialOverlapChunkRefs(t *testing.T) {
 	}
 }
 
+func TestAppendObjectRecordAddsOnlyNewChunkRef(t *testing.T) {
+	b := newTestLocalBackend(t)
+	ctx := context.Background()
+	_ = b.CreateBucket(ctx, "bkt")
+	if err := b.PutObjectRecord(ctx, "bkt", "k", &Object{Key: "k", Segments: []SegmentRef{{BlobID: "chunk-A"}}}); err != nil {
+		t.Fatal(err)
+	}
+	next := &Object{Key: "k", Segments: []SegmentRef{{BlobID: "chunk-A"}, {BlobID: "chunk-B"}}}
+	if err := b.putObjectRecordAppend(ctx, "bkt", "k", next, []string{"chunk-B"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.db.View(func(txn *badger.Txn) error {
+		s := NewChunkRefStore(txn)
+		if n, _ := s.RefCount("chunk-A"); n != 1 {
+			t.Fatalf("chunk-A RefCount = %d, want 1", n)
+		}
+		if _, ok, _ := s.TombstoneTime("chunk-A"); ok {
+			t.Fatalf("chunk-A has a tombstone after append-only manifest update")
+		}
+		if n, _ := s.RefCount("chunk-B"); n != 1 {
+			t.Fatalf("chunk-B RefCount = %d, want 1", n)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDeleteObjectRemovesChunkRefs(t *testing.T) {
 	b := newTestLocalBackend(t)
 	ctx := context.Background()
