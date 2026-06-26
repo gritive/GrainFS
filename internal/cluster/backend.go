@@ -228,12 +228,6 @@ type DistributedBackend struct {
 	// invariant 5), so the per-group DB need not duplicate the META-DB check.
 	bypassBucketCheck bool
 
-	// Phase A: FSM apply error propagation. Mirrors MetaRaft.applyErrs
-	// (meta_raft.go:797). applyErrs keys are Raft log indices; readers consume
-	// entries via ApplyError exactly once per ProposeWait.
-	applyResultMu sync.Mutex
-	applyErrs     map[uint64]error
-
 	// Phase B2 coalesce: lifecycle context + worker + first-seen tracker.
 	// coalesceCfg holds trigger thresholds (count / size / idle / cleanup).
 	// Stored as atomic.Pointer so SetCoalesceConfig and the backstop-scan
@@ -784,18 +778,11 @@ func (b *DistributedBackend) SetMultiGeneration(v bool) {
 }
 
 // RunApplyLoop consumes committed entries from the Raft node.
-// This must run in a goroutine. Delegates to applyActor, which decodes legacy
-// data-group command envelopes for no-op replay and restores snapshot entries.
+// This must run in a goroutine. It advances lastApplied for opaque command and
+// non-command entries and restores snapshot entries for brownfield raft stores.
 func (b *DistributedBackend) RunApplyLoop(stop <-chan struct{}) {
 	a := &applyActor{fsm: b.fsm}
 	a.run(b, stop)
-}
-
-// notifyOnApply runs post-apply hooks for a committed command. All apply-driven
-// cache-invalidation and reseal marker paths have been retired, so this is a
-// decode-only no-op kept for the apply actor's call shape.
-func (b *DistributedBackend) notifyOnApply(raw []byte) {
-	_ = DecodeCommand(raw)
 }
 
 // forwardReadIndex sends a StreamReadIndex RPC to leaderAddr and returns the leader's commitIndex.
@@ -1048,35 +1035,3 @@ func (b *DistributedBackend) objectMetaRMWLock(bucket, key string) func() {
 
 // Node returns the RaftNode interface for leadership and raft control.
 func (b *DistributedBackend) Node() RaftNode { return b.node }
-
-// recordApplyResult records a data-group apply error for the given Raft log index.
-// Mirrors MetaRaft.recordApplyResult (meta_raft.go:797): only non-nil errors
-// are stored, and a 1024-index lookback window self-trims to prevent unbounded
-// growth.
-func (b *DistributedBackend) recordApplyResult(index uint64, err error) {
-	if err == nil {
-		return
-	}
-	b.applyResultMu.Lock()
-	if b.applyErrs == nil {
-		b.applyErrs = make(map[uint64]error)
-	}
-	b.applyErrs[index] = err
-	for old := range b.applyErrs {
-		if old+1024 < index {
-			delete(b.applyErrs, old)
-		}
-	}
-	b.applyResultMu.Unlock()
-}
-
-// ApplyError returns the data-group apply error for the given Raft log index, or nil
-// if no error was recorded. Reading consumes the entry — callers must read
-// exactly once per ProposeWait.
-func (b *DistributedBackend) ApplyError(index uint64) error {
-	b.applyResultMu.Lock()
-	err := b.applyErrs[index]
-	delete(b.applyErrs, index)
-	b.applyResultMu.Unlock()
-	return err
-}

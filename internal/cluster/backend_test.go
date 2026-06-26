@@ -191,21 +191,3 @@ func TestSelectPeerByLoad_SingleNode(t *testing.T) {
 	_, ok := selectPeerByLoad(store, "node-a", 1.3)
 	require.False(t, ok, "single node: no peers to redirect to")
 }
-
-func TestNotifyOnApply_UnknownCommandsNoOp(t *testing.T) {
-	gb := newTestGroupBackend(t, "callback-test-group")
-
-	raw, err := buildRawCommand(250, []byte("legacy payload"))
-	require.NoError(t, err)
-	require.NotPanics(t, func() { gb.notifyOnApply(raw) })
-
-	rawReseal, err := buildRawCommand(251, []byte("legacy payload"))
-	require.NoError(t, err)
-	require.NotPanics(t, func() { gb.notifyOnApply(rawReseal) })
-
-	payload, err := encodeQuorumMetaBlob(PutObjectMetaCmd{Bucket: "b", Key: "k", Size: 1, ETag: "e"})
-	require.NoError(t, err)
-	rawPut, err := buildRawCommand(3, payload)
-	require.NoError(t, err)
-	require.NotPanics(t, func() { gb.notifyOnApply(rawPut) })
-}

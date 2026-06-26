@@ -91,8 +91,7 @@ func TestForwardReceiver_HandleGroupPropose_DispatchesToGroupBackend(t *testing.
 	mgr := NewDataGroupManager()
 	mgr.Add(NewDataGroupWithBackend("group-1", []string{"test-node"}, gb))
 	rcv := NewForwardReceiver(mgr)
-	cmd, err := buildRawCommand(0, nil)
-	require.NoError(t, err)
+	cmd := []byte("cursor-only forwarded entry")
 
 	reply, _ := rcv.HandleGroupPropose(encodeGroupForwardPayload("group-1", cmd))
 

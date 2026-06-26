@@ -86,8 +86,7 @@ var _ = Describe("Backend control integration", func() {
 		Expect(b.CreateBucket(ctx, "bucket")).To(Succeed())
 		// CreateBucket now goes through MetaBucketStore (direct FSM), not raft.
 		// Commit a raft no-op explicitly to get an applied log index.
-		raw, err := buildRawCommand(0, nil)
-		Expect(err).NotTo(HaveOccurred())
+		raw := []byte("cursor-only control entry")
 		applied, err := b.node.ProposeWait(ctx, raw)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(b.WaitApplied(ctx, applied)).To(Succeed())

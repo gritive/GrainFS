@@ -1,7 +1,6 @@
 package cluster
 
 import (
-	"fmt"
 	"os"
 	"strconv"
 
@@ -41,18 +40,18 @@ func applyBatchMax(v string) int {
 // isolation set GRAINFS_RAFT_APPLY_BATCH_MAX=1 to disable batching.
 var applyBatchEntriesCap = applyBatchMax(os.Getenv("GRAINFS_RAFT_APPLY_BATCH_MAX"))
 
-// applyActor owns the FSM apply loop. It drains committed Raft entries, decodes
-// command envelopes, and emits per-entry results.
-// Single-goroutine: batch buffers are reused without synchronization.
+// applyActor owns the data-group raft drain loop. Data-plane commands are
+// retired; committed command entries are opaque cursor markers. Snapshot
+// entries still restore the group metadata store for brownfield raft state.
 type applyActor struct {
 	fsm   *FSM
 	batch []raft.LogEntry // reused across iterations (batch[:0]); never re-nil'd
 }
 
 // run is the apply actor's main loop. It drains committed entries from the Raft
-// node, batches command entries for decode/no-op replay, and handles snapshot
-// entries / snapshot requests as batch barriers. Returns when stop fires or
-// ApplyCh closes.
+// node, batches command entries only to advance lastApplied efficiently, and
+// handles snapshot entries / snapshot requests as batch barriers. Returns when
+// stop fires or ApplyCh closes.
 func (a *applyActor) run(b *DistributedBackend, stop <-chan struct{}) {
 	applyCh := b.node.ApplyCh()
 	for {
@@ -136,24 +135,14 @@ func (a *applyActor) collectNonCommand(b *DistributedBackend, e raft.LogEntry) {
 	b.lastAppliedTerm.Store(e.Term)
 }
 
-// commitBatch decodes a.batch, records results, runs notifications, and advances
-// lastApplied. A zero-length batch is a no-op.
+// commitBatch advances lastApplied over a batch of retired data-group command
+// entries. Command bytes are deliberately opaque; all live data-plane writes are
+// off-raft and brownfield command payloads replay as no-ops.
 func (a *applyActor) commitBatch(b *DistributedBackend) {
 	if len(a.batch) == 0 {
 		return
 	}
 	metrics.ApplyBatchSize.Observe(float64(len(a.batch)))
-	for _, entry := range a.batch {
-		var result error
-		if err := DecodeCommand(entry.Command); err != nil {
-			result = fmt.Errorf("decode command: %w", err)
-		}
-		b.recordApplyResult(entry.Index, result)
-		if result != nil {
-			b.logger.Error().Uint64("index", entry.Index).Err(result).Msg("fsm apply error")
-		}
-		b.notifyOnApply(entry.Command)
-	}
 	last := a.batch[len(a.batch)-1]
 	b.lastApplied.Store(last.Index)
 	b.lastAppliedTerm.Store(last.Term)

@@ -1,11 +1,6 @@
 package cluster
 
-import (
-	"fmt"
-
-	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
-	"github.com/gritive/GrainFS/internal/storage"
-)
+import "github.com/gritive/GrainFS/internal/storage"
 
 type PutObjectMetaCmd struct {
 	Bucket      string
@@ -106,20 +101,4 @@ type SegmentMetaEntry struct {
 // DeleteMultipartDoneCmd, CreateMultipartUploadCmd, CompleteMultipartCmd, and
 // AbortMultipartCmd are removed in the multipart-off-raft epic (M4).
 // Their data-group command slots are not named in code anymore; brownfield log
-// replay decodes the envelope type numerically and no-ops.
-
-// DecodeCommand validates a legacy data-group raft command envelope.
-func DecodeCommand(raw []byte) (err error) {
-	if len(raw) == 0 {
-		return fmt.Errorf("unmarshal command: empty data")
-	}
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("unmarshal command: invalid flatbuffer: %v", r)
-		}
-	}()
-	t := clusterpb.GetRootAsCommand(raw, 0)
-	_ = t.Type()
-	_ = t.DataBytes()
-	return nil
-}
+// replay treats committed command entries as opaque cursor markers.

@@ -9,64 +9,6 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-func TestDistributedBackendApplyErrorExportedCleanupOnRead(t *testing.T) {
-	b := &DistributedBackend{} // minimal — applyErrs는 nil 시작, recordApplyResult가 lazy init
-	b.recordApplyResult(42, errors.New("test-err"))
-
-	err := b.ApplyError(42)
-	if err == nil || err.Error() != "test-err" {
-		t.Fatalf("first read: got %v", err)
-	}
-	if e := b.ApplyError(42); e != nil {
-		t.Fatalf("second read: got %v, want nil (cleanup)", e)
-	}
-}
-
-func TestDistributedBackendRecordApplyResultIgnoresNil(t *testing.T) {
-	b := &DistributedBackend{}
-	b.recordApplyResult(1, nil) // should be no-op
-	if e := b.ApplyError(1); e != nil {
-		t.Fatalf("nil should not be stored: %v", e)
-	}
-}
-
-func TestDistributedBackendRecordApplyResult1024Cleanup(t *testing.T) {
-	b := &DistributedBackend{}
-	b.recordApplyResult(1, errors.New("old"))
-	b.recordApplyResult(2000, errors.New("new"))
-	if e := b.ApplyError(1); e != nil {
-		t.Fatalf("old should be cleaned, got %v", e)
-	}
-	if e := b.ApplyError(2000); e == nil || e.Error() != "new" {
-		t.Fatalf("new should remain: %v", e)
-	}
-}
-
-// Red 11c: apply loop ordering — recordApplyResult must be set BEFORE
-// lastApplied.Store so the propose loop, on observing lastApplied >= idx,
-// always sees the apply error (race-free). This test simulates the apply
-// loop's side effects on the backend in the documented order and then
-// verifies the read-side observation.
-func TestDistributedBackendProposeReceivesApplyError(t *testing.T) {
-	b := &DistributedBackend{}
-	sentinel := errors.New("test-sentinel")
-
-	// Simulate apply loop ordering: recordApplyResult first, then lastApplied.Store.
-	const idx uint64 = 42
-	b.recordApplyResult(idx, sentinel)
-	b.lastApplied.Store(50) // any value >= idx
-
-	// propose's leader path polls until lastApplied.Load() >= idx then reads
-	// ApplyError(idx). Verify that read consumes the sentinel.
-	if !(b.lastApplied.Load() >= idx) {
-		t.Fatalf("lastApplied should be >= %d", idx)
-	}
-	got := b.ApplyError(idx)
-	if !errors.Is(got, sentinel) {
-		t.Fatalf("expected propagated apply error, got %v", got)
-	}
-}
-
 // Red 11d: encode/decode round-trip for known FSM apply sentinels.
 // Each sentinel must be preserved verbatim across the wire so the follower
 // can errors.Is() the canonical error.
@@ -128,9 +70,8 @@ func TestApplyErrorCodecWrappedSentinel(t *testing.T) {
 // forwardPropose returns (idx, nil), the caller MUST wait for
 // b.lastApplied.Load() >= idx before returning so the MPU phantom-winner guard
 // reads a stable local mpudone marker.  This test proves the polling condition
-// and the ApplyError surfacing via the same primitives the real propose() loop
-// uses, without requiring a two-node raft cluster (which would require a real
-// transport).
+// using the same lastApplied primitive as the real propose() loop, without
+// requiring a two-node raft cluster (which would require a real transport).
 //
 // True multi-node forwarded-propose coverage is provided implicitly by:
 //   - The existing integration suite (backend_multipart_integration_test.go)
@@ -142,45 +83,18 @@ func TestApplyErrorCodecWrappedSentinel(t *testing.T) {
 // The gap — a follower forwarding to a leader then waiting for its own apply —
 // requires a two-node harness. That harness does not currently exist in the
 // cluster package unit tests (newTestDistributedBackend spins a solo leader).
-// The primitives tested here (lastApplied/ApplyError) are the exact code
-// executed by the follower apply-wait added in this fix.
+// The primitive tested here (lastApplied) is the exact code executed by the
+// follower apply-wait added in this fix.
 func TestDistributedBackendFollowerApplyWaitUnblocksOnLastApplied(t *testing.T) {
 	const idx uint64 = 77
 	b := &DistributedBackend{}
 
-	// Simulate the apply loop completing entry idx (no error).
-	// recordApplyResult comes first (ensures ApplyError reads nil),
-	// then lastApplied.Store — matching the real apply loop ordering.
+	// Simulate the apply loop completing entry idx.
 	b.lastApplied.Store(idx)
 
 	// The polling condition used in the follower apply-wait must be satisfied.
 	if b.lastApplied.Load() < idx {
 		t.Fatalf("expected lastApplied %d >= idx %d", b.lastApplied.Load(), idx)
-	}
-	// ApplyError must return nil (no apply error for this entry).
-	if applyErr := b.ApplyError(idx); applyErr != nil {
-		t.Fatalf("expected nil apply error, got %v", applyErr)
-	}
-}
-
-// TestDistributedBackendFollowerApplyWaitSurfacesApplyError validates that the
-// follower apply-wait correctly surfaces an FSM apply error recorded at idx.
-func TestDistributedBackendFollowerApplyWaitSurfacesApplyError(t *testing.T) {
-	const idx uint64 = 88
-	b := &DistributedBackend{}
-	sentinel := errors.New("fsm-apply-sentinel")
-
-	// Apply loop ordering: error first, then lastApplied.
-	b.recordApplyResult(idx, sentinel)
-	b.lastApplied.Store(idx)
-
-	// Polling condition satisfied.
-	if b.lastApplied.Load() < idx {
-		t.Fatalf("expected lastApplied %d >= idx %d", b.lastApplied.Load(), idx)
-	}
-	// ApplyError must surface the sentinel exactly once.
-	if applyErr := b.ApplyError(idx); !errors.Is(applyErr, sentinel) {
-		t.Fatalf("expected sentinel %v, got %v", sentinel, applyErr)
 	}
 }
 

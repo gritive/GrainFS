@@ -29,59 +29,14 @@ func dumpFSMState(t *testing.T, fsm *FSM) map[string]string {
 	return out
 }
 
-func unknownCmdSequence(t *testing.T) [][]byte {
-	t.Helper()
-	raw := func(ct uint32) []byte {
-		b, err := buildNoDataCommand(ct)
-		require.NoError(t, err)
-		return b
-	}
-	return [][]byte{
-		raw(1),
-		raw(2),
-		raw(8),
-		raw(9),
-		raw(10),
-		raw(11),
-		raw(15),
-		raw(250),
-	}
-}
-
-func TestCommitBatch_UnknownCommandsNoOp(t *testing.T) {
-	cmds := unknownCmdSequence(t)
-	batch := make([]raft.LogEntry, len(cmds))
-	for i, c := range cmds {
-		batch[i] = raft.LogEntry{Index: uint64(i + 1), Term: 1, Type: raft.LogEntryCommand, Command: c}
-	}
-
-	fsm := NewFSM(newTestStore(t), newStateKeyspaceEmpty())
-	a := &applyActor{fsm: fsm}
-	b := &DistributedBackend{fsm: fsm}
-	a.batch = append(a.batch[:0], batch...)
-	a.commitBatch(b)
-
-	require.Empty(t, b.applyErrs)
-	require.Equal(t, uint64(len(batch)), b.lastApplied.Load())
-	require.Empty(t, dumpFSMState(t, fsm), "unknown data-group commands must not mutate the FSM DB")
-}
-
-func TestCommitBatch_DecodeErrorDoesNotAbortBatch(t *testing.T) {
-	// Build a batch where entry 2 (index 2) is not a valid command envelope.
-	// Entries before and after must be applied successfully.
-	goodNoOp, err := buildRawCommand(0, nil)
-	require.NoError(t, err)
-	badCommand := []byte("not a command envelope")
-
+func TestCommitBatch_CommandEntriesAdvanceCursorWithoutDecode(t *testing.T) {
 	cmds := [][]byte{
-		goodNoOp,   // entry 0: no-op → nil
-		goodNoOp,   // entry 1: no-op → nil
-		badCommand, // entry 2: decode error → error
-		goodNoOp,   // entry 3: no-op → nil (must not be aborted)
+		[]byte("legacy command bytes are opaque now"),
+		nil,
 	}
 	batch := make([]raft.LogEntry, len(cmds))
 	for i, c := range cmds {
-		batch[i] = raft.LogEntry{Index: uint64(i + 1), Term: 1, Type: raft.LogEntryCommand, Command: c}
+		batch[i] = raft.LogEntry{Index: uint64(i + 1), Term: 7, Type: raft.LogEntryCommand, Command: c}
 	}
 
 	fsm := NewFSM(newTestStore(t), newStateKeyspaceEmpty())
@@ -90,11 +45,9 @@ func TestCommitBatch_DecodeErrorDoesNotAbortBatch(t *testing.T) {
 	a.batch = append(a.batch[:0], batch...)
 	a.commitBatch(b)
 
-	require.NotContains(t, b.applyErrs, uint64(1))
-	require.NotContains(t, b.applyErrs, uint64(2))
-	require.Contains(t, b.applyErrs, uint64(3), "corrupt command envelope must be reported as error")
-	require.NotContains(t, b.applyErrs, uint64(4), "entries after a decode error must still be recorded")
-	require.Equal(t, uint64(4), b.lastApplied.Load())
+	require.Equal(t, uint64(2), b.lastApplied.Load())
+	require.Equal(t, uint64(7), b.lastAppliedTerm.Load())
+	require.Empty(t, dumpFSMState(t, fsm), "retired data-group command entries must not mutate the FSM DB")
 }
 
 // snapshotBarrierFakeNode is a RaftNode stub for the snapshot-barrier test. It
@@ -136,12 +89,10 @@ func TestApplyActor_SnapshotIsBatchBarrier(t *testing.T) {
 	// Target FSM + backend. Pre-snapshot object keys are written via direct DB
 	// update (simulating entries already applied before the snapshot arrives).
 	// Feed: command(pre1), command(pre2), snapshot, command(post).
-	// Commands use a valid legacy envelope since the batch actor must handle
-	// committed command entries without mutating the FSM.
+	// Commands are opaque: the batch actor must drain committed command entries
+	// without decoding or mutating the FSM.
 	noOp := func() []byte {
-		raw, nerr := buildRawCommand(0, nil)
-		require.NoError(t, nerr)
-		return raw
+		return []byte("opaque cursor marker")
 	}
 
 	fsm := NewFSM(newTestStore(t), newStateKeyspaceEmpty())
@@ -153,10 +104,9 @@ func TestApplyActor_SnapshotIsBatchBarrier(t *testing.T) {
 	writeObj(fsm, "snap-bkt", "pre1", "pre-etag")
 	writeObj(fsm, "snap-bkt", "pre2", "pre-etag")
 
-	// The post-snapshot command (c3) uses an unknown slot. It must replay as a
-	// no-op after the snapshot without blocking or creating a pending-migration key.
-	c3, err := buildRawCommand(250, []byte("legacy payload"))
-	require.NoError(t, err)
+	// The post-snapshot command must replay as a no-op after the snapshot
+	// without blocking or creating a pending-migration key.
+	c3 := []byte("opaque post-snapshot marker")
 	postSnapKey := string(fsm.keys.PendingMigrationKey("snap-bkt", "post-snap", "v1"))
 
 	c1 := noOp()
