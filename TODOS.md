@@ -166,26 +166,3 @@ analysis forward is a trap:
   needs a fresh spec.
 - **Versioned tag/ACL RMW holds the meta-RMW lock across a raft propose** — moot: versioned
   `writeQuorumMeta` is raft-free for versioning-enabled buckets.
-
-## Completed
-
-- **[DONE] Reseal machinery retired after proving node-local FSM-value rewrap compatibility.**
-  **Completed:** v0.0.754.0 (2026-06-26)
-- **[DONE] GC singleton/freshness raft-free replacement complete.**
-  **Completed:** v0.0.754.0 (2026-06-26)
-- **[DONE] HRW owner routing for append/multipart writes and stale quorum membership migration cleanup.**
-  **Completed:** v0.0.754.0 (2026-06-26)
-- **[DONE] DeleteBucket per-version blob cleanup.**
-  **Completed:** v0.0.754.0 (2026-06-26)
-- **[DONE] Follower-stale bucket-versioning and bucket-policy authz cache fixes shipped.**
-  **Completed:** v0.0.754.0 (2026-06-26)
-- **[DONE] AppendObject versioned-bucket read gate linearization and SetBucketVersioning cache updates.**
-  **Completed:** v0.0.754.0 (2026-06-26)
-- **[DONE] Throughput TODO and short-TTL edge-cache validation for versioned writes.**
-  **Completed:** v0.0.754.0 (2026-06-26)
-- **[DONE] Slice 2 and per-object FSM cleanup work.**
-  **Completed:** v0.0.754.0 (2026-06-26)
-- **[DONE] deleteShardsQuorum empty-placement guard and stale comment cleanup.**
-  **Completed:** v0.0.754.0 (2026-06-26)
-- **[DONE] Staticcheck U1000 removal in cluster/storage tests.**
-  **Completed:** v0.0.754.0 (2026-06-26)
