@@ -201,6 +201,10 @@ func (b *DistributedBackend) hydrateClusterAppendSideSegments(ctx context.Contex
 	if tailSize < 0 {
 		return fmt.Errorf("append side summary size check: invalid coalesced size %d exceeds object size %d", objCoalescedSize, obj.Size)
 	}
+	if tailSize == 0 {
+		obj.Segments = nil
+		return nil
+	}
 	if summary.Size != tailSize {
 		return fmt.Errorf("append side summary size %d does not match object tail size %d", summary.Size, tailSize)
 	}

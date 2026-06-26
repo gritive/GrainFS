@@ -4,37 +4,6 @@
 
 ### Data-group Raft cleanup follow-ups (CmdSetRing retirement, 2026-06-26)
 
-- **[DONE][raft-removal] Reseal machinery retired after proving node-local FSM-value rewrap
-  compatibility.** `FSMValueCheckLane` now actively rewrites each node's local `policy:` / `obj:`
-  FSM values through the shared rewrap controller, re-reading the current value inside the write
-  transaction so a live active-generation write cannot be clobbered by stale scan-time data.
-  The retired data-group reseal command API is removed; brownfield data-group command envelopes
-  replay through the generic no-op path. Epoch-1 progress no longer depends on a data-group raft
-  marker; `newRewrapScrubberKick` has bounded retry for transient lane failures. The automatic
-  data-group `Rebalancer` / `GroupRebalancer` plan surface is also removed.
-- **[DONE][raft-removal] data-group apply loop command decode retired.** Committed data-group
-  raft command entries are now opaque cursor markers: the apply actor advances `lastApplied` /
-  `lastAppliedTerm` and preserves snapshot restore barriers without decoding retired command
-  envelopes or invoking apply callbacks. Legacy command envelope builders/validators and
-  callback-only tests were removed from the cluster package.
-- **[DONE][raft-removal] data-group propose wire and command schema retired.** Removed the
-  dead `/forward/propose/data-group` buffered route, its raw raft-command payload/reply codecs,
-  and the retired `clusterpb.Command` envelope schema.
-- [x] **phantom-on-CAS-reject cleanup** — owner-local-first CAS quorum-meta writes now
-  compare-delete a freshly published owner-local latest-only blob if the peer quorum later
-  fails, preventing failed append/coalesce RMW attempts from leaving a readable phantom manifest.
-- [x] GC singleton/freshness raft-free replacement — GC freshness no longer depends on
-  data-group Raft `ReadIndex`; production wires a raft-free transport reachability gate
-  to existing and future owned data-group backends, while redundancy-upgrade relocation
-  keeps a deterministic per-group singleton owner and fails closed when the owner/peers
-  are not reachable.
-- [x] HRW-primary append/multipart owner — append and multipart session writes now
-  route to a deterministic per-group owner instead of the data-group Raft leader; owner-local
-  execution skips Raft leadership checks, and forwarded owner writes target only that owner peer.
-- [x] per-group raft membership mirror removal — per-group raft now boots as a local
-  singleton and no longer mirrors or mutates shard-group placement membership. Revoked-node
-  evacuation updates the meta-FSM `ShardGroupEntry.PeerIDs` roster directly, and the remaining
-  object RMW paths route through deterministic owner writes instead of data-group raft leadership.
 
 ### ShardService/DistributedBackend decomposition follow-ups (2026-06-25, PR1 LocalShardStore + Card1 QuorumMetaStore done)
 
@@ -56,17 +25,6 @@ separate PR, facades stay the spine — see design
 
 ### DeleteBucket non-Enabled emptiness follow-ups (2026-06-24)
 
-- **[DONE-local][pre-existing] Versioned/Suspended force-delete left per-version tombstone
-  blobs in `.quorum_meta_versions/{bucket}/`.** `purgePerVersionBlobs` deletes versions
-  via `DeleteObjectVersion`, which writes an `IsHardDeleted` tombstone (the versioned
-  shards then become orphan-eligible and ARE reclaimed by the orphan-shard walker;
-  non-versioned shards are hard-removed inline because the walker does not GC them).
-  `os.RemoveAll(b.bucketDir)` removes `{root}/data/{bucket}` but NOT the
-  `.quorum_meta_versions/{bucket}/` tombstone blobs, so they persisted as inert residue
-  (dropped from reads via `dropHardDeletedVersions`, so no resurrection). Shared with the
-  pre-existing Enabled force-delete path (`forceDeleteBucketBlobAuth`).
-  FIXED: `DeleteBucket` now removes `.quorum_meta{,_versions}/{bucket}` after
-  `os.RemoveAll(bucketDir)` and best-effort fan-outs the same physical cleanup to peer nodes.
 
 ### Bucket-delete config cascade follow-ups (PR: fix-bucket-delete-config-cascade)
 
@@ -79,44 +37,6 @@ separate PR, facades stay the spine — see design
 
 ### Bucket config off group-0 (control-plane read linearization)
 
-- **[DONE] Follower-stale bucket-versioning read at the mutating S3 edge.** A multipart-complete / PUT /
-  Copy on a group-0 follower read its lagging local replica and silently wrote the object
-  non-versioned (a just-joined follower observed Unversioned for ~90s after another node enabled
-  versioning). Fixed: the mutating edge resolves versioning via a linearizing read
-  (`GetBucketVersioningLinearized` = ReadIndex+WaitApplied, reusing the object-read primitive),
-  **degrading to a local read during a group-0 leaderless window** so writes aren't coupled to
-  control-plane leadership; reads/scrub keep the plain local read. Versioning stays on group-0 raft
-  (consensus preserved — a mutable RMW cell needs total order + atomic CAS, which a quorum LWW blob
-  can't provide; see `docs/superpowers/specs/2026-06-23-bucket-config-off-group0-quorum-design.md`).
-- **[premise-WRONG, do not implement] "Linearize `GetBucketPolicy` the same way".** Investigated and
-  refuted: the S3 mutating-edge authz decision does NOT call `GetBucketPolicy`. It goes
-  `mustAuthorize` → `authz_decision.go` `s.authz.Decide` → `RequestAuthorizer.Decide` → the in-memory
-  `*policy.CompiledPolicyStore`. `GetBucketPolicy` (`loadBucketPolicy`) is only the GET ?policy /
-  admin **display** read. Linearizing it changes no authorization and only adds group-0 coupling to a
-  display read. Superseded by the real gap below.
-- **[DONE] Follower's bucket-policy authz cache is never populated from committed Raft state.**
-  In cluster mode a follower (or a single-node node after restart) whose in-memory
-  `*policy.CompiledPolicyStore` was never populated for a bucket default-ALLOWed (`Allow` returned
-  `true` on a `cp == nil` miss), so a committed **Deny** bucket-policy was silently unenforced.
-  Fixed (hybrid, per the chosen design): (1) **pull-on-miss** — `Allow` now loads the policy from
-  the local committed replica via an injected loader (`storage.NewOperations` wires
-  `loadCommittedBucketPolicy` → `PolicyBackend.GetBucketPolicy`), compiles, and caches it positive
-  **or** negative; a successfully-read committed Deny is always honored on the first request. (2)
-  **apply-hook invalidate** — the old data-group policy apply hook invalidated
-  `CompiledPolicyStore` on committed policy changes so deletes/tightening on any node dropped the
-  cached entry → next `Allow` re-pulled. (3)
-  snapshot install flushes the whole policy cache (`restore` → `Invalidate("")`). A global generation
-  stamp drops an in-flight pull's result if a concurrent mutation raced it. Fault/structural-read
-  errors fail **open** (legacy default-allow, uncached, self-healing — no spurious-deny regression);
-  an unparseable committed policy fails **closed** (deny, cached). `internal/policy` stays free of
-  `internal/storage` (loader injected as a plain func). Tests: policy unit (pull/negative/fault/
-  malformed/tighten/loosen/flush/concurrency, race-clean), storage cold-cache, cluster apply-hook,
-  in-process server cold-cache proof.
-- **[DONE] AppendObject versioned-bucket feature-gate** read the PLAIN versioning state
-  (`object_append.go`), so a stale group-0 follower could read Unversioned for an Enabled bucket and
-  let an append bypass the 501 gate. Fixed: the gate now resolves versioning via the linearized read
-  (`GetBucketVersioningLinearized`, #839), matching the PUT/Copy/CompleteMultipart mutating-edge
-  contract. Discriminating unit test (`TestAppendObjectGateUsesLinearizedRead`, call-count).
 - **[P2][design-ready] AppendObject incremental metadata implementation.** Design:
   `docs/architecture/append-object-incremental-metadata.md`. A micro-benchmark sweep
   (`BenchmarkS3Append`, allocs/op deterministic) showed per-append cost GROWS with the existing
@@ -187,29 +107,11 @@ Deferred items:
   within a one-second window. `TestCompleteMultipart_VersionedLatestEdge` forces a >1s gap to assert
   the cross-second ModTime-primary behavior deterministically.
 
-- **[DONE] M4 stale comment + dead `MultipartDoneKey` cleanup (final-review batch).** Stale
-  cross-reference comments (references to the removed `CmdCompleteMultipart` flow, removed
-  `readDoneMarker` / `MultipartDoneKey` usage sites, stale `//nolint:unused` directives) cleaned
-  up; `MultipartDoneKey` (zero callers after M4) removed.
 
 ### Data-plane raft-free Slice 2 follow-ups (2026-06-24)
 
-- **[DONE] Retire remaining per-object FSM commands (Slice 2).** `CmdSetObjectTags`,
-  `CmdSetObjectACL`, `CmdPutObjectMeta` apply, `CmdPutObjectQuarantine`, `CmdDeleteObject`,
-  `CmdDeleteObjectVersion` all retired. FSM is pure control-plane. See CHANGELOG Unreleased entry.
-
-- **[DONE] `deleteShardsQuorum` empty-placement guard.** Fixed in the Slice 2 code-gate: both
-  `ForceDeleteBucket` non-versioned loops now fail closed with a descriptive error when
-  `len(cmd.NodeIDs) == 0` (corrupt/incomplete qmeta blob) instead of silently stranding shards and
-  the qmeta blob. Closes the shard-stranding class for force-delete on objects with corrupt placement.
-
-- **[DONE] Stale comments referencing removed functions.** Fixed in the Slice 2 code-gate:
-  the three comments (`apply.go`, `object_version.go`, `cluster_coordinator.go`) referencing
-  deleted apply helpers were reworded to describe behavior without the removed symbols.
-
 ### Append/coalesce off-raft follow-ups (Slice 1, 2026-06-24)
 
-- **[DONE] Slice 2 — retire remaining per-object FSM commands.** See Slice 2 section above.
 
 - **[P3][known-tradeoff] Coalesced orphans in a bucket switched to versioning-Enabled are not
   reclaimed.** `hasLiveCoalescedRef` gates on `blobAuthReadOn` and fails closed (keep) for Enabled
@@ -322,13 +224,5 @@ analysis forward is a trap:
   metadata is now a K-of-N replicated blob, not a generation-sharded FSM record, so the cross-group
   record migration it described no longer exists. Any residual non-redundant-genesis-DATA gap, if real,
   needs a fresh spec.
-- **DeleteObjectVersion stale-latest quorum-meta pointer** — DONE-IN-EFFECT: hard delete now writes a
-  durable `IsHardDeleted` tombstone (LWW `MetaSeq+1`) and versioned reads derive strictly from
-  per-version blobs excluding tombstones. Worth one confirmatory e2e of the old repro before formal
-  closure.
-- The entire **S4c-a / a2 / a3 soleauth-precondition** block (epoch fence, boot-window, flip-gating,
-  delete forward-wire epoch, etc.) — the soleauth machinery was removed in #824.
-- **`-race` test-harness race** (`per_version_backfill_walker_test.go` vs `RunApplyLoop`) — DONE-IN-EFFECT:
-  the backfill walker + its test were deleted in #822.
 - **Versioned tag/ACL RMW holds the meta-RMW lock across a raft propose** — moot: versioned
   `writeQuorumMeta` is raft-free for versioning-enabled buckets.
