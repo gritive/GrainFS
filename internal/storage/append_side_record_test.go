@@ -67,6 +67,36 @@ func TestAppendSummaryRoundTripsETagState(t *testing.T) {
 	require.Equal(t, want, got)
 }
 
+func TestAppendSummaryRoundTripsCompactedPrefix(t *testing.T) {
+	want := appendSummary{
+		Size:                 123,
+		SegmentCount:         4,
+		CompactedPrefixCount: 2,
+	}
+	encoded := encodeAppendSummary(want)
+	require.Len(t, encoded, 24)
+
+	got, err := decodeAppendSummary(encoded)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+}
+
+func TestAppendSummaryRoundTripsETagStateWithCompactedPrefix(t *testing.T) {
+	want := appendSummary{
+		Size:                 123,
+		SegmentCount:         4,
+		CompactedPrefixCount: 2,
+		ETagPartCount:        4,
+		ETagDigestState:      []byte("md5-state"),
+	}
+	encoded := encodeAppendSummary(want)
+	require.Len(t, encoded, 36+len(want.ETagDigestState))
+
+	got, err := decodeAppendSummary(encoded)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+}
+
 func seedAppendSideRecordObject(t *testing.T, parts []string) (*LocalBackend, *Object) {
 	t.Helper()
 	b := newTestLocalBackend(t)

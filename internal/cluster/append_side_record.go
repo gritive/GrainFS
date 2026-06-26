@@ -210,7 +210,9 @@ func (b *DistributedBackend) hydrateClusterAppendSideSegments(ctx context.Contex
 	}
 	segments := make([]storage.SegmentRef, 0, summary.SegmentCount)
 	var total int64
-	for seq := 1; seq <= summary.SegmentCount; seq++ {
+	startSeq := summary.CompactedPrefixCount + 1
+	endSeq := summary.CompactedPrefixCount + summary.SegmentCount
+	for seq := startSeq; seq <= endSeq; seq++ {
 		data, err := b.readClusterAppendSideRaw(ctx, bucket, appendSideSegmentSubpath(key, obj.VersionID, seq), obj.NodeIDs)
 		if err != nil {
 			if errors.Is(err, storage.ErrObjectNotFound) {

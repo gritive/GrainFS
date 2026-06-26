@@ -178,10 +178,45 @@ func TestPlanAppendSeedsAppendCallMD5sOnFirstCall(t *testing.T) {
 
 func TestPlanCoalescePreservesAppendCallMD5s(t *testing.T) {
 	base := PutObjectMetaCmd{Bucket: "b", Key: "k", IsAppendable: true, Segments: []SegmentMetaEntry{{BlobID: "s1"}}, AppendCallMD5s: [][]byte{[]byte("aaaaaaaaaaaaaaaa")}}
-	next, res, err := planCoalesceBlobRMW(base, CoalesceSegmentsPlan{Bucket: "b", Key: "k", CoalescedID: "x", ShardKey: "k/coalesced/x", ConsumedSegmentIDs: []string{"s1"}})
+	next, _, res, err := planCoalesceBlobRMWWithSideSummary(base, storage.AppendSummary{}, false, CoalesceSegmentsPlan{Bucket: "b", Key: "k", CoalescedID: "x", ShardKey: "k/coalesced/x", ConsumedSegmentIDs: []string{"s1"}})
 	require.NoError(t, err)
 	require.False(t, res.Noop)
 	require.Equal(t, base.AppendCallMD5s, next.AppendCallMD5s, "coalesce must carry the per-call digest history forward unchanged")
+}
+
+func TestPlanCoalesceAdvancesAppendSideSummaryPrefix(t *testing.T) {
+	base := PutObjectMetaCmd{
+		Bucket:       "b",
+		Key:          "k",
+		Size:         12,
+		IsAppendable: true,
+		MetaSeq:      7,
+	}
+	summary := storage.AppendSummary{
+		Size:            12,
+		SegmentCount:    3,
+		ETagPartCount:   3,
+		ETagDigestState: []byte("running-md5-state"),
+	}
+
+	next, nextSummary, res, err := planCoalesceBlobRMWWithSideSummary(base, summary, true, CoalesceSegmentsPlan{
+		Bucket:             "b",
+		Key:                "k",
+		CoalescedID:        "c1",
+		ShardKey:           "k/coalesced/c1",
+		Size:               8,
+		ConsumedSegmentIDs: []string{"s1", "s2"},
+	})
+
+	require.NoError(t, err)
+	require.False(t, res.Noop)
+	require.Len(t, next.Coalesced, 1)
+	require.Equal(t, uint64(8), next.MetaSeq)
+	require.Equal(t, int64(4), nextSummary.Size)
+	require.Equal(t, 1, nextSummary.SegmentCount)
+	require.Equal(t, 2, nextSummary.CompactedPrefixCount)
+	require.Equal(t, summary.ETagPartCount, nextSummary.ETagPartCount)
+	require.Equal(t, summary.ETagDigestState, nextSummary.ETagDigestState)
 }
 
 // TestPlanAppendFirstAppendOntoChunkedPutPreservesETag: first append onto a

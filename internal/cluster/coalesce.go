@@ -105,7 +105,15 @@ func (b *DistributedBackend) publishCoalesceBlob(ctx context.Context, cmd Coales
 			}
 			return fmt.Errorf("coalesce publish: read base: %w", err)
 		}
-		next, res, perr := planCoalesceBlobRMW(base, cmd)
+		summary, hasSummary, tailSize, err := b.readCoalesceAppendSideSummary(ctx, base)
+		if err != nil {
+			return fmt.Errorf("coalesce publish: read append side summary: %w", err)
+		}
+		alreadyPublished := coalescedRefPublished(base.Coalesced, cmd.CoalescedID)
+		if hasSummary && summary.Size != tailSize && !alreadyPublished {
+			return fmt.Errorf("coalesce publish: append side summary size %d does not match object tail size %d", summary.Size, tailSize)
+		}
+		next, nextSummary, res, perr := planCoalesceBlobRMWWithSideSummary(base, summary, hasSummary, cmd)
 		if perr != nil {
 			// Cap reached: stall coalesce for this object (best-effort) rather than
 			// fail the worker loudly. Segments stay intact.
@@ -115,11 +123,28 @@ func (b *DistributedBackend) publishCoalesceBlob(ctx context.Context, cmd Coales
 			return fmt.Errorf("coalesce publish: plan rmw: %w", perr)
 		}
 		if res.Noop {
+			if hasSummary && summary.Size != tailSize {
+				repairedSummary, err := advanceAppendSummaryForCoalesce(summary, cmd)
+				if err != nil {
+					return fmt.Errorf("coalesce publish append side summary repair: %w", err)
+				}
+				if repairedSummary.Size != tailSize {
+					return fmt.Errorf("coalesce publish append side summary repair size %d does not match object tail size %d", repairedSummary.Size, tailSize)
+				}
+				if err := b.writeClusterAppendSideRecords(ctx, cmd.Bucket, cmd.Key, base.VersionID, base.NodeIDs, int(base.ECData), repairedSummary, nil); err != nil {
+					return fmt.Errorf("coalesce publish append side summary repair commit: %w", err)
+				}
+			}
 			// CoalescedID already published (idempotent retry) → success no-op.
 			return nil
 		}
 		werr := b.writeQuorumMeta(ctx, next)
 		if werr == nil {
+			if hasSummary {
+				if err := b.writeClusterAppendSideRecords(ctx, cmd.Bucket, cmd.Key, next.VersionID, next.NodeIDs, int(next.ECData), nextSummary, nil); err != nil {
+					return fmt.Errorf("coalesce publish append side summary commit: %w", err)
+				}
+			}
 			return nil
 		}
 		if !errors.Is(werr, errQuorumMetaCASReject) || attempt >= maxCoalesceCASRetries {
@@ -132,6 +157,40 @@ func (b *DistributedBackend) publishCoalesceBlob(ctx context.Context, cmd Coales
 		}
 		// CAS reject: loop, re-read the current base, recompute consumed-id removal.
 	}
+}
+
+func coalescedRefPublished(refs []CoalescedShardRef, coalescedID string) bool {
+	for _, c := range refs {
+		if c.CoalescedID == coalescedID {
+			return true
+		}
+	}
+	return false
+}
+
+func (b *DistributedBackend) readCoalesceAppendSideSummary(ctx context.Context, base PutObjectMetaCmd) (storage.AppendSummary, bool, int64, error) {
+	if !base.IsAppendable || len(base.Segments) > 0 || base.Size == 0 {
+		return storage.AppendSummary{}, false, 0, nil
+	}
+	coalescedSize := int64(0)
+	for _, c := range base.Coalesced {
+		coalescedSize += c.Size
+	}
+	tailSize := base.Size - coalescedSize
+	if tailSize < 0 {
+		return storage.AppendSummary{}, false, 0, fmt.Errorf("invalid coalesced size %d exceeds object size %d", coalescedSize, base.Size)
+	}
+	if tailSize == 0 {
+		return storage.AppendSummary{}, false, tailSize, nil
+	}
+	summary, err := b.readClusterAppendSummary(ctx, base.Bucket, base.Key, base.VersionID, base.NodeIDs)
+	if err != nil {
+		if errors.Is(err, storage.ErrObjectNotFound) {
+			return storage.AppendSummary{}, false, tailSize, fmt.Errorf("missing append side summary for %s/%s", base.Bucket, base.Key)
+		}
+		return storage.AppendSummary{}, false, tailSize, err
+	}
+	return summary, true, tailSize, nil
 }
 
 // coalescedRefsToStorage projects cluster-level CoalescedShardRef entries
