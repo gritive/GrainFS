@@ -441,7 +441,13 @@ func (b *LocalBackend) HeadObject(ctx context.Context, bucket, key string) (*Obj
 	err := b.db.View(func(txn *badger.Txn) error {
 		val, err := getBadgerValue(txn, b.objectMetaKey(bucket, key))
 		if err == nil {
-			return unmarshalObjectInto(val, &obj)
+			if err := unmarshalObjectInto(val, &obj); err != nil {
+				return err
+			}
+			if obj.IsAppendable && obj.Size > 0 && len(obj.Segments) == 0 && len(obj.Coalesced) == 0 {
+				return b.loadAppendSideSegmentsInTxn(txn, bucket, key, &obj)
+			}
+			return nil
 		}
 		if err != badger.ErrKeyNotFound {
 			return err

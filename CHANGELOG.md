@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.743.0] - 2026-06-26
+
+### Changed
+- **Added the single-node AppendObject side-record read foundation.**
+  LocalBackend can now expand appendable object summaries from append side
+  segment records for Head/Get, and fails closed when a side-record summary is
+  missing instead of silently returning an unreadable object.
+
 ## [0.0.742.0] - 2026-06-26
 
 ### Changed
