@@ -253,11 +253,10 @@ surfaced the items below. None block; tracked for cleanup.
   `require` / `assert`.** The AppendObject side-record writer slice converted the touched
   append/chunkref tests plus small helper tests in `internal/storage`. v0.0.747.0 converted the
   segment reader/writer, pullthrough resolver, directio, context passthrough, buffer right-sizing,
-  and small packblob seam/list/AAD tests. Residual files: `internal/storage/data_encryptor_test.go`,
-  `internal/storage/datawal/wal_internal_test.go`, `internal/storage/eccodec/shardio_test.go`,
-  `internal/storage/encrypted_object_file_alloc_test.go`,
-  `internal/storage/encrypted_object_file_test.go`, `internal/storage/local_test.go`, and
-  `internal/storage/range_chunk_boundary_test.go`. Low-risk cleanup; keep it separate from behavior
+  and small packblob seam/list/AAD tests. v0.0.748.0 converted data encryptor, encrypted object file,
+  encrypted object allocation, and range chunk-boundary tests. Residual files:
+  `internal/storage/datawal/wal_internal_test.go`, `internal/storage/eccodec/shardio_test.go`, and
+  `internal/storage/local_test.go`. Low-risk cleanup; keep it separate from behavior
   changes so future diffs stay reviewable. Enumerate with
   `rg '\\bt\\.(Fatal|Fatalf|Error|Errorf)\\(' internal/storage --glob '*_test.go'`.
 

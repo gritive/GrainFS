@@ -2,10 +2,10 @@ package storage
 
 import (
 	"bytes"
-	"errors"
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/stretchr/testify/require"
 )
 
 func testSeamClusterID() []byte {
@@ -20,9 +20,7 @@ func newDEKKeeperAdapterForTest(t *testing.T) *DEKKeeperAdapter {
 	t.Helper()
 	kek := bytes.Repeat([]byte{0x11}, encrypt.KEKSize)
 	keeper, err := encrypt.NewDEKKeeper(kek, testSeamClusterID())
-	if err != nil {
-		t.Fatalf("NewDEKKeeper: %v", err)
-	}
+	require.NoError(t, err, "NewDEKKeeper")
 	return NewDEKKeeperAdapter(keeper, testSeamClusterID())
 }
 
@@ -32,16 +30,10 @@ func TestDEKKeeperAdapter_RoundTrip(t *testing.T) {
 	fields := []encrypt.AADField{encrypt.FieldString("bucket"), encrypt.FieldString("key"), encrypt.FieldUint32(3)}
 
 	ct, gen, err := a.Seal(encrypt.DomainShard, fields, plain)
-	if err != nil {
-		t.Fatalf("Seal: %v", err)
-	}
+	require.NoError(t, err, "Seal")
 	got, err := a.Open(encrypt.DomainShard, fields, gen, ct)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	if !bytes.Equal(got, plain) {
-		t.Fatalf("plaintext mismatch: got %q want %q", got, plain)
-	}
+	require.NoError(t, err, "Open")
+	require.Equal(t, plain, got)
 }
 
 func TestDEKKeeperAdapter_WrongAADFails(t *testing.T) {
@@ -49,22 +41,17 @@ func TestDEKKeeperAdapter_WrongAADFails(t *testing.T) {
 	plain := []byte("payload")
 	sealFields := []encrypt.AADField{encrypt.FieldString("bucket"), encrypt.FieldUint32(3)}
 	ct, gen, err := a.Seal(encrypt.DomainShard, sealFields, plain)
-	if err != nil {
-		t.Fatalf("Seal: %v", err)
-	}
+	require.NoError(t, err, "Seal")
 	openFields := []encrypt.AADField{encrypt.FieldString("bucket"), encrypt.FieldUint32(4)}
-	if _, err := a.Open(encrypt.DomainShard, openFields, gen, ct); err == nil {
-		t.Fatal("expected auth failure opening with mismatched AAD fields")
-	}
+	_, err = a.Open(encrypt.DomainShard, openFields, gen, ct)
+	require.Error(t, err, "expected auth failure opening with mismatched AAD fields")
 }
 
 func TestDEKKeeperAdapter_CopiesClusterID(t *testing.T) {
 	kek := bytes.Repeat([]byte{0x11}, encrypt.KEKSize)
 	clusterID := testSeamClusterID()
 	keeper, err := encrypt.NewDEKKeeper(kek, clusterID)
-	if err != nil {
-		t.Fatalf("NewDEKKeeper: %v", err)
-	}
+	require.NoError(t, err, "NewDEKKeeper")
 	wantClusterID := append([]byte(nil), clusterID...)
 	a := NewDEKKeeperAdapter(keeper, clusterID)
 	for i := range clusterID {
@@ -74,42 +61,26 @@ func TestDEKKeeperAdapter_CopiesClusterID(t *testing.T) {
 
 	fields := []encrypt.AADField{encrypt.FieldString("bucket"), encrypt.FieldUint32(3)}
 	ct, gen, err := a.Seal(encrypt.DomainShard, fields, []byte("payload"))
-	if err != nil {
-		t.Fatalf("Seal: %v", err)
-	}
+	require.NoError(t, err, "Seal")
 	got, err := opener.Open(encrypt.DomainShard, fields, gen, ct)
-	if err != nil {
-		t.Fatalf("Open after caller clusterID mutation: %v", err)
-	}
-	if !bytes.Equal(got, []byte("payload")) {
-		t.Fatalf("plaintext mismatch: got %q", got)
-	}
+	require.NoError(t, err, "Open after caller clusterID mutation")
+	require.Equal(t, []byte("payload"), got)
 }
 
 func TestDEKKeeperAdapter_OldGenOpensAfterRotate(t *testing.T) {
 	kek := bytes.Repeat([]byte{0x11}, encrypt.KEKSize)
 	keeper, err := encrypt.NewDEKKeeper(kek, testSeamClusterID())
-	if err != nil {
-		t.Fatalf("NewDEKKeeper: %v", err)
-	}
+	require.NoError(t, err, "NewDEKKeeper")
 	a := NewDEKKeeperAdapter(keeper, testSeamClusterID())
 	plain := []byte("payload")
 	fields := []encrypt.AADField{encrypt.FieldString("b"), encrypt.FieldUint32(0)}
 
 	ct, gen0, err := a.Seal(encrypt.DomainShard, fields, plain)
-	if err != nil {
-		t.Fatalf("Seal: %v", err)
-	}
-	if err := keeper.Rotate(); err != nil {
-		t.Fatalf("Rotate: %v", err)
-	}
+	require.NoError(t, err, "Seal")
+	require.NoError(t, keeper.Rotate(), "Rotate")
 	got, err := a.Open(encrypt.DomainShard, fields, gen0, ct)
-	if err != nil {
-		t.Fatalf("Open(gen0) after rotate: %v", err)
-	}
-	if !bytes.Equal(got, plain) {
-		t.Fatal("plaintext mismatch after rotate")
-	}
+	require.NoError(t, err, "Open(gen0) after rotate")
+	require.Equal(t, plain, got, "plaintext mismatch after rotate")
 }
 
 func TestDEKKeeperAdapter_ImplementsDataEncryptor(t *testing.T) {
@@ -123,38 +94,24 @@ func TestTransientDataEncryptor_OpensSameCiphertextAsLiveAdapter(t *testing.T) {
 	kek := bytes.Repeat([]byte{0x11}, encrypt.KEKSize)
 	clusterID := testSeamClusterID()
 	keeper, err := encrypt.NewDEKKeeper(kek, clusterID)
-	if err != nil {
-		t.Fatalf("NewDEKKeeper: %v", err)
-	}
-	if err := keeper.Rotate(); err != nil {
-		t.Fatalf("Rotate: %v", err)
-	}
+	require.NoError(t, err, "NewDEKKeeper")
+	require.NoError(t, keeper.Rotate(), "Rotate")
 	live := NewDEKKeeperAdapter(keeper, clusterID)
 	fields := []encrypt.AADField{encrypt.FieldString("sa"), encrypt.FieldString("AK")}
 	ct, gen, err := live.Seal(encrypt.DomainIAMCredential, fields, []byte("creds"))
-	if err != nil {
-		t.Fatalf("live Seal: %v", err)
-	}
+	require.NoError(t, err, "live Seal")
 
 	// Build a KEKStore at the same version the keeper currently wraps under
 	// (Phase A pins to 0; Rotate does not advance it).
 	store := encrypt.NewKEKStore()
-	if err := store.Add(0, kek); err != nil {
-		t.Fatalf("KEKStore.Add: %v", err)
-	}
+	require.NoError(t, store.Add(0, kek), "KEKStore.Add")
 	versions, active := keeper.VersionsAndActive()
 	transient, err := encrypt.NewTransientReadOnlyDEK(clusterID, versions, active, 0, store)
-	if err != nil {
-		t.Fatalf("NewTransientReadOnlyDEK: %v", err)
-	}
+	require.NoError(t, err, "NewTransientReadOnlyDEK")
 	a := NewTransientDataEncryptor(transient, clusterID)
 	got, err := a.Open(encrypt.DomainIAMCredential, fields, gen, ct)
-	if err != nil {
-		t.Fatalf("transient Open: %v", err)
-	}
-	if !bytes.Equal(got, []byte("creds")) {
-		t.Fatalf("plaintext mismatch: got %q", got)
-	}
+	require.NoError(t, err, "transient Open")
+	require.Equal(t, []byte("creds"), got)
 }
 
 // TestTransientDataEncryptor_SealIsRefused guards the read-only invariant
@@ -164,23 +121,15 @@ func TestTransientDataEncryptor_SealIsRefused(t *testing.T) {
 	kek := bytes.Repeat([]byte{0x11}, encrypt.KEKSize)
 	clusterID := testSeamClusterID()
 	keeper, err := encrypt.NewDEKKeeper(kek, clusterID)
-	if err != nil {
-		t.Fatalf("NewDEKKeeper: %v", err)
-	}
+	require.NoError(t, err, "NewDEKKeeper")
 	store := encrypt.NewKEKStore()
-	if err := store.Add(0, kek); err != nil {
-		t.Fatalf("KEKStore.Add: %v", err)
-	}
+	require.NoError(t, store.Add(0, kek), "KEKStore.Add")
 	versions, active := keeper.VersionsAndActive()
 	transient, err := encrypt.NewTransientReadOnlyDEK(clusterID, versions, active, 0, store)
-	if err != nil {
-		t.Fatalf("NewTransientReadOnlyDEK: %v", err)
-	}
+	require.NoError(t, err, "NewTransientReadOnlyDEK")
 	a := NewTransientDataEncryptor(transient, clusterID)
 	_, _, err = a.Seal(encrypt.DomainIAMCredential, nil, []byte("nope"))
-	if !errors.Is(err, encrypt.ErrTransientReadOnly) {
-		t.Fatalf("Seal must return ErrTransientReadOnly, got %v", err)
-	}
+	require.ErrorIs(t, err, encrypt.ErrTransientReadOnly)
 }
 
 func TestTransientDataEncryptor_ImplementsDataEncryptor(t *testing.T) {
@@ -199,23 +148,13 @@ func TestSealToRoundTripsAndMatchesSeal(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			ct, gen, err := tc.de.SealTo(make([]byte, 0, 512), encrypt.DomainShard, fields, plain)
-			if err != nil {
-				t.Fatalf("SealTo: %v", err)
-			}
+			require.NoError(t, err, "SealTo")
 			got, err := tc.de.Open(encrypt.DomainShard, fields, gen, ct)
-			if err != nil {
-				t.Fatalf("Open: %v", err)
-			}
-			if !bytes.Equal(got, plain) {
-				t.Fatalf("plaintext mismatch: got %q want %q", got, plain)
-			}
+			require.NoError(t, err, "Open")
+			require.Equal(t, plain, got)
 			ctSeal, _, err := tc.de.Seal(encrypt.DomainShard, fields, plain)
-			if err != nil {
-				t.Fatalf("Seal: %v", err)
-			}
-			if len(ctSeal) != len(ct) {
-				t.Fatalf("ciphertext len mismatch: Seal=%d SealTo=%d", len(ctSeal), len(ct))
-			}
+			require.NoError(t, err, "Seal")
+			require.Len(t, ctSeal, len(ct))
 		})
 	}
 }
@@ -232,23 +171,13 @@ func TestOpenToRoundTripsAndMatchesOpen(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			ct, gen, err := tc.de.Seal(encrypt.DomainShard, fields, plain)
-			if err != nil {
-				t.Fatalf("Seal: %v", err)
-			}
+			require.NoError(t, err, "Seal")
 			gotTo, err := tc.de.OpenTo(make([]byte, 0, 512), encrypt.DomainShard, fields, gen, ct)
-			if err != nil {
-				t.Fatalf("OpenTo: %v", err)
-			}
-			if !bytes.Equal(gotTo, plain) {
-				t.Fatalf("OpenTo plaintext mismatch: got %q want %q", gotTo, plain)
-			}
+			require.NoError(t, err, "OpenTo")
+			require.Equal(t, plain, gotTo)
 			gotOpen, err := tc.de.Open(encrypt.DomainShard, fields, gen, ct)
-			if err != nil {
-				t.Fatalf("Open: %v", err)
-			}
-			if !bytes.Equal(gotOpen, gotTo) {
-				t.Fatalf("OpenTo != Open: %q vs %q", gotTo, gotOpen)
-			}
+			require.NoError(t, err, "Open")
+			require.Equal(t, gotOpen, gotTo)
 		})
 	}
 }
@@ -260,23 +189,15 @@ func TestOpenToReusesCapacity(t *testing.T) {
 	fields := []encrypt.AADField{encrypt.FieldString("k")}
 	plain := bytes.Repeat([]byte("p"), 64)
 	ct, gen, err := de.Seal(encrypt.DomainShard, fields, plain)
-	if err != nil {
-		t.Fatalf("Seal: %v", err)
-	}
+	require.NoError(t, err, "Seal")
 	buf := make([]byte, 0, 4096)
 	got, err := de.OpenTo(buf, encrypt.DomainShard, fields, gen, ct)
-	if err != nil {
-		t.Fatalf("OpenTo: %v", err)
-	}
-	if &buf[:1][0] != &got[:1][0] {
-		t.Fatalf("OpenTo reallocated despite sufficient capacity")
-	}
+	require.NoError(t, err, "OpenTo")
+	require.Same(t, &buf[:1][0], &got[:1][0], "OpenTo reallocated despite sufficient capacity")
 }
 
 func TestTransientSealToUnsupported(t *testing.T) {
 	de := &TransientDataEncryptor{}
 	_, _, err := de.SealTo(nil, encrypt.DomainShard, nil, []byte("x"))
-	if !errors.Is(err, encrypt.ErrTransientReadOnly) {
-		t.Fatalf("SealTo must return ErrTransientReadOnly, got %v", err)
-	}
+	require.ErrorIs(t, err, encrypt.ErrTransientReadOnly)
 }
