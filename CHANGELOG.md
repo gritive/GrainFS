@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.748.0] - 2026-06-26
+
+### Changed
+- **Retired data-group raft command decoding from the apply loop.**
+  Data-group raft command entries now drain as opaque cursor markers while
+  snapshot entries still restore brownfield state. Legacy command envelope
+  validators, apply callbacks, data-group apply-error storage, and decode-only
+  tests were removed from the cluster package.
+
 ## [0.0.747.0] - 2026-06-26
 
 ### Changed

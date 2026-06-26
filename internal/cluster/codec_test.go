@@ -11,7 +11,7 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-func TestEncodeDecodeCommand_PutObjectMeta(t *testing.T) {
+func TestQuorumMetaBlobCodec_PutObjectMetaRoundTrip(t *testing.T) {
 	orig := PutObjectMetaCmd{
 		Bucket:           "test-bucket",
 		Key:              "photos/sunset.jpg",
@@ -120,7 +120,7 @@ func TestPutObjectMetaCmd_EmptySegmentsLegacyCompatible(t *testing.T) {
 	assert.Equal(t, "small.txt", decoded.Key)
 }
 
-// TestEncodeDecodeCommand_CompleteMultipart, TestCompleteMultipartCmd_PartsSegmentsRoundTrip
+// TestQuorumMetaBlobCodec_CompleteMultipart, TestCompleteMultipartCmd_PartsSegmentsRoundTrip
 // removed in M4: CmdCompleteMultipart/CompleteMultipartCmd are deleted.
 
 func TestObjectMetaCodecRoundTrip(t *testing.T) {
@@ -209,33 +209,19 @@ func TestClusterMultipartMetaCodecLegacyDecodeZeroValues(t *testing.T) {
 	assert.Equal(t, "group-legacy", decoded.PlacementGroupID)
 }
 
-func TestDecodeCommands_InvalidData(t *testing.T) {
-	// FlatBuffers panics on malformed data; test that the top-level entry
-	// points (DecodeCommand, unmarshalSnapshotState) convert panics to errors.
-	// Inner decode functions are only called with already-validated data.
-	err := DecodeCommand([]byte("not valid flatbuffer data"))
-	assert.Error(t, err, "DecodeCommand should fail on invalid data")
-
-	_, err = unmarshalSnapshotState([]byte("not valid flatbuffer data"))
+func TestUnmarshalSnapshotState_InvalidData(t *testing.T) {
+	// FlatBuffers panics on malformed data; the snapshot entry point converts
+	// panics to errors. Inner decode functions are only called with
+	// already-validated data.
+	_, err := unmarshalSnapshotState([]byte("not valid flatbuffer data"))
 	assert.Error(t, err, "unmarshalSnapshotState should fail on invalid data")
-
-	err = DecodeCommand(nil)
-	assert.Error(t, err, "DecodeCommand should fail on nil data")
 
 	_, err = unmarshalSnapshotState(nil)
 	assert.Error(t, err, "unmarshalSnapshotState should fail on nil data")
 }
 
 func TestClusterCodecOutputIsNotJSON(t *testing.T) {
-	// Encode a command and verify the output is not valid JSON
-	encoded, err := buildRawCommand(0, nil)
-	require.NoError(t, err)
-
 	var js json.RawMessage
-	err = json.Unmarshal(encoded, &js)
-	assert.Error(t, err, "protobuf output should not parse as valid JSON")
-
-	// Also verify objectMeta encoding is not JSON
 	metaBytes, err := marshalObjectMeta(objectMeta{
 		Key: "key", Size: 10, ContentType: "text/plain", ETag: "e", LastModified: 1,
 	})

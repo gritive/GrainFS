@@ -12,7 +12,6 @@ import (
 
 	"github.com/dgraph-io/badger/v4"
 
-	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/storage"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -21,26 +20,21 @@ import (
 
 type recordingMultipartRaftNode struct {
 	RaftNode
-	mu    sync.Mutex
-	types []uint32
+	mu       sync.Mutex
+	proposes int
 }
 
 func (n *recordingMultipartRaftNode) ProposeWait(ctx context.Context, command []byte) (uint64, error) {
-	if err := DecodeCommand(command); err == nil {
-		cmd := clusterpb.GetRootAsCommand(command, 0)
-		n.mu.Lock()
-		n.types = append(n.types, cmd.Type())
-		n.mu.Unlock()
-	}
+	n.mu.Lock()
+	n.proposes++
+	n.mu.Unlock()
 	return n.RaftNode.ProposeWait(ctx, command)
 }
 
-func (n *recordingMultipartRaftNode) commandTypes() []uint32 {
+func (n *recordingMultipartRaftNode) proposeCount() int {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	out := make([]uint32, len(n.types))
-	copy(out, n.types)
-	return out
+	return n.proposes
 }
 
 var _ = Describe("Backend multipart integration", func() {
@@ -68,9 +62,9 @@ var _ = Describe("Backend multipart integration", func() {
 		obj, err := b.CompleteMultipartUpload(ctx, "bucket", "mp.bin", up.UploadID, []storage.Part{*part})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(obj).NotTo(BeNil())
-		// M3: the complete commits the latest-only quorum-meta blob FAIL-CLOSED — no
-		// CmdCompleteMultipart propose (retired slot 6).
-		Expect(rec.commandTypes()).NotTo(ContainElement(6))
+		// M3: the complete commits the latest-only quorum-meta blob FAIL-CLOSED,
+		// without proposing to data-group raft.
+		Expect(rec.proposeCount()).To(Equal(0))
 	})
 
 	It("bypasses complete spooling for single-part multipart uploads", func() {

@@ -164,8 +164,8 @@ func (r *ForwardReceiver) Register(shardSvc *ShardService) {
 }
 
 // HandleGroupPropose forwards a raw DistributedBackend metadata command to the
-// matching local data-group raft node. The propose outcome (index + apply
-// error) is in-band via encodeProposeForwardReply.
+// matching local data-group raft node. The propose outcome is in-band via
+// encodeProposeForwardReply.
 func (r *ForwardReceiver) HandleGroupPropose(payload []byte) ([]byte, error) {
 	groupID, data, err := decodeGroupForwardPayload(payload)
 	if err != nil {
@@ -181,8 +181,6 @@ func (r *ForwardReceiver) HandleGroupPropose(payload []byte) ([]byte, error) {
 	if err == nil {
 		if waitErr := dg.Backend().WaitApplied(ctx, idx); waitErr != nil {
 			err = waitErr
-		} else if applyErr := dg.Backend().ApplyError(idx); applyErr != nil {
-			err = applyErr
 		}
 	}
 	return groupProposeReply(idx, err)
@@ -190,7 +188,6 @@ func (r *ForwardReceiver) HandleGroupPropose(payload []byte) ([]byte, error) {
 
 func groupProposeReply(index uint64, err error) ([]byte, error) {
 	// Phase A (Task 16): wire-compatible with decodeProposeForwardReply.
-	// GroupBackend.ApplyError harvesting will land alongside AppendObject (Task 18+).
 	return encodeProposeForwardReply(index, err), nil
 }
 

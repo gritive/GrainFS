@@ -46,7 +46,7 @@ func countSegmentShardFiles(t *testing.T, b *DistributedBackend, bucket string) 
 // TestCompleteMultipart_NoCompletePropose proves M3: a versioning-enabled
 // multipart complete makes NO CmdCompleteMultipart raft propose — the per-version
 // blob is the sole durable authority. Uses the recordingMultipartRaftNode to
-// observe every command type proposed during the complete.
+// observe whether the complete proposes to data-group raft.
 func TestCompleteMultipart_NoCompletePropose(t *testing.T) {
 	b := newSingleNode1Plus0ChunkCapable(t)
 	ctx := context.Background()
@@ -67,10 +67,8 @@ func TestCompleteMultipart_NoCompletePropose(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, obj)
 
-	for _, ct := range rec.commandTypes() {
-		require.NotEqualf(t, 6, ct,
-			"multipart complete must NOT propose the retired CmdCompleteMultipart slot 6 (blob is blob authority)")
-	}
+	require.Zero(t, rec.proposeCount(),
+		"multipart complete must NOT propose to data-group raft (blob is blob authority)")
 }
 
 // TestCompleteMultipart_NonVersionedNoCompletePropose proves the same for a
@@ -94,10 +92,8 @@ func TestCompleteMultipart_NonVersionedNoCompletePropose(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, obj)
 
-	for _, ct := range rec.commandTypes() {
-		require.NotEqualf(t, 6, ct,
-			"non-versioned multipart complete must NOT propose the retired CmdCompleteMultipart slot 6")
-	}
+	require.Zero(t, rec.proposeCount(),
+		"non-versioned multipart complete must NOT propose to data-group raft")
 }
 
 // TestCompleteMultipart_RetryShortCircuitsNoReassembly proves the det-vid

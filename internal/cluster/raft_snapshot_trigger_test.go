@@ -56,10 +56,8 @@ func TestDistributedBackend_TriggerRaftSnapshot_V2(t *testing.T) {
 	require.NoError(t, backend.CreateBucket(context.Background(), "v2-trigger"))
 	// Trigger a raft-committed entry to ensure lastApplied > 0. CreateBucket now
 	// goes through MetaBucketStore (direct FSM apply), not the raft proposal path.
-	// Use a legacy command envelope to get a raft log entry committed and applied.
-	raw, err := buildRawCommand(0, nil)
-	require.NoError(t, err)
-	_, err = node.ProposeWait(context.Background(), raw)
+	// Data-group command entries are cursor-only, so opaque bytes are enough.
+	_, err = node.ProposeWait(context.Background(), []byte("cursor-only entry"))
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
 		return backend.lastApplied.Load() > 0

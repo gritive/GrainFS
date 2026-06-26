@@ -12,6 +12,11 @@
   replay through the generic no-op path. Epoch-1 progress no longer depends on a data-group raft
   marker; `newRewrapScrubberKick` has bounded retry for transient lane failures. The automatic
   data-group `Rebalancer` / `GroupRebalancer` plan surface is also removed.
+- **[DONE][raft-removal] data-group apply loop command decode retired.** Committed data-group
+  raft command entries are now opaque cursor markers: the apply actor advances `lastApplied` /
+  `lastAppliedTerm` and preserves snapshot restore barriers without decoding retired command
+  envelopes or invoking apply callbacks. Legacy command envelope builders/validators and
+  callback-only tests were removed from the cluster package.
 - [x] **phantom-on-CAS-reject cleanup** — owner-local-first CAS quorum-meta writes now
   compare-delete a freshly published owner-local latest-only blob if the peer quorum later
   fails, preventing failed append/coalesce RMW attempts from leaving a readable phantom manifest.
