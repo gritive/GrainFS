@@ -444,8 +444,9 @@ func (b *LocalBackend) HeadObject(ctx context.Context, bucket, key string) (*Obj
 			if err := unmarshalObjectInto(val, &obj); err != nil {
 				return err
 			}
-			if obj.IsAppendable && obj.Size > 0 && len(obj.Segments) == 0 && len(obj.Coalesced) == 0 {
-				return b.loadAppendSideSegmentsInTxn(txn, bucket, key, &obj)
+			if obj.IsAppendable && obj.Size > 0 && len(obj.Segments) == 0 {
+				_, _, err := b.hydrateAppendSideSegmentsInTxn(txn, bucket, key, &obj)
+				return err
 			}
 			return nil
 		}

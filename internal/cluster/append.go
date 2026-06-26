@@ -80,10 +80,11 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 	}
 
 	var existing *storage.Object
+	existingSegmentCount := 0
 	if baseExists {
 		existing, _ = objectAndPlacementFromCmd(base)
-		if baseHasSummary && len(existing.Segments) == 0 && len(existing.Coalesced) == 0 {
-			existing.Segments = make([]storage.SegmentRef, baseSummary.SegmentCount)
+		if baseHasSummary {
+			existingSegmentCount = storage.AppendSummaryLogicalAppendCount(baseSummary)
 		}
 	}
 
@@ -94,10 +95,11 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 		sizeCapBytes = cfg.SizeCapBytes
 	}
 	if err := planAppendObjectAdmission(appendObjectAdmissionInput{
-		Existing:       existing,
-		ExpectedOffset: expectedOffset,
-		ChunkSize:      appendChunkSize(r),
-		SizeCapBytes:   sizeCapBytes,
+		Existing:             existing,
+		ExistingSegmentCount: existingSegmentCount,
+		ExpectedOffset:       expectedOffset,
+		ChunkSize:            appendChunkSize(r),
+		SizeCapBytes:         sizeCapBytes,
 	}); err != nil {
 		// Size-cap fast-reject (seekable body, known chunk size): own the counter
 		// here. The authoritative cap re-check in the RMW loop below covers the
@@ -250,12 +252,6 @@ func (b *DistributedBackend) readAppendBaseWithSide(ctx context.Context, bucket,
 					return cmd, true, storage.AppendSummary{}, false, nil
 				}
 				return PutObjectMetaCmd{}, false, storage.AppendSummary{}, false, fmt.Errorf("append object: read side summary: %w", serr)
-			}
-			if tailSize == 0 {
-				if summary.Size != 0 {
-					return PutObjectMetaCmd{}, false, storage.AppendSummary{}, false, fmt.Errorf("append side summary size %d does not match object tail size %d", summary.Size, tailSize)
-				}
-				return cmd, true, summary, true, nil
 			}
 			if summary.Size != tailSize {
 				return PutObjectMetaCmd{}, false, storage.AppendSummary{}, false, fmt.Errorf("append side summary size %d does not match object tail size %d", summary.Size, tailSize)

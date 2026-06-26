@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.760.0] - 2026-06-27
+
+### Fixed
+- **Kept append segment limits accurate after coalescing appendable objects.**
+  Append admission now counts the logical append history recorded in side
+  summaries, so a coalesced object cannot reset the segment cap by hiding older
+  append parts behind the compacted prefix.
+- **Aligned local append side-record tail handling with compacted prefixes.**
+  Local append metadata now reads and writes tail segment records after the
+  compacted prefix cursor and validates summaries against the live tail size,
+  preserving post-coalesce append accounting.
+
 ## [0.0.759.0] - 2026-06-27
 
 ### Changed

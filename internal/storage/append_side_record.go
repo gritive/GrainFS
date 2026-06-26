@@ -31,6 +31,30 @@ type appendSummary struct {
 
 type AppendSummary = appendSummary
 
+func appendSummaryLogicalAppendCount(summary appendSummary) int {
+	count := summary.CompactedPrefixCount + summary.SegmentCount
+	if summary.ETagPartCount > count {
+		return summary.ETagPartCount
+	}
+	return count
+}
+
+func AppendSummaryLogicalAppendCount(summary AppendSummary) int {
+	return appendSummaryLogicalAppendCount(summary)
+}
+
+func appendTailSize(totalSize int64, coalesced []CoalescedRef) (int64, error) {
+	coalescedSize := int64(0)
+	for _, c := range coalesced {
+		coalescedSize += c.Size
+	}
+	tailSize := totalSize - coalescedSize
+	if tailSize < 0 {
+		return 0, fmt.Errorf("append side summary: coalesced size %d exceeds object size %d", coalescedSize, totalSize)
+	}
+	return tailSize, nil
+}
+
 func appendSummaryKey(bucket, key, versionID string) []byte {
 	return []byte(appendSummaryPrefix + bucket + "/" + key + "/" + versionID)
 }
@@ -247,6 +271,35 @@ func (b *LocalBackend) readAppendSummaryInTxn(txn *badger.Txn, bucket, key, vers
 	return summary, nil
 }
 
+func (b *LocalBackend) readAppendSummaryForObjectInTxn(txn *badger.Txn, bucket, key string, obj *Object) (appendSummary, bool, error) {
+	tailSize, err := appendTailSize(obj.Size, obj.Coalesced)
+	if err != nil {
+		return appendSummary{}, false, err
+	}
+	summary, err := b.readAppendSummaryInTxn(txn, bucket, key, obj.VersionID)
+	if err != nil {
+		if errors.Is(err, badger.ErrKeyNotFound) && tailSize == 0 {
+			return appendSummary{}, false, nil
+		}
+		return appendSummary{}, false, err
+	}
+	if summary.Size != tailSize {
+		return appendSummary{}, false, fmt.Errorf("append side summary size %d does not match object tail size %d", summary.Size, tailSize)
+	}
+	return summary, true, nil
+}
+
+func (b *LocalBackend) hydrateAppendSideSegmentsInTxn(txn *badger.Txn, bucket, key string, obj *Object) (appendSummary, bool, error) {
+	summary, hasSummary, err := b.readAppendSummaryForObjectInTxn(txn, bucket, key, obj)
+	if err != nil || !hasSummary || summary.SegmentCount == 0 {
+		return summary, hasSummary, err
+	}
+	if err := b.loadAppendSideSegmentsInTxn(txn, bucket, key, obj); err != nil {
+		return appendSummary{}, false, err
+	}
+	return summary, true, nil
+}
+
 func (b *LocalBackend) writeAppendSideRecordsInTxn(txn *badger.Txn, bucket, key, versionID string, summary appendSummary, segments []SegmentRef) error {
 	if err := txn.Set(appendSummaryKey(bucket, key, versionID), encodeAppendSummary(summary)); err != nil {
 		return err
@@ -254,7 +307,8 @@ func (b *LocalBackend) writeAppendSideRecordsInTxn(txn *badger.Txn, bucket, key,
 	store := NewChunkRefStore(txn)
 	m := chunkref.ObjectVersionID(bucket, key, versionID)
 	for i, seg := range segments {
-		if err := txn.Set(appendSegmentKey(bucket, key, versionID, i+1), encodeAppendSegment(seg)); err != nil {
+		seq := summary.CompactedPrefixCount + i + 1
+		if err := txn.Set(appendSegmentKey(bucket, key, versionID, seq), encodeAppendSegment(seg)); err != nil {
 			return err
 		}
 		if err := store.AddRef(m, chunkref.ChunkID(ParseLocator(seg.BlobID).String())); err != nil {
@@ -280,7 +334,8 @@ func (b *LocalBackend) putAppendSideRecordAppend(ctx context.Context, bucket, ke
 		if err := txn.Set(appendSummaryKey(bucket, key, obj.VersionID), encodeAppendSummary(summary)); err != nil {
 			return err
 		}
-		if err := txn.Set(appendSegmentKey(bucket, key, obj.VersionID, summary.SegmentCount), encodeAppendSegment(seg)); err != nil {
+		seq := summary.CompactedPrefixCount + summary.SegmentCount
+		if err := txn.Set(appendSegmentKey(bucket, key, obj.VersionID, seq), encodeAppendSegment(seg)); err != nil {
 			return err
 		}
 		store := NewChunkRefStore(txn)
@@ -311,7 +366,9 @@ func (b *LocalBackend) deleteAppendSideRecordsInTxn(txn *badger.Txn, bucket, key
 	}
 	store := NewChunkRefStore(txn)
 	m := chunkref.ObjectVersionID(bucket, key, versionID)
-	for seq := 1; seq <= summary.SegmentCount; seq++ {
+	startSeq := summary.CompactedPrefixCount + 1
+	endSeq := summary.CompactedPrefixCount + summary.SegmentCount
+	for seq := startSeq; seq <= endSeq; seq++ {
 		item, err := txn.Get(appendSegmentKey(bucket, key, versionID, seq))
 		if err != nil {
 			return err
@@ -342,12 +399,18 @@ func (b *LocalBackend) loadAppendSideSegmentsInTxn(txn *badger.Txn, bucket, key 
 		}
 		return err
 	}
-	if summary.Size != obj.Size {
-		return fmt.Errorf("append side summary size %d does not match object size %d", summary.Size, obj.Size)
+	tailSize, err := appendTailSize(obj.Size, obj.Coalesced)
+	if err != nil {
+		return err
+	}
+	if summary.Size != tailSize {
+		return fmt.Errorf("append side summary size %d does not match object tail size %d", summary.Size, tailSize)
 	}
 	segments := make([]SegmentRef, 0, summary.SegmentCount)
 	var total int64
-	for seq := 1; seq <= summary.SegmentCount; seq++ {
+	startSeq := summary.CompactedPrefixCount + 1
+	endSeq := summary.CompactedPrefixCount + summary.SegmentCount
+	for seq := startSeq; seq <= endSeq; seq++ {
 		item, err := txn.Get(appendSegmentKey(bucket, key, obj.VersionID, seq))
 		if err != nil {
 			if err == badger.ErrKeyNotFound {
@@ -366,8 +429,8 @@ func (b *LocalBackend) loadAppendSideSegmentsInTxn(txn *badger.Txn, bucket, key 
 		total += seg.Size
 		segments = append(segments, seg)
 	}
-	if total != obj.Size {
-		return fmt.Errorf("append side segment size %d does not match object size %d", total, obj.Size)
+	if total != tailSize {
+		return fmt.Errorf("append side segment size %d does not match object tail size %d", total, tailSize)
 	}
 	obj.Segments = segments
 	return nil

@@ -65,6 +65,13 @@ Deferred items:
 ### Append/coalesce off-raft follow-ups (Slice 1, 2026-06-24)
 
 
+- **[P2][follow-up] LocalBackend `Coalesced` metadata is not persisted in `storagepb.Object`.**
+  While tightening append side-summary cap checks, a local post-coalesce append regression test could
+  not be made valid because `storage.Object.Coalesced` is not encoded by `internal/storage/codec.go`.
+  Cluster quorum-meta has `CoalescedShardRef` coverage; local storage needs a storage FlatBuffer
+  format slice (`storagepb.Object` coalesced vector + codec tests) before local post-coalesce
+  append/read behavior can be locked down.
+
 - **[P3][known-tradeoff] Coalesced orphans in a bucket switched to versioning-Enabled are not
   reclaimed.** `hasLiveCoalescedRef` gates on `blobAuthReadOn` and fails closed (keep) for Enabled
   buckets, so coalesced orphans created during a bucket's prior Unversioned/Suspended life leak after
