@@ -11,7 +11,6 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/incident"
-	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // IncidentRecorder is the slim interface Director uses to emit scrub events.
@@ -549,12 +548,10 @@ func (d *Director) markDone(sess *liveSession) {
 }
 
 // routeSourceFor maps a bucket to its scrub source name. ctx-free.
-// Internal buckets are full-object replicated (replication source);
-// all other (S3-exposed) buckets ride the EC data path.
+// Production registers the EC source for every bucket scrub path. Internal
+// buckets that no longer have a dedicated source must not route to an
+// unregistered name and silently no-op.
 func routeSourceFor(bucket string) string {
-	if storage.IsInternalBucket(bucket) {
-		return "replication"
-	}
 	return "ec"
 }
 

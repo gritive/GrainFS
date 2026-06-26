@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.734.0] - 2026-06-26
+
+### Fixed
+- **Routed internal-bucket scrub requests to the registered production source.**
+  The scrub Director no longer sends `__grainfs_*` buckets to an unregistered
+  `"replication"` source; internal and user buckets both route to the registered
+  `"ec"` source so explicit scrub requests do not become logged no-ops.
+
 ## [0.0.733.0] - 2026-06-26
 
 ### Changed
