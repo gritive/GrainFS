@@ -2,7 +2,6 @@ package cluster
 
 import (
 	"fmt"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,31 +13,6 @@ import (
 	"github.com/gritive/GrainFS/internal/gossip"
 	"github.com/gritive/GrainFS/internal/raft"
 )
-
-type blockingSnapshotter struct {
-	entered chan struct{}
-	release chan struct{}
-	closed  atomic.Bool
-}
-
-func newBlockingSnapshotter() *blockingSnapshotter {
-	return &blockingSnapshotter{
-		entered: make(chan struct{}),
-		release: make(chan struct{}),
-	}
-}
-
-func (s *blockingSnapshotter) Snapshot() ([]byte, error) {
-	if s.closed.CompareAndSwap(false, true) {
-		close(s.entered)
-	}
-	<-s.release
-	return []byte("blocked-snapshot"), nil
-}
-
-func (s *blockingSnapshotter) Restore(raft.SnapshotMeta, []byte) error {
-	return nil
-}
 
 type clusterTestTB interface {
 	Helper()

@@ -33,31 +33,6 @@ func writePlacement(t clusterTestTB, b *DistributedBackend, db *badger.DB, bucke
 	}
 }
 
-// seedPlacementMeta writes an object metadata record (including EC placement)
-// directly into the FSM's DB, so that readPlacementMeta can resolve it.
-// CmdPutObjectMeta is a no-op in apply.go (raft-free Slice 2), so we persist
-// directly via persistPutObjectMetaUpdate.
-func seedPlacementMeta(t clusterTestTB, b *DistributedBackend, bucket, key, versionID string, nodes []string, ecData, ecParity uint8) {
-	t.Helper()
-	cmd := PutObjectMetaCmd{
-		Bucket:      bucket,
-		Key:         key,
-		VersionID:   versionID,
-		Size:        1,
-		ContentType: "application/octet-stream",
-		ETag:        "etag",
-		ModTime:     1,
-		ECData:      ecData,
-		ECParity:    ecParity,
-		NodeIDs:     nodes,
-	}
-	if err := b.fsm.db.Update(func(txn MetadataTxn) error {
-		return b.fsm.persistPutObjectMetaUpdate(txn, cmd, buildPutObjectMeta(cmd))
-	}); err != nil {
-		t.Fatalf("seed placement meta: %v", err)
-	}
-}
-
 func TestRaftNodeID_NilNode(t *testing.T) {
 	// DistributedBackend with node == nil must return "" (no panic).
 	db := newTestDB(t)

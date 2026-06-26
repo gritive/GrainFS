@@ -66,10 +66,6 @@ func buildSACreatePayloadForTest(saID, name string, ts time.Time) []byte {
 	return b.FinishedBytes()
 }
 
-func buildKeyCreatePayloadForTest(ak, saID string, encBytes []byte, ts time.Time) []byte {
-	return buildKeyCreatePayloadForTestWithGen(ak, saID, encBytes, 0, ts)
-}
-
 func buildKeyCreatePayloadForTestWithGen(ak, saID string, encBytes []byte, gen uint32, ts time.Time) []byte {
 	b := flatbuffers.NewBuilder(128)
 	akOff := b.CreateString(ak)
