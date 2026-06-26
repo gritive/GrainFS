@@ -1,8 +1,9 @@
 package storage
 
 import (
-	"reflect"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestObjectChunkLocatorsCoversSegmentsAndCoalesced(t *testing.T) {
@@ -21,9 +22,7 @@ func TestObjectChunkLocatorsCoversSegmentsAndCoalesced(t *testing.T) {
 		"cas://b3-deadbeef",
 		"0192f3c0-dddd-7eee-8fff-000000000002",
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("ChunkLocators() = %v, want %v", got, want)
-	}
+	require.Equal(t, want, got)
 }
 
 func TestSnapshotObjectChunkLocatorsCoversSegmentsAndCoalesced(t *testing.T) {
@@ -33,13 +32,9 @@ func TestSnapshotObjectChunkLocatorsCoversSegmentsAndCoalesced(t *testing.T) {
 	}
 	got := so.ChunkLocators()
 	want := []string{"blob-1", "coalesced-1"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("ChunkLocators() = %v, want %v", got, want)
-	}
+	require.Equal(t, want, got)
 }
 
 func TestChunkLocatorsEmpty(t *testing.T) {
-	if got := (&Object{}).ChunkLocators(); got != nil {
-		t.Fatalf("empty object ChunkLocators = %v, want nil", got)
-	}
+	require.Nil(t, (&Object{}).ChunkLocators(), "empty object ChunkLocators")
 }

@@ -2,8 +2,9 @@ package storage
 
 import (
 	"bytes"
-	"reflect"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestObjectCodecRoundTripWithSegments(t *testing.T) {
@@ -17,35 +18,19 @@ func TestObjectCodecRoundTripWithSegments(t *testing.T) {
 		IsAppendable: true,
 	}
 	data, err := marshalObject(orig)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
+	require.NoError(t, err, "marshal")
 	got, err := unmarshalObject(data)
-	if err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if !reflect.DeepEqual(got.Segments, orig.Segments) {
-		t.Fatalf("segments mismatch: got=%v want=%v", got.Segments, orig.Segments)
-	}
-	if got.IsAppendable != orig.IsAppendable {
-		t.Fatalf("is_appendable mismatch: got=%v want=true", got.IsAppendable)
-	}
+	require.NoError(t, err, "unmarshal")
+	require.Equal(t, orig.Segments, got.Segments)
+	require.Equal(t, orig.IsAppendable, got.IsAppendable)
 }
 
 func TestObjectCodecLegacyHasNoSegments(t *testing.T) {
 	orig := &Object{Key: "legacy", Size: 100, ETag: "x"}
 	data, err := marshalObject(orig)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
+	require.NoError(t, err, "marshal")
 	got, err := unmarshalObject(data)
-	if err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if got.Segments != nil {
-		t.Fatalf("expected nil segments, got %v", got.Segments)
-	}
-	if got.IsAppendable {
-		t.Fatal("expected IsAppendable false for legacy")
-	}
+	require.NoError(t, err, "unmarshal")
+	require.Nil(t, got.Segments)
+	require.False(t, got.IsAppendable, "expected IsAppendable false for legacy")
 }

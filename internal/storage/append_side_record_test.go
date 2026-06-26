@@ -5,57 +5,42 @@ import (
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/dgraph-io/badger/v4"
+	"github.com/stretchr/testify/require"
 )
 
 func TestHeadObjectLoadsAppendSideSegments(t *testing.T) {
 	b, obj := seedAppendSideRecordObject(t, []string{"hello ", "world"})
 
 	got, err := b.HeadObject(context.Background(), "test", "k")
-	if err != nil {
-		t.Fatalf("HeadObject: %v", err)
-	}
-	if got.Size != obj.Size {
-		t.Fatalf("size=%d, want %d", got.Size, obj.Size)
-	}
-	if len(got.Segments) != 2 {
-		t.Fatalf("segments=%d, want 2", len(got.Segments))
-	}
-	if got.Segments[0].BlobID != obj.Segments[0].BlobID || got.Segments[1].BlobID != obj.Segments[1].BlobID {
-		t.Fatalf("segments=%v, want %v", got.Segments, obj.Segments)
-	}
+	require.NoError(t, err, "HeadObject")
+	require.Equal(t, obj.Size, got.Size)
+	require.Len(t, got.Segments, 2)
+	require.Equal(t, obj.Segments[0].BlobID, got.Segments[0].BlobID)
+	require.Equal(t, obj.Segments[1].BlobID, got.Segments[1].BlobID)
 }
 
 func TestGetObjectReadsAppendSideSegments(t *testing.T) {
 	b, _ := seedAppendSideRecordObject(t, []string{"hello ", "world"})
 
 	rc, obj, err := b.GetObject(context.Background(), "test", "k")
-	if err != nil {
-		t.Fatalf("GetObject: %v", err)
-	}
+	require.NoError(t, err, "GetObject")
 	defer rc.Close()
 	got, err := io.ReadAll(rc)
-	if err != nil {
-		t.Fatalf("ReadAll: %v", err)
-	}
-	if string(got) != "hello world" {
-		t.Fatalf("body=%q, want hello world", string(got))
-	}
-	if len(obj.Segments) != 2 {
-		t.Fatalf("segments=%d, want 2", len(obj.Segments))
-	}
+	require.NoError(t, err, "ReadAll")
+	require.Equal(t, "hello world", string(got))
+	require.Len(t, obj.Segments, 2)
 }
 
 func TestHeadObjectAppendSideRecordMissingSummaryFailsClosed(t *testing.T) {
 	b := newTestLocalBackend(t)
 	ctx := context.Background()
 	obj := &Object{Key: "k", Size: 5, ETag: "etag-1", IsAppendable: true}
-	if err := b.PutObjectRecord(ctx, "test", "k", obj); err != nil {
-		t.Fatalf("PutObjectRecord: %v", err)
-	}
+	require.NoError(t, b.PutObjectRecord(ctx, "test", "k", obj), "PutObjectRecord")
 
-	if _, err := b.HeadObject(ctx, "test", "k"); err == nil {
-		t.Fatal("HeadObject succeeded for side-record object with missing append summary")
-	}
+	_, err := b.HeadObject(ctx, "test", "k")
+	require.Error(t, err, "HeadObject succeeded for side-record object with missing append summary")
 }
 
 func seedAppendSideRecordObject(t *testing.T, parts []string) (*LocalBackend, *Object) {
@@ -66,9 +51,7 @@ func seedAppendSideRecordObject(t *testing.T, parts []string) (*LocalBackend, *O
 	var size int64
 	for _, p := range parts {
 		seg, err := b.WriteSegmentBlob("test", "k", strings.NewReader(p))
-		if err != nil {
-			t.Fatalf("WriteSegmentBlob: %v", err)
-		}
+		require.NoError(t, err, "WriteSegmentBlob")
 		segs = append(segs, seg)
 		size += seg.Size
 	}
@@ -79,12 +62,11 @@ func seedAppendSideRecordObject(t *testing.T, parts []string) (*LocalBackend, *O
 		ETag:         "side-etag-2",
 		IsAppendable: true,
 	}
-	if err := b.PutObjectRecord(ctx, "test", "k", obj); err != nil {
-		t.Fatalf("PutObjectRecord: %v", err)
-	}
-	if err := b.writeAppendSideRecords(ctx, "test", "k", "", appendSummary{Size: size, SegmentCount: len(segs)}, segs); err != nil {
-		t.Fatalf("writeAppendSideRecords: %v", err)
-	}
+	require.NoError(t, b.PutObjectRecord(ctx, "test", "k", obj), "PutObjectRecord")
+	err := b.db.Update(func(txn *badger.Txn) error {
+		return b.writeAppendSideRecordsInTxn(txn, "test", "k", "", appendSummary{Size: size, SegmentCount: len(segs)}, segs)
+	})
+	require.NoError(t, err, "writeAppendSideRecords")
 	full := *obj
 	full.Segments = append([]SegmentRef(nil), segs...)
 	return b, &full

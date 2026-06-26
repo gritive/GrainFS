@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/stretchr/testify/require"
 	"github.com/zeebo/xxh3"
 )
 
@@ -15,23 +16,17 @@ func TestInternalETag(t *testing.T) {
 	data := []byte("hello world")
 	got := storage.InternalETag(data)
 
-	if len(got) != 16 {
-		t.Fatalf("InternalETag len = %d, want 16", len(got))
-	}
+	require.Len(t, got, 16)
 
 	// 결정론적 확인
-	if got != storage.InternalETag(data) {
-		t.Fatal("InternalETag must be deterministic")
-	}
+	require.Equal(t, storage.InternalETag(data), got, "InternalETag must be deterministic")
 
 	// 예상값 검증
 	h := xxh3.Hash(data)
 	var buf [8]byte
 	binary.BigEndian.PutUint64(buf[:], h)
 	want := hex.EncodeToString(buf[:])
-	if got != want {
-		t.Fatalf("InternalETag = %q, want %q", got, want)
-	}
+	require.Equal(t, want, got)
 }
 
 func TestVerifyETag_MD5(t *testing.T) {
@@ -40,12 +35,8 @@ func TestVerifyETag_MD5(t *testing.T) {
 	etag := hex.EncodeToString(h[:])
 
 	ok, err := storage.VerifyETag(bytes.NewReader(data), etag)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !ok {
-		t.Fatal("VerifyETag(MD5) should return true for correct ETag")
-	}
+	require.NoError(t, err)
+	require.True(t, ok, "VerifyETag(MD5) should return true for correct ETag")
 }
 
 func TestVerifyETag_MD5_Mismatch(t *testing.T) {
@@ -53,12 +44,8 @@ func TestVerifyETag_MD5_Mismatch(t *testing.T) {
 	etag := "00000000000000000000000000000000" // 32자, 틀린 MD5
 
 	ok, err := storage.VerifyETag(bytes.NewReader(data), etag)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ok {
-		t.Fatal("VerifyETag(MD5) should return false for wrong ETag")
-	}
+	require.NoError(t, err)
+	require.False(t, ok, "VerifyETag(MD5) should return false for wrong ETag")
 }
 
 func TestVerifyETag_XXH3(t *testing.T) {
@@ -66,12 +53,8 @@ func TestVerifyETag_XXH3(t *testing.T) {
 	etag := storage.InternalETag(data)
 
 	ok, err := storage.VerifyETag(bytes.NewReader(data), etag)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !ok {
-		t.Fatal("VerifyETag(xxhash3) should return true for correct ETag")
-	}
+	require.NoError(t, err)
+	require.True(t, ok, "VerifyETag(xxhash3) should return true for correct ETag")
 }
 
 func TestVerifyETag_XXH3_Mismatch(t *testing.T) {
@@ -79,12 +62,8 @@ func TestVerifyETag_XXH3_Mismatch(t *testing.T) {
 	etag := "0000000000000000" // 16자, 틀린 xxhash3
 
 	ok, err := storage.VerifyETag(bytes.NewReader(data), etag)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ok {
-		t.Fatal("VerifyETag(xxhash3) should return false for wrong ETag")
-	}
+	require.NoError(t, err)
+	require.False(t, ok, "VerifyETag(xxhash3) should return false for wrong ETag")
 }
 
 func TestVerifyETag_UnknownLength(t *testing.T) {
@@ -92,12 +71,8 @@ func TestVerifyETag_UnknownLength(t *testing.T) {
 	etag := "DEL" // 3자 — delete marker sentinel
 
 	ok, err := storage.VerifyETag(bytes.NewReader(data), etag)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ok {
-		t.Fatal("VerifyETag with unknown-length ETag should return false, not error")
-	}
+	require.NoError(t, err)
+	require.False(t, ok, "VerifyETag with unknown-length ETag should return false, not error")
 }
 
 // TestVerifyETag_LegacyMD5_WithXXH3Migration: 마이그레이션 후에도 기존 MD5 ETag가
@@ -108,10 +83,6 @@ func TestVerifyETag_LegacyMD5_WithXXH3Migration(t *testing.T) {
 	legacyETag := hex.EncodeToString(h[:]) // 32자 MD5
 
 	ok, err := storage.VerifyETag(bytes.NewReader(data), legacyETag)
-	if err != nil {
-		t.Fatalf("VerifyETag(legacy MD5): %v", err)
-	}
-	if !ok {
-		t.Fatal("VerifyETag must verify legacy MD5 ETags during migration period")
-	}
+	require.NoError(t, err, "VerifyETag(legacy MD5)")
+	require.True(t, ok, "VerifyETag must verify legacy MD5 ETags during migration period")
 }

@@ -3,6 +3,8 @@ package storage
 import (
 	"context"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestIsInternalBucket(t *testing.T) {
@@ -19,9 +21,7 @@ func TestIsInternalBucket(t *testing.T) {
 		{"__other_", false},
 	}
 	for _, tt := range tests {
-		if got := IsInternalBucket(tt.bucket); got != tt.want {
-			t.Errorf("IsInternalBucket(%q) = %v, want %v", tt.bucket, got, tt.want)
-		}
+		require.Equal(t, tt.want, IsInternalBucket(tt.bucket), "IsInternalBucket(%q)", tt.bucket)
 	}
 }
 
@@ -42,12 +42,8 @@ func (b *countingWalkBackend) WalkObjects(_ context.Context, _, _ string, fn fun
 func TestCountObjects_Empty(t *testing.T) {
 	ops := NewOperations(&countingWalkBackend{})
 	n, err := ops.CountObjects(context.Background(), "b")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n != 0 {
-		t.Errorf("got %d, want 0", n)
-	}
+	require.NoError(t, err)
+	require.Zero(t, n)
 }
 
 func TestCountObjects_Three(t *testing.T) {
@@ -56,10 +52,6 @@ func TestCountObjects_Three(t *testing.T) {
 	}
 	ops := NewOperations(backend)
 	n, err := ops.CountObjects(context.Background(), "b")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n != 3 {
-		t.Errorf("got %d, want 3", n)
-	}
+	require.NoError(t, err)
+	require.Equal(t, int64(3), n)
 }

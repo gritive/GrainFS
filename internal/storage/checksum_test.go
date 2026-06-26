@@ -4,15 +4,15 @@ import (
 	"bytes"
 	"io"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestChecksumHashWriter_KnownVector(t *testing.T) {
 	// xxhash3-128 of empty string: known constant from zeebo/xxh3 docs.
 	h := NewChecksumHasher()
 	got := h.Sum()
-	if len(got) != 16 {
-		t.Fatalf("checksum length: want 16, got %d", len(got))
-	}
+	require.Len(t, got, 16)
 }
 
 func TestChecksumHashWriter_StreamingEqualsOneShot(t *testing.T) {
@@ -20,21 +20,16 @@ func TestChecksumHashWriter_StreamingEqualsOneShot(t *testing.T) {
 	oneShot := ChecksumOf(data)
 
 	h := NewChecksumHasher()
-	if _, err := io.Copy(h, bytes.NewReader(data)); err != nil {
-		t.Fatalf("copy: %v", err)
-	}
+	_, err := io.Copy(h, bytes.NewReader(data))
+	require.NoError(t, err, "copy")
 	streamed := h.Sum()
 
-	if !bytes.Equal(oneShot, streamed) {
-		t.Fatalf("one-shot != streamed: %x vs %x", oneShot, streamed)
-	}
+	require.True(t, bytes.Equal(oneShot, streamed), "one-shot != streamed: %x vs %x", oneShot, streamed)
 }
 
 func TestChecksumHashWriter_DetectsSingleBitFlip(t *testing.T) {
 	a := bytes.Repeat([]byte("a"), 4096)
 	b := append([]byte(nil), a...)
 	b[2048] ^= 0x01
-	if bytes.Equal(ChecksumOf(a), ChecksumOf(b)) {
-		t.Fatal("single-bit flip not detected")
-	}
+	require.False(t, bytes.Equal(ChecksumOf(a), ChecksumOf(b)), "single-bit flip not detected")
 }

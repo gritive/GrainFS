@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.745.0] - 2026-06-26
+
+### Changed
+- **Persisted single-node AppendObject manifests through side records.**
+  LocalBackend now stores non-coalesced append segment lists outside the object
+  manifest, converts brownfield embedded append manifests on the next append,
+  appends new side records incrementally, and removes side-record chunk refs
+  and metadata on overwrite/delete.
+
 ## [0.0.744.0] - 2026-06-26
 
 ### Changed

@@ -6,14 +6,13 @@ import (
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/gritive/GrainFS/internal/chunkref"
+	"github.com/stretchr/testify/require"
 )
 
 func openTestRefDB(t *testing.T) *badger.DB {
 	t.Helper()
 	db, err := badger.Open(badger.DefaultOptions(t.TempDir()).WithLogger(nil))
-	if err != nil {
-		t.Fatalf("open badger: %v", err)
-	}
+	require.NoError(t, err, "open badger")
 	t.Cleanup(func() { _ = db.Close() })
 	return db
 }
@@ -26,7 +25,7 @@ func TestChunkRefStoreRemoveStillReferencedNoTombstone(t *testing.T) {
 	c := chunkref.ChunkID("shared")
 	m1 := chunkref.ObjectVersionID("bkt", "k", "v1")
 	m2 := chunkref.SnapshotID(7)
-	if err := db.Update(func(txn *badger.Txn) error {
+	err := db.Update(func(txn *badger.Txn) error {
 		s := ChunkRefStore{txn: txn}
 		if err := s.AddRef(m1, c); err != nil {
 			return err
@@ -35,45 +34,41 @@ func TestChunkRefStoreRemoveStillReferencedNoTombstone(t *testing.T) {
 			return err
 		}
 		return s.RemoveRef(m1, c, time.Unix(1000, 0))
-	}); err != nil {
-		t.Fatalf("update: %v", err)
-	}
-	if err := db.View(func(txn *badger.Txn) error {
+	})
+	require.NoError(t, err, "update")
+	err = db.View(func(txn *badger.Txn) error {
 		s := ChunkRefStore{txn: txn}
-		if got, _ := s.RefCount(c); got != 1 {
-			t.Fatalf("RefCount = %d, want 1 (still referenced by m2)", got)
-		}
-		if _, ok, _ := s.TombstoneTime(c); ok {
-			t.Fatalf("tombstone written while chunk still referenced — false GC candidate")
-		}
+		got, err := s.RefCount(c)
+		require.NoError(t, err)
+		require.Equal(t, 1, got, "RefCount still referenced by m2")
+		_, ok, err := s.TombstoneTime(c)
+		require.NoError(t, err)
+		require.False(t, ok, "tombstone written while chunk still referenced")
 		return nil
-	}); err != nil {
-		t.Fatalf("view: %v", err)
-	}
+	})
+	require.NoError(t, err, "view")
 }
 
 func TestChunkRefStoreAddIsIdempotent(t *testing.T) {
 	db := openTestRefDB(t)
 	m := chunkref.ObjectVersionID("bkt", "k", "v1")
 	c := chunkref.ChunkID("chunk-1")
-	if err := db.Update(func(txn *badger.Txn) error {
+	err := db.Update(func(txn *badger.Txn) error {
 		s := ChunkRefStore{txn: txn}
 		if err := s.AddRef(m, c); err != nil {
 			return err
 		}
 		return s.AddRef(m, c)
-	}); err != nil {
-		t.Fatalf("update: %v", err)
-	}
-	if err := db.View(func(txn *badger.Txn) error {
+	})
+	require.NoError(t, err, "update")
+	err = db.View(func(txn *badger.Txn) error {
 		s := ChunkRefStore{txn: txn}
-		if got, _ := s.RefCount(c); got != 1 {
-			t.Fatalf("RefCount = %d, want 1", got)
-		}
+		got, err := s.RefCount(c)
+		require.NoError(t, err)
+		require.Equal(t, 1, got, "RefCount")
 		return nil
-	}); err != nil {
-		t.Fatalf("view: %v", err)
-	}
+	})
+	require.NoError(t, err, "view")
 }
 
 func TestChunkRefStoreRemoveToZeroWritesTombstone(t *testing.T) {
@@ -81,28 +76,26 @@ func TestChunkRefStoreRemoveToZeroWritesTombstone(t *testing.T) {
 	m := chunkref.ObjectVersionID("bkt", "k", "v1")
 	c := chunkref.ChunkID("chunk-1")
 	tZero := time.Unix(1000, 0)
-	if err := db.Update(func(txn *badger.Txn) error {
+	err := db.Update(func(txn *badger.Txn) error {
 		s := ChunkRefStore{txn: txn}
 		if err := s.AddRef(m, c); err != nil {
 			return err
 		}
 		return s.RemoveRef(m, c, tZero)
-	}); err != nil {
-		t.Fatalf("update: %v", err)
-	}
-	if err := db.View(func(txn *badger.Txn) error {
+	})
+	require.NoError(t, err, "update")
+	err = db.View(func(txn *badger.Txn) error {
 		s := ChunkRefStore{txn: txn}
-		if got, _ := s.RefCount(c); got != 0 {
-			t.Fatalf("RefCount = %d, want 0", got)
-		}
-		ts, ok, _ := s.TombstoneTime(c)
-		if !ok || !ts.Equal(tZero) {
-			t.Fatalf("TombstoneTime = (%v,%v), want (%v,true)", ts, ok, tZero)
-		}
+		got, err := s.RefCount(c)
+		require.NoError(t, err)
+		require.Zero(t, got, "RefCount")
+		ts, ok, err := s.TombstoneTime(c)
+		require.NoError(t, err)
+		require.True(t, ok, "TombstoneTime present")
+		require.True(t, ts.Equal(tZero), "TombstoneTime = %v, want %v", ts, tZero)
 		return nil
-	}); err != nil {
-		t.Fatalf("view: %v", err)
-	}
+	})
+	require.NoError(t, err, "view")
 }
 
 func TestChunkRefStoreReAddEvictsTombstone(t *testing.T) {
@@ -110,7 +103,7 @@ func TestChunkRefStoreReAddEvictsTombstone(t *testing.T) {
 	m1 := chunkref.ObjectVersionID("bkt", "k", "v1")
 	m2 := chunkref.SnapshotID(7)
 	c := chunkref.ChunkID("chunk-1")
-	if err := db.Update(func(txn *badger.Txn) error {
+	err := db.Update(func(txn *badger.Txn) error {
 		s := ChunkRefStore{txn: txn}
 		if err := s.AddRef(m1, c); err != nil {
 			return err
@@ -119,40 +112,36 @@ func TestChunkRefStoreReAddEvictsTombstone(t *testing.T) {
 			return err
 		}
 		return s.AddRef(m2, c)
-	}); err != nil {
-		t.Fatalf("update: %v", err)
-	}
-	if err := db.View(func(txn *badger.Txn) error {
+	})
+	require.NoError(t, err, "update")
+	err = db.View(func(txn *badger.Txn) error {
 		s := ChunkRefStore{txn: txn}
-		if _, ok, _ := s.TombstoneTime(c); ok {
-			t.Fatalf("tombstone present after re-add, want evicted")
-		}
-		if got, _ := s.RefCount(c); got != 1 {
-			t.Fatalf("RefCount = %d, want 1", got)
-		}
+		_, ok, err := s.TombstoneTime(c)
+		require.NoError(t, err)
+		require.False(t, ok, "tombstone present after re-add")
+		got, err := s.RefCount(c)
+		require.NoError(t, err)
+		require.Equal(t, 1, got, "RefCount")
 		return nil
-	}); err != nil {
-		t.Fatalf("view: %v", err)
-	}
+	})
+	require.NoError(t, err, "view")
 }
 
 func TestChunkRefStoreRemoveAbsentIsNoop(t *testing.T) {
 	db := openTestRefDB(t)
 	m := chunkref.ObjectVersionID("bkt", "k", "v1")
 	c := chunkref.ChunkID("chunk-1")
-	if err := db.Update(func(txn *badger.Txn) error {
+	err := db.Update(func(txn *badger.Txn) error {
 		s := ChunkRefStore{txn: txn}
 		return s.RemoveRef(m, c, time.Unix(1, 0)) // never added
-	}); err != nil {
-		t.Fatalf("remove absent should be no-op, got %v", err)
-	}
-	if err := db.View(func(txn *badger.Txn) error {
+	})
+	require.NoError(t, err, "remove absent should be no-op")
+	err = db.View(func(txn *badger.Txn) error {
 		s := ChunkRefStore{txn: txn}
-		if _, ok, _ := s.TombstoneTime(c); ok {
-			t.Fatalf("no-op remove must not write tombstone")
-		}
+		_, ok, err := s.TombstoneTime(c)
+		require.NoError(t, err)
+		require.False(t, ok, "no-op remove must not write tombstone")
 		return nil
-	}); err != nil {
-		t.Fatalf("view: %v", err)
-	}
+	})
+	require.NoError(t, err, "view")
 }

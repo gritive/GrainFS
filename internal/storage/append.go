@@ -93,15 +93,18 @@ func (b *LocalBackend) appendNew(ctx context.Context, bucket, key string, r io.R
 		AppendCallMD5s: callMD5s,
 		IsAppendable:   true,
 	}
-	if err := b.PutObjectRecord(ctx, bucket, key, obj); err != nil {
+	if err := b.putAppendSideRecordObject(ctx, bucket, key, obj, []SegmentRef{seg}); err != nil {
 		return nil, fmt.Errorf("persist: %w", err)
 	}
 	return obj, nil
 }
 
 func (b *LocalBackend) appendExisting(ctx context.Context, bucket, key string, existing *Object, r io.Reader) (*Object, error) {
-	hadChunkRefs := len(existing.Segments) > 0 || len(existing.Coalesced) > 0
-	existing, err := b.ensureAppendableBase(ctx, bucket, key, existing)
+	sideSegmentCount, hasSideRecords, err := b.appendSideRecordSegmentCount(ctx, bucket, key)
+	if err != nil {
+		return nil, err
+	}
+	existing, err = b.ensureAppendableBase(ctx, bucket, key, existing)
 	if err != nil {
 		return nil, err
 	}
@@ -121,8 +124,15 @@ func (b *LocalBackend) appendExisting(ctx context.Context, bucket, key string, e
 	obj.AppendCallMD5s = callMD5s
 	obj.ETag = CompositeETag(callMD5s)
 	obj.LastModified = time.Now().Unix()
+
 	var persistErr error
-	if hadChunkRefs {
+	if len(obj.Coalesced) == 0 {
+		if hasSideRecords {
+			persistErr = b.putAppendSideRecordAppend(ctx, bucket, key, &obj, sideSegmentCount+1, seg)
+		} else {
+			persistErr = b.putAppendSideRecordObject(ctx, bucket, key, &obj, segs)
+		}
+	} else if len(existing.Segments) > 0 || len(existing.Coalesced) > 0 {
 		persistErr = b.putObjectRecordAppend(ctx, bucket, key, &obj, []string{ParseLocator(seg.BlobID).String()})
 	} else {
 		persistErr = b.PutObjectRecord(ctx, bucket, key, &obj)
@@ -303,6 +313,9 @@ func (b *LocalBackend) PutObjectRecordInTxn(txn *badger.Txn, bucket, key string,
 			if err := store.RemoveRef(prevM, chunkref.ChunkID(c), now); err != nil {
 				return err
 			}
+		}
+		if err := b.deleteAppendSideRecordsInTxn(txn, bucket, key, prev.VersionID, now); err != nil {
+			return err
 		}
 	} else if err != nil && !errors.Is(err, badger.ErrKeyNotFound) {
 		return err
