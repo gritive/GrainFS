@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.0.755.0] - 2026-06-26
+
+### Added
+- **Added a Go S3 API micro-benchmark harness with automatic scratch cleanup.**
+  `make bench-go-api-micro` now runs focused single-node and cluster API
+  benchmarks, keeps profiles under `benchmarks/profiles`, and removes temporary
+  benchmark data on exit, interrupt, and termination paths.
+
+### Changed
+- **Made cluster LIST pagination read only the requested quorum-meta page.**
+  Single-node and multi-peer LIST page calls now scan page-sized local/remote
+  quorum-meta slices, verify candidate winners across peers, and batch raw
+  winner reads instead of scanning and decoding the full bucket prefix.
+- **Reduced fixed allocation costs in copy, spool, and encrypted shard paths.**
+  COPY now carries the source size hint into destination writes, encrypted spool
+  records reuse AAD fields, and encrypted shard encoding reuses the initial seal
+  buffer.
+
+### Fixed
+- **Cleaned benchmark scratch directories on early benchmark exits.**
+  The S3 compatibility benchmark now installs cleanup traps before early
+  dependency checks, so temporary data directories are removed even when the
+  benchmark exits before backends start.
+
 ## [0.0.754.0] - 2026-06-26
 
 ### Added
