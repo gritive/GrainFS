@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.740.0] - 2026-06-26
+
+### Changed
+- **Routed append and multipart writes to a deterministic data-group owner.**
+  AppendObject and multipart create/upload/complete/abort/list-parts now resolve a
+  single owner peer from the shard-group voter set instead of using the data-group
+  Raft leader. Local owner execution bypasses Raft leadership checks, forwarded owner
+  writes dial only that owner, and forward receivers reject owner-routed writes on
+  non-owner nodes even if that node is currently the Raft leader. This advances the
+  data-group Raft removal roadmap while leaving ordinary PUT/read forwarding on the
+  existing leader-hinted path.
+
 ## [0.0.739.0] - 2026-06-26
 
 ### Fixed
