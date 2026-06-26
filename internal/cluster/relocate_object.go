@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 
 	"github.com/gritive/GrainFS/internal/uuidutil"
 )
@@ -33,14 +34,8 @@ func relocationStillEligible(cur PutObjectMetaCmd, in relocateInput, clusterRedu
 		return fmt.Errorf("%w: cluster not redundant", ErrRelocateSkipped)
 	case cur.IsDeleteMarker:
 		return fmt.Errorf("%w: delete marker", ErrRelocateSkipped)
-	case cur.IsAppendable || len(cur.Coalesced) > 0:
-		// Relocation re-encodes the body via runChunkedPut, which writes a plain
-		// chunked manifest with no IsAppendable / Coalesced / AppendCallMD5s. Relocating
-		// an appendable/coalesced object would therefore drop its append-call digest
-		// history (resetting the composite ETag on the next append) and its coalesced
-		// refs. Skip it — it stays 1+0 (no redundancy upgrade) rather than be corrupted.
-		// Redundancy upgrade for appendable/coalesced objects is a separate feature.
-		return fmt.Errorf("%w: appendable/coalesced object (manifest shape not preserved by chunked re-encode)", ErrRelocateSkipped)
+	case len(cur.Coalesced) > 0 && !cur.IsAppendable:
+		return fmt.Errorf("%w: coalesced object is not appendable", ErrRelocateSkipped)
 	case cur.ECParity != 0:
 		return fmt.Errorf("%w: already redundant (parity=%d)", ErrRelocateSkipped, cur.ECParity)
 	case cur.ECData < 1:
@@ -52,6 +47,17 @@ func relocationStillEligible(cur PutObjectMetaCmd, in relocateInput, clusterRedu
 	default:
 		return nil
 	}
+}
+
+func relocatedMetaCmd(cur, cmd PutObjectMetaCmd) PutObjectMetaCmd {
+	cmd.MetaSeq = cur.MetaSeq + 1 // strictly win the (ModTime,VersionID) LWW tie
+	cmd.ExpectedETag = ""         // eligibility already enforced ETag/VersionID; FSM CAS N/A for quorum-meta objects
+	cmd.ETag = cur.ETag
+	if cur.IsAppendable {
+		cmd.IsAppendable = true
+		cmd.AppendCallMD5s = cloneBytesSlice(cur.AppendCallMD5s)
+	}
+	return cmd
 }
 
 // relocateObjectToRedundantGroup re-encodes the LATEST record of (bucket,key) —
@@ -86,6 +92,9 @@ func (b *DistributedBackend) relocateObjectToRedundantGroup(ctx context.Context,
 		return err
 	}
 	defer rc.Close()
+	if cur.IsAppendable && len(cur.AppendCallMD5s) == 0 {
+		return b.relocateSideRecordAppendableToRedundantCoalesced(ctx, cur, in, rc)
+	}
 
 	// Pre-allocate blobIDs + placements sized to the exact segment count, mirroring
 	// putObjectChunked. A 0-byte object still gets one (empty) segment.
@@ -132,9 +141,7 @@ func (b *DistributedBackend) relocateObjectToRedundantGroup(ctx context.Context,
 	// deletes the NEW blobs while the OLD blobs and the prior winning record are
 	// untouched (the stale record still wins LWW until a later successful re-write).
 	csb.writeQuorumMetaFn = func(ctx context.Context, cmd PutObjectMetaCmd) error {
-		cmd.MetaSeq = cur.MetaSeq + 1 // strictly win the (ModTime,VersionID) LWW tie
-		cmd.ExpectedETag = ""         // eligibility already enforced ETag/VersionID; FSM CAS N/A for quorum-meta objects
-		return b.writeQuorumMeta(ctx, cmd)
+		return b.writeQuorumMeta(ctx, relocatedMetaCmd(cur, cmd))
 	}
 
 	_, err = runChunkedPut(ctx, csb, rc, in.Bucket, in.Key, in.VersionID, obj.ContentType,
@@ -149,4 +156,117 @@ func (b *DistributedBackend) relocateObjectToRedundantGroup(ctx context.Context,
 	}
 
 	return nil
+}
+
+func (b *DistributedBackend) relocateSideRecordAppendableToRedundantCoalesced(ctx context.Context, cur PutObjectMetaCmd, in relocateInput, body io.Reader) error {
+	summary, err := b.readClusterAppendSummary(ctx, in.Bucket, in.Key, cur.VersionID, cur.NodeIDs)
+	if err != nil {
+		return fmt.Errorf("relocate append summary: %w", err)
+	}
+	coalescedSize := int64(0)
+	for _, c := range cur.Coalesced {
+		coalescedSize += c.Size
+	}
+	tailSize := cur.Size - coalescedSize
+	if tailSize < 0 {
+		return fmt.Errorf("%w: invalid coalesced size", ErrRelocateSkipped)
+	}
+	if summary.Size != tailSize {
+		return fmt.Errorf("%w: append summary size mismatch", ErrRelocateSkipped)
+	}
+
+	coalescedID := uuidutil.MustNewV7()
+	shardKey := in.Key + "/coalesced/" + coalescedID
+	var placementGroup *ShardGroupEntry
+	if b.shardGroup != nil {
+		groupID := cur.PlacementGroupID
+		if groupID == "" {
+			if candidate, ok := b.onlyPlacementCandidate(); ok {
+				groupID = candidate.ID
+			}
+		}
+		if groupID != "" {
+			if group, ok := b.shardGroup.ShardGroup(groupID); ok {
+				placementGroup = &group
+			}
+		}
+	}
+	placementPlan, err := b.planObjectWritePlacement(ctx, ObjectWritePlacementInput{
+		Operation:        "relocate_appendable_coalesced",
+		PlacementGroupID: cur.PlacementGroupID,
+		PlacementGroup:   placementGroup,
+		ShardKey:         shardKey,
+	})
+	if err != nil {
+		return fmt.Errorf("relocate appendable placement: %w", err)
+	}
+	sp, err := spoolObject(ctx, b.ecSpoolDir(), body, in.Bucket)
+	if err != nil {
+		return fmt.Errorf("relocate appendable spool: %w", err)
+	}
+	defer sp.Cleanup()
+
+	plan := ecObjectWritePlan{
+		Bucket:           in.Bucket,
+		Key:              in.Key,
+		VersionID:        "coalesced/" + coalescedID,
+		PlacementGroupID: placementPlan.PlacementGroupID,
+		Config:           placementPlan.Config,
+		Placement:        placementPlan.NodeIDs,
+	}
+	writer := newECObjectWriter(b.currentSelfAddr(), b.shardSvc, b.currentPeerHealth())
+	wr, err := writer.writeSpooledShards(ctx, plan, b.coalescedSpoolDir(), sp)
+	if err != nil {
+		if placementPlan.TopologyWrite {
+			return topologyShardWriteError(placementPlan.TopologyGroup, placementPlan.Config, err)
+		}
+		return fmt.Errorf("relocate appendable ec write: %w", err)
+	}
+
+	consumed := make([]string, summary.SegmentCount)
+	coalescedRef := CoalesceSegmentsPlan{
+		CoalescedID:        coalescedID,
+		ShardKey:           shardKey,
+		Size:               cur.Size,
+		ETag:               sp.ETag,
+		ConsumedSegmentIDs: consumed,
+		Placement:          wr.Placement,
+		ECData:             wr.ECData,
+		ECParity:           wr.ECParity,
+	}
+	nextSummary, err := advanceAppendSummaryForCoalesce(summary, coalescedRef)
+	if err != nil {
+		b.deleteRelocatedShards(ctx, in.Bucket, wr.ShardKey, wr.Placement)
+		return fmt.Errorf("relocate append summary advance: %w", err)
+	}
+	cmd := cur
+	cmd.MetaSeq = cur.MetaSeq + 1
+	cmd.ExpectedETag = ""
+	cmd.NodeIDs = cloneStringSlice(wr.Placement)
+	cmd.ECData = wr.ECData
+	cmd.ECParity = wr.ECParity
+	cmd.PlacementGroupID = placementPlan.PlacementGroupID
+	cmd.Segments = nil
+	cmd.Coalesced = []CoalescedShardRef{coalescedRefFromPlan(coalescedRef)}
+	cmd.AppendCallMD5s = nil
+	cmd.IsAppendable = true
+	cmd.IsDeleteMarker = false
+	cmd.IsHardDeleted = false
+	cmd.PreserveLatest = false
+
+	if err := b.writeClusterAppendSideRecords(ctx, in.Bucket, in.Key, cur.VersionID, cmd.NodeIDs, int(cmd.ECData), nextSummary, nil); err != nil {
+		b.deleteRelocatedShards(ctx, in.Bucket, wr.ShardKey, wr.Placement)
+		return fmt.Errorf("relocate append summary write: %w", err)
+	}
+	if err := b.writeQuorumMeta(ctx, cmd); err != nil {
+		b.deleteRelocatedShards(ctx, in.Bucket, wr.ShardKey, wr.Placement)
+		return fmt.Errorf("relocate append meta: %w", err)
+	}
+	return nil
+}
+
+func (b *DistributedBackend) deleteRelocatedShards(ctx context.Context, bucket, shardKey string, nodes []string) {
+	for _, node := range nodes {
+		_ = b.shardSvc.DeleteShards(ctx, node, bucket, shardKey)
+	}
 }
