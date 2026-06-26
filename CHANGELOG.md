@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.738.0] - 2026-06-26
+
+### Changed
+- **Added e2e coverage for `ListObjects` V1 (legacy) Marker pagination.**
+  New cases exercise listing without `list-type=2`: paging with an exclusive
+  `Marker`/`NextMarker` cursor returns every key exactly once in ascending
+  lexicographic order with no duplicates or gaps, and a marker past the last
+  key yields an empty, non-truncated page. Both run on the single-node and
+  4-node cluster fixtures. No production behavior change.
+
 ## [0.0.737.0] - 2026-06-26
 
 ### Fixed
