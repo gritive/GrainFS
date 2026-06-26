@@ -141,16 +141,6 @@ func getObjectRange(client *s3.Client, bucket, key string, startInclusive, endIn
 	return io.ReadAll(resp.Body)
 }
 
-// metricCounterAtLeast scrapes the target node's /metrics endpoint and
-// returns true when the named counter (with labels) is >= threshold. Works
-// for both single (1 endpoint) and cluster (N endpoints) targets via
-// tgt.endpoint(i).
-// Lightweight parser — accepts the prometheus text format line "name{labels} value".
-func metricCounterAtLeast(t testing.TB, tgt s3Target, nodeIdx int, metricLine string, threshold float64) bool {
-	value, ok := metricCounterValue(t, tgt, nodeIdx, metricLine)
-	return ok && value >= threshold
-}
-
 func metricCounterTotal(t testing.TB, tgt s3Target, metricLine string) float64 {
 	t.Helper()
 	var total float64

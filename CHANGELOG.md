@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.739.0] - 2026-06-26
+
+### Fixed
+- **Removed e2e unused test scaffolding.**
+  Deleted default-build e2e `staticcheck` U1000 helper leftovers and moved
+  integration-only e2e helpers behind the `integration` build tag, keeping
+  both default and integration compile-only test passes clean.
+
 ## [0.0.738.0] - 2026-06-26
 
 ### Changed

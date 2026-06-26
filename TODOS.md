@@ -229,10 +229,10 @@ golangci's `make lint` subset, and it analyzes test files that golangci skips vi
 surfaced the items below. None block; tracked for cleanup.
 
 - **[P4] remaining unused test-helper symbols (staticcheck U1000) across `_test.go` files**
-  (e2e/cluster). The raft (6), scrubber (4), server (2), and storage/lifecycle (2) symbols were removed.
+  (cluster). The raft (6), scrubber (4), server (2), storage/lifecycle (2), and e2e symbols were removed.
   golangci `unused` skips them (`tests: false`) so `make lint` stays green. Batch-removable dead test
-  scaffolding; low risk. The remaining `internal/cluster` / `tests/e2e` ones overlap the active
-  decompose fleet — clear them once it drains. Enumerate with `staticcheck ./... | grep U1000`.
+  scaffolding; low risk. The remaining `internal/cluster` ones overlap the active decompose fleet —
+  clear them once it drains. Enumerate with `staticcheck ./... | grep U1000`.
 
 - **[P4][note, not a defect] staticcheck also flags 3 PRODUCTION U1000 that are INTENTIONAL
   `//nolint:unused` scaffolding** — `(*MetaFSM).incDEKRef` / `decDEKRef` (`meta_fsm_rotation.go`, kept

@@ -835,20 +835,6 @@ func requireMRCreateBucketEventually(t testing.TB, ctx context.Context, c *mrClu
 	})
 }
 
-func requireMRGetObjectEventually(t testing.TB, ctx context.Context, client *s3.Client, c *mrCluster, nodeIdx int, bucket, key string, want []byte) {
-	t.Helper()
-	var lastErr error
-	var got []byte
-	diag := mrS3ObjectDiagnosticContext("GetObject", c, nodeIdx, bucket, key, "")
-	gomega.Eventually(func() bool {
-		got, lastErr = getObjectBytes(ctx, client, bucket, key)
-		return lastErr == nil && bytes.Equal(got, want)
-	}).WithTimeout(60*time.Second).WithPolling(2*time.Second).
-		Should(gomega.BeTrue(),
-			"GetObject never returned committed object: %s lastErr=%v got=%q",
-			diag, lastErr, string(got))
-}
-
 func requireMRGetObjectFromAnyNodeEventually(t testing.TB, ctx context.Context, c *mrCluster, bucket, key string, want []byte) {
 	t.Helper()
 	var lastErr error
