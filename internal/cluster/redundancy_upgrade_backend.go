@@ -40,7 +40,7 @@ func (a redundancyUpgradeAdapter) listBuckets() ([]string, error) {
 
 func (a redundancyUpgradeAdapter) caughtUpOwner(bucket string) bool {
 	gb := a.b.owningGroupBackend(bucket)
-	return gb != nil && gb.CaughtUp(a.ctx)
+	return gb != nil && gb.CaughtUp(a.ctx) && a.b.gcSingletonOwner(bucket)
 }
 
 func (a redundancyUpgradeAdapter) scanObjects(bucket string) (<-chan scrubber.ObjectRecord, error) {
@@ -53,7 +53,8 @@ func (a redundancyUpgradeAdapter) relocate(ctx context.Context, in relocateInput
 
 // RunRedundancyUpgradeSweep relocates up to maxPerCycle non-redundant (1+0) EC
 // objects into a redundant placement group, returning the count relocated. Only
-// the caught-up leader of each hosted group relocates that group's objects.
+// the deterministic singleton owner of each fresh hosted group relocates that
+// group's objects.
 // minAge is the minimum object age before relocation (avoids racing in-flight
 // writes); when minAge < 0 the conservative default is used, while minAge == 0
 // relocates eligible objects immediately (used by tests and aggressive ops).

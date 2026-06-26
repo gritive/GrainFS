@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.736.0] - 2026-06-26
+
+### Changed
+- **Made data-group GC freshness and redundancy-upgrade relocation raft-free.**
+  Production scrubber boot now wires a transport-reachability GC freshness gate into existing and
+  future owned data-group backends, so segment GC no longer depends on data-group Raft `ReadIndex`.
+  Redundancy-upgrade relocation is additionally limited to the canonical first peer of each shard
+  group, with legacy raft-address matching and fail-closed behavior when group metadata or peers are
+  unavailable.
+
+### Fixed
+- **Closed GC gate wiring races and latest-base lint blockers.**
+  GC freshness/singleton callbacks are stored through atomic holders, `DataGroupManager` serializes
+  gate updates against new group registration, and stale `ShardService` quorum-meta decode forwarding
+  helpers plus a superseded segment-staging promote helper were removed after latest base merges
+  exposed them as unused.
+
 ## [0.0.735.0] - 2026-06-26
 
 ### Changed

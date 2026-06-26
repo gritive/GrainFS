@@ -164,7 +164,7 @@ func TestRunRedundancyUpgradeSweep_DrainsChannelOnCap(t *testing.T) {
 }
 
 // TestRunRedundancyUpgradeSweep_CaughtUpGate skips a bucket whose owning group
-// is not the locally-hosted caught-up leader.
+// is not fresh and singleton-owned locally.
 func TestRunRedundancyUpgradeSweep_CaughtUpGate(t *testing.T) {
 	const now, minAge = int64(1000), int64(60)
 	d := &fakeRedundancyUpgradeDeps{

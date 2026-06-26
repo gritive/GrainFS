@@ -16,7 +16,11 @@
 - [x] **phantom-on-CAS-reject cleanup** — owner-local-first CAS quorum-meta writes now
   compare-delete a freshly published owner-local latest-only blob if the peer quorum later
   fails, preventing failed append/coalesce RMW attempts from leaving a readable phantom manifest.
-- [ ] GC singleton/freshness raft-free replacement.
+- [x] GC singleton/freshness raft-free replacement — GC freshness no longer depends on
+  data-group Raft `ReadIndex`; production wires a raft-free transport reachability gate
+  to existing and future owned data-group backends, while redundancy-upgrade relocation
+  keeps a deterministic per-group singleton owner and fails closed when the owner/peers
+  are not reachable.
 - [ ] HRW-primary append/multipart owner.
 - [ ] per-group raft membership mirror removal.
 

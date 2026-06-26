@@ -190,6 +190,15 @@ type DistributedBackend struct {
 	// returns this backend (single-group, identical to pre-multi-group behavior).
 	owningGroupBackendFn func(bucket string) *DistributedBackend
 
+	// gcFreshnessGate overrides the legacy data-Raft ReadIndex freshness barrier
+	// for GC paths. nil preserves brownfield/tests' old CaughtUp behavior.
+	gcFreshnessGate atomic.Pointer[gcFreshnessGateHolder]
+
+	// gcSingletonOwnerFn gates GC work that rewrites global metadata. Local orphan
+	// cleanup can run on every locally-authoritative node, but redundancy upgrade
+	// relocation needs one deterministic runner per owning group.
+	gcSingletonOwnerFn atomic.Pointer[gcSingletonOwnerHolder]
+
 	metaBucketStore MetaBucketStore  // Task 7: cluster-wide bucket metadata seam; nil = not wired
 	router          *Router          // PR-D: bucket→group routing; nil = no routing
 	shardGroup      ShardGroupSource // v0.0.7.0: query active groups for hash assignment; nil = legacy single-group path
