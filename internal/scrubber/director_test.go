@@ -25,7 +25,7 @@ func (r *recordingIncident) Record(ctx context.Context, facts []incident.Fact) e
 
 func TestDirector_TriggerDedupSameRequest(t *testing.T) {
 	d := NewDirector(DirectorOpts{Incident: &recordingIncident{}, QueueSize: 8})
-	d.Register("replication", &countingSource{name: "replication"}, noopVerifier{})
+	d.Register("ec", &countingSource{name: "ec"}, noopVerifier{})
 	d.Start(context.Background())
 	defer d.Stop()
 	req := TriggerReq{Bucket: "__grainfs_volumes", KeyPrefix: "__vol/v/blk_"}
@@ -38,9 +38,9 @@ func TestDirector_TriggerDedupSameRequest(t *testing.T) {
 }
 
 func TestDirector_ApplyFromFSM_Nonblocking(t *testing.T) {
-	src := &countingSource{name: "replication"}
+	src := &countingSource{name: "ec"}
 	d := NewDirector(DirectorOpts{Incident: &recordingIncident{}, QueueSize: 1})
-	d.Register("replication", src, noopVerifier{})
+	d.Register("ec", src, noopVerifier{})
 	d.Start(context.Background())
 	defer d.Stop()
 	for i := 0; i < 5; i++ {
@@ -61,7 +61,7 @@ func TestRouteSourceFor(t *testing.T) {
 		bucket string
 		want   string
 	}{
-		{"internal buckets are full-object replicated", "__grainfs_volumes", "replication"},
+		{"internal buckets use the registered production source", "__grainfs_volumes", "ec"},
 		{"S3-exposed buckets ride the EC data path", "user-bucket", "ec"},
 	}
 	for _, tt := range tests {
