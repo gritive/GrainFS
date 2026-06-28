@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -125,7 +126,11 @@ type putTraceSink struct {
 	pid    int
 }
 
-var globalPutTraceSink = openPutTraceSinkFromEnv()
+var globalPutTraceSink atomic.Pointer[putTraceSink]
+
+func init() {
+	globalPutTraceSink.Store(openPutTraceSinkFromEnv())
+}
 
 func openPutTraceSinkFromEnv() *putTraceSink {
 	path := os.Getenv("GRAINFS_PUT_TRACE_FILE")
@@ -145,15 +150,16 @@ func openPutTraceSinkFromEnv() *putTraceSink {
 
 //nolint:unused // referenced by *_test.go files across the cluster package.
 func reloadPutTraceSinkForTest() {
-	if globalPutTraceSink != nil && globalPutTraceSink.file != nil {
-		_ = globalPutTraceSink.file.Close()
+	old := globalPutTraceSink.Load()
+	if old != nil && old.file != nil {
+		_ = old.file.Close()
 	}
-	globalPutTraceSink = openPutTraceSinkFromEnv()
+	globalPutTraceSink.Store(openPutTraceSinkFromEnv())
 }
 
 //nolint:unused // referenced by put_trace_test.go.
 func putTraceEnabled() bool {
-	return globalPutTraceSink != nil
+	return globalPutTraceSink.Load() != nil
 }
 
 func ContextWithPutTrace(ctx context.Context, req PutTraceRequest) context.Context {
@@ -179,7 +185,7 @@ func StartPutTraceStage(ctx context.Context, stage PutTraceStage) func(PutTraceS
 }
 
 func ObservePutTraceStage(ctx context.Context, stage PutTraceStage, start time.Time, fields PutTraceStageFields) {
-	sink := globalPutTraceSink
+	sink := globalPutTraceSink.Load()
 	if sink == nil {
 		return
 	}

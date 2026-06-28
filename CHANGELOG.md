@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.764.6] - 2026-06-29
+
+### Fixed
+- **Eliminated data race in `globalPutTraceSink` under `-race`.**
+  Changed the global put-trace sink from a plain pointer to `atomic.Pointer[putTraceSink]`
+  so concurrent reads in `ObservePutTraceStage` and test-setup writes in
+  `reloadPutTraceSinkForTest` are sequentially consistent without a mutex.
+  Added goroutine drain to the forward-sender concurrency test to prevent
+  goroutines from outliving the test and triggering cross-test races.
+
 ## [0.0.764.5] - 2026-06-29
 
 ### Changed
