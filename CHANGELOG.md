@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.764.5] - 2026-06-29
+
+### Changed
+- **Extended S3 compatibility matrix with CopyObject and DeleteObjects entries.**
+  Added CopyObject (including versioned-source, metadata-directive, tagging-directive,
+  and per-version ACL enforcement) and DeleteObjects (batch delete POST `?delete`)
+  rows to `docs/reference/s3-compatibility.md`.
+
 ## [0.0.764.4] - 2026-06-29
 
 ### Added
