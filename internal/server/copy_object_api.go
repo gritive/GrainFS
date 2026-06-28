@@ -22,8 +22,8 @@ func (s *Server) handleCopyObject(ctx context.Context, c *app.RequestContext, ds
 	}
 
 	// CopyObject carrying an unsupported canned ACL or any x-amz-grant-* header:
-	// reject with 501 (fail-closed) before source authorization so an unauthorized
-	// caller cannot probe object existence via the copy path.
+	// reject with 501 (fail-closed) before parseCopySource/loadCopySourceObject so
+	// the request does not touch storage.
 	if hasUnsupportedACLHeaders(c) {
 		writeACLNotImplemented(c)
 		return

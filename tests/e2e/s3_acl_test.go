@@ -242,6 +242,18 @@ func runS3ACLCases(getTgt func() s3Target, getClient func() *s3.Client) {
 		})
 		requireS3ErrorCode(err, "NotImplemented")
 	}, ginkgo.NodeTimeout(60*time.Second))
+
+	ginkgo.It("rejects CreateMultipartUpload with authenticated-read canned ACL", func(ctx context.Context) {
+		bucket := createSpecBucket(getTgt(), "mpuauthread")
+		cli := getClient()
+
+		_, err := cli.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String("mpu.txt"),
+			ACL:    types.ObjectCannedACLAuthenticatedRead,
+		})
+		requireS3ErrorCode(err, "NotImplemented")
+	}, ginkgo.NodeTimeout(60*time.Second))
 }
 
 // requireAnonGetEventually asserts an unsigned HTTP GET returns wantStatus with
