@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.764.2] - 2026-06-29
+
+### Fixed
+- **CopyObject and UploadPartCopy now enforce the ACL of the requested version,
+  not the latest.** When a copy source specifies `?versionId=`, the server
+  previously checked the latest-version ACL instead of the specified version's
+  ACL, allowing anonymous callers to copy a private older version if the latest
+  version was public-read. Both the versioned and non-versioned copy-source
+  head paths now correctly stamp the bucket-versioning context so per-version
+  ACL enforcement works in multi-group clusters.
+
 ## [0.0.764.1] - 2026-06-29
 
 ### Changed

@@ -83,7 +83,11 @@ func (s *Server) loadObjectForHead(ctx context.Context, bucket, key, versionID s
 }
 
 func (s *Server) loadCopySourceObject(ctx context.Context, src storage.ObjectRef) (*storage.Object, error) {
-	return s.ops.HeadObject(ctx, src.Bucket, src.Key)
+	if src.VersionID != "" {
+		ctx = s.ctxWithBucketVersioning(ctx, src.Bucket)
+		return s.ops.HeadObjectVersion(ctx, src.Bucket, src.Key, src.VersionID)
+	}
+	return s.headObjectWithReadAfterWriteRetry(ctx, src.Bucket, src.Key)
 }
 
 func sleepReadAfterWriteRetry(ctx context.Context, interval time.Duration) bool {
