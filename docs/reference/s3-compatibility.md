@@ -29,6 +29,7 @@ binary and data compatibility across rolling upgrades.
 | Object basics     | GetObject                               | Supported     |                                                                                  |
 | Object basics     | HeadObject                              | Supported     |                                                                                  |
 | Object basics     | DeleteObject                            | Supported     |                                                                                  |
+| Object basics     | DeleteObjects (batch delete, POST `?delete`) | Supported | Concurrency-capped fan-out (up to 16 parallel per-object deletes). Single-node and 4-node cluster e2e cover batch deletion and `x-amz-bypass-governance-retention` no-op. |
 | Object basics     | ListObjects with prefix                 | Supported     |                                                                                  |
 | Object basics     | Nested keys                             | Supported     |                                                                                  |
 | Object basics     | Overwrite object                        | Supported     |                                                                                  |
