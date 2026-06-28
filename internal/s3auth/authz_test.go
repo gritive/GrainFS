@@ -78,6 +78,28 @@ func TestIsAuthorizedByACL(t *testing.T) {
 	}
 }
 
+func TestValidateCannedACL(t *testing.T) {
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{"", true},                           // 빈 값 → 지원 (기본 private)
+		{"private", true},                    // 명시적 private
+		{"public-read", true},                // 공개 읽기
+		{"public-read-write", true},          // 공개 읽기+쓰기
+		{"authenticated-read", false},        // 인식되지만 미지원 (cross-account 필요)
+		{"bucket-owner-read", false},         // 인식되지만 미지원
+		{"bucket-owner-full-control", false}, // 인식되지만 미지원
+		{"aws-exec-read", false},             // 인식되지만 미지원
+		{"garbage", false},                   // 알 수 없는 값
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			assert.Equal(t, tt.want, ValidateCannedACL(tt.input))
+		})
+	}
+}
+
 func TestParseACLHeader(t *testing.T) {
 	tests := []struct {
 		input string

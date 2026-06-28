@@ -45,7 +45,7 @@ binary and data compatibility across rolling upgrades.
 | Auth              | Presigned GET/PUT URL                   | Supported     |                                                                                  |
 | Auth              | Browser POST policy/form upload         | Supported     |                                                                                  |
 | Access control    | Bucket policy set/get/deny              | Supported     |                                                                                  |
-| Access control    | ACL header on object write/copy         | Supported     |                                                                                  |
+| Access control    | ACL header on object write/copy         | Supported     | Supported canned ACLs: `private`, `public-read`, `public-read-write`. Recognized-but-unsupported AWS canned values (`authenticated-read`, `bucket-owner-*`, `aws-exec-read`) and all `x-amz-grant-*` explicit ACL grant headers are rejected with `NotImplemented` (501) rather than silently downgraded to private. Single-node and 4-node cluster e2e cover the honored subset (anonymous GET authorization) and the fail-closed rejection surface. |
 | Bucket controls   | Versioning                              | Supported     |                                                                                  |
 | Bucket controls   | Lifecycle config replication            | Supported     | Replicates lifecycle configuration through cluster metadata.                     |
 | Bucket controls   | Lifecycle Expiration.Days               | Supported     | Lifecycle worker tests cover current-version expiration through the normal delete path; cluster e2e covers lifecycle config replication. |

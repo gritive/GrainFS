@@ -105,6 +105,16 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
+	// PutObject carrying an unsupported canned ACL or any x-amz-grant-* header:
+	// silently downgrading would give the caller false confidence that their
+	// access-control semantics were honored. Reject with 501 (fail-closed).
+	// Placed after multipart/copy/append have already returned above so the
+	// guard applies only to the plain PutObject path.
+	if hasUnsupportedACLHeaders(c) {
+		writeACLNotImplemented(c)
+		return
+	}
+
 	prepareStart := time.Now()
 	systemMetadata, sseErr := parseObjectSSEHeaders(c)
 	if sseErr != nil {
