@@ -135,6 +135,25 @@ func runS3ObjectLockCases(getTgt func() s3Target, getClient func() *s3.Client) {
 		})
 		requireS3ErrorCode(err, "NotImplemented")
 	}, ginkgo.NodeTimeout(60*time.Second))
+
+	// Regression guard: x-amz-bypass-governance-retention on DELETE must be
+	// treated as a no-op (ignored), not as a 501 NotImplemented. There is no
+	// governance retention to bypass, so the header is harmless and AWS itself
+	// treats it as a no-op when no retention is in place. Fail-closing with 501
+	// here would break legitimate rclone / aws-cli --bypass-governance-retention
+	// deletes against buckets that have no Object Lock active.
+	ginkgo.It("ignores x-amz-bypass-governance-retention on DeleteObject (no-op: no retention to bypass)", func(ctx context.Context) {
+		bucket := createSpecBucket(getTgt(), "lockbypass")
+		cli := getClient()
+		putPlainObjectEventually(ctx, getTgt(), bucket, "obj.txt", "body")
+
+		_, err := cli.DeleteObject(ctx, &s3.DeleteObjectInput{
+			Bucket:                    aws.String(bucket),
+			Key:                       aws.String("obj.txt"),
+			BypassGovernanceRetention: aws.Bool(true),
+		})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	}, ginkgo.NodeTimeout(60*time.Second))
 }
 
 func putPlainObjectEventually(ctx context.Context, tgt s3Target, bucket, key, body string) {
