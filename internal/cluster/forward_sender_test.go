@@ -662,7 +662,12 @@ func TestForwardSender_SendStreamDefaultLimitHandlesWarpMultipartConcurrency(t *
 		t.Fatal("single-message dialer must not be used for streamed body")
 		return nil, nil
 	}).WithStreamDialer(streamDialer)
-	defer close(release)
+
+	// Use sync.Once so close(release) is safe to call from both the success
+	// path and t.Cleanup (which fires on t.Fatal / timeout).
+	var once sync.Once
+	closeRelease := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(closeRelease)
 
 	done := make(chan error, concurrency)
 	for i := 0; i < concurrency; i++ {
@@ -682,6 +687,12 @@ func TestForwardSender_SendStreamDefaultLimitHandlesWarpMultipartConcurrency(t *
 		case <-time.After(time.Second):
 			t.Fatal("timed out waiting for concurrent streams to start")
 		}
+	}
+
+	// Unblock all goroutines and drain to ensure none outlive this test.
+	closeRelease()
+	for i := 0; i < concurrency; i++ {
+		require.NoError(t, <-done)
 	}
 }
 
