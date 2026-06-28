@@ -153,6 +153,42 @@ func runS3ObjectLockCases(getTgt func() s3Target, getClient func() *s3.Client) {
 			BypassGovernanceRetention: aws.Bool(true),
 		})
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+		// Verify the object was actually deleted (not silently skipped).
+		_, headErr := cli.HeadObject(ctx, &s3.HeadObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String("obj.txt"),
+		})
+		requireS3ErrorCode(headErr, "NotFound")
+	}, ginkgo.NodeTimeout(60*time.Second))
+
+	// Regression guard: x-amz-bypass-governance-retention on DeleteObjects (batch)
+	// must also be a no-op. The doc note names both DELETE and DeleteObjects.
+	ginkgo.It("ignores x-amz-bypass-governance-retention on DeleteObjects batch (no-op: no retention to bypass)", func(ctx context.Context) {
+		bucket := createSpecBucket(getTgt(), "lockbatchbypass")
+		cli := getClient()
+		putPlainObjectEventually(ctx, getTgt(), bucket, "obj.txt", "body")
+
+		out, err := cli.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+			Bucket:                    aws.String(bucket),
+			BypassGovernanceRetention: aws.Bool(true),
+			Delete: &types.Delete{
+				Objects: []types.ObjectIdentifier{
+					{Key: aws.String("obj.txt")},
+				},
+				Quiet: aws.Bool(false),
+			},
+		})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(out.Errors).To(gomega.BeEmpty())
+		gomega.Expect(out.Deleted).To(gomega.HaveLen(1))
+
+		// Verify the object was actually deleted.
+		_, headErr := cli.HeadObject(ctx, &s3.HeadObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String("obj.txt"),
+		})
+		requireS3ErrorCode(headErr, "NotFound")
 	}, ginkgo.NodeTimeout(60*time.Second))
 }
 
