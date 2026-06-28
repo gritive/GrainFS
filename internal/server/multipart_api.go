@@ -53,6 +53,17 @@ func (s *Server) handlePost(ctx context.Context, c *app.RequestContext) {
 }
 
 func (s *Server) createMultipartUpload(ctx context.Context, c *app.RequestContext, bucket, key string) {
+	// Fail-closed: reject unsupported canned ACL values and x-amz-grant-* headers
+	// before any storage access.  The x-amz-acl header on CreateMultipartUpload is
+	// consumed here; the ACL is not yet propagated to the completed object (MPU
+	// ACL stamping is a separate follow-up), so supported values pass through with
+	// the default private ACL.  Unsupported values are rejected with 501 for
+	// consistency with PutObject and CopyObject.
+	if hasUnsupportedACLHeaders(c) {
+		writeACLNotImplemented(c)
+		return
+	}
+
 	contentType := string(c.GetHeader("Content-Type"))
 	if contentType == "" {
 		contentType = "application/octet-stream"

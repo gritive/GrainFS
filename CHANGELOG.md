@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.764.4] - 2026-06-29
+
+### Added
+- **Added fail-closed 501 NotImplemented guards for unsupported canned ACL values
+  and `x-amz-grant-*` explicit-grant headers on PutObject, CopyObject, and
+  CreateMultipartUpload.** Recognized-but-unsupported AWS canned values
+  (`authenticated-read`, `bucket-owner-read`, `bucket-owner-full-control`,
+  `aws-exec-read`) and all `x-amz-grant-*` headers are now rejected with
+  `NotImplemented` (501) on every object-write surface rather than being silently
+  downgraded to private. Supported canned ACLs (`private`, `public-read`,
+  `public-read-write`) and requests with no ACL header continue to be accepted.
+  E2e tests cover the fail-closed rejection surface across both SingleNode and
+  4-node cluster topologies. The `ACL header on object write/copy` row in
+  `docs/reference/s3-compatibility.md` has been updated from Supported to Partial
+  to reflect the current scope.
+
 ## [0.0.764.3] - 2026-06-29
 
 ### Changed

@@ -21,6 +21,14 @@ func (s *Server) handleCopyObject(ctx context.Context, c *app.RequestContext, ds
 		return
 	}
 
+	// CopyObject carrying an unsupported canned ACL or any x-amz-grant-* header:
+	// reject with 501 (fail-closed) before parseCopySource/loadCopySourceObject so
+	// the request does not touch storage.
+	if hasUnsupportedACLHeaders(c) {
+		writeACLNotImplemented(c)
+		return
+	}
+
 	src, ok := parseCopySource(copySource)
 	if !ok {
 		writeXMLError(c, consts.StatusBadRequest, "InvalidArgument", "invalid x-amz-copy-source format")

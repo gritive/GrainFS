@@ -66,6 +66,22 @@ type PermCheckInput struct {
 	ObjectACL ACLGrant // 0 if metadata not yet loaded
 }
 
+// ValidateCannedACL reports whether s is in the supported canned-ACL set.
+// Supported: "", "private", "public-read", "public-read-write".
+// Recognized-but-unsupported AWS values (authenticated-read, bucket-owner-*,
+// aws-exec-read) and unknown garbage values both return false.
+// Callers should reject unsupported values with 501 NotImplemented rather than
+// silently downgrading to private, which would give the caller false confidence
+// that access control semantics were honored.
+func ValidateCannedACL(s string) bool {
+	switch s {
+	case "", "private", "public-read", "public-read-write":
+		return true
+	default:
+		return false
+	}
+}
+
 // ParseACLHeader converts an x-amz-acl header value to ACLGrant.
 // Unknown or empty values fall back to ACLPrivate.
 func ParseACLHeader(s string) ACLGrant {
