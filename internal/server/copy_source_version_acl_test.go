@@ -76,6 +76,35 @@ func TestHandleCopyObject_VersionedSource_OldPrivateVersion_Denied(t *testing.T)
 
 	assert.Equal(t, http.StatusForbidden, resp.StatusCode,
 		"anonymous copy of a private versioned source must be denied (403 not 501); body=%s", string(body))
+	assert.True(t, spy.headObjectVersionCalled,
+		"CopyObject with ?versionId= must dispatch to HeadObjectVersion so the per-version ACL is checked")
+}
+
+// TestLoadCopySourceObject_NoVersionID_UsesHeadObject guards the non-versioned
+// path of loadCopySourceObject: when VersionID is empty the function must call
+// HeadObject (not HeadObjectVersion) and return the latest-version ACL. This
+// is the complement of TestUploadPartCopy_VersionedSource_OldPrivateVersion_Denied
+// and together they close the dispatch regression gap: a bug that always routes
+// to HeadObjectVersion would fail this test.
+func TestLoadCopySourceObject_NoVersionID_UsesHeadObject(t *testing.T) {
+	real, err := storage.NewLocalBackend(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { real.Close() })
+	require.NoError(t, real.CreateBucket(context.Background(), "src-bkt"))
+
+	spy := &aclParitySpy{Backend: real}
+	srv := New("127.0.0.1:0", spy)
+
+	obj, err := srv.loadCopySourceObject(context.Background(), storage.ObjectRef{
+		Bucket: "src-bkt",
+		Key:    "src-key",
+		// VersionID: "" (not set — non-versioned path)
+	})
+	require.NoError(t, err)
+	assert.False(t, spy.headObjectVersionCalled,
+		"loadCopySourceObject must NOT call HeadObjectVersion when VersionID is empty")
+	assert.Equal(t, uint8(s3auth.ACLPublicRead), obj.ACL,
+		"ACL from HeadObject (public-read) must be returned for the non-versioned path")
 }
 
 // TestUploadPartCopy_VersionedSource_OldPrivateVersion_Denied proves the shared
@@ -86,6 +115,7 @@ func TestHandleCopyObject_VersionedSource_OldPrivateVersion_Denied(t *testing.T)
 func TestUploadPartCopy_VersionedSource_OldPrivateVersion_Denied(t *testing.T) {
 	real, err := storage.NewLocalBackend(t.TempDir())
 	require.NoError(t, err)
+	t.Cleanup(func() { real.Close() })
 	require.NoError(t, real.CreateBucket(context.Background(), "src-bkt"))
 
 	spy := &aclParitySpy{Backend: real}
