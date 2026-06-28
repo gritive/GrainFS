@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.764.1] - 2026-06-29
+
+### Changed
+- **Verified DeleteObjects (`POST /?delete`) end-to-end against real cluster and single-node fixtures.**
+  Multi-key bulk delete, quiet mode, absent-key success semantics, and empty-key `InvalidArgument`
+  error shape are now covered by live e2e tests in both SingleNode and Cluster4Node topologies.
+
 ## [0.0.763.0] - 2026-06-27
 
 ### Fixed
