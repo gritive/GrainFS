@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.764.3] - 2026-06-29
+
+### Changed
+- **Documented governance-bypass header behavior.** The `x-amz-bypass-governance-retention`
+  header on DELETE and DeleteObjects is accepted as a no-op — there is no
+  governance retention to bypass, matching AWS S3 behavior when no Object Lock is active.
+  Tools such as rclone and aws-cli that pass `--bypass-governance-retention` on all deletes
+  continue to work without modification.
+
 ## [0.0.764.2] - 2026-06-29
 
 ### Fixed
