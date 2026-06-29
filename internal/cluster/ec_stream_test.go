@@ -35,6 +35,10 @@ func TestSpoolECShardsWritesPlaintext(t *testing.T) {
 	n, err := io.ReadAtLeast(f, buf, 1)
 	require.NoError(t, err)
 	require.Greater(t, n, 0)
+
+	raw, err := os.ReadFile(shards.paths[0])
+	require.NoError(t, err)
+	require.True(t, bytes.Contains(raw, bytes.Repeat([]byte("Q"), 4096)), "data shard 0 must contain plaintext payload bytes")
 }
 
 // TestSpoolECShardsZeroSizeIsClean verifies the zero-size path in spoolECShards

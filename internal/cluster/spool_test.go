@@ -284,12 +284,17 @@ func TestEncryptedSpoolECShardsReconstruct(t *testing.T) {
 	defer shards.Cleanup()
 
 	payloads := make([][]byte, cfg.NumShards())
+	marker := []byte("sensitive-erasure-coding-block-")
 	for i := range payloads {
 		rc, err := shards.OpenShard(i)
 		require.NoError(t, err)
 		payloads[i], err = io.ReadAll(rc)
 		require.NoError(t, err)
 		require.NoError(t, rc.Close())
+
+		raw, readErr := os.ReadFile(shards.paths[i])
+		require.NoError(t, readErr)
+		require.True(t, bytes.Contains(raw, marker), "EC shard %d must be plaintext", i)
 	}
 	got, err := ECReconstruct(cfg, payloads)
 	require.NoError(t, err)
