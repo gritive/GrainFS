@@ -133,7 +133,7 @@ func (b *DistributedBackend) GetObject(ctx context.Context, bucket, key string) 
 	}
 	if !obj.IsAppendable && len(obj.Segments) > 0 {
 		store := &clusterSegmentStore{b: b, bucket: bucket, key: key, obj: obj}
-		return storage.NewSegmentReaderCtx(ctx, store, obj.Segments), obj, nil
+		return storage.NewStreamingSegmentReaderCtx(ctx, store, obj.Segments), obj, nil
 	}
 
 	if b.shardSvc != nil {

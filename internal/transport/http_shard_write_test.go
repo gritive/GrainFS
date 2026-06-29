@@ -120,6 +120,65 @@ func TestShardWrite_StagingKeyRoundTrips(t *testing.T) {
 	}
 }
 
+func TestShardWrite_StreamSizeRoundTrips(t *testing.T) {
+	srv, cli, addr := shardWritePair(t)
+	got := make(chan ShardWriteRequest, 1)
+	srv.RegisterShardWriteHandler(func(req ShardWriteRequest, body io.Reader) error {
+		_, _ = io.Copy(io.Discard, body)
+		got <- req
+		return nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	payload := []byte("staged-shard-bytes")
+	req := ShardWriteRequest{
+		Bucket:          "bkt",
+		Key:             "obj/segments/blob-1",
+		StagingKey:      ".segstaging/txn-7/blob-1",
+		ShardIdx:        2,
+		Sealed:          false,
+		StreamSizeKnown: true,
+		StreamSize:      int64(len(payload)),
+	}
+	if err := cli.ShardWrite(ctx, addr, req, bytes.NewReader(payload)); err != nil {
+		t.Fatalf("ShardWrite: %v", err)
+	}
+	select {
+	case w := <-got:
+		if w != req {
+			t.Fatalf("handler req = %+v, want %+v (stream size must round-trip)", w, req)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("handler not invoked")
+	}
+}
+
+func TestShardWrite_StreamSizeZeroIsKnown(t *testing.T) {
+	srv, cli, addr := shardWritePair(t)
+	got := make(chan ShardWriteRequest, 1)
+	srv.RegisterShardWriteHandler(func(req ShardWriteRequest, body io.Reader) error {
+		_, _ = io.Copy(io.Discard, body)
+		got <- req
+		return nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req := ShardWriteRequest{Bucket: "bkt", Key: "obj/key", ShardIdx: 1, StreamSizeKnown: true, StreamSize: 0}
+	if err := cli.ShardWrite(ctx, addr, req, bytes.NewReader(nil)); err != nil {
+		t.Fatalf("ShardWrite: %v", err)
+	}
+	select {
+	case w := <-got:
+		if !w.StreamSizeKnown || w.StreamSize != 0 {
+			t.Fatalf("StreamSize = known:%v size:%d, want known zero", w.StreamSizeKnown, w.StreamSize)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("handler not invoked")
+	}
+}
+
 // TestShardWrite_NoStagingKeyOmitsParam confirms the legacy path is unchanged: an
 // empty StagingKey round-trips as empty (the client omits the `staging` param).
 func TestShardWrite_NoStagingKeyOmitsParam(t *testing.T) {
@@ -141,6 +200,9 @@ func TestShardWrite_NoStagingKeyOmitsParam(t *testing.T) {
 	case w := <-got:
 		if w.StagingKey != "" {
 			t.Fatalf("StagingKey = %q, want empty for legacy write", w.StagingKey)
+		}
+		if w.StreamSizeKnown {
+			t.Fatalf("StreamSizeKnown = true, want false when size param is absent")
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("handler not invoked")

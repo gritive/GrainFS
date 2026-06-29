@@ -289,6 +289,21 @@ func (l *LocalShardStore) writeLocalShardAADStream(ctx context.Context, bucket, 
 		if sizeHint >= 0 && cr.n != sizeHint {
 			return fmt.Errorf("shard %d short read: encoded %d plaintext bytes, expected %d", shardIdx, cr.n, sizeHint)
 		}
+		if sizeHint >= 0 {
+			var extra [1]byte
+			for {
+				n, err := body.Read(extra[:])
+				if n > 0 {
+					return fmt.Errorf("shard %d oversized body: encoded %d plaintext bytes, expected %d", shardIdx, cr.n+int64(n), sizeHint)
+				}
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					return err
+				}
+			}
+		}
 		return nil
 	})
 	if werr != nil {

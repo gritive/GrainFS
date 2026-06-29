@@ -90,6 +90,14 @@ func (s *recordingShardStore) WriteShardStreamStaged(_ context.Context, _ string
 	return nil
 }
 
+func (s *recordingShardStore) WriteShardStreamStagedSized(_ context.Context, _ string, _ string, stagingKey, finalKey string, _ int, body io.Reader, streamSize int64) error {
+	s.record("WriteShardStreamStagedSized")
+	s.stagedStagingKey, s.stagedFinalKey = stagingKey, finalKey
+	s.stagedSize = streamSize
+	_, _ = io.Copy(io.Discard, body)
+	return nil
+}
+
 func (s *recordingShardStore) DeleteShards(context.Context, string, string, string) error {
 	s.record("DeleteShards")
 	return nil
@@ -341,7 +349,7 @@ func TestShardTargetStagedWriteRoutesAndPreservesAADKey(t *testing.T) {
 		require.Equal(t, finalKey, store.stagedFinalKey, "shardKey must remain the final AAD key")
 	})
 
-	t.Run("remote endpoint -> WriteShardStreamStaged(staging, final)", func(t *testing.T) {
+	t.Run("remote endpoint -> WriteShardStreamStagedSized(staging, final)", func(t *testing.T) {
 		store := &recordingShardStore{}
 		ep := remoteShardEndpoint{node: "peer", shards: store, writeAttempts: 1}
 		require.False(t, ep.IsLocal())
@@ -349,7 +357,25 @@ func TestShardTargetStagedWriteRoutesAndPreservesAADKey(t *testing.T) {
 			func(int) (io.Reader, error) { return strings.NewReader("payload"), nil },
 			func(int) (int64, error) { return int64(len("payload")), nil })
 		require.NoError(t, err)
+		require.Contains(t, store.calls, "WriteShardStreamStagedSized")
+		require.NotContains(t, store.calls, "WriteShardStreamStaged")
+		require.NotContains(t, store.calls, "WriteShard")
+		require.NotContains(t, store.calls, "WriteShardStream")
+		require.Equal(t, stagingKey, store.stagedStagingKey, "staging key must be the physical path")
+		require.Equal(t, finalKey, store.stagedFinalKey, "finalKey must be the AAD key")
+		require.Equal(t, int64(len("payload")), store.stagedSize)
+	})
+
+	t.Run("remote endpoint unknown size -> WriteShardStreamStaged(staging, final)", func(t *testing.T) {
+		store := &recordingShardStore{}
+		ep := remoteShardEndpoint{node: "peer", shards: store, writeAttempts: 1}
+		require.False(t, ep.IsLocal())
+		err := ep.WriteShardReader(context.Background(), "b", finalKey, stagingKey, 0,
+			func(int) (io.Reader, error) { return strings.NewReader("payload"), nil },
+			func(int) (int64, error) { return 0, errors.New("unknown shard size") })
+		require.NoError(t, err)
 		require.Contains(t, store.calls, "WriteShardStreamStaged")
+		require.NotContains(t, store.calls, "WriteShardStreamStagedSized")
 		require.NotContains(t, store.calls, "WriteShard")
 		require.NotContains(t, store.calls, "WriteShardStream")
 		require.Equal(t, stagingKey, store.stagedStagingKey, "staging key must be the physical path")

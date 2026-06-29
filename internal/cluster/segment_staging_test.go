@@ -151,6 +151,30 @@ func TestNativeWriteHandler_StagedRequest_WritesStagingWithFinalAAD(t *testing.T
 	require.Equal(t, data, got, "receiver must seal with finalKey AAD so the promoted read decrypts")
 }
 
+func TestNativeWriteHandler_StagedSizedRequestRejectsSizeMismatch(t *testing.T) {
+	svc, _ := newTestShardService(t)
+	handler := svc.NativeWriteHandler()
+	const (
+		bucket     = "b"
+		finalKey   = "obj/segments/blob-sized"
+		stagingKey = ".segstaging/txn-sized/blob-sized"
+	)
+	data := []byte("receiver-staged-shard-payload-9876543210")
+
+	req := transport.ShardWriteRequest{
+		Bucket:          bucket,
+		Key:             finalKey,
+		StagingKey:      stagingKey,
+		ShardIdx:        0,
+		Sealed:          false,
+		StreamSizeKnown: true,
+		StreamSize:      int64(len(data) - 1),
+	}
+	require.Error(t, handler(req, bytes.NewReader(data)))
+	_, preErr := svc.ReadLocalShard(bucket, finalKey, 0)
+	require.Error(t, preErr, "mismatched staged write must not publish final shard")
+}
+
 // TestPromoteLocalStagedShards_NothingStaged_Fails locks the code-gate fix: a
 // promote that renames nothing AND finds nothing already at the final path must
 // FAIL, not silently report success — otherwise the manifest commit would

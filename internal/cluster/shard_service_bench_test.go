@@ -7,6 +7,7 @@ import (
 	"io"
 	"testing"
 
+	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/stretchr/testify/require"
 )
 
@@ -67,6 +68,30 @@ func BenchmarkShardServiceWriteLocalShardStreamStaged5MiBEncrypted(b *testing.B)
 			name: "sized-staged",
 			put: func(ctx context.Context, svc *ShardService, bucket, stagingKey, finalKey string, shardIdx int, body []byte) error {
 				return svc.WriteLocalShardStreamStagedSizedContext(ctx, bucket, stagingKey, finalKey, shardIdx, bytes.NewReader(body), int64(len(body)))
+			},
+		},
+		{
+			name: "native-unsized-staged",
+			put: func(ctx context.Context, svc *ShardService, bucket, stagingKey, finalKey string, shardIdx int, body []byte) error {
+				return svc.NativeWriteHandler()(transport.ShardWriteRequest{
+					Bucket:     bucket,
+					Key:        finalKey,
+					StagingKey: stagingKey,
+					ShardIdx:   shardIdx,
+				}, bytes.NewReader(body))
+			},
+		},
+		{
+			name: "native-sized-staged",
+			put: func(ctx context.Context, svc *ShardService, bucket, stagingKey, finalKey string, shardIdx int, body []byte) error {
+				return svc.NativeWriteHandler()(transport.ShardWriteRequest{
+					Bucket:          bucket,
+					Key:             finalKey,
+					StagingKey:      stagingKey,
+					ShardIdx:        shardIdx,
+					StreamSizeKnown: true,
+					StreamSize:      int64(len(body)),
+				}, bytes.NewReader(body))
 			},
 		},
 	} {

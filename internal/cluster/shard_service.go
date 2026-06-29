@@ -343,6 +343,34 @@ func (s *ShardService) WriteShardStreamStaged(ctx context.Context, peer, bucket,
 	return nil
 }
 
+// WriteShardStreamStagedSized streams a staged shard with a known plaintext
+// size so the receiver can use the bounded sized-write path.
+func (s *ShardService) WriteShardStreamStagedSized(ctx context.Context, peer, bucket, stagingKey, finalKey string, shardIdx int, body io.Reader, streamSize int64) error {
+	if streamSize < 0 {
+		return s.WriteShardStreamStaged(ctx, peer, bucket, stagingKey, finalKey, shardIdx, body)
+	}
+	peerAddr, err := s.resolvePeerAddress(peer)
+	if err != nil {
+		return err
+	}
+	if s.transport == nil {
+		return fmt.Errorf("shard service: no transport")
+	}
+	req := transport.ShardWriteRequest{
+		Bucket:          bucket,
+		Key:             finalKey,
+		StagingKey:      stagingKey,
+		ShardIdx:        shardIdx,
+		Sealed:          false,
+		StreamSizeKnown: true,
+		StreamSize:      streamSize,
+	}
+	if err := s.transport.ShardWrite(ctx, peerAddr, req, body); err != nil {
+		return fmt.Errorf("stream sized staged shard to %s: %w", peerAddr, err)
+	}
+	return nil
+}
+
 // SealedShardTrailerLen is the length of the completeness trailer appended to a
 // streamed sealed-shard body: an 8-byte big-endian count of the payload bytes
 // that precede it. The receiver requires it to reject a TRUNCATED body. Without
@@ -1086,6 +1114,13 @@ func (s *ShardService) NativeWriteHandler() transport.ShardWriteHandler {
 		// staging physical path while Key stays the FINAL key used as AAD, so a
 		// post-promote read of Key decrypts correctly.
 		if req.StagingKey != "" {
+			if req.StreamSizeKnown {
+				if err := s.WriteLocalShardStreamStagedSizedContext(context.Background(), req.Bucket, req.StagingKey, req.Key, req.ShardIdx, body, req.StreamSize); err != nil {
+					return err
+				}
+				observePutStage("shard_stream_server", "write_local_staged_sized", stageStart)
+				return nil
+			}
 			if err := s.WriteLocalShardStreamStagedContext(context.Background(), req.Bucket, req.StagingKey, req.Key, req.ShardIdx, body); err != nil {
 				return err
 			}
