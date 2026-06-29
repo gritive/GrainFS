@@ -1,28 +1,26 @@
 #!/usr/bin/env bash
-# Multi-node GCP cluster benchmark harness (git-tracked; prior copies lived in
-# ephemeral worktrees and were lost — keep this one in the repo).
+# Multi-node GCP GrainFS/MinIO benchmark harness.
 #
-# Cross-binary GCP A/B use: provisions a GrainFS cluster + 1 warp/builder client
-# in one GCP zone, builds both refs ON a linux VM (duckdb cgo can't cross-compile
-# from darwin), boots the cluster per binary, runs warp PUT/GET/HEAD from the
-# in-network client through bench_s3_compat_compare.sh's external-cluster path,
-# pulls warp-results.tsv into a paired run layout, and writes verdict.md.
+# Provisions storage VMs plus one warp/builder client in one GCP zone, builds
+# NEW_REF on a Linux VM (duckdb cgo can't cross-compile from darwin), boots
+# GrainFS and MinIO targets, runs signed MinIO warp workloads from the in-network
+# client, and pulls results into a stable run layout.
 #
-# Subcommands (run incrementally; `full` chains the A/B + MinIO):
+# Subcommands (run incrementally):
 #   up                 provision storage VMs + client (idempotent)
-#   build              git-archive devel+master -> client -> go build both -> fan out
-#   arm <new|old> <i>  reset+boot cluster with that binary, warp, pull run<i>/<arm>
-#   verdict            aggregate A/B tsvs -> verdict.md
+#   build              git-archive NEW_REF -> client -> go build -> fan out
+#   grainfs-cluster [i]
+#                      reset+boot GrainFS cluster, warp, pull run<i>
 #   minio [i]          install+run MinIO on node-0 (SSE-S3 encrypted), warp from client
 #   minio-verdict      print MinIO vs GrainFS-devel throughput comparison
+#   minio-cluster [i]  install+run distributed MinIO on storage nodes, warp from client
+#   cluster-minio-verdict
+#                      print distributed MinIO vs GrainFS cluster comparison
 #   single [i]         single-node GrainFS (devel) on node-0 + pprof, warp from client
 #   single-verdict     print single-node GrainFS vs MinIO comparison + pprof inspect cmds
 #   down               delete all VMs
-#   full               up; build; for i in 1..RUNS { arm new i; arm old i }; verdict;
-#                      minio 1; minio-verdict
-#                      (down is NOT automatic — confirm results first, then `down`)
 #
-# Cost guard: always `down` when finished. `full` does not auto-teardown.
+# Cost guard: always `down` when finished.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,7 +33,7 @@ NODE_COUNT="${NODE_COUNT:-4}"
 IMAGE_FAMILY="${IMAGE_FAMILY:-debian-12}"
 IMAGE_PROJECT="${IMAGE_PROJECT:-debian-cloud}"
 STORAGE_DISK_GB="${STORAGE_DISK_GB:-80}"
-PREFIX="${PREFIX:-gr-ab}"
+PREFIX="${PREFIX:-gr-bench}"
 CLIENT="$PREFIX-cli"
 GO_VERSION="${GO_VERSION:-1.26.4}"
 WARP_VERSION="${WARP_VERSION:-1.1.4}"
@@ -48,7 +46,6 @@ WARP_VERSION="${WARP_VERSION:-1.1.4}"
 OPS_AGENT="${OPS_AGENT:-1}"
 
 NEW_REF="${NEW_REF:-devel}"
-OLD_REF="${OLD_REF:-master}"
 RUNS="${RUNS:-1}"
 
 # warp workload (passed through to bench_s3_compat_compare.sh on the client)
@@ -58,23 +55,23 @@ WARP_CONCURRENT="${WARP_CONCURRENT:-32}"
 WARP_DURATION="${WARP_DURATION:-1m}"
 WARP_OBJECTS="${WARP_OBJECTS:-4096}"
 
-# decision-rule thresholds (forwarded to the verdict python)
-PUT_WIN_MIN="${PUT_WIN_MIN:-1.05}"
-NOREG_MIN="${NOREG_MIN:-0.95}"
-
-RESULT_DIR="${RESULT_DIR:-$REPO_ROOT/benchmarks/profiles/gcp-ab-$(date +%Y%m%d-%H%M%S)}"
+RESULT_DIR="${RESULT_DIR:-$REPO_ROOT/benchmarks/profiles/gcp-$(date +%Y%m%d-%H%M%S)}"
 REMOTE_USER="${REMOTE_USER:-$(whoami)}"
 DATA_DIR="/var/lib/gfs"
 BIN_DIR="/opt/grainfs"
 HTTP_PORT=9000
 RAFT_PORT=7000
 JOIN_PORT=7100
-PSK="gcp-cross-binary-cluster-key"
+PSK="gcp-grainfs-minio-cluster-key"
 
 MINIO_PORT="${MINIO_PORT:-9001}"
+MINIO_CONSOLE_PORT="${MINIO_CONSOLE_PORT:-10001}"
 MINIO_UNIT="minio-bench"
 PPROF_PORT="${PPROF_PORT:-6060}"
 PPROF_CPU_SECONDS="${PPROF_CPU_SECONDS:-30}"
+PPROF_WARMUP_SECONDS="${PPROF_WARMUP_SECONDS:-5}"
+CLUSTER_PPROF="${CLUSTER_PPROF:-0}"
+CLUSTER_PPROF_BASE_PORT="${CLUSTER_PPROF_BASE_PORT:-6060}"
 
 ssh_node() { # node-name "cmd..."
   local n="$1"; shift
@@ -160,25 +157,21 @@ cmd_prep_client() {
 
 # ------------------------------------------------------------- build -----------
 cmd_build() {
-  log "git-archive $NEW_REF + $OLD_REF -> client -> build"
+  log "git-archive $NEW_REF -> client -> build"
   ( cd "$REPO_ROOT" && git archive --format=tar.gz "$NEW_REF" -o /tmp/p5-src-new.tgz )
-  ( cd "$REPO_ROOT" && git archive --format=tar.gz "$OLD_REF" -o /tmp/p5-src-old.tgz )
   scp_to /tmp/p5-src-new.tgz "$CLIENT:/tmp/p5-src-new.tgz"
-  scp_to /tmp/p5-src-old.tgz "$CLIENT:/tmp/p5-src-old.tgz"
   ssh_node "$CLIENT" "
     set -e
     export PATH=/usr/local/go/bin:\$PATH
-    for arm in new old; do
-      rm -rf /tmp/p5-\$arm && mkdir -p /tmp/p5-\$arm
-      tar -C /tmp/p5-\$arm -xzf /tmp/p5-src-\$arm.tgz
-      cd /tmp/p5-\$arm
-      echo \"[build \$arm] go build...\"
-      CGO_ENABLED=1 go build -ldflags '-s -w' -o /tmp/grainfs-\$arm ./cmd/grainfs/
-    done
-    /tmp/grainfs-new --version; /tmp/grainfs-old --version
+    rm -rf /tmp/p5-new && mkdir -p /tmp/p5-new
+    tar -C /tmp/p5-new -xzf /tmp/p5-src-new.tgz
+    cd /tmp/p5-new
+    echo '[build grainfs] go build...'
+    CGO_ENABLED=1 go build -ldflags '-s -w' -o /tmp/grainfs-new ./cmd/grainfs/
+    /tmp/grainfs-new --version
     echo build-done
   " || return 1
-  # fan out both binaries to every storage node
+  # fan out the GrainFS binary to every storage node
   log "fanning out binaries to storage nodes"
   for i in $(seq 0 $((NODE_COUNT - 1))); do
     local n; n="$(node_name "$i")"
@@ -188,17 +181,15 @@ cmd_build() {
   # The IAP-tunnelled scp intermittently corrupts the ~122MB binary (silent
   # "fatal error: invalid runtime symbol table" at boot), so every hop is md5-
   # verified and retried — a corrupt binary otherwise wastes a full boot cycle.
-  local arm md5 nm
-  for arm in new old; do
-    md5="$(ssh_node "$CLIENT" "md5sum /tmp/grainfs-$arm | cut -d' ' -f1")"
-    push_verified "$CLIENT:/tmp/grainfs-$arm" "/tmp/grainfs-$arm" "$md5" || { log "ERROR: client->local grainfs-$arm corrupt"; return 1; }
-    for i in $(seq 0 $((NODE_COUNT - 1))); do
-      nm="$(node_name "$i")"
-      push_verified "/tmp/grainfs-$arm" "$nm:$BIN_DIR/grainfs-$arm" "$md5" "$nm" || { log "ERROR: ->$nm grainfs-$arm corrupt"; return 1; }
-    done
+  local md5 nm
+  md5="$(ssh_node "$CLIENT" "md5sum /tmp/grainfs-new | cut -d' ' -f1")"
+  push_verified "$CLIENT:/tmp/grainfs-new" "/tmp/grainfs-new" "$md5" || { log "ERROR: client->local grainfs-new corrupt"; return 1; }
+  for i in $(seq 0 $((NODE_COUNT - 1))); do
+    nm="$(node_name "$i")"
+    push_verified "/tmp/grainfs-new" "$nm:$BIN_DIR/grainfs-new" "$md5" "$nm" || { log "ERROR: ->$nm grainfs-new corrupt"; return 1; }
   done
   for i in $(seq 0 $((NODE_COUNT - 1))); do
-    ssh_node "$(node_name "$i")" "chmod +x $BIN_DIR/grainfs-new $BIN_DIR/grainfs-old"
+    ssh_node "$(node_name "$i")" "chmod +x $BIN_DIR/grainfs-new"
   done
   log "build done"
 }
@@ -223,6 +214,20 @@ push_verified() {
   return 1
 }
 
+install_minio_binary() { # node-name
+  local n="$1"
+  ssh_node "$n" "
+    curl -fsSL https://dl.min.io/server/minio/release/linux-amd64/minio -o /tmp/minio-dl
+    if ! file /tmp/minio-dl 2>/dev/null | grep -q ELF; then
+      echo 'ERROR: minio download is not an ELF binary (got HTML/redirect?)'
+      file /tmp/minio-dl
+      exit 1
+    fi
+    sudo install -m 755 /tmp/minio-dl /usr/local/bin/minio
+    /usr/local/bin/minio --version
+  "
+}
+
 # --------------------------------------------------------- boot cluster --------
 # Processes run under a transient systemd unit (grainfs-node) — `nohup ... &` over
 # an IAP ssh channel drops the channel (exit 255) and the backgrounded serve never
@@ -235,7 +240,8 @@ reset_cluster() {
     ssh_node "$(node_name "$i")" "
       sudo systemctl stop $UNIT 2>/dev/null || true
       sudo systemctl reset-failed $UNIT 2>/dev/null || true
-      sudo pkill -9 -f 'grainfs' 2>/dev/null || true
+      sudo pkill -9 -x grainfs-new 2>/dev/null || true
+      sudo pkill -9 -x grainfs 2>/dev/null || true
       # wait for the S3 port to actually free (a killed serve can hold it briefly);
       # a stale listener makes the next genesis exit 1 (bind failure).
       for _ in \$(seq 1 30); do
@@ -252,16 +258,16 @@ serve_node() {
   local idx="$1" bin="$2" bundle="${3:-}" pprof_port="${4:-0}"
   local n; n="$(node_name "$idx")"
   local ipi; ipi="$(internal_ip "$n")"
-  local setenv=()
+  local invite_env=""
   if [ -z "$bundle" ]; then
     # genesis: pre-stage cluster PSK (root-owned dir)
     ssh_node "$n" "printf '%s\n' '$PSK' | sudo tee $DATA_DIR/keys.d/current.key >/dev/null"
   else
-    setenv=(--setenv="GRAINFS_INVITE_BUNDLE=$bundle")
+    invite_env="--setenv=GRAINFS_INVITE_BUNDLE=$bundle"
   fi
   local pprof_flag=""
   if (( pprof_port > 0 )); then pprof_flag="--pprof-port $pprof_port"; fi
-  ssh_node "$n" "sudo systemd-run --unit=$UNIT --collect ${setenv[*]} \
+  ssh_node "$n" "sudo systemd-run --unit=$UNIT --collect $invite_env \
     $bin serve --data $DATA_DIR --port $HTTP_PORT --node-id p5-node-$idx \
     --raft-addr $ipi:$RAFT_PORT --join-listen-addr $ipi:$JOIN_PORT \
     --raft-heartbeat-interval ${RAFT_HEARTBEAT:-1s} --raft-election-timeout ${RAFT_ELECTION:-3s} \
@@ -282,14 +288,20 @@ wait_http() {
   [[ "$out" == *http-up* ]]
 }
 
-# boot_cluster <arm: new|old>  -> exports BOOT_ACCESS_KEY/BOOT_SECRET_KEY/BOOT_HOSTS
+# boot_cluster -> exports BOOT_ACCESS_KEY/BOOT_SECRET_KEY/BOOT_HOSTS
 boot_cluster() {
-  local arm="$1"
-  local bin="$BIN_DIR/grainfs-$arm"
+  local bin="$BIN_DIR/grainfs-new"
   local ip0; ip0="$(internal_ip "$(node_name 0)")"
-  log "boot arm=$arm genesis=$(node_name 0)@$ip0"
-  serve_node 0 "$bin"
-  if ! wait_http 0; then log "ERROR: arm=$arm genesis never came up — aborting"; return 1; fi
+  BOOT_PPROF_PORTS=""
+  local pprof0=0
+  if [[ "$CLUSTER_PPROF" == "1" ]]; then
+    pprof0="$CLUSTER_PPROF_BASE_PORT"
+    BOOT_PPROF_PORTS="$pprof0"
+    log "grainfs-cluster: pprof enabled base_port=$CLUSTER_PPROF_BASE_PORT"
+  fi
+  log "grainfs-cluster: boot genesis=$(node_name 0)@$ip0"
+  serve_node 0 "$bin" "" "$pprof0"
+  if ! wait_http 0; then log "ERROR: grainfs-cluster genesis never came up — aborting"; return 1; fi
   ssh_node "$(node_name 0)" "for _ in \$(seq 1 60); do sudo test -f $DATA_DIR/cluster.id && break; sleep 0.5; done; echo genesis-up"
   # bootstrap IAM SA on node-0 (admin.sock is root-owned)
   local saj
@@ -297,24 +309,29 @@ boot_cluster() {
     sudo $bin iam --json sa create phase5 --endpoint $DATA_DIR/admin.sock
   ")"
   if [ -z "$saj" ] || ! echo "$saj" | python3 -c 'import json,sys;json.load(sys.stdin)["access_key"]' 2>/dev/null; then
-    log "ERROR: arm=$arm IAM SA create returned no JSON: ${saj:0:120}"; return 1
+    log "ERROR: grainfs-cluster IAM SA create returned no JSON: ${saj:0:120}"; return 1
   fi
   BOOT_ACCESS_KEY="$(echo "$saj" | python3 -c 'import json,sys;print(json.load(sys.stdin)["access_key"])')"
   BOOT_SECRET_KEY="$(echo "$saj" | python3 -c 'import json,sys;print(json.load(sys.stdin)["secret_key"])')"
   local sa_id; sa_id="$(echo "$saj" | python3 -c 'import json,sys;print(json.load(sys.stdin)["sa_id"])')"
-  log "arm=$arm SA created access=${BOOT_ACCESS_KEY:0:8}..."
+  log "grainfs-cluster: SA created access=${BOOT_ACCESS_KEY:0:8}..."
   # joiners 1..N-1 (serial: each mint needs the live leader)
   for i in $(seq 1 $((NODE_COUNT - 1))); do
     local bundle
     bundle="$(ssh_node "$(node_name 0)" "sudo $bin cluster invite create --endpoint $DATA_DIR/admin.sock" \
       | awk 'f{print;exit} /GRAINFS_INVITE_BUNDLE:/{f=1}')"
     if [ -z "$bundle" ]; then log "ERROR: empty invite bundle for node $i"; return 1; fi
-    serve_node "$i" "$bin" "$bundle"
+    local pprof_port=0
+    if [[ "$CLUSTER_PPROF" == "1" ]]; then
+      pprof_port=$((CLUSTER_PPROF_BASE_PORT + i))
+      BOOT_PPROF_PORTS="${BOOT_PPROF_PORTS:+$BOOT_PPROF_PORTS,}$pprof_port"
+    fi
+    serve_node "$i" "$bin" "$bundle" "$pprof_port"
     wait_http "$i" >/dev/null
   done
   # wait leader + shard groups (poll on node-0 over ssh; mac can't reach internal IPs)
   local expected=$((NODE_COUNT * 4)); [ "$expected" -lt 8 ] && expected=8
-  log "arm=$arm waiting leader + $expected shard groups"
+  log "grainfs-cluster: waiting leader + $expected shard groups"
   ssh_node "$(node_name 0)" "
     for _ in \$(seq 1 120); do
       s=\$(curl -sf http://127.0.0.1:$HTTP_PORT/api/cluster/status 2>/dev/null||true)
@@ -339,17 +356,77 @@ boot_cluster() {
     hosts="${hosts:+$hosts,}$ipi:$HTTP_PORT"
   done
   BOOT_HOSTS="$hosts"
-  log "arm=$arm cluster ready hosts=$BOOT_HOSTS"
+  log "grainfs-cluster: ready hosts=$BOOT_HOSTS"
 }
 
-# ----------------------------------------------------------- arm (warp) --------
-# run_warp_on_client emits warp-results.tsv to a remote dir, pulled into run<i>/<arm>/.
-cmd_arm() { # <new|old> <runidx>
-  local arm="$1" idx="$2"
+cluster_pprof_enabled() {
+  [[ "$CLUSTER_PPROF" == "1" && -n "${BOOT_PPROF_PORTS:-}" ]]
+}
+
+capture_cluster_cpu_profiles() { # <runidx> <pprof_dir>
+  local idx="$1" pprof_dir="$2"
+  cluster_pprof_enabled || return 0
+  mkdir -p "$pprof_dir/cpu"
+  local ports=()
+  IFS=',' read -ra ports <<<"$BOOT_PPROF_PORTS"
+  log "grainfs-cluster: run=$idx pprof CPU capture ${PPROF_WARMUP_SECONDS}s warmup + ${PPROF_CPU_SECONDS}s"
+  local pids=()
+  local i
+  for i in "${!ports[@]}"; do
+    (
+      local n remote out
+      n="$(node_name "$i")"
+      remote="/tmp/grainfs-cluster-${idx}-cpu-node${i}.pb.gz"
+      out="$pprof_dir/cpu/node${i}.pb.gz"
+      sleep "$PPROF_WARMUP_SECONDS"
+      ssh_node "$n" "curl -sf 'http://127.0.0.1:${ports[$i]}/debug/pprof/profile?seconds=$PPROF_CPU_SECONDS' -o '$remote' 2>/dev/null && echo pprof-cpu-node${i}-done" || true
+      gcloud compute scp --zone="$ZONE" --project="$PROJECT" --tunnel-through-iap \
+        "$n:$remote" "$out" >/dev/null 2>&1 || log "WARN: cluster CPU profile pull failed for $n"
+    ) &
+    pids+=($!)
+  done
+  wait "${pids[@]}" 2>/dev/null || true
+  log "grainfs-cluster: run=$idx pprof CPU profiles -> $pprof_dir/cpu/"
+}
+
+collect_cluster_pprof_snapshots() { # <runidx> <pprof_dir>
+  local idx="$1" pprof_dir="$2"
+  cluster_pprof_enabled || return 0
+  local ports=()
+  IFS=',' read -ra ports <<<"$BOOT_PPROF_PORTS"
+  log "grainfs-cluster: run=$idx pprof collecting post-warp snapshots"
+  local i prof
+  for i in "${!ports[@]}"; do
+    local n node_dir
+    n="$(node_name "$i")"
+    node_dir="$pprof_dir/snap/node${i}"
+    mkdir -p "$node_dir"
+    for prof in heap allocs goroutine mutex block; do
+      local remote="/tmp/grainfs-cluster-${idx}-${prof}-node${i}.pb.gz"
+      ssh_node "$n" "curl -sf 'http://127.0.0.1:${ports[$i]}/debug/pprof/$prof' -o '$remote' 2>/dev/null" || true
+      gcloud compute scp --zone="$ZONE" --project="$PROJECT" --tunnel-through-iap \
+        "$n:$remote" "$node_dir/$prof.pb.gz" >/dev/null 2>&1 || true
+    done
+  done
+  log "grainfs-cluster: run=$idx pprof snapshots -> $pprof_dir/snap/"
+}
+
+# --------------------------------------------------- grainfs-cluster ----------
+# Emits warp-results.tsv to a remote dir, pulled into grainfs-cluster/run<i>/.
+cmd_grainfs_cluster() { # <runidx>
+  local idx="${1:-1}"
   reset_cluster
-  boot_cluster "$arm" || return 1
-  local rprof="/tmp/p5-prof-$arm-$idx"
-  log "arm=$arm run=$idx warp via bench_s3_compat_compare.sh external mode"
+  boot_cluster || return 1
+  local rprof="/tmp/p5-prof-grainfs-cluster-$idx"
+  local localdir="$RESULT_DIR/grainfs-cluster/run$idx"
+  local pprof_dir="$localdir/pprof"
+  mkdir -p "$localdir"
+  log "grainfs-cluster: run=$idx warp via bench_s3_compat_compare.sh external mode"
+  local pprof_pid=""
+  if cluster_pprof_enabled; then
+    capture_cluster_cpu_profiles "$idx" "$pprof_dir" &
+    pprof_pid=$!
+  fi
   # push the repo's benchmark scripts to the client (external cluster mode reuses
   # all warp+parse+tsv logic). The client already has the source from build.
   ssh_node "$CLIENT" "
@@ -359,7 +436,7 @@ cmd_arm() { # <new|old> <runidx>
     GRAINFS_CLUSTER_URL='$BOOT_HOSTS' \
     GRAINFS_ACCESS_KEY='$BOOT_ACCESS_KEY' \
     GRAINFS_SECRET_KEY='$BOOT_SECRET_KEY' \
-    BINARY=/tmp/grainfs-$arm \
+    BINARY=/tmp/grainfs-new \
     TARGETS=grainfs-cluster \
     WARP_OPS='$WARP_OPS' WARP_OBJ_SIZE='$WARP_OBJ_SIZE' \
     WARP_CONCURRENT='$WARP_CONCURRENT' WARP_DURATION='$WARP_DURATION' \
@@ -369,17 +446,22 @@ cmd_arm() { # <new|old> <runidx>
     bash benchmarks/bench_s3_compat_compare.sh || echo 'BENCH_NONZERO'
     echo '--- warp-results.tsv ---'; cat $rprof/warp-results.tsv 2>/dev/null || echo MISSING
   "
-  # pull the tsv into the layout the verdict python reads
-  local localdir="$RESULT_DIR/run$idx/$arm"
-  mkdir -p "$localdir"
+  if [[ -n "$pprof_pid" ]]; then
+    wait "$pprof_pid" 2>/dev/null || true
+    collect_cluster_pprof_snapshots "$idx" "$pprof_dir"
+  fi
   gcloud compute scp --zone="$ZONE" --project="$PROJECT" --tunnel-through-iap \
     "$CLIENT:$rprof/warp-results.tsv" "$localdir/warp-results.tsv" >/dev/null 2>&1 \
-    || log "WARN: no warp-results.tsv pulled for $arm run$idx"
+    || log "WARN: no warp-results.tsv pulled for grainfs-cluster run$idx"
+  if [[ ! -s "$localdir/warp-results.tsv" ]]; then
+    log "ERROR: empty warp-results.tsv for grainfs-cluster run$idx"
+    return 1
+  fi
   mkdir -p "$localdir/raw"
   gcloud compute scp --recurse --zone="$ZONE" --project="$PROJECT" --tunnel-through-iap \
     "$CLIENT:$rprof" "$localdir/raw/" >/dev/null 2>&1 \
-    || log "WARN: raw profile pull failed for $arm run$idx"
-  log "arm=$arm run=$idx pulled -> $localdir"
+    || log "WARN: raw profile pull failed for grainfs-cluster run$idx"
+  log "grainfs-cluster: run=$idx pulled -> $localdir"
 }
 
 # --------------------------------------------------------- minio arm -----------
@@ -398,22 +480,13 @@ cmd_minio() { # <runidx>
   log "minio: installing binary on $n"
   # Always re-download to avoid stale corrupt installs. Verify ELF before
   # installing — dl.min.io returns 200 HTML on quota/redirect errors.
-  ssh_node "$n" "
-    curl -fsSL https://dl.min.io/server/minio/release/linux-amd64/minio -o /tmp/minio-dl
-    if ! file /tmp/minio-dl 2>/dev/null | grep -q ELF; then
-      echo 'ERROR: minio download is not an ELF binary (got HTML/redirect?)'
-      file /tmp/minio-dl
-      exit 1
-    fi
-    sudo install -m 755 /tmp/minio-dl /usr/local/bin/minio
-    /usr/local/bin/minio --version
-  "
+  install_minio_binary "$n"
 
   log "minio: reset node-0 (stop grainfs + minio, wipe $minio_data)"
   ssh_node "$n" "
     sudo systemctl stop $UNIT 2>/dev/null || true
     sudo systemctl stop $MINIO_UNIT 2>/dev/null || true
-    sudo pkill -9 minio 2>/dev/null || true
+    sudo pkill -9 -x minio 2>/dev/null || true
     for _ in \$(seq 1 30); do
       (exec 3<>/dev/tcp/127.0.0.1/$MINIO_PORT) 2>/dev/null && { exec 3>&- 3<&-; sleep 0.5; } || break
     done
@@ -478,11 +551,134 @@ cmd_minio() { # <runidx>
   log "minio: run=$idx pulled -> $localdir"
 }
 
-# ----------------------------------------------------------- verdict -----------
-cmd_verdict() {
-  log "aggregating $RESULT_DIR -> verdict.md"
-  python3 "$REPO_ROOT/benchmarks/lib/ab_verdict.py" \
-    "$RESULT_DIR" "$RUNS" "$PUT_WIN_MIN" "$NOREG_MIN" "$NEW_REF" "$OLD_REF" 0
+# ------------------------------------------------- distributed minio arm -------
+# Runs distributed MinIO across the same storage VMs used by GrainFS cluster and
+# benchmarks from the client with the same warp parameters.
+cmd_minio_cluster() { # <runidx>
+  local idx="${1:-1}"
+  local minio_data="/var/lib/minio-cluster-bench"
+  local urls=""
+  local endpoint_args=""
+  local i n ipi
+
+  if (( NODE_COUNT < 4 )); then
+    log "ERROR: minio-cluster requires NODE_COUNT>=4; got $NODE_COUNT"
+    return 1
+  fi
+
+  log "minio-cluster: installing binary on all storage nodes"
+  for i in $(seq 0 $((NODE_COUNT - 1))); do
+    install_minio_binary "$(node_name "$i")" || return 1
+  done
+
+  log "minio-cluster: reset storage nodes (stop grainfs + minio, wipe $minio_data)"
+  for i in $(seq 0 $((NODE_COUNT - 1))); do
+    n="$(node_name "$i")"
+    ssh_node "$n" "
+      sudo systemctl stop $UNIT 2>/dev/null || true
+      sudo systemctl stop $MINIO_UNIT 2>/dev/null || true
+      sudo systemctl reset-failed $UNIT 2>/dev/null || true
+      sudo systemctl reset-failed $MINIO_UNIT 2>/dev/null || true
+      sudo pkill -9 -x grainfs-new 2>/dev/null || true
+      sudo pkill -9 -x grainfs 2>/dev/null || true
+      sudo pkill -9 -x minio 2>/dev/null || true
+      for port in $HTTP_PORT $MINIO_PORT; do
+        for _ in \$(seq 1 30); do
+          (exec 3<>/dev/tcp/127.0.0.1/\$port) 2>/dev/null && { exec 3>&- 3<&-; sleep 0.5; } || break
+        done
+      done
+      sudo rm -rf $minio_data && sudo mkdir -p $minio_data
+    " || return 1
+  done
+
+  for i in $(seq 0 $((NODE_COUNT - 1))); do
+    ipi="$(internal_ip "$(node_name "$i")")"
+    urls="${urls:+$urls,}http://$ipi:$MINIO_PORT"
+    endpoint_args="${endpoint_args:+$endpoint_args }http://$ipi:$MINIO_PORT$minio_data"
+  done
+
+  local kms_key; kms_key="$(openssl rand -base64 32 | tr -d '\n')"
+  log "minio-cluster: starting distributed MinIO nodes (SSE-S3 MINIO_KMS_AUTO_ENCRYPTION=on)"
+  for i in $(seq 0 $((NODE_COUNT - 1))); do
+    n="$(node_name "$i")"
+    ssh_node "$n" "sudo systemd-run --unit=$MINIO_UNIT --collect \
+      --setenv=MINIO_CI_CD=1 \
+      --setenv=MINIO_ROOT_USER=minioadmin \
+      --setenv=MINIO_ROOT_PASSWORD=minioadmin \
+      '--setenv=MINIO_KMS_SECRET_KEY=warp-bench:$kms_key' \
+      --setenv=MINIO_KMS_AUTO_ENCRYPTION=on \
+      /usr/local/bin/minio server $endpoint_args \
+      --address :$MINIO_PORT --console-address :$MINIO_CONSOLE_PORT \
+      && echo minio-cluster-node-$i-launched" || return 1
+  done
+
+  log "minio-cluster: waiting for live endpoints"
+  for i in $(seq 0 $((NODE_COUNT - 1))); do
+    n="$(node_name "$i")"
+    local minio_up
+    minio_up="$(ssh_node "$n" "
+      for _ in \$(seq 1 120); do
+        curl -sf http://127.0.0.1:$MINIO_PORT/minio/health/live >/dev/null 2>&1 && { echo minio-http-up; exit 0; }; sleep 1
+      done; echo minio-http-down; sudo journalctl -u $MINIO_UNIT --no-pager 2>/dev/null | tail -8
+    ")"
+    echo "$minio_up"
+    if ! [[ "$minio_up" == *minio-http-up* ]]; then
+      log "ERROR: minio-cluster node $n never came up — aborting"
+      return 1
+    fi
+  done
+
+  n="$(node_name 0)"
+  log "minio-cluster: waiting for cluster health on $n:$MINIO_PORT"
+  local cluster_up
+  cluster_up="$(ssh_node "$n" "
+    for _ in \$(seq 1 240); do
+      curl -sf http://127.0.0.1:$MINIO_PORT/minio/health/cluster >/dev/null 2>&1 && { echo minio-cluster-up; exit 0; }; sleep 0.5
+    done; echo minio-cluster-down; sudo journalctl -u $MINIO_UNIT --no-pager 2>/dev/null | tail -20
+  ")"
+  echo "$cluster_up"
+  if ! [[ "$cluster_up" == *minio-cluster-up* ]]; then
+    log "ERROR: minio-cluster never reported healthy — aborting"
+    return 1
+  fi
+
+  local rprof="/tmp/p5-prof-minio-cluster-$idx"
+  log "minio-cluster: run=$idx warp from client -> $urls"
+  ssh_node "$CLIENT" "
+    export PATH=/usr/local/go/bin:\$PATH
+    cd /tmp/p5-new
+    rm -rf $rprof
+    MINIO_CLUSTER_URL='$urls' \
+    MINIO_ACCESS_KEY='minioadmin' \
+    MINIO_SECRET_KEY='minioadmin' \
+    TARGETS=minio-cluster \
+    WARP_OPS='$WARP_OPS' WARP_OBJ_SIZE='$WARP_OBJ_SIZE' \
+    WARP_CONCURRENT='$WARP_CONCURRENT' WARP_DURATION='$WARP_DURATION' \
+    WARP_OBJECTS='$WARP_OBJECTS' \
+    WARP_NOCLEAR=1 \
+    PROFILE_ROOT='$rprof' \
+    bash benchmarks/bench_s3_compat_compare.sh || echo 'BENCH_NONZERO'
+    echo '--- warp-results.tsv ---'; cat $rprof/warp-results.tsv 2>/dev/null || echo MISSING
+  "
+
+  local localdir="$RESULT_DIR/minio-cluster/run$idx"
+  mkdir -p "$localdir"
+  gcloud compute scp --zone="$ZONE" --project="$PROJECT" --tunnel-through-iap \
+    "$CLIENT:$rprof/warp-results.tsv" "$localdir/warp-results.tsv" >/dev/null 2>&1 \
+    || log "WARN: no warp-results.tsv pulled for minio-cluster run$idx"
+  if [[ ! -s "$localdir/warp-results.tsv" ]]; then
+    log "ERROR: empty warp-results.tsv for minio-cluster run$idx"
+    return 1
+  fi
+  mkdir -p "$localdir/raw" "$localdir/logs"
+  gcloud compute scp --recurse --zone="$ZONE" --project="$PROJECT" --tunnel-through-iap \
+    "$CLIENT:$rprof" "$localdir/raw/" >/dev/null 2>&1 \
+    || log "WARN: raw profile pull failed for minio-cluster run$idx"
+  for i in $(seq 0 $((NODE_COUNT - 1))); do
+    n="$(node_name "$i")"
+    ssh_node "$n" "sudo journalctl -u $MINIO_UNIT --no-pager -n 300" >"$localdir/logs/$n.log" 2>/dev/null || true
+  done
+  log "minio-cluster: run=$idx pulled -> $localdir"
 }
 
 # ----------------------------------------------------------- minio-verdict ------
@@ -493,11 +689,25 @@ cmd_minio_verdict() {
   echo ""
   echo "=== MinIO vs GrainFS-devel comparison (warp-results.tsv) ==="
   echo ""
-  echo "--- GrainFS devel (new arm) ---"
-  cat "$RESULT_DIR"/run*/"new"/warp-results.tsv 2>/dev/null || echo "  (no results)"
+  echo "--- GrainFS single node (devel, EC 4+2, XAES-256-GCM) ---"
+  cat "$RESULT_DIR"/single/run*/warp-results.tsv 2>/dev/null || echo "  (no results)"
   echo ""
   echo "--- MinIO (single node, SSE-S3 auto-encryption) ---"
   cat "$RESULT_DIR"/minio/run*/warp-results.tsv 2>/dev/null || echo "  (no results)"
+  echo ""
+}
+
+# ----------------------------------------------------------- cluster verdict ---
+cmd_cluster_minio_verdict() {
+  log "cluster comparison: $RESULT_DIR"
+  echo ""
+  echo "=== Cluster GrainFS (devel) vs distributed MinIO comparison ==="
+  echo ""
+  echo "--- GrainFS cluster (devel, EC 4+2, XAES-256-GCM) ---"
+  cat "$RESULT_DIR"/grainfs-cluster/run*/warp-results.tsv 2>/dev/null || echo "  (no results)"
+  echo ""
+  echo "--- MinIO distributed cluster (SSE-S3 auto-encryption) ---"
+  cat "$RESULT_DIR"/minio-cluster/run*/warp-results.tsv 2>/dev/null || echo "  (no results)"
   echo ""
 }
 
@@ -517,8 +727,9 @@ cmd_single() { # <runidx>
     sudo systemctl stop $UNIT 2>/dev/null || true
     sudo systemctl stop $MINIO_UNIT 2>/dev/null || true
     sudo systemctl reset-failed $UNIT 2>/dev/null || true
-    sudo pkill -9 -f 'grainfs' 2>/dev/null || true
-    sudo pkill -9 minio 2>/dev/null || true
+    sudo pkill -9 -x grainfs-new 2>/dev/null || true
+    sudo pkill -9 -x grainfs 2>/dev/null || true
+    sudo pkill -9 -x minio 2>/dev/null || true
     for _ in \$(seq 1 30); do
       (exec 3<>/dev/tcp/127.0.0.1/$HTTP_PORT) 2>/dev/null && { exec 3>&- 3<&-; sleep 0.5; } || break
     done
@@ -656,32 +867,18 @@ cmd_down() {
   log "down done"
 }
 
-cmd_full() {
-  cmd_up || return 1
-  cmd_build || return 1
-  for i in $(seq 1 "$RUNS"); do
-    cmd_arm new "$i" || return 1
-    cmd_arm old "$i" || return 1
-  done
-  cmd_verdict
-  cmd_minio 1
-  cmd_minio_verdict
-  log "full done — results in $RESULT_DIR. Run '$0 down' to delete VMs."
-}
-
 case "${1:-}" in
   up) cmd_up ;;
   prep-client) cmd_prep_client ;;
   build) cmd_build ;;
-  arm) cmd_arm "${2:?arm new|old}" "${3:?runidx}" ;;
-  boot) reset_cluster; boot_cluster "${2:?new|old}" ;;
+  grainfs-cluster) cmd_grainfs_cluster "${2:-1}" ;;
   minio) cmd_minio "${2:-1}" ;;
-  verdict) cmd_verdict ;;
+  minio-cluster) cmd_minio_cluster "${2:-1}" ;;
   minio-verdict) cmd_minio_verdict ;;
+  cluster-minio-verdict) cmd_cluster_minio_verdict ;;
   single) cmd_single "${2:-1}" ;;
   single-verdict) cmd_single_verdict ;;
   down) cmd_down ;;
-  full) cmd_full ;;
   ip) for i in $(seq 0 $((NODE_COUNT-1))); do echo "$(node_name "$i") $(internal_ip "$(node_name "$i")")"; done ;;
-  *) echo "usage: $0 {up|prep-client|build|arm <new|old> <i>|boot <new|old>|minio [i]|verdict|minio-verdict|single [i]|single-verdict|down|full|ip}" >&2; exit 2 ;;
+  *) echo "usage: $0 {up|prep-client|build|grainfs-cluster [i]|minio [i]|minio-cluster [i]|minio-verdict|cluster-minio-verdict|single [i]|single-verdict|down|ip}" >&2; exit 2 ;;
 esac

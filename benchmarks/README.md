@@ -21,7 +21,6 @@ export ZONE=asia-northeast3-a
 export PREFIX=gr-single
 export NODE_COUNT=1
 export NEW_REF=HEAD
-export OLD_REF=master
 export RUNS=3
 export RESULT_DIR="$PWD/benchmarks/profiles/gcp-single-$(date +%Y%m%d-%H%M%S)"
 export WARP_OPS=put,get,stat
@@ -47,21 +46,46 @@ inside the script so GET and stat measure the objects created by PUT. GrainFS
 pprof snapshots are saved under `single/run<N>/pprof/`; raw warp artifacts are
 saved under `single/run<N>/raw/` and `minio/run<N>/raw/`.
 
-Always run `down` after preserving results; `full` intentionally does not
-auto-teardown VMs.
+Always run `down` after preserving results.
 
-## GCP Cross-Binary A/B
+## GCP Cluster Encrypted Comparison
 
-Use the same GCP wrapper for paired GrainFS binary comparisons. This path boots
-`NEW_REF` and `OLD_REF`, runs the same warp workload for each arm, and aggregates
-`run<N>/{new,old}` results with `lib/ab_verdict.py`.
+Use the same wrapper for a 4-node GrainFS cluster vs 4-node distributed MinIO
+comparison. GrainFS is booted with `grainfs-cluster`; MinIO distributed is booted across
+the same storage VMs with SSE-S3 auto-encryption. Both targets are driven from
+the in-network client with the same signed `warp` workload.
 
 ```bash
-export RESULT_DIR="$PWD/benchmarks/profiles/gcp-ab-$(date +%Y%m%d-%H%M%S)"
-RUNS=3 WARP_OBJ_SIZE=10MiB WARP_CONCURRENT=32 WARP_DURATION=1m \
-  ./benchmarks/gcp/bench_gcp_cluster.sh full
-# results: benchmarks/profiles/gcp-ab-<timestamp>/verdict.md
+export PROJECT=grainfs
+export ZONE=asia-northeast3-a
+export PREFIX=gr-cluster
+export NODE_COUNT=4
+export NEW_REF=HEAD
+export RUNS=1
+export RESULT_DIR="$PWD/benchmarks/profiles/gcp-cluster-$(date +%Y%m%d-%H%M%S)"
+export WARP_OPS=put,get
+export WARP_OBJ_SIZE=10MiB
+export WARP_CONCURRENT=32
+export WARP_DURATION=1m
+export WARP_OBJECTS=2048
+
+./benchmarks/gcp/bench_gcp_cluster.sh up
+./benchmarks/gcp/bench_gcp_cluster.sh build
+for i in $(seq 1 "$RUNS"); do
+  ./benchmarks/gcp/bench_gcp_cluster.sh grainfs-cluster "$i"
+  ./benchmarks/gcp/bench_gcp_cluster.sh minio-cluster "$i"
+done
+./benchmarks/gcp/bench_gcp_cluster.sh cluster-minio-verdict | tee "$RESULT_DIR/cluster-minio-verdict.txt"
+./benchmarks/gcp/bench_gcp_cluster.sh down
+# results: benchmarks/profiles/gcp-cluster-<timestamp>/
 ```
+
+Cluster result rows are saved under `grainfs-cluster/run<N>/warp-results.tsv`
+for GrainFS and `minio-cluster/run<N>/warp-results.tsv` for MinIO distributed.
+Raw warp output is saved under each run's `raw/` directory; MinIO node journals
+are saved under `minio-cluster/run<N>/logs/`. Set `CLUSTER_PPROF=1` to collect
+per-node GrainFS CPU and heap/alloc/goroutine/mutex/block profiles under
+`grainfs-cluster/run<N>/pprof/`.
 
 ## Local S3-Compatible Comparison
 

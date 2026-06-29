@@ -12,7 +12,8 @@ Only publish numbers that include enough context to reproduce them:
 - Command line, environment variables, object size, concurrency, and duration.
 - Durability mode: single-node, replication, EC profile, and node count.
 - Encryption state. `GrainFS` benchmarks should assume at-rest encryption is on.
-- Result artifact path, including raw JSON, fio output, traces, or pprof files.
+- Archived result artifact reference when one exists; do not rely on ignored
+  local-only paths as publishable evidence.
 - Date of run.
 
 Do not compare `GrainFS` with RustFS, MinIO, or any other S3-compatible store
@@ -21,11 +22,13 @@ object sizes, concurrency, and cold/warm-cache rules.
 
 ## Current Publishable Path
 
-Use the GCP single-node encrypted benchmark for GrainFS vs MinIO performance
-claims. It builds a committed GrainFS `NEW_REF` on a Linux client VM, starts
-single-node GrainFS on `node-0` with at-rest encryption, starts single-node MinIO
-on the same VM class with SSE-S3 auto-encryption, and drives both from the
-in-network client with signed MinIO `warp` requests.
+Use the GCP encrypted benchmark paths for GrainFS vs MinIO performance claims.
+They build a committed GrainFS `NEW_REF` on a Linux client VM, run GrainFS and
+MinIO on the same GCP VM class, and drive both from the in-network client with
+signed MinIO `warp` requests.
+
+The single-node path starts GrainFS on `node-0` with at-rest encryption and
+single-node MinIO with SSE-S3 auto-encryption:
 
 Keep `RESULT_DIR` exported across subcommands so all runs land in one artifact
 directory:
@@ -36,7 +39,6 @@ export ZONE=asia-northeast3-a
 export PREFIX=gr-single
 export NODE_COUNT=1
 export NEW_REF=HEAD
-export OLD_REF=master
 export RUNS=3
 export RESULT_DIR="$PWD/benchmarks/profiles/gcp-single-$(date +%Y%m%d-%H%M%S)"
 export WARP_OPS=put,get,stat
@@ -79,13 +81,69 @@ The same measurement attempt produced two additional valid MinIO runs
 runs 2 and 3 failed during `warp` preparation with `Access Denied` and empty
 TSV files. Those failed GrainFS arms are excluded from the table above.
 
+### GCP Cluster Encrypted Path
+
+The cluster path starts a 4-node GrainFS cluster with at-rest encryption and a
+4-node distributed MinIO cluster with SSE-S3 auto-encryption. Use the same
+workload shape for both targets:
+
+```bash
+export PROJECT=grainfs
+export ZONE=asia-northeast3-a
+export PREFIX=gr-cluster
+export NODE_COUNT=4
+export NEW_REF=HEAD
+export RUNS=1
+export RESULT_DIR="$PWD/benchmarks/profiles/gcp-cluster-$(date +%Y%m%d-%H%M%S)"
+export WARP_OPS=put,get
+export WARP_OBJ_SIZE=10MiB
+export WARP_CONCURRENT=32
+export WARP_DURATION=1m
+export WARP_OBJECTS=2048
+
+./benchmarks/gcp/bench_gcp_cluster.sh up
+./benchmarks/gcp/bench_gcp_cluster.sh build
+for i in $(seq 1 "$RUNS"); do
+  ./benchmarks/gcp/bench_gcp_cluster.sh grainfs-cluster "$i"
+  ./benchmarks/gcp/bench_gcp_cluster.sh minio-cluster "$i"
+done
+./benchmarks/gcp/bench_gcp_cluster.sh cluster-minio-verdict | tee "$RESULT_DIR/cluster-minio-verdict.txt"
+./benchmarks/gcp/bench_gcp_cluster.sh down
+```
+
+Artifacts:
+
+- `grainfs-cluster/run<N>/warp-results.tsv`: GrainFS cluster throughput rows.
+- `minio-cluster/run<N>/warp-results.tsv`: distributed MinIO throughput rows.
+- `grainfs-cluster/run<N>/pprof/`: per-node GrainFS profiles when `CLUSTER_PPROF=1`.
+- `cluster-minio-verdict.txt`: side-by-side summary captured from `cluster-minio-verdict`.
+
+### Latest GCP Cluster Encrypted Result
+
+Captured on 2026-06-30 KST in `asia-northeast3-a` with one `n2-standard-4`
+client VM and four `n2-standard-4` storage VMs, 10 MiB object size, 2048 total
+objects, concurrency 32, 1 minute per operation, signed S3 requests,
+round-robin host selection, warm GET over the preceding PUT objects, and
+0 errors.
+
+| Target            | PUT MiB/s | PUT p50 ms | PUT p99 ms | GET MiB/s | GET p50 ms | GET p99 ms | vs MinIO PUT | vs MinIO GET |
+| ----------------- | --------: | ---------: | ---------: | --------: | ---------: | ---------: | -----------: | -----------: |
+| `GrainFS` cluster |    341.17 |      995.5 |     1411.0 |   2380.79 |      118.7 |      430.5 |        0.73x |        1.07x |
+| MinIO distributed |    468.56 |      690.2 |      881.2 |   2216.49 |      131.3 |      383.0 |        1.00x |        1.00x |
+
+Interpretation: GrainFS cluster write throughput is 0.73x of distributed
+MinIO under this workload; read throughput is 1.07x of MinIO. GrainFS read TTFB
+was higher than MinIO in the raw `warp analyze` output (`median 40 ms` vs
+`25 ms`), so the GET win is throughput, not first-byte latency.
+
 ## Existing Benchmark Targets
 
 | Target                                       | Scope                                                     | Primary artifacts                                       |
 | -------------------------------------------- | --------------------------------------------------------- | ------------------------------------------------------- |
 | `benchmarks/gcp/bench_gcp_cluster.sh single` | GCP single-node GrainFS `warp` workload with pprof        | `benchmarks/profiles/gcp-single-*/single/run<N>/`       |
 | `benchmarks/gcp/bench_gcp_cluster.sh minio`  | GCP single-node MinIO SSE-S3 `warp` workload              | `benchmarks/profiles/gcp-single-*/minio/run<N>/`        |
-| `benchmarks/gcp/bench_gcp_cluster.sh full`   | GCP cross-binary GrainFS A/B workload                     | `benchmarks/profiles/gcp-ab-*/verdict.md`               |
+| `benchmarks/gcp/bench_gcp_cluster.sh grainfs-cluster` | GCP cluster GrainFS `warp` workload               | `benchmarks/profiles/gcp-cluster-*/grainfs-cluster/run<N>/` |
+| `benchmarks/gcp/bench_gcp_cluster.sh minio-cluster` | GCP distributed MinIO SSE-S3 `warp` workload       | `benchmarks/profiles/gcp-cluster-*/minio-cluster/run<N>/` |
 | `make bench`                                 | Local single-node S3 `warp` smoke/regression workload     | `benchmarks/profiles/s3-compat-compare-*`               |
 | `make bench-cluster`                         | Local cluster S3 `warp` smoke/regression workload         | `benchmarks/profiles/s3-compat-compare-*`, cluster logs |
 | `make bench-s3-compat-compare`               | Local same-host GrainFS vs native MinIO/RustFS comparison | `benchmarks/profiles/s3-compat-compare-*`               |

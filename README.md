@@ -131,6 +131,18 @@ objects, concurrency 32, 1 minute per operation, signed S3 requests, 0 errors:
 auto-encryption on the same GCP VM class. Methodology and script flags:
 [benchmarks/README.md](benchmarks/README.md#gcp-single-node-encrypted-comparison).
 
+Latest GCP 4-node encrypted cluster `warp` run, same workload shape and 0
+errors:
+
+| Target            | PUT MiB/s | GET MiB/s | vs MinIO PUT | vs MinIO GET |
+| ----------------- | --------: | --------: | -----------: | -----------: |
+| `GrainFS` cluster |    341.17 |   2380.79 |        0.73x |        1.07x |
+| MinIO distributed |    468.56 |   2216.49 |        1.00x |        1.00x |
+
+The cluster comparison uses four GCP storage VMs plus one in-network client.
+`GrainFS` ran with XAES-256-GCM at-rest encryption; MinIO distributed ran with
+SSE-S3 auto-encryption.
+
 ## Core Concepts
 
 **Admin socket first.** Mutating admin operations use the local Unix domain
@@ -191,7 +203,7 @@ make lint
 GCP benchmark entry point:
 
 ```bash
-./benchmarks/gcp/bench_gcp_cluster.sh {up|build|single|minio|single-verdict|down}
+./benchmarks/gcp/bench_gcp_cluster.sh {up|build|single|grainfs-cluster|minio|minio-cluster|single-verdict|cluster-minio-verdict|down}
 ```
 
 Local benchmark targets:
