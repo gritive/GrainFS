@@ -7,7 +7,7 @@ GO_SRC := $(shell find cmd internal -name '*.go' -not -name '*_test.go')
 FBS_SRC := $(shell find internal -name '*.fbs')
 FBS_STAMPS := $(FBS_SRC:.fbs=.fbs.stamp)
 
-.PHONY: test test-unit test-colima test-race test-e2e test-e2e-colima test-directio-linux test-jepsen test-smoke test-network-fault clean run lint lint-keyspace lint-storage-fixture bench bench-cluster bench-s3-compat-compare bench-go-api-micro build-pgo update-deps fbs test-fuse-s3-colima test-s3-client-smoke-colima bench-fuse-s3-colima test-raft-v2-chaos test-compat
+.PHONY: test test-unit test-colima test-race test-e2e test-e2e-colima test-directio-linux test-jepsen test-smoke test-network-fault clean run lint lint-keyspace lint-storage-fixture bench bench-cluster bench-s3-compat-compare bench-go-api-micro build-pgo update-deps fbs test-fuse-s3-colima test-s3-client-smoke-colima test-raft-v2-chaos test-compat
 
 PGO_PROFILE ?= /tmp/grainfs-bench-cpu.out
 E2E_TEST_TIMEOUT ?= 3600s
@@ -68,11 +68,6 @@ test-fuse-s3-colima: build
 
 test-s3-client-smoke-colima:
 	go test -v -tags colima -timeout 180s ./tests/fuse_s3_colima/ -run 'TestFUSE_S3_(S3FS|Goofys)' -count=1
-
-# FUSE-over-S3 throughput benchmark: compares direct S3 GET/PUT vs rclone mount
-# read/write to quantify the FUSE overhead. Run after test-fuse-s3-colima.
-bench-fuse-s3-colima: build
-	go test -v -tags colima -timeout 300s -run '^$$' -bench BenchmarkFUSE_S3_Throughput -benchtime 1x ./benchmarks/fuse_s3_colima/
 
 test-jepsen: bin/$(BINARY)
 	GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) go test ./tests/e2e/ -run TestJepsen -v -timeout 5m

@@ -2,19 +2,17 @@
 # Multi-node GCP cluster benchmark harness (git-tracked; prior copies lived in
 # ephemeral worktrees and were lost — keep this one in the repo).
 #
-# Phase 5 use: cross-binary A/B (devel "신규 전체" vs master "옛 전체"). It
-# provisions a 4-node GrainFS cluster + 1 warp/builder client in one GCP zone,
-# builds both refs ON a linux VM (duckdb cgo can't cross-compile from darwin),
-# boots the cluster per binary, runs warp PUT/GET/HEAD from the in-network
-# client through the reused bench_s3_compat_compare.sh external-cluster path,
-# pulls warp-results.tsv into the layout cross_binary_ab.sh's verdict python
-# reads, and applies the merge-blocker rule.
+# Cross-binary GCP A/B use: provisions a GrainFS cluster + 1 warp/builder client
+# in one GCP zone, builds both refs ON a linux VM (duckdb cgo can't cross-compile
+# from darwin), boots the cluster per binary, runs warp PUT/GET/HEAD from the
+# in-network client through bench_s3_compat_compare.sh's external-cluster path,
+# pulls warp-results.tsv into a paired run layout, and writes verdict.md.
 #
 # Subcommands (run incrementally; `full` chains the A/B + MinIO):
 #   up                 provision storage VMs + client (idempotent)
 #   build              git-archive devel+master -> client -> go build both -> fan out
 #   arm <new|old> <i>  reset+boot cluster with that binary, warp, pull run<i>/<arm>
-#   verdict            aggregate A/B tsvs -> verdict.md (uses cross_binary_ab.sh python)
+#   verdict            aggregate A/B tsvs -> verdict.md
 #   minio [i]          install+run MinIO on node-0 (SSE-S3 encrypted), warp from client
 #   minio-verdict      print MinIO vs GrainFS-devel throughput comparison
 #   single [i]         single-node GrainFS (devel) on node-0 + pprof, warp from client
@@ -37,7 +35,7 @@ NODE_COUNT="${NODE_COUNT:-4}"
 IMAGE_FAMILY="${IMAGE_FAMILY:-debian-12}"
 IMAGE_PROJECT="${IMAGE_PROJECT:-debian-cloud}"
 STORAGE_DISK_GB="${STORAGE_DISK_GB:-80}"
-PREFIX="${PREFIX:-gr-p5}"
+PREFIX="${PREFIX:-gr-ab}"
 CLIENT="$PREFIX-cli"
 GO_VERSION="${GO_VERSION:-1.26.4}"
 WARP_VERSION="${WARP_VERSION:-1.1.4}"
@@ -64,14 +62,14 @@ WARP_OBJECTS="${WARP_OBJECTS:-4096}"
 PUT_WIN_MIN="${PUT_WIN_MIN:-1.05}"
 NOREG_MIN="${NOREG_MIN:-0.95}"
 
-RESULT_DIR="${RESULT_DIR:-$REPO_ROOT/benchmarks/profiles/gcp-phase5-$(date +%Y%m%d-%H%M%S)}"
+RESULT_DIR="${RESULT_DIR:-$REPO_ROOT/benchmarks/profiles/gcp-ab-$(date +%Y%m%d-%H%M%S)}"
 REMOTE_USER="${REMOTE_USER:-$(whoami)}"
 DATA_DIR="/var/lib/gfs"
 BIN_DIR="/opt/grainfs"
 HTTP_PORT=9000
 RAFT_PORT=7000
 JOIN_PORT=7100
-PSK="phase5-cross-binary-cluster-key"
+PSK="gcp-cross-binary-cluster-key"
 
 MINIO_PORT="${MINIO_PORT:-9001}"
 MINIO_UNIT="minio-bench"
@@ -483,10 +481,8 @@ cmd_minio() { # <runidx>
 # ----------------------------------------------------------- verdict -----------
 cmd_verdict() {
   log "aggregating $RESULT_DIR -> verdict.md"
-  # reuse the validated aggregation python embedded in cross_binary_ab.sh
-  sed -n '/^python3 - "\$CROSS_ROOT"/,/^PY$/p' "$REPO_ROOT/benchmarks/cross_binary_ab.sh" \
-    | sed '1d;$d' > /tmp/p5-agg.py
-  python3 /tmp/p5-agg.py "$RESULT_DIR" "$RUNS" "$PUT_WIN_MIN" "$NOREG_MIN" "$NEW_REF" "$OLD_REF" 1
+  python3 "$REPO_ROOT/benchmarks/lib/ab_verdict.py" \
+    "$RESULT_DIR" "$RUNS" "$PUT_WIN_MIN" "$NOREG_MIN" "$NEW_REF" "$OLD_REF" 0
 }
 
 # ----------------------------------------------------------- minio-verdict ------
