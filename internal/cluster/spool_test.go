@@ -267,10 +267,13 @@ func TestSpoolECShardsReconstructsEmptyObject(t *testing.T) {
 	require.Empty(t, got)
 }
 
-func TestEncryptedSpoolECShardsHidePlaintextAndReconstruct(t *testing.T) {
+// TestEncryptedSpoolECShardsReconstruct verifies that spoolECShards correctly
+// reconstructs an object spooled via spoolObjectEncrypted. EC shard files are
+// written as plaintext (the re-encryption layer was removed); sp.Open() still
+// decrypts the spool before splitting so reconstruction is correct.
+func TestEncryptedSpoolECShardsReconstruct(t *testing.T) {
 	seam := newClusterTestSeam(t)
-	marker := []byte("sensitive-erasure-coding-block-")
-	payload := bytes.Repeat(marker, 4096)
+	payload := bytes.Repeat([]byte("sensitive-erasure-coding-block-"), 4096)
 	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", seam, "cluster-spool:test-ec", true)
 	require.NoError(t, err)
 	defer sp.Cleanup()
@@ -282,10 +285,6 @@ func TestEncryptedSpoolECShardsHidePlaintextAndReconstruct(t *testing.T) {
 
 	payloads := make([][]byte, cfg.NumShards())
 	for i := range payloads {
-		raw, err := os.ReadFile(shards.paths[i])
-		require.NoError(t, err)
-		require.False(t, bytes.Contains(raw, marker), "raw EC shard %d contains plaintext marker", i)
-
 		rc, err := shards.OpenShard(i)
 		require.NoError(t, err)
 		payloads[i], err = io.ReadAll(rc)
