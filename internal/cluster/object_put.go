@@ -14,16 +14,18 @@ import (
 )
 
 // validateContentMD5 rejects a PUT whose computed body MD5 (hex) does not match
-// the client-supplied Content-MD5. No-op when the client sent none or the
-// digest is unavailable. Returns storage.ErrContentMD5Mismatch (mapped to 400
-// BadDigest) on mismatch.
+// the client-supplied Content-MD5. No-op when the client sent no Content-MD5.
+// Returns storage.ErrContentMD5Mismatch (→ 400 BadDigest) on mismatch.
+// Returns a plain error (→ 500 InternalError) if a Content-MD5 was sent but
+// the body MD5 was not computed — indicating a broken needsMD5 invariant.
 func validateContentMD5(computedHex, clientHex string) error {
 	if clientHex == "" {
 		return nil // no Content-MD5 header sent; nothing to validate
 	}
 	if computedHex == "" {
-		// Caller invariant broken: needsMD5 must be true when ContentMD5Hex != "".
-		return fmt.Errorf("%w: body MD5 not computed (needsMD5 invariant broken)", storage.ErrContentMD5Mismatch)
+		// Unreachable by construction (needsMD5=true whenever ContentMD5Hex != "").
+		// Plain error (not ErrContentMD5Mismatch) so a regression surfaces as 500, not 400.
+		return fmt.Errorf("internal: needsMD5 invariant broken — Content-MD5 requested but body MD5 was not computed")
 	}
 	if computedHex == clientHex {
 		return nil
