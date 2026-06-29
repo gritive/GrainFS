@@ -110,7 +110,7 @@ var _ = Describe("Backend EC object integration", func() {
 			configureEC(cfg)
 
 			payload := bytes.Repeat([]byte("abort-before-commit-"), 1024)
-			sp, err := b.spoolPutObject(ctx, "bucket", bytes.NewReader(payload))
+			sp, err := b.spoolPutObject(ctx, "bucket", bytes.NewReader(payload), false)
 			Expect(err).NotTo(HaveOccurred())
 			defer sp.Cleanup()
 

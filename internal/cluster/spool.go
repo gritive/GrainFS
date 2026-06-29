@@ -70,7 +70,7 @@ type spooledObject struct {
 	domain    string
 }
 
-func spoolObject(ctx context.Context, dir string, r io.Reader, bucket string) (*spooledObject, error) {
+func spoolObject(ctx context.Context, dir string, r io.Reader, bucket string, needsMD5 bool) (*spooledObject, error) {
 	stageStart := time.Now()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create spool dir: %w", err)
@@ -107,7 +107,7 @@ func spoolObject(ctx context.Context, dir string, r io.Reader, bucket string) (*
 				etag = hex.EncodeToString(buf[:])
 			}
 			storage.PutXXH3Hasher(xh)
-		} else {
+		} else if needsMD5 {
 			h := md5Pool.Get().(hash.Hash)
 			h.Reset()
 			size, err = io.CopyBuffer(tmp, io.TeeReader(reader, h), *bufp)
@@ -115,6 +115,8 @@ func spoolObject(ctx context.Context, dir string, r io.Reader, bucket string) (*
 				etag = hex.EncodeToString(h.Sum(nil))
 			}
 			md5Pool.Put(h)
+		} else {
+			size, err = io.CopyBuffer(tmp, reader, *bufp)
 		}
 	} else {
 		size, err = io.CopyBuffer(tmp, reader, *bufp)
@@ -133,7 +135,7 @@ func spoolObject(ctx context.Context, dir string, r io.Reader, bucket string) (*
 	return &spooledObject{Path: path, Size: size, ETag: etag}, nil
 }
 
-func spoolObjectEncrypted(ctx context.Context, dir string, r io.Reader, bucket string, seam storage.DataEncryptor, domain string) (*spooledObject, error) {
+func spoolObjectEncrypted(ctx context.Context, dir string, r io.Reader, bucket string, seam storage.DataEncryptor, domain string, needsMD5 bool) (*spooledObject, error) {
 	if seam == nil {
 		return nil, fmt.Errorf("encrypt spool object: nil seam")
 	}
@@ -166,7 +168,7 @@ func spoolObjectEncrypted(ctx context.Context, dir string, r io.Reader, bucket s
 		spoolCopyBufferPool.Put(bufp)
 	}()
 	writer := &encryptedSpoolRecordWriter{w: tmp, seam: seam, domain: domain}
-	hashWriter, etagFunc, releaseHash := spoolHashForBucket(bucket)
+	hashWriter, etagFunc, releaseHash := spoolHashForBucket(bucket, needsMD5)
 	defer releaseHash()
 	stageStart = time.Now()
 	for {
@@ -222,15 +224,15 @@ func (s *spooledObject) Cleanup() {
 	_ = os.Remove(s.Path)
 }
 
-func (b *DistributedBackend) spoolPutObject(ctx context.Context, bucket string, r io.Reader) (*spooledObject, error) {
+func (b *DistributedBackend) spoolPutObject(ctx context.Context, bucket string, r io.Reader, needsMD5 bool) (*spooledObject, error) {
 	if b.shardSvc != nil && b.shardSvc.segEnc() != nil {
 		domain := fmt.Sprintf("cluster-spool:%d", spoolDomainSeq.Add(1))
-		return spoolObjectEncrypted(ctx, b.spoolDir(), r, bucket, b.shardSvc.segEnc(), domain)
+		return spoolObjectEncrypted(ctx, b.spoolDir(), r, bucket, b.shardSvc.segEnc(), domain, needsMD5)
 	}
-	return spoolObject(ctx, b.spoolDir(), r, bucket)
+	return spoolObject(ctx, b.spoolDir(), r, bucket, needsMD5)
 }
 
-func spoolHashForBucket(bucket string) (io.Writer, func() string, func()) {
+func spoolHashForBucket(bucket string, needsMD5 bool) (io.Writer, func() string, func()) {
 	if bucket == "" {
 		return nil, nil, func() {}
 	}
@@ -241,6 +243,9 @@ func spoolHashForBucket(bucket string) (io.Writer, func() string, func()) {
 			binary.BigEndian.PutUint64(buf[:], xh.Sum64())
 			return hex.EncodeToString(buf[:])
 		}, func() { storage.PutXXH3Hasher(xh) }
+	}
+	if !needsMD5 {
+		return nil, nil, func() {}
 	}
 	h := md5Pool.Get().(hash.Hash)
 	h.Reset()

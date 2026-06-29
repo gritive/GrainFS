@@ -29,7 +29,7 @@ func BenchmarkEncryptedSpoolWrite(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sp, err := spoolObjectEncrypted(context.Background(), dir, bytes.NewReader(payload), "bench-bucket", seam, "bench:spool")
+		sp, err := spoolObjectEncrypted(context.Background(), dir, bytes.NewReader(payload), "bench-bucket", seam, "bench:spool", true)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -40,10 +40,44 @@ func BenchmarkEncryptedSpoolWrite(b *testing.B) {
 	}
 }
 
+// BenchmarkSpoolMD5WithMD5 / NoMD5 measure the CPU impact of skipping MD5 in spool.
+// Run with: go test -bench=BenchmarkSpoolMD5 -benchmem ./internal/cluster/
+func BenchmarkSpoolMD5WithMD5(b *testing.B) {
+	seam := benchmarkClusterSeam(b)
+	payload := bytes.Repeat([]byte("x"), 1<<20)
+	dir := b.TempDir()
+	b.SetBytes(int64(len(payload)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		sp, err := spoolObjectEncrypted(context.Background(), dir, bytes.NewReader(payload), "user-bucket", seam, "bench:md5-with", true)
+		if err != nil {
+			b.Fatal(err)
+		}
+		sp.Cleanup()
+	}
+}
+
+func BenchmarkSpoolMD5NoMD5(b *testing.B) {
+	seam := benchmarkClusterSeam(b)
+	payload := bytes.Repeat([]byte("x"), 1<<20)
+	dir := b.TempDir()
+	b.SetBytes(int64(len(payload)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		sp, err := spoolObjectEncrypted(context.Background(), dir, bytes.NewReader(payload), "user-bucket", seam, "bench:md5-no", false)
+		if err != nil {
+			b.Fatal(err)
+		}
+		sp.Cleanup()
+	}
+}
+
 func BenchmarkEncryptedSpoolOpen(b *testing.B) {
 	seam := benchmarkClusterSeam(b)
 	payload := bytes.Repeat([]byte("o"), 8<<20)
-	sp, err := spoolObjectEncrypted(context.Background(), b.TempDir(), bytes.NewReader(payload), "bench-bucket", seam, "bench:spool")
+	sp, err := spoolObjectEncrypted(context.Background(), b.TempDir(), bytes.NewReader(payload), "bench-bucket", seam, "bench:spool", true)
 	if err != nil {
 		b.Fatal(err)
 	}

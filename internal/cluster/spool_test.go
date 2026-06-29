@@ -28,7 +28,7 @@ func (r failingReader) Read([]byte) (int, error) {
 
 func TestSpoolObjectComputesSizeAndETag(t *testing.T) {
 	data := []byte("hello")
-	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader(data), "__grainfs_test_internal")
+	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader(data), "__grainfs_test_internal", false)
 	require.NoError(t, err)
 	defer sp.Cleanup()
 	require.Equal(t, int64(5), sp.Size)
@@ -44,7 +44,7 @@ func TestSpoolObjectComputesSizeAndETag(t *testing.T) {
 
 func TestSpoolObjectS3BucketUsesMD5ETag(t *testing.T) {
 	data := []byte("hello s3 object")
-	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader(data), "user-bucket")
+	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader(data), "user-bucket", true)
 	require.NoError(t, err)
 	defer sp.Cleanup()
 	require.Equal(t, int64(len(data)), sp.Size)
@@ -52,9 +52,18 @@ func TestSpoolObjectS3BucketUsesMD5ETag(t *testing.T) {
 	require.Equal(t, hex.EncodeToString(h[:]), sp.ETag) // MD5 for S3 user buckets
 }
 
+func TestSpoolObjectS3BucketNoMD5SkipsHash(t *testing.T) {
+	data := []byte("no md5 needed")
+	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader(data), "user-bucket", false)
+	require.NoError(t, err)
+	defer sp.Cleanup()
+	require.Equal(t, int64(len(data)), sp.Size)
+	require.Empty(t, sp.ETag) // needsMD5=false → no MD5 computed
+}
+
 func TestSpoolObjectNoBucketSkipsHashing(t *testing.T) {
 	data := []byte("no etag needed")
-	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader(data), "")
+	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader(data), "", false)
 	require.NoError(t, err)
 	defer sp.Cleanup()
 	require.Equal(t, int64(len(data)), sp.Size)
@@ -63,7 +72,7 @@ func TestSpoolObjectNoBucketSkipsHashing(t *testing.T) {
 
 func TestSpoolObjectCleansTempOnReadError(t *testing.T) {
 	dir := t.TempDir()
-	_, err := spoolObject(context.Background(), dir, failingReader{err: errors.New("boom")}, "__grainfs_test_internal")
+	_, err := spoolObject(context.Background(), dir, failingReader{err: errors.New("boom")}, "__grainfs_test_internal", false)
 	require.ErrorContains(t, err, "spool object")
 	entries, readErr := os.ReadDir(dir)
 	require.NoError(t, readErr)
@@ -73,7 +82,7 @@ func TestSpoolObjectCleansTempOnReadError(t *testing.T) {
 func TestEncryptedSpoolObjectHidesPlaintext(t *testing.T) {
 	seam := newClusterTestSeam(t)
 	payload := []byte("sensitive cluster spool payload")
-	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", seam, "cluster-spool:test")
+	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", seam, "cluster-spool:test", true)
 	require.NoError(t, err)
 	defer sp.Cleanup()
 	require.Equal(t, int64(len(payload)), sp.Size)
@@ -100,7 +109,7 @@ func TestSpoolObjectEncryptedRoundTripsViaDEKSeam(t *testing.T) {
 
 	dir := t.TempDir()
 	plain := bytes.Repeat([]byte("spool-bytes-"), 200_000) // > 1 MiB, multiple records
-	sp, err := spoolObjectEncrypted(context.Background(), dir, bytes.NewReader(plain), "bkt", seam, "cluster-spool:test")
+	sp, err := spoolObjectEncrypted(context.Background(), dir, bytes.NewReader(plain), "bkt", seam, "cluster-spool:test", true)
 	require.NoError(t, err)
 	defer sp.Cleanup()
 
@@ -121,7 +130,7 @@ func TestSpoolObjectEncryptedRoundTripsViaDEKSeam(t *testing.T) {
 func TestEncryptedSpoolObjectOpenStreamsWithoutDecryptingFutureRecords(t *testing.T) {
 	seam := newClusterTestSeam(t)
 	payload := append(bytes.Repeat([]byte("a"), spoolCopyBufferSize), bytes.Repeat([]byte("b"), spoolCopyBufferSize)...)
-	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", seam, "cluster-spool:stream")
+	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", seam, "cluster-spool:stream", true)
 	require.NoError(t, err)
 	defer sp.Cleanup()
 
@@ -181,7 +190,7 @@ func TestCopyToSpoolChunkedHandlesLargeReaders(t *testing.T) {
 func TestEncryptedSpoolObjectRejectsOversizedRecordHeader(t *testing.T) {
 	seam := newClusterTestSeam(t)
 	payload := []byte("sensitive cluster spool payload")
-	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", seam, "cluster-spool:oversized")
+	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", seam, "cluster-spool:oversized", true)
 	require.NoError(t, err)
 	defer sp.Cleanup()
 
@@ -203,7 +212,7 @@ func TestEncryptedSpoolObjectRejectsOversizedRecordHeader(t *testing.T) {
 }
 
 func TestSpoolECShardsReconstructsOriginal(t *testing.T) {
-	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader([]byte("hello erasure coding")), "__grainfs_test_internal")
+	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader([]byte("hello erasure coding")), "__grainfs_test_internal", false)
 	require.NoError(t, err)
 	defer sp.Cleanup()
 
@@ -226,7 +235,7 @@ func TestSpoolECShardsReconstructsOriginal(t *testing.T) {
 }
 
 func TestSpoolECShardsReconstructsEmptyObject(t *testing.T) {
-	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader(nil), "__grainfs_test_internal")
+	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader(nil), "__grainfs_test_internal", false)
 	require.NoError(t, err)
 	defer sp.Cleanup()
 
@@ -252,7 +261,7 @@ func TestEncryptedSpoolECShardsHidePlaintextAndReconstruct(t *testing.T) {
 	seam := newClusterTestSeam(t)
 	marker := []byte("sensitive-erasure-coding-block-")
 	payload := bytes.Repeat(marker, 4096)
-	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", seam, "cluster-spool:test-ec")
+	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", seam, "cluster-spool:test-ec", true)
 	require.NoError(t, err)
 	defer sp.Cleanup()
 
@@ -299,7 +308,7 @@ func TestEncryptedSpoolReader_MultiRecordByteExact(t *testing.T) {
 	for i := range payload {
 		payload[i] = byte(i*31 + 7)
 	}
-	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", seam, "cluster-spool:reuse")
+	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", seam, "cluster-spool:reuse", true)
 	require.NoError(t, err)
 	defer sp.Cleanup()
 
@@ -317,7 +326,7 @@ func TestEncryptedSpoolReader_MultiRecordByteExact(t *testing.T) {
 func TestEncryptedSpoolReader_ZeroizesPlaintextOnClose(t *testing.T) {
 	seam := newClusterTestSeam(t)
 	payload := bytes.Repeat([]byte("S"), 4096)
-	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", seam, "cluster-spool:zeroize")
+	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", seam, "cluster-spool:zeroize", true)
 	require.NoError(t, err)
 	defer sp.Cleanup()
 
@@ -395,7 +404,7 @@ func (s *recordingOpenSeam) OpenTo(dst []byte, domain encrypt.AADDomain, fields 
 func TestEncryptedSpoolReader_ReusesPooledBuffersAndAADFields(t *testing.T) {
 	seam := &recordingOpenSeam{DataEncryptor: newClusterTestSeam(t)}
 	payload := append(bytes.Repeat([]byte("A"), spoolCopyBufferSize), bytes.Repeat([]byte("b"), 512)...)
-	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", seam, "cluster-spool:reader-reuse")
+	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", seam, "cluster-spool:reader-reuse", true)
 	require.NoError(t, err)
 	defer sp.Cleanup()
 

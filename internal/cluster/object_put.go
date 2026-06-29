@@ -76,16 +76,20 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 	// paths were removed — they duplicated placement + size routing and let a
 	// large known-size object slip through as one over-cap whole-object shard.
 	stageStart = time.Now()
-	sp, err := b.spoolPutObject(ctx, bucket, r)
+	// needsMD5: compute MD5 during spool when (a) client sent Content-MD5 header
+	// (validation) OR (b) shardGroup is nil (legacy spool path stores sp.ETag
+	// directly as the object ETag). Production always has shardGroup != nil and
+	// takes the chunked path where WriteSized computes ETag independently.
+	needsMD5 := req.ContentMD5Hex != "" || b.shardGroup == nil
+	sp, err := b.spoolPutObject(ctx, bucket, r, needsMD5)
 	if err != nil {
 		return nil, err
 	}
 	observePutStage("distributed", "spool_object", stageStart)
 	defer sp.Cleanup()
 	// Single write-path Content-MD5 validation: sp.ETag is the body's md5,
-	// computed during spooling before any shard/metadata is written. Covers
-	// both spool sub-cases (single-local and multi-shard EC). No-op when the
-	// client sent no Content-MD5.
+	// computed during spooling only when Content-MD5 was sent (needsMD5=true).
+	// No-op when the client sent no Content-MD5 (sp.ETag is "" in that case).
 	if err := validateContentMD5(sp.ETag, req.ContentMD5Hex); err != nil {
 		return nil, err
 	}
@@ -108,7 +112,9 @@ func (b *DistributedBackend) PutObjectAsync(ctx context.Context, bucket, key str
 		return nil, nil, err
 	}
 	defer unlockBucketWrite()
-	sp, err := b.spoolPutObject(ctx, bucket, r)
+	// PutObjectAsync: skip MD5 on chunked path (shardGroup != nil). Legacy path
+	// (shardGroup == nil, test only) still needs MD5 as the stored ETag.
+	sp, err := b.spoolPutObject(ctx, bucket, r, b.shardGroup == nil)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -145,7 +145,7 @@ func TestECObjectWriter_WriteDataShardsComputesObjectFacts(t *testing.T) {
 
 	require.Len(t, shards.bufferedLocalWrites, 1)
 	require.Equal(t, int64(5), result.Size)
-	require.Equal(t, "5d41402abc4b2a76b9719d911017c592", result.ETag)
+	require.Equal(t, "", result.ETag) // MD5 removed: writeDataShards ETag is discarded at WriteSegmentBytes
 	require.Equal(t, "object/v1", result.ShardKey)
 	require.Equal(t, []string{"node-a"}, result.Placement)
 }
