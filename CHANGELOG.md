@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.0.765.0] - 2026-06-29
+
+### Performance
+- **Removed redundant double-encryption from the PUT spool write path.**
+  The original path encrypted data three times: once into the put-spool buffer,
+  again into each EC-spool shard, and a final time via `eccodec.EncodeEncryptedShard`
+  into durable storage. Only the third layer is necessary; the first two were
+  eliminated. Put-spool files and EC-spool shards are now written as plaintext
+  temporaries on disk. Microbenchmark on an 8 MiB object: put-spool allocations
+  −95% (1087 KB → 57 KB per op); full EC pipeline allocations −79% (2.2 MB →
+  455 KB per op); EC encode throughput +7.5%. The MPU (multipart upload) spool
+  path retains its encryption because parts survive across requests and must
+  remain opaque on disk.
+
+### Fixed
+- **Crash-residue spool files are now cleaned up on restart.**
+  Renamed put-spool (`put-spool-*.tmp`) and EC-spool (`ec-{data,parity,empty}-N-*.tmp`)
+  temp-file patterns to end in `.tmp`, matching the startup sweep that removes
+  orphaned temporaries after an unclean shutdown.
+- **Tightened spool directory permissions from 0755 to 0700.**
+  Both `{root}/tmp/put-spool/` and `{root}/tmp/ec-spool/` are now created with
+  mode 0700 so no other local user can read plaintext spool files while a PUT
+  is in progress.
+- **Fixed nil-interface panic in EC-spool deferred close loop** (pre-existing).
+  The loop that closes data-reader handles after EC encoding could panic when
+  the parity-shard reader slot was nil. Added a nil guard before each `rc.Close()`.
+
 ## [0.0.764.8] - 2026-06-29
 
 ### Performance
