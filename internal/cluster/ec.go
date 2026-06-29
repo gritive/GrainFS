@@ -146,6 +146,50 @@ func ecSplitBodies(cfg ECConfig, data []byte) ([][]byte, error) {
 	return shards, nil
 }
 
+func ecSplitBodiesPooled(cfg ECConfig, data []byte) ([][]byte, [][]byte, error) {
+	n := cfg.NumShards()
+	if len(data) == 0 {
+		return make([][]byte, n), nil, nil
+	}
+	enc, err := getEncoder(cfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("ec encoder: %w", err)
+	}
+	perShard := ecSplitBackingSize(cfg, len(data)) / n
+	fullShards := len(data) / perShard
+	paddingCount := n - fullShards
+	padding := getECSplitPaddingShards(paddingCount, perShard)
+
+	shards := make([][]byte, n)
+	remaining := data
+	for i := 0; i < fullShards; i++ {
+		shards[i] = remaining[:perShard:perShard]
+		remaining = remaining[perShard:]
+	}
+	for i := 0; i < paddingCount; i++ {
+		pad := padding[i]
+		if fullShards+i < cfg.DataShards {
+			clear(pad)
+		}
+		if i == 0 && len(remaining) > 0 {
+			copy(pad, remaining)
+		}
+		shards[fullShards+i] = pad
+	}
+	if err := enc.Encode(shards); err != nil {
+		putECSplitPaddingShards(padding)
+		return nil, nil, fmt.Errorf("ec encode: %w", err)
+	}
+	return shards, padding, nil
+}
+
+func ecSplitBackingSize(cfg ECConfig, dataLen int) int {
+	if dataLen <= 0 || cfg.DataShards <= 0 {
+		return 0
+	}
+	return ((dataLen + cfg.DataShards - 1) / cfg.DataShards) * cfg.NumShards()
+}
+
 // ecSplitRawInto is the allocation-reusing variant of ecSplitBodies: instead
 // of letting reedsolomon.Split allocate a fresh shard matrix per call (~1 MiB
 // for a 1 MiB stripe — the largest single PUT-path allocation), it lays the
@@ -164,7 +208,7 @@ func ecSplitRawInto(cfg ECConfig, data []byte, dst []byte) (shards [][]byte, bac
 	if err != nil {
 		return nil, dst, fmt.Errorf("ec encoder: %w", err)
 	}
-	perShard := (len(data) + cfg.DataShards - 1) / cfg.DataShards
+	perShard := ecSplitBackingSize(cfg, len(data)) / n
 	total := perShard * n
 	if cap(dst) < total {
 		dst = make([]byte, total)

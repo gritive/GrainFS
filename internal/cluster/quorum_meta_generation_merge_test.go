@@ -26,8 +26,8 @@ func twoGenerationBackend(t *testing.T, selfIsB bool) (*DistributedBackend, *Sha
 	t.Cleanup(func() { trA.Close() })
 	t.Cleanup(func() { trB.Close() })
 
-	svcA := NewShardService(t.TempDir(), trA, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
-	svcB := NewShardService(t.TempDir(), trB, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svcA := NewShardService(t.TempDir(), trA, WithShardDEKKeeper(keeper, clusterID))
+	svcB := NewShardService(t.TempDir(), trB, WithShardDEKKeeper(keeper, clusterID))
 	trA.RegisterBufferedRoute(transport.RouteShardRPC, svcA.NativeRPCHandler())
 	trB.RegisterBufferedRoute(transport.RouteShardRPC, svcB.NativeRPCHandler())
 	trA.RegisterBufferedRoute(transport.RouteShardRPC, svcA.NativeRPCHandler())

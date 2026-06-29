@@ -49,8 +49,8 @@ func TestWriteQuorumMetaVersion_RPC(t *testing.T) {
 	defer trB.Close()
 
 	dirB := t.TempDir()
-	svcA := NewShardService(t.TempDir(), trA, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
-	svcB := NewShardService(dirB, trB, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svcA := NewShardService(t.TempDir(), trA, WithShardDEKKeeper(keeper, clusterID))
+	svcB := NewShardService(dirB, trB, WithShardDEKKeeper(keeper, clusterID))
 	trB.RegisterBufferedRoute(transport.RouteShardRPC, svcB.NativeRPCHandler())
 
 	data := []byte("ver-blob")

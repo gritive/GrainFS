@@ -142,8 +142,8 @@ func TestScatterGatherList_LWWAndTombstone(t *testing.T) {
 
 	dirA := t.TempDir()
 	dirB := t.TempDir()
-	svcA := NewShardService(dirA, trA, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
-	svcB := NewShardService(dirB, trB, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svcA := NewShardService(dirA, trA, WithShardDEKKeeper(keeper, clusterID))
+	svcB := NewShardService(dirB, trB, WithShardDEKKeeper(keeper, clusterID))
 	trA.RegisterBufferedRoute(transport.RouteShardRPC, svcA.NativeRPCHandler())
 	trB.RegisterBufferedRoute(transport.RouteShardRPC, svcB.NativeRPCHandler())
 	trA.RegisterBufferedRoute(transport.RouteShardRPC, svcA.NativeRPCHandler())
@@ -216,8 +216,8 @@ func TestScatterGatherList_SpansAllShardGroups(t *testing.T) {
 
 	dirA := t.TempDir()
 	dirB := t.TempDir()
-	svcA := NewShardService(dirA, trA, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
-	svcB := NewShardService(dirB, trB, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svcA := NewShardService(dirA, trA, WithShardDEKKeeper(keeper, clusterID))
+	svcB := NewShardService(dirB, trB, WithShardDEKKeeper(keeper, clusterID))
 	trA.RegisterBufferedRoute(transport.RouteShardRPC, svcA.NativeRPCHandler())
 	trB.RegisterBufferedRoute(transport.RouteShardRPC, svcB.NativeRPCHandler())
 	trA.RegisterBufferedRoute(transport.RouteShardRPC, svcA.NativeRPCHandler())
@@ -273,7 +273,7 @@ func TestScanObjectMetaEntries_CarriesPlacementFields(t *testing.T) {
 	tr := transport.MustNewHTTPTransport("test-cluster-psk")
 	require.NoError(t, tr.Listen(ctx, "127.0.0.1:0"))
 	defer tr.Close()
-	svc := NewShardService(t.TempDir(), tr, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(t.TempDir(), tr, WithShardDEKKeeper(keeper, clusterID))
 	tr.RegisterBufferedRoute(transport.RouteShardRPC, svc.NativeRPCHandler())
 	tr.RegisterBufferedRoute(transport.RouteShardRPC, svc.NativeRPCHandler())
 
@@ -484,9 +484,9 @@ func TestReadQuorumMeta_PeerFallback_ParityNodeMiss(t *testing.T) {
 	dirData := t.TempDir()
 	dirParity := t.TempDir()
 	svcData := NewShardService(dirData, trData,
-		WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+		WithShardDEKKeeper(keeper, clusterID))
 	svcParity := NewShardService(dirParity, trParity,
-		WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+		WithShardDEKKeeper(keeper, clusterID))
 
 	// trData serves incoming shard RPCs (including ReadQuorumMeta).
 	trData.RegisterBufferedRoute(transport.RouteShardRPC, svcData.NativeRPCHandler())

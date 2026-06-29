@@ -168,8 +168,8 @@ func writeEncryptedObjectFile(path string, enc DataEncryptor, baseFields []encry
 	if err := bw.Flush(); err != nil {
 		return 0, fmt.Errorf("flush encrypted object: %w", err)
 	}
-	// Durability is owned by internal/storage/datawal. The tmp+rename below
-	// provides atomic visibility of already-WAL-flushed bytes.
+	// The tmp file provides atomic visibility after rename; callers control
+	// whether the write is fsynced for crash durability.
 	return size, nil
 }
 
@@ -527,10 +527,8 @@ func writeEncryptedObjectFileAtomic(path string, enc DataEncryptor, baseFields [
 		cleanup()
 		return 0, fmt.Errorf("rename encrypted object: %w", err)
 	}
-	// Directory metadata durability is owned by the data WAL: the WAL
-	// record was flushed before this materialization ran, so a crash
-	// after rename and before the next natural dir sync replays the
-	// same bytes from the WAL.
+	// Directory metadata durability follows the caller's sync policy after
+	// this atomic rename.
 	return size, nil
 }
 

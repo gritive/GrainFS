@@ -200,8 +200,8 @@ func TestBuildECShardTargets_CarryStripeBytes(t *testing.T) {
 	require.Equal(t, segStripe, segTgt.Placement.StripeBytes, "segment target must carry StripeBytes")
 	require.Equal(t, coalStripe, coalTgt.Placement.StripeBytes, "coalesced target must carry StripeBytes")
 
-	// Datawal path: ResolveShardKeyPlacement -> RepairShardAtShardKey must also
-	// carry StripeBytes. This path still reads the FSM obj: record (EC-repair
+	// ResolveShardKeyPlacement -> RepairShardAtShardKey must also carry
+	// StripeBytes. This path still reads the FSM obj: record (EC-repair
 	// placement resolver), so seed it accordingly.
 	seedLatestObjectMetaVersion(t, backend, "b", "striped", "sv1", objectMeta{
 		Segments: []storage.SegmentRef{
@@ -215,10 +215,10 @@ func TestBuildECShardTargets_CarryStripeBytes(t *testing.T) {
 	segRec, skip, err := backend.ResolveShardKeyPlacement(ctx, "b", "striped/segments/seg-s", scan)
 	require.NoError(t, err)
 	require.Empty(t, skip)
-	require.Equal(t, segStripe, segRec.StripeBytes, "datawal segment placement must carry StripeBytes")
+	require.Equal(t, segStripe, segRec.StripeBytes, "segment placement must carry StripeBytes")
 
 	coalRec, skip, err := backend.ResolveShardKeyPlacement(ctx, "b", "striped/coalesced/c1", scan)
 	require.NoError(t, err)
 	require.Empty(t, skip)
-	require.Equal(t, coalStripe, coalRec.StripeBytes, "datawal coalesced placement must carry StripeBytes")
+	require.Equal(t, coalStripe, coalRec.StripeBytes, "coalesced placement must carry StripeBytes")
 }

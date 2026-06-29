@@ -85,9 +85,9 @@ func RegisterClusterKeys(s *Store, h ReloadHooks) {
 	})
 
 	// encryption.rotate-dek: ENABLED (S5). All data lanes now carry gen framing
-	// or self-roll on a gen advance (packblob per-entry gen S1; datawal/logical-WAL
-	// rotation boundaries S2/S3; EC/object seal-at-pinned-gen S4; datawal Append
-	// roll-then-retry S5), so advancing the active gen is safe. OnTrigger is a
+	// or seal under a pinned generation (packblob per-entry gen S1; logical-WAL
+	// rotation boundaries S2/S3; EC/object seal-at-pinned-gen S4), so advancing
+	// the active gen is safe. OnTrigger is a
 	// no-op accept: it runs SYNCHRONOUSLY inside the raft apply loop
 	// (applyConfigPut → cfgStore.Set → fireReload), where calling the blocking
 	// ProposeDEKRotate would deadlock the apply loop. The actual rotation is

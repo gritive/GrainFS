@@ -59,7 +59,7 @@ func TestECCluster_Smoke_3Node(t *testing.T) {
 	backend.SetECConfig(ECConfig{DataShards: 2, ParityShards: 1})
 
 	keeper, clusterID := testDEKKeeper(t)
-	svc := NewShardService(backend.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(backend.root, nil, WithShardDEKKeeper(keeper, clusterID))
 	backend.SetShardService(svc, []string{"self", "self", "self"})
 
 	content := bytes.Repeat([]byte("ec-smoke-3node-"), 4096)

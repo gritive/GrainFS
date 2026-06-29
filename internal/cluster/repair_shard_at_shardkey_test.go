@@ -120,7 +120,7 @@ func TestRepairShardAtShardKey_InsufficientSurvivors(t *testing.T) {
 
 	// Delete BOTH shards: repairing shard 0 skips shard 0 and finds shard 1 also
 	// gone, leaving 0 survivors < DataShards. The error must carry the substring
-	// classifyDataWALStartupRepairFailure matches on.
+	// startup repair error classification matches on.
 	require.NoError(t, os.Remove(mustShardPath(svc, "b", shardKey, 0)))
 	require.NoError(t, os.Remove(mustShardPath(svc, "b", shardKey, 1)))
 

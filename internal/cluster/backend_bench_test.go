@@ -29,7 +29,7 @@ func newECBenchmarkBackend(tb clusterTestTB) *DistributedBackend {
 	bk.SetECConfig(cfg)
 
 	keeper, clusterID := testDEKKeeper(tb)
-	svc := NewShardService(bk.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(tb, keeper, clusterID))
+	svc := NewShardService(bk.root, nil, WithShardDEKKeeper(keeper, clusterID))
 	allNodes := make([]string, cfg.NumShards())
 	for i := range allNodes {
 		allNodes[i] = bk.selfAddr
@@ -127,7 +127,7 @@ func BenchmarkPutObjectEC_Spool2plus2_10MiB(b *testing.B) {
 	cfg := ECConfig{DataShards: 2, ParityShards: 2}
 	bk.SetECConfig(cfg)
 	keeper, clusterID := testDEKKeeper(b)
-	svc := NewShardService(bk.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(b, keeper, clusterID))
+	svc := NewShardService(bk.root, nil, WithShardDEKKeeper(keeper, clusterID))
 	allNodes := make([]string, cfg.NumShards())
 	for i := range allNodes {
 		allNodes[i] = bk.selfAddr

@@ -518,7 +518,7 @@ func newTestFollowerGroupBackend(t testing.TB, groupID, nodeID string) (*GroupBa
 		},
 	)
 	keeper, clusterID := testDEKKeeper(t)
-	svc := NewShardService(dir+"/shards", nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(dir+"/shards", nil, WithShardDEKKeeper(keeper, clusterID))
 	gb, err := NewGroupBackend(GroupBackendConfig{
 		ID:       groupID,
 		Root:     dir,

@@ -88,7 +88,7 @@ func TestClusterPutGet_10MiB_2plus2_RoundTrip(t *testing.T) {
 	backend := NewSingletonBackendForTest(t)
 	shardDir := t.TempDir()
 	keeper, clusterID := testDEKKeeper(t)
-	backend.shardSvc = NewShardService(shardDir, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	backend.shardSvc = NewShardService(shardDir, nil, WithShardDEKKeeper(keeper, clusterID))
 
 	// 4 "nodes" all pointing at self → 2+2 IsActive(4)=true, all shards local.
 	const selfAddr = "self"
@@ -201,7 +201,7 @@ func TestClusterMultipart_10MiB_2plus2_RoundTrip(t *testing.T) {
 	backend := NewSingletonBackendForTest(t)
 	shardDir := t.TempDir()
 	keeper, clusterID := testDEKKeeper(t)
-	backend.shardSvc = NewShardService(shardDir, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	backend.shardSvc = NewShardService(shardDir, nil, WithShardDEKKeeper(keeper, clusterID))
 
 	const selfAddr = "self"
 	backend.selfAddr = selfAddr

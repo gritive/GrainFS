@@ -87,7 +87,7 @@ are saved under `minio-cluster/run<N>/logs/`. Set `CLUSTER_PPROF=1` to collect
 per-node GrainFS CPU and heap/alloc/goroutine/mutex/block profiles under
 `grainfs-cluster/run<N>/pprof/`.
 
-## Local S3-Compatible Comparison
+## Local Benchmarks
 
 `make bench`, `make bench-cluster`, and `make bench-s3-compat-compare` run the
 official S3 workload with MinIO `warp` on the local machine. Use these targets

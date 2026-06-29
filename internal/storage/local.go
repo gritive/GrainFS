@@ -12,7 +12,6 @@
 package storage
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/hex"
@@ -34,7 +33,6 @@ import (
 	"github.com/gritive/GrainFS/internal/chunkref"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/metrics/readamp"
-	"github.com/gritive/GrainFS/internal/storage/datawal"
 )
 
 // localTraceEnabled activates per-stage PutObject/HeadObject latency logging.
@@ -43,21 +41,11 @@ var localTraceEnabled = os.Getenv("GRAINFS_VOLUME_TRACE") == "1"
 
 // LocalBackend stores objects as flat files on disk with BadgerDB for metadata.
 type LocalBackend struct {
-	metaDir          string
-	dataRoots        []string
-	db               *badger.DB
-	segEnc           DataEncryptor // object/segment file data-at-rest seam
-	clusterID        [16]byte      // zero sentinel in D-seg-local; real ID in D-seg-ec
-	dataWAL          DataWAL
-	dataWALDir       string
-	replayingDataWAL bool
-}
-
-type DataWAL interface {
-	Append(context.Context, datawal.Record) (uint64, error)
-	AppendReader(context.Context, datawal.Record, io.Reader) (uint64, error)
-	Flush() error
-	Dir() string
+	metaDir   string
+	dataRoots []string
+	db        *badger.DB
+	segEnc    DataEncryptor // object/segment file data-at-rest seam
+	clusterID [16]byte      // zero sentinel in D-seg-local; real ID in D-seg-ec
 }
 
 var (
@@ -78,35 +66,6 @@ func NewMultiRootLocalBackend(metaDir string, dataRoots []string) (*LocalBackend
 	return newLocalBackend(metaDir, dataRoots)
 }
 
-func NewMultiRootLocalBackendWithDataWAL(metaDir string, dataRoots []string, dwal DataWAL) (*LocalBackend, error) {
-	if len(dataRoots) == 0 {
-		return nil, fmt.Errorf("multi-root local backend requires at least one data root")
-	}
-	if dwal == nil {
-		return nil, fmt.Errorf("multi-root local backend data wal requires wal")
-	}
-	b, err := newLocalBackend(metaDir, dataRoots)
-	if err != nil {
-		return nil, err
-	}
-	b.dataWAL = dwal
-	b.dataWALDir = dwal.Dir()
-	return b, nil
-}
-
-func NewLocalBackendWithDataWAL(root string, dwal DataWAL) (*LocalBackend, error) {
-	if dwal == nil {
-		return nil, fmt.Errorf("local backend data wal requires wal")
-	}
-	b, err := newLocalBackend(root, []string{root})
-	if err != nil {
-		return nil, err
-	}
-	b.dataWAL = dwal
-	b.dataWALDir = dwal.Dir()
-	return b, nil
-}
-
 // NewLocalBackendWithDEKKeeper builds a LocalBackend whose object/segment
 // data-at-rest seam is the generation-aware DEKKeeper (slice C). clusterID MUST
 // be 16 bytes. Badger meta is plaintext (the static meta encryptor was retired).
@@ -119,24 +78,6 @@ func NewLocalBackendWithDEKKeeper(root string, keeper *encrypt.DEKKeeper, cluste
 		copy(b.clusterID[:], clusterID)
 		b.segEnc = NewDEKKeeperAdapter(keeper, b.clusterID[:])
 	}
-	return b, nil
-}
-
-// NewLocalBackendWithDEKKeeperAndDataWAL builds a DEKKeeper-backed LocalBackend
-// (see NewLocalBackendWithDEKKeeper) wired to a DataWAL. The DataWAL's record
-// sealer MUST wrap the SAME keeper instance (NewDEKKeeper randomizes the DEK),
-// so RecoverDataWAL — which seals/opens WAL records via b.segEnc — can decrypt
-// what the WAL wrote. clusterID MUST be 16 bytes.
-func NewLocalBackendWithDEKKeeperAndDataWAL(root string, keeper *encrypt.DEKKeeper, clusterID []byte, dwal DataWAL) (*LocalBackend, error) {
-	if dwal == nil {
-		return nil, fmt.Errorf("local backend data wal requires wal")
-	}
-	b, err := NewLocalBackendWithDEKKeeper(root, keeper, clusterID)
-	if err != nil {
-		return nil, err
-	}
-	b.dataWAL = dwal
-	b.dataWALDir = dwal.Dir()
 	return b, nil
 }
 
@@ -158,10 +99,9 @@ func newLocalBackend(metaDir string, dataRoots []string) (*LocalBackend, error) 
 	// Badger meta is stored as plaintext; the data-at-rest seam is b.segEnc
 	// (a DEKKeeperAdapter on the DEK path), wired by the DEKKeeper constructors.
 	b := &LocalBackend{
-		metaDir:    metaDir,
-		dataRoots:  dataRoots,
-		db:         db,
-		dataWALDir: filepath.Join(metaDir, "datawal"),
+		metaDir:   metaDir,
+		dataRoots: dataRoots,
+		db:        db,
 	}
 	return b, nil
 }
@@ -596,19 +536,6 @@ func (b *LocalBackend) Truncate(ctx context.Context, bucket, key string, size in
 			return err
 		}
 	}
-	if b.dataWAL != nil && !b.replayingDataWAL {
-		if _, err := b.dataWAL.Append(ctx, datawal.Record{
-			Op:     datawal.OpObjectTruncate,
-			Bucket: bucket,
-			Key:    key,
-			Size:   size,
-		}); err != nil {
-			return err
-		}
-		if err := b.dataWAL.Flush(); err != nil {
-			return err
-		}
-	}
 	objPath := b.objectPath(bucket, key)
 	var currentSize int64
 	if b.segEnc != nil {
@@ -664,22 +591,6 @@ func (b *LocalBackend) WriteAt(ctx context.Context, bucket, key string, offset u
 	}
 	if existingErr != nil && !errors.Is(existingErr, ErrObjectNotFound) {
 		return nil, existingErr
-	}
-
-	if b.dataWAL != nil && !b.replayingDataWAL {
-		if _, err := b.dataWAL.Append(ctx, datawal.Record{
-			Op:      datawal.OpObjectWriteAt,
-			Bucket:  bucket,
-			Key:     key,
-			Offset:  int64(offset),
-			Size:    int64(len(data)),
-			Payload: data,
-		}); err != nil {
-			return nil, err
-		}
-		if err := b.dataWAL.Flush(); err != nil {
-			return nil, err
-		}
 	}
 
 	objPath := b.objectPath(bucket, key)
@@ -1043,90 +954,8 @@ func (b *LocalBackend) PreferWriteAt(bucket string) bool {
 	return b.segEnc == nil && IsInternalBucket(bucket)
 }
 
-func (b *LocalBackend) RecoverDataWAL(ctx context.Context) error {
-	b.replayingDataWAL = true
-	defer func() { b.replayingDataWAL = false }()
-	var sealer datawal.RecordSealer
-	if b.segEnc != nil {
-		// b.segEnc is the data-at-rest seam (a *DEKKeeperAdapter on the DEK
-		// path); it satisfies datawal.RecordSealer and opens DEK-sealed WAL
-		// records written under the same keeper.
-		sealer = b.segEnc
-	}
-	return datawal.Recover(ctx, b.dataWALDir, 0, sealer, datawal.NamespaceNode, localDataWALMaterializer{b: b})
-}
-
-type localDataWALMaterializer struct {
-	b *LocalBackend
-}
-
-func (m localDataWALMaterializer) HasReplacement(ctx context.Context, rec datawal.Record) (bool, error) {
-	_ = ctx
-	if rec.Op != datawal.OpSegmentPut {
-		return false, nil
-	}
-
-	path := m.b.segmentPath(rec.Bucket, rec.Key, rec.Target)
-	if m.b.segEnc == nil {
-		info, err := os.Stat(path)
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		if err != nil {
-			return false, err
-		}
-		return info.Size() == rec.Size, nil
-	}
-
-	rc, err := openEncryptedObjectFile(path, m.b.segEnc, segmentFileAADFields(rec.Bucket, rec.Key, rec.Target), rec.Size)
-	if os.IsNotExist(err) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	defer rc.Close()
-	got, err := io.ReadAll(rc)
-	if err != nil {
-		return false, err
-	}
-	return bytes.Equal(got, rec.Payload), nil
-}
-
-func (m localDataWALMaterializer) Materialize(ctx context.Context, rec datawal.Record) error {
-	switch rec.Op {
-	case datawal.OpSegmentPut:
-		path := m.b.segmentPath(rec.Bucket, rec.Key, rec.Target)
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			return err
-		}
-		if m.b.segEnc != nil {
-			if _, err := writeEncryptedObjectFile(path, m.b.segEnc, segmentFileAADFields(rec.Bucket, rec.Key, rec.Target), bytes.NewReader(rec.Payload), io.Discard); err != nil {
-				// Drop the partial so WAL recovery re-materializes cleanly
-				// instead of trying to decrypt a half-written segment. Mirrors
-				// WriteSegmentBlob's cleanup; matters once D-seg-ec's
-				// DEKKeeperAdapter makes gen-pinning failures reachable.
-				_ = os.Remove(path)
-				return err
-			}
-			return nil
-		}
-		return os.WriteFile(path, rec.Payload, 0o644)
-	case datawal.OpObjectWriteAt:
-		_, err := m.b.WriteAt(ctx, rec.Bucket, rec.Key, uint64(rec.Offset), rec.Payload)
-		return err
-	case datawal.OpObjectTruncate:
-		return m.b.Truncate(ctx, rec.Bucket, rec.Key, rec.Size)
-	default:
-		return nil
-	}
-}
-
 // Sync fsyncs the on-disk state for a specific object.
 func (b *LocalBackend) Sync(bucket, key string) error {
-	if b.dataWAL != nil {
-		return b.dataWAL.Flush()
-	}
 	obj, err := b.HeadObject(context.Background(), bucket, key)
 	if err != nil {
 		return err

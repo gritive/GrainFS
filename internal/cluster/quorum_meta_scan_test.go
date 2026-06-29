@@ -24,7 +24,7 @@ import (
 // skips in IterQuorumMetaECShardTargets/ScanQuorumMetaBucket; GREEN with them.
 func TestQuorumMetaScanners_SkipInFlightTempFiles(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
-	svc := NewShardService(t.TempDir(), nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(t.TempDir(), nil, WithShardDEKKeeper(keeper, clusterID))
 
 	cmd := PutObjectMetaCmd{
 		Bucket: "b", Key: "obj", Size: 2048, ContentType: "application/octet-stream",

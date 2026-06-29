@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -377,6 +378,74 @@ func TestECObjectWriter_WriteDataShardsAllocBytesBounded(t *testing.T) {
 	}))
 	t.Logf("writeDataShards alloc bytes: %d", allocedBytes)
 	require.LessOrEqual(t, allocedBytes, int64(3*1024*1024))
+}
+
+func TestECObjectWriter_WriteDataShards10MiBAllocBytesBounded(t *testing.T) {
+	data := bytes.Repeat([]byte("0123456789abcdef"), 640*1024)
+	cfg := ECConfig{DataShards: 4, ParityShards: 2}
+	placement := []string{"node-a", "node-b", "node-c", "node-d", "node-e", "node-f"}
+
+	run := func(t testing.TB) {
+		t.Helper()
+		shards := &fakeECObjectWriterShards{}
+		writer := ecObjectWriter{
+			selfID: "not-a-placement-node",
+			shards: shards,
+		}
+		result, err := writer.writeDataShards(context.Background(), ecObjectWritePlan{
+			Bucket:    "bucket",
+			Key:       "object",
+			Config:    cfg,
+			Placement: placement,
+		}, data)
+		require.NoError(t, err)
+		result.waitBackgroundWrites()
+		require.Len(t, shards.streamWrites, cfg.NumShards())
+	}
+
+	run(t)
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+	const steadyRuns = 5
+	for range steadyRuns {
+		run(t)
+	}
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	allocedBytes := int64((after.TotalAlloc - before.TotalAlloc) / steadyRuns)
+	t.Logf("writeDataShards 10MiB steady alloc bytes: %d", allocedBytes)
+	require.LessOrEqual(t, allocedBytes, int64(1*1024*1024))
+}
+
+func BenchmarkECObjectWriterWriteDataShards10MiB(b *testing.B) {
+	data := bytes.Repeat([]byte("0123456789abcdef"), 640*1024)
+	cfg := ECConfig{DataShards: 4, ParityShards: 2}
+	placement := []string{"node-a", "node-b", "node-c", "node-d", "node-e", "node-f"}
+	run := func(tb testing.TB) {
+		tb.Helper()
+		shards := &fakeECObjectWriterShards{}
+		writer := ecObjectWriter{
+			selfID: "not-a-placement-node",
+			shards: shards,
+		}
+		result, err := writer.writeDataShards(context.Background(), ecObjectWritePlan{
+			Bucket:    "bucket",
+			Key:       "object",
+			Config:    cfg,
+			Placement: placement,
+		}, data)
+		require.NoError(tb, err)
+		result.waitBackgroundWrites()
+		require.Len(tb, shards.streamWrites, cfg.NumShards())
+	}
+
+	run(b)
+	b.SetBytes(int64(len(data)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		run(b)
+	}
 }
 
 func TestECObjectWriter_WriteOneSegmentRotatesPlacementBySegmentShardKey(t *testing.T) {
@@ -750,7 +819,7 @@ func TestEcObjectSegmentShardKey_AADPropagation(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 
 	dir := t.TempDir()
-	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID))
 
 	bucket := "bucket"
 	plan := ecObjectWritePlan{Key: "obj", VersionID: "v1", SegmentBlobID: "blob1", SegmentIdx: 0}

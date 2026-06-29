@@ -31,7 +31,7 @@ func setupECBackend(t *testing.T) *DistributedBackend {
 	const selfAddr = "self"
 	shardDir := t.TempDir()
 	keeper, clusterID := testDEKKeeper(t)
-	svc := NewShardService(shardDir, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(shardDir, nil, WithShardDEKKeeper(keeper, clusterID))
 	// Set allNodes to 3 copies of selfAddr: IsActive(3)=true, all shards local.
 	backend.shardSvc = svc
 	backend.selfAddr = selfAddr

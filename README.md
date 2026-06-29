@@ -117,30 +117,22 @@ conformance, or real client integration tests. Unit tests alone do not qualify.
 
 ## Performance
 
-Latest GCP single-node encrypted `warp` run, 10 MiB object size, 2048 total
-objects, concurrency 32, 1 minute per operation, signed S3 requests, 0 errors:
+Both runs used `warp`, 10 MiB object size. `GrainFS` ran with XAES-256-GCM
+at-rest encryption; MinIO ran with SSE-S3 auto-encryption.
+
+Latest GCP single-node `warp` run:
 
 | Target    | PUT MiB/s | GET MiB/s | vs MinIO PUT | vs MinIO GET |
 | --------- | --------: | --------: | -----------: | -----------: |
 | `GrainFS` |    215.50 |    437.02 |        1.03x |        0.92x |
 | MinIO     |    209.77 |    472.65 |        1.00x |        1.00x |
 
-`GrainFS` ran with XAES-256-GCM at-rest encryption; MinIO ran with SSE-S3
-auto-encryption on the same GCP VM class. Methodology and script flags:
-[benchmarks/README.md](benchmarks/README.md#gcp-single-node-encrypted-comparison).
-
-Latest GCP 4-node encrypted cluster `warp` run, 10 MiB object size, 2048 total
-objects, concurrency 32, 1 minute per operation, `put,get` only, signed S3
-requests, `CLUSTER_PPROF=1`, 0 errors:
+Latest GCP 4-node cluster `warp` run:
 
 | Target            | PUT MiB/s | GET MiB/s | vs MinIO PUT | vs MinIO GET |
 | ----------------- | --------: | --------: | -----------: | -----------: |
-| `GrainFS` cluster |    340.90 |   2126.21 |        0.73x |        0.98x |
-| MinIO distributed |    469.77 |   2170.48 |        1.00x |        1.00x |
-
-The cluster comparison uses four GCP storage VMs plus one in-network client.
-`GrainFS` ran with XAES-256-GCM at-rest encryption; MinIO distributed ran with
-SSE-S3 auto-encryption.
+| `GrainFS` cluster |    357.73 |   1917.79 |        0.76x |        0.89x |
+| MinIO distributed |    470.55 |   2158.60 |        1.00x |        1.00x |
 
 ## Core Concepts
 

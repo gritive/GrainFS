@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.769.0] - 2026-06-30
+
+### Performance
+- **Reduced EC split allocations on cluster PUTs.**
+  EC data/parity split now reuses padding shard buffers across writes while
+  preserving byte-identical output and clearing reused padding before encoding.
+
+### Removed
+- **Removed the retired shard data WAL package.**
+  The obsolete `internal/storage/datawal` package, wiring, replay tests, and
+  stale test fixtures are gone. Current shard durability is covered by direct
+  fsync decisions and EC reconstruction paths.
+
+### Changed
+- **Refreshed GCP benchmark documentation.**
+  The README and benchmark reference now show the latest single-node and 4-node
+  encrypted GrainFS vs MinIO `warp` results.
+
 ## [0.0.768.0] - 2026-06-30
 
 ### Performance

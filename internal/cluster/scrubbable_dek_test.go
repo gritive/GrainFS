@@ -17,14 +17,6 @@ import (
 	"github.com/gritive/GrainFS/internal/storage/eccodec"
 )
 
-// withTestWALDEK USED to wire a data WAL (mandatory before S4). The shard data
-// WAL was removed in S4; this is retained as a no-op ShardServiceOption so the
-// ~28 call sites compile unchanged. Durability is now write-time fsync / EC.
-func withTestWALDEK(tb clusterTestTB, _ *encrypt.DEKKeeper, _ []byte) ShardServiceOption {
-	tb.Helper()
-	return func(*ShardService) {}
-}
-
 // newTestDistributedBackendDEK mirrors newTestDistributedBackend but wires the
 // ShardService with WithShardDEKKeeper — the production shape after PR #631.
 // This reproduces the at-rest hole the scrubber-repair fix closes: the pre-fix
@@ -68,7 +60,7 @@ func newTestDistributedBackendDEK(t *testing.T, extraSvcOpts ...ShardServiceOpti
 	clusterID := bytes.Repeat([]byte{0x78}, 16)
 	keeper, err := encrypt.NewDEKKeeper(kek, clusterID)
 	require.NoError(t, err)
-	svc := NewShardService(backend.root, nil, append([]ShardServiceOption{WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID)}, extraSvcOpts...)...)
+	svc := NewShardService(backend.root, nil, append([]ShardServiceOption{WithShardDEKKeeper(keeper, clusterID)}, extraSvcOpts...)...)
 	require.NotNil(t, svc.DEKKeeper(), "production shape: DEK keeper must be wired")
 	backend.SetShardService(svc, []string{backend.selfAddr})
 

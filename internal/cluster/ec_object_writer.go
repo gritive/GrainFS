@@ -215,7 +215,7 @@ func (w ecObjectWriter) writeOneSegment(ctx context.Context, in writeSegmentInpu
 }
 
 func (w ecObjectWriter) writeDataShards(ctx context.Context, plan ecObjectWritePlan, data []byte) (ecObjectWriteResult, error) {
-	shards, err := ecSplitBodies(plan.Config, data)
+	shards, padding, err := ecSplitBodiesPooled(plan.Config, data)
 	if err != nil {
 		return ecObjectWriteResult{}, fmt.Errorf("ec split: %w", err)
 	}
@@ -225,7 +225,7 @@ func (w ecObjectWriter) writeDataShards(ctx context.Context, plan ecObjectWriteP
 		ETag: "", // intentionally empty: caller (WriteSegmentBytes) discards this ETag; segment checksum is xxhash3 via storage.ChecksumOf
 	}
 
-	return w.writeShardReadersWithSize(ctx, plan, sp, func(idx int) (io.Reader, error) {
+	result, err := w.writeShardReadersWithSize(ctx, plan, sp, func(idx int) (io.Reader, error) {
 		if idx < 0 || idx >= len(shards) {
 			return nil, fmt.Errorf("ec data shard %d out of range", idx)
 		}
@@ -236,6 +236,24 @@ func (w ecObjectWriter) writeDataShards(ctx context.Context, plan ecObjectWriteP
 		}
 		return int64(shardHeaderSize + len(shards[idx])), nil
 	}, "ec")
+	if err != nil {
+		putECSplitPaddingShards(padding)
+		return ecObjectWriteResult{}, err
+	}
+	if len(padding) == 0 {
+		return result, nil
+	}
+	var releasePadding sync.Once
+	waitBackgroundWrites := result.waitBackgroundWrites
+	result.waitBackgroundWrites = func() {
+		if waitBackgroundWrites != nil {
+			waitBackgroundWrites()
+		}
+		releasePadding.Do(func() {
+			putECSplitPaddingShards(padding)
+		})
+	}
+	return result, nil
 }
 
 func (w ecObjectWriter) writeSpooledShards(ctx context.Context, plan ecObjectWritePlan, spoolDir string, sp *spooledObject) (ecObjectWriteResult, error) {

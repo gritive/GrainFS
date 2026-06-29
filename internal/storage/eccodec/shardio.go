@@ -1037,8 +1037,8 @@ func writeEncryptedShardStreamAtomic(path string, r io.Reader, enc ShardEncrypto
 		return err
 	}
 	observeEncryptedShardStage("encode_stream", stageStart)
-	// Durability is owned by internal/storage/datawal. The tmp+rename below
-	// provides atomic visibility of already-WAL-flushed bytes.
+	// The tmp+rename below provides atomic visibility; caller-controlled sync
+	// policy owns crash durability.
 	stageStart = time.Now()
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmp)
@@ -1272,11 +1272,10 @@ func (r *sizedShardReader) verifyFooter() error {
 	return nil
 }
 
-// WriteShardAtomic writes data (with CRC32 footer) to path using the
-// tmp + rename recipe. Durability is owned by internal/storage/datawal;
-// the tmp file here provides atomic visibility of already-WAL-flushed
-// bytes, so a crash mid-write never exposes a torn shard at the
-// destination.
+// WriteShardAtomic writes data (with CRC32 footer) to path using the tmp +
+// rename recipe. The tmp file provides atomic visibility, so a crash mid-write
+// never exposes a torn shard at the destination. Callers control whether the
+// write is fsynced for crash durability.
 func WriteShardAtomic(path string, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("mkdir shard dir: %w", err)
@@ -1339,8 +1338,8 @@ func writeShardStreamAtomic(path string, r io.Reader, mkdir bool) error {
 		cleanup()
 		return fmt.Errorf("write shard footer: %w", err)
 	}
-	// Durability is owned by internal/storage/datawal. The tmp+rename
-	// below provides atomic visibility of already-WAL-flushed bytes.
+	// The tmp+rename below provides atomic visibility; caller-controlled
+	// sync policy owns crash durability.
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("close tmp shard: %w", err)

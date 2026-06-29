@@ -90,8 +90,8 @@ func TestScanQuorumMetaVersionsAll_RPCRoundTrip(t *testing.T) {
 	defer trSelf.Close()
 	defer trPeer.Close()
 
-	svcSelf := NewShardService(t.TempDir(), trSelf, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
-	svcPeer := NewShardService(t.TempDir(), trPeer, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svcSelf := NewShardService(t.TempDir(), trSelf, WithShardDEKKeeper(keeper, clusterID))
+	svcPeer := NewShardService(t.TempDir(), trPeer, WithShardDEKKeeper(keeper, clusterID))
 	trPeer.RegisterBufferedRoute(transport.RouteShardRPC, svcPeer.NativeRPCHandler())
 
 	const bkt, key = "bkt", "a/b/c.txt"
@@ -145,8 +145,8 @@ func TestScanQuorumMetaVersionsAll_FailClosedOnUnsupported(t *testing.T) {
 	defer trSelf.Close()
 	defer trPeer.Close()
 
-	svcSelf := NewShardService(t.TempDir(), trSelf, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
-	svcPeer := NewShardService(t.TempDir(), trPeer, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svcSelf := NewShardService(t.TempDir(), trSelf, WithShardDEKKeeper(keeper, clusterID))
+	svcPeer := NewShardService(t.TempDir(), trPeer, WithShardDEKKeeper(keeper, clusterID))
 
 	// Simulate an UN-UPGRADED peer: its shard route replies "Error" for the new
 	// msgType exactly as the pre-T3 default dispatch case would have

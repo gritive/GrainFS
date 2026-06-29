@@ -16,7 +16,7 @@ import (
 func newShardServiceTestWithDataDir(t *testing.T) *ShardService {
 	t.Helper()
 	keeper, clusterID := testDEKKeeper(t)
-	svc := NewShardService(t.TempDir(), nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(t.TempDir(), nil, WithShardDEKKeeper(keeper, clusterID))
 	return svc
 }
 

@@ -2,8 +2,6 @@ package serveruntime
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -65,18 +63,6 @@ func storagePhasePrereqs(t *testing.T) (context.Context, *bootState) {
 	require.NoError(t, bootRotationAndAdminAPI(state))
 	require.NoError(t, bootMetaRaftStart(ctx, state))
 	return ctx, state
-}
-
-// TestBootShardService_NoWALDirCreated proves S4: boot no longer opens a shard
-// data WAL, so no {dataDir}/datawal directory is created. Durability is
-// write-time fsync / EC; there is no WAL to replay.
-func TestBootShardService_NoWALDirCreated(t *testing.T) {
-	ctx, state := storagePhasePrereqs(t)
-
-	require.NoError(t, bootShardService(ctx, state))
-
-	_, err := os.Stat(filepath.Join(state.cfg.DataDir, "datawal"))
-	require.True(t, os.IsNotExist(err), "S4: boot must not create a datawal directory")
 }
 
 func TestRuntimeTopologyNodesPrefersJoinedMetaNodes(t *testing.T) {
@@ -156,8 +142,7 @@ func TestBootStoragePhases_OrderingInvariant(t *testing.T) {
 	assert.Nil(t, state.shardCache)
 	assert.Equal(t, 0, state.effectiveEC.NumShards(), "effectiveEC zero-value before phases")
 
-	// 1. ShardService — populates shardSvc + effectiveEC; no router yet. The shard
-	//    data WAL was removed in S4: boot wires/opens/replays no WAL.
+	// 1. ShardService - populates shardSvc + effectiveEC; no router yet.
 	require.NoError(t, bootShardService(ctx, state))
 	require.NotNil(t, state.shardSvc, "shardSvc after bootShardService")
 	require.Greater(t, state.effectiveEC.NumShards(), 0, "effectiveEC after bootShardService")

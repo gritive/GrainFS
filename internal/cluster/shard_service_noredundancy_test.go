@@ -21,7 +21,6 @@ func TestShardWriteRequiresFsync_NoRedundancyForcesFsyncForLargeShard(t *testing
 	keeper, clusterID := testDEKKeeper(t)
 	svc := NewShardService(t.TempDir(), nil,
 		WithShardDEKKeeper(keeper, clusterID),
-		withTestWALDEK(t, keeper, clusterID),
 		WithNoRedundancy(func() bool { return true }),
 	)
 
@@ -30,17 +29,16 @@ func TestShardWriteRequiresFsync_NoRedundancyForcesFsyncForLargeShard(t *testing
 }
 
 // TestShardWriteRequiresFsync_NoRedundancySmallFsynced asserts the S2 flip: a
-// small shard is now fsynced directly (its old WAL-inline durability is gone).
+// small shard is now fsynced directly.
 func TestShardWriteRequiresFsync_NoRedundancySmallFsynced(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 	svc := NewShardService(t.TempDir(), nil,
 		WithShardDEKKeeper(keeper, clusterID),
-		withTestWALDEK(t, keeper, clusterID),
 		WithNoRedundancy(func() bool { return true }),
 	)
 
 	require.True(t, svc.local.shardWriteRequiresFsync(len([]byte("small"))),
-		"small shard is fsynced directly after S2 (no WAL)")
+		"small shard is fsynced directly after S2")
 }
 
 // TestShardWriteRequiresFsync_RedundantLargeNoFsync asserts the parity>0 case is
@@ -50,7 +48,6 @@ func TestShardWriteRequiresFsync_RedundantLargeNoFsync(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 	svc := NewShardService(t.TempDir(), nil,
 		WithShardDEKKeeper(keeper, clusterID),
-		withTestWALDEK(t, keeper, clusterID),
 		WithNoRedundancy(func() bool { return false }),
 	)
 
@@ -62,7 +59,7 @@ func TestShardWriteRequiresFsync_RedundantLargeNoFsync(t *testing.T) {
 // (no provider wired) counts as redundant: a large shard is not fsynced.
 func TestShardWriteRequiresFsync_NilNoRedundancyLargeNoFsync(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
-	svc := NewShardService(t.TempDir(), nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID)) // no WithNoRedundancy
+	svc := NewShardService(t.TempDir(), nil, WithShardDEKKeeper(keeper, clusterID)) // no WithNoRedundancy
 
 	require.False(t, svc.local.shardWriteRequiresFsync(len(largeShardPayload())),
 		"nil noRedundancy counts as redundant; large → no fsync")

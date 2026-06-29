@@ -22,13 +22,13 @@ const bulkCipherFormatFile = "encryption.format"
 // under DomainIAMCredential AAD (R2). Pre-"5" IAM ciphertext used the static
 // *encrypt.Encryptor with raw saID AAD; "5" binary uses the DataEncryptor seam
 // with BuildAAD(DomainIAMCredential, clusterID, FieldString(saID), FieldString(accessKey))
-// and cannot read pre-"5" IAM bytes. "6" = data-group FSM values and data WAL
-// records moved to the gen-aware DEK seam with persisted DEK generation frames.
+// and cannot read pre-"5" IAM bytes. "6" = data-group FSM values and retired
+// data-plane WAL records moved to the gen-aware DEK seam with persisted DEK generation frames.
 // "7" = Zero-CA bootstrap/node identity no longer uses the legacy static
 // encryption.key as boot glue; node.key.enc must be recoverable through KEK
 // generation evidence. "8" = raft v2 Badger log stores are encrypted at rest
-// by a node-local raft-store key sealed under the cluster KEK. "9" = encrypted
-// data WAL node/shard AEAD namespace separation. Greenfield only.
+// by a node-local raft-store key sealed under the cluster KEK. "9" = retired
+// data-plane WAL namespace separation. Greenfield only.
 const bulkCipherFormatVersion = "9"
 
 // EnsureBulkCipherFormat enforces the XAES greenfield boundary at boot. Call it
@@ -41,7 +41,7 @@ func EnsureBulkCipherFormat(dataDir string, bulkDataPresent bool) error {
 	switch {
 	case err == nil:
 		if got := strings.TrimSpace(string(b)); got != bulkCipherFormatVersion {
-			return fmt.Errorf("bulk-cipher format %q in %s is not supported by this binary (expected %q); data WAL namespace separation was enabled and in-place upgrade is unsupported — create a new cluster", got, bulkCipherFormatFile, bulkCipherFormatVersion)
+			return fmt.Errorf("bulk-cipher format %q in %s is not supported by this binary (expected %q); in-place upgrade is unsupported for this storage format - create a new cluster", got, bulkCipherFormatFile, bulkCipherFormatVersion)
 		}
 		return nil
 	case os.IsNotExist(err):

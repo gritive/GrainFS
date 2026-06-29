@@ -26,7 +26,7 @@ func setupECRewrapBackend(t *testing.T) (*DistributedBackend, *encrypt.DEKKeeper
 	const selfAddr = "self"
 	shardDir := t.TempDir()
 	keeper, clusterID := testDEKKeeper(t)
-	svc := NewShardService(shardDir, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(shardDir, nil, WithShardDEKKeeper(keeper, clusterID))
 	backend.shardSvc = svc
 	backend.selfAddr = selfAddr
 	backend.allNodes = []string{selfAddr, selfAddr, selfAddr}

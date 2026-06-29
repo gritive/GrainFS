@@ -56,7 +56,7 @@ func newDEKBackendAt(t *testing.T, dataDir string, keeper *encrypt.DEKKeeper, cl
 	require.NoError(t, err)
 	backend.SetECConfig(ECConfig{DataShards: 1, ParityShards: 0})
 
-	svc := NewShardService(backend.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(backend.root, nil, WithShardDEKKeeper(keeper, clusterID))
 	require.NotNil(t, svc.DEKKeeper(), "production shape: DEK keeper must be wired")
 	backend.SetShardService(svc, []string{backend.selfAddr})
 	backend.SetMetaBucketStore(newDirectFSMMetaBucketStore(backend.fsm))

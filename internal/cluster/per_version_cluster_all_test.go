@@ -102,8 +102,8 @@ func TestHandleScanQuorumMetaVersionsAll_PropagatesStrictError(t *testing.T) {
 	defer trSelf.Close()
 	defer trPeer.Close()
 
-	svcSelf := NewShardService(t.TempDir(), trSelf, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
-	svcPeer := NewShardService(t.TempDir(), trPeer, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svcSelf := NewShardService(t.TempDir(), trSelf, WithShardDEKKeeper(keeper, clusterID))
+	svcPeer := NewShardService(t.TempDir(), trPeer, WithShardDEKKeeper(keeper, clusterID))
 	trPeer.RegisterBufferedRoute(transport.RouteShardRPC, svcPeer.NativeRPCHandler())
 
 	const bkt = "bkt"
@@ -132,8 +132,8 @@ func TestScanQuorumMetaVersionsAll_FailsClosedOnClientDecodeError(t *testing.T) 
 	defer trSelf.Close()
 	defer trPeer.Close()
 
-	svcSelf := NewShardService(t.TempDir(), trSelf, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
-	svcPeer := NewShardService(t.TempDir(), trPeer, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svcSelf := NewShardService(t.TempDir(), trSelf, WithShardDEKKeeper(keeper, clusterID))
+	svcPeer := NewShardService(t.TempDir(), trPeer, WithShardDEKKeeper(keeper, clusterID))
 
 	good, err := encodeQuorumMetaBlob(PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: "019ed400-0000-7000-8000-000000000001", ETag: "ok"})
 	require.NoError(t, err)
