@@ -123,18 +123,19 @@ Artifacts:
 Captured on 2026-06-30 KST in `asia-northeast3-a` with one `n2-standard-4`
 client VM and four `n2-standard-4` storage VMs, 10 MiB object size, 2048 total
 objects, concurrency 32, 1 minute per operation, signed S3 requests,
-round-robin host selection, warm GET over the preceding PUT objects, and
-0 errors.
+round-robin host selection, warm GET over the preceding PUT objects,
+`CLUSTER_PPROF=1`, and 0 errors.
 
 | Target            | PUT MiB/s | PUT p50 ms | PUT p99 ms | GET MiB/s | GET p50 ms | GET p99 ms | vs MinIO PUT | vs MinIO GET |
 | ----------------- | --------: | ---------: | ---------: | --------: | ---------: | ---------: | -----------: | -----------: |
-| `GrainFS` cluster |    341.17 |      995.5 |     1411.0 |   2380.79 |      118.7 |      430.5 |        0.73x |        1.07x |
-| MinIO distributed |    468.56 |      690.2 |      881.2 |   2216.49 |      131.3 |      383.0 |        1.00x |        1.00x |
+| `GrainFS` cluster |    340.90 |      951.2 |     1426.1 |   2126.21 |      131.4 |      519.4 |        0.73x |        0.98x |
+| MinIO distributed |    469.77 |      689.3 |      850.9 |   2170.48 |      134.7 |      412.0 |        1.00x |        1.00x |
 
 Interpretation: GrainFS cluster write throughput is 0.73x of distributed
-MinIO under this workload; read throughput is 1.07x of MinIO. GrainFS read TTFB
-was higher than MinIO in the raw `warp analyze` output (`median 40 ms` vs
-`25 ms`), so the GET win is throughput, not first-byte latency.
+MinIO under this workload; read throughput is 0.98x of MinIO. GrainFS read TTFB
+was higher than MinIO in the raw `warp analyze` output (`median 47 ms` vs
+`26 ms`). The captured GrainFS cluster CPU profiles were dominated by
+Linux write syscalls, MD5, AES-GCM encryption, and memory copy/clear work.
 
 ## Existing Benchmark Targets
 

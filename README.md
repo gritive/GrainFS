@@ -133,12 +133,12 @@ auto-encryption on the same GCP VM class. Methodology and script flags:
 
 Latest GCP 4-node encrypted cluster `warp` run, 10 MiB object size, 2048 total
 objects, concurrency 32, 1 minute per operation, `put,get` only, signed S3
-requests, 0 errors:
+requests, `CLUSTER_PPROF=1`, 0 errors:
 
 | Target            | PUT MiB/s | GET MiB/s | vs MinIO PUT | vs MinIO GET |
 | ----------------- | --------: | --------: | -----------: | -----------: |
-| `GrainFS` cluster |    341.17 |   2380.79 |        0.73x |        1.07x |
-| MinIO distributed |    468.56 |   2216.49 |        1.00x |        1.00x |
+| `GrainFS` cluster |    340.90 |   2126.21 |        0.73x |        0.98x |
+| MinIO distributed |    469.77 |   2170.48 |        1.00x |        1.00x |
 
 The cluster comparison uses four GCP storage VMs plus one in-network client.
 `GrainFS` ran with XAES-256-GCM at-rest encryption; MinIO distributed ran with
