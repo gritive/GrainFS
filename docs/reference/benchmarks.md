@@ -128,14 +128,18 @@ round-robin host selection, warm GET over the preceding PUT objects,
 
 | Target            | PUT MiB/s | PUT p50 ms | PUT p99 ms | GET MiB/s | GET p50 ms | GET p99 ms | vs MinIO PUT | vs MinIO GET |
 | ----------------- | --------: | ---------: | ---------: | --------: | ---------: | ---------: | -----------: | -----------: |
-| `GrainFS` cluster |    340.90 |      951.2 |     1426.1 |   2126.21 |      131.4 |      519.4 |        0.73x |        0.98x |
-| MinIO distributed |    469.77 |      689.3 |      850.9 |   2170.48 |      134.7 |      412.0 |        1.00x |        1.00x |
+| `GrainFS` cluster |    357.73 |      949.7 |     1346.2 |   1917.79 |      144.5 |      577.2 |        0.76x |        0.89x |
+| MinIO distributed |    470.55 |      695.3 |      889.1 |   2158.60 |      141.2 |      417.0 |        1.00x |        1.00x |
 
-Interpretation: GrainFS cluster write throughput is 0.73x of distributed
-MinIO under this workload; read throughput is 0.98x of MinIO. GrainFS read TTFB
-was higher than MinIO in the raw `warp analyze` output (`median 47 ms` vs
-`26 ms`). The captured GrainFS cluster CPU profiles were dominated by
-Linux write syscalls, MD5, AES-GCM encryption, and memory copy/clear work.
+Interpretation: GrainFS cluster write throughput is 0.76x of distributed
+MinIO under this workload; read throughput is 0.89x of MinIO. GrainFS read TTFB
+was higher than MinIO in the raw `warp analyze` output (`median 59 ms` vs
+`26 ms`). The captured GrainFS cluster PUT CPU profiles were dominated by local
+staged shard writes and `EncodeEncryptedShard`: Linux write syscalls were about
+40-44 percent flat CPU per node, followed by MD5 (`crypto/md5.block`, about
+16-17 percent), AES-GCM encryption (about 14-16 percent), and memory
+copy/clear work. Reed-Solomon parity compute was visible but small at about
+2 percent flat CPU.
 
 ## Existing Benchmark Targets
 
