@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.764.8] - 2026-06-29
+
+### Performance
+- **Skip MD5 computation on PUT hot path when no `Content-MD5` header is sent.**
+  `spoolObject` / `spoolObjectEncrypted` now accept a `needsMD5 bool` parameter.
+  When false (no client-supplied digest and the shard-group EC path handles ETag
+  independently), the body is copied without running `md5.Sum`, saving one full
+  read of the object payload for crypto and reducing per-PUT allocations.
+  `writeDataShards` no longer computes MD5 at all; the segment checksum remains
+  xxhash3-128. Multipart-complete and object-relocate callers continue to set
+  `needsMD5=true` because they store the spool ETag as the final object ETag.
+  Benchmark: 485 MB/s → 1509 MB/s (3.1×) for the uncached spool path.
+
 ## [0.0.764.7] - 2026-06-29
 
 ### Removed
