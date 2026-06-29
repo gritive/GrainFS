@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
@@ -27,12 +26,6 @@ var md5Pool = sync.Pool{
 const spoolCopyBufferSize = 1 << 20
 const maxEncryptedSpoolBlobBytes = 2 * spoolCopyBufferSize
 const encryptedSpoolCipherBufferSize = spoolCopyBufferSize + 64
-
-// spoolDomainSeq yields a process-unique per-spool domain counter so each PUT
-// spool gets a distinct AAD domain (the per-record counter prevents intra-spool
-// splice; a unique per-spool domain prevents cross-spool splice). Reset on
-// restart is harmless — PUT spool files are transient and deleted.
-var spoolDomainSeq atomic.Uint64
 
 var spoolCopyBufferPool = sync.Pool{
 	New: func() any {
@@ -72,10 +65,13 @@ type spooledObject struct {
 
 func spoolObject(ctx context.Context, dir string, r io.Reader, bucket string, needsMD5 bool) (*spooledObject, error) {
 	stageStart := time.Now()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create spool dir: %w", err)
 	}
-	tmp, err := os.CreateTemp(dir, ".put-spool-*")
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("set spool dir perms: %w", err)
+	}
+	tmp, err := os.CreateTemp(dir, "put-spool-*.tmp")
 	if err != nil {
 		return nil, fmt.Errorf("create spool file: %w", err)
 	}
@@ -143,10 +139,13 @@ func spoolObjectEncrypted(ctx context.Context, dir string, r io.Reader, bucket s
 		return nil, fmt.Errorf("encrypt spool object: empty domain")
 	}
 	stageStart := time.Now()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create spool dir: %w", err)
 	}
-	tmp, err := os.CreateTemp(dir, ".put-spool-*")
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("set spool dir perms: %w", err)
+	}
+	tmp, err := os.CreateTemp(dir, "put-spool-*.tmp")
 	if err != nil {
 		return nil, fmt.Errorf("create spool file: %w", err)
 	}
@@ -225,10 +224,6 @@ func (s *spooledObject) Cleanup() {
 }
 
 func (b *DistributedBackend) spoolPutObject(ctx context.Context, bucket string, r io.Reader, needsMD5 bool) (*spooledObject, error) {
-	if b.shardSvc != nil && b.shardSvc.segEnc() != nil {
-		domain := fmt.Sprintf("cluster-spool:%d", spoolDomainSeq.Add(1))
-		return spoolObjectEncrypted(ctx, b.spoolDir(), r, bucket, b.shardSvc.segEnc(), domain, needsMD5)
-	}
 	return spoolObject(ctx, b.spoolDir(), r, bucket, needsMD5)
 }
 
