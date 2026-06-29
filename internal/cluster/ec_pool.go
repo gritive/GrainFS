@@ -37,6 +37,51 @@ type streamEncoderKey struct {
 // streamEncoderCache maps streamEncoderKey → reedsolomon.StreamEncoder.
 var streamEncoderCache sync.Map
 
+const maxECSplitPaddingPoolBytes = 64 << 20
+
+var ecSplitPaddingPool sync.Pool
+
+func getECSplitPaddingShards(count, shardSize int) [][]byte {
+	if count <= 0 || shardSize <= 0 {
+		return nil
+	}
+	if v := ecSplitPaddingPool.Get(); v != nil {
+		shardsp := v.(*[][]byte)
+		shards := *shardsp
+		if len(shards) == count {
+			ok := true
+			for i := range shards {
+				if cap(shards[i]) < shardSize {
+					ok = false
+					break
+				}
+			}
+			if ok {
+				for i := range shards {
+					shards[i] = shards[i][:shardSize]
+				}
+				return shards
+			}
+		}
+	}
+	return reedsolomon.AllocAligned(count, shardSize)
+}
+
+func putECSplitPaddingShards(shards [][]byte) {
+	if len(shards) == 0 {
+		return
+	}
+	totalCap := 0
+	for i := range shards {
+		totalCap += cap(shards[i])
+		shards[i] = shards[i][:cap(shards[i])]
+	}
+	if totalCap > maxECSplitPaddingPoolBytes {
+		return
+	}
+	ecSplitPaddingPool.Put(&shards)
+}
+
 // getStreamEncoder returns a reusable reedsolomon stream encoder for cfg at
 // blockSize. A reedsolomon stream encoder owns an internal sync.Pool of aligned
 // per-block scratch buffers (AllocAligned); building a fresh encoder per PUT (as
