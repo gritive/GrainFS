@@ -24,7 +24,7 @@ import (
 // with the tmp+rename write every successful read decodes cleanly.
 func TestWriteQuorumMetaLocal_ConcurrentWriteReadNeverTorn(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
-	svc := NewShardService(t.TempDir(), nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(t.TempDir(), nil, WithShardDEKKeeper(keeper, clusterID))
 
 	cmd := PutObjectMetaCmd{
 		Bucket: "b", Key: "k", Size: 2048, ContentType: "application/octet-stream",

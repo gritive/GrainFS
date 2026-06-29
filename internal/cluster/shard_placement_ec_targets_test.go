@@ -200,8 +200,8 @@ func TestBuildECShardTargets_CarryStripeBytes(t *testing.T) {
 	require.Equal(t, segStripe, segTgt.Placement.StripeBytes, "segment target must carry StripeBytes")
 	require.Equal(t, coalStripe, coalTgt.Placement.StripeBytes, "coalesced target must carry StripeBytes")
 
-	// Datawal path: ResolveShardKeyPlacement -> RepairShardAtShardKey must also
-	// carry StripeBytes. This path still reads the FSM obj: record (EC-repair
+	// ResolveShardKeyPlacement -> RepairShardAtShardKey must also carry
+	// StripeBytes. This path still reads the FSM obj: record (EC-repair
 	// placement resolver), so seed it accordingly.
 	seedLatestObjectMetaVersion(t, backend, "b", "striped", "sv1", objectMeta{
 		Segments: []storage.SegmentRef{

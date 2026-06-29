@@ -57,8 +57,8 @@ func TestReadQuorumMetaVersions_RPC(t *testing.T) {
 	defer trA.Close()
 	defer trB.Close()
 
-	svcA := NewShardService(t.TempDir(), trA, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
-	svcB := NewShardService(t.TempDir(), trB, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svcA := NewShardService(t.TempDir(), trA, WithShardDEKKeeper(keeper, clusterID))
+	svcB := NewShardService(t.TempDir(), trB, WithShardDEKKeeper(keeper, clusterID))
 	trB.RegisterBufferedRoute(transport.RouteShardRPC, svcB.NativeRPCHandler())
 
 	for _, vid := range []string{"v1", "v2"} {
@@ -91,8 +91,8 @@ func TestReadQuorumMetaVersions_UnionsAcrossGroups(t *testing.T) {
 	defer trA.Close()
 	defer trB.Close()
 
-	svcA := NewShardService(t.TempDir(), trA, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
-	svcB := NewShardService(t.TempDir(), trB, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svcA := NewShardService(t.TempDir(), trA, WithShardDEKKeeper(keeper, clusterID))
+	svcB := NewShardService(t.TempDir(), trB, WithShardDEKKeeper(keeper, clusterID))
 	trA.RegisterBufferedRoute(transport.RouteShardRPC, svcA.NativeRPCHandler())
 	trB.RegisterBufferedRoute(transport.RouteShardRPC, svcB.NativeRPCHandler())
 
@@ -423,8 +423,8 @@ func TestS2a_GenerationUnion_DeriveAndDelete(t *testing.T) {
 	defer trA.Close()
 	defer trB.Close()
 
-	svcA := NewShardService(t.TempDir(), trA, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
-	svcB := NewShardService(t.TempDir(), trB, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svcA := NewShardService(t.TempDir(), trA, WithShardDEKKeeper(keeper, clusterID))
+	svcB := NewShardService(t.TempDir(), trB, WithShardDEKKeeper(keeper, clusterID))
 	trA.RegisterBufferedRoute(transport.RouteShardRPC, svcA.NativeRPCHandler())
 	trB.RegisterBufferedRoute(transport.RouteShardRPC, svcB.NativeRPCHandler())
 

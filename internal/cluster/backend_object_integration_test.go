@@ -34,7 +34,7 @@ var _ = Describe("Backend object integration", func() {
 		GinkgoHelper()
 		b.SetECConfig(ECConfig{DataShards: 2, ParityShards: 1})
 		keeper, clusterID := testDEKKeeper(GinkgoT())
-		b.SetShardService(NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID)), []string{b.selfAddr, b.selfAddr, b.selfAddr})
+		b.SetShardService(NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID)), []string{b.selfAddr, b.selfAddr, b.selfAddr})
 	}
 
 	It("puts and gets objects", func() {

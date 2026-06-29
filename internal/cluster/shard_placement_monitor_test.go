@@ -23,7 +23,7 @@ func newTestShardService(t *testing.T) (*ShardService, string) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	keeper, clusterID := testDEKKeeper(t)
-	svc := NewShardService(dir, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(dir, nil, WithShardDEKKeeper(keeper, clusterID))
 	return svc, dir
 }
 

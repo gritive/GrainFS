@@ -185,7 +185,7 @@ var _ = Describe("Backend multipart integration", func() {
 
 	It("encrypts multipart part storage", func() {
 		keeper, clusterID := testDEKKeeper(GinkgoT())
-		b.SetShardService(NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID)), []string{b.selfAddr})
+		b.SetShardService(NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID)), []string{b.selfAddr})
 
 		partBytes := []byte("cluster multipart sensitive payload")
 		upload, err := b.CreateMultipartUpload(ctx, "bucket", "mp.bin", "application/octet-stream")
@@ -297,7 +297,7 @@ func configureChunkedMultipartTestBackend(b *DistributedBackend) {
 	GinkgoHelper()
 	nodes := []string{b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr}
 	keeper, clusterID := testDEKKeeper(GinkgoT())
-	b.SetShardService(NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID)), nodes)
+	b.SetShardService(NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID)), nodes)
 	b.SetECConfig(ECConfig{DataShards: 4, ParityShards: 2})
 	b.chunkedPutChunkSize = testChunkedMultipartChunkSize
 	b.SetShardGroupSource(&fakeShardGroupSource{groups: map[string]ShardGroupEntry{

@@ -35,7 +35,7 @@ var _ = Describe("Coalesce EC integration", func() {
 		GinkgoHelper()
 		b.SetECConfig(ECConfig{DataShards: 4, ParityShards: 2})
 		keeper, clusterID := testDEKKeeper(GinkgoT())
-		opts = append(opts, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID))
+		opts = append(opts, WithShardDEKKeeper(keeper, clusterID))
 		svc := NewShardService(b.root, nil, opts...)
 		b.SetShardService(svc, []string{b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr})
 	}

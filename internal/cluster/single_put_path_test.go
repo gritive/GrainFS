@@ -20,7 +20,7 @@ func newSingleNode1Plus0ChunkCapable(t *testing.T) *DistributedBackend {
 	backend := NewSingletonBackendForTest(t)
 	const selfAddr = "self"
 	keeper, clusterID := testDEKKeeper(t)
-	backend.shardSvc = NewShardService(t.TempDir(), nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	backend.shardSvc = NewShardService(t.TempDir(), nil, WithShardDEKKeeper(keeper, clusterID))
 	backend.selfAddr = selfAddr
 	backend.allNodes = []string{selfAddr}
 	backend.SetECConfig(ECConfig{DataShards: 1, ParityShards: 0})

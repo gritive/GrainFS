@@ -35,7 +35,7 @@ func newTraversalTestShardService(t *testing.T) (*ShardService, string) {
 	t.Helper()
 	root := t.TempDir()
 	keeper, clusterID := testDEKKeeper(t)
-	svc := NewShardService(root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(root, nil, WithShardDEKKeeper(keeper, clusterID))
 	return svc, root
 }
 

@@ -58,7 +58,7 @@ var _ = Describe("Incident repair integration", func() {
 	It("records verified when a concurrent repair already restored the shard", func() {
 		dir := GinkgoT().TempDir()
 		keeper, clusterID := testDEKKeeper(GinkgoT())
-		svc := NewShardService(dir, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID))
+		svc := NewShardService(dir, nil, WithShardDEKKeeper(keeper, clusterID))
 		nodes := []string{"test-node", "other-a", "other-b", "other-c", "other-d", "other-e"}
 		b.SetShardService(svc, nodes)
 		// Placement (NodeIDs + VersionID) lives on the latest-only quorum-meta blob —

@@ -31,7 +31,7 @@ var _ = Describe("Coalesce read and trigger integration", func() {
 		GinkgoHelper()
 		b.SetECConfig(ECConfig{DataShards: 4, ParityShards: 2})
 		keeper, clusterID := testDEKKeeper(GinkgoT())
-		svc := NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID))
+		svc := NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID))
 		b.SetShardService(svc, []string{b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr})
 	}
 

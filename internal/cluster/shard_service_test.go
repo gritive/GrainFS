@@ -22,7 +22,7 @@ func TestShardService_LocalWriteAndRead(t *testing.T) {
 	dir := t.TempDir()
 	tr := transport.MustNewHTTPTransport("test-cluster-psk")
 	keeper, clusterID := testDEKKeeper(t)
-	svc := NewShardService(dir, tr, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(dir, tr, WithShardDEKKeeper(keeper, clusterID))
 
 	// Verify shards directory created
 	_, err := os.Stat(filepath.Join(dir, "shards"))
@@ -82,7 +82,7 @@ func TestShardService_Encryption(t *testing.T) {
 
 	dir := t.TempDir()
 	tr := transport.MustNewHTTPTransport("test-cluster-psk")
-	svc := NewShardService(dir, tr, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(dir, tr, WithShardDEKKeeper(keeper, clusterID))
 
 	plaintext := []byte("secret shard data")
 	require.NoError(t, svc.WriteLocalShard("bkt", "obj", 0, plaintext))
@@ -103,7 +103,7 @@ func TestShardService_OpenLocalShard_EncryptedStreamsPlaintext(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 
 	dir := t.TempDir()
-	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID))
 
 	plaintext := bytes.Repeat([]byte("secret shard data"), 8192)
 	require.NoError(t, svc.WriteLocalShard("bkt", "obj", 0, plaintext))
@@ -127,7 +127,7 @@ func TestShardService_WriteLocalSealedShardVerbatim(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 	dir := t.TempDir()
 	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"),
-		WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+		WithShardDEKKeeper(keeper, clusterID))
 
 	plaintext := bytes.Repeat([]byte("sealed-at-source shard "), 8192)
 	// Source seals (mirrors CPUPool / coordinator seal-at-source).
@@ -157,7 +157,7 @@ func TestShardService_NativeWriteHandler_SealedShardRoundTrip(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 	dir := t.TempDir()
 	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"),
-		WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+		WithShardDEKKeeper(keeper, clusterID))
 
 	plaintext := bytes.Repeat([]byte("rpc sealed shard "), 8192)
 	sealed, err := svc.EncodeEncryptedShardBuffer("bkt", "obj", 3, plaintext)
@@ -211,7 +211,7 @@ func TestShardService_NativeWriteHandler_RejectsTruncatedSealedShard(t *testing.
 	keeper, clusterID := testDEKKeeper(t)
 	dir := t.TempDir()
 	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"),
-		WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+		WithShardDEKKeeper(keeper, clusterID))
 
 	plaintext := bytes.Repeat([]byte("truncated sealed shard "), 8192)
 	sealed, err := svc.EncodeEncryptedShardBuffer("bkt", "obj", 5, plaintext)
@@ -242,7 +242,7 @@ func TestShardService_ReadLocalShardAt_EncryptedShard(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 
 	dir := t.TempDir()
-	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID))
 
 	plaintext := bytes.Repeat([]byte("0123456789abcdef"), 192*1024)
 	require.NoError(t, svc.WriteLocalShard("bkt", "obj", 0, plaintext))
@@ -258,7 +258,7 @@ func TestShardService_ReadLocalShardAt_EncryptedShard(t *testing.T) {
 func TestShardService_ReadLocalShard_FileNotFound(t *testing.T) {
 	dir := t.TempDir()
 	keeper, clusterID := testDEKKeeper(t)
-	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID))
 
 	_, err := svc.ReadLocalShard("bkt", "no-such-obj", 0)
 	require.Error(t, err)
@@ -269,7 +269,7 @@ func TestShardService_ReadLocalShard_DecryptError(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 
 	dir := t.TempDir()
-	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID))
 
 	// Write garbage bytes that look like valid data but aren't valid ciphertext
 	rawPath := filepath.Join(dir, "shards", "bkt", "obj", "shard_0")
@@ -290,7 +290,7 @@ func TestShardService_ReadLocalShard_LegacyShardRejectedAsCorrupt(t *testing.T) 
 	keeper, clusterID := testDEKKeeper(t)
 
 	dir := t.TempDir()
-	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID))
 
 	const bucket = "bkt"
 
@@ -331,7 +331,7 @@ func TestShardService_ResolvePeerAddress(t *testing.T) {
 	f := NewMetaFSM()
 	require.NoError(t, f.applyCmd(makeAddNodeCmd(t, "node-a", "10.0.0.1:7001", 0)))
 	keeper, clusterID := testDEKKeeper(t)
-	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithNodeAddressBook(f), WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithNodeAddressBook(f), WithShardDEKKeeper(keeper, clusterID))
 
 	addr, err := svc.resolvePeerAddress("node-a")
 	require.NoError(t, err)
@@ -361,8 +361,8 @@ func TestShardService_RPCEncryptedWriteRead(t *testing.T) {
 	defer tr2.Close()
 
 	dir1, dir2 := t.TempDir(), t.TempDir()
-	svc1 := NewShardService(dir1, tr1, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
-	svc2 := NewShardService(dir2, tr2, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc1 := NewShardService(dir1, tr1, WithShardDEKKeeper(keeper, clusterID))
+	svc2 := NewShardService(dir2, tr2, WithShardDEKKeeper(keeper, clusterID))
 	tr2.RegisterBufferedRoute(transport.RouteShardRPC, svc2.NativeRPCHandler())
 	tr2.RegisterBufferedRoute(transport.RouteShardRPC, svc2.NativeRPCHandler())
 
@@ -402,8 +402,8 @@ func TestShardService_ReadShardStream_EncryptedStreamsPlaintext(t *testing.T) {
 	defer tr2.Close()
 
 	dir1, dir2 := t.TempDir(), t.TempDir()
-	svc1 := NewShardService(dir1, tr1, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
-	svc2 := NewShardService(dir2, tr2, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc1 := NewShardService(dir1, tr1, WithShardDEKKeeper(keeper, clusterID))
+	svc2 := NewShardService(dir2, tr2, WithShardDEKKeeper(keeper, clusterID))
 	tr2.RegisterShardWriteHandler(svc2.NativeWriteHandler()) // WriteShardStream dials the native route (Phase 8 N6)
 	tr2.RegisterShardReadHandler(svc2.NativeReadHandler())   // ReadShardStream dials the native route (Phase 8 N7-1)
 	tr2.RegisterShardWriteHandler(svc2.NativeWriteHandler())
@@ -438,8 +438,8 @@ func TestShardService_ReadShardRange_RejectsMediumSingleFrame(t *testing.T) {
 
 	dir1, dir2 := t.TempDir(), t.TempDir()
 	keeper, clusterID := testDEKKeeper(t)
-	svc1 := NewShardService(dir1, tr1, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
-	svc2 := NewShardService(dir2, tr2, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc1 := NewShardService(dir1, tr1, WithShardDEKKeeper(keeper, clusterID))
+	svc2 := NewShardService(dir2, tr2, WithShardDEKKeeper(keeper, clusterID))
 	tr2.RegisterBufferedRoute(transport.RouteShardRPC, svc2.NativeRPCHandler())
 	tr2.RegisterBufferedRoute(transport.RouteShardRPC, svc2.NativeRPCHandler())
 
@@ -468,8 +468,8 @@ func TestShardService_RPCWriteReadDelete(t *testing.T) {
 	dir2 := t.TempDir()
 
 	keeper, clusterID := testDEKKeeper(t)
-	svc1 := NewShardService(dir1, tr1, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
-	svc2 := NewShardService(dir2, tr2, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc1 := NewShardService(dir1, tr1, WithShardDEKKeeper(keeper, clusterID))
+	svc2 := NewShardService(dir2, tr2, WithShardDEKKeeper(keeper, clusterID))
 
 	// Set tr2's stream handler to svc2's handler (simulating node2's shard server)
 	tr2.RegisterBufferedRoute(transport.RouteShardRPC, svc2.NativeRPCHandler())
@@ -537,7 +537,7 @@ func requireShardServiceTraceStage(t *testing.T, events []PutTraceEvent, stage P
 func TestWriteLocalShard_Atomic(t *testing.T) {
 	dir := t.TempDir()
 	keeper, clusterID := testDEKKeeper(t)
-	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID))
 
 	data := []byte("atomic-shard-payload")
 	require.NoError(t, svc.WriteLocalShard("bkt", "key/v1", 0, data))
@@ -566,7 +566,7 @@ func TestWriteLocalShard_OverwritePreservesOriginalOnError(t *testing.T) {
 	}
 	dir := t.TempDir()
 	keeper, clusterID := testDEKKeeper(t)
-	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID))
 
 	original := []byte("original-safe-content")
 	require.NoError(t, svc.WriteLocalShard("bkt", "key", 0, original))
@@ -592,7 +592,7 @@ func TestWriteReadLocalShard_Encrypted_AAD(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 
 	dir := t.TempDir()
-	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID))
 
 	data := []byte("secret shard payload")
 	require.NoError(t, svc.WriteLocalShard("mybucket", "obj/v1", 2, data))
@@ -613,7 +613,7 @@ func TestWriteLocalShardStream_EncryptedUsesChunkedEnvelope(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 
 	dir := t.TempDir()
-	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID))
 
 	data := bytes.Repeat([]byte("stream-secret-"), 8192)
 	require.NoError(t, svc.WriteLocalShardStream("b", "k", 1, bytes.NewReader(data)))
@@ -632,7 +632,7 @@ func TestWriteLocalShard_AAD_LocationBinding(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 
 	dir := t.TempDir()
-	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(dir, transport.MustNewHTTPTransport("test-cluster-psk"), WithShardDEKKeeper(keeper, clusterID))
 
 	data := []byte("payload")
 	require.NoError(t, svc.WriteLocalShard("b", "k", 0, data))
@@ -688,8 +688,8 @@ func TestShardService_NativeWriteHandler_PlainAndSealed(t *testing.T) {
 	defer tr2.Close()
 
 	dir1, dir2 := t.TempDir(), t.TempDir()
-	svc1 := NewShardService(dir1, tr1, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
-	svc2 := NewShardService(dir2, tr2, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc1 := NewShardService(dir1, tr1, WithShardDEKKeeper(keeper, clusterID))
+	svc2 := NewShardService(dir2, tr2, WithShardDEKKeeper(keeper, clusterID))
 	tr2.RegisterShardWriteHandler(svc2.NativeWriteHandler())
 	tr2.RegisterShardReadHandler(svc2.NativeReadHandler()) // ReadShardStream dials the native route (Phase 8 N7-1)
 	// Tunnel registrations mirror boot wiring: the write tunnel handler stays

@@ -34,7 +34,7 @@ var _ = Describe("Backend EC object integration", func() {
 		// Reuse the backend's existing keeper so FSM-sealed meta written before
 		// this reconfigure (e.g. legacy-convert tests) stays decryptable.
 		keeper, clusterID := b.shardSvc.DEKKeeper(), b.shardSvc.ClusterID()
-		b.SetShardService(NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID)), nodes)
+		b.SetShardService(NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID)), nodes)
 	}
 
 	It("rejects an object key that escapes the shard data root", func() {

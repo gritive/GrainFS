@@ -269,8 +269,8 @@ func TestListObjectsPerVersion_GenerationUnion(t *testing.T) {
 	defer trA.Close()
 	defer trB.Close()
 
-	svcA := NewShardService(t.TempDir(), trA, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
-	svcB := NewShardService(t.TempDir(), trB, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svcA := NewShardService(t.TempDir(), trA, WithShardDEKKeeper(keeper, clusterID))
+	svcB := NewShardService(t.TempDir(), trB, WithShardDEKKeeper(keeper, clusterID))
 	trA.RegisterBufferedRoute(transport.RouteShardRPC, svcA.NativeRPCHandler())
 	trB.RegisterBufferedRoute(transport.RouteShardRPC, svcB.NativeRPCHandler())
 
@@ -379,8 +379,8 @@ func TestScanQuorumMetaVersions_RPC(t *testing.T) {
 	defer trA.Close()
 	defer trB.Close()
 
-	svcA := NewShardService(t.TempDir(), trA, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
-	svcB := NewShardService(t.TempDir(), trB, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svcA := NewShardService(t.TempDir(), trA, WithShardDEKKeeper(keeper, clusterID))
+	svcB := NewShardService(t.TempDir(), trB, WithShardDEKKeeper(keeper, clusterID))
 	trB.RegisterBufferedRoute(transport.RouteShardRPC, svcB.NativeRPCHandler())
 
 	writeVerBlob(t, svcB, "bkt", "k1", "019ed400-0000-7000-8000-000000000001", PutObjectMetaCmd{ETag: "k1-v1"})

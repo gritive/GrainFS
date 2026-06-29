@@ -84,7 +84,7 @@ func TestWriteEncryptedShardFile_LockedFsyncOrder(t *testing.T) {
 }
 
 // TestSmallShard_Fsynced proves S2: a small shard (< 1 MiB) is fsynced (file +
-// dir chain) at write time — durability is direct fsync (no WAL).
+// dir chain) at write time.
 func TestSmallShard_Fsynced(t *testing.T) {
 	backend, _, _, _ := newS1ShardSvc(t,
 		ECConfig{DataShards: 1, ParityShards: 0}, []string{"self"},
@@ -109,7 +109,7 @@ func TestSmallShard_Fsynced(t *testing.T) {
 }
 
 // TestLargeNoRedundancy_Fsynced proves the no-redundancy large path is fsynced
-// (file + dir chain) directly (no WAL, no EC parity to reconstruct from).
+// (file + dir chain) directly because there is no EC parity to reconstruct from.
 func TestLargeNoRedundancy_Fsynced(t *testing.T) {
 	backend, _, _, _ := newS1ShardSvc(t,
 		ECConfig{DataShards: 1, ParityShards: 0}, []string{"self"},
@@ -193,23 +193,4 @@ func TestDBV_ECCommitPath_DirFsyncFailureBlocksVisibility(t *testing.T) {
 
 	_, _, gerr := backend.GetObject(context.Background(), "b", "obj-dbv2")
 	require.Error(t, gerr, "a PUT whose durability failed must not be visible via GET")
-}
-
-// TestS2Recovery_FsyncedShardReadsBackWithoutWAL proves recovery passivity for
-// the fsync classes: a small shard written with NO WAL record reads back — the
-// fsynced file is the source of truth, no WAL replay required.
-func TestS2Recovery_FsyncedShardReadsBackWithoutWAL(t *testing.T) {
-	backend, _, _, _ := newS1ShardSvc(t,
-		ECConfig{DataShards: 1, ParityShards: 0}, []string{"self"},
-		WithNoRedundancy(func() bool { return true }))
-	ctx := context.Background()
-	payload := []byte("s2-recovery-payload")
-	_, err := backend.PutObject(ctx, "b", "obj", bytes.NewReader(payload), "application/octet-stream")
-	require.NoError(t, err)
-
-	rc, _, err := backend.GetObject(ctx, "b", "obj")
-	require.NoError(t, err)
-	defer rc.Close()
-	got, _ := io.ReadAll(rc)
-	require.Equal(t, payload, got)
 }
