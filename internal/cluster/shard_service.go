@@ -529,41 +529,8 @@ func (s *ShardService) RemoveBucketPhysicalTreesRPC(ctx context.Context, peer, b
 	return nil
 }
 
-// PromoteStagedShards renames a segment's staged shard dirs (stagingKey) to their final path
-// (finalKey) on a remote node — the remote counterpart of PromoteLocalStagedShards. The single-Key
-// envelope carries stagingKey in Key and finalKey in Data. PR1 segment staging.
-func (s *ShardService) PromoteStagedShards(ctx context.Context, peer, bucket, stagingKey, finalKey string) error {
-	peerAddr, err := s.resolvePeerAddress(peer)
-	if err != nil {
-		return err
-	}
-	if s.transport == nil {
-		return fmt.Errorf("shard service: no transport")
-	}
-	envb := buildShardEnvelope("PromoteStagedShards", bucket, stagingKey, 0, []byte(finalKey))
-	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
-	respEnvelope, err := s.callShardRPC(ctx, peerAddr, envb)
-	if err != nil {
-		return fmt.Errorf("promote staged shards on %s: %w", peerAddr, err)
-	}
-	// Promote sits on the commit critical path (all-or-fail, data-before-meta), so
-	// the handler's in-band application error (rename/mkdir/path failure surfaces as
-	// an "Error" reply envelope, NOT a transport error) MUST be parsed and treated
-	// as a promote failure — otherwise the manifest could commit while a peer's
-	// shard is still staged. This differs from DeleteShards, whose best-effort
-	// cleanup can swallow the reply.
-	rpcType, _, err := unmarshalEnvelope(respEnvelope)
-	if err != nil {
-		return fmt.Errorf("promote staged shards on %s: unmarshal response: %w", peerAddr, err)
-	}
-	if rpcType == "Error" {
-		return fmt.Errorf("promote staged shards on %s: remote error", peer)
-	}
-	return nil
-}
-
 // PromoteStagedShardsBatch renames multiple staged segment shard dirs on one
-// remote node in one RPC. It is the batched counterpart of PromoteStagedShards.
+// remote node in one RPC.
 func (s *ShardService) PromoteStagedShardsBatch(ctx context.Context, peer, bucket string, pairs []stagedPromotePair) error {
 	if len(pairs) == 0 {
 		return nil
@@ -724,8 +691,6 @@ func (s *ShardService) handleRPC(payload []byte) []byte {
 		return s.handleDelete(sr)
 	case "RemoveBucketPhysicalTrees":
 		return s.handleRemoveBucketPhysicalTrees(sr)
-	case "PromoteStagedShards":
-		return s.handlePromoteStaged(sr)
 	case "PromoteStagedShardsBatch":
 		return s.handlePromoteStagedBatch(sr)
 	case "WriteQuorumMeta":
@@ -1366,15 +1331,6 @@ func (s *ShardService) handleDelete(sr *shardRequest) []byte {
 
 func (s *ShardService) handleRemoveBucketPhysicalTrees(sr *shardRequest) []byte {
 	if err := s.RemoveBucketPhysicalTrees(sr.Bucket); err != nil {
-		return s.errorResponse(err.Error())
-	}
-	return s.okResponse(nil)
-}
-
-// handlePromoteStaged renames staged segment shard dirs (sr.Key) to the final path; the final logical
-// key is carried in sr.Data (the single-Key envelope). PR1 segment staging.
-func (s *ShardService) handlePromoteStaged(sr *shardRequest) []byte {
-	if err := s.PromoteLocalStagedShards(sr.Bucket, sr.Key, string(sr.Data)); err != nil {
 		return s.errorResponse(err.Error())
 	}
 	return s.okResponse(nil)

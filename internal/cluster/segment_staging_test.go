@@ -194,18 +194,22 @@ func TestPromoteLocalStagedShards_DstAlreadyPresent_StillFsyncs(t *testing.T) {
 	require.True(t, sawDst, "fsync must cover the final dst path, got %v", synced)
 }
 
-// TestHandlePromoteStaged_Failure_ReturnsErrorEnvelope locks the receiver half of
-// the all-or-fail contract: when PromoteLocalStagedShards fails, the RPC handler
-// must surface it as an in-band "Error" reply envelope (which the now-fixed
-// PromoteStagedShards client parses), not a silent OK.
-func TestHandlePromoteStaged_Failure_ReturnsErrorEnvelope(t *testing.T) {
+// TestHandlePromoteStagedBatch_Failure_ReturnsErrorEnvelope locks the receiver
+// half of the all-or-fail contract for the batch path: when
+// PromoteLocalStagedShards fails, handlePromoteStagedBatch must surface it as
+// an in-band "Error" reply envelope, not a silent OK.
+func TestHandlePromoteStagedBatch_Failure_ReturnsErrorEnvelope(t *testing.T) {
 	svc, _ := newTestShardService(t)
-	// stagingKey with nothing staged -> PromoteLocalStagedShards fails.
-	sr := &shardRequest{Bucket: "b", Key: ".segstaging/txnY/blobY", Data: []byte("obj/segments/blobY")}
-	resp := svc.handlePromoteStaged(sr)
+	// Encode one pair where the stagingKey doesn't exist -> PromoteLocalStagedShards fails.
+	data, err := encodeStagedPromotePairs([]stagedPromotePair{
+		{stagingKey: ".segstaging/txnZ/blobZ", finalKey: "obj/segments/blobZ"},
+	})
+	require.NoError(t, err)
+	sr := &shardRequest{Bucket: "b", Data: data}
+	resp := svc.handlePromoteStagedBatch(sr)
 	rpcType, _, err := unmarshalEnvelope(resp)
 	require.NoError(t, err)
-	require.Equal(t, "Error", rpcType, "a failed promote must reply with an Error envelope")
+	require.Equal(t, "Error", rpcType, "a failed batch promote must reply with an Error envelope")
 }
 
 func TestWriteLocalShardStaged_AADIsFinalKey_PromoteReadable(t *testing.T) {
