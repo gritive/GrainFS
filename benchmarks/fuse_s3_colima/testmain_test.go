@@ -65,7 +65,6 @@ func TestMain(m *testing.M) {
 		"serve",
 		"--data", dataDir,
 		"--port", colimaHTTPPort,
-		"--nbd-port", "0",
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
