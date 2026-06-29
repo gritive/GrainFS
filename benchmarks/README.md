@@ -3,12 +3,74 @@
 For benchmark principles, result interpretation, and RustFS/MinIO comparison
 rules, see [`docs/reference/benchmarks.md`](../docs/reference/benchmarks.md).
 
-## S3-Compatible Comparison
+## GCP Single-Node Encrypted Comparison
+
+Use `gcp/bench_gcp_cluster.sh` for publishable single-node GrainFS vs MinIO
+performance comparisons. The script provisions a GCP client VM plus storage
+VMs, builds `NEW_REF` on Linux, runs GrainFS single-node on `node-0` with
+at-rest encryption, runs MinIO single-node on the same VM class with SSE-S3
+auto-encryption, and drives both from the in-network client with MinIO `warp`.
+
+Keep `RESULT_DIR` exported across subcommands; otherwise each invocation creates
+a new timestamped artifact directory. Commit the ref you want to measure before
+running the script because `build` uses `git archive`.
+
+```bash
+export PROJECT=grainfs
+export ZONE=asia-northeast3-a
+export PREFIX=gr-single
+export NODE_COUNT=1
+export NEW_REF=HEAD
+export OLD_REF=master
+export RUNS=3
+export RESULT_DIR="$PWD/benchmarks/profiles/gcp-single-$(date +%Y%m%d-%H%M%S)"
+export WARP_OPS=put,get,stat
+export WARP_OBJ_SIZE=10MiB
+export WARP_CONCURRENT=32
+export WARP_DURATION=1m
+export WARP_OBJECTS=4096
+
+./benchmarks/gcp/bench_gcp_cluster.sh up
+./benchmarks/gcp/bench_gcp_cluster.sh build
+for i in $(seq 1 "$RUNS"); do
+  ./benchmarks/gcp/bench_gcp_cluster.sh single "$i"
+  ./benchmarks/gcp/bench_gcp_cluster.sh minio "$i"
+done
+./benchmarks/gcp/bench_gcp_cluster.sh single-verdict | tee "$RESULT_DIR/single-verdict.txt"
+./benchmarks/gcp/bench_gcp_cluster.sh down
+# results: benchmarks/profiles/gcp-single-<timestamp>/
+```
+
+The default GCP workload is signed S3 `warp` with 10 MiB objects, concurrency
+32, 1 minute per operation, `put,get,stat`, 4096 objects, and `WARP_NOCLEAR=1`
+inside the script so GET and stat measure the objects created by PUT. GrainFS
+pprof snapshots are saved under `single/run<N>/pprof/`; raw warp artifacts are
+saved under `single/run<N>/raw/` and `minio/run<N>/raw/`.
+
+Always run `down` after preserving results; `full` intentionally does not
+auto-teardown VMs.
+
+## GCP Cross-Binary A/B
+
+Use the same GCP wrapper for paired GrainFS binary comparisons. This path boots
+`NEW_REF` and `OLD_REF`, runs the same warp workload for each arm, and aggregates
+`run<N>/{new,old}` results with `lib/ab_verdict.py`.
+
+```bash
+export RESULT_DIR="$PWD/benchmarks/profiles/gcp-ab-$(date +%Y%m%d-%H%M%S)"
+RUNS=3 WARP_OBJ_SIZE=10MiB WARP_CONCURRENT=32 WARP_DURATION=1m \
+  ./benchmarks/gcp/bench_gcp_cluster.sh full
+# results: benchmarks/profiles/gcp-ab-<timestamp>/verdict.md
+```
+
+## Local S3-Compatible Comparison
 
 `make bench`, `make bench-cluster`, and `make bench-s3-compat-compare` run the
-official S3 workload with MinIO `warp`. `make bench` targets a local GrainFS
-single-node server, `make bench-cluster` targets a local GrainFS 4-node cluster,
-and `make bench-s3-compat-compare` compares GrainFS single-node with any native
+official S3 workload with MinIO `warp` on the local machine. Use these targets
+for smoke checks and local regressions, not for publishable GrainFS vs MinIO
+claims. `make bench` targets a local GrainFS single-node server,
+`make bench-cluster` targets a local GrainFS 4-node cluster, and
+`make bench-s3-compat-compare` compares GrainFS single-node with any native
 MinIO/RustFS binaries available on `PATH`. The comparison script can also boot
 local 4-node MinIO and RustFS clusters with `TARGETS=minio-cluster` and
 `TARGETS=rustfs-cluster`. Set `MINIO_BIN`, `RUSTFS_BIN`, `MINIO_URL`,
@@ -81,22 +143,9 @@ adds summary warnings when the host already has `grainfs serve` processes or
 the benchmark filesystem is at least 90 percent full. The same file records
 `load1`, `cpu_count`, `load_per_cpu`, and `max_load_per_cpu`; strict mode fails
 when `load_per_cpu` exceeds `BENCH_MAX_LOAD_PER_CPU` (default `1.0`). Use
-strict mode for publishable runs so contaminated host state fails before any
-benchmark server starts:
+strict mode for local comparison runs so contaminated host state fails before
+any benchmark server starts:
 
 ```bash
 BENCH_STRICT_HOST=1 WARP_OPS=put,get make bench-s3-compat-compare
-```
-
-## GCP Cross-Binary A/B
-
-`gcp/bench_gcp_cluster.sh` runs paired GrainFS binary comparisons on GCP: it
-builds `NEW_REF` and `OLD_REF` on a Linux client VM, boots the cluster with each
-binary, runs the same warp workload, and aggregates `run<N>/{new,old}` results
-with `lib/ab_verdict.py`.
-
-```bash
-RUNS=3 WARP_OBJ_SIZE=10MiB WARP_CONCURRENT=32 WARP_DURATION=1m \
-  ./benchmarks/gcp/bench_gcp_cluster.sh full
-# results: benchmarks/profiles/gcp-ab-<timestamp>/verdict.md
 ```

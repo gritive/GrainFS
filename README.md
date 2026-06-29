@@ -54,6 +54,7 @@ chmod 0600 "$DATA_DIR/keys/0.key" "$DATA_DIR/cluster.id"
   --bind-addr <nodeB>:7001 \
   --cluster-key "$CLUSTER_KEY"
 ```
+
 </details>
 
 <details>
@@ -82,6 +83,7 @@ GRAINFS_INVITE_BUNDLE='<bundle-token>' ./bin/grainfs serve \
 
 For production steps, verification, cutover, and revocation, see
 [`docs/operators/zero-ca-cluster-join.md`](docs/operators/zero-ca-cluster-join.md).
+
 </details>
 
 <details>
@@ -93,6 +95,7 @@ DATA_DIR=./tmp
 ./bin/grainfs iam policy attach readwrite --sa <id> --endpoint "$DATA_DIR/admin.sock" --i-know
 ./bin/grainfs iam bucket create analytics --attach-sa <id> --attach-policy readwrite --endpoint "$DATA_DIR/admin.sock"
 ```
+
 </details>
 
 <details>
@@ -100,32 +103,33 @@ DATA_DIR=./tmp
 
 TLS / encryption-key / audit / proxy-trust — all hot-applyable via `config set`.
 See [`docs/operators/deploy-production-cluster.md`](docs/operators/deploy-production-cluster.md).
+
 </details>
 
 ## What It Supports
 
-| Area | Summary | Details |
-| --- | --- | --- |
-| S3 API | Bucket/object basics, AppendObject (S3 Express), multipart upload/listing, SigV4, presigned URL, form upload | [S3 compatibility](docs/reference/s3-compatibility.md) |
-| Cluster durability | Custom Raft, zero-config EC profile, shard integrity envelope | [Runbook](docs/operators/runbook.md) |
-| Operations | Object browser, metrics, balancer status, incidents, recovery drills | [Documentation](#documentation) |
+| Area               | Summary                                                                                                      | Details                                                |
+| ------------------ | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------ |
+| S3 API             | Bucket/object basics, AppendObject (S3 Express), multipart upload/listing, SigV4, presigned URL, form upload | [S3 compatibility](docs/reference/s3-compatibility.md) |
+| Cluster durability | Custom Raft, zero-config EC profile, shard integrity envelope                                                | [Runbook](docs/operators/runbook.md)                   |
+| Operations         | Object browser, metrics, balancer status, incidents, recovery drills                                         | [Documentation](#documentation)                        |
 
 The compatibility tables use `Supported` only for features covered by e2e,
 conformance, or real client integration tests. Unit tests alone do not qualify.
 
 ## Performance
 
-Latest same-host single-node `warp` runs, 64 KiB objects, concurrency 32,
-signed S3 requests, 0 errors:
+Latest GCP single-node encrypted `warp` run, 10 MiB object size, 2048 total
+objects, concurrency 32, 1 minute per operation, signed S3 requests, 0 errors:
 
 | Target    | PUT MiB/s | GET MiB/s | vs MinIO PUT | vs MinIO GET |
 | --------- | --------: | --------: | -----------: | -----------: |
-| `GrainFS` |    548.30 |   1849.34 |        3.13x |        4.04x |
-| MinIO     |    175.14 |    457.81 |        1.00x |        1.00x |
-| RustFS    |     26.62 |    437.77 |        0.15x |        0.96x |
+| `GrainFS` |    210.45 |    717.21 |        0.98x |        1.44x |
+| MinIO     |    213.90 |    499.07 |        1.00x |        1.00x |
 
-Methodology and raw artifacts:
-[benchmark reference](docs/reference/benchmarks.md#latest-local-result).
+`GrainFS` ran with XAES-256-GCM at-rest encryption; MinIO ran with SSE-S3
+auto-encryption on the same GCP VM class. Methodology and script flags:
+[benchmarks/README.md](benchmarks/README.md#gcp-single-node-encrypted-comparison).
 
 ## Core Concepts
 
@@ -146,21 +150,21 @@ Use the compatibility docs for protocol-specific limits.
 
 ## Common Workflows
 
-| Workflow | Command or entry point |
-| --- | --- |
-| Create/list service accounts, keys, and policies | `grainfs iam --endpoint <data>/admin.sock ...` |
-| Inspect cluster peers | `grainfs cluster --endpoint <data>/admin.sock peers` |
-| Add a peer with zero-CA invite join | [`docs/operators/zero-ca-cluster-join.md`](docs/operators/zero-ca-cluster-join.md) |
-| Mint a zero-CA join invite (leader) | `grainfs cluster invite create --endpoint <data>/admin.sock --ttl 1h` |
-| Drop the shared cluster-key accept path | `grainfs cluster --endpoint <data>/admin.sock complete-cutover` |
-| Revoke a zero-CA node identity | `grainfs cluster --endpoint <data>/admin.sock revoke-node <node-id>` |
-| Inspect object placement | `grainfs cluster --endpoint <data>/admin.sock placement [bucket] [key]` |
-| Grow placement groups on a running cluster | `grainfs cluster expand-placement --endpoint <data>/admin.sock` |
-| Retire a drained placement generation | `grainfs cluster retire-placement-generation --endpoint <data>/admin.sock --epoch <n>` |
-| Configure cluster policy | `grainfs cluster config --endpoint <data>/admin.sock ...` |
-| Rotate / inspect the cluster encryption key (KEK) | `grainfs encrypt kek status\|rotate\|retire\|prune --endpoint <data>/admin.sock` |
-| Check balancer status | `curl http://localhost:9000/api/cluster/balancer/status` |
-| Check incidents | `curl http://localhost:9000/api/incidents` |
+| Workflow                                          | Command or entry point                                                                 |
+| ------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| Create/list service accounts, keys, and policies  | `grainfs iam --endpoint <data>/admin.sock ...`                                         |
+| Inspect cluster peers                             | `grainfs cluster --endpoint <data>/admin.sock peers`                                   |
+| Add a peer with zero-CA invite join               | [`docs/operators/zero-ca-cluster-join.md`](docs/operators/zero-ca-cluster-join.md)     |
+| Mint a zero-CA join invite (leader)               | `grainfs cluster invite create --endpoint <data>/admin.sock --ttl 1h`                  |
+| Drop the shared cluster-key accept path           | `grainfs cluster --endpoint <data>/admin.sock complete-cutover`                        |
+| Revoke a zero-CA node identity                    | `grainfs cluster --endpoint <data>/admin.sock revoke-node <node-id>`                   |
+| Inspect object placement                          | `grainfs cluster --endpoint <data>/admin.sock placement [bucket] [key]`                |
+| Grow placement groups on a running cluster        | `grainfs cluster expand-placement --endpoint <data>/admin.sock`                        |
+| Retire a drained placement generation             | `grainfs cluster retire-placement-generation --endpoint <data>/admin.sock --epoch <n>` |
+| Configure cluster policy                          | `grainfs cluster config --endpoint <data>/admin.sock ...`                              |
+| Rotate / inspect the cluster encryption key (KEK) | `grainfs encrypt kek status\|rotate\|retire\|prune --endpoint <data>/admin.sock`       |
+| Check balancer status                             | `curl http://localhost:9000/api/cluster/balancer/status`                               |
+| Check incidents                                   | `curl http://localhost:9000/api/incidents`                                             |
 
 Operational details live in [docs/index.md](docs/index.md#operators).
 
@@ -171,6 +175,7 @@ Requirements:
 - Go 1.26+
 - `golangci-lint` (run by `make lint`, which `make build` depends on)
 - `warp` for S3-compatible comparison benchmarks
+- `gcloud` CLI and project access for GCP performance benchmarks
 - Linux client tooling for FUSE-over-S3 integration tests
 
 Common commands:
@@ -183,7 +188,13 @@ make test-e2e
 make lint
 ```
 
-Benchmark targets:
+GCP benchmark entry point:
+
+```bash
+./benchmarks/gcp/bench_gcp_cluster.sh {up|build|single|minio|single-verdict|down}
+```
+
+Local benchmark targets:
 
 ```bash
 make bench
@@ -197,13 +208,13 @@ methodology and result interpretation. Use
 
 ## Documentation
 
-| Topic | Document |
-| --- | --- |
-| Documentation hub | [docs/index.md](docs/index.md) |
-| Users | [docs/users/guide.md](docs/users/guide.md) |
-| Operators | [docs/index.md#operators](docs/index.md#operators) |
-| Reference | [docs/index.md#reference](docs/index.md#reference) |
-| Explanation | [docs/index.md#explanation](docs/index.md#explanation) |
+| Topic             | Document                                               |
+| ----------------- | ------------------------------------------------------ |
+| Documentation hub | [docs/index.md](docs/index.md)                         |
+| Users             | [docs/users/guide.md](docs/users/guide.md)             |
+| Operators         | [docs/index.md#operators](docs/index.md#operators)     |
+| Reference         | [docs/index.md#reference](docs/index.md#reference)     |
+| Explanation       | [docs/index.md#explanation](docs/index.md#explanation) |
 
 ## License
 

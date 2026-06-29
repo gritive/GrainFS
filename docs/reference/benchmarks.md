@@ -19,13 +19,74 @@ Do not compare `GrainFS` with RustFS, MinIO, or any other S3-compatible store
 unless all systems run on the same host class, with comparable durability,
 object sizes, concurrency, and cold/warm-cache rules.
 
+## Current Publishable Path
+
+Use the GCP single-node encrypted benchmark for GrainFS vs MinIO performance
+claims. It builds a committed GrainFS `NEW_REF` on a Linux client VM, starts
+single-node GrainFS on `node-0` with at-rest encryption, starts single-node MinIO
+on the same VM class with SSE-S3 auto-encryption, and drives both from the
+in-network client with signed MinIO `warp` requests.
+
+Keep `RESULT_DIR` exported across subcommands so all runs land in one artifact
+directory:
+
+```bash
+export PROJECT=grainfs
+export ZONE=asia-northeast3-a
+export PREFIX=gr-single
+export NODE_COUNT=1
+export NEW_REF=HEAD
+export OLD_REF=master
+export RUNS=3
+export RESULT_DIR="$PWD/benchmarks/profiles/gcp-single-$(date +%Y%m%d-%H%M%S)"
+export WARP_OPS=put,get,stat
+export WARP_OBJ_SIZE=10MiB
+export WARP_CONCURRENT=32
+export WARP_DURATION=1m
+export WARP_OBJECTS=4096
+
+./benchmarks/gcp/bench_gcp_cluster.sh up
+./benchmarks/gcp/bench_gcp_cluster.sh build
+for i in $(seq 1 "$RUNS"); do
+  ./benchmarks/gcp/bench_gcp_cluster.sh single "$i"
+  ./benchmarks/gcp/bench_gcp_cluster.sh minio "$i"
+done
+./benchmarks/gcp/bench_gcp_cluster.sh single-verdict | tee "$RESULT_DIR/single-verdict.txt"
+./benchmarks/gcp/bench_gcp_cluster.sh down
+```
+
+Artifacts:
+
+- `single/run<N>/warp-results.tsv`: GrainFS throughput and latency rows.
+- `minio/run<N>/warp-results.tsv`: MinIO throughput and latency rows.
+- `single/run<N>/pprof/`: GrainFS CPU, heap, allocs, goroutine, mutex, and block profiles.
+- `single-verdict.txt`: side-by-side summary captured from `single-verdict`.
+
+### Latest GCP Single-Node Encrypted Result
+
+Captured on 2026-06-30 KST in `asia-northeast3-a` with `n2-standard-4` VMs,
+10 MiB object size, 2048 total objects, concurrency 32, 1 minute per operation,
+signed S3 requests, and 0 errors. `GrainFS` ran with XAES-256-GCM at-rest
+encryption; MinIO ran with SSE-S3 auto-encryption.
+
+| Target | PUT MiB/s | GET MiB/s | vs MinIO PUT | vs MinIO GET |
+| --- | ---: | ---: | ---: | ---: |
+| `GrainFS` | 210.45 | 717.21 | 0.98x | 1.44x |
+| MinIO | 213.90 | 499.07 | 1.00x | 1.00x |
+
+Raw artifact path from the run:
+`benchmarks/profiles/gcp-single-allenc-buffer-reuse-20260630-021115`.
+
 ## Existing Benchmark Targets
 
-| Target                                        | Scope                                              | Primary artifacts                                                   |
-| --------------------------------------------- | -------------------------------------------------- | ------------------------------------------------------------------- |
-| `make bench`                                  | Single-node S3 `warp` PUT/GET workload             | `benchmarks/profiles/s3-compat-compare-*`                           |
-| `make bench-cluster`                          | 3-node S3 `warp` PUT/GET workload                  | `benchmarks/profiles/s3-compat-compare-*`, cluster logs             |
-| `make bench-s3-compat-compare`                | `GrainFS` vs native MinIO/RustFS S3 `warp` workload | `benchmarks/profiles/s3-compat-compare-*`                           |
+| Target                                           | Scope                                                        | Primary artifacts                                                   |
+| ------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------------- |
+| `benchmarks/gcp/bench_gcp_cluster.sh single`     | GCP single-node GrainFS `warp` workload with pprof           | `benchmarks/profiles/gcp-single-*/single/run<N>/`                   |
+| `benchmarks/gcp/bench_gcp_cluster.sh minio`      | GCP single-node MinIO SSE-S3 `warp` workload                 | `benchmarks/profiles/gcp-single-*/minio/run<N>/`                    |
+| `benchmarks/gcp/bench_gcp_cluster.sh full`       | GCP cross-binary GrainFS A/B workload                        | `benchmarks/profiles/gcp-ab-*/verdict.md`                           |
+| `make bench`                                     | Local single-node S3 `warp` smoke/regression workload        | `benchmarks/profiles/s3-compat-compare-*`                           |
+| `make bench-cluster`                             | Local cluster S3 `warp` smoke/regression workload            | `benchmarks/profiles/s3-compat-compare-*`, cluster logs             |
+| `make bench-s3-compat-compare`                   | Local same-host GrainFS vs native MinIO/RustFS comparison    | `benchmarks/profiles/s3-compat-compare-*`                           |
 
 ## Result Interpretation
 
@@ -58,23 +119,24 @@ Use this protocol before publishing `GrainFS` vs RustFS vs MinIO results.
 | Observability | Capture CPU/RSS, process logs, and raw benchmark artifacts.          |
 | Repetition    | Run at least three iterations and report median plus spread.         |
 
-For publishable local results, run benchmark scripts with `BENCH_STRICT_HOST=1`.
-The S3 warp scripts write `host-preflight.txt` into the raw artifact
-directory and fail before starting benchmark backends when the host already has
-`grainfs serve` processes or the benchmark filesystem is at least 90 percent
-full. The same preflight records `load1`, `cpu_count`, `load_per_cpu`, and
-`max_load_per_cpu`; strict mode also fails when `load_per_cpu` exceeds
-`BENCH_MAX_LOAD_PER_CPU` (default `1.0`). Without strict mode, those conditions
-are warning-only and the resulting throughput/RSS rows must be treated as
-contaminated unless the extra load is intentional and documented.
+For local smoke/regression results, run benchmark scripts with
+`BENCH_STRICT_HOST=1` when host contamination matters. The S3 warp scripts write
+`host-preflight.txt` into the raw artifact directory and fail before starting
+benchmark backends when the host already has `grainfs serve` processes or the
+benchmark filesystem is at least 90 percent full. The same preflight records
+`load1`, `cpu_count`, `load_per_cpu`, and `max_load_per_cpu`; strict mode also
+fails when `load_per_cpu` exceeds `BENCH_MAX_LOAD_PER_CPU` (default `1.0`).
+Without strict mode, those conditions are warning-only and the resulting
+throughput/RSS rows must be treated as contaminated unless the extra load is
+intentional and documented.
 
 RustFS and MinIO are valid comparison anchors. Do not claim parity until this
 document or an adjacent report links a reproducible run.
 
-`benchmarks/bench_s3_compat_compare.sh` implements the local same-host version
-of this protocol with MinIO `warp` as the official comparison tool. It prefers
-native binaries or explicit external endpoints and skips unusable local builds,
-such as license-gated MinIO AIStor binaries. Set
+`benchmarks/bench_s3_compat_compare.sh` implements the local same-host smoke
+version of this protocol with MinIO `warp` as the official comparison tool. It
+prefers native binaries or explicit external endpoints and skips unusable local
+builds, such as license-gated MinIO AIStor binaries. Set
 `MINIO_BIN=$HOME/go/bin/minio` or another explicit binary path when the default
 `minio` on `PATH` is not benchmarkable. The script reports PUT and GET
 separately from `warp analyze`, using the same signed S3 requests, object size,
@@ -96,11 +158,13 @@ multipart-listing capability evidence to propagate through gossip; set
 the capability-ready probe follow-up). k6-based S3 benchmark scripts have
 been removed; S3 performance claims should use `warp`.
 
-## Latest Local Result
+## Historical Local Result
 
-This section keeps only the latest comparable S3 results. Older benchmark runs
-remain in their raw artifact directories and prior commits, not in this
-reference page.
+This section keeps the last local Apple M3 loopback comparison for historical
+context. Do not use these same-host local numbers as the current publishable
+GrainFS vs MinIO benchmark; use the GCP single-node encrypted path above.
+Older benchmark runs remain in their raw artifact directories and prior
+commits, not in this reference page.
 
 These snapshots were captured on the local Apple M3 loopback setup with signed
 S3 requests, 64 KiB objects, concurrency 32, `warp`, `--host-select
