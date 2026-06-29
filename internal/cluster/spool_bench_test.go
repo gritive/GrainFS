@@ -104,6 +104,53 @@ func BenchmarkSpoolECShardsEncrypted(b *testing.B) {
 	}
 }
 
+// BenchmarkPlainSpoolWrite measures the new plaintext put-spool write path.
+// Compare against BenchmarkEncryptedSpoolWrite to see the eliminated overhead.
+func BenchmarkPlainSpoolWrite(b *testing.B) {
+	payload := bytes.Repeat([]byte("s"), 8<<20)
+	dir := b.TempDir()
+
+	b.SetBytes(int64(len(payload)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		sp, err := spoolObject(context.Background(), dir, bytes.NewReader(payload), "bench-bucket", true)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if sp.Size != int64(len(payload)) {
+			b.Fatal("size mismatch")
+		}
+		sp.Cleanup()
+	}
+}
+
+// BenchmarkSpoolECShardsPlain measures the full put-spool → EC split pipeline
+// with plaintext spool files. Both the eliminated put-spool encryption and the
+// eliminated ec-spool re-encryption are captured here.
+func BenchmarkSpoolECShardsPlain(b *testing.B) {
+	payload := bytes.Repeat([]byte("s"), 8<<20) // 8 MiB
+	spoolDir := b.TempDir()
+	ecDir := b.TempDir()
+	cfg := ECConfig{DataShards: 4, ParityShards: 2}
+
+	b.SetBytes(int64(len(payload)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		sp, err := spoolObject(context.Background(), spoolDir, bytes.NewReader(payload), "bench-bucket", false)
+		if err != nil {
+			b.Fatal(err)
+		}
+		shards, err := spoolECShards(context.Background(), cfg, ecDir, sp)
+		sp.Cleanup()
+		if err != nil {
+			b.Fatal(err)
+		}
+		shards.Cleanup()
+	}
+}
+
 func BenchmarkEncryptedSpoolOpen(b *testing.B) {
 	seam := benchmarkClusterSeam(b)
 	payload := bytes.Repeat([]byte("o"), 8<<20)
