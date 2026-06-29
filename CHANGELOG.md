@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.764.7] - 2026-06-29
+
+### Removed
+- **Removed orphaned single-key `PromoteStagedShards` RPC and its transport handler.**
+  The single-key variant was superseded by `PromoteStagedShardsBatch` (PR #930)
+  and had no remaining callers; the dead code and its test have been deleted.
+
 ## [0.0.764.6] - 2026-06-29
 
 ### Fixed
