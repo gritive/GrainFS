@@ -236,6 +236,7 @@ func (b *DistributedBackend) relocateSideRecordAppendableToRedundantCoalesced(ct
 	}
 	nextSummary, err := advanceAppendSummaryForCoalesce(summary, coalescedRef)
 	if err != nil {
+		wr.abortBackgroundWrites()
 		b.deleteRelocatedShards(ctx, in.Bucket, wr.ShardKey, wr.Placement)
 		return fmt.Errorf("relocate append summary advance: %w", err)
 	}
@@ -255,10 +256,12 @@ func (b *DistributedBackend) relocateSideRecordAppendableToRedundantCoalesced(ct
 	cmd.PreserveLatest = false
 
 	if err := b.writeClusterAppendSideRecords(ctx, in.Bucket, in.Key, cur.VersionID, cmd.NodeIDs, int(cmd.ECData), nextSummary, nil); err != nil {
+		wr.abortBackgroundWrites()
 		b.deleteRelocatedShards(ctx, in.Bucket, wr.ShardKey, wr.Placement)
 		return fmt.Errorf("relocate append summary write: %w", err)
 	}
 	if err := b.writeQuorumMeta(ctx, cmd); err != nil {
+		wr.abortBackgroundWrites()
 		b.deleteRelocatedShards(ctx, in.Bucket, wr.ShardKey, wr.Placement)
 		return fmt.Errorf("relocate append meta: %w", err)
 	}

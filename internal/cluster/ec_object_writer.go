@@ -3,12 +3,14 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	"github.com/gritive/GrainFS/internal/storage"
-	"golang.org/x/sync/errgroup"
+	"github.com/rs/zerolog/log"
 )
 
 type ecObjectSizedShardStore interface {
@@ -76,6 +78,18 @@ type ecObjectWriteResult struct {
 	ECParity  uint8
 	Parts     []storage.MultipartPartEntry // populated by CompleteMultipartUpload
 	Tags      []storage.Tag                // populated by CompleteMultipartUpload (carried from multipartMeta.Tags)
+
+	cancelBackgroundWrites func()
+	waitBackgroundWrites   func()
+}
+
+func (r ecObjectWriteResult) abortBackgroundWrites() {
+	if r.cancelBackgroundWrites != nil {
+		r.cancelBackgroundWrites()
+	}
+	if r.waitBackgroundWrites != nil {
+		r.waitBackgroundWrites()
+	}
 }
 
 type ecObjectShardWriteError struct {
@@ -192,6 +206,10 @@ func (w ecObjectWriter) writeOneSegment(ctx context.Context, in writeSegmentInpu
 	if err != nil {
 		return PlacementRecord{}, "", "", fmt.Errorf("write segment %d (blob %s): %w", in.SegmentIdx, in.SegmentBlobID, err)
 	}
+	// Segment writes feed the chunked PUT staging/promote pipeline, which promotes
+	// every planned shard before metadata commit. Let background parity writes
+	// finish here so promote never races a still-writing staging shard.
+	res.waitBackgroundWrites()
 	rec := PlacementRecord{Nodes: placement, K: in.Cfg.DataShards, M: in.Cfg.ParityShards}
 	return rec, res.ETag, in.SegmentBlobID, nil
 }
@@ -227,11 +245,10 @@ func (w ecObjectWriter) writeSpooledShards(ctx context.Context, plan ecObjectWri
 		return ecObjectWriteResult{}, err
 	}
 	observePutStage("ec", "spool_shards", stageStart)
-	defer shards.Cleanup()
 
-	return w.writeShardReadersWithSize(ctx, plan, sp, func(idx int) (io.Reader, error) {
+	return w.writeShardReadersWithSizeCleanup(ctx, plan, sp, func(idx int) (io.Reader, error) {
 		return shards.OpenShard(idx)
-	}, shards.ShardSize, "ec")
+	}, shards.ShardSize, "ec", shards.Cleanup)
 }
 
 func (w ecObjectWriter) writeShardReadersWithSize(
@@ -241,6 +258,18 @@ func (w ecObjectWriter) writeShardReadersWithSize(
 	openShard func(idx int) (io.Reader, error),
 	shardSize func(idx int) (int64, error),
 	metricPath string,
+) (ecObjectWriteResult, error) {
+	return w.writeShardReadersWithSizeCleanup(ctx, plan, sp, openShard, shardSize, metricPath, nil)
+}
+
+func (w ecObjectWriter) writeShardReadersWithSizeCleanup(
+	ctx context.Context,
+	plan ecObjectWritePlan,
+	sp *spooledObject,
+	openShard func(idx int) (io.Reader, error),
+	shardSize func(idx int) (int64, error),
+	metricPath string,
+	cleanup func(),
 ) (ecObjectWriteResult, error) {
 	shardKey := ecObjectSegmentShardKey(plan)
 	// PR1 segment staging: when active, shards are written to the per-node staging
@@ -252,42 +281,148 @@ func (w ecObjectWriter) writeShardReadersWithSize(
 	if stagingShardKey != "" {
 		cleanupKey = stagingShardKey
 	}
-	written := make(chan string, len(plan.Placement))
-
-	cleanup := func() {
-		close(written)
-		for node := range written {
-			_ = w.endpointFor(node).DeleteShards(ctx, plan.Bucket, cleanupKey)
+	quorum := plan.Config.DataShards
+	if quorum <= 0 || quorum > len(plan.Placement) {
+		if cleanup != nil {
+			cleanup()
 		}
+		return ecObjectWriteResult{}, fmt.Errorf("ec write quorum %d invalid for %d placements", quorum, len(plan.Placement))
 	}
 
 	stageStart := time.Now()
-	g, gctx := errgroup.WithContext(ctx)
+	type shardWriteResult struct {
+		shardIdx int
+		node     string
+		err      error
+	}
+	writeCtx, cancelWrites := context.WithCancel(context.WithoutCancel(ctx))
+	// Respect caller cancellation until quorum; after K successes, remaining
+	// shard writes run detached unless explicitly aborted by the commit path.
+	stopParentCancel := context.AfterFunc(ctx, cancelWrites)
+	cancelAllWrites := func() {
+		stopParentCancel()
+		cancelWrites()
+	}
+	resultCh := make(chan shardWriteResult, len(plan.Placement))
+	var wg sync.WaitGroup
 	for i, node := range plan.Placement {
 		i, node := i, node
-		g.Go(func() error {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
 			ep := w.endpointFor(node)
-			if werr := ep.WriteShardReader(gctx, plan.Bucket, shardKey, stagingShardKey, i, openShard, shardSize); werr != nil {
-				return &ecObjectShardWriteError{shardIdx: i, node: node, err: werr}
+			if werr := ep.WriteShardReader(writeCtx, plan.Bucket, shardKey, stagingShardKey, i, openShard, shardSize); werr != nil {
+				resultCh <- shardWriteResult{shardIdx: i, node: node, err: &ecObjectShardWriteError{shardIdx: i, node: node, err: werr}}
+				return
 			}
-			written <- node
-			return nil
-		})
+			resultCh <- shardWriteResult{shardIdx: i, node: node}
+		}()
 	}
-	if err := g.Wait(); err != nil {
-		cleanup()
-		return ecObjectWriteResult{}, err
-	}
-	observePutStage(metricPath, "write_shards", stageStart)
-	close(written)
 
-	return ecObjectWriteResult{
-		Size:      sp.Size,
-		ETag:      sp.ETag,
-		ModTime:   time.Now().Unix(),
-		ShardKey:  shardKey,
-		Placement: cloneStringSlice(plan.Placement),
-		ECData:    uint8(plan.Config.DataShards),
-		ECParity:  uint8(plan.Config.ParityShards),
-	}, nil
+	deleteLanded := func(nodes []string) {
+		cleanupCtx := context.WithoutCancel(ctx)
+		for _, node := range nodes {
+			_ = w.endpointFor(node).DeleteShards(cleanupCtx, plan.Bucket, cleanupKey)
+		}
+	}
+	var rootErr error
+	waitCleanupDrainAndDelete := func(completed int, landed []string) error {
+		cancelAllWrites()
+		wg.Wait()
+		if cleanup != nil {
+			cleanup()
+		}
+		for ; completed < len(plan.Placement); completed++ {
+			res := <-resultCh
+			if res.err != nil {
+				if rootErr == nil {
+					rootErr = res.err
+				}
+				continue
+			}
+			landed = append(landed, res.node)
+		}
+		deleteLanded(landed)
+		return rootErr
+	}
+	successResult := func(done <-chan struct{}) ecObjectWriteResult {
+		return ecObjectWriteResult{
+			Size:      sp.Size,
+			ETag:      sp.ETag,
+			ModTime:   time.Now().Unix(),
+			ShardKey:  shardKey,
+			Placement: cloneStringSlice(plan.Placement),
+			ECData:    uint8(plan.Config.DataShards),
+			ECParity:  uint8(plan.Config.ParityShards),
+			cancelBackgroundWrites: func() {
+				cancelAllWrites()
+			},
+			waitBackgroundWrites: func() {
+				<-done
+			},
+		}
+	}
+
+	successes := 0
+	completed := 0
+	landed := make([]string, 0, len(plan.Placement))
+	for completed < len(plan.Placement) {
+		select {
+		case res := <-resultCh:
+			completed++
+			if res.err != nil {
+				if rootErr == nil {
+					rootErr = res.err
+				}
+				if successes < quorum || successes+len(plan.Placement)-completed < quorum {
+					rootErr = waitCleanupDrainAndDelete(completed, landed)
+					return ecObjectWriteResult{}, rootErr
+				}
+				continue
+			}
+			successes++
+			landed = append(landed, res.node)
+			if successes < quorum {
+				continue
+			}
+
+			observePutStage(metricPath, "write_shards", stageStart)
+			stopParentCancel()
+			done := make(chan struct{})
+			go func(completed int) {
+				defer cancelAllWrites()
+				defer close(done)
+				for ; completed < len(plan.Placement); completed++ {
+					res := <-resultCh
+					if res.err != nil {
+						if errors.Is(res.err, context.Canceled) {
+							continue
+						}
+						log.Warn().
+							Err(res.err).
+							Str("bucket", plan.Bucket).
+							Str("shard_key", shardKey).
+							Int("shard_idx", res.shardIdx).
+							Str("node", res.node).
+							Msg("ec object writer: background shard write failed after quorum")
+					}
+				}
+				wg.Wait()
+				if cleanup != nil {
+					cleanup()
+				}
+			}(completed)
+			return successResult(done), nil
+		case <-ctx.Done():
+			if err := waitCleanupDrainAndDelete(completed, landed); err != nil {
+				return ecObjectWriteResult{}, err
+			}
+			return ecObjectWriteResult{}, ctx.Err()
+		}
+	}
+	if rootErr == nil {
+		rootErr = fmt.Errorf("ec write quorum %d not reached with %d placements", quorum, len(plan.Placement))
+	}
+	rootErr = waitCleanupDrainAndDelete(completed, landed)
+	return ecObjectWriteResult{}, rootErr
 }
