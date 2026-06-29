@@ -17,6 +17,10 @@ import (
 	"github.com/gritive/GrainFS/internal/storage/eccodec"
 )
 
+const shardDirectIOEnv = "GRAINFS_SHARD_DIRECT_IO"
+
+var openDirectShardFile = directio.OpenFile
+
 // LocalShardStore owns the local-shard concern carved out of ShardService: the
 // shard-blob physical I/O, the at-rest seal (DEK-backed GFSENC3), the
 // syncDirChain durability state machine (ancestor-fsync dedup) and the
@@ -365,6 +369,10 @@ func (l *LocalShardStore) fsyncDir(dir string) error {
 	return syncDir(dir)
 }
 
+func shardDirectIOSpikeEnabled() bool {
+	return os.Getenv(shardDirectIOEnv) == "1"
+}
+
 // syncDirChain durably LINKS a freshly written shard into the namespace: it
 // fsyncs the leaf (its new shard-file entry) and persists each ancestor's entry
 // in its parent up to (exclusive) stop. getShardDir builds dir = dataDir/bucket/key
@@ -460,6 +468,12 @@ func (l *LocalShardStore) syncDirChain(leaf, stop string) error {
 // ciphertext bytes written (cw.n); EncOpen fires before any byte is written so it
 // reports 0 — the put-trace sink is a diagnostic-only no-op in production.
 func (l *LocalShardStore) atomicShardFileWrite(ctx context.Context, dir, path string, shardIdx int, writeBody func(w io.Writer) error) error {
+	if shardDirectIOSpikeEnabled() {
+		// Spike-only path: validate O_DIRECT impact without changing the default
+		// streaming write pipeline.
+		return l.atomicShardFileWriteDirectBuffered(ctx, dir, path, shardIdx, writeBody)
+	}
+
 	tmp := fmt.Sprintf("%s.%d.%d.tmp", path, os.Getpid(), time.Now().UnixNano())
 	openStart := time.Now()
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
@@ -502,6 +516,132 @@ func (l *LocalShardStore) atomicShardFileWrite(ctx context.Context, dir, path st
 		ShardIndex:       shardIdx,
 		ShardTargetClass: "local",
 	})
+
+	return l.finishAtomicShardFileWrite(ctx, dir, path, tmp, f, written, shardIdx)
+}
+
+func (l *LocalShardStore) atomicShardFileWriteDirectBuffered(ctx context.Context, dir, path string, shardIdx int, writeBody func(w io.Writer) error) error {
+	tmp := fmt.Sprintf("%s.%d.%d.tmp", path, os.Getpid(), time.Now().UnixNano())
+
+	var payload bytes.Buffer
+	writeStart := time.Now()
+	if err := writeBody(&payload); err != nil {
+		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncWrite, writeStart, PutTraceStageFields{
+			Bytes:            int64(payload.Len()),
+			ShardIndex:       shardIdx,
+			ShardTargetClass: "local",
+			Error:            err.Error(),
+		})
+		_ = os.Remove(tmp)
+		return fmt.Errorf("write tmp shard: %w", err)
+	}
+
+	openStart := time.Now()
+	f, usedDirect, err := openShardTmpFileDirectFallback(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncOpen, openStart, PutTraceStageFields{
+			ShardIndex:       shardIdx,
+			ShardTargetClass: "local",
+			Error:            err.Error(),
+		})
+		return fmt.Errorf("create tmp shard: %w", err)
+	}
+	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncOpen, openStart, PutTraceStageFields{
+		ShardIndex:       shardIdx,
+		ShardTargetClass: "local",
+	})
+
+	f, err = writeShardPayloadToFileWithFallback(tmp, f, payload.Bytes(), usedDirect)
+	if err != nil {
+		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncWrite, writeStart, PutTraceStageFields{
+			Bytes:            int64(payload.Len()),
+			ShardIndex:       shardIdx,
+			ShardTargetClass: "local",
+			Error:            err.Error(),
+		})
+		if f != nil {
+			_ = f.Close()
+		}
+		_ = os.Remove(tmp)
+		return fmt.Errorf("write tmp shard: %w", err)
+	}
+	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncWrite, writeStart, PutTraceStageFields{
+		Bytes:            int64(payload.Len()),
+		ShardIndex:       shardIdx,
+		ShardTargetClass: "local",
+	})
+
+	return l.finishAtomicShardFileWrite(ctx, dir, path, tmp, f, int64(payload.Len()), shardIdx)
+}
+
+func openShardTmpFileDirectFallback(path string, flag int, mode os.FileMode) (*os.File, bool, error) {
+	f, err := openDirectShardFile(path, flag, mode)
+	if err == nil {
+		return f, true, nil
+	}
+	f, fallbackErr := os.OpenFile(path, flag, mode)
+	if fallbackErr != nil {
+		return nil, false, fmt.Errorf("direct open: %v; fallback open: %w", err, fallbackErr)
+	}
+	return f, false, nil
+}
+
+func writeShardPayloadToFileWithFallback(path string, f *os.File, payload []byte, usedDirect bool) (*os.File, error) {
+	if !usedDirect {
+		return f, writeFileFull(f, payload)
+	}
+	if err := writeShardPayloadToFile(f, payload, true); err == nil {
+		return f, nil
+	} else {
+		_ = f.Close()
+		_ = os.Remove(path)
+		fallback, fallbackErr := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+		if fallbackErr != nil {
+			return nil, fmt.Errorf("direct write: %v; fallback open: %w", err, fallbackErr)
+		}
+		f = fallback
+	}
+	return f, writeFileFull(f, payload)
+}
+
+func writeShardPayloadToFile(f *os.File, payload []byte, usedDirect bool) error {
+	if !usedDirect {
+		return writeFileFull(f, payload)
+	}
+	if len(payload) == 0 {
+		return f.Truncate(0)
+	}
+	aligned, alignedLen := directio.AlignedCopy(payload)
+	if err := writeFileFull(f, aligned[:alignedLen]); err != nil {
+		return err
+	}
+	if alignedLen != len(payload) {
+		if err := f.Truncate(int64(len(payload))); err != nil {
+			return fmt.Errorf("truncate direct shard payload: %w", err)
+		}
+	}
+	return nil
+}
+
+func writeFileFull(f *os.File, payload []byte) error {
+	for len(payload) > 0 {
+		n, err := f.Write(payload)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+		payload = payload[n:]
+	}
+	return nil
+}
+
+func (l *LocalShardStore) finishAtomicShardFileWrite(ctx context.Context, dir, path, tmp string, f *os.File, written int64, shardIdx int) error {
+	cleanup := func() {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+	}
 
 	// requireFsync is derived from the ciphertext bytes actually written — the same
 	// value the callers previously passed as shardWriteRequiresFsync(len(payload)).

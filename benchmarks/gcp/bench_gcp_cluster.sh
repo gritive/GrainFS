@@ -267,7 +267,11 @@ serve_node() {
   fi
   local pprof_flag=""
   if (( pprof_port > 0 )); then pprof_flag="--pprof-port $pprof_port"; fi
-  ssh_node "$n" "sudo systemd-run --unit=$UNIT --collect $invite_env \
+  local directio_env=""
+  if [[ "${GRAINFS_SHARD_DIRECT_IO:-0}" == "1" ]]; then
+    directio_env="--setenv=GRAINFS_SHARD_DIRECT_IO=1"
+  fi
+  ssh_node "$n" "sudo systemd-run --unit=$UNIT --collect $invite_env $directio_env \
     $bin serve --data $DATA_DIR --port $HTTP_PORT --node-id p5-node-$idx \
     --raft-addr $ipi:$RAFT_PORT --join-listen-addr $ipi:$JOIN_PORT \
     --raft-heartbeat-interval ${RAFT_HEARTBEAT:-1s} --raft-election-timeout ${RAFT_ELECTION:-3s} \
