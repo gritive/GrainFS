@@ -124,8 +124,8 @@ objects, concurrency 32, 1 minute per operation, signed S3 requests, 0 errors:
 
 | Target    | PUT MiB/s | GET MiB/s | vs MinIO PUT | vs MinIO GET |
 | --------- | --------: | --------: | -----------: | -----------: |
-| `GrainFS` |    210.45 |    717.21 |        0.98x |        1.44x |
-| MinIO     |    213.90 |    499.07 |        1.00x |        1.00x |
+| `GrainFS` |    215.50 |    437.02 |        1.03x |        0.92x |
+| MinIO     |    209.77 |    472.65 |        1.00x |        1.00x |
 
 `GrainFS` ran with XAES-256-GCM at-rest encryption; MinIO ran with SSE-S3
 auto-encryption on the same GCP VM class. Methodology and script flags:

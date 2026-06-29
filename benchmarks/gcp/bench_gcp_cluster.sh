@@ -515,8 +515,10 @@ cmd_single() { # <runidx>
   log "single: resetting node-0"
   ssh_node "$n" "
     sudo systemctl stop $UNIT 2>/dev/null || true
+    sudo systemctl stop $MINIO_UNIT 2>/dev/null || true
     sudo systemctl reset-failed $UNIT 2>/dev/null || true
     sudo pkill -9 -f 'grainfs' 2>/dev/null || true
+    sudo pkill -9 minio 2>/dev/null || true
     for _ in \$(seq 1 30); do
       (exec 3<>/dev/tcp/127.0.0.1/$HTTP_PORT) 2>/dev/null && { exec 3>&- 3<&-; sleep 0.5; } || break
     done
@@ -552,7 +554,7 @@ cmd_single() { # <runidx>
 
   # Pre-create warp buckets (grainfs-cluster target names; single node reuses that path)
   for op in ${WARP_OPS//,/ }; do
-    ssh_node "$n" "sudo $bin bucket create warp-grainfs-cluster-$op --endpoint $DATA_DIR/admin.sock --attach-sa $sa_id --attach-policy bucket-admin >/dev/null 2>&1 || true"
+    ssh_node "$n" "sudo $bin bucket create warp-grainfs-cluster-$op --endpoint $DATA_DIR/admin.sock --attach-sa $sa_id --attach-policy bucket-admin >/dev/null"
   done
 
   local rprof="/tmp/p5-prof-single-$idx"
@@ -609,6 +611,10 @@ cmd_single() { # <runidx>
   gcloud compute scp --zone="$ZONE" --project="$PROJECT" --tunnel-through-iap \
     "$CLIENT:$rprof/warp-results.tsv" "$localdir/warp-results.tsv" >/dev/null 2>&1 \
     || log "WARN: no warp-results.tsv for single run$idx"
+  if [[ ! -s "$localdir/warp-results.tsv" ]]; then
+    log "ERROR: empty warp-results.tsv for single run$idx"
+    return 1
+  fi
   mkdir -p "$localdir/raw"
   gcloud compute scp --recurse --zone="$ZONE" --project="$PROJECT" --tunnel-through-iap \
     "$CLIENT:$rprof" "$localdir/raw/" >/dev/null 2>&1 \

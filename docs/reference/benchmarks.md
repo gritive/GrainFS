@@ -69,24 +69,26 @@ Captured on 2026-06-30 KST in `asia-northeast3-a` with `n2-standard-4` VMs,
 signed S3 requests, and 0 errors. `GrainFS` ran with XAES-256-GCM at-rest
 encryption; MinIO ran with SSE-S3 auto-encryption.
 
-| Target | PUT MiB/s | GET MiB/s | vs MinIO PUT | vs MinIO GET |
-| --- | ---: | ---: | ---: | ---: |
-| `GrainFS` | 210.45 | 717.21 | 0.98x | 1.44x |
-| MinIO | 213.90 | 499.07 | 1.00x | 1.00x |
+| Target    | PUT MiB/s | GET MiB/s | vs MinIO PUT | vs MinIO GET |
+| --------- | --------: | --------: | -----------: | -----------: |
+| `GrainFS` |    215.50 |    437.02 |        1.03x |        0.92x |
+| MinIO     |    209.77 |    472.65 |        1.00x |        1.00x |
 
-Raw artifact path from the run:
-`benchmarks/profiles/gcp-single-allenc-buffer-reuse-20260630-021115`.
+The same measurement attempt produced two additional valid MinIO runs
+(`PUT=212.37/210.74 MiB/s`, `GET=669.94/716.38 MiB/s`), but GrainFS repeat
+runs 2 and 3 failed during `warp` preparation with `Access Denied` and empty
+TSV files. Those failed GrainFS arms are excluded from the table above.
 
 ## Existing Benchmark Targets
 
-| Target                                           | Scope                                                        | Primary artifacts                                                   |
-| ------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------------- |
-| `benchmarks/gcp/bench_gcp_cluster.sh single`     | GCP single-node GrainFS `warp` workload with pprof           | `benchmarks/profiles/gcp-single-*/single/run<N>/`                   |
-| `benchmarks/gcp/bench_gcp_cluster.sh minio`      | GCP single-node MinIO SSE-S3 `warp` workload                 | `benchmarks/profiles/gcp-single-*/minio/run<N>/`                    |
-| `benchmarks/gcp/bench_gcp_cluster.sh full`       | GCP cross-binary GrainFS A/B workload                        | `benchmarks/profiles/gcp-ab-*/verdict.md`                           |
-| `make bench`                                     | Local single-node S3 `warp` smoke/regression workload        | `benchmarks/profiles/s3-compat-compare-*`                           |
-| `make bench-cluster`                             | Local cluster S3 `warp` smoke/regression workload            | `benchmarks/profiles/s3-compat-compare-*`, cluster logs             |
-| `make bench-s3-compat-compare`                   | Local same-host GrainFS vs native MinIO/RustFS comparison    | `benchmarks/profiles/s3-compat-compare-*`                           |
+| Target                                       | Scope                                                     | Primary artifacts                                       |
+| -------------------------------------------- | --------------------------------------------------------- | ------------------------------------------------------- |
+| `benchmarks/gcp/bench_gcp_cluster.sh single` | GCP single-node GrainFS `warp` workload with pprof        | `benchmarks/profiles/gcp-single-*/single/run<N>/`       |
+| `benchmarks/gcp/bench_gcp_cluster.sh minio`  | GCP single-node MinIO SSE-S3 `warp` workload              | `benchmarks/profiles/gcp-single-*/minio/run<N>/`        |
+| `benchmarks/gcp/bench_gcp_cluster.sh full`   | GCP cross-binary GrainFS A/B workload                     | `benchmarks/profiles/gcp-ab-*/verdict.md`               |
+| `make bench`                                 | Local single-node S3 `warp` smoke/regression workload     | `benchmarks/profiles/s3-compat-compare-*`               |
+| `make bench-cluster`                         | Local cluster S3 `warp` smoke/regression workload         | `benchmarks/profiles/s3-compat-compare-*`, cluster logs |
+| `make bench-s3-compat-compare`               | Local same-host GrainFS vs native MinIO/RustFS comparison | `benchmarks/profiles/s3-compat-compare-*`               |
 
 ## Result Interpretation
 
@@ -173,19 +175,19 @@ a warm-read pass over objects kept from the preceding PUT pass. `GrainFS` ran
 with at-rest encryption and S3-only benchmark flags:
 `--block-cache-size=0 --shard-cache-size=0`.
 
-| S3 op | MinIO MiB/s | MinIO obj/s | MinIO errors | MinIO RSS MiB | RustFS MiB/s | RustFS obj/s | RustFS errors | RustFS RSS MiB | GrainFS MiB/s | GrainFS obj/s | GrainFS errors | GrainFS RSS MiB | GrainFS artifact |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| put | 175.14 | 2802.27 | 0 | 796.30 | 26.62 | 425.95 | 0 | 106.58 | 548.30 | 8772.82 | 0 | 601.22 | `benchmarks/profiles/grainfs-single-put-after-small-badger-options-20260520-145417` |
-| get | 457.81 | 7325.01 | 0 | 919.20 | 437.77 | 7004.32 | 0 | 213.28 | 1849.34 | 29589.49 | 0 | 767.03 | `benchmarks/profiles/grainfs-single-get-after-small-badger-options-20260520-145504` |
-| delete | 0.00 | 1968.80 | 0 | 533.90 | 0.00 | 2835.91 | 0 | 232.11 | 0.00 | 17964.91 | 0 | 460.70 | `benchmarks/profiles/grainfs-single-delete-after-small-vlog-file-20260520-145342` |
-| mixed | 126.89 | 2030.20 | 0 | 687.70 | 163.62 | 2617.84 | 0 | 258.25 | 176.17 | 2818.79 | 0 | 251.75 | `benchmarks/profiles/grainfs-single-mixed-after-small-badger-options-20260520-145750` |
-| list | 0.00 | 31285.46 | 0 | 1158.50 | 0.00 | 11869.98 | 0 | 605.75 | 0.00 | 434233.02 | 0 | 150.38 | `benchmarks/profiles/grainfs-single-list-after-small-badger-options-20260520-145950` |
-| stat | 0.00 | 14601.34 | 0 | 727.20 | 0.00 | 9428.66 | 0 | 187.55 | 0.00 | 58557.94 | 0 | 126.72 | `benchmarks/profiles/grainfs-single-stat-after-small-badger-options-20260520-150109` |
-| versioned | 129.32 | 2069.14 | 0 | 602.00 | 75.57 | 1209.13 | 0 | 407.53 | 182.82 | 2925.17 | 0 | 486.23 | `benchmarks/profiles/grainfs-single-versioned-after-stream-shard-pack-20260520-150840` |
-| retention | 0.00 | 6546.51 | 0 | 646.83 | 0.00 | 3208.87 | 0 | 367.53 | 0.00 | 19336.57 | 0 | 280.86 | `benchmarks/profiles/grainfs-single-retention-after-stream-shard-pack-20260520-151345` |
-| multipart | 3245.85 | 649.17 | 0 | 1101.73 | 3622.07 | 724.41 | 0 | 475.05 | 3986.73 | 797.35 | 0 | 675.98 | `benchmarks/profiles/grainfs-single-multipart-after-head-metadata-cache-bounded-20260520-163449` |
-| multipart-put | 321.18 | 64.24 | 0 | 1579.06 | 614.95 | 122.99 | 0 | 539.89 | 804.95 | 160.99 | 0 | 879.59 | `benchmarks/profiles/grainfs-single-multipart-put-after-complete-8m-limit24-20260520-170108` |
-| append | n/a | n/a | 146687 | 663.12 | n/a | n/a | 78801 | 119.12 | 78.39 | 1254.28 | 0 | 326.50 | `benchmarks/profiles/grainfs-single-append-initial-20260520-170436` |
+| S3 op         | MinIO MiB/s | MinIO obj/s | MinIO errors | MinIO RSS MiB | RustFS MiB/s | RustFS obj/s | RustFS errors | RustFS RSS MiB | GrainFS MiB/s | GrainFS obj/s | GrainFS errors | GrainFS RSS MiB | GrainFS artifact                                                                                 |
+| ------------- | ----------: | ----------: | -----------: | ------------: | -----------: | -----------: | ------------: | -------------: | ------------: | ------------: | -------------: | --------------: | ------------------------------------------------------------------------------------------------ |
+| put           |      175.14 |     2802.27 |            0 |        796.30 |        26.62 |       425.95 |             0 |         106.58 |        548.30 |       8772.82 |              0 |          601.22 | `benchmarks/profiles/grainfs-single-put-after-small-badger-options-20260520-145417`              |
+| get           |      457.81 |     7325.01 |            0 |        919.20 |       437.77 |      7004.32 |             0 |         213.28 |       1849.34 |      29589.49 |              0 |          767.03 | `benchmarks/profiles/grainfs-single-get-after-small-badger-options-20260520-145504`              |
+| delete        |        0.00 |     1968.80 |            0 |        533.90 |         0.00 |      2835.91 |             0 |         232.11 |          0.00 |      17964.91 |              0 |          460.70 | `benchmarks/profiles/grainfs-single-delete-after-small-vlog-file-20260520-145342`                |
+| mixed         |      126.89 |     2030.20 |            0 |        687.70 |       163.62 |      2617.84 |             0 |         258.25 |        176.17 |       2818.79 |              0 |          251.75 | `benchmarks/profiles/grainfs-single-mixed-after-small-badger-options-20260520-145750`            |
+| list          |        0.00 |    31285.46 |            0 |       1158.50 |         0.00 |     11869.98 |             0 |         605.75 |          0.00 |     434233.02 |              0 |          150.38 | `benchmarks/profiles/grainfs-single-list-after-small-badger-options-20260520-145950`             |
+| stat          |        0.00 |    14601.34 |            0 |        727.20 |         0.00 |      9428.66 |             0 |         187.55 |          0.00 |      58557.94 |              0 |          126.72 | `benchmarks/profiles/grainfs-single-stat-after-small-badger-options-20260520-150109`             |
+| versioned     |      129.32 |     2069.14 |            0 |        602.00 |        75.57 |      1209.13 |             0 |         407.53 |        182.82 |       2925.17 |              0 |          486.23 | `benchmarks/profiles/grainfs-single-versioned-after-stream-shard-pack-20260520-150840`           |
+| retention     |        0.00 |     6546.51 |            0 |        646.83 |         0.00 |      3208.87 |             0 |         367.53 |          0.00 |      19336.57 |              0 |          280.86 | `benchmarks/profiles/grainfs-single-retention-after-stream-shard-pack-20260520-151345`           |
+| multipart     |     3245.85 |      649.17 |            0 |       1101.73 |      3622.07 |       724.41 |             0 |         475.05 |       3986.73 |        797.35 |              0 |          675.98 | `benchmarks/profiles/grainfs-single-multipart-after-head-metadata-cache-bounded-20260520-163449` |
+| multipart-put |      321.18 |       64.24 |            0 |       1579.06 |       614.95 |       122.99 |             0 |         539.89 |        804.95 |        160.99 |              0 |          879.59 | `benchmarks/profiles/grainfs-single-multipart-put-after-complete-8m-limit24-20260520-170108`     |
+| append        |         n/a |         n/a |       146687 |        663.12 |          n/a |          n/a |         78801 |         119.12 |         78.39 |       1254.28 |              0 |          326.50 | `benchmarks/profiles/grainfs-single-append-initial-20260520-170436`                              |
 
 MinIO and RustFS append runs returned errors, so they are not valid correctness
 baselines for append throughput. `warp append` exercises S3 Express append
