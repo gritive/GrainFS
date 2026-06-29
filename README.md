@@ -1,11 +1,7 @@
 # `GrainFS`
 
-`GrainFS` is a single-binary distributed storage server. It runs as one local
-node or as a Raft-backed cluster.
-
-It exposes object storage over one storage layer:
-
-- **Object storage:** S3-compatible HTTP API
+`GrainFS` is a high-performance distributed S3-compatible storage server with
+zero-config cluster management and at-rest encryption on by default.
 
 ## Quick Start (2-5 minutes)
 
@@ -38,26 +34,6 @@ That's it. You have a working local S3 server.
 ### Optional: cluster / production setup
 
 <details>
-<summary>Cluster</summary>
-
-Phase A stages two files on each joining node: `<data>/keys/0.key` (active KEK) and `<data>/cluster.id` (cluster identity). Both must be copied from a healthy peer before running `cluster join`:
-
-```bash
-DATA_DIR=./dataB
-mkdir -p "$DATA_DIR/keys"
-scp <nodeA>:<nodeA-data-dir>/keys/0.key "$DATA_DIR/keys/0.key"
-scp <nodeA>:<nodeA-data-dir>/cluster.id "$DATA_DIR/cluster.id"
-chmod 0600 "$DATA_DIR/keys/0.key" "$DATA_DIR/cluster.id"
-./bin/grainfs cluster join <nodeA>:7001 \
-  --data "$DATA_DIR" \
-  --node-id node-b \
-  --bind-addr <nodeB>:7001 \
-  --cluster-key "$CLUSTER_KEY"
-```
-
-</details>
-
-<details>
 <summary>Cluster (zero-CA join)</summary>
 
 A brand-new node can join with no pre-shared secrets — no `scp` of the KEK or
@@ -87,6 +63,26 @@ For production steps, verification, cutover, and revocation, see
 </details>
 
 <details>
+<summary>Cluster (manual key staging)</summary>
+
+Phase A stages two files on each joining node: `<data>/keys/0.key` (active KEK) and `<data>/cluster.id` (cluster identity). Both must be copied from a healthy peer before running `cluster join`:
+
+```bash
+DATA_DIR=./dataB
+mkdir -p "$DATA_DIR/keys"
+scp <nodeA>:<nodeA-data-dir>/keys/0.key "$DATA_DIR/keys/0.key"
+scp <nodeA>:<nodeA-data-dir>/cluster.id "$DATA_DIR/cluster.id"
+chmod 0600 "$DATA_DIR/keys/0.key" "$DATA_DIR/cluster.id"
+./bin/grainfs cluster join <nodeA>:7001 \
+  --data "$DATA_DIR" \
+  --node-id node-b \
+  --bind-addr <nodeB>:7001 \
+  --cluster-key "$CLUSTER_KEY"
+```
+
+</details>
+
+<details>
 <summary>Auth</summary>
 
 ```bash
@@ -108,11 +104,13 @@ See [`docs/operators/deploy-production-cluster.md`](docs/operators/deploy-produc
 
 ## What It Supports
 
-| Area               | Summary                                                                                                      | Details                                                |
-| ------------------ | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------ |
-| S3 API             | Bucket/object basics, AppendObject (S3 Express), multipart upload/listing, SigV4, presigned URL, form upload | [S3 compatibility](docs/reference/s3-compatibility.md) |
-| Cluster durability | Custom Raft, zero-config EC profile, shard integrity envelope                                                | [Runbook](docs/operators/runbook.md)                   |
-| Operations         | Object browser, metrics, balancer status, incidents, recovery drills                                         | [Documentation](#documentation)                        |
+| Area               | Summary                                                                                                      | Details                                                                     |
+| ------------------ | ------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------- |
+| S3 API             | Bucket/object basics, AppendObject (S3 Express), multipart upload/listing, SigV4, presigned URL, form upload | [S3 compatibility](docs/reference/s3-compatibility.md)                      |
+| Cluster durability | Custom Raft, zero-config topology (EC profile, join, key hierarchy), shard integrity envelope                | [Runbook](docs/operators/runbook.md)                                        |
+| Encryption         | XAES-256-GCM at rest by default, KEK/DEK rotation, hot-applyable via `config set`                            | [Production deploy](docs/operators/deploy-production-cluster.md)            |
+| Auth               | Service accounts, access keys, bucket policies, SigV4 request signing                                        | [Admin and identity](docs/architecture/admin-identity-and-bucket-config.md) |
+| Operations         | Object browser, metrics, balancer status, incidents, recovery drills                                         | [Documentation](#documentation)                                             |
 
 The compatibility tables use `Supported` only for features covered by e2e,
 conformance, or real client integration tests. Unit tests alone do not qualify.
@@ -146,20 +144,20 @@ SSE-S3 auto-encryption.
 
 ## Core Concepts
 
+**Zero-config cluster.** Operators set no topology parameters. `GrainFS` derives
+the erasure-coding profile from cluster size, manages join ceremonies without
+pre-shared secrets, and handles the full key hierarchy (KEK/DEK) automatically.
+
+**At-rest encryption.** All data is encrypted with XAES-256-GCM by default, no
+configuration needed. The cluster manages its own key hierarchy (KEK/DEK); rotate
+keys live via `encrypt kek rotate`.
+
 **Admin socket first.** Mutating admin operations use the local Unix domain
 socket by default (`<data>/admin.sock`). Set `GRAINFS_ADMIN_SOCKET` to avoid
 passing `--endpoint` on every command.
 
 **Secure bootstrap.** A fresh cluster has no S3 credentials. Create the first
 service account through the admin socket; the secret key is shown once.
-
-**Zero-config EC.** Operators do not choose `k/m` at startup. `GrainFS` derives
-the desired erasure-coding profile from cluster size and placement group voters.
-Temporary target loss does not silently lower durability; writes fail until the
-required targets are writable.
-
-**S3 API.** All object operations route through the same distributed storage backend.
-Use the compatibility docs for protocol-specific limits.
 
 ## Common Workflows
 
