@@ -1,18 +1,8 @@
 # Changelog
 
-## [0.0.765.0] - 2026-06-30
+## [0.0.766.0] - 2026-06-30
 
 ### Performance
-- **Removed redundant double-encryption from the PUT spool write path.**
-  The original path encrypted data three times: once into the put-spool buffer,
-  again into each EC-spool shard, and a final time via `eccodec.EncodeEncryptedShard`
-  into durable storage. Only the third layer is necessary; the first two were
-  eliminated. Put-spool files and EC-spool shards are now written as plaintext
-  temporaries on disk. Microbenchmark on an 8 MiB object: put-spool allocations
-  −95% (1087 KB → 57 KB per op); full EC pipeline allocations −79% (2.2 MB →
-  455 KB per op); EC encode throughput +7.5%. The MPU (multipart upload) spool
-  path retains its encryption because parts survive across requests and must
-  remain opaque on disk.
 - **Exact-size encrypted PUTs bypass the spool entirely.**
   When the client sends a `Content-Length` header with no `Content-MD5`, GrainFS
   now streams the request body directly into the EC encoder without first
@@ -29,19 +19,6 @@
   memory after the first request warms the pool.
 
 ### Fixed
-- **Crash-residue spool files are now cleaned up on restart.**
-  Renamed put-spool (`put-spool-*.tmp`) and EC-spool (`ec-{data,parity,empty}-N-*.tmp`)
-  temp-file patterns to end in `.tmp`, matching the startup sweep that removes
-  orphaned temporaries after an unclean shutdown.
-- **Tightened spool directory permissions from 0755 to 0700.**
-  Both `{root}/tmp/put-spool/` and `{root}/tmp/ec-spool/` are now created with
-  mode 0700 so no other local user can read plaintext spool files while a PUT
-  is in progress. An explicit `os.Chmod(dir, 0o700)` call is now issued after
-  `os.MkdirAll` so that existing directories (upgrades or MPU-first deployments
-  that landed at 0755) are also corrected at first use.
-- **Fixed nil-interface panic in EC-spool deferred close loop** (pre-existing).
-  The loop that closes data-reader handles after EC encoding could panic when
-  the parity-shard reader slot was nil. Added a nil guard before each `rc.Close()`.
 - **Fixed oversized-body detection in exact-size PUT fast path.**
   When a request body exceeded the declared `Content-Length`, the overflow probe
   in `exactObjectSizeReader` could be misinterpreted as a clean EOF by the chunk
@@ -56,6 +33,35 @@
   fast path could cause GrainFS to allocate segment metadata (blob IDs, placement
   records) proportional to the declared size before reading any body bytes. Capped
   at 5 TiB, matching the S3 single-PUT limit.
+
+## [0.0.765.0] - 2026-06-29
+
+### Performance
+- **Removed redundant double-encryption from the PUT spool write path.**
+  The original path encrypted data three times: once into the put-spool buffer,
+  again into each EC-spool shard, and a final time via `eccodec.EncodeEncryptedShard`
+  into durable storage. Only the third layer is necessary; the first two were
+  eliminated. Put-spool files and EC-spool shards are now written as plaintext
+  temporaries on disk. Microbenchmark on an 8 MiB object: put-spool allocations
+  −95% (1087 KB → 57 KB per op); full EC pipeline allocations −79% (2.2 MB →
+  455 KB per op); EC encode throughput +7.5%. The MPU (multipart upload) spool
+  path retains its encryption because parts survive across requests and must
+  remain opaque on disk.
+
+### Fixed
+- **Crash-residue spool files are now cleaned up on restart.**
+  Renamed put-spool (`put-spool-*.tmp`) and EC-spool (`ec-{data,parity,empty}-N-*.tmp`)
+  temp-file patterns to end in `.tmp`, matching the startup sweep that removes
+  orphaned temporaries after an unclean shutdown.
+- **Tightened spool directory permissions from 0755 to 0700.**
+  Both `{root}/tmp/put-spool/` and `{root}/tmp/ec-spool/` are now created with
+  mode 0700 so no other local user can read plaintext spool files while a PUT
+  is in progress. An explicit `os.Chmod(dir, 0o700)` call is now issued after
+  `os.MkdirAll` so that existing directories (upgrades or MPU-first deployments
+  that landed at 0755) are also corrected at first use.
+- **Fixed nil-interface panic in EC-spool deferred close loop** (pre-existing).
+  The loop that closes data-reader handles after EC encoding could panic when
+  the parity-shard reader slot was nil. Added a nil guard before each `rc.Close()`.
 
 ## [0.0.764.8] - 2026-06-29
 
