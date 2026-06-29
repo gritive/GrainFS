@@ -281,6 +281,25 @@ func TestFanOutOwnerLocalFirst_PeerFailureBudgetUnchanged(t *testing.T) {
 		"K=3 with the local ack but all peers down is unreachable")
 }
 
+func TestFanOutOwnerLocalFirst_RejectsUnreachableQuorumBeforeLocalWrite(t *testing.T) {
+	ctx := context.Background()
+	const self = "self"
+	nodes := []string{self, "p1"} // local ack + one peer can never satisfy K=3
+
+	var localWrites atomic.Int32
+	writeLocal := func() error {
+		localWrites.Add(1)
+		return nil
+	}
+	cleanupLocal := func() error { return nil }
+	writePeer := func(_ context.Context, _ string) error { return nil }
+
+	err := fanOutQuorumMetaOwnerLocalFirst(ctx, nodes, self, 3, writeLocal, cleanupLocal, writePeer)
+	require.Error(t, err)
+	require.Equal(t, int32(0), localWrites.Load(),
+		"unreachable quorum must fail before owner-local fsync")
+}
+
 // TestFanOutOwnerLocalFirst_DuplicateSelfCountsAllLocalAcks pins the regression
 // that a placement set listing self MORE THAN ONCE (e.g. EC over a single host:
 // NodeIDs=[self,self,...]) must count every self entry as a local ack, exactly as
