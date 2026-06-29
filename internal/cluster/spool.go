@@ -65,10 +65,10 @@ type spooledObject struct {
 
 func spoolObject(ctx context.Context, dir string, r io.Reader, bucket string, needsMD5 bool) (*spooledObject, error) {
 	stageStart := time.Now()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create spool dir: %w", err)
 	}
-	tmp, err := os.CreateTemp(dir, ".put-spool-*")
+	tmp, err := os.CreateTemp(dir, "put-spool-*.tmp")
 	if err != nil {
 		return nil, fmt.Errorf("create spool file: %w", err)
 	}

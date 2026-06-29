@@ -23,7 +23,7 @@ type spooledECShards struct {
 
 func spoolECShards(ctx context.Context, cfg ECConfig, dir string, sp *spooledObject) (*spooledECShards, error) {
 	stageStart := time.Now()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create ec spool dir: %w", err)
 	}
 	enc, err := getStreamEncoder(cfg, ecStreamBlockSize(cfg, sp.Size))
@@ -40,7 +40,7 @@ func spoolECShards(ctx context.Context, cfg ECConfig, dir string, sp *spooledObj
 	}
 	if sp.Size == 0 {
 		for i := range out.paths {
-			f, err := os.CreateTemp(dir, fmt.Sprintf(".ec-empty-%d-*", i))
+			f, err := os.CreateTemp(dir, fmt.Sprintf("ec-empty-%d-*.tmp", i))
 			if err != nil {
 				cleanup()
 				return nil, fmt.Errorf("create empty ec shard: %w", err)
@@ -57,7 +57,7 @@ func spoolECShards(ctx context.Context, cfg ECConfig, dir string, sp *spooledObj
 	dataFiles := make([]*os.File, cfg.DataShards)
 	dataWriters := make([]io.Writer, cfg.DataShards)
 	for i := range dataFiles {
-		f, err := os.CreateTemp(dir, fmt.Sprintf(".ec-data-%d-*", i))
+		f, err := os.CreateTemp(dir, fmt.Sprintf("ec-data-%d-*.tmp", i))
 		if err != nil {
 			cleanup()
 			return nil, fmt.Errorf("create ec data shard: %w", err)
@@ -107,7 +107,9 @@ func spoolECShards(ctx context.Context, cfg ECConfig, dir string, sp *spooledObj
 	}
 	defer func() {
 		for _, rc := range dataReadClosers {
-			_ = rc.Close()
+			if rc != nil {
+				_ = rc.Close()
+			}
 		}
 	}()
 
@@ -115,7 +117,7 @@ func spoolECShards(ctx context.Context, cfg ECConfig, dir string, sp *spooledObj
 	parityWriters := make([]io.Writer, cfg.ParityShards)
 	for i := range parityWriters {
 		idx := cfg.DataShards + i
-		f, err := os.CreateTemp(dir, fmt.Sprintf(".ec-parity-%d-*", i))
+		f, err := os.CreateTemp(dir, fmt.Sprintf("ec-parity-%d-*.tmp", i))
 		if err != nil {
 			cleanup()
 			return nil, fmt.Errorf("create ec parity shard: %w", err)
