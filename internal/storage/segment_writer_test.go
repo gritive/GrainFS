@@ -11,6 +11,7 @@ import (
 	"testing"
 	"testing/iotest"
 	"time"
+	"unsafe"
 
 	"github.com/stretchr/testify/require"
 )
@@ -162,7 +163,10 @@ func TestSegmentWriter_UsesByteFastPathWhenAvailable(t *testing.T) {
 }
 
 func TestSegmentWriter_ByteFastPathAllocBytesBounded(t *testing.T) {
-	payload := makePattern(5 << 20)
+	if raceDetectorEnabled {
+		t.Skip("race instrumentation inflates TotalAlloc, making the byte threshold meaningless")
+	}
+	payload := makePattern(DefaultChunkSize)
 
 	run := func(t testing.TB) error {
 		t.Helper()
@@ -175,10 +179,57 @@ func TestSegmentWriter_ByteFastPathAllocBytesBounded(t *testing.T) {
 		return nil
 	}
 
-	require.NoError(t, run(t))
-	allocedBytes := int64(allocBytesPerRunForStorageTest(t, 3, func() error {
+	require.NoError(t, run(t)) // warm chunk pool
+	allocedBytes := int64(allocBytesPerRunForStorageTest(t, 10, func() error {
 		return run(t)
 	}))
 	t.Logf("SegmentWriter byte fast path alloc bytes: %d", allocedBytes)
-	require.LessOrEqual(t, allocedBytes, int64(18*1024*1024))
+	require.LessOrEqual(t, allocedBytes, int64(9*1024*1024))
+}
+
+type blockingBytesBackend struct {
+	entered chan struct{}
+	release chan struct{}
+	ptrs    chan uintptr
+}
+
+func (b *blockingBytesBackend) WriteSegment(context.Context, string, string, int, io.Reader) (SegmentRef, error) {
+	return SegmentRef{}, errors.New("reader path should not be used")
+}
+
+func (b *blockingBytesBackend) WriteSegmentBytes(_ context.Context, _ string, _ string, idx int, data []byte) (SegmentRef, error) {
+	if len(data) > 0 {
+		b.ptrs <- uintptr(unsafe.Pointer(&data[0]))
+	}
+	if idx == 0 {
+		close(b.entered)
+		<-b.release
+	}
+	return SegmentRef{
+		BlobID:   string(rune('a' + idx)),
+		Size:     int64(len(data)),
+		Checksum: ChecksumOf(data),
+	}, nil
+}
+
+func TestSegmentWriter_PooledChunkReleasedAfterBackendReturns(t *testing.T) {
+	backend := &blockingBytesBackend{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+		ptrs:    make(chan uintptr, 2),
+	}
+	payload := makePattern((DefaultChunkSize * 2) + 1)
+	done := make(chan error, 1)
+	go func() {
+		_, err := NewSegmentWriterWithChunkSizeAndWorkers(backend, DefaultChunkSize, 2).
+			Write(context.Background(), "test", "pooled", "application/octet-stream", bytes.NewReader(payload))
+		done <- err
+	}()
+
+	<-backend.entered
+	firstPtr := <-backend.ptrs
+	secondPtr := <-backend.ptrs
+	require.NotEqual(t, firstPtr, secondPtr, "second chunk reused the first chunk buffer before backend returned")
+	close(backend.release)
+	require.NoError(t, <-done)
 }
