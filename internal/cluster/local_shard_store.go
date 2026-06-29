@@ -292,6 +292,9 @@ func (l *LocalShardStore) writeLocalShardAADStream(ctx context.Context, bucket, 
 		if sizeHint >= 0 {
 			var extra [1]byte
 			for {
+				if cerr := ctx.Err(); cerr != nil {
+					return cerr
+				}
 				n, err := body.Read(extra[:])
 				if n > 0 {
 					return fmt.Errorf("shard %d oversized body: encoded %d plaintext bytes, expected %d", shardIdx, cr.n+int64(n), sizeHint)
@@ -655,6 +658,9 @@ func (l *LocalShardStore) WriteLocalShardStreamStagedContext(ctx context.Context
 func (l *LocalShardStore) WriteLocalShardStreamStagedSizedContext(ctx context.Context, bucket, stagingKey, finalKey string, shardIdx int, body io.Reader, streamSize int64) error {
 	if streamSize < 0 {
 		return l.WriteLocalShardStreamStagedContext(ctx, bucket, stagingKey, finalKey, shardIdx, body)
+	}
+	if rawCap := maxRawShardPayload(false); streamSize > rawCap {
+		return fmt.Errorf("shard payload too large: %d", streamSize)
 	}
 	return l.writeLocalShardAADStream(ctx, bucket, stagingKey, finalKey, shardIdx, body, streamSize)
 }

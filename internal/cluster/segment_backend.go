@@ -355,6 +355,13 @@ func (b *DistributedBackend) putObjectChunkedReader(
 	if size < 0 {
 		return nil, fmt.Errorf("putObjectChunked: negative size %d", size)
 	}
+	// Guard against pre-body heap exhaustion: the SizeHintExact fast path feeds
+	// a client-declared Content-Length directly here before reading any body bytes.
+	// Cap at 5 TiB (S3 single-PUT limit) to bound the blobIDs/placements alloc.
+	const maxObjectSize = int64(5) << 40 // 5 TiB
+	if size > maxObjectSize {
+		return nil, fmt.Errorf("putObjectChunked: object too large: %d bytes (max %d)", size, maxObjectSize)
+	}
 	// Pre-allocate blobIDs + placements sized to exact segment count. A 0-byte
 	// object still gets one (empty) segment so every simple PUT — including
 	// empty objects — takes this single chunked path (mirrors the multipart

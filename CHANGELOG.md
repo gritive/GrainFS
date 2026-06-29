@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.0.765.0] - 2026-06-29
+## [0.0.765.0] - 2026-06-30
 
 ### Performance
 - **Removed redundant double-encryption from the PUT spool write path.**
@@ -13,6 +13,20 @@
   455 KB per op); EC encode throughput +7.5%. The MPU (multipart upload) spool
   path retains its encryption because parts survive across requests and must
   remain opaque on disk.
+- **Exact-size encrypted PUTs bypass the spool entirely.**
+  When the client sends a `Content-Length` header with no `Content-MD5`, GrainFS
+  now streams the request body directly into the EC encoder without first
+  spooling to a temp file. This eliminates one full copy of the object from memory
+  on every standard S3 PUT.
+- **Segment GET reads are now streaming.**
+  The cluster segment reader opens and reads one shard at a time rather than
+  reading all shards into memory before returning data. Large multi-segment
+  objects no longer require buffering more than one segment worth of data during
+  a GET.
+- **Segment writer pool buffers are reused across PUT requests.**
+  The `SegmentWriter` chunk pool now reuses 16 MiB backing buffers across calls.
+  Repeated PUTs of the same or similarly sized objects allocate no new chunk
+  memory after the first request warms the pool.
 
 ### Fixed
 - **Crash-residue spool files are now cleaned up on restart.**
@@ -28,6 +42,20 @@
 - **Fixed nil-interface panic in EC-spool deferred close loop** (pre-existing).
   The loop that closes data-reader handles after EC encoding could panic when
   the parity-shard reader slot was nil. Added a nil guard before each `rc.Close()`.
+- **Fixed oversized-body detection in exact-size PUT fast path.**
+  When a request body exceeded the declared `Content-Length`, the overflow probe
+  in `exactObjectSizeReader` could be misinterpreted as a clean EOF by the chunk
+  loop, causing the excess to be silently ignored rather than rejected.
+- **Added payload cap to staged sized shard writes.**
+  The new staged-streaming shard write path for sized shards did not apply the
+  same `maxRawShardPayload` guard enforced by the unsized and non-staged paths.
+  An over-limit staged shard write now fails immediately instead of streaming
+  the full body to disk.
+- **Bounded pre-body allocation for exact-size PUT requests.**
+  A client supplying a very large `Content-Length` header with the exact-size
+  fast path could cause GrainFS to allocate segment metadata (blob IDs, placement
+  records) proportional to the declared size before reading any body bytes. Capped
+  at 5 TiB, matching the S3 single-PUT limit.
 
 ## [0.0.764.8] - 2026-06-29
 

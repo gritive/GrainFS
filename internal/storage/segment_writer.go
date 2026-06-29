@@ -45,8 +45,12 @@ func (c ownedSegmentChunk) release() {
 	if c.ref == nil {
 		return
 	}
-	clear(c.body)
-	*c.ref = (*c.ref)[:cap(*c.ref)]
+	// Zero the full backing array (not just the used slice) before returning to
+	// the pool to prevent stale plaintext bytes in the tail from leaking to the
+	// next consumer that acquires a larger capacity from the same pool slot.
+	full := (*c.ref)[:cap(*c.ref)]
+	clear(full)
+	*c.ref = full
 	segmentChunkPool.Put(c.ref)
 }
 

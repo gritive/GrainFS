@@ -55,8 +55,10 @@ func (r *exactObjectSizeReader) Read(p []byte) (int, error) {
 		return 0, io.EOF
 	}
 	r.probed = true
-	var extra [1]byte
-	n, err := r.r.Read(extra[:])
+	if len(p) == 0 {
+		return 0, nil
+	}
+	n, err := r.r.Read(p[:1])
 	if n > 0 {
 		return n, fmt.Errorf("body exceeds exact size")
 	}
