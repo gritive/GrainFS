@@ -8,7 +8,6 @@ make test-unit           # unit 테스트만 (colima/e2e 제외)
 make test                # test-unit + test-colima (colima VM 필요)
 make test-race           # race detector 포함
 make test-e2e            # E2E (binary 필요, 자동 빌드)
-make test-nbd-colima     # NBD 테스트 (colima VM)
 make test-fuse-s3-colima # FUSE/S3 테스트 (colima VM)
 make lint                # golangci-lint
 make fbs                 # FlatBuffers (.fbs → .go) 재생성
@@ -101,9 +100,7 @@ Clean Architecture를 따른다. 패키지-레이어 매핑:
 
 ### 테스트 레이아웃
 - `tests/e2e/`: 일반 E2E (Go test)
-- `tests/nbd_interop/`: NBD interop (Linux 필요)
-- `tests/nbd_colima/`, `tests/fuse_s3_colima/`: colima VM, 빌드 태그 `colima` 필수
-- NBD 테스트는 colima VM에서 실행
+- `tests/fuse_s3_colima/`: FUSE/S3 colima VM, 빌드 태그 `colima` 필수
 
 ## Tasks
 

@@ -16,7 +16,7 @@ import (
 func TestSpoolPutObjectEncryptsUnderDEK(t *testing.T) {
 	b := newTestDistributedBackendDEK(t) // production shape: WithShardDEKKeeper, encryptor nil
 	plain := bytes.Repeat([]byte("X"), 3<<20)
-	sp, err := b.spoolPutObject(context.Background(), "bkt", bytes.NewReader(plain))
+	sp, err := b.spoolPutObject(context.Background(), "bkt", bytes.NewReader(plain), true)
 	require.NoError(t, err)
 	defer sp.Cleanup()
 	require.True(t, sp.encrypted, "spool must be encrypted under a DEK-backed backend")

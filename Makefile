@@ -7,7 +7,7 @@ GO_SRC := $(shell find cmd internal -name '*.go' -not -name '*_test.go')
 FBS_SRC := $(shell find internal -name '*.fbs')
 FBS_STAMPS := $(FBS_SRC:.fbs=.fbs.stamp)
 
-.PHONY: test test-unit test-colima test-race test-e2e test-e2e-colima test-directio-linux test-jepsen test-smoke test-network-fault clean run lint lint-keyspace lint-storage-fixture bench bench-cluster bench-s3-compat-compare bench-go-api-micro build-pgo test-nbd-interop update-deps fbs test-nbd-colima bench-nbd bench-nbd-cluster test-fuse-s3-colima test-s3-client-smoke-colima bench-fuse-s3-colima test-raft-v2-chaos test-compat test-cluster-mount-colima
+.PHONY: test test-unit test-colima test-race test-e2e test-e2e-colima test-directio-linux test-jepsen test-smoke test-network-fault clean run lint lint-keyspace lint-storage-fixture bench bench-cluster bench-s3-compat-compare bench-go-api-micro build-pgo update-deps fbs test-fuse-s3-colima test-s3-client-smoke-colima bench-fuse-s3-colima test-raft-v2-chaos test-compat
 
 PGO_PROFILE ?= /tmp/grainfs-bench-cpu.out
 E2E_TEST_TIMEOUT ?= 3600s
@@ -48,10 +48,7 @@ test: test-unit test-colima
 test-unit:
 	go test $(UNIT_PKGS) -count=1 -cover
 
-test-colima: test-directio-linux test-nbd-colima test-fuse-s3-colima test-s3-client-smoke-colima test-cluster-mount-colima
-
-test-cluster-mount-colima: build
-	go test -v -tags colima -count=1 -timeout 300s -run TestNBD_ClusterMount ./tests/nbd_colima/
+test-colima: test-directio-linux test-fuse-s3-colima test-s3-client-smoke-colima
 
 test-race:
 	go test $(UNIT_PKGS) -count=1 -race -cover
@@ -59,24 +56,12 @@ test-race:
 test-e2e: bin/$(BINARY)
 	GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) $(GINKGO) --procs=$(E2E_GINKGO_PROCS) --timeout=$(E2E_TEST_TIMEOUT) $(E2E_GINKGO_REPORT_ARGS) $(E2E_GINKGO_ARGS) ./tests/e2e
 
-test-nbd-colima: build
-	go test -v -tags colima -timeout 120s ./tests/nbd_colima/
-
-test-nbd-interop: build
-	GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) go test -v -timeout 180s ./tests/nbd_interop/
-
 # test-raft-v2-chaos: sustained chaos run with -race for raft/v2.
 # Per-PR CI default: RAFT_CHAOS_DURATION=30s (runs in ~35s wall clock with -race).
 # Nightly: RAFT_CHAOS_DURATION=30m make test-raft-v2-chaos.
 # The timeout is set to 35m to cover the 30m nightly run plus setup overhead.
 test-raft-v2-chaos:
 	RAFT_CHAOS_DURATION=$${RAFT_CHAOS_DURATION:-30s} go test -race -count=1 -run TestChaos_Sustained -timeout 35m ./internal/raft/v2
-
-bench-nbd: build
-	./benchmarks/bench_nbd_profile.sh
-
-bench-nbd-cluster: build
-	./benchmarks/bench_nbd_cluster_profile.sh
 
 test-fuse-s3-colima: build
 	go test -v -tags colima -timeout 180s ./tests/fuse_s3_colima/ -run TestFUSE_S3
@@ -145,8 +130,6 @@ bench-s3-compat-compare: bin/$(BINARY)
 
 bench-go-api-micro:
 	./benchmarks/bench_go_api_micro.sh
-
-NBD_PPROF_DIR ?= $(HOME)/tmp/grainfs-nbd-pprof
 
 # Run Linux-only tests directly inside Colima. The host cross-compiles Linux
 # binaries and test binaries, copies them into the VM, then executes there.

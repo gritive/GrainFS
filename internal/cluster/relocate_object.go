@@ -200,7 +200,7 @@ func (b *DistributedBackend) relocateSideRecordAppendableToRedundantCoalesced(ct
 	if err != nil {
 		return fmt.Errorf("relocate appendable placement: %w", err)
 	}
-	sp, err := spoolObject(ctx, b.ecSpoolDir(), body, in.Bucket)
+	sp, err := spoolObject(ctx, b.ecSpoolDir(), body, in.Bucket, true /* needsMD5: sp.ETag stored in CoalesceSegmentsPlan.ETag (line 232) → metadata */)
 	if err != nil {
 		return fmt.Errorf("relocate appendable spool: %w", err)
 	}

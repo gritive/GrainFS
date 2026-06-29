@@ -26,11 +26,6 @@ object sizes, concurrency, and cold/warm-cache rules.
 | `make bench`                                  | Single-node S3 `warp` PUT/GET workload             | `benchmarks/profiles/s3-compat-compare-*`                           |
 | `make bench-cluster`                          | 3-node S3 `warp` PUT/GET workload                  | `benchmarks/profiles/s3-compat-compare-*`, cluster logs             |
 | `make bench-s3-compat-compare`                | `GrainFS` vs native MinIO/RustFS S3 `warp` workload | `benchmarks/profiles/s3-compat-compare-*`                           |
-| `make bench-nfs`                              | Single-node NFS fio profile via Colima             | `benchmarks/profiles/nfs-*/fio_output.txt`                          |
-| `make bench-nfs-cluster`                      | Multi-node NFS fio profile                         | `benchmarks/profiles/nfs-*`                                         |
-| `make bench-nfs-multi`                        | Multi-bucket NFS export profile                    | `benchmarks/profiles/nfs-multi-*`                                   |
-| `make bench-nbd`                              | Single-node NBD fio profile via Colima             | `benchmarks/profiles/nbd-*`                                         |
-| `make bench-nbd-cluster`                      | Multi-node NBD fio profile                         | `benchmarks/profiles/nbd-*`                                         |
 | `make bench-fuse-s3-colima`                   | rclone direct S3 vs rclone mount throughput        | Go benchmark output                                                 |
 
 ## Result Interpretation

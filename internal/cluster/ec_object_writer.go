@@ -3,8 +3,6 @@ package cluster
 import (
 	"bytes"
 	"context"
-	"crypto/md5"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"time"
@@ -196,10 +194,9 @@ func (w ecObjectWriter) writeDataShards(ctx context.Context, plan ecObjectWriteP
 		return ecObjectWriteResult{}, fmt.Errorf("ec split: %w", err)
 	}
 	header := encodeShardHeader(int64(len(data)))
-	h := md5.Sum(data)
 	sp := &spooledObject{
 		Size: int64(len(data)),
-		ETag: hex.EncodeToString(h[:]),
+		ETag: "", // intentionally empty: caller (WriteSegmentBytes) discards this ETag; segment checksum is xxhash3 via storage.ChecksumOf
 	}
 
 	return w.writeShardReadersWithSize(ctx, plan, sp, func(idx int) (io.Reader, error) {

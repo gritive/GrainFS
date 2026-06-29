@@ -451,9 +451,9 @@ func (b *DistributedBackend) spoolMultipartCompleteManifest(ctx context.Context,
 	}
 	defer body.Close()
 	if b.encryptedShardStorage() {
-		return spoolObjectEncrypted(ctx, b.spoolDir(), body, bucket, b.shardSvc.segEnc(), clusterMultipartSpoolDomain(uploadID, versionID))
+		return spoolObjectEncrypted(ctx, b.spoolDir(), body, bucket, b.shardSvc.segEnc(), clusterMultipartSpoolDomain(uploadID, versionID), true /* needsMD5: sp.ETag stored as the completed multipart ETag */)
 	}
-	return spoolObject(ctx, b.spoolDir(), body, bucket)
+	return spoolObject(ctx, b.spoolDir(), body, bucket, true /* needsMD5: sp.ETag stored as the completed multipart ETag */)
 }
 
 func contextForMultipartComplete(
