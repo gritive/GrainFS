@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gritive/GrainFS/internal/hrw"
 	"github.com/gritive/GrainFS/internal/transport"
@@ -35,7 +36,7 @@ func TestECObjectWriter_CleansWrittenShardsOnWriteFailure(t *testing.T) {
 		Key:              "object",
 		VersionID:        "v1",
 		PlacementGroupID: "group-1",
-		Config:           ECConfig{DataShards: 1, ParityShards: 1},
+		Config:           ECConfig{DataShards: 2, ParityShards: 0},
 		Placement:        []string{"node-a", "node-b"},
 		ContentType:      "application/octet-stream",
 	}
@@ -47,6 +48,202 @@ func TestECObjectWriter_CleansWrittenShardsOnWriteFailure(t *testing.T) {
 	require.ErrorIs(t, err, writeErr)
 	require.Equal(t, []string{"bucket/object/v1"}, shards.deleteLocalCalls)
 	require.Empty(t, shards.deleteRemoteCalls)
+}
+
+func TestECObjectWriter_FailsClosedOnShardErrorBeforeQuorumDespiteRemainingCapacity(t *testing.T) {
+	writeErr := errors.New("remote write failed")
+	releaseB := make(chan struct{})
+	releaseD := make(chan struct{})
+	shards := &fakeECObjectWriterShards{
+		writeShardErr: map[string]error{"node-c": writeErr},
+		writeShardBlock: map[string]chan struct{}{
+			"node-b": releaseB,
+			"node-d": releaseD,
+		},
+	}
+	writer := ecObjectWriter{
+		selfID:        "node-a",
+		shards:        shards,
+		writeAttempts: 1,
+	}
+
+	plan := ecObjectWritePlan{
+		Bucket:           "bucket",
+		Key:              "object",
+		VersionID:        "v1",
+		PlacementGroupID: "group-1",
+		Config:           ECConfig{DataShards: 2, ParityShards: 2},
+		Placement:        []string{"node-a", "node-b", "node-c", "node-d"},
+		ContentType:      "application/octet-stream",
+	}
+	sp := &spooledObject{Size: 11, ETag: "etag"}
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := writer.writeShardReadersWithSize(context.Background(), plan, sp, func(idx int) (io.Reader, error) {
+			return strings.NewReader("shard"), nil
+		}, nil, "test")
+		errCh <- err
+	}()
+
+	select {
+	case err := <-errCh:
+		require.ErrorIs(t, err, writeErr)
+	case <-time.After(time.Second):
+		require.Fail(t, "pre-quorum shard failure did not fail closed")
+	}
+	close(releaseB)
+	close(releaseD)
+	require.Equal(t, []string{"bucket/object/v1"}, shards.deleteLocalCalls)
+	require.Empty(t, shards.peersWithBufferedWrites("node-b", "node-d"))
+}
+
+func TestECObjectWriter_ReturnsAfterDataShardQuorumBeforeAllWritesComplete(t *testing.T) {
+	releaseC := make(chan struct{})
+	releaseD := make(chan struct{})
+	shards := &fakeECObjectWriterShards{
+		writeShardBlock: map[string]chan struct{}{
+			"node-c": releaseC,
+			"node-d": releaseD,
+		},
+	}
+	writer := ecObjectWriter{
+		selfID:        "node-a",
+		shards:        shards,
+		writeAttempts: 1,
+	}
+	plan := ecObjectWritePlan{
+		Bucket:           "bucket",
+		Key:              "object",
+		VersionID:        "v1",
+		PlacementGroupID: "group-1",
+		Config:           ECConfig{DataShards: 2, ParityShards: 2},
+		Placement:        []string{"node-a", "node-b", "node-c", "node-d"},
+		ContentType:      "application/octet-stream",
+	}
+	sp := &spooledObject{Size: 11, ETag: "etag"}
+
+	resultCh := make(chan ecObjectWriteResult, 1)
+	errCh := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		result, err := writer.writeShardReadersWithSize(ctx, plan, sp, func(idx int) (io.Reader, error) {
+			return strings.NewReader("shard"), nil
+		}, func(idx int) (int64, error) {
+			return int64(len("shard")), nil
+		}, "test")
+		if err != nil {
+			errCh <- err
+			return
+		}
+		resultCh <- result
+	}()
+
+	var result ecObjectWriteResult
+	select {
+	case result = <-resultCh:
+	case err := <-errCh:
+		require.NoError(t, err)
+	case <-time.After(500 * time.Millisecond):
+		require.Fail(t, "write did not return after data shard quorum")
+	}
+
+	require.Empty(t, shards.peersWithBufferedWrites("node-c", "node-d"))
+	cancel()
+	close(releaseC)
+	close(releaseD)
+	result.waitBackgroundWrites()
+	require.ElementsMatch(t, []string{"node-c", "node-d"}, shards.peersWithBufferedWrites("node-c", "node-d"))
+}
+
+func TestECObjectWriter_CleansWrittenShardsWhenContextCanceledBeforeQuorum(t *testing.T) {
+	releaseB := make(chan struct{})
+	releaseC := make(chan struct{})
+	releaseD := make(chan struct{})
+	shards := &fakeECObjectWriterShards{
+		writeShardBlock: map[string]chan struct{}{
+			"node-b": releaseB,
+			"node-c": releaseC,
+			"node-d": releaseD,
+		},
+	}
+	writer := ecObjectWriter{
+		selfID:        "node-a",
+		shards:        shards,
+		writeAttempts: 1,
+	}
+	plan := ecObjectWritePlan{
+		Bucket:           "bucket",
+		Key:              "object",
+		VersionID:        "v1",
+		PlacementGroupID: "group-1",
+		Config:           ECConfig{DataShards: 2, ParityShards: 2},
+		Placement:        []string{"node-a", "node-b", "node-c", "node-d"},
+		ContentType:      "application/octet-stream",
+	}
+	sp := &spooledObject{Size: 11, ETag: "etag"}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := writer.writeShardReadersWithSize(ctx, plan, sp, func(idx int) (io.Reader, error) {
+			return strings.NewReader("shard"), nil
+		}, func(idx int) (int64, error) {
+			return int64(len("shard")), nil
+		}, "test")
+		errCh <- err
+	}()
+
+	require.Eventually(t, func() bool {
+		shards.mu.Lock()
+		defer shards.mu.Unlock()
+		return len(shards.bufferedLocalWrites) == 1
+	}, time.Second, 10*time.Millisecond)
+	cancel()
+
+	require.ErrorIs(t, <-errCh, context.Canceled)
+	require.Equal(t, []string{"bucket/object/v1"}, shards.deleteLocalCalls)
+	require.Empty(t, shards.deleteRemoteCalls)
+}
+
+func TestECObjectWriteResult_AbortBackgroundWritesStopsSlowRemainingWrites(t *testing.T) {
+	releaseC := make(chan struct{})
+	releaseD := make(chan struct{})
+	shards := &fakeECObjectWriterShards{
+		writeShardBlock: map[string]chan struct{}{
+			"node-c": releaseC,
+			"node-d": releaseD,
+		},
+	}
+	writer := ecObjectWriter{
+		selfID:        "node-a",
+		shards:        shards,
+		writeAttempts: 1,
+	}
+	plan := ecObjectWritePlan{
+		Bucket:           "bucket",
+		Key:              "object",
+		VersionID:        "v1",
+		PlacementGroupID: "group-1",
+		Config:           ECConfig{DataShards: 2, ParityShards: 2},
+		Placement:        []string{"node-a", "node-b", "node-c", "node-d"},
+		ContentType:      "application/octet-stream",
+	}
+	sp := &spooledObject{Size: 11, ETag: "etag"}
+
+	result, err := writer.writeShardReadersWithSize(context.Background(), plan, sp, func(idx int) (io.Reader, error) {
+		return strings.NewReader("shard"), nil
+	}, func(idx int) (int64, error) {
+		return int64(len("shard")), nil
+	}, "test")
+	require.NoError(t, err)
+
+	result.abortBackgroundWrites()
+	require.Empty(t, shards.peersWithBufferedWrites("node-c", "node-d"))
+	close(releaseC)
+	close(releaseD)
+	require.Empty(t, shards.peersWithBufferedWrites("node-c", "node-d"))
 }
 
 func TestECObjectWriter_WriteSpooledShardsMaterializesAndWritesBufferedRemote(t *testing.T) {
@@ -162,13 +359,14 @@ func TestECObjectWriter_WriteDataShardsAllocBytesBounded(t *testing.T) {
 			selfID: "not-a-placement-node",
 			shards: shards,
 		}
-		_, err := writer.writeDataShards(context.Background(), ecObjectWritePlan{
+		result, err := writer.writeDataShards(context.Background(), ecObjectWritePlan{
 			Bucket:    "bucket",
 			Key:       "object",
 			Config:    cfg,
 			Placement: placement,
 		}, data)
 		require.NoError(t, err)
+		result.waitBackgroundWrites()
 		require.Len(t, shards.streamWrites, cfg.NumShards())
 	}
 
@@ -313,12 +511,44 @@ func requireECObjectWriterTraceStage(t *testing.T, events []PutTraceEvent, stage
 type fakeECObjectWriterShards struct {
 	mu                  sync.Mutex
 	writeShardErr       map[string]error
+	writeShardBlock     map[string]chan struct{}
 	bufferedLocalWrites []fakeECObjectWriterLocalWrite
 	bufferedWrites      []fakeECObjectWriterBufferedWrite
 	streamWrites        []fakeECObjectWriterStreamWrite
 	stagedWrites        []fakeECObjectWriterStagedWrite
 	deleteLocalCalls    []string
 	deleteRemoteCalls   []string
+}
+
+func (f *fakeECObjectWriterShards) maybeBlockWrite(ctx context.Context, peer string) error {
+	f.mu.Lock()
+	release := f.writeShardBlock[peer]
+	f.mu.Unlock()
+	if release == nil {
+		return nil
+	}
+	select {
+	case <-release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (f *fakeECObjectWriterShards) peersWithBufferedWrites(peers ...string) []string {
+	want := make(map[string]struct{}, len(peers))
+	for _, peer := range peers {
+		want[peer] = struct{}{}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	got := make([]string, 0, len(peers))
+	for _, write := range f.bufferedWrites {
+		if _, ok := want[write.peer]; ok {
+			got = append(got, write.peer)
+		}
+	}
+	return got
 }
 
 // fakeECObjectWriterStagedWrite captures a PR1 staged shard write (local or
@@ -380,6 +610,12 @@ func (f *fakeECObjectWriterShards) WriteLocalShardStreamStagedContext(ctx contex
 
 func (f *fakeECObjectWriterShards) WriteShardStreamStaged(ctx context.Context, peer, bucket, stagingKey, finalKey string, shardIdx int, body io.Reader) error {
 	_, _ = io.Copy(io.Discard, body)
+	if err := f.maybeBlockWrite(ctx, peer); err != nil {
+		return err
+	}
+	if err := f.writeShardErr[peer]; err != nil {
+		return err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.stagedWrites = append(f.stagedWrites, fakeECObjectWriterStagedWrite{
@@ -389,9 +625,6 @@ func (f *fakeECObjectWriterShards) WriteShardStreamStaged(ctx context.Context, p
 		finalKey:   finalKey,
 		shardIdx:   shardIdx,
 	})
-	if err := f.writeShardErr[peer]; err != nil {
-		return err
-	}
 	return nil
 }
 
@@ -412,6 +645,12 @@ func (f *fakeECObjectWriterShards) WriteLocalShardContext(ctx context.Context, b
 }
 
 func (f *fakeECObjectWriterShards) WriteShard(ctx context.Context, peer, bucket, key string, shardIdx int, data []byte) error {
+	if err := f.maybeBlockWrite(ctx, peer); err != nil {
+		return err
+	}
+	if err := f.writeShardErr[peer]; err != nil {
+		return err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.bufferedWrites = append(f.bufferedWrites, fakeECObjectWriterBufferedWrite{
@@ -421,14 +660,17 @@ func (f *fakeECObjectWriterShards) WriteShard(ctx context.Context, peer, bucket,
 		shardIdx: shardIdx,
 		body:     append([]byte(nil), data...),
 	})
-	if err := f.writeShardErr[peer]; err != nil {
-		return err
-	}
 	return nil
 }
 
 func (f *fakeECObjectWriterShards) WriteShardStream(ctx context.Context, peer, bucket, key string, shardIdx int, body io.Reader) error {
 	_, _ = io.Copy(io.Discard, body)
+	if err := f.maybeBlockWrite(ctx, peer); err != nil {
+		return err
+	}
+	if err := f.writeShardErr[peer]; err != nil {
+		return err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.streamWrites = append(f.streamWrites, fakeECObjectWriterStreamWrite{
@@ -437,9 +679,6 @@ func (f *fakeECObjectWriterShards) WriteShardStream(ctx context.Context, peer, b
 		key:      key,
 		shardIdx: shardIdx,
 	})
-	if err := f.writeShardErr[peer]; err != nil {
-		return err
-	}
 	return nil
 }
 

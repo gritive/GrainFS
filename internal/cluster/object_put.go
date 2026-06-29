@@ -342,6 +342,7 @@ func (b *DistributedBackend) putObjectECSpooledWithOptionalModTime(ctx context.C
 	}
 	if beforeCommit != nil {
 		if err := beforeCommit(); err != nil {
+			result.abortBackgroundWrites()
 			b.deleteShardsAsync(plan.Bucket, result.Placement, result.ShardKey)
 			return nil, err
 		}
@@ -403,6 +404,7 @@ func (b *DistributedBackend) commitECObjectWriteResult(
 	// Phase 3: quorum meta write replaces data_raft propose.
 	if merr := b.writeQuorumMeta(ctx, metaCmd); merr != nil {
 		ObservePutTraceStage(ctx, PutTraceStageQuorumMetaWrite, stageStart, PutTraceStageFields{Error: merr.Error()})
+		result.abortBackgroundWrites()
 		go b.deleteShardsAsync(plan.Bucket, result.Placement, result.ShardKey)
 		return nil, merr
 	}
@@ -477,6 +479,8 @@ func (b *DistributedBackend) commitCompleteMultipartObjectWriteResult(
 	// Suspended get nil and commit via the latest-only quorum-meta write below.
 	metaBlob, mberr := b.buildMultipartMetaBlob(ctx, metaCmd)
 	if mberr != nil {
+		result.abortBackgroundWrites()
+		go b.deleteShardsAsync(plan.Bucket, result.Placement, result.ShardKey)
 		return nil, mberr
 	}
 	if len(metaBlob) > 0 {
@@ -484,6 +488,7 @@ func (b *DistributedBackend) commitCompleteMultipartObjectWriteResult(
 		// failure nothing is durable — eager-delete the shards and let the client retry.
 		winCmd, werr := b.writeCompletedMultipartBlob(ctx, metaBlob)
 		if werr != nil {
+			result.abortBackgroundWrites()
 			go b.deleteShardsAsync(plan.Bucket, result.Placement, result.ShardKey)
 			return nil, werr
 		}
@@ -498,6 +503,7 @@ func (b *DistributedBackend) commitCompleteMultipartObjectWriteResult(
 	// (commitECObjectWriteResult). On failure nothing is durable; eager-delete shards.
 	if merr := b.writeQuorumMeta(ctx, metaCmd); merr != nil {
 		ObservePutTraceStage(ctx, PutTraceStageDataRaftProposeMeta, stageStart, PutTraceStageFields{Error: merr.Error()})
+		result.abortBackgroundWrites()
 		go b.deleteShardsAsync(plan.Bucket, result.Placement, result.ShardKey)
 		return nil, merr
 	}
