@@ -17,6 +17,8 @@
 #   verdict            aggregate A/B tsvs -> verdict.md (uses cross_binary_ab.sh python)
 #   minio [i]          install+run MinIO on node-0 (SSE-S3 encrypted), warp from client
 #   minio-verdict      print MinIO vs GrainFS-devel throughput comparison
+#   single [i]         single-node GrainFS (devel) on node-0 + pprof, warp from client
+#   single-verdict     print single-node GrainFS vs MinIO comparison + pprof inspect cmds
 #   down               delete all VMs
 #   full               up; build; for i in 1..RUNS { arm new i; arm old i }; verdict;
 #                      minio 1; minio-verdict
@@ -72,6 +74,8 @@ PSK="phase5-cross-binary-cluster-key"
 
 MINIO_PORT="${MINIO_PORT:-9001}"
 MINIO_UNIT="minio-bench"
+PPROF_PORT="${PPROF_PORT:-6060}"
+PPROF_CPU_SECONDS="${PPROF_CPU_SECONDS:-30}"
 
 ssh_node() { # node-name "cmd..."
   local n="$1"; shift
@@ -244,9 +248,9 @@ reset_cluster() {
   wait
 }
 
-# serve_node <node_idx> <bin> [invite_bundle]
+# serve_node <node_idx> <bin> [invite_bundle] [pprof_port]
 serve_node() {
-  local idx="$1" bin="$2" bundle="${3:-}"
+  local idx="$1" bin="$2" bundle="${3:-}" pprof_port="${4:-0}"
   local n; n="$(node_name "$idx")"
   local ipi; ipi="$(internal_ip "$n")"
   local setenv=()
@@ -256,11 +260,14 @@ serve_node() {
   else
     setenv=(--setenv="GRAINFS_INVITE_BUNDLE=$bundle")
   fi
+  local pprof_flag=""
+  if (( pprof_port > 0 )); then pprof_flag="--pprof-port $pprof_port"; fi
   ssh_node "$n" "sudo systemd-run --unit=$UNIT --collect ${setenv[*]} \
     $bin serve --data $DATA_DIR --port $HTTP_PORT --node-id p5-node-$idx \
     --raft-addr $ipi:$RAFT_PORT --join-listen-addr $ipi:$JOIN_PORT \
     --raft-heartbeat-interval ${RAFT_HEARTBEAT:-1s} --raft-election-timeout ${RAFT_ELECTION:-3s} \
     --scrub-interval 0 --lifecycle-interval 0 --log-level ${LOG_LEVEL:-warn} \
+    $pprof_flag \
     && echo node-$idx-launched"
 }
 
@@ -384,12 +391,17 @@ cmd_minio() { # <runidx>
   local ip0; ip0="$(internal_ip "$n")"
   local minio_data="/var/lib/minio-bench"
 
-  log "minio: installing binary on $n (if absent)"
+  log "minio: installing binary on $n"
+  # Always re-download to avoid stale corrupt installs. Verify ELF before
+  # installing — dl.min.io returns 200 HTML on quota/redirect errors.
   ssh_node "$n" "
-    if [ ! -x /usr/local/bin/minio ]; then
-      curl -sSL https://dl.min.io/server/minio/release/linux-amd64/minio -o /tmp/minio-dl
-      sudo install -m 755 /tmp/minio-dl /usr/local/bin/minio
+    curl -fsSL https://dl.min.io/server/minio/release/linux-amd64/minio -o /tmp/minio-dl
+    if ! file /tmp/minio-dl 2>/dev/null | grep -q ELF; then
+      echo 'ERROR: minio download is not an ELF binary (got HTML/redirect?)'
+      file /tmp/minio-dl
+      exit 1
     fi
+    sudo install -m 755 /tmp/minio-dl /usr/local/bin/minio
     /usr/local/bin/minio --version
   "
 
@@ -404,8 +416,10 @@ cmd_minio() { # <runidx>
     sudo rm -rf $minio_data && sudo mkdir -p $minio_data
   "
 
-  # AES-256 key for SSE-S3 auto-encryption (hex; re-generated per run)
-  local kms_key; kms_key="$(openssl rand -hex 32)"
+  # AES-256 key for SSE-S3 auto-encryption. MinIO parses MINIO_KMS_SECRET_KEY
+  # value as base64 and rejects non-{16,24,32}-byte decoded lengths; openssl
+  # rand 32 | base64 produces exactly 32 bytes when decoded (AES-256).
+  local kms_key; kms_key="$(openssl rand 32 | base64 | tr -d '\n')"
 
   log "minio: starting on $n:$MINIO_PORT (SSE-S3 MINIO_KMS_AUTO_ENCRYPTION=on)"
   ssh_node "$n" "sudo systemd-run --unit=$MINIO_UNIT --collect \
@@ -480,6 +494,141 @@ cmd_minio_verdict() {
   echo ""
 }
 
+# --------------------------------------------------------- single-node ----------
+# Single-node GrainFS (devel) with pprof — goal: amd64 re-confirm whether
+# MD5 ETag still dominates write CPU (was 68% arm64; unclear on amd64 with
+# hardware MD5 asm). CPU profile captured during warp PUT; heap/allocs/goroutine
+# collected post-warp. Compare against cmd_minio for throughput baseline.
+cmd_single() { # <runidx>
+  local idx="${1:-1}"
+  local n; n="$(node_name 0)"
+  local ip0; ip0="$(internal_ip "$n")"
+  local bin="$BIN_DIR/grainfs-new"
+
+  log "single: resetting node-0"
+  ssh_node "$n" "
+    sudo systemctl stop $UNIT 2>/dev/null || true
+    sudo systemctl reset-failed $UNIT 2>/dev/null || true
+    sudo pkill -9 -f 'grainfs' 2>/dev/null || true
+    for _ in \$(seq 1 30); do
+      (exec 3<>/dev/tcp/127.0.0.1/$HTTP_PORT) 2>/dev/null && { exec 3>&- 3<&-; sleep 0.5; } || break
+    done
+    sudo rm -rf $DATA_DIR && sudo mkdir -p $DATA_DIR/keys.d
+  "
+
+  log "single: starting GrainFS (devel) on $n:$HTTP_PORT pprof=:$PPROF_PORT"
+  serve_node 0 "$bin" "" "$PPROF_PORT"
+  if ! wait_http 0; then
+    log "ERROR: single GrainFS never came up on $n — aborting"
+    return 1
+  fi
+  # Wait for leader — single node promotes quickly; no shard-group wait needed.
+  ssh_node "$n" "
+    for _ in \$(seq 1 60); do
+      s=\$(curl -sf http://127.0.0.1:$HTTP_PORT/api/cluster/status 2>/dev/null||true)
+      st=\$(echo \"\$s\" | python3 -c 'import sys,json;print(json.load(sys.stdin).get(\"state\",\"\"))' 2>/dev/null||true)
+      [ \"\$st\" = Leader ] && { echo leader-ready; exit 0; }; sleep 0.5
+    done; echo leader-timeout
+  "
+
+  # Bootstrap IAM SA
+  local saj
+  saj="$(ssh_node "$n" "sudo $bin iam --json sa create bench-single --endpoint $DATA_DIR/admin.sock")"
+  if ! echo "$saj" | python3 -c 'import json,sys;json.load(sys.stdin)["access_key"]' 2>/dev/null; then
+    log "ERROR: single IAM SA create failed: ${saj:0:120}"; return 1
+  fi
+  local access_key secret_key sa_id
+  access_key="$(echo "$saj" | python3 -c 'import json,sys;print(json.load(sys.stdin)["access_key"])')"
+  secret_key="$(echo "$saj" | python3 -c 'import json,sys;print(json.load(sys.stdin)["secret_key"])')"
+  sa_id="$(echo "$saj" | python3 -c 'import json,sys;print(json.load(sys.stdin)["sa_id"])')"
+  log "single: SA access=${access_key:0:8}..."
+
+  # Pre-create warp buckets (grainfs-cluster target names; single node reuses that path)
+  for op in ${WARP_OPS//,/ }; do
+    ssh_node "$n" "sudo $bin bucket create warp-grainfs-cluster-$op --endpoint $DATA_DIR/admin.sock --attach-sa $sa_id --attach-policy bucket-admin >/dev/null 2>&1 || true"
+  done
+
+  local rprof="/tmp/p5-prof-single-$idx"
+  local localdir="$RESULT_DIR/single/run$idx"
+  local pprof_dir="$localdir/pprof"
+  mkdir -p "$pprof_dir"
+
+  # Background: 5s PUT warm-up delay then capture PPROF_CPU_SECONDS of CPU.
+  log "single: spawning background CPU profile capture (5s warmup + ${PPROF_CPU_SECONDS}s)"
+  (
+    sleep 5
+    ssh_node "$n" "curl -sf 'http://127.0.0.1:$PPROF_PORT/debug/pprof/profile?seconds=$PPROF_CPU_SECONDS' -o /tmp/single-cpu.pb.gz 2>/dev/null && echo pprof-cpu-done" || true
+    if gcloud compute scp --zone="$ZONE" --project="$PROJECT" --tunnel-through-iap \
+      "$n:/tmp/single-cpu.pb.gz" "$pprof_dir/cpu.pb.gz" >/dev/null 2>&1; then
+      log "single: CPU profile -> $pprof_dir/cpu.pb.gz"
+    else
+      log "WARN: single CPU profile pull failed"
+    fi
+  ) &
+  local pprof_pid=$!
+
+  # Run warp from client (single node = 1-node cluster via grainfs-cluster target).
+  log "single: run=$idx warp from client -> $ip0:$HTTP_PORT"
+  ssh_node "$CLIENT" "
+    export PATH=/usr/local/go/bin:\$PATH
+    cd /tmp/p5-new
+    rm -rf $rprof
+    GRAINFS_CLUSTER_URL='$ip0:$HTTP_PORT' \
+    GRAINFS_ACCESS_KEY='$access_key' \
+    GRAINFS_SECRET_KEY='$secret_key' \
+    BINARY=/tmp/grainfs-new \
+    TARGETS=grainfs-cluster \
+    WARP_OPS='$WARP_OPS' WARP_OBJ_SIZE='$WARP_OBJ_SIZE' \
+    WARP_CONCURRENT='$WARP_CONCURRENT' WARP_DURATION='$WARP_DURATION' \
+    WARP_NOCLEAR=1 \
+    PROFILE_ROOT='$rprof' \
+    bash benchmarks/bench_s3_compat_compare.sh || echo 'BENCH_NONZERO'
+    echo '--- warp-results.tsv ---'; cat $rprof/warp-results.tsv 2>/dev/null || echo MISSING
+  "
+
+  wait "$pprof_pid" 2>/dev/null || true
+
+  # Post-warp snapshots: heap, allocs, goroutine, mutex, block.
+  log "single: collecting post-warp pprof snapshots on $n"
+  for prof in heap allocs goroutine mutex block; do
+    ssh_node "$n" "curl -sf 'http://127.0.0.1:$PPROF_PORT/debug/pprof/$prof' -o /tmp/single-${prof}.pb.gz 2>/dev/null" || true
+    gcloud compute scp --zone="$ZONE" --project="$PROJECT" --tunnel-through-iap \
+      "$n:/tmp/single-${prof}.pb.gz" "$pprof_dir/${prof}.pb.gz" >/dev/null 2>&1 || true
+  done
+  log "single: pprof snapshots -> $pprof_dir/"
+
+  # Pull warp TSV.
+  gcloud compute scp --zone="$ZONE" --project="$PROJECT" --tunnel-through-iap \
+    "$CLIENT:$rprof/warp-results.tsv" "$localdir/warp-results.tsv" >/dev/null 2>&1 \
+    || log "WARN: no warp-results.tsv for single run$idx"
+  log "single: run=$idx done -> $localdir"
+}
+
+# ----------------------------------------------------------- single-verdict -----
+# Print single-node GrainFS vs MinIO throughput + pprof inspect commands.
+cmd_single_verdict() {
+  log "single-node comparison: $RESULT_DIR"
+  echo ""
+  echo "=== Single-node GrainFS (devel, pprof) vs MinIO comparison ==="
+  echo ""
+  echo "--- GrainFS single node (devel, EC 4+2, XAES-256-GCM) ---"
+  cat "$RESULT_DIR"/single/run*/warp-results.tsv 2>/dev/null || echo "  (no results)"
+  echo ""
+  echo "--- MinIO (single node, SSE-S3 auto-encryption) ---"
+  cat "$RESULT_DIR"/minio/run*/warp-results.tsv 2>/dev/null || echo "  (no results)"
+  echo ""
+  local cpu_prof
+  cpu_prof="$(find "$RESULT_DIR/single" -name 'cpu.pb.gz' -path '*/pprof/*' 2>/dev/null | sort -r | head -1)"
+  if [ -n "$cpu_prof" ]; then
+    local pdir; pdir="$(dirname "$cpu_prof")"
+    echo "--- Profiling (GrainFS single node) ---"
+    echo "CPU:    go tool pprof -http=:8080 $cpu_prof"
+    echo "Heap:   go tool pprof -http=:8080 $pdir/heap.pb.gz"
+    echo "Allocs: go tool pprof -http=:8080 $pdir/allocs.pb.gz"
+    echo "Top:    go tool pprof -top $cpu_prof"
+  fi
+}
+
 # ----------------------------------------------------------- down --------------
 cmd_down() {
   log "TEARDOWN: deleting all VMs"
@@ -511,8 +660,10 @@ case "${1:-}" in
   minio) cmd_minio "${2:-1}" ;;
   verdict) cmd_verdict ;;
   minio-verdict) cmd_minio_verdict ;;
+  single) cmd_single "${2:-1}" ;;
+  single-verdict) cmd_single_verdict ;;
   down) cmd_down ;;
   full) cmd_full ;;
   ip) for i in $(seq 0 $((NODE_COUNT-1))); do echo "$(node_name "$i") $(internal_ip "$(node_name "$i")")"; done ;;
-  *) echo "usage: $0 {up|prep-client|build|arm <new|old> <i>|boot <new|old>|minio [i]|verdict|minio-verdict|down|full|ip}" >&2; exit 2 ;;
+  *) echo "usage: $0 {up|prep-client|build|arm <new|old> <i>|boot <new|old>|minio [i]|verdict|minio-verdict|single [i]|single-verdict|down|full|ip}" >&2; exit 2 ;;
 esac
