@@ -10,13 +10,16 @@
 # pulls warp-results.tsv into the layout cross_binary_ab.sh's verdict python
 # reads, and applies the merge-blocker rule.
 #
-# Subcommands (run incrementally; `full` chains the A/B):
+# Subcommands (run incrementally; `full` chains the A/B + MinIO):
 #   up                 provision storage VMs + client (idempotent)
 #   build              git-archive devel+master -> client -> go build both -> fan out
 #   arm <new|old> <i>  reset+boot cluster with that binary, warp, pull run<i>/<arm>
-#   verdict            aggregate pulled tsvs -> verdict.md (uses cross_binary_ab.sh python)
+#   verdict            aggregate A/B tsvs -> verdict.md (uses cross_binary_ab.sh python)
+#   minio [i]          install+run MinIO on node-0 (SSE-S3 encrypted), warp from client
+#   minio-verdict      print MinIO vs GrainFS-devel throughput comparison
 #   down               delete all VMs
-#   full               up; build; for i in 1..RUNS { arm new i; arm old i }; verdict
+#   full               up; build; for i in 1..RUNS { arm new i; arm old i }; verdict;
+#                      minio 1; minio-verdict
 #                      (down is NOT automatic — confirm results first, then `down`)
 #
 # Cost guard: always `down` when finished. `full` does not auto-teardown.
@@ -66,6 +69,9 @@ HTTP_PORT=9000
 RAFT_PORT=7000
 JOIN_PORT=7100
 PSK="phase5-cross-binary-cluster-key"
+
+MINIO_PORT="${MINIO_PORT:-9001}"
+MINIO_UNIT="minio-bench"
 
 ssh_node() { # node-name "cmd..."
   local n="$1"; shift
@@ -254,7 +260,7 @@ serve_node() {
     $bin serve --data $DATA_DIR --port $HTTP_PORT --node-id p5-node-$idx \
     --raft-addr $ipi:$RAFT_PORT --join-listen-addr $ipi:$JOIN_PORT \
     --raft-heartbeat-interval ${RAFT_HEARTBEAT:-1s} --raft-election-timeout ${RAFT_ELECTION:-3s} \
-    --nbd-port 0 --scrub-interval 0 --lifecycle-interval 0 --log-level ${LOG_LEVEL:-warn} \
+    --scrub-interval 0 --lifecycle-interval 0 --log-level ${LOG_LEVEL:-warn} \
     && echo node-$idx-launched"
 }
 
@@ -365,6 +371,90 @@ cmd_arm() { # <new|old> <runidx>
   log "arm=$arm run=$idx pulled -> $localdir"
 }
 
+# --------------------------------------------------------- minio arm -----------
+# Runs MinIO (single-node, single-drive) on node-0 and benchmarks from the
+# client with the same warp parameters used by GrainFS arms.
+# Encryption: MINIO_KMS_AUTO_ENCRYPTION=on (server-side SSE-S3 via inline KMS
+# master key) — mirrors GrainFS XAES-256-GCM at-rest encryption for a fair
+# comparison.  Note: single node vs 4-node cluster; latency/throughput scale
+# differently, but it gives an absolute MinIO baseline on identical hardware.
+cmd_minio() { # <runidx>
+  local idx="${1:-1}"
+  local n; n="$(node_name 0)"
+  local ip0; ip0="$(internal_ip "$n")"
+  local minio_data="/var/lib/minio-bench"
+
+  log "minio: installing binary on $n (if absent)"
+  ssh_node "$n" "
+    if [ ! -x /usr/local/bin/minio ]; then
+      curl -sSL https://dl.min.io/server/minio/release/linux-amd64/minio -o /tmp/minio-dl
+      sudo install -m 755 /tmp/minio-dl /usr/local/bin/minio
+    fi
+    /usr/local/bin/minio --version
+  "
+
+  log "minio: reset node-0 (stop grainfs + minio, wipe $minio_data)"
+  ssh_node "$n" "
+    sudo systemctl stop $UNIT 2>/dev/null || true
+    sudo systemctl stop $MINIO_UNIT 2>/dev/null || true
+    sudo pkill -9 minio 2>/dev/null || true
+    for _ in \$(seq 1 30); do
+      (exec 3<>/dev/tcp/127.0.0.1/$MINIO_PORT) 2>/dev/null && { exec 3>&- 3<&-; sleep 0.5; } || break
+    done
+    sudo rm -rf $minio_data && sudo mkdir -p $minio_data
+  "
+
+  # AES-256 key for SSE-S3 auto-encryption (hex; re-generated per run)
+  local kms_key; kms_key="$(openssl rand -hex 32)"
+
+  log "minio: starting on $n:$MINIO_PORT (SSE-S3 MINIO_KMS_AUTO_ENCRYPTION=on)"
+  ssh_node "$n" "sudo systemd-run --unit=$MINIO_UNIT --collect \
+    --setenv=MINIO_ROOT_USER=minioadmin \
+    --setenv=MINIO_ROOT_PASSWORD=minioadmin \
+    '--setenv=MINIO_KMS_SECRET_KEY=warp-bench:$kms_key' \
+    --setenv=MINIO_KMS_AUTO_ENCRYPTION=on \
+    /usr/local/bin/minio server $minio_data --address :$MINIO_PORT \
+    && echo minio-launched"
+
+  log "minio: waiting for health endpoint on $n:$MINIO_PORT"
+  local minio_up
+  minio_up="$(ssh_node "$n" "
+    for _ in \$(seq 1 90); do
+      curl -sf http://127.0.0.1:$MINIO_PORT/minio/health/live >/dev/null 2>&1 && { echo minio-http-up; exit 0; }; sleep 1
+    done; echo minio-http-down; sudo journalctl -u $MINIO_UNIT --no-pager 2>/dev/null | tail -8
+  ")"
+  echo "$minio_up"
+  if ! [[ "$minio_up" == *minio-http-up* ]]; then
+    log "ERROR: minio never came up on $n:$MINIO_PORT — aborting"
+    return 1
+  fi
+
+  local rprof="/tmp/p5-prof-minio-$idx"
+  log "minio: run=$idx warp from client -> $ip0:$MINIO_PORT"
+  ssh_node "$CLIENT" "
+    export PATH=/usr/local/go/bin:\$PATH
+    cd /tmp/p5-new
+    rm -rf $rprof
+    MINIO_URL='http://$ip0:$MINIO_PORT' \
+    MINIO_ACCESS_KEY='minioadmin' \
+    MINIO_SECRET_KEY='minioadmin' \
+    TARGETS=minio \
+    WARP_OPS='$WARP_OPS' WARP_OBJ_SIZE='$WARP_OBJ_SIZE' \
+    WARP_CONCURRENT='$WARP_CONCURRENT' WARP_DURATION='$WARP_DURATION' \
+    WARP_NOCLEAR=1 \
+    PROFILE_ROOT='$rprof' \
+    bash benchmarks/bench_s3_compat_compare.sh || echo 'BENCH_NONZERO'
+    echo '--- warp-results.tsv ---'; cat $rprof/warp-results.tsv 2>/dev/null || echo MISSING
+  "
+
+  local localdir="$RESULT_DIR/minio/run$idx"
+  mkdir -p "$localdir"
+  gcloud compute scp --zone="$ZONE" --project="$PROJECT" --tunnel-through-iap \
+    "$CLIENT:$rprof/warp-results.tsv" "$localdir/warp-results.tsv" >/dev/null 2>&1 \
+    || log "WARN: no warp-results.tsv pulled for minio run$idx"
+  log "minio: run=$idx pulled -> $localdir"
+}
+
 # ----------------------------------------------------------- verdict -----------
 cmd_verdict() {
   log "aggregating $RESULT_DIR -> verdict.md"
@@ -372,6 +462,22 @@ cmd_verdict() {
   sed -n '/^python3 - "\$CROSS_ROOT"/,/^PY$/p' "$REPO_ROOT/benchmarks/cross_binary_ab.sh" \
     | sed '1d;$d' > /tmp/p5-agg.py
   python3 /tmp/p5-agg.py "$RESULT_DIR" "$RUNS" "$PUT_WIN_MIN" "$NOREG_MIN" "$NEW_REF" "$OLD_REF" 1
+}
+
+# ----------------------------------------------------------- minio-verdict ------
+# Print a side-by-side summary of MinIO vs GrainFS-devel throughput.
+# TSV columns: target, op, throughput_MBps, ops_per_sec, p50_ms, p99_ms
+cmd_minio_verdict() {
+  log "minio comparison: $RESULT_DIR"
+  echo ""
+  echo "=== MinIO vs GrainFS-devel comparison (warp-results.tsv) ==="
+  echo ""
+  echo "--- GrainFS devel (new arm) ---"
+  cat "$RESULT_DIR"/run*/"new"/warp-results.tsv 2>/dev/null || echo "  (no results)"
+  echo ""
+  echo "--- MinIO (single node, SSE-S3 auto-encryption) ---"
+  cat "$RESULT_DIR"/minio/run*/warp-results.tsv 2>/dev/null || echo "  (no results)"
+  echo ""
 }
 
 # ----------------------------------------------------------- down --------------
@@ -391,6 +497,8 @@ cmd_full() {
     cmd_arm old "$i" || return 1
   done
   cmd_verdict
+  cmd_minio 1
+  cmd_minio_verdict
   log "full done — results in $RESULT_DIR. Run '$0 down' to delete VMs."
 }
 
@@ -400,9 +508,11 @@ case "${1:-}" in
   build) cmd_build ;;
   arm) cmd_arm "${2:?arm new|old}" "${3:?runidx}" ;;
   boot) reset_cluster; boot_cluster "${2:?new|old}" ;;
+  minio) cmd_minio "${2:-1}" ;;
   verdict) cmd_verdict ;;
+  minio-verdict) cmd_minio_verdict ;;
   down) cmd_down ;;
   full) cmd_full ;;
   ip) for i in $(seq 0 $((NODE_COUNT-1))); do echo "$(node_name "$i") $(internal_ip "$(node_name "$i")")"; done ;;
-  *) echo "usage: $0 {up|prep-client|build|arm <new|old> <i>|boot <new|old>|verdict|down|full|ip}" >&2; exit 2 ;;
+  *) echo "usage: $0 {up|prep-client|build|arm <new|old> <i>|boot <new|old>|minio [i]|verdict|minio-verdict|down|full|ip}" >&2; exit 2 ;;
 esac
