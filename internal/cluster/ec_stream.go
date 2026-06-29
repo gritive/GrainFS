@@ -26,6 +26,9 @@ func spoolECShards(ctx context.Context, cfg ECConfig, dir string, sp *spooledObj
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create ec spool dir: %w", err)
 	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("set ec spool dir perms: %w", err)
+	}
 	enc, err := getStreamEncoder(cfg, ecStreamBlockSize(cfg, sp.Size))
 	if err != nil {
 		return nil, fmt.Errorf("ec stream encoder: %w", err)
