@@ -382,13 +382,18 @@ func fanOutQuorumMeta(ctx context.Context, nodes []string, k int, dispatch func(
 // update). Under a single stable leader the owner is the authoritative reader of
 // its own copy, so its local write MUST be durable before the RMW returns.
 //
-// Fix: when self is a placement node, write the owner-local copy SYNCHRONOUSLY
-// first; it must be durable before any return so a subsequent owner-local-first
-// base read sees it. The local write counts for EVERY self entry in the placement
-// set (a placement set can list self more than once — e.g. EC over a single host,
-// where the byte-identical CAS re-delivery is idempotent), exactly as plain
-// fanOutQuorumMeta acked once per self goroutine. The remaining k-selfCount acks
-// come from the true peers, preserving the N-K peer failure budget unchanged:
+// Fix: when self is a placement node, write the owner-local copy before peer
+// publish and require it to be durable before any return so a subsequent
+// owner-local-first base read sees it. Do NOT overlap peer publishes with the
+// owner-local CAS write in this one-phase protocol: writeLocal includes the CAS
+// accept/reject decision plus file and directory fsync. If it rejects or fails
+// after peers have accepted the candidate, the caller has no compare-and-rollback
+// peer primitive to remove only that candidate without deleting a newer or
+// previously committed blob. The local write counts for EVERY self entry in the
+// placement set (a placement set can list self more than once — e.g. EC over a
+// single host, where the byte-identical CAS re-delivery is idempotent), exactly as
+// plain fanOutQuorumMeta acked once per self goroutine. The remaining k-selfCount
+// acks come from the true peers, preserving the N-K peer failure budget unchanged:
 // (peerCount)-(k-selfCount) = n-k. A CAS reject on the owner-local write is
 // surfaced immediately (the owner's own base advanced — the genuine retry signal).
 // When self is NOT a placement node the behavior is identical to plain
@@ -430,12 +435,15 @@ func fanOutQuorumMetaOwnerLocalFirst(
 	// Owner-local write first, SYNCHRONOUSLY (once; idempotent for duplicate self
 	// entries). A CAS reject here is the owner's own base advancing — surface it so
 	// the RMW re-reads and retries.
+	remaining := k - selfCount
+	if remaining > len(peers) {
+		return fmt.Errorf("quorum meta: placement nodes %d < quorum size %d", len(nodes), k)
+	}
 	if err := writeLocal(); err != nil {
 		return err
 	}
 	// The local write satisfies selfCount of the k required acks. Require the rest
 	// from the true peers; if the local acks already meet the quorum we are done.
-	remaining := k - selfCount
 	if remaining <= 0 {
 		return nil
 	}
