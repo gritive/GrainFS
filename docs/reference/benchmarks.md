@@ -45,7 +45,7 @@ export WARP_OPS=put,get,stat
 export WARP_OBJ_SIZE=10MiB
 export WARP_CONCURRENT=32
 export WARP_DURATION=1m
-export WARP_OBJECTS=4096
+export WARP_OBJECTS=2048
 
 ./benchmarks/gcp/bench_gcp_cluster.sh up
 ./benchmarks/gcp/bench_gcp_cluster.sh build

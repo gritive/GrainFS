@@ -131,8 +131,9 @@ objects, concurrency 32, 1 minute per operation, signed S3 requests, 0 errors:
 auto-encryption on the same GCP VM class. Methodology and script flags:
 [benchmarks/README.md](benchmarks/README.md#gcp-single-node-encrypted-comparison).
 
-Latest GCP 4-node encrypted cluster `warp` run, same workload shape and 0
-errors:
+Latest GCP 4-node encrypted cluster `warp` run, 10 MiB object size, 2048 total
+objects, concurrency 32, 1 minute per operation, `put,get` only, signed S3
+requests, 0 errors:
 
 | Target            | PUT MiB/s | GET MiB/s | vs MinIO PUT | vs MinIO GET |
 | ----------------- | --------: | --------: | -----------: | -----------: |

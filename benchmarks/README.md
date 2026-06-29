@@ -27,7 +27,7 @@ export WARP_OPS=put,get,stat
 export WARP_OBJ_SIZE=10MiB
 export WARP_CONCURRENT=32
 export WARP_DURATION=1m
-export WARP_OBJECTS=4096
+export WARP_OBJECTS=2048
 
 ./benchmarks/gcp/bench_gcp_cluster.sh up
 ./benchmarks/gcp/bench_gcp_cluster.sh build
@@ -41,7 +41,7 @@ done
 ```
 
 The default GCP workload is signed S3 `warp` with 10 MiB objects, concurrency
-32, 1 minute per operation, `put,get,stat`, 4096 objects, and `WARP_NOCLEAR=1`
+32, 1 minute per operation, `put,get,stat`, 2048 objects, and `WARP_NOCLEAR=1`
 inside the script so GET and stat measure the objects created by PUT. GrainFS
 pprof snapshots are saved under `single/run<N>/pprof/`; raw warp artifacts are
 saved under `single/run<N>/raw/` and `minio/run<N>/raw/`.
