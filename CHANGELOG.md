@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.767.0] - 2026-06-30
+
+### Performance
+- **Cluster PUTs return after data-shard quorum.**
+  EC object writes now unblock once the required data-shard acknowledgements are
+  durable, while remaining parity shard writes continue in the background.
+
+### Fixed
+- **Preserved fail-closed cleanup around late shard writes.**
+  Pre-quorum shard failures and caller cancellation still drain outstanding writes
+  and delete landed shards, while metadata/relocation commit failures now abort
+  any background writes before deleting the planned shard set.
+
 ## [0.0.766.0] - 2026-06-30
 
 ### Performance
