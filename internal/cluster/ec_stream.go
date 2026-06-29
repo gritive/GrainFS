@@ -58,6 +58,19 @@ func spoolECShards(ctx context.Context, cfg ECConfig, dir string, sp *spooledObj
 	}
 
 	dataFiles := make([]*os.File, cfg.DataShards)
+	parityFiles := make([]*os.File, cfg.ParityShards)
+	defer func() {
+		for _, f := range dataFiles {
+			if f != nil {
+				_ = f.Close()
+			}
+		}
+		for _, f := range parityFiles {
+			if f != nil {
+				_ = f.Close()
+			}
+		}
+	}()
 	dataWriters := make([]io.Writer, cfg.DataShards)
 	for i := range dataFiles {
 		f, err := os.CreateTemp(dir, fmt.Sprintf("ec-data-%d-*.tmp", i))
@@ -116,7 +129,6 @@ func spoolECShards(ctx context.Context, cfg ECConfig, dir string, sp *spooledObj
 		}
 	}()
 
-	parityFiles := make([]*os.File, cfg.ParityShards)
 	parityWriters := make([]io.Writer, cfg.ParityShards)
 	for i := range parityWriters {
 		idx := cfg.DataShards + i
