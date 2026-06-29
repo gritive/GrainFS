@@ -215,10 +215,10 @@ func TestBuildECShardTargets_CarryStripeBytes(t *testing.T) {
 	segRec, skip, err := backend.ResolveShardKeyPlacement(ctx, "b", "striped/segments/seg-s", scan)
 	require.NoError(t, err)
 	require.Empty(t, skip)
-	require.Equal(t, segStripe, segRec.StripeBytes, "datawal segment placement must carry StripeBytes")
+	require.Equal(t, segStripe, segRec.StripeBytes, "segment placement must carry StripeBytes")
 
 	coalRec, skip, err := backend.ResolveShardKeyPlacement(ctx, "b", "striped/coalesced/c1", scan)
 	require.NoError(t, err)
 	require.Empty(t, skip)
-	require.Equal(t, coalStripe, coalRec.StripeBytes, "datawal coalesced placement must carry StripeBytes")
+	require.Equal(t, coalStripe, coalRec.StripeBytes, "coalesced placement must carry StripeBytes")
 }

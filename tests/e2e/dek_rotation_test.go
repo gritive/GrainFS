@@ -36,8 +36,7 @@ func configSetViaCLI(dataDir, key, value string) (string, error) {
 // admin socket → ConfigPut → post-commit dispatcher → ProposeDEKRotate → raft →
 // every node advances the active DEK generation. Then proves the data plane:
 // objects sealed before the rotation stay readable (old gen retained) and new
-// writes succeed under the new gen, across the EC-shard + datawal lanes that S1-S5
-// made gen-aware.
+// writes succeed under the new gen, across the EC-shard and object lanes.
 var _ = ginkgo.Describe("data-DEK rotation (encryption.rotate-dek)", func() {
 	ginkgo.It("advances the active DEK generation cluster-wide and keeps pre/post-rotation objects readable", func() {
 		t := ginkgo.GinkgoTB()

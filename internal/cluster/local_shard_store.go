@@ -607,7 +607,7 @@ func (l *LocalShardStore) writeEncryptedShardFile(ctx context.Context, dir, path
 
 // shardWriteRequiresFsync reports whether a freshly written shard file (and its
 // parent directory chain) must be fsynced for durability, by shard class.
-// Post-S2 the data WAL is no longer written on the shard PUT path — durability
+// Post-S2 the WAL is no longer written on the shard PUT path; durability
 // is established at write time:
 //
 //   - Small (< largeShardFsyncThreshold) OR large with NO EC redundancy
@@ -619,7 +619,7 @@ func (l *LocalShardStore) writeEncryptedShardFile(ctx context.Context, dir, path
 //     is NOT fsynced → returns false. A nil noRedundancy provider counts as
 //     redundant (matches production wiring; nil only occurs in tests).
 //
-// S4 removed the data WAL entirely, so there is no replay path to special-case.
+// S4 removed the WAL entirely, so there is no replay path to special-case.
 func (l *LocalShardStore) shardWriteRequiresFsync(payloadLen int) bool {
 	large := payloadLen >= largeShardFsyncThreshold
 	if large && (l.noRedundancy == nil || !l.noRedundancy()) {

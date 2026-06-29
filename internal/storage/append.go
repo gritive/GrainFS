@@ -12,7 +12,6 @@
 package storage
 
 import (
-	"bytes"
 	"context"
 	"crypto/md5"
 	"encoding"
@@ -27,7 +26,6 @@ import (
 	"github.com/dgraph-io/badger/v4"
 
 	"github.com/gritive/GrainFS/internal/chunkref"
-	"github.com/gritive/GrainFS/internal/storage/datawal"
 	"github.com/gritive/GrainFS/internal/uuidutil"
 )
 
@@ -255,29 +253,6 @@ func (b *LocalBackend) ensureAppendableBase(ctx context.Context, bucket, key str
 func (b *LocalBackend) WriteSegmentBlob(bucket, key string, r io.Reader) (SegmentRef, error) {
 	blobID := uuidutil.MustNewV7()
 	path := b.segmentPath(bucket, key, blobID)
-	if b.dataWAL != nil {
-		payload, err := io.ReadAll(io.LimitReader(r, datawal.MaxPayloadBytes+1))
-		if err != nil {
-			return SegmentRef{}, err
-		}
-		if len(payload) > datawal.MaxPayloadBytes {
-			return SegmentRef{}, fmt.Errorf("datawal: payload too large: %d", len(payload))
-		}
-		_, err = b.dataWAL.AppendReader(context.Background(), datawal.Record{
-			Op:     datawal.OpSegmentPut,
-			Bucket: bucket,
-			Key:    key,
-			Target: blobID,
-			Size:   int64(len(payload)),
-		}, bytes.NewReader(payload))
-		if err != nil {
-			return SegmentRef{}, err
-		}
-		if err := b.dataWAL.Flush(); err != nil {
-			return SegmentRef{}, err
-		}
-		r = bytes.NewReader(payload)
-	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return SegmentRef{}, err
 	}

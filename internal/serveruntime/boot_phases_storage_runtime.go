@@ -49,10 +49,10 @@ func warnIfReducedDataFsync() {
 func bootShardService(ctx context.Context, state *bootState) error {
 	// Warn if the data-plane fsync policy (GRAINFS_FSYNC_MODE) has been weakened.
 	warnIfReducedDataFsync()
-	// The shard data WAL was removed in S4 (WAL-removal epic). Shard durability is
-	// now established at write time — small/no-redundancy shards fsync directly,
+	// The shard WAL was removed in S4 (WAL-removal epic). Shard durability is
+	// now established at write time: small/no-redundancy shards fsync directly,
 	// large redundant shards rely on EC reconstruction + the background scrubber.
-	// Boot no longer opens, wires, or replays a shard data WAL.
+	// Boot no longer opens, wires, or replays a shard WAL.
 
 	clusterSize := 1 + len(state.peers)
 	// Option B (uniform genesis seeding): a solo genesis node that declares a

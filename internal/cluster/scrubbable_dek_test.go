@@ -17,8 +17,8 @@ import (
 	"github.com/gritive/GrainFS/internal/storage/eccodec"
 )
 
-// withTestWALDEK USED to wire a data WAL (mandatory before S4). The shard data
-// WAL was removed in S4; this is retained as a no-op ShardServiceOption so the
+// withTestWALDEK used to wire the shard WAL (mandatory before S4). That WAL was
+// removed in S4; this is retained as a no-op ShardServiceOption so the
 // ~28 call sites compile unchanged. Durability is now write-time fsync / EC.
 func withTestWALDEK(tb clusterTestTB, _ *encrypt.DEKKeeper, _ []byte) ShardServiceOption {
 	tb.Helper()

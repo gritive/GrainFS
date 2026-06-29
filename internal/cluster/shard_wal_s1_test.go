@@ -11,7 +11,7 @@ import (
 
 // newS1ShardSvc builds a DistributedBackend + ShardService with the given EC
 // config. It returns the shard dir + the DEK keeper/clusterID for callers that
-// need them. The shard data WAL was removed in S4 — durability is write-time
+// need them. The shard WAL was removed in S4; durability is write-time
 // fsync (small / no-redundancy) or EC (large redundant). extraOpts lets a
 // caller wire WithNoRedundancy.
 func newS1ShardSvc(t *testing.T, ec ECConfig, nodes []string, extraOpts ...ShardServiceOption) (*DistributedBackend, string, *encrypt.DEKKeeper, []byte) {

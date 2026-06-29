@@ -200,7 +200,7 @@ sum(grainfs_volumes_by_health{health!="healthy"}) by (health)
 increase(grainfs_operator_state_scrape_errors_total{source="buckets"}[10m])
 ```
 
-After a node restart, committed objects are durable on disk (small / no-redundancy shards were fsynced at write time; large redundant shards are EC-reconstructable) — there is no data WAL replay since S4. Missing or corrupt EC shards are healed lazily: read-time EC reconstruction serves reads, and the periodic placement monitor + background scrubber proactively repair between boots.
+After a node restart, committed objects are durable on disk (small / no-redundancy shards were fsynced at write time; large redundant shards are EC-reconstructable) -- there is no shard WAL replay since S4. Missing or corrupt EC shards are healed lazily: read-time EC reconstruction serves reads, and the periodic placement monitor + background scrubber proactively repair between boots.
 
 The periodic placement monitor proactively detects and repairs segment (`<key>/segments/<blobID>`) and coalesced (`<key>/coalesced/<id>`) EC shards for **latest-version** objects between boots, complementing read-time reconstruction. Non-latest-version segment/coalesced shards are not proactively scanned by the placement monitor; they remain covered by read-time EC reconstruction. Corrupt segment or coalesced shards trigger quarantine of the parent object (object-level, using the scanned version). The metric `grainfs_placement_monitor_invalid_ec_ref_total{kind="segment|coalesced"}` is incremented when a ref has malformed placement (`len(NodeIDs) != ECData+ECParity`); a non-zero rate indicates corrupt object metadata and warrants investigation.
 
@@ -1195,18 +1195,13 @@ volume, so there is no nonce-exhaustion cliff forcing rotation. The per-generati
 seal count below is a cumulative-usage signal for rotation hygiene and
 compromise-recovery, not a hard limit.
 
-**Data-DEK rotation is deferred in this release.** The `encryption.rotate-dek`
-trigger is intentionally rejected (`grainfs config set encryption.rotate-dek now`
-returns a "deferred — not supported in this release" error) — the append-only
-at-rest writers pin the DEK generation at open. Data WAL segment creation now
-persists the active generation in its encrypted segment header, but live rotation
-still needs a rollover or seal-under-pinned-generation boundary. Node-local data
-WALs and cluster-shard data WALs use distinct AEAD namespaces (`datawal/node`
-and `datawal/shard`), so frames cannot be swapped between those physical WAL
-families even when sequence numbers match. Every remaining ciphertext-bearing
-lane must have equivalent generation framing before rotation is re-enabled. Because
-XAES removed the nonce-exhaustion cliff, the seal count below is **observability
-only** (cumulative-usage / compromise-recovery signal), not an action threshold.
+**Data-DEK rotation is enabled.** The `encryption.rotate-dek` trigger advances
+the active data-encryption generation through meta-raft
+(`grainfs config set encryption.rotate-dek now`). Data-plane writers either carry
+generation framing or seal under a pinned generation, so pre-rotation objects
+remain readable while new writes use the new generation. Because XAES removed the
+nonce-exhaustion cliff, the seal count below is **observability only**
+(cumulative-usage / compromise-recovery signal), not an action threshold.
 **KEK rotation** (`cluster rotate-key`, which re-wraps the existing DEKs without
 changing the DEK keys) remains fully available and is unaffected.
 

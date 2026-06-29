@@ -18,14 +18,16 @@ import (
 	"github.com/gritive/GrainFS/internal/pool"
 	pb "github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/gritive/GrainFS/internal/storage/datawal"
 	"github.com/gritive/GrainFS/internal/storage/eccodec"
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
 var shardBuilderPool = pool.New(func() *flatbuffers.Builder { return flatbuffers.NewBuilder(512) })
 
-const maxShardRangeReplyBytes = 64 << 10
+const (
+	maxShardRangeReplyBytes = 64 << 10
+	maxShardPayloadBytes    = 64 << 20
+)
 
 func getShardBuilder(minSize int) *flatbuffers.Builder {
 	b := shardBuilderPool.Get()
@@ -1090,13 +1092,13 @@ func (s *ShardService) NativeWriteHandler() transport.ShardWriteHandler {
 		stageStart := time.Now()
 		if req.Sealed {
 			// The body is the final encoded payload plus an 8-byte completeness
-			// trailer, so the payload is bounded directly by the data WAL's
-			// MaxPayloadBytes (no further encode grows it); read with room for the
-			// trailer. Buffer is per-shard, not whole-object. A truncated body is
-			// rejected: a mid-stream abort surfaces over HTTP as a clean EOF, so
-			// the trailer's declared length is the only signal that distinguishes
-			// a complete shard from a partial one.
-			raw, rerr := readShardPayload(body, datawal.MaxPayloadBytes+SealedShardTrailerLen, -1, false)
+			// trailer, so the payload is bounded directly by maxShardPayloadBytes
+			// (no further encode grows it); read with room for the trailer. Buffer
+			// is per-shard, not whole-object. A truncated body is rejected: a
+			// mid-stream abort surfaces over HTTP as a clean EOF, so the trailer's
+			// declared length is the only signal that distinguishes a complete
+			// shard from a partial one.
+			raw, rerr := readShardPayload(body, maxShardPayloadBytes+SealedShardTrailerLen, -1, false)
 			if rerr != nil {
 				return rerr
 			}
@@ -1252,19 +1254,19 @@ func syncDir(dir string) error {
 const encryptedShardEnvelopeOverhead = 64
 
 // maxRawShardPayload returns the largest raw plaintext shard size whose
-// encoded payload is guaranteed to fit within datawal.MaxPayloadBytes. The
+// encoded payload is guaranteed to fit within maxShardPayloadBytes. The
 // encrypted path inflates input by chunked AEAD overhead; the plain path is
-// only the small CRC envelope and is bounded by MaxPayloadBytes directly.
+// only the small CRC envelope and is bounded by maxShardPayloadBytes directly.
 func maxRawShardPayload(encrypted bool) int64 {
 	if !encrypted {
-		return datawal.MaxPayloadBytes
+		return maxShardPayloadBytes
 	}
-	chunks := int64(datawal.MaxPayloadBytes/eccodec.DefaultEncryptedChunkSize) + 1
+	chunks := int64(maxShardPayloadBytes/eccodec.DefaultEncryptedChunkSize) + 1
 	overhead := chunks * encryptedShardEnvelopeOverhead
-	if overhead >= datawal.MaxPayloadBytes {
+	if overhead >= maxShardPayloadBytes {
 		return 0
 	}
-	return datawal.MaxPayloadBytes - overhead
+	return maxShardPayloadBytes - overhead
 }
 
 // readShardPayload buffers body into a byte slice bounded by rawCap. When

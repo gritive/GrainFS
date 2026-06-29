@@ -29,10 +29,9 @@ import (
 	"syscall"
 )
 
-// SyncMode selects the data-plane fsync policy used by Sync. It governs the
-// single live data-plane durability fsync (shard finalize when no WAL is
-// wired, otherwise the datawal flush — the two are wiring-exclusive), so one
-// knob controls whichever is active. It does NOT touch the raft/consensus
+// SyncMode selects the data-plane fsync policy used by Sync. It governs shard
+// finalize durability, so one knob controls the hot-path data-plane fsync. It
+// does NOT touch the raft/consensus
 // fsync (raft state is not reconstructable from erasure coding, and its sync
 // is off the PUT hot path).
 type SyncMode int32
@@ -80,11 +79,10 @@ func SetSyncMode(m SyncMode) { fsyncMode.Store(int32(m)) }
 func CurrentSyncMode() SyncMode { return SyncMode(fsyncMode.Load()) }
 
 // FastFsyncEnabled reports whether the current mode skips the F_FULLFSYNC
-// barrier (true for SyncFast and SyncOff). Retained for datawal.syncWAL, which
-// branches on it before applying its own mode handling.
+// barrier (true for SyncFast and SyncOff).
 func FastFsyncEnabled() bool { return CurrentSyncMode() != SyncFull }
 
-// Sync flushes f to stable storage per the active SyncMode. Shard / WAL
+// Sync flushes f to stable storage per the active SyncMode. Data-plane
 // durability fsyncs route through here so the policy lives in one place.
 func Sync(f *os.File) error {
 	switch CurrentSyncMode() {
