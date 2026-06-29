@@ -1152,6 +1152,12 @@ func (s *ShardService) WriteLocalShardStreamStagedContext(ctx context.Context, b
 	return s.local.WriteLocalShardStreamStagedContext(ctx, bucket, stagingKey, finalKey, shardIdx, body)
 }
 
+// WriteLocalShardStreamStagedSizedContext is the known-size variant of staged
+// local shard writes; it streams to stagingKey while sealing with finalKey.
+func (s *ShardService) WriteLocalShardStreamStagedSizedContext(ctx context.Context, bucket, stagingKey, finalKey string, shardIdx int, body io.Reader, streamSize int64) error {
+	return s.local.WriteLocalShardStreamStagedSizedContext(ctx, bucket, stagingKey, finalKey, shardIdx, body, streamSize)
+}
+
 // EncodeEncryptedShardBuffer seals data as a GFSENC3 chunked shard using the DEK
 // seam (scrubber/EC-repair path).
 func (s *ShardService) EncodeEncryptedShardBuffer(bucket, key string, shardIdx int, data []byte) ([]byte, error) {

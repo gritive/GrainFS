@@ -637,6 +637,13 @@ func (l *LocalShardStore) WriteLocalShardStreamStagedContext(ctx context.Context
 	return l.writeLocalShardStaged(ctx, bucket, stagingKey, finalKey, shardIdx, data)
 }
 
+func (l *LocalShardStore) WriteLocalShardStreamStagedSizedContext(ctx context.Context, bucket, stagingKey, finalKey string, shardIdx int, body io.Reader, streamSize int64) error {
+	if streamSize < 0 {
+		return l.WriteLocalShardStreamStagedContext(ctx, bucket, stagingKey, finalKey, shardIdx, body)
+	}
+	return l.writeLocalShardAADStream(ctx, bucket, stagingKey, finalKey, shardIdx, body, streamSize)
+}
+
 func (l *LocalShardStore) writeLocalShardStreamContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader, streamSize int64) error {
 	rawCap := maxRawShardPayload(false)
 	// Sized path: the shard length is known, so stream the body straight into the

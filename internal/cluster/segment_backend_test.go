@@ -185,7 +185,7 @@ func TestClusterSegmentBackend_WriteSegment_RecordsPlacement(t *testing.T) {
 const testChunkedPutChunkSize = 64 << 10
 
 // makeSpool writes payload to a temp file and returns a *spooledObject.
-func makeSpool(t *testing.T, payload []byte) *spooledObject {
+func makeSpool(t clusterTestTB, payload []byte) *spooledObject {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "spool")

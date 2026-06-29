@@ -58,6 +58,7 @@ WARP_OPS="${WARP_OPS:-put,get,stat}"
 WARP_OBJ_SIZE="${WARP_OBJ_SIZE:-10MiB}"
 WARP_CONCURRENT="${WARP_CONCURRENT:-32}"
 WARP_DURATION="${WARP_DURATION:-1m}"
+WARP_OBJECTS="${WARP_OBJECTS:-4096}"
 
 # decision-rule thresholds (forwarded to the verdict python)
 PUT_WIN_MIN="${PUT_WIN_MIN:-1.05}"
@@ -364,6 +365,7 @@ cmd_arm() { # <new|old> <runidx>
     TARGETS=grainfs-cluster \
     WARP_OPS='$WARP_OPS' WARP_OBJ_SIZE='$WARP_OBJ_SIZE' \
     WARP_CONCURRENT='$WARP_CONCURRENT' WARP_DURATION='$WARP_DURATION' \
+    WARP_OBJECTS='$WARP_OBJECTS' \
     WARP_NOCLEAR=1 \
     PROFILE_ROOT='$rprof' \
     bash benchmarks/bench_s3_compat_compare.sh || echo 'BENCH_NONZERO'
@@ -375,6 +377,10 @@ cmd_arm() { # <new|old> <runidx>
   gcloud compute scp --zone="$ZONE" --project="$PROJECT" --tunnel-through-iap \
     "$CLIENT:$rprof/warp-results.tsv" "$localdir/warp-results.tsv" >/dev/null 2>&1 \
     || log "WARN: no warp-results.tsv pulled for $arm run$idx"
+  mkdir -p "$localdir/raw"
+  gcloud compute scp --recurse --zone="$ZONE" --project="$PROJECT" --tunnel-through-iap \
+    "$CLIENT:$rprof" "$localdir/raw/" >/dev/null 2>&1 \
+    || log "WARN: raw profile pull failed for $arm run$idx"
   log "arm=$arm run=$idx pulled -> $localdir"
 }
 
@@ -455,6 +461,7 @@ cmd_minio() { # <runidx>
     TARGETS=minio \
     WARP_OPS='$WARP_OPS' WARP_OBJ_SIZE='$WARP_OBJ_SIZE' \
     WARP_CONCURRENT='$WARP_CONCURRENT' WARP_DURATION='$WARP_DURATION' \
+    WARP_OBJECTS='$WARP_OBJECTS' \
     WARP_NOCLEAR=1 \
     PROFILE_ROOT='$rprof' \
     bash benchmarks/bench_s3_compat_compare.sh || echo 'BENCH_NONZERO'
@@ -466,6 +473,10 @@ cmd_minio() { # <runidx>
   gcloud compute scp --zone="$ZONE" --project="$PROJECT" --tunnel-through-iap \
     "$CLIENT:$rprof/warp-results.tsv" "$localdir/warp-results.tsv" >/dev/null 2>&1 \
     || log "WARN: no warp-results.tsv pulled for minio run$idx"
+  mkdir -p "$localdir/raw"
+  gcloud compute scp --recurse --zone="$ZONE" --project="$PROJECT" --tunnel-through-iap \
+    "$CLIENT:$rprof" "$localdir/raw/" >/dev/null 2>&1 \
+    || log "WARN: raw profile pull failed for minio run$idx"
   log "minio: run=$idx pulled -> $localdir"
 }
 
@@ -580,6 +591,7 @@ cmd_single() { # <runidx>
     TARGETS=grainfs-cluster \
     WARP_OPS='$WARP_OPS' WARP_OBJ_SIZE='$WARP_OBJ_SIZE' \
     WARP_CONCURRENT='$WARP_CONCURRENT' WARP_DURATION='$WARP_DURATION' \
+    WARP_OBJECTS='$WARP_OBJECTS' \
     WARP_NOCLEAR=1 \
     PROFILE_ROOT='$rprof' \
     bash benchmarks/bench_s3_compat_compare.sh || echo 'BENCH_NONZERO'
@@ -601,6 +613,10 @@ cmd_single() { # <runidx>
   gcloud compute scp --zone="$ZONE" --project="$PROJECT" --tunnel-through-iap \
     "$CLIENT:$rprof/warp-results.tsv" "$localdir/warp-results.tsv" >/dev/null 2>&1 \
     || log "WARN: no warp-results.tsv for single run$idx"
+  mkdir -p "$localdir/raw"
+  gcloud compute scp --recurse --zone="$ZONE" --project="$PROJECT" --tunnel-through-iap \
+    "$CLIENT:$rprof" "$localdir/raw/" >/dev/null 2>&1 \
+    || log "WARN: raw profile pull failed for single run$idx"
   log "single: run=$idx done -> $localdir"
 }
 

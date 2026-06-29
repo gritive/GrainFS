@@ -49,6 +49,47 @@ func BenchmarkShardServiceWriteLocalShardStream5MiBEncrypted(b *testing.B) {
 	}
 }
 
+func BenchmarkShardServiceWriteLocalShardStreamStaged5MiBEncrypted(b *testing.B) {
+	keeper, clusterID := testDEKKeeper(b)
+	payload := bytes.Repeat([]byte("x"), 5<<20)
+
+	for _, tc := range []struct {
+		name string
+		put  func(context.Context, *ShardService, string, string, string, int, []byte) error
+	}{
+		{
+			name: "unsized-staged",
+			put: func(ctx context.Context, svc *ShardService, bucket, stagingKey, finalKey string, shardIdx int, body []byte) error {
+				return svc.WriteLocalShardStreamStagedContext(ctx, bucket, stagingKey, finalKey, shardIdx, bytes.NewReader(body))
+			},
+		},
+		{
+			name: "sized-staged",
+			put: func(ctx context.Context, svc *ShardService, bucket, stagingKey, finalKey string, shardIdx int, body []byte) error {
+				return svc.WriteLocalShardStreamStagedSizedContext(ctx, bucket, stagingKey, finalKey, shardIdx, bytes.NewReader(body), int64(len(body)))
+			},
+		},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			svc := NewShardService(
+				b.TempDir(),
+				nil,
+				WithShardDEKKeeper(keeper, clusterID),
+			)
+
+			b.SetBytes(int64(len(payload)))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				finalKey := fmt.Sprintf("obj-%d/segments/blob", i)
+				stagingKey := fmt.Sprintf(".segstaging/txn-%d/blob", i)
+				err := tc.put(context.Background(), svc, "bench", stagingKey, finalKey, 0, payload)
+				require.NoError(b, err)
+			}
+		})
+	}
+}
+
 // BenchmarkShardServiceOpenLocalShardStream2_5MiB measures the streaming read
 // path for a single encrypted shard the size produced by a 10 MiB EC 4+2
 // object (10 MiB / 4 data shards = 2.5 MiB per shard). This is the GET hot

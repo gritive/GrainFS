@@ -15,6 +15,10 @@ type ecObjectSizedShardStore interface {
 	WriteLocalShardStreamSizedContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader, streamSize int64) error
 }
 
+type ecObjectStagedSizedShardStore interface {
+	WriteLocalShardStreamStagedSizedContext(ctx context.Context, bucket, stagingKey, finalKey string, shardIdx int, body io.Reader, streamSize int64) error
+}
+
 type ecObjectPeerHealth interface {
 	MarkHealthy(peer string) bool
 	MarkUnhealthy(peer string) bool

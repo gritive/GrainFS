@@ -70,6 +70,43 @@ func TestChunkedSegmentStore_RoutesAndReads(t *testing.T) {
 	})
 }
 
+func TestChunkedSegmentStore_OpenSegmentLargeSegmentStreamsExactBytes(t *testing.T) {
+	b := setupECBackend(t)
+	b.chunkedPutChunkSize = 10 << 20
+	b.SetShardGroupSource(&fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"group-a": {ID: "group-a", PeerIDs: []string{"self", "self", "self"}},
+	}})
+
+	const (
+		bucket = "chunked-bucket"
+		key    = "large-streamed-object"
+	)
+	body := makeChunkedTestBody(10 << 20)
+	sp := makeSpool(t, body)
+
+	require.NoError(t, b.CreateBucket(context.Background(), bucket))
+	_, err := b.putObjectChunked(context.Background(),
+		bucket, key, "v1", sp, "application/octet-stream",
+		nil, "", 0, 0, false, "", nil, nil, nil)
+	require.NoError(t, err)
+	obj, err := b.HeadObject(context.Background(), bucket, key)
+	require.NoError(t, err)
+	require.Len(t, obj.Segments, 1)
+	require.Greater(t, obj.Segments[0].Size, int64(maxECPooledReadObjectSize))
+
+	store := &clusterSegmentStore{b: b, bucket: bucket, key: key, obj: obj}
+	rc, err := store.OpenSegment(context.Background(), obj.Segments[0])
+	require.NoError(t, err)
+	defer rc.Close()
+
+	_, buffered := rc.(interface{ SegmentBytes() []byte })
+	require.False(t, buffered, "large segment OpenSegment must stream instead of returning a full-buffer provider")
+
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, body, got)
+}
+
 func TestCompleteMultipartUpload_ChunkedObjectPreservesParts(t *testing.T) {
 	b := setupECBackend(t)
 	b.chunkedPutChunkSize = testChunkedMultipartChunkSize
