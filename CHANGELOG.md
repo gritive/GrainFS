@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.768.0] - 2026-06-30
+
+### Performance
+- **Avoided impossible owner-local quorum-meta fsyncs.**
+  Hot-key `AppendObject` publishes now reject placement sets that cannot satisfy
+  their quorum before durably writing the owner-local metadata copy, eliminating
+  a wasted owner disk sync on doomed CAS attempts.
+
+### Fixed
+- **Kept owner-local CAS ordering explicit.**
+  The owner-local-first quorum-meta path now documents why peer publishes cannot
+  safely overlap the owner CAS/fsync under the current one-phase protocol without
+  a compare-and-rollback peer primitive.
+
 ## [0.0.767.0] - 2026-06-30
 
 ### Performance
