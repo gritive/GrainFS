@@ -39,6 +39,20 @@ func newECBenchmarkBackend(tb clusterTestTB) *DistributedBackend {
 	return bk
 }
 
+func newChunkedECBenchmarkBackend(tb clusterTestTB) *DistributedBackend {
+	tb.Helper()
+	bk := newECBenchmarkBackend(tb)
+	cfg := bk.currentECConfig()
+	peers := make([]string, cfg.NumShards())
+	for i := range peers {
+		peers[i] = bk.selfAddr
+	}
+	bk.SetShardGroupSource(&fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"group-a": {ID: "group-a", PeerIDs: peers},
+	}})
+	return bk
+}
+
 // BenchmarkPutObjectEC measures the local EC write path with a full 4+2 stripe.
 func BenchmarkPutObjectEC_Sequential(b *testing.B) {
 	cases := []struct {
@@ -62,6 +76,38 @@ func BenchmarkPutObjectEC_Sequential(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
 				_, err := bk.PutObject(context.Background(), "bench", "key", bytes.NewReader(data), "application/octet-stream")
+				require.NoError(b, err)
+			}
+		})
+	}
+}
+
+func BenchmarkPutObjectEC_Chunked10MiB(b *testing.B) {
+	for _, tc := range []struct {
+		name      string
+		exactHint bool
+	}{
+		{name: "spooled"},
+		{name: "exact-size-stream", exactHint: true},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			bk := newChunkedECBenchmarkBackend(b)
+			require.NoError(b, bk.CreateBucket(context.Background(), "bench"))
+
+			data := make([]byte, 10<<20)
+			size := int64(len(data))
+			b.SetBytes(size)
+			b.ResetTimer()
+			b.ReportAllocs()
+			for b.Loop() {
+				_, err := bk.PutObjectWithRequest(context.Background(), storage.PutObjectRequest{
+					Bucket:        "bench",
+					Key:           "key",
+					Body:          bytes.NewReader(data),
+					SizeHint:      &size,
+					SizeHintExact: tc.exactHint,
+					ContentType:   "application/octet-stream",
+				})
 				require.NoError(b, err)
 			}
 		})

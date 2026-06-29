@@ -160,3 +160,56 @@ func TestSinglePutPath_UserBucketETagIsPlaintextMD5(t *testing.T) {
 	sum := md5.Sum(body)
 	require.Equal(t, hex.EncodeToString(sum[:]), obj.ETag, "non-internal bucket ETag must be md5(plaintext)")
 }
+
+func TestSinglePutPath_ExactSizeHintRejectsShortBody(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "b"))
+
+	size := int64(10)
+	_, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{
+		Bucket: "b", Key: "short", Body: bytes.NewReader([]byte("short")),
+		ContentType: "application/octet-stream", SizeHint: &size, SizeHintExact: true,
+	})
+	require.Error(t, err)
+	_, _, getErr := b.GetObject(ctx, "b", "short")
+	require.Error(t, getErr)
+}
+
+func TestSinglePutPath_ExactSizeHintRejectsLongBody(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "b"))
+
+	body := []byte("longer-than-hint")
+	size := int64(4)
+	_, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{
+		Bucket: "b", Key: "long", Body: bytes.NewReader(body),
+		ContentType: "application/octet-stream", SizeHint: &size, SizeHintExact: true,
+	})
+	require.Error(t, err)
+	_, _, getErr := b.GetObject(ctx, "b", "long")
+	require.Error(t, getErr)
+}
+
+func TestSinglePutPath_AdvisorySizeHintStillAllowsLongBody(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "b"))
+
+	body := []byte("longer-than-hint")
+	size := int64(4)
+	obj, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{
+		Bucket: "b", Key: "advisory", Body: bytes.NewReader(body),
+		ContentType: "application/octet-stream", SizeHint: &size,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(len(body)), obj.Size)
+
+	rc, _, gerr := b.GetObject(ctx, "b", "advisory")
+	require.NoError(t, gerr)
+	defer rc.Close()
+	got, readErr := io.ReadAll(rc)
+	require.NoError(t, readErr)
+	require.Equal(t, body, got)
+}

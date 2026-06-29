@@ -122,10 +122,13 @@ type ObjectSystemMetadata struct {
 // PutObjectRequest carries optional object metadata that cannot fit in the
 // legacy PutObject signature without overloading user metadata.
 type PutObjectRequest struct {
-	Bucket         string
-	Key            string
-	Body           io.Reader
-	SizeHint       *int64
+	Bucket   string
+	Key      string
+	Body     io.Reader
+	SizeHint *int64
+	// SizeHintExact means SizeHint is a verified body length, not just an
+	// allocation hint. Backends may reject bodies shorter or longer than it.
+	SizeHintExact  bool
 	ContentType    string
 	ACL            *uint8
 	UserMetadata   map[string]string

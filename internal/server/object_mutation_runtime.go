@@ -35,6 +35,7 @@ func (s *Server) putObjectWithUserMetadataAndMD5(
 		Key:            key,
 		Body:           body,
 		SizeHint:       sizeHint,
+		SizeHintExact:  sizeHint != nil,
 		ContentType:    contentType,
 		ACL:            acl,
 		UserMetadata:   userMetadata,

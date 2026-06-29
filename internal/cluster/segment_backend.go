@@ -328,12 +328,39 @@ func (b *DistributedBackend) putObjectChunked(
 	parts []storage.MultipartPartEntry,
 	tags []storage.Tag,
 ) (*storage.Object, error) {
+	body, err := sp.Open()
+	if err != nil {
+		return nil, fmt.Errorf("open spool: %w", err)
+	}
+	defer body.Close()
+	return b.putObjectChunkedReader(ctx, bucket, key, versionID, body, sp.Size, contentType, userMetadata, sseAlgorithm, acl, modTime, preserveModTime, expectedETag, beforeCommit, parts, tags)
+}
+
+func (b *DistributedBackend) putObjectChunkedReader(
+	ctx context.Context,
+	bucket, key, versionID string,
+	body io.Reader,
+	size int64,
+	contentType string,
+	userMetadata map[string]string,
+	sseAlgorithm string,
+	acl uint8,
+	modTime int64,
+	preserveModTime bool,
+	expectedETag string,
+	beforeCommit func() error,
+	parts []storage.MultipartPartEntry,
+	tags []storage.Tag,
+) (*storage.Object, error) {
+	if size < 0 {
+		return nil, fmt.Errorf("putObjectChunked: negative size %d", size)
+	}
 	// Pre-allocate blobIDs + placements sized to exact segment count. A 0-byte
 	// object still gets one (empty) segment so every simple PUT — including
 	// empty objects — takes this single chunked path (mirrors the multipart
 	// variant + SegmentWriter, which always emits one segment for empty input).
 	chunkSize := int64(b.effectiveChunkedPutChunkSize())
-	numSegments := int((sp.Size + chunkSize - 1) / chunkSize)
+	numSegments := int((size + chunkSize - 1) / chunkSize)
 	if numSegments < 1 {
 		numSegments = 1
 	}
@@ -356,13 +383,8 @@ func (b *DistributedBackend) putObjectChunked(
 		// PR1 segment staging: a fresh per-PUT txn id isolates this write's in-flight
 		// segment shards under .segstaging until the commit-time promote.
 		stagingTxnID: uuidutil.MustNewV7(),
-		sizeHint:     sp.Size,
+		sizeHint:     size,
 	}
-	body, err := sp.Open()
-	if err != nil {
-		return nil, fmt.Errorf("open spool: %w", err)
-	}
-	defer body.Close()
 	return runChunkedPut(ctx, csb, body, bucket, key, versionID, contentType, userMetadata, sseAlgorithm, modTime, preserveModTime, expectedETag, beforeCommit, parts, tags)
 }
 

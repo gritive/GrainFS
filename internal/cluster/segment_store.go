@@ -44,7 +44,7 @@ func (s *clusterSegmentStore) OpenSegment(ctx context.Context, ref storage.Segme
 	if err != nil {
 		return nil, fmt.Errorf("open segment %s: %w", entry.BlobID, err)
 	}
-	return rc, nil
+	return &exactSegmentReadCloser{rc: rc, segment: entry.BlobID, expected: entry.Size, remaining: entry.Size}, nil
 }
 
 type segmentBytesReadCloser struct {
@@ -55,6 +55,48 @@ type segmentBytesReadCloser struct {
 func (r *segmentBytesReadCloser) Close() error { return nil }
 
 func (r *segmentBytesReadCloser) SegmentBytes() []byte { return r.data }
+
+type exactSegmentReadCloser struct {
+	rc        io.ReadCloser
+	segment   string
+	expected  int64
+	remaining int64
+	probed    bool
+}
+
+func (r *exactSegmentReadCloser) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if r.remaining > 0 {
+		if int64(len(p)) > r.remaining {
+			p = p[:r.remaining]
+		}
+		n, err := r.rc.Read(p)
+		r.remaining -= int64(n)
+		if err == io.EOF && r.remaining > 0 {
+			return n, fmt.Errorf("segment %s reconstructed size short by %d bytes: %w", r.segment, r.remaining, io.ErrUnexpectedEOF)
+		}
+		return n, err
+	}
+	if r.probed {
+		return 0, io.EOF
+	}
+	r.probed = true
+	var extra [1]byte
+	n, err := r.rc.Read(extra[:])
+	if n > 0 {
+		return 0, fmt.Errorf("segment %s reconstructed size exceeds metadata size %d", r.segment, r.expected)
+	}
+	if err != nil && err != io.EOF {
+		return 0, err
+	}
+	return 0, io.EOF
+}
+
+func (r *exactSegmentReadCloser) Close() error {
+	return r.rc.Close()
+}
 
 func (s *clusterSegmentStore) ReadAtSegment(ctx context.Context, ref storage.SegmentRef, offset int64, buf []byte) (int, error) {
 	if offset < 0 {

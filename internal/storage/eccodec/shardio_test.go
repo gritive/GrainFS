@@ -199,6 +199,56 @@ func TestEncryptedShardChunkedWriter_EmptyShard(t *testing.T) {
 	require.Equal(t, encryptedHeaderLen, out.Len())
 }
 
+type writeCountingBuffer struct {
+	bytes.Buffer
+	writes int
+}
+
+func (w *writeCountingBuffer) Write(p []byte) (int, error) {
+	w.writes++
+	return w.Buffer.Write(p)
+}
+
+func TestEncodeEncryptedShard_CoalescesFrameWrites(t *testing.T) {
+	f := newFakeShardEncryptor(t)
+	data := bytes.Repeat([]byte("x"), 2500)
+	fields := shardBaseFields()
+	chunkSize := 1024
+
+	var encoded writeCountingBuffer
+	require.NoError(t, EncodeEncryptedShard(&encoded, bytes.NewReader(data), f, fields, chunkSize))
+	require.Equal(t, 3, encoded.writes, "3 chunks should be emitted as 3 frame writes")
+
+	var got bytes.Buffer
+	require.NoError(t, DecodeEncryptedShard(&got, bytes.NewReader(encoded.Bytes()), f, fields))
+	require.Equal(t, data, got.Bytes())
+}
+
+func TestEncryptedShardChunkedWriter_CoalescesFrameWrites(t *testing.T) {
+	f := newFakeShardEncryptor(t)
+	data := bytes.Repeat([]byte("x"), 2500)
+	fields := shardBaseFields()
+	chunkSize := 1024
+
+	var encoded writeCountingBuffer
+	w, err := NewEncryptedShardChunkedWriter(&encoded, f, fields, chunkSize)
+	require.NoError(t, err)
+	for i := 0; i < len(data); i += 333 {
+		end := i + 333
+		if end > len(data) {
+			end = len(data)
+		}
+		_, err := w.Write(data[i:end])
+		require.NoError(t, err)
+	}
+	require.NoError(t, w.Close())
+	require.Equal(t, 3, encoded.writes, "3 chunks should be emitted as 3 frame writes")
+
+	var got bytes.Buffer
+	require.NoError(t, DecodeEncryptedShard(&got, bytes.NewReader(encoded.Bytes()), f, fields))
+	require.Equal(t, data, got.Bytes())
+}
+
 func TestEncryptedShardStream_RoundTripMultiChunk(t *testing.T) {
 	f := newFakeShardEncryptor(t)
 	data := bytes.Repeat([]byte("encrypted-shard-payload-"), 256)
