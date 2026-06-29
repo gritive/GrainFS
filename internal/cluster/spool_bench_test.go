@@ -74,6 +74,36 @@ func BenchmarkSpoolMD5NoMD5(b *testing.B) {
 	}
 }
 
+// BenchmarkSpoolECShardsEncrypted measures the full EC spool pipeline using
+// the encrypted put-spool path. This is the BASELINE — run this benchmark
+// on this commit (before Task 2), then compare against BenchmarkSpoolECShardsPlain
+// (Task 3) to quantify the EC spool re-encryption elimination.
+// After Task 2, this benchmark still compiles (spoolObjectEncrypted is kept for
+// MPU) but measures a different path (encrypted put-spool + plaintext EC shards).
+func BenchmarkSpoolECShardsEncrypted(b *testing.B) {
+	seam := benchmarkClusterSeam(b)
+	payload := bytes.Repeat([]byte("s"), 8<<20) // 8 MiB
+	spoolDir := b.TempDir()
+	ecDir := b.TempDir()
+	cfg := ECConfig{DataShards: 4, ParityShards: 2}
+
+	b.SetBytes(int64(len(payload)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		sp, err := spoolObjectEncrypted(context.Background(), spoolDir, bytes.NewReader(payload), "bench-bucket", seam, "bench:ec-encrypted", false)
+		if err != nil {
+			b.Fatal(err)
+		}
+		shards, err := spoolECShards(context.Background(), cfg, ecDir, sp)
+		sp.Cleanup()
+		if err != nil {
+			b.Fatal(err)
+		}
+		shards.Cleanup()
+	}
+}
+
 func BenchmarkEncryptedSpoolOpen(b *testing.B) {
 	seam := benchmarkClusterSeam(b)
 	payload := bytes.Repeat([]byte("o"), 8<<20)
