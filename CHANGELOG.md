@@ -22,7 +22,9 @@
 - **Tightened spool directory permissions from 0755 to 0700.**
   Both `{root}/tmp/put-spool/` and `{root}/tmp/ec-spool/` are now created with
   mode 0700 so no other local user can read plaintext spool files while a PUT
-  is in progress.
+  is in progress. An explicit `os.Chmod(dir, 0o700)` call is now issued after
+  `os.MkdirAll` so that existing directories (upgrades or MPU-first deployments
+  that landed at 0755) are also corrected at first use.
 - **Fixed nil-interface panic in EC-spool deferred close loop** (pre-existing).
   The loop that closes data-reader handles after EC encoding could panic when
   the parity-shard reader slot was nil. Added a nil guard before each `rc.Close()`.
