@@ -79,6 +79,16 @@ func TestSpoolObjectCleansTempOnReadError(t *testing.T) {
 	require.Empty(t, entries)
 }
 
+func TestEncryptedSpoolObjectNoMD5SkipsHash(t *testing.T) {
+	seam := newClusterTestSeam(t)
+	payload := []byte("encrypted spool no md5")
+	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", seam, "cluster-spool:no-md5", false)
+	require.NoError(t, err)
+	defer sp.Cleanup()
+	require.Equal(t, int64(len(payload)), sp.Size)
+	require.Empty(t, sp.ETag) // needsMD5=false → spoolHashForBucket skips MD5
+}
+
 func TestEncryptedSpoolObjectHidesPlaintext(t *testing.T) {
 	seam := newClusterTestSeam(t)
 	payload := []byte("sensitive cluster spool payload")

@@ -18,7 +18,14 @@ import (
 // digest is unavailable. Returns storage.ErrContentMD5Mismatch (mapped to 400
 // BadDigest) on mismatch.
 func validateContentMD5(computedHex, clientHex string) error {
-	if clientHex == "" || computedHex == "" || computedHex == clientHex {
+	if clientHex == "" {
+		return nil // no Content-MD5 header sent; nothing to validate
+	}
+	if computedHex == "" {
+		// Caller invariant broken: needsMD5 must be true when ContentMD5Hex != "".
+		return fmt.Errorf("%w: body MD5 not computed (needsMD5 invariant broken)", storage.ErrContentMD5Mismatch)
+	}
+	if computedHex == clientHex {
 		return nil
 	}
 	return fmt.Errorf("%w: client %s, body %s", storage.ErrContentMD5Mismatch, clientHex, computedHex)

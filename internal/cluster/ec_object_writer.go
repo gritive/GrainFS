@@ -196,7 +196,7 @@ func (w ecObjectWriter) writeDataShards(ctx context.Context, plan ecObjectWriteP
 	header := encodeShardHeader(int64(len(data)))
 	sp := &spooledObject{
 		Size: int64(len(data)),
-		ETag: "",
+		ETag: "", // intentionally empty: caller (WriteSegmentBytes) discards this ETag; segment checksum is xxhash3 via storage.ChecksumOf
 	}
 
 	return w.writeShardReadersWithSize(ctx, plan, sp, func(idx int) (io.Reader, error) {

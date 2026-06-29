@@ -232,6 +232,10 @@ func (b *DistributedBackend) spoolPutObject(ctx context.Context, bucket string, 
 	return spoolObject(ctx, b.spoolDir(), r, bucket, needsMD5)
 }
 
+// spoolHashForBucket returns a hash writer, ETag getter, and release func.
+// Internal buckets always use XXH3 (ignoring needsMD5). User buckets use MD5
+// only when needsMD5 is true (Content-MD5 validation or legacy ETag path).
+// Empty bucket and needsMD5=false both skip hashing.
 func spoolHashForBucket(bucket string, needsMD5 bool) (io.Writer, func() string, func()) {
 	if bucket == "" {
 		return nil, nil, func() {}

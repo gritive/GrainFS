@@ -102,3 +102,28 @@ func TestPutObject_ContentMD5Match(t *testing.T) {
 		})
 	}
 }
+
+// TestValidateContentMD5 exercises the guard directly, including the defensive
+// case where clientHex is set but computedHex is empty (needsMD5 invariant broken).
+func TestValidateContentMD5(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		computed string
+		client   string
+		wantErr  bool
+	}{
+		{"no header", "", "", false},
+		{"match", "abc123", "abc123", false},
+		{"mismatch", "abc123", "wrong", true},
+		{"computed empty client set", "", "deadbeef", true}, // defensive: invariant broken
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateContentMD5(tt.computed, tt.client)
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
