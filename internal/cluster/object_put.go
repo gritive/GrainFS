@@ -33,6 +33,41 @@ func validateContentMD5(computedHex, clientHex string) error {
 	return fmt.Errorf("%w: client %s, body %s", storage.ErrContentMD5Mismatch, clientHex, computedHex)
 }
 
+type exactObjectSizeReader struct {
+	r         io.Reader
+	remaining int64
+	probed    bool
+}
+
+func (r *exactObjectSizeReader) Read(p []byte) (int, error) {
+	if r.remaining > 0 {
+		if int64(len(p)) > r.remaining {
+			p = p[:r.remaining]
+		}
+		n, err := r.r.Read(p)
+		r.remaining -= int64(n)
+		if err == io.EOF && r.remaining > 0 {
+			return n, io.ErrUnexpectedEOF
+		}
+		return n, err
+	}
+	if r.probed {
+		return 0, io.EOF
+	}
+	r.probed = true
+	if len(p) == 0 {
+		return 0, nil
+	}
+	n, err := r.r.Read(p[:1])
+	if n > 0 {
+		return n, fmt.Errorf("body exceeds exact size")
+	}
+	if err != nil && err != io.EOF {
+		return 0, err
+	}
+	return 0, io.EOF
+}
+
 // derefACL returns the request ACL bitmask, or 0 (private — the default) when
 // unset. nil and &0 are equivalent: both store the private default.
 func derefACL(acl *uint8) uint8 {
@@ -90,6 +125,19 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 	// directly as the object ETag). Production always has shardGroup != nil and
 	// takes the chunked path where WriteSized computes ETag independently.
 	needsMD5 := req.ContentMD5Hex != "" || b.shardGroup == nil
+	if !needsMD5 && req.SizeHint != nil && req.SizeHintExact && *req.SizeHint >= 0 && b.shardGroup != nil {
+		if b.currentECConfig().NumShards() == 0 || b.shardSvc == nil {
+			return nil, fmt.Errorf("put object: EC storage is required")
+		}
+		if _, err := b.planObjectWritePlacement(ctx, ObjectWritePlacementInput{
+			Operation: "put_object",
+			ShardKey:  ecObjectShardKey(key, versionID),
+		}); err != nil {
+			return nil, err
+		}
+		body := &exactObjectSizeReader{r: r, remaining: *req.SizeHint}
+		return b.putObjectChunkedReader(ctx, bucket, key, versionID, body, *req.SizeHint, contentType, userMetadata, sseAlgorithm, acl, 0, false, "", nil, nil, nil)
+	}
 	sp, err := b.spoolPutObject(ctx, bucket, r, needsMD5)
 	if err != nil {
 		return nil, err

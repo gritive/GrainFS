@@ -155,6 +155,94 @@ func TestSegmentReader_UsesProvidedSegmentBytesWithoutSecondReadAll(t *testing.T
 	require.True(t, store.closed, "materialized reader was not closed")
 }
 
+func TestStreamingSegmentReader_StreamsOneSegmentAtATime(t *testing.T) {
+	t.Parallel()
+	segs := makeTestSegments(t, []int{1024, 2048, 512})
+	store := newTrackingStreamingSegmentStore(segs)
+	r := NewStreamingSegmentReaderCtx(context.Background(), store, segs.refs)
+
+	got, err := io.ReadAll(r)
+	require.NoError(t, err)
+	require.Equal(t, segs.flat, got)
+	require.Equal(t, 1, store.maxOpen)
+	require.Equal(t, []string{"blob-0", "blob-1", "blob-2"}, store.openOrder)
+	require.Equal(t, []string{"blob-0", "blob-1", "blob-2"}, store.closeOrder)
+}
+
+func TestStreamingSegmentReader_ContinuesAfterSegmentShortReadEOF(t *testing.T) {
+	t.Parallel()
+	store := &shortEOFSegmentStore{
+		segments: map[string][]byte{
+			"blob-0": []byte("abc"),
+			"blob-1": []byte("def"),
+		},
+	}
+	refs := []SegmentRef{
+		{BlobID: "blob-0", Size: 3},
+		{BlobID: "blob-1", Size: 3},
+	}
+	r := NewStreamingSegmentReaderCtx(context.Background(), store, refs)
+
+	buf := make([]byte, 3)
+	n, err := r.Read(buf)
+	require.NoError(t, err)
+	require.Equal(t, 3, n)
+	require.Equal(t, "abc", string(buf[:n]))
+
+	n, err = r.Read(buf)
+	require.NoError(t, err)
+	require.Equal(t, 3, n)
+	require.Equal(t, "def", string(buf[:n]))
+
+	n, err = r.Read(buf)
+	require.Equal(t, io.EOF, err)
+	require.Zero(t, n)
+}
+
+func TestStreamingSegmentReader_CloseWhileOpeningClosesReturnedReader(t *testing.T) {
+	t.Parallel()
+	store := &closeDuringOpenSegmentStore{
+		entered:  make(chan struct{}),
+		release:  make(chan struct{}),
+		closed:   make(chan struct{}),
+		openDone: make(chan struct{}),
+	}
+	refs := []SegmentRef{{BlobID: "blocked", Size: 1}, {BlobID: "not-opened", Size: 1}}
+	r := NewStreamingSegmentReaderCtx(context.Background(), store, refs)
+	readDone := make(chan error, 1)
+	go func() {
+		_, err := r.Read(make([]byte, 1))
+		readDone <- err
+	}()
+
+	select {
+	case <-store.entered:
+	case <-time.After(time.Second):
+		require.Fail(t, "OpenSegment was not entered")
+	}
+
+	require.NoError(t, r.Close())
+	close(store.release)
+
+	select {
+	case <-store.openDone:
+	case <-time.After(time.Second):
+		require.Fail(t, "OpenSegment did not return")
+	}
+	select {
+	case <-store.closed:
+	case <-time.After(time.Second):
+		require.Fail(t, "reader returned after Close was not closed")
+	}
+	select {
+	case err := <-readDone:
+		require.Error(t, err)
+	case <-time.After(time.Second):
+		require.Fail(t, "Read did not unblock after Close")
+	}
+	require.Equal(t, []string{"blocked"}, store.openOrder)
+}
+
 // --- helpers ---
 
 type testSegments struct {
@@ -223,6 +311,116 @@ func (r *materializedSegmentReadCloser) Read([]byte) (int, error) {
 
 func (r *materializedSegmentReadCloser) Close() error {
 	r.store.closed = true
+	return nil
+}
+
+type trackingStreamingSegmentStore struct {
+	mu         sync.Mutex
+	data       map[string][]byte
+	open       int
+	maxOpen    int
+	openOrder  []string
+	closeOrder []string
+}
+
+func newTrackingStreamingSegmentStore(segs *testSegments) *trackingStreamingSegmentStore {
+	s := &trackingStreamingSegmentStore{data: make(map[string][]byte)}
+	for i, ref := range segs.refs {
+		s.data[ref.BlobID] = segs.data[i]
+	}
+	return s
+}
+
+func (s *trackingStreamingSegmentStore) OpenSegment(_ context.Context, ref SegmentRef) (io.ReadCloser, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	data, ok := s.data[ref.BlobID]
+	if !ok {
+		return nil, fmt.Errorf("missing ref %s", ref.BlobID)
+	}
+	s.open++
+	if s.open > s.maxOpen {
+		s.maxOpen = s.open
+	}
+	s.openOrder = append(s.openOrder, ref.BlobID)
+	return &trackingSegmentReadCloser{
+		Reader: bytes.NewReader(data),
+		store:  s,
+		blobID: ref.BlobID,
+	}, nil
+}
+
+type trackingSegmentReadCloser struct {
+	*bytes.Reader
+	store  *trackingStreamingSegmentStore
+	blobID string
+}
+
+func (r *trackingSegmentReadCloser) Close() error {
+	r.store.mu.Lock()
+	defer r.store.mu.Unlock()
+	r.store.open--
+	r.store.closeOrder = append(r.store.closeOrder, r.blobID)
+	return nil
+}
+
+type shortEOFSegmentStore struct {
+	segments map[string][]byte
+}
+
+func (s *shortEOFSegmentStore) OpenSegment(_ context.Context, ref SegmentRef) (io.ReadCloser, error) {
+	data, ok := s.segments[ref.BlobID]
+	if !ok {
+		return nil, fmt.Errorf("missing ref %s", ref.BlobID)
+	}
+	return &shortEOFReadCloser{data: data}, nil
+}
+
+type shortEOFReadCloser struct {
+	data []byte
+	done bool
+}
+
+func (r *shortEOFReadCloser) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, io.EOF
+	}
+	r.done = true
+	return copy(p, r.data), io.EOF
+}
+
+func (r *shortEOFReadCloser) Close() error { return nil }
+
+type closeDuringOpenSegmentStore struct {
+	entered   chan struct{}
+	release   chan struct{}
+	closed    chan struct{}
+	openDone  chan struct{}
+	openOrder []string
+}
+
+func (s *closeDuringOpenSegmentStore) OpenSegment(ctx context.Context, ref SegmentRef) (io.ReadCloser, error) {
+	s.openOrder = append(s.openOrder, ref.BlobID)
+	close(s.entered)
+	select {
+	case <-s.release:
+	case <-ctx.Done():
+	}
+	close(s.openDone)
+	return &closeSignalReadCloser{closed: s.closed}, nil
+}
+
+type closeSignalReadCloser struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (r *closeSignalReadCloser) Read([]byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (r *closeSignalReadCloser) Close() error {
+	r.once.Do(func() { close(r.closed) })
 	return nil
 }
 

@@ -167,7 +167,7 @@ func (b *DistributedBackend) getObjectVersionCtx(ctx context.Context, bucket, ke
 	}
 	if !obj.IsAppendable && len(obj.Segments) > 0 {
 		store := &clusterSegmentStore{b: b, bucket: bucket, key: key, obj: obj}
-		return storage.NewSegmentReaderCtx(ctx, store, obj.Segments), obj, nil
+		return storage.NewStreamingSegmentReaderCtx(ctx, store, obj.Segments), obj, nil
 	}
 	// EC path: reconstruct from shards when the bucket is erasure-coded.
 	// Mirrors GetObject — versioned objects use shardKey = key+"/"+versionID,

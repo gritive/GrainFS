@@ -124,13 +124,23 @@ func (e localShardEndpoint) WriteShardReader(ctx context.Context, bucket, shardK
 		return fmt.Errorf("open ec shard %d: %w", shardIdx, err)
 	}
 
-	// PR1 segment staging: write the bytes to stagingShardKey but seal with
-	// shardKey (the FINAL path) as AAD via the staged stream primitive. The
-	// streaming write buffers the shard bounded internally; the buffered-size
-	// optimization below is skipped for staged writes on purpose (one staging
-	// write path, mirrors the remote endpoint forcing the stream RPC).
 	if stagingShardKey != "" {
-		werr := e.shards.WriteLocalShardStreamStagedContext(ctx, bucket, stagingShardKey, shardKey, shardIdx, body)
+		size, knownSize := int64(-1), false
+		if shardSize != nil {
+			if sz, sizeErr := shardSize(shardIdx); sizeErr == nil {
+				size, knownSize = sz, true
+			}
+		}
+		var werr error
+		if knownSize {
+			if sized, ok := e.shards.(ecObjectStagedSizedShardStore); ok {
+				werr = sized.WriteLocalShardStreamStagedSizedContext(ctx, bucket, stagingShardKey, shardKey, shardIdx, body, size)
+			} else {
+				werr = e.shards.WriteLocalShardStreamStagedContext(ctx, bucket, stagingShardKey, shardKey, shardIdx, body)
+			}
+		} else {
+			werr = e.shards.WriteLocalShardStreamStagedContext(ctx, bucket, stagingShardKey, shardKey, shardIdx, body)
+		}
 		if closer, ok := body.(io.Closer); ok {
 			if closeErr := closer.Close(); werr == nil && closeErr != nil {
 				werr = fmt.Errorf("close ec shard %d: %w", shardIdx, closeErr)
@@ -300,11 +310,22 @@ func (e remoteShardEndpoint) writeRemoteShard(
 
 		writeCtx, writeCancel := context.WithTimeout(ctx, shardRPCTimeout)
 		if stagingShardKey != "" {
-			// PR1 segment staging: always stream (skip the buffered-RPC
-			// optimization) so the receiver sees one staging-aware wire path. The
-			// bytes land at stagingShardKey; finalKey (shardKey) is the AAD.
+			size, knownSize := int64(-1), false
+			if shardSize != nil {
+				if sz, sizeErr := shardSize(shardIdx); sizeErr == nil {
+					size, knownSize = sz, true
+				}
+			}
 			rpcStart := time.Now()
-			err = e.shards.WriteShardStreamStaged(writeCtx, node, bucket, stagingShardKey, shardKey, shardIdx, readerWithoutWriterTo{Reader: body})
+			if knownSize {
+				if sized, ok := e.shards.(ecObjectRemoteStagedSizedShardStore); ok {
+					err = sized.WriteShardStreamStagedSized(writeCtx, node, bucket, stagingShardKey, shardKey, shardIdx, readerWithoutWriterTo{Reader: body}, size)
+				} else {
+					err = e.shards.WriteShardStreamStaged(writeCtx, node, bucket, stagingShardKey, shardKey, shardIdx, readerWithoutWriterTo{Reader: body})
+				}
+			} else {
+				err = e.shards.WriteShardStreamStaged(writeCtx, node, bucket, stagingShardKey, shardKey, shardIdx, readerWithoutWriterTo{Reader: body})
+			}
 			ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteRPC, rpcStart, PutTraceStageFields{
 				ShardIndex:       shardIdx,
 				ShardTarget:      node,

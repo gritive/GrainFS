@@ -401,9 +401,9 @@ func (b *LocalBackend) GetObject(ctx context.Context, bucket, key string) (io.Re
 			}
 			return f, obj, nil
 		}
-		// Multi-segment: stream via the parallel SegmentReader.
+		// Multi-segment: stream sequentially without materializing each segment.
 		store := localSegmentStore{b: b, bucket: bucket, key: key}
-		return io.NopCloser(NewSegmentReader(store, obj.Segments)), obj, nil
+		return NewStreamingSegmentReader(store, obj.Segments), obj, nil
 	}
 
 	// Legacy single-file path for WriteAt-created fixture objects. Range GETs

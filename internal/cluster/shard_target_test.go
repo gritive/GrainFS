@@ -3,6 +3,7 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -20,6 +21,7 @@ type recordingShardStore struct {
 	// AAD=final) correctly across the local and remote seams.
 	stagedStagingKey string
 	stagedFinalKey   string
+	stagedSize       int64
 }
 
 func (s *recordingShardStore) record(name string) { s.calls = append(s.calls, name) }
@@ -38,6 +40,14 @@ func (s *recordingShardStore) WriteLocalShardStreamContext(_ context.Context, _ 
 func (s *recordingShardStore) WriteLocalShardStreamStagedContext(_ context.Context, _ string, stagingKey, finalKey string, _ int, body io.Reader) error {
 	s.record("WriteLocalShardStreamStagedContext")
 	s.stagedStagingKey, s.stagedFinalKey = stagingKey, finalKey
+	_, _ = io.Copy(io.Discard, body)
+	return nil
+}
+
+func (s *recordingShardStore) WriteLocalShardStreamStagedSizedContext(_ context.Context, _ string, stagingKey, finalKey string, _ int, body io.Reader, streamSize int64) error {
+	s.record("WriteLocalShardStreamStagedSizedContext")
+	s.stagedStagingKey, s.stagedFinalKey = stagingKey, finalKey
+	s.stagedSize = streamSize
 	_, _ = io.Copy(io.Discard, body)
 	return nil
 }
@@ -76,6 +86,14 @@ func (s *recordingShardStore) WriteShardStream(_ context.Context, _ string, _ st
 func (s *recordingShardStore) WriteShardStreamStaged(_ context.Context, _ string, _ string, stagingKey, finalKey string, _ int, body io.Reader) error {
 	s.record("WriteShardStreamStaged")
 	s.stagedStagingKey, s.stagedFinalKey = stagingKey, finalKey
+	_, _ = io.Copy(io.Discard, body)
+	return nil
+}
+
+func (s *recordingShardStore) WriteShardStreamStagedSized(_ context.Context, _ string, _ string, stagingKey, finalKey string, _ int, body io.Reader, streamSize int64) error {
+	s.record("WriteShardStreamStagedSized")
+	s.stagedStagingKey, s.stagedFinalKey = stagingKey, finalKey
+	s.stagedSize = streamSize
 	_, _ = io.Copy(io.Discard, body)
 	return nil
 }
@@ -298,23 +316,40 @@ func TestShardTargetStagedWriteRoutesAndPreservesAADKey(t *testing.T) {
 		stagingKey = ".segstaging/txn-9/blob-1"
 	)
 
-	t.Run("local endpoint -> WriteLocalShardStreamStagedContext(staging, final)", func(t *testing.T) {
+	t.Run("local endpoint -> WriteLocalShardStreamStagedSizedContext(staging, final)", func(t *testing.T) {
 		store := &recordingShardStore{}
 		ep := newECObjectWriter("self", store, nil).endpointFor("self")
 		require.True(t, ep.IsLocal())
-		// shardSize is non-nil and small: the legacy path would pick the buffered
-		// WriteLocalShardContext, so routing to the staged method proves staging wins.
+		// shardSize is non-nil: staged local writes should preserve the streaming
+		// path while still using the known-size optimization.
 		err := ep.WriteShardReader(context.Background(), "b", finalKey, stagingKey, 0,
 			func(int) (io.Reader, error) { return strings.NewReader("payload"), nil },
 			func(int) (int64, error) { return int64(len("payload")), nil })
 		require.NoError(t, err)
+		require.Contains(t, store.calls, "WriteLocalShardStreamStagedSizedContext")
+		require.NotContains(t, store.calls, "WriteLocalShardStreamStagedContext")
+		require.NotContains(t, store.calls, "WriteLocalShardContext")
+		require.Equal(t, stagingKey, store.stagedStagingKey, "staging key must be the physical path")
+		require.Equal(t, finalKey, store.stagedFinalKey, "shardKey must remain the final AAD key")
+		require.Equal(t, int64(len("payload")), store.stagedSize)
+	})
+
+	t.Run("local endpoint unknown size -> WriteLocalShardStreamStagedContext(staging, final)", func(t *testing.T) {
+		store := &recordingShardStore{}
+		ep := newECObjectWriter("self", store, nil).endpointFor("self")
+		require.True(t, ep.IsLocal())
+		err := ep.WriteShardReader(context.Background(), "b", finalKey, stagingKey, 0,
+			func(int) (io.Reader, error) { return strings.NewReader("payload"), nil },
+			func(int) (int64, error) { return 0, errors.New("unknown shard size") })
+		require.NoError(t, err)
 		require.Contains(t, store.calls, "WriteLocalShardStreamStagedContext")
+		require.NotContains(t, store.calls, "WriteLocalShardStreamStagedSizedContext")
 		require.NotContains(t, store.calls, "WriteLocalShardContext")
 		require.Equal(t, stagingKey, store.stagedStagingKey, "staging key must be the physical path")
 		require.Equal(t, finalKey, store.stagedFinalKey, "shardKey must remain the final AAD key")
 	})
 
-	t.Run("remote endpoint -> WriteShardStreamStaged(staging, final)", func(t *testing.T) {
+	t.Run("remote endpoint -> WriteShardStreamStagedSized(staging, final)", func(t *testing.T) {
 		store := &recordingShardStore{}
 		ep := remoteShardEndpoint{node: "peer", shards: store, writeAttempts: 1}
 		require.False(t, ep.IsLocal())
@@ -322,7 +357,25 @@ func TestShardTargetStagedWriteRoutesAndPreservesAADKey(t *testing.T) {
 			func(int) (io.Reader, error) { return strings.NewReader("payload"), nil },
 			func(int) (int64, error) { return int64(len("payload")), nil })
 		require.NoError(t, err)
+		require.Contains(t, store.calls, "WriteShardStreamStagedSized")
+		require.NotContains(t, store.calls, "WriteShardStreamStaged")
+		require.NotContains(t, store.calls, "WriteShard")
+		require.NotContains(t, store.calls, "WriteShardStream")
+		require.Equal(t, stagingKey, store.stagedStagingKey, "staging key must be the physical path")
+		require.Equal(t, finalKey, store.stagedFinalKey, "finalKey must be the AAD key")
+		require.Equal(t, int64(len("payload")), store.stagedSize)
+	})
+
+	t.Run("remote endpoint unknown size -> WriteShardStreamStaged(staging, final)", func(t *testing.T) {
+		store := &recordingShardStore{}
+		ep := remoteShardEndpoint{node: "peer", shards: store, writeAttempts: 1}
+		require.False(t, ep.IsLocal())
+		err := ep.WriteShardReader(context.Background(), "b", finalKey, stagingKey, 0,
+			func(int) (io.Reader, error) { return strings.NewReader("payload"), nil },
+			func(int) (int64, error) { return 0, errors.New("unknown shard size") })
+		require.NoError(t, err)
 		require.Contains(t, store.calls, "WriteShardStreamStaged")
+		require.NotContains(t, store.calls, "WriteShardStreamStagedSized")
 		require.NotContains(t, store.calls, "WriteShard")
 		require.NotContains(t, store.calls, "WriteShardStream")
 		require.Equal(t, stagingKey, store.stagedStagingKey, "staging key must be the physical path")

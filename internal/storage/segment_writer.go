@@ -19,6 +19,41 @@ const DefaultChunkSize = 16 << 20 // 16 MiB
 // DefaultPutWorkers is the per-request concurrency for segment writes.
 const DefaultPutWorkers = 8
 
+const minPooledSegmentChunkSize = 8 << 20
+
+var segmentChunkPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, DefaultChunkSize)
+		return &buf
+	},
+}
+
+type ownedSegmentChunk struct {
+	body []byte
+	ref  *[]byte
+}
+
+func acquireSegmentChunk(capacity, chunkSize int) ownedSegmentChunk {
+	if chunkSize == DefaultChunkSize && capacity >= minPooledSegmentChunkSize && capacity <= DefaultChunkSize {
+		ref := segmentChunkPool.Get().(*[]byte)
+		return ownedSegmentChunk{body: (*ref)[:capacity], ref: ref}
+	}
+	return ownedSegmentChunk{body: make([]byte, capacity)}
+}
+
+func (c ownedSegmentChunk) release() {
+	if c.ref == nil {
+		return
+	}
+	// Zero the full backing array (not just the used slice) before returning to
+	// the pool to prevent stale plaintext bytes in the tail from leaking to the
+	// next consumer that acquires a larger capacity from the same pool slot.
+	full := (*c.ref)[:cap(*c.ref)]
+	clear(full)
+	*c.ref = full
+	segmentChunkPool.Put(c.ref)
+}
+
 type segmentWriteResult struct {
 	idx int
 	ref SegmentRef
@@ -40,6 +75,8 @@ type segmentWriterBackend interface {
 }
 
 type segmentBytesWriterBackend interface {
+	// WriteSegmentBytes may read data only during the call. SegmentWriter owns
+	// the backing buffer and may reuse it as soon as this method returns.
 	WriteSegmentBytes(ctx context.Context, bucket, key string, idx int, data []byte) (SegmentRef, error)
 }
 
@@ -114,6 +151,9 @@ func (w *SegmentWriter) WriteSized(ctx context.Context, bucket, key, contentType
 				} else {
 					ref, err = w.backend.WriteSegment(cctx, bucket, key, job.idx, bytes.NewReader(job.body))
 				}
+				if job.release != nil {
+					job.release()
+				}
 				resultCh <- segmentWriteResult{idx: job.idx, ref: ref, err: err}
 			}
 		}()
@@ -171,8 +211,9 @@ func (w *SegmentWriter) WriteSized(ctx context.Context, bucket, key, contentType
 }
 
 type chunkJob struct {
-	idx  int
-	body []byte
+	idx     int
+	body    []byte
+	release func()
 }
 
 // chunkLoop reads from r in chunkSize blocks and emits chunkJob values until EOF.
@@ -187,11 +228,14 @@ type chunkJob struct {
 // rewrite EOF→ErrUnexpectedEOF mid-buffer, making real ErrUnexpectedEOF
 // errors from the source indistinguishable from a normal short final chunk.
 func (w *SegmentWriter) chunkLoop(ctx context.Context, r io.Reader, workCh chan<- chunkJob, firstChunkSize int, exactFirstChunk bool, sizeHint int64) error {
-	emit := func(idx int, body []byte) error {
+	emit := func(idx int, body []byte, release func()) error {
 		select {
-		case workCh <- chunkJob{idx: idx, body: body}:
+		case workCh <- chunkJob{idx: idx, body: body, release: release}:
 			return nil
 		case <-ctx.Done():
+			if release != nil {
+				release()
+			}
 			return ctx.Err()
 		}
 	}
@@ -216,7 +260,7 @@ func (w *SegmentWriter) chunkLoop(ctx context.Context, r io.Reader, workCh chan<
 		default:
 		}
 		if idx == 0 && exactFirstChunk && firstChunkSize == 0 {
-			return emit(idx, nil) // empty object, exact
+			return emit(idx, nil, nil) // empty object, exact
 		}
 
 		// Decide this chunk's read capacity (excluding any carried prefix).
@@ -234,7 +278,8 @@ func (w *SegmentWriter) chunkLoop(ctx context.Context, r io.Reader, workCh chan<
 			capacity = int(hintRemaining)
 		}
 
-		body := make([]byte, len(carry)+capacity)
+		chunk := acquireSegmentChunk(len(carry)+capacity, w.chunkSize)
+		body := chunk.body
 		copy(body, carry)
 		carried := len(carry)
 		carry = nil
@@ -246,29 +291,34 @@ func (w *SegmentWriter) chunkLoop(ctx context.Context, r io.Reader, workCh chan<
 				// Clean EOF exactly at the hinted length. A zero-length object
 				// (hint 0, nothing emitted yet) still owes its one empty segment.
 				if idx == 0 {
-					return emit(idx, nil)
+					chunk.release()
+					return emit(idx, nil, nil)
 				}
+				chunk.release()
 				return nil
 			}
 			// Body exceeds its hint: stop trusting it and carry the probed
 			// byte(s) into a real chunk rather than a 1-byte segment.
 			hintRemaining = -1
 			if errors.Is(readErr, io.EOF) {
-				return emit(idx, body[:total])
+				return emit(idx, body[:total], chunk.release)
 			}
 			if readErr != nil {
+				chunk.release()
 				return readErr
 			}
 			carry = append([]byte(nil), body[:total]...)
+			chunk.release()
 			continue
 		}
 
 		// Empty-object case: first iteration, no bytes, clean EOF.
 		if total == 0 && errors.Is(readErr, io.EOF) && idx == 0 {
-			return emit(idx, nil)
+			chunk.release()
+			return emit(idx, nil, nil)
 		}
 		if total > 0 {
-			if err := emit(idx, body[:total]); err != nil {
+			if err := emit(idx, body[:total], chunk.release); err != nil {
 				return err
 			}
 			idx++
@@ -283,9 +333,15 @@ func (w *SegmentWriter) chunkLoop(ctx context.Context, r io.Reader, workCh chan<
 		}
 		// Clean end-of-stream from the source.
 		if errors.Is(readErr, io.EOF) {
+			if total == 0 {
+				chunk.release()
+			}
 			return nil
 		}
 		if readErr != nil {
+			if total == 0 {
+				chunk.release()
+			}
 			return readErr
 		}
 	}

@@ -36,10 +36,12 @@ const shardWriteErrCap = 4 << 10
 // completeness trailer, stored verbatim) vs the plaintext streaming write
 // (WriteShard semantics: destination seals).
 type ShardWriteRequest struct {
-	Bucket   string
-	Key      string
-	ShardIdx int
-	Sealed   bool
+	Bucket          string
+	Key             string
+	ShardIdx        int
+	Sealed          bool
+	StreamSizeKnown bool
+	StreamSize      int64
 	// StagingKey, when non-empty, is the staging physical path the shard bytes are
 	// written to; Key stays the FINAL logical key used as encryption AAD (PR1
 	// segment staging). Empty ⇒ legacy direct-to-final write (Key is both path and
@@ -97,12 +99,26 @@ func (t *HTTPTransport) handleShardWrite(c context.Context, ctx *app.RequestCont
 		ctx.SetBodyString("bad sealed flag (want 0 or 1)")
 		return
 	}
+	streamSizeKnown := false
+	streamSize := int64(0)
+	if sizeStr, ok := ctx.GetQuery("size"); ok {
+		sz, parseErr := strconv.ParseInt(sizeStr, 10, 64)
+		if parseErr != nil || sz < 0 {
+			ctx.SetStatusCode(consts.StatusBadRequest)
+			ctx.SetBodyString("bad size")
+			return
+		}
+		streamSizeKnown = true
+		streamSize = sz
+	}
 	req := ShardWriteRequest{
-		Bucket:     string(ctx.Query("bucket")),
-		Key:        string(ctx.Query("key")),
-		ShardIdx:   idx,
-		Sealed:     sealedStr == "1",
-		StagingKey: string(ctx.Query("staging")),
+		Bucket:          string(ctx.Query("bucket")),
+		Key:             string(ctx.Query("key")),
+		ShardIdx:        idx,
+		Sealed:          sealedStr == "1",
+		StreamSizeKnown: streamSizeKnown,
+		StreamSize:      streamSize,
+		StagingKey:      string(ctx.Query("staging")),
 	}
 	if req.Bucket == "" || req.Key == "" {
 		ctx.SetStatusCode(consts.StatusBadRequest)
@@ -143,6 +159,9 @@ func (t *HTTPTransport) ShardWrite(ctx context.Context, addr string, req ShardWr
 	}
 	if req.StagingKey != "" {
 		q.Set("staging", req.StagingKey)
+	}
+	if req.StreamSizeKnown {
+		q.Set("size", strconv.FormatInt(req.StreamSize, 10))
 	}
 
 	hreq := protocol.AcquireRequest()

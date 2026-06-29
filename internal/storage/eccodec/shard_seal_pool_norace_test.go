@@ -31,13 +31,16 @@ func sealFresh(plain []byte) []byte {
 }
 
 func sealInto(dst, plain []byte) []byte {
-	need := len(plain) + sealProbeTag
+	start := len(dst)
+	need := start + len(plain) + sealProbeTag
 	if cap(dst) < need {
-		dst = make([]byte, need)
+		out := make([]byte, need)
+		copy(out, dst)
+		dst = out
 	} else {
 		dst = dst[:need]
 	}
-	copy(dst, plain)
+	copy(dst[start:], plain)
 	return dst
 }
 
