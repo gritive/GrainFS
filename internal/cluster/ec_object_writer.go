@@ -266,6 +266,35 @@ func (w ecObjectWriter) writeDataShards(ctx context.Context, plan ecObjectWriteP
 	return result, nil
 }
 
+// writeStreamShards is the disk-temp-file-spool-free sibling of
+// writeSpooledShards: it feeds a plain one-pass reader + known size straight
+// into the whole-object EC stream encoder (spoolECShardsStream) rather than
+// opening a *spooledObject temp file. The encoder math and shard layout are
+// identical — only the source changes. `etagFn` is invoked AFTER the source has
+// been fully consumed by the encoder, so callers can compute the object ETag via
+// an inline md5 tee over `src` and read it at EOF; a nil etagFn yields an empty
+// ETag. The caller owns `src`'s lifecycle (close after this returns).
+func (w ecObjectWriter) writeStreamShards(ctx context.Context, plan ecObjectWritePlan, spoolDir string, src io.Reader, size int64, etagFn func() string) (ecObjectWriteResult, error) {
+	stageStart := time.Now()
+	shards, err := spoolECShardsStream(ctx, plan.Config, spoolDir, src, size)
+	if err != nil {
+		return ecObjectWriteResult{}, err
+	}
+	observePutStage("ec", "spool_shards", stageStart)
+
+	etag := ""
+	if etagFn != nil {
+		etag = etagFn()
+	}
+	// Transient in-memory carrier for Size+ETag only (no temp file / Path),
+	// mirroring writeDataShards. writeShardReadersWithSizeCleanup consumes just
+	// these two fields for the success result.
+	sp := &spooledObject{Size: size, ETag: etag}
+	return w.writeShardReadersWithSizeCleanup(ctx, plan, sp, func(idx int) (io.Reader, error) {
+		return shards.OpenShard(idx)
+	}, shards.ShardSize, "ec", shards.Cleanup)
+}
+
 func (w ecObjectWriter) writeSpooledShards(ctx context.Context, plan ecObjectWritePlan, spoolDir string, sp *spooledObject) (ecObjectWriteResult, error) {
 	stageStart := time.Now()
 	shards, err := spoolECShards(ctx, plan.Config, spoolDir, sp)

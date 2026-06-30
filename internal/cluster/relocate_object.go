@@ -2,6 +2,8 @@ package cluster
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -200,12 +202,6 @@ func (b *DistributedBackend) relocateSideRecordAppendableToRedundantCoalesced(ct
 	if err != nil {
 		return fmt.Errorf("relocate appendable placement: %w", err)
 	}
-	sp, err := spoolObject(ctx, b.ecSpoolDir(), body, in.Bucket, true /* needsMD5: sp.ETag stored in CoalesceSegmentsPlan.ETag (line 232) → metadata */)
-	if err != nil {
-		return fmt.Errorf("relocate appendable spool: %w", err)
-	}
-	defer sp.Cleanup()
-
 	plan := ecObjectWritePlan{
 		Bucket:           in.Bucket,
 		Key:              in.Key,
@@ -215,7 +211,13 @@ func (b *DistributedBackend) relocateSideRecordAppendableToRedundantCoalesced(ct
 		Placement:        placementPlan.NodeIDs,
 	}
 	writer := newECObjectWriter(b.currentSelfAddr(), b.shardSvc, b.currentPeerHealth())
-	wr, err := writer.writeSpooledShards(ctx, plan, b.coalescedSpoolDir(), sp)
+	// Feed the GetObject read-back stream straight into the EC stream encoder,
+	// teeing it through md5 to compute the coalesced-body ETag (stored in the
+	// CoalescedShardRef below) at EOF — no disk temp-file spool of the source.
+	bodyHash := md5.New()
+	wr, err := writer.writeStreamShards(ctx, plan, b.coalescedSpoolDir(), io.TeeReader(body, bodyHash), cur.Size, func() string {
+		return hex.EncodeToString(bodyHash.Sum(nil))
+	})
 	if err != nil {
 		if placementPlan.TopologyWrite {
 			return topologyShardWriteError(placementPlan.TopologyGroup, placementPlan.Config, err)
@@ -228,7 +230,7 @@ func (b *DistributedBackend) relocateSideRecordAppendableToRedundantCoalesced(ct
 		CoalescedID:        coalescedID,
 		ShardKey:           shardKey,
 		Size:               cur.Size,
-		ETag:               sp.ETag,
+		ETag:               wr.ETag,
 		ConsumedSegmentIDs: consumed,
 		Placement:          wr.Placement,
 		ECData:             wr.ECData,
