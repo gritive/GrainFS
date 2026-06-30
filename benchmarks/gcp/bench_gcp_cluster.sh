@@ -69,6 +69,7 @@ MINIO_CONSOLE_PORT="${MINIO_CONSOLE_PORT:-10001}"
 MINIO_UNIT="minio-bench"
 PPROF_PORT="${PPROF_PORT:-6060}"
 PPROF_CPU_SECONDS="${PPROF_CPU_SECONDS:-30}"
+PPROF_TRACE_SECONDS="${PPROF_TRACE_SECONDS:-5}"   # execution trace (on+off CPU); 0 to skip
 PPROF_WARMUP_SECONDS="${PPROF_WARMUP_SECONDS:-5}"
 CLUSTER_PPROF="${CLUSTER_PPROF:-0}"
 CLUSTER_PPROF_BASE_PORT="${CLUSTER_PPROF_BASE_PORT:-6060}"
@@ -397,7 +398,7 @@ capture_cluster_load_profiles() { # <runidx> <pprof_dir>
   mkdir -p "$pprof_dir/cpu"
   local ports=()
   IFS=',' read -ra ports <<<"$BOOT_PPROF_PORTS"
-  log "grainfs-cluster: run=$idx pprof load capture ${PPROF_WARMUP_SECONDS}s warmup + ${PPROF_CPU_SECONDS}s (cpu+block+mutex+goroutine)"
+  log "grainfs-cluster: run=$idx pprof load capture ${PPROF_WARMUP_SECONDS}s warmup + ${PPROF_TRACE_SECONDS}s trace + ${PPROF_CPU_SECONDS}s (cpu+block+mutex+goroutine)"
   local pids=()
   local i
   for i in "${!ports[@]}"; do
@@ -411,6 +412,13 @@ capture_cluster_load_profiles() { # <runidx> <pprof_dir>
       out_cpu="$pprof_dir/cpu/node${i}.pb.gz"
       rb="/tmp/gr-${idx}-n${i}"   # remote basename for load profiles
       sleep "$PPROF_WARMUP_SECONDS"
+      # execution trace FIRST (under load, before the CPU window) so its heavy
+      # scheduler-event recording does not inflate the CPU profile. go tool trace
+      # shows wall-clock on+off CPU: syscall blocking (disk fsync), network wait,
+      # GC, and scheduler latency — the ground-truth view of what stalls PUT.
+      if (( PPROF_TRACE_SECONDS > 0 )); then
+        ssh_node "$n" "curl -sf 'http://127.0.0.1:${port}/debug/pprof/trace?seconds=$PPROF_TRACE_SECONDS' -o '${rb}-trace.out' 2>/dev/null" || true
+      fi
       # window-start contention baselines (cumulative counters)
       ssh_node "$n" "curl -sf 'http://127.0.0.1:${port}/debug/pprof/block' -o '${rb}-block-before.pb.gz' 2>/dev/null; \
                      curl -sf 'http://127.0.0.1:${port}/debug/pprof/mutex' -o '${rb}-mutex-before.pb.gz' 2>/dev/null" || true
@@ -436,6 +444,10 @@ capture_cluster_load_profiles() { # <runidx> <pprof_dir>
       done
       gcloud compute scp --zone="$ZONE" --project="$PROJECT" --tunnel-through-iap \
         "$n:${rb}-goroutine.txt" "$node_dir/goroutine.txt" >/dev/null 2>&1 || true
+      if (( PPROF_TRACE_SECONDS > 0 )); then
+        gcloud compute scp --zone="$ZONE" --project="$PROJECT" --tunnel-through-iap \
+          "$n:${rb}-trace.out" "$node_dir/trace.out" >/dev/null 2>&1 || true
+      fi
     ) &
     pids+=($!)
   done
