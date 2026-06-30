@@ -57,6 +57,10 @@ func TestWriteSegmentBytes_CompressibleSetsStoredSize(t *testing.T) {
 func TestWriteSegmentBytes_IncompressibleStoresRaw(t *testing.T) {
 	c := newTestClusterSegmentBackend(t)
 	rnd := make([]byte, 256<<10)
+	// Fixed-seed pseudo-random bytes approximate maximum entropy: the Go PRNG
+	// output has no repeating byte patterns, so zstd finds no back-references
+	// and cannot compress it below the input size (i.e. compressing would
+	// expand). WriteSegmentBytes must detect this and store raw (StoredSize==0).
 	r := rand.New(rand.NewSource(0xdeadbeef)) //nolint:gosec // fixed-seed PRNG, deterministic test data
 	_, _ = r.Read(rnd)
 	ref, err := c.WriteSegmentBytes(context.Background(), "bkt", "key", 0, append([]byte(nil), rnd...))
