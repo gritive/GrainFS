@@ -481,8 +481,9 @@ cmd_grainfs_cluster() { # <runidx>
     for i in $(seq 0 $((NODE_COUNT - 1))); do
       local n
       n="$(node_name "$i")"
+      ssh_node "$n" "sudo cp /tmp/grainfs-put-trace-node$i.jsonl /tmp/grainfs-put-trace-node$i.pull.jsonl 2>/dev/null && sudo chmod 0644 /tmp/grainfs-put-trace-node$i.pull.jsonl" || true
       gcloud compute scp --zone="$ZONE" --project="$PROJECT" --tunnel-through-iap \
-        "$n:/tmp/grainfs-put-trace-node$i.jsonl" "$localdir/put-trace/node$i.jsonl" >/dev/null 2>&1 \
+        "$n:/tmp/grainfs-put-trace-node$i.pull.jsonl" "$localdir/put-trace/node$i.jsonl" >/dev/null 2>&1 \
         || log "WARN: put trace pull failed for $n"
     done
   fi

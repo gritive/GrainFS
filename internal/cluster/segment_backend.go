@@ -9,6 +9,7 @@ import (
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/uuidutil"
+	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -575,10 +576,19 @@ func runChunkedPutWithParts(
 				promotes[node] = append(promotes[node], stagedPromotePair{stagingKey: stagingKey, finalKey: finalKey})
 			}
 		}
+		g, promoteCtx := errgroup.WithContext(ctx)
 		for _, node := range nodeOrder {
-			if perr := csb.promoteStagedShardsBatch(ctx, node, bucket, promotes[node]); perr != nil {
-				return nil, fmt.Errorf("promote staged segment shard batch (node %s, count %d): %w", node, len(promotes[node]), perr)
-			}
+			node := node
+			pairs := promotes[node]
+			g.Go(func() error {
+				if perr := csb.promoteStagedShardsBatch(promoteCtx, node, bucket, pairs); perr != nil {
+					return fmt.Errorf("promote staged segment shard batch (node %s, count %d): %w", node, len(pairs), perr)
+				}
+				return nil
+			})
+		}
+		if err := g.Wait(); err != nil {
+			return nil, err
 		}
 	}
 
