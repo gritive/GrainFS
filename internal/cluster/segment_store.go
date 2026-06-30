@@ -158,9 +158,10 @@ func (s *clusterSegmentStore) ReadAtSegment(ctx context.Context, ref storage.Seg
 		n, err := io.ReadFull(rc, buf)
 		if err == io.ErrUnexpectedEOF {
 			// buf was clamped to remaining plaintext; a short read at the tail
-			// means we hit EOF — return bytes read with EOF (matches uncompressed
-			// path semantics).
-			return n, io.EOF
+			// means we hit EOF — return bytes read with nil to match the
+			// uncompressed paths (ecObjectReader.ReadAt and readAtStripedStreaming
+			// both normalize tail/short reads to (n, nil)).
+			return n, nil
 		}
 		return n, err
 	}

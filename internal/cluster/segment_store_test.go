@@ -456,6 +456,48 @@ func TestReadAtSegment_CompressedOffset(t *testing.T) {
 	require.Equal(t, plaintext[off:off+n], buf[:n], "range bytes mismatch at offset %d", off)
 }
 
+func TestReadAtSegment_CompressedExactTail(t *testing.T) {
+	b := setupECBackend(t)
+	b.chunkedPutChunkSize = testChunkedPutChunkSize
+	b.SetShardGroupSource(&fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"group-a": {ID: "group-a", PeerIDs: []string{"self", "self", "self"}},
+	}})
+
+	const (
+		bucket = "compressed-readat-tail-bucket"
+		key    = "compressed-readat-tail-object"
+	)
+	// Highly compressible so StoredSize < Size.
+	plaintext := bytes.Repeat([]byte("abcdefghij"), 20000) // 200 KiB
+	sp := makeSpool(t, plaintext)
+
+	require.NoError(t, b.CreateBucket(context.Background(), bucket))
+	_, err := b.putObjectChunked(context.Background(),
+		bucket, key, "v1", sp, "application/octet-stream",
+		nil, "", 0, 0, false, "", nil, nil, nil)
+	require.NoError(t, err)
+
+	obj, err := b.HeadObject(context.Background(), bucket, key)
+	require.NoError(t, err)
+	require.NotEmpty(t, obj.Segments)
+	seg := obj.Segments[0]
+	require.Greater(t, seg.StoredSize, int64(0), "precondition: expected compressed segment")
+
+	store := &clusterSegmentStore{b: b, bucket: bucket, key: key, obj: obj}
+
+	// Read from offset to the very last byte of the segment (exact tail).
+	const off = 12345
+	tailLen := int(seg.Size) - off
+	buf := make([]byte, tailLen)
+	n, err := store.ReadAtSegment(context.Background(), seg, off, buf)
+	// Tail read must not return an error (nil or io.EOF both accepted).
+	if err != nil && err != io.EOF {
+		t.Fatalf("ReadAtSegment exact tail: unexpected error: %v", err)
+	}
+	require.Equal(t, tailLen, n, "expected to read all tail bytes")
+	require.Equal(t, plaintext[off:off+n], buf[:n], "range bytes mismatch at exact tail offset %d", off)
+}
+
 func makeChunkedTestBody(size int) []byte {
 	body := make([]byte, size)
 	// xorshift64: produces pseudo-random bytes that zstd cannot compress,
