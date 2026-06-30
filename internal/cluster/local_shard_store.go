@@ -850,6 +850,22 @@ func (l *LocalShardStore) shardWriteRequiresFsync(payloadLen int) bool {
 	return true // small, or large + no-redundancy: write-time fsync
 }
 
+// promoteShardRequiresFsync decides whether a staging→final promote must fsync
+// the final dir chain, mirroring shardWriteRequiresFsync on the write side: a
+// large + EC-redundant shard skips it (EC reconstruction + the scrubber own
+// durability), so the synchronous dir-fsync stays off the commit-tail. Sizing is
+// from the on-disk (encrypted) shard file, whose few bytes of AEAD overhead never
+// straddle the 1 MiB boundary in practice. A shard whose size can't be read falls
+// back to fsync — the safe default for the dst-already-present race path, whose
+// shard file may not be present on this dataDir.
+func (l *LocalShardStore) promoteShardRequiresFsync(dst string, d int) bool {
+	info, err := os.Stat(filepath.Join(dst, fmt.Sprintf("shard_%d", d)))
+	if err != nil {
+		return true
+	}
+	return l.shardWriteRequiresFsync(int(info.Size()))
+}
+
 // WriteLocalShardStream stores a shard from body without buffering plaintext.
 func (l *LocalShardStore) WriteLocalShardStream(bucket, key string, shardIdx int, body io.Reader) error {
 	return l.WriteLocalShardStreamContext(context.Background(), bucket, key, shardIdx, body)
@@ -936,8 +952,16 @@ func (l *LocalShardStore) PromoteLocalStagedShards(bucket, stagingKey, finalKey 
 	// idempotent (syncDirChain dedups once this process persisted it), so re-syncing
 	// an already-durable dst is cheap.
 	promote := func(dst string, d int) error {
-		if err := l.syncDirChain(dst, l.dataDirs[d]); err != nil {
-			return fmt.Errorf("promote staged segment fsync %s: %w", dst, err)
+		// Mirror the write path: large + EC-redundant shards skip the durability
+		// fsync (EC reconstruction + the scrubber own durability — see
+		// shardWriteRequiresFsync). The rename above is already done synchronously,
+		// so the final dir entry is visible for read-after-write; only the crash
+		// durability of that entry defers to EC/scrubber. This keeps the promote
+		// round off the PUT commit-tail latency (the dir-fsync was ~all of it).
+		if l.promoteShardRequiresFsync(dst, d) {
+			if err := l.syncDirChain(dst, l.dataDirs[d]); err != nil {
+				return fmt.Errorf("promote staged segment fsync %s: %w", dst, err)
+			}
 		}
 		promotedAny = true
 		return nil

@@ -9,6 +9,7 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -216,6 +217,32 @@ func TestPromoteLocalStagedShards_DstAlreadyPresent_StillFsyncs(t *testing.T) {
 		}
 	}
 	require.True(t, sawDst, "fsync must cover the final dst path, got %v", synced)
+}
+
+// TestPromoteLocalStagedShards_LargeRedundant_SkipsDirFsync locks the commit-tail
+// optimization: a large (>= largeShardFsyncThreshold) shard in a redundant (EC
+// parity) deployment skips the promote dir-fsync, mirroring the write path which
+// already skips file-fsync for the same class (EC reconstruction + the scrubber
+// own durability — see shardWriteRequiresFsync). The rename stays synchronous so
+// read-after-write still works; only the durability fsync is deferred to
+// EC/scrubber. This is what removes promote from the PUT commit-tail latency.
+func TestPromoteLocalStagedShards_LargeRedundant_SkipsDirFsync(t *testing.T) {
+	svc, _ := newTestShardService(t) // noRedundancy nil => counts as redundant
+	var syncedCount int
+	svc.local.syncDirHook = func(string) error { syncedCount++; return nil }
+
+	const bucket = "b"
+	const stagingKey = ".segstaging/txnL/blobL"
+	const finalKey = "obj/segments/blobL"
+	large := bytes.Repeat([]byte("x"), largeShardFsyncThreshold)
+	for d := 0; d < len(svc.local.dataDirs); d++ {
+		sdir, err := svc.local.getShardDir(bucket, stagingKey, d)
+		require.NoError(t, err)
+		require.NoError(t, os.MkdirAll(sdir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(sdir, fmt.Sprintf("shard_%d", d)), large, 0o644))
+	}
+	require.NoError(t, svc.PromoteLocalStagedShards(bucket, stagingKey, finalKey))
+	require.Zero(t, syncedCount, "large+redundant promote must skip dir-fsync (EC+scrubber own durability, mirrors write path)")
 }
 
 // TestHandlePromoteStagedBatch_Failure_ReturnsErrorEnvelope locks the receiver
