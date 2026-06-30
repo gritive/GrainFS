@@ -85,7 +85,7 @@ func TestChunkedSegmentStore_OpenSegmentLargeSegmentStreamsExactBytes(t *testing
 	sp := makeSpool(t, body)
 
 	require.NoError(t, b.CreateBucket(context.Background(), bucket))
-	_, err := b.putObjectChunked(context.Background(),
+	_, err := b.putChunked(context.Background(),
 		bucket, key, "v1", sp, "application/octet-stream",
 		nil, "", 0, 0, false, "", nil, nil, nil)
 	require.NoError(t, err)
@@ -411,7 +411,7 @@ func putChunkedTestObject(t *testing.T) (*DistributedBackend, string, string, []
 	sp := makeSpool(t, body)
 
 	require.NoError(t, b.CreateBucket(context.Background(), bucket))
-	_, err := b.putObjectChunked(context.Background(),
+	_, err := b.putChunked(context.Background(),
 		bucket, key, "v1", sp, "application/octet-stream",
 		nil, "", 0, 0, false, "", nil, nil, nil)
 	require.NoError(t, err)

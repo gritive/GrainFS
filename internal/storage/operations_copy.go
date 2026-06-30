@@ -169,6 +169,7 @@ func (o *Operations) copyObject(ctx context.Context, req CopyObjectRequest) (*Co
 		Key:            req.Destination.Key,
 		Body:           rc,
 		SizeHint:       &srcObj.Size,
+		SizeHintExact:  true, // copy source yields exactly srcObj.Size bytes → streaming PUT (no spool)
 		ContentType:    contentType,
 		ACL:            req.ACL,
 		UserMetadata:   userMetadata,

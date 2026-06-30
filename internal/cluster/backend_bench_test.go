@@ -35,6 +35,9 @@ func newECBenchmarkBackend(tb clusterTestTB) *DistributedBackend {
 		allNodes[i] = bk.selfAddr
 	}
 	bk.SetShardService(svc, allNodes)
+	// Re-wire the shard group to the 4+2 stripe width (the default constructor
+	// wired a 1-peer group at EC 1+0 before this widened the config).
+	wireTestShardGroup(bk)
 	require.True(tb, bk.ECActive(), "EC setup must exercise the EC path")
 	return bk
 }
@@ -204,7 +207,7 @@ func BenchmarkGetObjectEC_ChunkedSegment10MiB(b *testing.B) {
 
 	data := make([]byte, 10<<20)
 	sp := makeSpool(b, data)
-	_, err := bk.putObjectChunked(context.Background(),
+	_, err := bk.putChunked(context.Background(),
 		"bench", "chunked-readkey", "v1", sp, "application/octet-stream",
 		nil, "", 0, 0, false, "", nil, nil, nil)
 	require.NoError(b, err)

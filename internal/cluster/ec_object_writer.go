@@ -230,12 +230,9 @@ func (w ecObjectWriter) writeDataShards(ctx context.Context, plan ecObjectWriteP
 		ShardIndex: plan.SegmentIdx,
 	})
 	header := encodeShardHeader(int64(len(data)))
-	sp := &spooledObject{
-		Size: int64(len(data)),
-		ETag: "", // intentionally empty: caller (WriteSegmentBytes) discards this ETag; segment checksum is xxhash3 via storage.ChecksumOf
-	}
-
-	result, err := w.writeShardReadersWithSize(ctx, plan, sp, func(idx int) (io.Reader, error) {
+	// ETag intentionally empty: caller (WriteSegmentBytes) discards this ETag;
+	// segment checksum is xxhash3 via storage.ChecksumOf.
+	result, err := w.writeShardReadersWithSize(ctx, plan, int64(len(data)), "", func(idx int) (io.Reader, error) {
 		if idx < 0 || idx >= len(shards) {
 			return nil, fmt.Errorf("ec data shard %d out of range", idx)
 		}
@@ -266,11 +263,9 @@ func (w ecObjectWriter) writeDataShards(ctx context.Context, plan ecObjectWriteP
 	return result, nil
 }
 
-// writeStreamShards is the disk-temp-file-spool-free sibling of
-// writeSpooledShards: it feeds a plain one-pass reader + known size straight
-// into the whole-object EC stream encoder (spoolECShardsStream) rather than
-// opening a *spooledObject temp file. The encoder math and shard layout are
-// identical — only the source changes. `etagFn` is invoked AFTER the source has
+// writeStreamShards feeds a plain one-pass reader + known size straight into the
+// whole-object EC stream encoder (spoolECShardsStream); it never stages the body
+// to a disk temp file. `etagFn` is invoked AFTER the source has
 // been fully consumed by the encoder, so callers can compute the object ETag via
 // an inline md5 tee over `src` and read it at EOF; a nil etagFn yields an empty
 // ETag. The caller owns `src`'s lifecycle (close after this returns).
@@ -286,24 +281,7 @@ func (w ecObjectWriter) writeStreamShards(ctx context.Context, plan ecObjectWrit
 	if etagFn != nil {
 		etag = etagFn()
 	}
-	// Transient in-memory carrier for Size+ETag only (no temp file / Path),
-	// mirroring writeDataShards. writeShardReadersWithSizeCleanup consumes just
-	// these two fields for the success result.
-	sp := &spooledObject{Size: size, ETag: etag}
-	return w.writeShardReadersWithSizeCleanup(ctx, plan, sp, func(idx int) (io.Reader, error) {
-		return shards.OpenShard(idx)
-	}, shards.ShardSize, "ec", shards.Cleanup)
-}
-
-func (w ecObjectWriter) writeSpooledShards(ctx context.Context, plan ecObjectWritePlan, spoolDir string, sp *spooledObject) (ecObjectWriteResult, error) {
-	stageStart := time.Now()
-	shards, err := spoolECShards(ctx, plan.Config, spoolDir, sp)
-	if err != nil {
-		return ecObjectWriteResult{}, err
-	}
-	observePutStage("ec", "spool_shards", stageStart)
-
-	return w.writeShardReadersWithSizeCleanup(ctx, plan, sp, func(idx int) (io.Reader, error) {
+	return w.writeShardReadersWithSizeCleanup(ctx, plan, size, etag, func(idx int) (io.Reader, error) {
 		return shards.OpenShard(idx)
 	}, shards.ShardSize, "ec", shards.Cleanup)
 }
@@ -311,18 +289,20 @@ func (w ecObjectWriter) writeSpooledShards(ctx context.Context, plan ecObjectWri
 func (w ecObjectWriter) writeShardReadersWithSize(
 	ctx context.Context,
 	plan ecObjectWritePlan,
-	sp *spooledObject,
+	size int64,
+	etag string,
 	openShard func(idx int) (io.Reader, error),
 	shardSize func(idx int) (int64, error),
 	metricPath string,
 ) (ecObjectWriteResult, error) {
-	return w.writeShardReadersWithSizeCleanup(ctx, plan, sp, openShard, shardSize, metricPath, nil)
+	return w.writeShardReadersWithSizeCleanup(ctx, plan, size, etag, openShard, shardSize, metricPath, nil)
 }
 
 func (w ecObjectWriter) writeShardReadersWithSizeCleanup(
 	ctx context.Context,
 	plan ecObjectWritePlan,
-	sp *spooledObject,
+	size int64,
+	etag string,
 	openShard func(idx int) (io.Reader, error),
 	shardSize func(idx int) (int64, error),
 	metricPath string,
@@ -404,8 +384,8 @@ func (w ecObjectWriter) writeShardReadersWithSizeCleanup(
 	}
 	successResult := func(done <-chan struct{}) ecObjectWriteResult {
 		return ecObjectWriteResult{
-			Size:      sp.Size,
-			ETag:      sp.ETag,
+			Size:      size,
+			ETag:      etag,
 			ModTime:   time.Now().Unix(),
 			ShardKey:  shardKey,
 			Placement: cloneStringSlice(plan.Placement),

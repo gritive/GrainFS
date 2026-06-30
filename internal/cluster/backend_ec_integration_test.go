@@ -3,7 +3,6 @@ package cluster
 import (
 	"bytes"
 	"context"
-	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -35,6 +34,7 @@ var _ = Describe("Backend EC object integration", func() {
 		// this reconfigure (e.g. legacy-convert tests) stays decryptable.
 		keeper, clusterID := b.shardSvc.DEKKeeper(), b.shardSvc.ClusterID()
 		b.SetShardService(NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID)), nodes)
+		wireTestShardGroup(b)
 	}
 
 	It("rejects an object key that escapes the shard data root", func() {
@@ -53,11 +53,11 @@ var _ = Describe("Backend EC object integration", func() {
 		Expect(os.IsNotExist(statErr)).To(BeTrue(), "no shard dir may escape the data dir: %s", escaped)
 	})
 
-	It("spools large parity EC shard encoding to disk", func() {
+	It("round-trips large parity EC objects via the streaming chunked path", func() {
 		configureEC(ECConfig{DataShards: 2, ParityShards: 1})
 
 		payload := bytes.Repeat([]byte("b"), 2<<20)
-		body := io.LimitReader(bytes.NewReader(payload), int64(len(payload)))
+		body := bytes.NewReader(payload)
 		obj, err := b.PutObject(ctx, "bucket", "large-spooled.bin", body, "application/octet-stream")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(obj.Size).To(Equal(int64(len(payload))))
@@ -70,16 +70,13 @@ var _ = Describe("Backend EC object integration", func() {
 		Expect(closeErr).NotTo(HaveOccurred())
 		Expect(got).To(Equal(payload))
 		Expect(gotObj.ETag).To(Equal(obj.ETag))
-
-		_, err = os.Stat(b.ecSpoolDir())
-		Expect(err).NotTo(HaveOccurred())
 	})
 
-	It("preserves user metadata when EC shard encoding is spooled", func() {
+	It("preserves user metadata for EC objects on the streaming chunked path", func() {
 		configureEC(ECConfig{DataShards: 2, ParityShards: 1})
 
 		payload := bytes.Repeat([]byte("a"), 64<<10)
-		body := io.LimitReader(bytes.NewReader(payload), int64(len(payload)))
+		body := bytes.NewReader(payload)
 		obj, err := b.PutObjectWithUserMetadata(
 			ctx,
 			"bucket",
@@ -105,39 +102,10 @@ var _ = Describe("Backend EC object integration", func() {
 	// isolation in put_object_meta_test.go; there is no blob analogue to assert
 	// end-to-end via headObjectMeta (which now reads only blobs).
 
-	DescribeTable("cleans written shards when EC commit aborts before metadata",
-		func(cfg ECConfig) {
-			configureEC(cfg)
-
-			payload := bytes.Repeat([]byte("abort-before-commit-"), 1024)
-			sp, err := b.spoolPutObject(ctx, "bucket", bytes.NewReader(payload), false)
-			Expect(err).NotTo(HaveOccurred())
-			defer sp.Cleanup()
-
-			errChanged := errors.New("metadata changed")
-			_, err = b.putObjectECSpooledWithOptionalModTime(
-				ctx,
-				"bucket",
-				"abort.bin",
-				"",
-				sp,
-				"application/octet-stream",
-				nil,
-				"",
-				0,
-				1,
-				true,
-				"",
-				func() error { return errChanged },
-				nil,
-				nil,
-				"",
-			)
-			Expect(err).To(MatchError(errChanged))
-			_, err = b.shardSvc.ReadLocalShard("bucket", "abort.bin", 0)
-			Expect(os.IsNotExist(err)).To(BeTrue())
-		},
-		Entry("parity", ECConfig{DataShards: 2, ParityShards: 1}),
-		Entry("single-local", ECConfig{DataShards: 1, ParityShards: 0}),
-	)
+	// "cleans written shards when EC commit aborts before metadata" was removed
+	// with the EC-spooled whole-object write path. The streaming chunked PUT is
+	// now the only write path; its commit-abort shard reclamation (Content-MD5
+	// mismatch → beforeCommit abort → staged-shard cleanup) is covered by
+	// object_put_md5_test.go (TestPutObject_SizedContentMD5_Mismatch_NoLeak via
+	// finalShardFileCount, and TestRunChunkedPut_BeforeCommitError_ReclaimsStagedShards).
 })

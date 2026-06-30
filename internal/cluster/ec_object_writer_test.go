@@ -41,9 +41,9 @@ func TestECObjectWriter_CleansWrittenShardsOnWriteFailure(t *testing.T) {
 		Placement:        []string{"node-a", "node-b"},
 		ContentType:      "application/octet-stream",
 	}
-	sp := &spooledObject{Size: 11, ETag: "etag"}
+	size, etag := int64(11), "etag"
 
-	_, err := writer.writeShardReadersWithSize(context.Background(), plan, sp, func(idx int) (io.Reader, error) {
+	_, err := writer.writeShardReadersWithSize(context.Background(), plan, size, etag, func(idx int) (io.Reader, error) {
 		return strings.NewReader("shard"), nil
 	}, nil, "test")
 	require.ErrorIs(t, err, writeErr)
@@ -77,11 +77,11 @@ func TestECObjectWriter_FailsClosedOnShardErrorBeforeQuorumDespiteRemainingCapac
 		Placement:        []string{"node-a", "node-b", "node-c", "node-d"},
 		ContentType:      "application/octet-stream",
 	}
-	sp := &spooledObject{Size: 11, ETag: "etag"}
+	size, etag := int64(11), "etag"
 
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := writer.writeShardReadersWithSize(context.Background(), plan, sp, func(idx int) (io.Reader, error) {
+		_, err := writer.writeShardReadersWithSize(context.Background(), plan, size, etag, func(idx int) (io.Reader, error) {
 			return strings.NewReader("shard"), nil
 		}, nil, "test")
 		errCh <- err
@@ -122,13 +122,13 @@ func TestECObjectWriter_ReturnsAfterDataShardQuorumBeforeAllWritesComplete(t *te
 		Placement:        []string{"node-a", "node-b", "node-c", "node-d"},
 		ContentType:      "application/octet-stream",
 	}
-	sp := &spooledObject{Size: 11, ETag: "etag"}
+	size, etag := int64(11), "etag"
 
 	resultCh := make(chan ecObjectWriteResult, 1)
 	errCh := make(chan error, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		result, err := writer.writeShardReadersWithSize(ctx, plan, sp, func(idx int) (io.Reader, error) {
+		result, err := writer.writeShardReadersWithSize(ctx, plan, size, etag, func(idx int) (io.Reader, error) {
 			return strings.NewReader("shard"), nil
 		}, func(idx int) (int64, error) {
 			return int64(len("shard")), nil
@@ -182,13 +182,13 @@ func TestECObjectWriter_CleansWrittenShardsWhenContextCanceledBeforeQuorum(t *te
 		Placement:        []string{"node-a", "node-b", "node-c", "node-d"},
 		ContentType:      "application/octet-stream",
 	}
-	sp := &spooledObject{Size: 11, ETag: "etag"}
+	size, etag := int64(11), "etag"
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := writer.writeShardReadersWithSize(ctx, plan, sp, func(idx int) (io.Reader, error) {
+		_, err := writer.writeShardReadersWithSize(ctx, plan, size, etag, func(idx int) (io.Reader, error) {
 			return strings.NewReader("shard"), nil
 		}, func(idx int) (int64, error) {
 			return int64(len("shard")), nil
@@ -231,9 +231,9 @@ func TestECObjectWriteResult_AbortBackgroundWritesStopsSlowRemainingWrites(t *te
 		Placement:        []string{"node-a", "node-b", "node-c", "node-d"},
 		ContentType:      "application/octet-stream",
 	}
-	sp := &spooledObject{Size: 11, ETag: "etag"}
+	size, etag := int64(11), "etag"
 
-	result, err := writer.writeShardReadersWithSize(context.Background(), plan, sp, func(idx int) (io.Reader, error) {
+	result, err := writer.writeShardReadersWithSize(context.Background(), plan, size, etag, func(idx int) (io.Reader, error) {
 		return strings.NewReader("shard"), nil
 	}, func(idx int) (int64, error) {
 		return int64(len("shard")), nil
@@ -247,16 +247,13 @@ func TestECObjectWriteResult_AbortBackgroundWritesStopsSlowRemainingWrites(t *te
 	require.Empty(t, shards.peersWithBufferedWrites("node-c", "node-d"))
 }
 
-func TestECObjectWriter_WriteSpooledShardsMaterializesAndWritesBufferedRemote(t *testing.T) {
+func TestECObjectWriter_WriteStreamShardsMaterializesAndWritesBufferedRemote(t *testing.T) {
 	shards := &fakeECObjectWriterShards{}
 	writer := ecObjectWriter{
 		selfID: "node-a",
 		shards: shards,
 	}
 	dir := t.TempDir()
-	spoolPath := filepath.Join(dir, "object")
-	require.NoError(t, os.WriteFile(spoolPath, []byte("hello"), 0o600))
-	sp := &spooledObject{Path: spoolPath, Size: 5, ETag: "etag"}
 	plan := ecObjectWritePlan{
 		Bucket:           "bucket",
 		Key:              "object",
@@ -267,7 +264,7 @@ func TestECObjectWriter_WriteSpooledShardsMaterializesAndWritesBufferedRemote(t 
 		ContentType:      "text/plain",
 	}
 
-	result, err := writer.writeSpooledShards(context.Background(), plan, dir, sp)
+	result, err := writer.writeStreamShards(context.Background(), plan, dir, bytes.NewReader([]byte("hello")), 5, func() string { return "etag" })
 	require.NoError(t, err)
 
 	require.Len(t, shards.bufferedWrites, 1)

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"time"
 )
 
@@ -19,19 +18,6 @@ type spooledECShards struct {
 	paths    []string
 	sizes    []int64
 	origSize int64
-}
-
-// spoolECShards spools the data+parity EC shard temp files for a spooledObject.
-// It opens the (possibly encrypted) spool source and delegates to
-// spoolECShardsStream. Source ownership stays here: the opened reader is closed
-// before return.
-func spoolECShards(ctx context.Context, cfg ECConfig, dir string, sp *spooledObject) (*spooledECShards, error) {
-	src, err := sp.Open()
-	if err != nil {
-		return nil, fmt.Errorf("open spooled object: %w", err)
-	}
-	defer src.Close()
-	return spoolECShardsStream(ctx, cfg, dir, src, sp.Size)
 }
 
 // spoolECShardsStream is the source-agnostic EC shard spooler: it reads exactly
@@ -226,10 +212,6 @@ func (w *countingWriter) Write(p []byte) (int, error) {
 	n, err := w.w.Write(p)
 	*w.n += int64(n)
 	return n, err
-}
-
-func (b *DistributedBackend) ecSpoolDir() string {
-	return filepath.Join(b.root, "tmp", "ec-spool")
 }
 
 type multiReadCloser struct {

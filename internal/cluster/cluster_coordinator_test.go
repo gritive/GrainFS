@@ -531,6 +531,8 @@ func newTestFollowerGroupBackend(t testing.TB, groupID, nodeID string) (*GroupBa
 	require.NoError(t, err)
 	// Wire the direct-FSM MetaBucketStore so CreateBucket works in tests.
 	gb.SetMetaBucketStore(newDirectFSMMetaBucketStore(gb.fsm))
+	// The streaming chunked PUT path needs a non-nil ShardGroupSource.
+	wireTestShardGroup(gb.DistributedBackend)
 	t.Cleanup(func() {
 		require.NoError(t, gb.Close())
 		if closeRaft != nil {

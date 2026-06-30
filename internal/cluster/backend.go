@@ -423,19 +423,6 @@ func (b *DistributedBackend) bucketVersioningCacheDelete(bucket string) {
 	b.bucketVersioningCache.Delete(bucket)
 }
 
-// invalidateShardCache drops every shard slot for one shardKey. Used by
-// PutObject overwrite, DeleteObject, and repairShardEC so a subsequent
-// read sees post-write state. nShards covers the full k+m fan-out.
-func (b *DistributedBackend) invalidateShardCache(bucket, shardKey string, nShards int) {
-	if b.shardCache == nil {
-		return
-	}
-	b.shardCache.InvalidatePrefix(fmt.Sprintf("%s/%s/", bucket, shardKey))
-	for i := 0; i < nShards; i++ {
-		b.shardCache.Invalidate(shardCacheKey(bucket, shardKey, i))
-	}
-}
-
 // SetCoalesceConfig updates the coalesce thresholds at runtime by storing
 // them in the live b.coalesceCfg atomic, which the append/coalesce path
 // reads on the next operation.

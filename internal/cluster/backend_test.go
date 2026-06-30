@@ -23,6 +23,28 @@ type clusterTestTB interface {
 	Fatalf(format string, args ...interface{})
 }
 
+// wireTestShardGroup attaches a single placement group whose peer list is sized
+// to the backend's current EC stripe width, all pointing at selfAddr. This gives
+// test backends the non-nil ShardGroupSource the streaming chunked PUT path
+// requires (production always wires one). Call again after changing the EC config.
+func wireTestShardGroup(backend *DistributedBackend) {
+	n := backend.currentECConfig().NumShards()
+	if n < 1 {
+		n = 1
+	}
+	peers := make([]string, n)
+	for i := range peers {
+		if i < len(backend.allNodes) && backend.allNodes[i] != "" {
+			peers[i] = backend.allNodes[i]
+		} else {
+			peers[i] = backend.selfAddr
+		}
+	}
+	backend.SetShardGroupSource(&fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"group-a": {ID: "group-a", PeerIDs: peers},
+	}})
+}
+
 // newTestDistributedBackend creates a DistributedBackend backed by a local Raft node.
 func newTestDistributedBackend(t clusterTestTB) *DistributedBackend {
 	t.Helper()
@@ -72,6 +94,11 @@ func newTestDistributedBackendWithDB(t clusterTestTB) (*DistributedBackend, *bad
 	keeper, clusterID := testDEKKeeper(t)
 	svc := NewShardService(backend.root, nil, WithShardDEKKeeper(keeper, clusterID))
 	backend.SetShardService(svc, []string{backend.selfAddr})
+	// Wire a single-node ShardGroupSource by default so the streaming chunked PUT
+	// path (which requires a non-nil shardGroup) is exercised — production always
+	// wires one. Tests that change the EC config to a wider stripe must re-wire a
+	// group sized to NumShards (see wireTestShardGroup).
+	wireTestShardGroup(backend)
 	// Wire the direct-FSM MetaBucketStore so bucket-write paths work without a
 	// real meta-Raft cluster. Bucket mutations are applied directly to the local
 	// FSM, keeping the local read paths (HeadBucket, etc.) consistent.

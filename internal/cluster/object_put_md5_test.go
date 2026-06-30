@@ -43,17 +43,15 @@ func newStreamingBackend(t *testing.T) *DistributedBackend {
 	return b
 }
 
-// requireNoSpoolDir proves no spool was used by the PUT: spoolObject's first
-// action is MkdirAll(<root>/tmp/put-spool), and the dir is not pre-created at
-// backend init, so its absence means spoolObject was never called. The streaming
-// path never spools; the spool path always creates this dir (it persists even
-// after the temp file is cleaned up). A read-only freeze would not work here —
-// spoolObject chmods the dir back to 0o700 — so dir-absence is the discriminator.
+// requireNoSpoolDir proves no PUT-body temp file was ever written: the removed
+// spool path created <root>/tmp/put-spool. The streaming write path never
+// touches it, so the directory's absence is the regression guard against a spool
+// path being reintroduced.
 func requireNoSpoolDir(t *testing.T, b *DistributedBackend) {
 	t.Helper()
-	_, err := os.Stat(b.spoolDir())
+	_, err := os.Stat(filepath.Join(b.root, "tmp", "put-spool"))
 	require.True(t, errors.Is(err, fs.ErrNotExist),
-		"spool dir must not exist (streaming path must not spool); stat err: %v", err)
+		"put-spool dir must not exist (streaming path must not spool); stat err: %v", err)
 }
 
 // finalShardFileCount walks every shard data dir and counts shard_* files under
@@ -104,20 +102,18 @@ func TestPutObject_BareBytesReader_Streams(t *testing.T) {
 	require.Equal(t, data, got)
 }
 
-// TestPutObject_BareReaderOnly_Spools: a body that hides Len() (readerOnly) and
-// carries no SizeHint still falls through to the spool path even on a streaming
-// backend — the central Len() detection cannot size it. This pins the boundary of
-// the no-spool optimization (genuinely-unknown-size streams remain on spool).
-func TestPutObject_BareReaderOnly_Spools(t *testing.T) {
+// TestPutObject_BareReaderOnly_Rejected: a body that hides Len() (readerOnly)
+// carries no SizeHint and cannot be sized centrally, so it can no longer take any
+// write path — the spool fallback was removed. It must be rejected, not silently
+// spooled. This pins the post-removal boundary: every PUT to DistributedBackend
+// must carry an exact size (server ingress / copy / pull-through / forward all do).
+func TestPutObject_BareReaderOnly_Rejected(t *testing.T) {
 	b := newStreamingBackend(t)
 	ctx := context.Background()
 
-	data := []byte("no Len() so this spools")
-	obj, err := b.PutObject(ctx, "bucket", "unsized", readerOnly{r: bytes.NewReader(data)}, "application/octet-stream")
-	require.NoError(t, err)
-	require.Equal(t, int64(len(data)), obj.Size)
-	_, statErr := os.Stat(b.spoolDir())
-	require.NoError(t, statErr, "unsized body must have spooled (spool dir created)")
+	_, err := b.PutObject(ctx, "bucket", "unsized", readerOnly{r: bytes.NewReader([]byte("no Len() so this is rejected"))}, "application/octet-stream")
+	require.Error(t, err)
+	requireNoSpoolDir(t, b)
 }
 
 // TestPutObject_SizedContentMD5_Mismatch_NoSpool: a sized PUT (SizeHint +
@@ -295,9 +291,9 @@ func TestPutObject_ContentMD5_ETagParity(t *testing.T) {
 }
 
 // TestPutObject_SizedReader_ContentMD5Mismatch: a small PUT whose body is a
-// sized reader (bytes.NewReader) but carries NO SizeHint takes the spool path; a
-// wrong Content-MD5 is rejected as BadDigest at the spool site (sp.ETag) before
-// any shard write.
+// sized reader (bytes.NewReader) and carries NO SizeHint is centrally sized from
+// Len() and takes the streaming path; a wrong Content-MD5 is rejected as
+// BadDigest by the beforeCommit tee-validate before the quorum-meta commit.
 func TestPutObject_SizedReader_ContentMD5Mismatch(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	ctx := context.Background()
@@ -312,70 +308,22 @@ func TestPutObject_SizedReader_ContentMD5Mismatch(t *testing.T) {
 	require.ErrorIs(t, err, storage.ErrContentMD5Mismatch)
 }
 
-// TestPutObject_SpoolPath_ContentMD5Mismatch: a PUT whose body is not a
-// sized-reader (forces the spool path) with a wrong Content-MD5 must be rejected
-// as BadDigest at the spool site (sp.ETag) before any shard write.
-func TestPutObject_SpoolPath_ContentMD5Mismatch(t *testing.T) {
-	b := newTestDistributedBackend(t)
-	ctx := context.Background()
-	require.NoError(t, b.CreateBucket(ctx, "bucket"))
-
-	_, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{
-		Bucket:        "bucket",
-		Key:           "spool",
-		Body:          readerOnly{r: bytes.NewReader([]byte("hello"))},
-		ContentMD5Hex: "deadbeefdeadbeefdeadbeefdeadbeef", // wrong
-	})
-	require.ErrorIs(t, err, storage.ErrContentMD5Mismatch)
-}
-
-// TestPutObject_WithSizeHint_ContentMD5Mismatch: a PUT carrying SizeHint but NOT
-// SizeHintExact stays on the spool path (the streaming gate requires
-// SizeHintExact), so Content-MD5 is validated at the spool site. A wrong digest is
-// rejected as BadDigest.
-func TestPutObject_WithSizeHint_ContentMD5Mismatch(t *testing.T) {
-	b := newTestDistributedBackend(t)
-	ctx := context.Background()
-	require.NoError(t, b.CreateBucket(ctx, "bucket"))
-
-	sz := int64(5)
-	_, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{
-		Bucket:        "bucket",
-		Key:           "sized",
-		Body:          bytes.NewReader([]byte("hello")),
-		SizeHint:      &sz,
-		ContentMD5Hex: "deadbeefdeadbeefdeadbeefdeadbeef", // wrong
-	})
-	require.ErrorIs(t, err, storage.ErrContentMD5Mismatch)
-}
-
 // TestPutObject_ContentMD5Match: a correct Content-MD5 succeeds and the stored
-// ETag equals the body md5. Both subtests carry no SizeHint, so both take the
-// spool path.
+// ETag equals the body md5. The body is a sized reader (centrally sized from
+// Len()) so it takes the streaming path.
 func TestPutObject_ContentMD5Match(t *testing.T) {
 	b := newTestDistributedBackend(t)
 	ctx := context.Background()
 	require.NoError(t, b.CreateBucket(ctx, "bucket"))
 
-	for _, tc := range []struct {
-		name string
-		body io.Reader
-		key  string
-	}{
-		{"reader", bytes.NewReader([]byte("hello")), "ok-reader"},
-		{"spool", readerOnly{r: bytes.NewReader([]byte("hello"))}, "ok-spool"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			obj, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{
-				Bucket:        "bucket",
-				Key:           tc.key,
-				Body:          tc.body,
-				ContentMD5Hex: helloMD5Hex,
-			})
-			require.NoError(t, err)
-			require.Equal(t, helloMD5Hex, obj.ETag)
-		})
-	}
+	obj, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{
+		Bucket:        "bucket",
+		Key:           "ok-reader",
+		Body:          bytes.NewReader([]byte("hello")),
+		ContentMD5Hex: helloMD5Hex,
+	})
+	require.NoError(t, err)
+	require.Equal(t, helloMD5Hex, obj.ETag)
 }
 
 // TestValidateContentMD5 exercises the guard directly, including the defensive

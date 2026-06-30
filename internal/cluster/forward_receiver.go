@@ -365,12 +365,12 @@ func (r *ForwardReceiver) handlePutObject(dg *DataGroup, args []byte) []byte {
 }
 
 // buildForwardStreamPutRequest reconstructs the storage.PutObjectRequest for a
-// streamed forwarded PUT. When the sender stamped an exact decoded length
-// (decoded_length >= 0), the request carries SizeHint+SizeHintExact so the
+// streamed forwarded PUT. The sender stamps an exact decoded length
+// (decoded_length >= 0) so the request carries SizeHint+SizeHintExact and the
 // backend takes the no-spool streaming path (it wraps body in
-// exactObjectSizeReader itself). When absent (-1, old sender / non-exact hint)
-// the request is left unsized and falls back to the spool path — preserving wire
-// compatibility.
+// exactObjectSizeReader itself). When absent (-1) the request is left unsized;
+// since the disk spool was removed, the backend rejects an unsized streamed
+// forward rather than buffering it — production senders always stamp the length.
 func buildForwardStreamPutRequest(pa *raftpb.PutObjectArgs, body io.Reader) storage.PutObjectRequest {
 	req := storage.PutObjectRequest{
 		Bucket:         string(pa.Bucket()),

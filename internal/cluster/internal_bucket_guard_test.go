@@ -152,8 +152,8 @@ func TestInternalBucketGuard_VersionedOpsRejected(t *testing.T) {
 		require.ErrorIs(t, err, ErrInternalBucketNotObjectStore)
 	})
 
-	t.Run("PutObjectAsync", func(t *testing.T) {
-		_, _, err := b.PutObjectAsync(ctx, internalBkt, "k", strings.NewReader("data"), "application/octet-stream")
+	t.Run("PutObject", func(t *testing.T) {
+		_, err := b.PutObject(ctx, internalBkt, "k", strings.NewReader("data"), "application/octet-stream")
 		require.ErrorIs(t, err, ErrInternalBucketNotObjectStore)
 	})
 

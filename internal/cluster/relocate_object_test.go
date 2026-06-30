@@ -6,6 +6,7 @@ import (
 	"crypto/md5"
 	"io"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -235,7 +236,7 @@ func TestRelocateAppendSideRecordObjectPreservesFutureAppendETag(t *testing.T) {
 	// stream encoder via an inline md5 tee — it no longer spools the GetObject
 	// read-back stream to a disk temp file, so the EC source-spool dir must never
 	// be created during relocate.
-	_, statErr := os.Stat(b.ecSpoolDir())
+	_, statErr := os.Stat(filepath.Join(b.root, "tmp", "ec-spool"))
 	require.True(t, os.IsNotExist(statErr), "ec source-spool dir must not be created during relocate")
 
 	relocated, err := b.readQuorumMetaCmd("bk", "k")

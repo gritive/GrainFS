@@ -2,13 +2,11 @@ package cluster
 
 import (
 	"bytes"
-	"context"
-	"crypto/md5"
 	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"testing"
 	"unsafe"
 
@@ -18,91 +16,36 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-type failingReader struct {
-	err error
-}
-
-func (r failingReader) Read([]byte) (int, error) {
-	return 0, r.err
-}
-
-func TestSpoolObjectComputesSizeAndETag(t *testing.T) {
-	data := []byte("hello")
-	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader(data), "__grainfs_test_internal", false)
+// writeEncryptedSpoolRecordFile stages `payload` to disk as encrypted spool
+// records via encryptedSpoolRecordWriter + copyToSpoolChunked — the exact codec
+// multipart UploadPart uses (the PUT-body spool was removed; this per-record
+// codec survives for disk-staged multipart parts). copyToSpoolChunked (not a
+// single w.Write) is required so the payload is split into
+// spoolCopyBufferSize-bounded records, which the multi-record reader-reuse and
+// streaming tests below depend on. Returns the staged file path.
+func writeEncryptedSpoolRecordFile(t *testing.T, dir string, seam storage.DataEncryptor, domain string, payload []byte) string {
+	t.Helper()
+	path := filepath.Join(dir, "encrypted-record")
+	f, err := os.Create(path)
 	require.NoError(t, err)
-	defer sp.Cleanup()
-	require.Equal(t, int64(5), sp.Size)
-	require.Equal(t, storage.InternalETag(data), sp.ETag) // xxhash3 for internal buckets
-
-	rc, err := sp.Open()
+	w := &encryptedSpoolRecordWriter{w: f, seam: seam, domain: domain}
+	n, err := copyToSpoolChunked(w, bytes.NewReader(payload))
 	require.NoError(t, err)
-	defer rc.Close()
-	got, err := io.ReadAll(rc)
-	require.NoError(t, err)
-	require.Equal(t, "hello", string(got))
+	require.Equal(t, int64(len(payload)), n)
+	require.NoError(t, f.Close())
+	return path
 }
 
-func TestSpoolObjectS3BucketUsesMD5ETag(t *testing.T) {
-	data := []byte("hello s3 object")
-	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader(data), "user-bucket", true)
-	require.NoError(t, err)
-	defer sp.Cleanup()
-	require.Equal(t, int64(len(data)), sp.Size)
-	h := md5.Sum(data)
-	require.Equal(t, hex.EncodeToString(h[:]), sp.ETag) // MD5 for S3 user buckets
-}
-
-func TestSpoolObjectS3BucketNoMD5SkipsHash(t *testing.T) {
-	data := []byte("no md5 needed")
-	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader(data), "user-bucket", false)
-	require.NoError(t, err)
-	defer sp.Cleanup()
-	require.Equal(t, int64(len(data)), sp.Size)
-	require.Empty(t, sp.ETag) // needsMD5=false → no MD5 computed
-}
-
-func TestSpoolObjectNoBucketSkipsHashing(t *testing.T) {
-	data := []byte("no etag needed")
-	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader(data), "", false)
-	require.NoError(t, err)
-	defer sp.Cleanup()
-	require.Equal(t, int64(len(data)), sp.Size)
-	require.Empty(t, sp.ETag) // no bucket → no etag computed
-}
-
-func TestSpoolObjectCleansTempOnReadError(t *testing.T) {
-	dir := t.TempDir()
-	_, err := spoolObject(context.Background(), dir, failingReader{err: errors.New("boom")}, "__grainfs_test_internal", false)
-	require.ErrorContains(t, err, "spool object")
-	entries, readErr := os.ReadDir(dir)
-	require.NoError(t, readErr)
-	require.Empty(t, entries)
-}
-
-func TestEncryptedSpoolObjectNoMD5SkipsHash(t *testing.T) {
-	seam := newClusterTestSeam(t)
-	payload := []byte("encrypted spool no md5")
-	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", seam, "cluster-spool:no-md5", false)
-	require.NoError(t, err)
-	defer sp.Cleanup()
-	require.Equal(t, int64(len(payload)), sp.Size)
-	require.Empty(t, sp.ETag) // needsMD5=false → spoolHashForBucket skips MD5
-}
-
-func TestEncryptedSpoolObjectHidesPlaintext(t *testing.T) {
+func TestEncryptedSpoolRecordHidesPlaintext(t *testing.T) {
 	seam := newClusterTestSeam(t)
 	payload := []byte("sensitive cluster spool payload")
-	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", seam, "cluster-spool:test", true)
-	require.NoError(t, err)
-	defer sp.Cleanup()
-	require.Equal(t, int64(len(payload)), sp.Size)
-	require.Equal(t, "7d0467b8ee0ad76a1c41e37b3c2d3056", sp.ETag)
+	path := writeEncryptedSpoolRecordFile(t, t.TempDir(), seam, "cluster-spool:test", payload)
 
-	raw, err := os.ReadFile(sp.Path)
+	raw, err := os.ReadFile(path)
 	require.NoError(t, err)
 	require.NotContains(t, string(raw), string(payload))
 
-	rc, err := sp.Open()
+	rc, err := openSpoolEncryptedRecordFile(path, seam, "cluster-spool:test")
 	require.NoError(t, err)
 	got, err := io.ReadAll(rc)
 	require.NoError(t, err)
@@ -110,26 +53,23 @@ func TestEncryptedSpoolObjectHidesPlaintext(t *testing.T) {
 	require.Equal(t, payload, got)
 }
 
-func TestSpoolObjectEncryptedRoundTripsViaDEKSeam(t *testing.T) {
+func TestEncryptedSpoolRecordRoundTripsViaDEKSeam(t *testing.T) {
 	clusterID := bytes.Repeat([]byte("c"), 16)
 	kek := bytes.Repeat([]byte{0x77}, encrypt.KEKSize)
 	keeper, err := encrypt.NewDEKKeeper(kek, clusterID)
 	require.NoError(t, err)
 	seam := storage.NewDEKKeeperAdapter(keeper, clusterID)
 
-	dir := t.TempDir()
 	plain := bytes.Repeat([]byte("spool-bytes-"), 200_000) // > 1 MiB, multiple records
-	sp, err := spoolObjectEncrypted(context.Background(), dir, bytes.NewReader(plain), "bkt", seam, "cluster-spool:test", true)
-	require.NoError(t, err)
-	defer sp.Cleanup()
+	path := writeEncryptedSpoolRecordFile(t, t.TempDir(), seam, "cluster-spool:test", plain)
 
-	// On-disk spool file must be ciphertext, not the plaintext run.
-	raw, err := os.ReadFile(sp.Path)
+	// On-disk record file must be ciphertext, not the plaintext run.
+	raw, err := os.ReadFile(path)
 	require.NoError(t, err)
-	require.False(t, bytes.Contains(raw, plain[:4096]), "spool file must not contain plaintext")
+	require.False(t, bytes.Contains(raw, plain[:4096]), "record file must not contain plaintext")
 
 	// Reads back to the exact plaintext via the seam.
-	rc, err := sp.Open()
+	rc, err := openSpoolEncryptedRecordFile(path, seam, "cluster-spool:test")
 	require.NoError(t, err)
 	defer rc.Close()
 	got, err := io.ReadAll(rc)
@@ -137,14 +77,12 @@ func TestSpoolObjectEncryptedRoundTripsViaDEKSeam(t *testing.T) {
 	require.Equal(t, plain, got)
 }
 
-func TestEncryptedSpoolObjectOpenStreamsWithoutDecryptingFutureRecords(t *testing.T) {
+func TestEncryptedSpoolRecordOpenStreamsWithoutDecryptingFutureRecords(t *testing.T) {
 	seam := newClusterTestSeam(t)
 	payload := append(bytes.Repeat([]byte("a"), spoolCopyBufferSize), bytes.Repeat([]byte("b"), spoolCopyBufferSize)...)
-	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", seam, "cluster-spool:stream", true)
-	require.NoError(t, err)
-	defer sp.Cleanup()
+	path := writeEncryptedSpoolRecordFile(t, t.TempDir(), seam, "cluster-spool:stream", payload)
 
-	f, err := os.OpenFile(sp.Path, os.O_RDWR, 0)
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	require.NoError(t, err)
 	var hdr [12]byte
 	_, err = f.ReadAt(hdr[:], 0)
@@ -157,7 +95,7 @@ func TestEncryptedSpoolObjectOpenStreamsWithoutDecryptingFutureRecords(t *testin
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
 
-	rc, err := sp.Open()
+	rc, err := openSpoolEncryptedRecordFile(path, seam, "cluster-spool:stream")
 	require.NoError(t, err)
 	defer rc.Close()
 	buf := make([]byte, 32)
@@ -197,14 +135,12 @@ func TestCopyToSpoolChunkedHandlesLargeReaders(t *testing.T) {
 	require.Equal(t, payload, got)
 }
 
-func TestEncryptedSpoolObjectRejectsOversizedRecordHeader(t *testing.T) {
+func TestEncryptedSpoolRecordRejectsOversizedRecordHeader(t *testing.T) {
 	seam := newClusterTestSeam(t)
 	payload := []byte("sensitive cluster spool payload")
-	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", seam, "cluster-spool:oversized", true)
-	require.NoError(t, err)
-	defer sp.Cleanup()
+	path := writeEncryptedSpoolRecordFile(t, t.TempDir(), seam, "cluster-spool:oversized", payload)
 
-	f, err := os.OpenFile(sp.Path, os.O_RDWR, 0)
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	require.NoError(t, err)
 	var hdr [12]byte
 	_, err = f.ReadAt(hdr[:], 0)
@@ -214,91 +150,11 @@ func TestEncryptedSpoolObjectRejectsOversizedRecordHeader(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
 
-	rc, err := sp.Open()
+	rc, err := openSpoolEncryptedRecordFile(path, seam, "cluster-spool:oversized")
 	require.NoError(t, err)
 	_, err = io.ReadAll(rc)
 	require.Error(t, err)
 	require.NoError(t, rc.Close())
-}
-
-func TestSpoolECShardsReconstructsOriginal(t *testing.T) {
-	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader([]byte("hello erasure coding")), "__grainfs_test_internal", false)
-	require.NoError(t, err)
-	defer sp.Cleanup()
-
-	cfg := ECConfig{DataShards: 2, ParityShards: 1}
-	shards, err := spoolECShards(context.Background(), cfg, t.TempDir(), sp)
-	require.NoError(t, err)
-	defer shards.Cleanup()
-
-	payloads := make([][]byte, cfg.NumShards())
-	for i := range payloads {
-		rc, err := shards.OpenShard(i)
-		require.NoError(t, err)
-		payloads[i], err = io.ReadAll(rc)
-		require.NoError(t, err)
-		require.NoError(t, rc.Close())
-	}
-	got, err := ECReconstruct(cfg, payloads)
-	require.NoError(t, err)
-	require.Equal(t, "hello erasure coding", string(got))
-}
-
-func TestSpoolECShardsReconstructsEmptyObject(t *testing.T) {
-	sp, err := spoolObject(context.Background(), t.TempDir(), bytes.NewReader(nil), "__grainfs_test_internal", false)
-	require.NoError(t, err)
-	defer sp.Cleanup()
-
-	cfg := ECConfig{DataShards: 2, ParityShards: 1}
-	shards, err := spoolECShards(context.Background(), cfg, t.TempDir(), sp)
-	require.NoError(t, err)
-	defer shards.Cleanup()
-
-	payloads := make([][]byte, cfg.NumShards())
-	for i := range payloads {
-		rc, err := shards.OpenShard(i)
-		require.NoError(t, err)
-		payloads[i], err = io.ReadAll(rc)
-		require.NoError(t, err)
-		require.NoError(t, rc.Close())
-	}
-	got, err := ECReconstruct(cfg, payloads)
-	require.NoError(t, err)
-	require.Empty(t, got)
-}
-
-// TestEncryptedSpoolECShardsReconstruct verifies that spoolECShards correctly
-// reconstructs an object spooled via spoolObjectEncrypted. EC shard files are
-// written as plaintext (the re-encryption layer was removed); sp.Open() still
-// decrypts the spool before splitting so reconstruction is correct.
-func TestEncryptedSpoolECShardsReconstruct(t *testing.T) {
-	seam := newClusterTestSeam(t)
-	payload := bytes.Repeat([]byte("sensitive-erasure-coding-block-"), 4096)
-	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", seam, "cluster-spool:test-ec", true)
-	require.NoError(t, err)
-	defer sp.Cleanup()
-
-	cfg := ECConfig{DataShards: 2, ParityShards: 1}
-	shards, err := spoolECShards(context.Background(), cfg, t.TempDir(), sp)
-	require.NoError(t, err)
-	defer shards.Cleanup()
-
-	payloads := make([][]byte, cfg.NumShards())
-	marker := []byte("sensitive-erasure-coding-block-")
-	for i := range payloads {
-		rc, err := shards.OpenShard(i)
-		require.NoError(t, err)
-		payloads[i], err = io.ReadAll(rc)
-		require.NoError(t, err)
-		require.NoError(t, rc.Close())
-
-		raw, readErr := os.ReadFile(shards.paths[i])
-		require.NoError(t, readErr)
-		require.True(t, bytes.Contains(raw, marker), "EC shard %d must be plaintext", i)
-	}
-	got, err := ECReconstruct(cfg, payloads)
-	require.NoError(t, err)
-	require.Equal(t, payload, got)
 }
 
 func TestECStreamBlockSizeScalesWithObjectSize(t *testing.T) {
@@ -309,9 +165,8 @@ func TestECStreamBlockSizeScalesWithObjectSize(t *testing.T) {
 	require.Equal(t, 1<<20, ecStreamBlockSize(cfg, 64<<20))
 }
 
-// newClusterTestSeam returns a DataEncryptor over the static test encryptor so
 // TestEncryptedSpoolReader_MultiRecordByteExact reconstructs a payload spanning
-// several 1 MiB spool records (last one smaller) byte-for-byte. This is the
+// several 1 MiB records (last one smaller) byte-for-byte. This is the
 // regression guard for the reader-owned plaintext/ciphertext buffer reuse
 // (OpenTo + r.cipherBuf): a slice/cap bug shows up here and nowhere else.
 func TestEncryptedSpoolReader_MultiRecordByteExact(t *testing.T) {
@@ -322,11 +177,9 @@ func TestEncryptedSpoolReader_MultiRecordByteExact(t *testing.T) {
 	for i := range payload {
 		payload[i] = byte(i*31 + 7)
 	}
-	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", seam, "cluster-spool:reuse", true)
-	require.NoError(t, err)
-	defer sp.Cleanup()
+	path := writeEncryptedSpoolRecordFile(t, t.TempDir(), seam, "cluster-spool:reuse", payload)
 
-	rc, err := sp.Open()
+	rc, err := openSpoolEncryptedRecordFile(path, seam, "cluster-spool:reuse")
 	require.NoError(t, err)
 	got, err := io.ReadAll(rc)
 	require.NoError(t, err)
@@ -340,11 +193,9 @@ func TestEncryptedSpoolReader_MultiRecordByteExact(t *testing.T) {
 func TestEncryptedSpoolReader_ZeroizesPlaintextOnClose(t *testing.T) {
 	seam := newClusterTestSeam(t)
 	payload := bytes.Repeat([]byte("S"), 4096)
-	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", seam, "cluster-spool:zeroize", true)
-	require.NoError(t, err)
-	defer sp.Cleanup()
+	path := writeEncryptedSpoolRecordFile(t, t.TempDir(), seam, "cluster-spool:zeroize", payload)
 
-	rc, err := sp.Open()
+	rc, err := openSpoolEncryptedRecordFile(path, seam, "cluster-spool:zeroize")
 	require.NoError(t, err)
 	r, ok := rc.(*encryptedSpoolRecordReader)
 	require.True(t, ok, "expected *encryptedSpoolRecordReader")
@@ -418,11 +269,9 @@ func (s *recordingOpenSeam) OpenTo(dst []byte, domain encrypt.AADDomain, fields 
 func TestEncryptedSpoolReader_ReusesPooledBuffersAndAADFields(t *testing.T) {
 	seam := &recordingOpenSeam{DataEncryptor: newClusterTestSeam(t)}
 	payload := append(bytes.Repeat([]byte("A"), spoolCopyBufferSize), bytes.Repeat([]byte("b"), 512)...)
-	sp, err := spoolObjectEncrypted(context.Background(), t.TempDir(), bytes.NewReader(payload), "user-bucket", seam, "cluster-spool:reader-reuse", true)
-	require.NoError(t, err)
-	defer sp.Cleanup()
+	path := writeEncryptedSpoolRecordFile(t, t.TempDir(), seam, "cluster-spool:reader-reuse", payload)
 
-	rc, err := sp.Open()
+	rc, err := openSpoolEncryptedRecordFile(path, seam, "cluster-spool:reader-reuse")
 	require.NoError(t, err)
 	r, ok := rc.(*encryptedSpoolRecordReader)
 	require.True(t, ok, "expected *encryptedSpoolRecordReader")

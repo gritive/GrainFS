@@ -53,6 +53,7 @@ var _ = Describe("EC compatibility integration", func() {
 			nodes[i] = b.selfAddr
 		}
 		b.SetShardService(svc, nodes)
+		wireTestShardGroup(b)
 	}
 
 	It("stores the first shard service node as selfAddr", func() {
@@ -169,7 +170,9 @@ var _ = Describe("EC compatibility integration", func() {
 		obj, err := b.PutObject(ctx, "bkt", "obj", bytes.NewReader(data), "text/plain")
 		Expect(err).NotTo(HaveOccurred())
 
-		shardKey := "obj/" + obj.VersionID
+		// Chunked PUT stores shards under the per-segment key (key/segments/<blobID>).
+		Expect(obj.Segments).NotTo(BeEmpty())
+		shardKey := "obj/segments/" + obj.Segments[0].BlobID
 		Expect(os.Remove(mustShardPath(b.shardSvc, "bkt", shardKey, 0))).To(Succeed())
 
 		rc, _, err := b.GetObject(ctx, "bkt", "obj")

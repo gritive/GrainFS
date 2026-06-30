@@ -23,6 +23,7 @@ func newS1ShardSvc(t *testing.T, ec ECConfig, nodes []string, extraOpts ...Shard
 	backend.selfAddr = "self"
 	backend.allNodes = nodes
 	backend.SetECConfig(ec)
+	wireTestShardGroup(backend)
 	require.NoError(t, backend.CreateBucket(context.Background(), "b"))
 	return backend, shardDir, keeper, clusterID
 }

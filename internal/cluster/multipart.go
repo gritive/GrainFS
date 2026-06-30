@@ -292,33 +292,14 @@ func (b *DistributedBackend) CompleteMultipartUpload(ctx context.Context, bucket
 	}
 
 	var obj *storage.Object
-	if b.currentECConfig().NumShards() > 0 && b.shardSvc != nil {
+	if b.currentECConfig().NumShards() > 0 && b.shardSvc != nil && b.shardGroup != nil {
 		// Single multipart-complete path: every completion (any total size) takes
 		// the chunked/segment path so the route does not branch on size — matching
 		// the simple-PUT single path. putMultipartObjectChunked emits one segment
-		// for small/empty totals. The legacy spool path below is kept only for
-		// backends without a ShardGroupSource (never production).
-		if b.shardGroup != nil {
-			beforeCommit := b.testBeforeChunkedMultipartCommit
-			obj, err = b.putMultipartObjectChunked(ctx, bucket, key, versionID, uploadID, manifest, meta.ContentType, nil, "", 0, false, "", beforeCommit, meta.Tags)
-		} else {
-			var sp *spooledObject
-			cleanupSpool := true
-			if len(manifest.Parts) == 1 {
-				sp = b.multipartPartSpooledObject(uploadID, manifest.Parts[0])
-				cleanupSpool = false
-			} else {
-				var spoolErr error
-				sp, spoolErr = b.spoolMultipartCompleteManifest(ctx, uploadID, versionID, bucket, manifest)
-				if spoolErr != nil {
-					return nil, spoolErr
-				}
-			}
-			if cleanupSpool {
-				defer sp.Cleanup()
-			}
-			obj, err = b.putObjectECSpooledWithOptionalModTime(ctx, bucket, key, versionID, sp, meta.ContentType, nil, "", 0, 0, false, "", nil, manifest.Parts, meta.Tags, uploadID)
-		}
+		// for small/empty totals. Requires a ShardGroupSource (always wired in
+		// production; test backends wire a 1-node group by default).
+		beforeCommit := b.testBeforeChunkedMultipartCommit
+		obj, err = b.putMultipartObjectChunked(ctx, bucket, key, versionID, uploadID, manifest, meta.ContentType, nil, "", 0, false, "", beforeCommit, meta.Tags)
 	} else {
 		err = fmt.Errorf("complete multipart: EC storage is required")
 	}
@@ -428,32 +409,6 @@ func (b *DistributedBackend) readCompletedMultipartSentinel(bucket, key, uploadI
 	}
 	obj, _ := objectAndPlacementFromCmd(cmd)
 	return obj, true, nil
-}
-
-func (b *DistributedBackend) multipartPartSpooledObject(uploadID string, part storage.MultipartPartEntry) *spooledObject {
-	sp := &spooledObject{
-		Path: b.partPath(uploadID, part.PartNumber),
-		Size: part.Size,
-		ETag: part.ETag,
-	}
-	if b.encryptedShardStorage() {
-		sp.encrypted = true
-		sp.seam = b.shardSvc.segEnc()
-		sp.domain = clusterMultipartPartDomain(uploadID, part.PartNumber)
-	}
-	return sp
-}
-
-func (b *DistributedBackend) spoolMultipartCompleteManifest(ctx context.Context, uploadID, versionID, bucket string, manifest multipartCompleteManifest) (*spooledObject, error) {
-	body, err := manifest.Open()
-	if err != nil {
-		return nil, fmt.Errorf("open multipart manifest: %w", err)
-	}
-	defer body.Close()
-	if b.encryptedShardStorage() {
-		return spoolObjectEncrypted(ctx, b.spoolDir(), body, bucket, b.shardSvc.segEnc(), clusterMultipartSpoolDomain(uploadID, versionID), true /* needsMD5: sp.ETag stored as the completed multipart ETag */)
-	}
-	return spoolObject(ctx, b.spoolDir(), body, bucket, true /* needsMD5: sp.ETag stored as the completed multipart ETag */)
 }
 
 func contextForMultipartComplete(
@@ -664,10 +619,6 @@ func (b *DistributedBackend) openMultipartPart(uploadID string, partNumber int) 
 
 func clusterMultipartPartDomain(uploadID string, partNumber int) string {
 	return fmt.Sprintf("cluster-multipart-part:%s:%d", uploadID, partNumber)
-}
-
-func clusterMultipartSpoolDomain(uploadID, versionID string) string {
-	return fmt.Sprintf("cluster-multipart-spool:%s:%s", uploadID, versionID)
 }
 
 func (b *DistributedBackend) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error {

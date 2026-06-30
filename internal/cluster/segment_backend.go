@@ -363,34 +363,6 @@ func acquireChunkedMultipartCompleteSlot(ctx context.Context) (func(), error) {
 	}
 }
 
-// putObjectChunked is the chunked-PUT cluster pipeline: split the spooled
-// body into N segments via storage.SegmentWriter, fan out per-segment EC
-// writes across placement groups (best-effort, defer cleanup on any error),
-// then commit a single PutObjectMetaCmd carrying all per-segment placements.
-// The single raft commit is the atomic point.
-func (b *DistributedBackend) putObjectChunked(
-	ctx context.Context,
-	bucket, key, versionID string,
-	sp *spooledObject,
-	contentType string,
-	userMetadata map[string]string,
-	sseAlgorithm string,
-	acl uint8,
-	modTime int64,
-	preserveModTime bool,
-	expectedETag string,
-	beforeCommit func() error,
-	parts []storage.MultipartPartEntry,
-	tags []storage.Tag,
-) (*storage.Object, error) {
-	body, err := sp.Open()
-	if err != nil {
-		return nil, fmt.Errorf("open spool: %w", err)
-	}
-	defer body.Close()
-	return b.putObjectChunkedReader(ctx, bucket, key, versionID, body, sp.Size, contentType, userMetadata, sseAlgorithm, acl, modTime, preserveModTime, expectedETag, beforeCommit, parts, tags)
-}
-
 func (b *DistributedBackend) putObjectChunkedReader(
 	ctx context.Context,
 	bucket, key, versionID string,

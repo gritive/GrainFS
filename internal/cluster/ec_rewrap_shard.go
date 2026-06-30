@@ -52,13 +52,6 @@ func (b *DistributedBackend) RewrapShardIfStaleAt(bucket, canonicalKey string, s
 	return true, nil
 }
 
-// RewrapShardIfStale migrates a single owned EC shard of a regular versioned
-// object onto activeGen. It is a thin wrapper around RewrapShardIfStaleAt that
-// derives the canonical shard key from (key, versionID).
-func (b *DistributedBackend) RewrapShardIfStale(bucket, key, versionID string, shardIdx int, activeGen uint32) (bool, error) {
-	return b.RewrapShardIfStaleAt(bucket, ecObjectShardKey(key, versionID), shardIdx, activeGen)
-}
-
 // readOwnedShardRaw locates and returns the raw on-disk shard bytes (pack-first,
 // else the standalone file) together with the canonical standalone path used for
 // a standalone re-write. It exists ONLY to feed eccodec.EncryptedShardGen and so

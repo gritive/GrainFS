@@ -30,6 +30,12 @@ var _ = Describe("Backend control integration", func() {
 		b.SetECConfig(ECConfig{DataShards: 2, ParityShards: 1})
 		keeper, clusterID := testDEKKeeper(GinkgoT())
 		b.SetShardService(NewShardService(GinkgoT().TempDir(), nil, WithShardDEKKeeper(keeper, clusterID)), []string{"n1", "n2", "n3"})
+		// All topology targets are unavailable (reported down). The streaming
+		// write-placement plan rejects them up front, before any shard write, so
+		// the no-spool path never attempts a doomed write.
+		b.peerHealth.MarkUnhealthy("n1")
+		b.peerHealth.MarkUnhealthy("n2")
+		b.peerHealth.MarkUnhealthy("n3")
 
 		group := ShardGroupEntry{ID: "group-1", PeerIDs: []string{"n1", "n2", "n3"}}
 		baseCtx, cancel := context.WithTimeout(ctx, 20*time.Millisecond)

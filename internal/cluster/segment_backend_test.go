@@ -270,13 +270,48 @@ func TestClusterSegmentBackend_WriteSegment_RecordsPlacement(t *testing.T) {
 
 const testChunkedPutChunkSize = 64 << 10
 
-// makeSpool writes payload to a temp file and returns a *spooledObject.
-func makeSpool(t clusterTestTB, payload []byte) *spooledObject {
+// testSpool is an in-memory stand-in for the removed *spooledObject: it carries
+// a payload + size and Opens to a fresh one-pass reader, so chunked-PUT tests can
+// feed a body + known size without staging a temp file.
+type testSpool struct {
+	payload []byte
+	Size    int64
+}
+
+// makeSpool returns an in-memory testSpool over payload.
+func makeSpool(t clusterTestTB, payload []byte) *testSpool {
 	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "spool")
-	require.NoError(t, os.WriteFile(path, payload, 0o600))
-	return &spooledObject{Path: path, Size: int64(len(payload))}
+	return &testSpool{payload: payload, Size: int64(len(payload))}
+}
+
+func (s *testSpool) Open() (io.ReadCloser, error) {
+	return io.NopCloser(bytes.NewReader(s.payload)), nil
+}
+
+// putChunked is the test entry point that replaced the removed putObjectChunked
+// method: it opens the testSpool body and streams it through the chunked PUT
+// pipeline with a known size.
+func (b *DistributedBackend) putChunked(
+	ctx context.Context,
+	bucket, key, versionID string,
+	sp *testSpool,
+	contentType string,
+	userMetadata map[string]string,
+	sseAlgorithm string,
+	acl uint8,
+	modTime int64,
+	preserveModTime bool,
+	expectedETag string,
+	beforeCommit func() error,
+	parts []storage.MultipartPartEntry,
+	tags []storage.Tag,
+) (*storage.Object, error) {
+	body, err := sp.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer body.Close()
+	return b.putObjectChunkedReader(ctx, bucket, key, versionID, body, sp.Size, contentType, userMetadata, sseAlgorithm, acl, modTime, preserveModTime, expectedETag, beforeCommit, parts, tags)
 }
 
 func chunkFanoutMetricCount(t *testing.T) uint64 {
@@ -816,7 +851,7 @@ func TestPutObjectChunked_RejectsBelowChunkThreshold(t *testing.T) {
 	// > DefaultChunkSize. Direct call with smaller size returns an error.
 	sp := makeSpool(t, []byte("small"))
 	b := &DistributedBackend{}
-	_, err := b.putObjectChunked(context.Background(),
+	_, err := b.putChunked(context.Background(),
 		"bucket", "k", "v", sp, "ct", nil, "",
 		0, 0, false, "", nil, nil, nil)
 	require.Error(t, err)
