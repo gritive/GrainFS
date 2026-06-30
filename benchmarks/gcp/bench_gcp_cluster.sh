@@ -72,6 +72,7 @@ PPROF_CPU_SECONDS="${PPROF_CPU_SECONDS:-30}"
 PPROF_WARMUP_SECONDS="${PPROF_WARMUP_SECONDS:-5}"
 CLUSTER_PPROF="${CLUSTER_PPROF:-0}"
 CLUSTER_PPROF_BASE_PORT="${CLUSTER_PPROF_BASE_PORT:-6060}"
+CLUSTER_PUT_TRACE="${CLUSTER_PUT_TRACE:-0}"
 
 ssh_node() { # node-name "cmd..."
   local n="$1"; shift
@@ -275,7 +276,12 @@ serve_node() {
   if [[ "${GRAINFS_S3_ETAG_MD5:-1}" == "0" ]]; then
     s3_etag_env="--setenv=GRAINFS_S3_ETAG_MD5=0"
   fi
-  ssh_node "$n" "sudo systemd-run --unit=$UNIT --collect $invite_env $directio_env $s3_etag_env \
+  local trace_env=""
+  if [[ "$CLUSTER_PUT_TRACE" == "1" ]]; then
+    ssh_node "$n" "sudo rm -f /tmp/grainfs-put-trace-node$idx.jsonl"
+    trace_env="--setenv=GRAINFS_PUT_TRACE_FILE=/tmp/grainfs-put-trace-node$idx.jsonl --setenv=GRAINFS_NODE_ID=p5-node-$idx"
+  fi
+  ssh_node "$n" "sudo systemd-run --unit=$UNIT --collect $invite_env $directio_env $s3_etag_env $trace_env \
     $bin serve --data $DATA_DIR --port $HTTP_PORT --node-id p5-node-$idx \
     --raft-addr $ipi:$RAFT_PORT --join-listen-addr $ipi:$JOIN_PORT \
     --raft-heartbeat-interval ${RAFT_HEARTBEAT:-1s} --raft-election-timeout ${RAFT_ELECTION:-3s} \
@@ -449,6 +455,7 @@ cmd_grainfs_cluster() { # <runidx>
     WARP_OPS='$WARP_OPS' WARP_OBJ_SIZE='$WARP_OBJ_SIZE' \
     WARP_CONCURRENT='$WARP_CONCURRENT' WARP_DURATION='$WARP_DURATION' \
     WARP_OBJECTS='$WARP_OBJECTS' \
+    WARP_WRITE_AUTOTERM='${WARP_WRITE_AUTOTERM:-1}' \
     WARP_NOCLEAR=1 \
     PROFILE_ROOT='$rprof' \
     bash benchmarks/bench_s3_compat_compare.sh || echo 'BENCH_NONZERO'
@@ -469,6 +476,16 @@ cmd_grainfs_cluster() { # <runidx>
   gcloud compute scp --recurse --zone="$ZONE" --project="$PROJECT" --tunnel-through-iap \
     "$CLIENT:$rprof" "$localdir/raw/" >/dev/null 2>&1 \
     || log "WARN: raw profile pull failed for grainfs-cluster run$idx"
+  if [[ "$CLUSTER_PUT_TRACE" == "1" ]]; then
+    mkdir -p "$localdir/put-trace"
+    for i in $(seq 0 $((NODE_COUNT - 1))); do
+      local n
+      n="$(node_name "$i")"
+      gcloud compute scp --zone="$ZONE" --project="$PROJECT" --tunnel-through-iap \
+        "$n:/tmp/grainfs-put-trace-node$i.jsonl" "$localdir/put-trace/node$i.jsonl" >/dev/null 2>&1 \
+        || log "WARN: put trace pull failed for $n"
+    done
+  fi
   log "grainfs-cluster: run=$idx pulled -> $localdir"
 }
 
@@ -541,6 +558,7 @@ cmd_minio() { # <runidx>
     WARP_OPS='$WARP_OPS' WARP_OBJ_SIZE='$WARP_OBJ_SIZE' \
     WARP_CONCURRENT='$WARP_CONCURRENT' WARP_DURATION='$WARP_DURATION' \
     WARP_OBJECTS='$WARP_OBJECTS' \
+    WARP_WRITE_AUTOTERM='${WARP_WRITE_AUTOTERM:-1}' \
     WARP_NOCLEAR=1 \
     PROFILE_ROOT='$rprof' \
     bash benchmarks/bench_s3_compat_compare.sh || echo 'BENCH_NONZERO'
@@ -663,6 +681,7 @@ cmd_minio_cluster() { # <runidx>
     WARP_OPS='$WARP_OPS' WARP_OBJ_SIZE='$WARP_OBJ_SIZE' \
     WARP_CONCURRENT='$WARP_CONCURRENT' WARP_DURATION='$WARP_DURATION' \
     WARP_OBJECTS='$WARP_OBJECTS' \
+    WARP_WRITE_AUTOTERM='${WARP_WRITE_AUTOTERM:-1}' \
     WARP_NOCLEAR=1 \
     PROFILE_ROOT='$rprof' \
     bash benchmarks/bench_s3_compat_compare.sh || echo 'BENCH_NONZERO'
@@ -809,6 +828,7 @@ cmd_single() { # <runidx>
     WARP_OPS='$WARP_OPS' WARP_OBJ_SIZE='$WARP_OBJ_SIZE' \
     WARP_CONCURRENT='$WARP_CONCURRENT' WARP_DURATION='$WARP_DURATION' \
     WARP_OBJECTS='$WARP_OBJECTS' \
+    WARP_WRITE_AUTOTERM='${WARP_WRITE_AUTOTERM:-1}' \
     WARP_NOCLEAR=1 \
     PROFILE_ROOT='$rprof' \
     bash benchmarks/bench_s3_compat_compare.sh || echo 'BENCH_NONZERO'
