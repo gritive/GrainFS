@@ -469,11 +469,12 @@ func (l *LocalShardStore) syncDirChain(leaf, stop string) error {
 // reports 0 — the put-trace sink is a diagnostic-only no-op in production.
 func (l *LocalShardStore) atomicShardFileWrite(ctx context.Context, dir, path string, shardIdx int, writeBody func(w io.Writer) error) error {
 	if shardDirectIOSpikeEnabled() {
-		// Spike-only path: validate O_DIRECT impact without changing the default
-		// streaming write pipeline.
-		return l.atomicShardFileWriteDirectBuffered(ctx, dir, path, shardIdx, writeBody)
+		return l.atomicShardFileWriteDirectStream(ctx, dir, path, shardIdx, writeBody)
 	}
+	return l.atomicShardFileWriteStandard(ctx, dir, path, shardIdx, writeBody)
+}
 
+func (l *LocalShardStore) atomicShardFileWriteStandard(ctx context.Context, dir, path string, shardIdx int, writeBody func(w io.Writer) error) error {
 	tmp := fmt.Sprintf("%s.%d.%d.tmp", path, os.Getpid(), time.Now().UnixNano())
 	openStart := time.Now()
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
@@ -520,110 +521,59 @@ func (l *LocalShardStore) atomicShardFileWrite(ctx context.Context, dir, path st
 	return l.finishAtomicShardFileWrite(ctx, dir, path, tmp, f, written, shardIdx)
 }
 
-func (l *LocalShardStore) atomicShardFileWriteDirectBuffered(ctx context.Context, dir, path string, shardIdx int, writeBody func(w io.Writer) error) error {
+func (l *LocalShardStore) atomicShardFileWriteDirectStream(ctx context.Context, dir, path string, shardIdx int, writeBody func(w io.Writer) error) error {
 	tmp := fmt.Sprintf("%s.%d.%d.tmp", path, os.Getpid(), time.Now().UnixNano())
-
-	var payload bytes.Buffer
-	writeStart := time.Now()
-	if err := writeBody(&payload); err != nil {
-		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncWrite, writeStart, PutTraceStageFields{
-			Bytes:            int64(payload.Len()),
-			ShardIndex:       shardIdx,
-			ShardTargetClass: "local",
-			Error:            err.Error(),
-		})
-		_ = os.Remove(tmp)
-		return fmt.Errorf("write tmp shard: %w", err)
-	}
-
 	openStart := time.Now()
-	f, usedDirect, err := openShardTmpFileDirectFallback(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	f, err := openDirectShardFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
-		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncOpen, openStart, PutTraceStageFields{
-			ShardIndex:       shardIdx,
-			ShardTargetClass: "local",
-			Error:            err.Error(),
-		})
-		return fmt.Errorf("create tmp shard: %w", err)
+		_ = os.Remove(tmp)
+		return l.atomicShardFileWriteStandard(ctx, dir, path, shardIdx, writeBody)
 	}
 	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncOpen, openStart, PutTraceStageFields{
 		ShardIndex:       shardIdx,
 		ShardTargetClass: "local",
 	})
+	cleanup := func() {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+	}
 
-	f, err = writeShardPayloadToFileWithFallback(tmp, f, payload.Bytes(), usedDirect)
-	if err != nil {
+	dw := newDirectShardStreamWriter(f, directio.PageSize())
+	writeStart := time.Now()
+	// Once streaming starts the source body cannot be replayed, so only direct
+	// open failure falls back to the standard writer.
+	if err := writeBody(dw); err != nil {
 		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncWrite, writeStart, PutTraceStageFields{
-			Bytes:            int64(payload.Len()),
+			Bytes:            dw.BytesWritten(),
 			ShardIndex:       shardIdx,
 			ShardTargetClass: "local",
 			Error:            err.Error(),
 		})
-		if f != nil {
-			_ = f.Close()
-		}
-		_ = os.Remove(tmp)
+		cleanup()
 		return fmt.Errorf("write tmp shard: %w", err)
 	}
+	if err := dw.Close(); err != nil {
+		ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncWrite, writeStart, PutTraceStageFields{
+			Bytes:            dw.BytesWritten(),
+			ShardIndex:       shardIdx,
+			ShardTargetClass: "local",
+			Error:            err.Error(),
+		})
+		cleanup()
+		return fmt.Errorf("write tmp shard: %w", err)
+	}
+
+	written := dw.BytesWritten()
 	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncWrite, writeStart, PutTraceStageFields{
-		Bytes:            int64(payload.Len()),
+		Bytes:            written,
 		ShardIndex:       shardIdx,
 		ShardTargetClass: "local",
 	})
 
-	return l.finishAtomicShardFileWrite(ctx, dir, path, tmp, f, int64(payload.Len()), shardIdx)
+	return l.finishAtomicShardFileWrite(ctx, dir, path, tmp, f, written, shardIdx)
 }
 
-func openShardTmpFileDirectFallback(path string, flag int, mode os.FileMode) (*os.File, bool, error) {
-	f, err := openDirectShardFile(path, flag, mode)
-	if err == nil {
-		return f, true, nil
-	}
-	f, fallbackErr := os.OpenFile(path, flag, mode)
-	if fallbackErr != nil {
-		return nil, false, fmt.Errorf("direct open: %v; fallback open: %w", err, fallbackErr)
-	}
-	return f, false, nil
-}
-
-func writeShardPayloadToFileWithFallback(path string, f *os.File, payload []byte, usedDirect bool) (*os.File, error) {
-	if !usedDirect {
-		return f, writeFileFull(f, payload)
-	}
-	if err := writeShardPayloadToFile(f, payload, true); err == nil {
-		return f, nil
-	} else {
-		_ = f.Close()
-		_ = os.Remove(path)
-		fallback, fallbackErr := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-		if fallbackErr != nil {
-			return nil, fmt.Errorf("direct write: %v; fallback open: %w", err, fallbackErr)
-		}
-		f = fallback
-	}
-	return f, writeFileFull(f, payload)
-}
-
-func writeShardPayloadToFile(f *os.File, payload []byte, usedDirect bool) error {
-	if !usedDirect {
-		return writeFileFull(f, payload)
-	}
-	if len(payload) == 0 {
-		return f.Truncate(0)
-	}
-	aligned, alignedLen := directio.AlignedCopy(payload)
-	if err := writeFileFull(f, aligned[:alignedLen]); err != nil {
-		return err
-	}
-	if alignedLen != len(payload) {
-		if err := f.Truncate(int64(len(payload))); err != nil {
-			return fmt.Errorf("truncate direct shard payload: %w", err)
-		}
-	}
-	return nil
-}
-
-func writeFileFull(f *os.File, payload []byte) error {
+func writeFileFull(f io.Writer, payload []byte) error {
 	for len(payload) > 0 {
 		n, err := f.Write(payload)
 		if err != nil {
@@ -633,6 +583,133 @@ func writeFileFull(f *os.File, payload []byte) error {
 			return io.ErrShortWrite
 		}
 		payload = payload[n:]
+	}
+	return nil
+}
+
+const directShardStreamBufferSize = 1 << 20
+
+type directShardFile interface {
+	io.Writer
+	Truncate(size int64) error
+}
+
+type directShardStreamWriter struct {
+	f         directShardFile
+	blockSize int
+	buf       []byte
+	tail      []byte
+	written   int64
+	closed    bool
+}
+
+func newDirectShardStreamWriter(f directShardFile, blockSize int) *directShardStreamWriter {
+	if blockSize < 1 {
+		blockSize = 1
+	}
+	bufSize := directShardStreamBufferSize
+	if bufSize < blockSize {
+		bufSize = blockSize
+	}
+	bufSize -= bufSize % blockSize
+	if bufSize == 0 {
+		bufSize = blockSize
+	}
+	buf, alignedLen := directio.AlignedCopy(make([]byte, bufSize))
+	if alignedLen < bufSize {
+		bufSize = alignedLen
+	}
+	return &directShardStreamWriter{
+		f:         f,
+		blockSize: blockSize,
+		buf:       buf[:bufSize],
+		tail:      make([]byte, 0, blockSize),
+	}
+}
+
+func (w *directShardStreamWriter) Write(p []byte) (int, error) {
+	if w.closed {
+		return 0, os.ErrClosed
+	}
+	consumed := 0
+	for len(p) > 0 {
+		if len(w.tail) > 0 {
+			n := min(len(p), w.blockSize-len(w.tail))
+			w.tail = append(w.tail, p[:n]...)
+			p = p[n:]
+			consumed += n
+			w.written += int64(n)
+			if len(w.tail) < w.blockSize {
+				return consumed, nil
+			}
+			if err := w.writeAlignedBlocks(w.tail); err != nil {
+				return consumed, err
+			}
+			w.tail = w.tail[:0]
+			continue
+		}
+
+		full := len(p) - len(p)%w.blockSize
+		if full == 0 {
+			w.tail = append(w.tail, p...)
+			consumed += len(p)
+			w.written += int64(len(p))
+			return consumed, nil
+		}
+		for full > 0 {
+			n := min(full, len(w.buf))
+			n -= n % w.blockSize
+			if n == 0 {
+				n = w.blockSize
+			}
+			if err := w.writeAlignedBlocks(p[:n]); err != nil {
+				return consumed, err
+			}
+			p = p[n:]
+			full -= n
+			consumed += n
+			w.written += int64(n)
+		}
+	}
+	return consumed, nil
+}
+
+func (w *directShardStreamWriter) Close() error {
+	if w.closed {
+		return nil
+	}
+	w.closed = true
+	if len(w.tail) == 0 {
+		return nil
+	}
+	clear(w.buf[:w.blockSize])
+	copy(w.buf, w.tail)
+	if err := writeFileFull(w.f, w.buf[:w.blockSize]); err != nil {
+		return err
+	}
+	w.tail = w.tail[:0]
+	if err := w.f.Truncate(w.written); err != nil {
+		return fmt.Errorf("truncate direct shard payload: %w", err)
+	}
+	return nil
+}
+
+func (w *directShardStreamWriter) BytesWritten() int64 {
+	return w.written
+}
+
+func (w *directShardStreamWriter) writeAlignedBlocks(p []byte) error {
+	for len(p) > 0 {
+		n := min(len(p), len(w.buf))
+		n -= n % w.blockSize
+		if n == 0 {
+			n = w.blockSize
+		}
+		copy(w.buf[:n], p[:n])
+		if err := writeFileFull(w.f, w.buf[:n]); err != nil {
+			return err
+		}
+		p = p[n:]
 	}
 	return nil
 }
