@@ -79,6 +79,47 @@ func finalShardFileCount(t *testing.T, b *DistributedBackend, bucket string) int
 	return n
 }
 
+// TestPutObject_BareBytesReader_Streams: the bare PutObject convenience (no
+// SizeHint) with a *bytes.Reader body now takes the no-spool streaming path —
+// PutObjectWithRequest stamps the reader's exact Len() as SizeHintExact centrally.
+// This is the discriminator that proves internal sized-reader callers (WriteAt /
+// Truncate RMW, forwarded small bodies) no longer spool. requireNoSpoolDir proves
+// spoolObject (MkdirAll <root>/tmp/put-spool) was never reached; the round-trip
+// proves the body is stored intact.
+func TestPutObject_BareBytesReader_Streams(t *testing.T) {
+	b := newStreamingBackend(t)
+	ctx := context.Background()
+
+	data := []byte("bare bytes.Reader must stream, not spool")
+	obj, err := b.PutObject(ctx, "bucket", "bare", bytes.NewReader(data), "application/octet-stream")
+	require.NoError(t, err)
+	require.Equal(t, int64(len(data)), obj.Size)
+	requireNoSpoolDir(t, b)
+
+	rc, _, err := b.GetObject(ctx, "bucket", "bare")
+	require.NoError(t, err)
+	got, readErr := io.ReadAll(rc)
+	require.NoError(t, rc.Close())
+	require.NoError(t, readErr)
+	require.Equal(t, data, got)
+}
+
+// TestPutObject_BareReaderOnly_Spools: a body that hides Len() (readerOnly) and
+// carries no SizeHint still falls through to the spool path even on a streaming
+// backend — the central Len() detection cannot size it. This pins the boundary of
+// the no-spool optimization (genuinely-unknown-size streams remain on spool).
+func TestPutObject_BareReaderOnly_Spools(t *testing.T) {
+	b := newStreamingBackend(t)
+	ctx := context.Background()
+
+	data := []byte("no Len() so this spools")
+	obj, err := b.PutObject(ctx, "bucket", "unsized", readerOnly{r: bytes.NewReader(data)}, "application/octet-stream")
+	require.NoError(t, err)
+	require.Equal(t, int64(len(data)), obj.Size)
+	_, statErr := os.Stat(b.spoolDir())
+	require.NoError(t, statErr, "unsized body must have spooled (spool dir created)")
+}
+
 // TestPutObject_SizedContentMD5_Mismatch_NoSpool: a sized PUT (SizeHint +
 // SizeHintExact) with a WRONG Content-MD5 is rejected as BadDigest via the
 // streaming tee-validate before-commit hook — without spooling. requireNoSpoolDir

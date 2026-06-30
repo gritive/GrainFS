@@ -101,6 +101,21 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 	userMetadata := req.UserMetadata
 	sseAlgorithm := req.SystemMetadata.SSEAlgorithm
 	acl := derefACL(req.ACL)
+	// No-spool for internal sized-reader callers: a body that already knows its
+	// exact remaining length (bytes.Reader / bytes.Buffer / strings.Reader — e.g.
+	// the WriteAt/Truncate RMW writes and forwarded small bodies in
+	// handlePutObject) carries no SizeHint when it arrives via the bare PutObject
+	// convenience. Stamp the exact size here so it takes the streaming path below
+	// instead of spooling. Len() on these stdlib readers is the exact unread byte
+	// count == what we store, so SizeHintExact holds. The server S3 ingress always
+	// sets SizeHint itself, so this only fires for the in-process callers.
+	if req.SizeHint == nil {
+		if sizer, ok := r.(interface{ Len() int }); ok {
+			n := int64(sizer.Len())
+			req.SizeHint = &n
+			req.SizeHintExact = true
+		}
+	}
 	stageStart := time.Now()
 	unlockBucketWrite, err := b.enterBucketObjectWrite(ctx, bucket)
 	if err != nil {

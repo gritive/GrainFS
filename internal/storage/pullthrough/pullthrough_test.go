@@ -351,3 +351,42 @@ func TestPullThrough_PutObject_GoesToLocal(t *testing.T) {
 	body, _ := io.ReadAll(rc)
 	assert.Equal(t, "new", string(body))
 }
+
+// recordingRequestPutterBackend captures the PutObjectRequest the pullthrough
+// cache-fill threads into the inner backend, while delegating storage to a real
+// LocalBackend so the 2-pass GetObject still works.
+type recordingRequestPutterBackend struct {
+	storage.Backend
+	lastReq *storage.PutObjectRequest
+}
+
+func (b *recordingRequestPutterBackend) PutObjectWithRequest(ctx context.Context, req storage.PutObjectRequest) (*storage.Object, error) {
+	cp := req
+	b.lastReq = &cp
+	return b.Backend.(storage.RequestPutter).PutObjectWithRequest(ctx, req)
+}
+
+// TestPullThrough_CacheFill_ThreadsExactSizeHint proves the cache-fill write
+// threads the upstream's exact size as SizeHintExact so the inner backend takes
+// the no-spool streaming path instead of staging the body to a temp file. The
+// recording backend captures the request the pullthrough decorator builds.
+func TestPullThrough_CacheFill_ThreadsExactSizeHint(t *testing.T) {
+	local := newLocalBackend(t)
+	require.NoError(t, local.CreateBucket(context.Background(), "b"))
+	rec := &recordingRequestPutterBackend{Backend: local}
+
+	const content = "upstream cache fill body"
+	upstream := &stubUpstream{objects: map[string]string{"b/k": content}}
+	pt := pullthrough.NewBackend(rec, &staticResolver{up: upstream})
+
+	rc, _, err := pt.GetObject(context.Background(), "b", "k")
+	require.NoError(t, err)
+	body, _ := io.ReadAll(rc)
+	require.NoError(t, rc.Close())
+	assert.Equal(t, content, string(body), "cache-miss must return upstream content")
+
+	require.NotNil(t, rec.lastReq, "cache fill must go through PutObjectWithRequest (sized path)")
+	require.NotNil(t, rec.lastReq.SizeHint, "cache fill must thread a SizeHint")
+	assert.Equal(t, int64(len(content)), *rec.lastReq.SizeHint, "SizeHint must equal upstream Size")
+	assert.True(t, rec.lastReq.SizeHintExact, "SizeHint must be exact so the inner backend streams (no spool)")
+}
