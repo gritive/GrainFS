@@ -8,6 +8,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/storage/zstdpool"
 	"github.com/gritive/GrainFS/internal/uuidutil"
 	"golang.org/x/sync/errgroup"
 )
@@ -133,6 +134,26 @@ func (c *clusterSegmentBackend) WriteSegmentBytes(ctx context.Context, bucket, k
 	// coordinating writer. writeOneSegment passes it to weighted HRW; the chosen
 	// NodeIDs are recorded and replayed on read, so readers never recompute.
 	weights, weightedEnabled := c.peerWeights(group.PeerIDs)
+
+	// Plaintext identity stays the contract for object size, range-offset
+	// mapping, and AppendObject composite ETag — compute BEFORE compression.
+	originalLen := int64(len(data))
+	sum := storage.ChecksumOf(data)
+
+	// Per-segment zstd: store the smaller of {compressed, raw}. StoredSize==0
+	// means raw (read path skips decompression).
+	storedSize := int64(0)
+	if len(data) > 0 {
+		compressed, cerr := zstdpool.Compress(data)
+		if cerr != nil {
+			return storage.SegmentRef{}, fmt.Errorf("segment %d: compress: %w", idx, cerr)
+		}
+		if len(compressed) < len(data) {
+			data = compressed
+			storedSize = int64(len(compressed))
+		}
+	}
+
 	ObservePutTraceStage(ctx, PutTraceStageSegmentWritePrepare, prepareStart, PutTraceStageFields{
 		Bytes:       int64(len(data)),
 		ShardIndex:  idx,
@@ -171,14 +192,13 @@ func (c *clusterSegmentBackend) WriteSegmentBytes(ctx context.Context, bucket, k
 		ShardSize:        shardSize,
 	}
 
-	// 4. xxhash3-128 over plaintext.
-	sum := storage.ChecksumOf(data)
 	return storage.SegmentRef{
 		BlobID:           blobID,
-		Size:             int64(len(data)),
-		Checksum:         sum,
+		Size:             originalLen, // plaintext byte count
+		Checksum:         sum,         // xxhash3-128 over plaintext (computed before compression)
 		PlacementGroupID: group.ID,
 		ShardSize:        shardSize,
+		StoredSize:       storedSize,
 	}, nil
 }
 

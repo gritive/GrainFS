@@ -10,7 +10,11 @@ import (
 
 var (
 	encoderPool = pool.New(func() *zstd.Encoder {
-		enc, _ := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
+		enc, _ := zstd.NewWriter(nil,
+			zstd.WithEncoderLevel(zstd.SpeedDefault),
+			zstd.WithEncoderConcurrency(1), // callers provide their own concurrency (segment writers)
+			zstd.WithWindowSize(1<<20),     // 1 MiB window: caps cold-start table alloc while preserving ratio
+		)
 		return enc
 	})
 	decoderPool = pool.New(func() *zstd.Decoder {
