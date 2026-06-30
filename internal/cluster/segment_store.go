@@ -144,6 +144,26 @@ func (s *clusterSegmentStore) ReadAtSegment(ctx context.Context, ref storage.Seg
 	if max := entry.Size - offset; int64(len(buf)) > max {
 		buf = buf[:max]
 	}
+	if entry.StoredSize > 0 {
+		// Compressed: no random access into the zstd frame. Open the
+		// decompressed (≤16 MiB) segment, discard up to offset, fill buf.
+		rc, err := s.OpenSegment(ctx, ref)
+		if err != nil {
+			return 0, err
+		}
+		defer rc.Close()
+		if _, err := io.CopyN(io.Discard, rc, offset); err != nil {
+			return 0, fmt.Errorf("segment %s: seek %d: %w", entry.BlobID, offset, err)
+		}
+		n, err := io.ReadFull(rc, buf)
+		if err == io.ErrUnexpectedEOF {
+			// buf was clamped to remaining plaintext; a short read at the tail
+			// means we hit EOF — return bytes read with EOF (matches uncompressed
+			// path semantics).
+			return n, io.EOF
+		}
+		return n, err
+	}
 	record, err := s.placementRecord(entry)
 	if err != nil {
 		return 0, err

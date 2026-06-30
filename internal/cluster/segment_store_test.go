@@ -419,6 +419,43 @@ func putChunkedTestObject(t *testing.T) (*DistributedBackend, string, string, []
 	return b, bucket, key, body
 }
 
+func TestReadAtSegment_CompressedOffset(t *testing.T) {
+	b := setupECBackend(t)
+	b.chunkedPutChunkSize = testChunkedPutChunkSize
+	b.SetShardGroupSource(&fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"group-a": {ID: "group-a", PeerIDs: []string{"self", "self", "self"}},
+	}})
+
+	const (
+		bucket = "compressed-readat-bucket"
+		key    = "compressed-readat-object"
+	)
+	// Highly compressible: zstd will produce StoredSize << Size.
+	plaintext := bytes.Repeat([]byte("0123456789"), 20000) // 200 KiB
+	sp := makeSpool(t, plaintext)
+
+	require.NoError(t, b.CreateBucket(context.Background(), bucket))
+	_, err := b.putObjectChunked(context.Background(),
+		bucket, key, "v1", sp, "application/octet-stream",
+		nil, "", 0, 0, false, "", nil, nil, nil)
+	require.NoError(t, err)
+
+	obj, err := b.HeadObject(context.Background(), bucket, key)
+	require.NoError(t, err)
+	require.NotEmpty(t, obj.Segments)
+	require.Greater(t, obj.Segments[0].StoredSize, int64(0), "precondition: expected compressed segment")
+
+	store := &clusterSegmentStore{b: b, bucket: bucket, key: key, obj: obj}
+
+	const off = 12345
+	buf := make([]byte, 777)
+	n, err := store.ReadAtSegment(context.Background(), obj.Segments[0], off, buf)
+	if err != nil && err != io.EOF {
+		t.Fatalf("ReadAtSegment: %v", err)
+	}
+	require.Equal(t, plaintext[off:off+n], buf[:n], "range bytes mismatch at offset %d", off)
+}
+
 func makeChunkedTestBody(size int) []byte {
 	body := make([]byte, size)
 	// xorshift64: produces pseudo-random bytes that zstd cannot compress,
