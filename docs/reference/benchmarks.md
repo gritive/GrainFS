@@ -121,25 +121,26 @@ Artifacts:
 ### Latest GCP Cluster Encrypted Result
 
 Captured on 2026-06-30 KST in `asia-northeast3-a` with one `n2-standard-4`
-client VM and four `n2-standard-4` storage VMs, 10 MiB object size, 2048 total
-objects, concurrency 32, 1 minute per operation, signed S3 requests,
-round-robin host selection, warm GET over the preceding PUT objects,
-`CLUSTER_PPROF=1`, and 0 errors.
+client VM and four `n2-standard-4` storage VMs, 10 MiB object size, concurrency
+32, 1 minute per operation, signed S3 requests, round-robin host selection, warm
+GET over the preceding PUT objects, profiling disabled (no observer overhead),
+and 0 errors. This run uses the adaptive chunk-size policy (a 10 MiB PUT splits
+into 2 segments so the SegmentWriter pipelines EC encode and shard writes).
 
-| Target            | PUT MiB/s | PUT p50 ms | PUT p99 ms | GET MiB/s | GET p50 ms | GET p99 ms | vs MinIO PUT | vs MinIO GET |
-| ----------------- | --------: | ---------: | ---------: | --------: | ---------: | ---------: | -----------: | -----------: |
-| `GrainFS` cluster |    357.73 |      949.7 |     1346.2 |   1917.79 |      144.5 |      577.2 |        0.76x |        0.89x |
-| MinIO distributed |    470.55 |      695.3 |      889.1 |   2158.60 |      141.2 |      417.0 |        1.00x |        1.00x |
+| Target            | PUT MiB/s | GET MiB/s | vs MinIO PUT | vs MinIO GET |
+| ----------------- | --------: | --------: | -----------: | -----------: |
+| `GrainFS` cluster |    446.42 |   1997.72 |        0.95x |        1.02x |
+| MinIO distributed |    469.42 |   1952.44 |        1.00x |        1.00x |
 
-Interpretation: GrainFS cluster write throughput is 0.76x of distributed
-MinIO under this workload; read throughput is 0.89x of MinIO. GrainFS read TTFB
-was higher than MinIO in the raw `warp analyze` output (`median 59 ms` vs
-`26 ms`). The captured GrainFS cluster PUT CPU profiles were dominated by local
-staged shard writes and `EncodeEncryptedShard`: Linux write syscalls were about
-40-44 percent flat CPU per node, followed by MD5 (`crypto/md5.block`, about
-16-17 percent), AES-GCM encryption (about 14-16 percent), and memory
-copy/clear work. Reed-Solomon parity compute was visible but small at about
-2 percent flat CPU.
+Interpretation: GrainFS cluster read throughput is 1.02x of distributed MinIO
+(slightly ahead) and write throughput is 0.95x. The write gap closed from an
+earlier 0.76x once the adaptive chunk-size policy split mid-size objects into 2
+segments: a 10 MiB PUT previously landed in a single 16 MiB chunk, so the
+8-worker SegmentWriter used only one worker and ran read, EC encode, and shard
+writes serially. Splitting into 2 segments overlaps those stages (read‖EC‖write
+pipeline), lifting PUT from ~358 to 446 MiB/s. CPU stays around 58 percent under
+this workload, so the remaining gap to MinIO is off-CPU (shard-write fsync and
+inter-node transfer latency), not compute headroom.
 
 ## Existing Benchmark Targets
 
