@@ -69,8 +69,9 @@ func (b *DistributedBackend) createMultipartUploadInternal(ctx context.Context, 
 	placementGroupID, ok := PlacementGroupFromContext(ctx)
 	// GroupBackend (bypassBucketCheck=true) always injects a placement-group ID via
 	// context; missing one there is a programming error. Direct DistributedBackend
-	// callers (bypassBucketCheck=false) may omit it — putObjectECSpooled resolves
-	// placement from the stored empty string using the object's bucket assignment.
+	// callers (bypassBucketCheck=false) may omit it — CompleteMultipartUpload
+	// resolves placement at complete time (per-segment SelectSegmentPlacementGroup
+	// in putMultipartObjectChunked) from the object's bucket assignment.
 	if !ok && b.shardSvc != nil && b.bypassBucketCheck {
 		return "", 0, fmt.Errorf("create multipart: missing placement_group_id")
 	}

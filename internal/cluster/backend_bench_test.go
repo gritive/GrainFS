@@ -117,14 +117,12 @@ func BenchmarkPutObjectEC_Chunked10MiB(b *testing.B) {
 	}
 }
 
-// BenchmarkPutObjectEC_Spool2plus2_10MiB measures the all-local SPOOL write path
-// at EC 2+2 / 10 MiB so it is config- and size-matched to
-// putpipeline.BenchmarkPipelinePut10MiB (the STREAM path, also 2+2 / 10 MiB,
-// all-local). The pair isolates the spool double-staging penalty (spool_object +
-// spool_shards) with no network and no EC-width confound — the conservative
-// lower bound on the streaming-EC win (multi-node adds network/ingest overlap on
-// top, common to both). putPipeline is NOT enabled here, so a >1 MiB parity
-// object takes putObjectECSpooled -> writeSpooledShards.
+// BenchmarkPutObjectEC_Spool2plus2_10MiB measures the all-local EC 2+2 / 10 MiB
+// write so it is config- and size-matched to putpipeline.BenchmarkPipelinePut10MiB
+// (also 2+2 / 10 MiB, all-local) with no network and no EC-width confound. The
+// historical spool double-staging path this name refers to has been removed: a
+// sized PutObject (bytes.Reader carries an exact length) now streams straight
+// into writeStreamShards, so this benchmark measures the streaming-EC write.
 func BenchmarkPutObjectEC_Spool2plus2_10MiB(b *testing.B) {
 	bk := newTestDistributedBackend(b)
 	cfg := ECConfig{DataShards: 2, ParityShards: 2}

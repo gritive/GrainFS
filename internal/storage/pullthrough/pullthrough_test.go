@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -265,6 +266,85 @@ func TestPullthrough_UpstreamErrorMidStream(t *testing.T) {
 	_, _, err = local.GetObject(context.Background(), "b", "bad")
 	assert.ErrorIs(t, err, storage.ErrObjectNotFound,
 		"partial upstream stream must not create a local cache entry")
+}
+
+// mismatchUpstream reports a Content-Length (Size) that differs from the number
+// of bytes its reader actually yields — a truncating or over-long upstream.
+type mismatchUpstream struct {
+	body         string
+	reportedSize int64
+}
+
+func (u *mismatchUpstream) GetObject(bucket, key string) (io.ReadCloser, *storage.Object, error) {
+	return io.NopCloser(strings.NewReader(u.body)), &storage.Object{
+		Key:  key,
+		Size: u.reportedSize,
+		ETag: "mismatch",
+	}, nil
+}
+
+// exactSizeEnforcingBackend stands in for the production cluster DistributedBackend:
+// when SizeHintExact is set it enforces the exact body length (the real
+// exactObjectSizeReader contract, which is unexported in the cluster package) and
+// commits NOTHING on a mismatch — the body never reaches the embedded store. This
+// is the collaborator pullthrough's SizeHintExact threading is designed to engage.
+type exactSizeEnforcingBackend struct {
+	storage.Backend
+}
+
+func (b *exactSizeEnforcingBackend) PutObjectWithRequest(ctx context.Context, req storage.PutObjectRequest) (*storage.Object, error) {
+	if req.SizeHint != nil && req.SizeHintExact {
+		buf, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		if int64(len(buf)) != *req.SizeHint {
+			// Reject BEFORE delegating, so nothing is persisted/made visible —
+			// exactly as the cluster path's exactObjectSizeReader does.
+			return nil, fmt.Errorf("size mismatch: got %d, want %d", len(buf), *req.SizeHint)
+		}
+		req.Body = bytes.NewReader(buf)
+	}
+	return b.Backend.(storage.RequestPutter).PutObjectWithRequest(ctx, req)
+}
+
+// TestPullThrough_CacheFill_SizeMismatch_FailsAndCachesNothing proves that when an
+// upstream's actual body length disagrees with its reported Content-Length, the
+// cache-fill (which threads SizeHintExact) fails against a size-enforcing inner
+// backend, the GET surfaces the error, and NO partial object is cached or served.
+// This is the safe consequence of threading the exact size — the old behavior
+// silently cached a truncated object. Covers both truncating and over-long.
+func TestPullThrough_CacheFill_SizeMismatch_FailsAndCachesNothing(t *testing.T) {
+	cases := []struct {
+		name         string
+		body         string
+		reportedSize int64
+	}{
+		{"truncating (fewer bytes than reported)", "short", 100},
+		{"over-long (more bytes than reported)", strings.Repeat("x", 100), 5},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			local := newLocalBackend(t)
+			require.NoError(t, local.CreateBucket(context.Background(), "b"))
+			inner := &exactSizeEnforcingBackend{Backend: local}
+
+			upstream := &mismatchUpstream{body: tc.body, reportedSize: tc.reportedSize}
+			pt := pullthrough.NewBackend(inner, &staticResolver{up: upstream})
+
+			rc, _, err := pt.GetObject(context.Background(), "b", "k")
+			if err == nil {
+				defer rc.Close()
+				_, err = io.ReadAll(rc)
+			}
+			require.Error(t, err, "a size-mismatched upstream must fail the GET, not serve a truncated object")
+
+			// No partial object must remain in the cache: a follow-up GET still misses.
+			_, _, err = local.GetObject(context.Background(), "b", "k")
+			assert.ErrorIs(t, err, storage.ErrObjectNotFound,
+				"a failed size-mismatched cache fill must leave no partial object")
+		})
+	}
 }
 
 // zeroReader returns an infinite stream of zero bytes.

@@ -49,14 +49,16 @@ func TestBuildForwardStreamPutRequest_SizedWhenDecodedLengthPresent(t *testing.T
 }
 
 func TestBuildForwardStreamPutRequest_UnsizedWhenAbsent(t *testing.T) {
-	// Old sender: decoded_length absent -> default -1 -> unsized request (spool).
+	// Old sender: decoded_length absent -> default -1 -> unsized request. The spool
+	// was removed, so an unsized request errors downstream (no size, no spool); the
+	// codec still decodes it faithfully here.
 	args := buildPutObjectArgs("b", "k", "text/plain", nil)
 	pa := raftpb.GetRootAsPutObjectArgs(args, 0)
 	require.Equal(t, int64(-1), pa.DecodedLength(), "old-sender frame reads decoded_length as -1")
 
 	req := buildForwardStreamPutRequest(pa, bytes.NewReader(nil))
 
-	require.Nil(t, req.SizeHint, "unsized frame must leave SizeHint nil so the spool fallback applies")
+	require.Nil(t, req.SizeHint, "unsized frame must leave SizeHint nil (downstream rejects it; no spool fallback)")
 	require.False(t, req.SizeHintExact)
 }
 

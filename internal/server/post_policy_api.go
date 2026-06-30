@@ -63,7 +63,7 @@ func (s *Server) handleFormUpload(ctx context.Context, c *app.RequestContext, bu
 	}
 	defer file.Close()
 
-	result, err := s.putFormObject(ctx, bucket, key, file, contentType)
+	result, err := s.putFormObject(ctx, bucket, key, file, contentType, files[0].Size)
 	if err != nil {
 		mapError(c, err)
 		return

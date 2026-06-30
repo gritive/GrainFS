@@ -285,7 +285,7 @@ func (b *DistributedBackend) coalescedSpoolDir() string {
 //
 //  1. HeadObject → snapshot S = current segments.
 //  2. mergeSegmentsOwnerLocal(S) → single coalesced blob on owner disk.
-//  3. planObjectWritePlacement + writeSpooledShards distribute the coalesced
+//  3. planObjectWritePlacement + writeStreamShards distribute the coalesced
 //     blob across k+m peers. shardKey = "<key>/coalesced/<coalescedID>".
 //  4. publishCoalesceBlob CAS-publishes the CoalescedShardRef onto the
 //     quorum-meta manifest blob (owner-gated, off-raft — no FSM propose).

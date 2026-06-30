@@ -121,7 +121,10 @@ func buildPutObjectArgsWithSSE(bucket, key, contentType string, body []byte, sse
 // a STREAMED PutObjectArgs frame, or -1 (unknown) when the request carries no
 // verified size. Only an EXACT hint (SizeHintExact) is threaded: an advisory
 // hint stamped as exact would make the receiver's exactObjectSizeReader reject a
-// valid body. -1 keeps the receiver on its spool fallback (old-sender semantics).
+// valid body. The spool fallback is gone: a -1 (old-sender) streamed forward now
+// makes the receiver build an unsized request, which errors (no size, no spool).
+// Forward-stream PUTs therefore require every node upgraded — an accepted
+// rolling-upgrade deploy constraint, not a runtime fallback.
 func forwardStreamDecodedLength(req storage.PutObjectRequest) int64 {
 	if req.SizeHint != nil && req.SizeHintExact && *req.SizeHint >= 0 {
 		return *req.SizeHint

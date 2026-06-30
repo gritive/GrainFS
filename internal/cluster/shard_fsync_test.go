@@ -145,8 +145,8 @@ func TestLargeRedundant_NoFsync(t *testing.T) {
 }
 
 // TestDBV_NoRedundancyPath_DirFsyncFailureBlocksVisibility proves DBV on the
-// no-redundancy path (1+0 → writeSpooledShards → writeQuorumMeta; the single-local
-// fast path was removed, so 1+0 now routes through the spooled writer): a
+// no-redundancy path (1+0 → writeStreamShards → writeQuorumMeta; the single-local
+// fast path was removed, so 1+0 now routes through the stream writer): a
 // dir-fsync failure fails the PUT and the object never becomes visible.
 func TestDBV_NoRedundancyPath_DirFsyncFailureBlocksVisibility(t *testing.T) {
 	backend, _, _, _ := newS1ShardSvc(t,

@@ -60,12 +60,23 @@ func (s *Server) putObjectWithUserMetadataAndMD5(
 	return result, nil
 }
 
-func (s *Server) putFormObject(ctx context.Context, bucket, key string, body io.Reader, contentType string) (*storage.PutObjectResult, error) {
+// putFormObject persists an S3 POST form upload. The multipart FileHeader.Size
+// is authoritative, so thread it as an EXACT SizeHint: the cluster backend's
+// single streaming write path requires SizeHintExact (it errors without one),
+// and an exact size is strictly fine on the single-node LocalBackend too.
+func (s *Server) putFormObject(ctx context.Context, bucket, key string, body io.Reader, contentType string, size int64) (*storage.PutObjectResult, error) {
 	ctx, err := s.ctxWithBucketVersioningStrict(ctx, bucket)
 	if err != nil {
 		return nil, err
 	}
-	result, err := s.ops.PutObjectWithResult(ctx, bucket, key, body, contentType)
+	result, err := s.ops.PutObjectWithRequestResult(ctx, storage.PutObjectRequest{
+		Bucket:        bucket,
+		Key:           key,
+		Body:          body,
+		ContentType:   contentType,
+		SizeHint:      &size,
+		SizeHintExact: true,
+	})
 	if err != nil {
 		return nil, err
 	}
