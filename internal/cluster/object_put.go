@@ -2,6 +2,8 @@ package cluster
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -125,7 +127,14 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 	// directly as the object ETag). Production always has shardGroup != nil and
 	// takes the chunked path where WriteSized computes ETag independently.
 	needsMD5 := req.ContentMD5Hex != "" || b.shardGroup == nil
-	if !needsMD5 && req.SizeHint != nil && req.SizeHintExact && *req.SizeHint >= 0 && b.shardGroup != nil {
+	// Streaming, no-spool path: any sized exact body on a real shard group goes
+	// through putObjectChunkedReader. A Content-MD5, if present, is validated by
+	// teeing the body's PLAINTEXT through md5 (encryption is downstream in the
+	// shard write) and rejecting in a beforeCommit hook — which fires after the
+	// body is streamed but before the quorum-meta commit, so a mismatch leaves
+	// nothing committed (no spool of the body to a temp file first).
+	streamable := req.SizeHint != nil && req.SizeHintExact && *req.SizeHint >= 0 && b.shardGroup != nil
+	if streamable {
 		if b.currentECConfig().NumShards() == 0 || b.shardSvc == nil {
 			return nil, fmt.Errorf("put object: EC storage is required")
 		}
@@ -135,8 +144,16 @@ func (b *DistributedBackend) PutObjectWithRequest(ctx context.Context, req stora
 		}); err != nil {
 			return nil, err
 		}
-		body := &exactObjectSizeReader{r: r, remaining: *req.SizeHint}
-		return b.putObjectChunkedReader(ctx, bucket, key, versionID, body, *req.SizeHint, contentType, userMetadata, sseAlgorithm, acl, 0, false, "", nil, nil, nil)
+		var body io.Reader = &exactObjectSizeReader{r: r, remaining: *req.SizeHint}
+		var beforeCommit func() error
+		if req.ContentMD5Hex != "" {
+			h := md5.New()
+			body = io.TeeReader(body, h)
+			beforeCommit = func() error {
+				return validateContentMD5(hex.EncodeToString(h.Sum(nil)), req.ContentMD5Hex)
+			}
+		}
+		return b.putObjectChunkedReader(ctx, bucket, key, versionID, body, *req.SizeHint, contentType, userMetadata, sseAlgorithm, acl, 0, false, "", beforeCommit, nil, nil)
 	}
 	sp, err := b.spoolPutObject(ctx, bucket, r, needsMD5)
 	if err != nil {
