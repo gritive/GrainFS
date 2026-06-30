@@ -96,6 +96,7 @@ type SegmentMetaEntry struct {
 	ECData           uint8
 	ECParity         uint8
 	StripeBytes      uint32
+	StoredSize       int64 // 0 = uncompressed; >0 = compressed bytes in EC blob
 }
 
 // DeleteMultipartDoneCmd, CreateMultipartUploadCmd, CompleteMultipartCmd, and

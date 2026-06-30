@@ -241,6 +241,7 @@ func segmentMetaEntriesToRefs(entries []SegmentMetaEntry) []storage.SegmentRef {
 			ECParity:         entry.ECParity,
 			StripeBytes:      entry.StripeBytes,
 			NodeIDs:          cloneStringSlice(entry.NodeIDs),
+			StoredSize:       entry.StoredSize,
 		}
 	}
 	return refs
@@ -269,6 +270,7 @@ func segmentRefsToMetaEntries(refs []storage.SegmentRef) []SegmentMetaEntry {
 			ECParity:         ref.ECParity,
 			StripeBytes:      ref.StripeBytes,
 			NodeIDs:          cloneStringSlice(ref.NodeIDs),
+			StoredSize:       ref.StoredSize,
 		}
 	}
 	return entries
