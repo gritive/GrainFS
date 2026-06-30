@@ -136,7 +136,7 @@ func (r forwardRuntime) putObject(
 	contentType := req.ContentType
 	versioningState := versioningStateFromContext(ctx)
 	if r.sender.streamDialer != nil && shouldStreamForwardBody(bodyReader, r.maxBody) {
-		args := buildPutObjectArgsWithSSE(bucket, key, contentType, nil, req.SystemMetadata.SSEAlgorithm, req.UserMetadata, req.ContentMD5Hex, derefACL(req.ACL), versioningState)
+		args := buildPutObjectArgsWithSSE(bucket, key, contentType, nil, req.SystemMetadata.SSEAlgorithm, req.UserMetadata, req.ContentMD5Hex, derefACL(req.ACL), versioningState, forwardStreamDecodedLength(req))
 		ctx = ContextWithPutTrace(ctx, PutTraceRequest{
 			Bucket:      bucket,
 			Key:         key,
@@ -165,7 +165,10 @@ func (r forwardRuntime) putObject(
 	if err != nil {
 		return nil, err
 	}
-	args := buildPutObjectArgsWithSSE(bucket, key, contentType, body, req.SystemMetadata.SSEAlgorithm, req.UserMetadata, req.ContentMD5Hex, derefACL(req.ACL), versioningState)
+	// Non-stream path: the body rides inline in the frame, so the receiver's
+	// handlePutObject already knows the size via len(BodyBytes()). decoded_length
+	// is only needed by the stream receiver, so leave it unset (-1) here.
+	args := buildPutObjectArgsWithSSE(bucket, key, contentType, body, req.SystemMetadata.SSEAlgorithm, req.UserMetadata, req.ContentMD5Hex, derefACL(req.ACL), versioningState, -1)
 	ctx = ContextWithPutTrace(ctx, PutTraceRequest{
 		Bucket:      bucket,
 		Key:         key,

@@ -63,7 +63,7 @@ func contextWithVersioningState(ctx context.Context, state byte) context.Context
 
 // --- Args builders (request side) ---
 
-func buildPutObjectArgsWithSSE(bucket, key, contentType string, body []byte, sseAlgorithm string, userMetadata map[string]string, contentMD5Hex string, acl uint8, versioningState byte) []byte {
+func buildPutObjectArgsWithSSE(bucket, key, contentType string, body []byte, sseAlgorithm string, userMetadata map[string]string, contentMD5Hex string, acl uint8, versioningState byte, decodedLength int64) []byte {
 	b := flatbuffers.NewBuilder(putObjectArgsBuilderSize(bucket, key, contentType, sseAlgorithm, len(body)))
 	bk := b.CreateString(bucket)
 	k := b.CreateString(key)
@@ -110,8 +110,23 @@ func buildPutObjectArgsWithSSE(bucket, key, contentType string, body []byte, sse
 	if versioningState != versioningStateUnknown {
 		raftpb.PutObjectArgsAddVersioningState(b, versioningState)
 	}
+	if decodedLength >= 0 {
+		raftpb.PutObjectArgsAddDecodedLength(b, decodedLength)
+	}
 	b.Finish(raftpb.PutObjectArgsEnd(b))
 	return b.FinishedBytes()
+}
+
+// forwardStreamDecodedLength returns the exact decoded object length to stamp on
+// a STREAMED PutObjectArgs frame, or -1 (unknown) when the request carries no
+// verified size. Only an EXACT hint (SizeHintExact) is threaded: an advisory
+// hint stamped as exact would make the receiver's exactObjectSizeReader reject a
+// valid body. -1 keeps the receiver on its spool fallback (old-sender semantics).
+func forwardStreamDecodedLength(req storage.PutObjectRequest) int64 {
+	if req.SizeHint != nil && req.SizeHintExact && *req.SizeHint >= 0 {
+		return *req.SizeHint
+	}
+	return -1
 }
 
 func putObjectArgsBuilderSize(bucket, key, contentType, sseAlgorithm string, bodyLen int) int {
