@@ -271,6 +271,42 @@ func TestGetObject_AppendableNotRoutedToChunked(t *testing.T) {
 	require.Equal(t, []byte("hello world"), got)
 }
 
+func TestOpenSegment_CompressedRoundTrip(t *testing.T) {
+	b := setupECBackend(t)
+	b.chunkedPutChunkSize = testChunkedPutChunkSize
+	b.SetShardGroupSource(&fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"group-a": {ID: "group-a", PeerIDs: []string{"self", "self", "self"}},
+	}})
+
+	const (
+		bucket = "compressed-roundtrip-bucket"
+		key    = "compressed-object"
+	)
+	// Highly compressible: zstd will produce StoredSize << Size.
+	plaintext := bytes.Repeat([]byte("zstd-roundtrip "), 16384)
+	sp := makeSpool(t, plaintext)
+
+	require.NoError(t, b.CreateBucket(context.Background(), bucket))
+	_, err := b.putObjectChunked(context.Background(),
+		bucket, key, "v1", sp, "application/octet-stream",
+		nil, "", 0, 0, false, "", nil, nil, nil)
+	require.NoError(t, err)
+
+	obj, err := b.HeadObject(context.Background(), bucket, key)
+	require.NoError(t, err)
+	require.NotEmpty(t, obj.Segments)
+	require.Greater(t, obj.Segments[0].StoredSize, int64(0), "precondition: expected compressed segment")
+
+	store := &clusterSegmentStore{b: b, bucket: bucket, key: key, obj: obj}
+	rc, err := store.OpenSegment(context.Background(), obj.Segments[0])
+	require.NoError(t, err)
+	defer rc.Close()
+
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, plaintext[:obj.Segments[0].Size], got)
+}
+
 func TestChunkedSegmentWindow_SelectsOnlyOverlappingSegments(t *testing.T) {
 	refs := []storage.SegmentRef{
 		{BlobID: "seg-0", Size: 10},
@@ -385,8 +421,15 @@ func putChunkedTestObject(t *testing.T) (*DistributedBackend, string, string, []
 
 func makeChunkedTestBody(size int) []byte {
 	body := make([]byte, size)
+	// xorshift64: produces pseudo-random bytes that zstd cannot compress,
+	// unlike the old cyclic (i*31)%251 pattern (period 251) that was
+	// trivially compressed. Tests that need compressible data use bytes.Repeat.
+	state := uint64(0xcafe12345678abcd)
 	for i := range body {
-		body[i] = byte((i * 31) % 251)
+		state ^= state << 13
+		state ^= state >> 7
+		state ^= state << 17
+		body[i] = byte(state)
 	}
 	return body
 }

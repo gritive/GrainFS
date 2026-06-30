@@ -860,12 +860,14 @@ func buildSegmentMetaEntries(placements []segmentPlacement, refs []storage.Segme
 	out := make([]SegmentMetaEntry, len(placements))
 	for i, p := range placements {
 		var (
-			size     int64
-			checksum []byte
+			size       int64
+			checksum   []byte
+			storedSize int64
 		)
 		if i < len(refs) {
 			size = refs[i].Size
 			checksum = refs[i].Checksum
+			storedSize = refs[i].StoredSize
 		}
 		out[i] = SegmentMetaEntry{
 			BlobID:           p.BlobID,
@@ -877,6 +879,7 @@ func buildSegmentMetaEntries(placements []segmentPlacement, refs []storage.Segme
 			NodeIDs:          p.NodeIDs,
 			ECData:           uint8(p.Config.DataShards),
 			ECParity:         uint8(p.Config.ParityShards),
+			StoredSize:       storedSize,
 		}
 	}
 	return out

@@ -8,6 +8,7 @@ import (
 	"io"
 
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/storage/zstdpool"
 )
 
 type clusterSegmentStore struct {
@@ -39,12 +40,36 @@ func (s *clusterSegmentStore) OpenSegment(ctx context.Context, ref storage.Segme
 		return nil, err
 	}
 
+	storedSize := entry.Size
+	if entry.StoredSize > 0 {
+		storedSize = entry.StoredSize
+	}
 	shardKey := s.key + "/segments/" + entry.BlobID
-	rc, err := s.b.newECObjectReader().OpenObject(ctx, s.bucket, shardKey, record, entry.Size)
+	rc, err := s.b.newECObjectReader().OpenObject(ctx, s.bucket, shardKey, record, storedSize)
 	if err != nil {
 		return nil, fmt.Errorf("open segment %s: %w", entry.BlobID, err)
 	}
-	return &exactSegmentReadCloser{rc: rc, segment: entry.BlobID, expected: entry.Size, remaining: entry.Size}, nil
+	exact := &exactSegmentReadCloser{rc: rc, segment: entry.BlobID, expected: storedSize, remaining: storedSize}
+	if entry.StoredSize == 0 {
+		return exact, nil
+	}
+	// Compressed: read the whole (≤16 MiB) compressed segment and decompress to
+	// plaintext. Segment-bounded buffering; range reads use ReadAtSegment.
+	compressed, err := io.ReadAll(exact)
+	if cerr := exact.Close(); cerr != nil && err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read compressed segment %s: %w", entry.BlobID, err)
+	}
+	plain, err := zstdpool.Decompress(compressed)
+	if err != nil {
+		return nil, fmt.Errorf("decompress segment %s: %w", entry.BlobID, err)
+	}
+	if int64(len(plain)) != entry.Size {
+		return nil, fmt.Errorf("decompress segment %s: size %d != expected %d", entry.BlobID, len(plain), entry.Size)
+	}
+	return &segmentBytesReadCloser{Reader: bytes.NewReader(plain), data: plain}, nil
 }
 
 type segmentBytesReadCloser struct {
