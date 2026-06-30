@@ -60,7 +60,9 @@ func TestPutTraceStageVocabularyIsStable(t *testing.T) {
 	require.Equal(t, "shard_write_local_enc_close", string(PutTraceStageShardWriteLocalEncClose))
 	require.Equal(t, "shard_write_local_enc_rename", string(PutTraceStageShardWriteLocalEncRename))
 	require.Equal(t, "shard_write_local_dirsync", string(PutTraceStageShardWriteLocalDirSync))
+	require.Equal(t, "promote_staged_shards", string(PutTraceStagePromoteStagedShards))
 	require.Equal(t, "data_raft_propose_meta", string(PutTraceStageDataRaftProposeMeta))
+	require.Equal(t, "quorum_meta_write", string(PutTraceStageQuorumMetaWrite))
 }
 
 func TestPutTraceWritesJSONLWhenEnabled(t *testing.T) {

@@ -561,6 +561,7 @@ func runChunkedPutWithParts(
 	// between promote and commit) leaves final-path shards no manifest references —
 	// a disk leak, not data loss; PR1 narrows the leak, it does not close the class.
 	if csb.stagingTxnID != "" {
+		promoteStart := time.Now()
 		promotes := make(map[string][]stagedPromotePair)
 		var nodeOrder []string
 		for _, p := range csb.placements {
@@ -588,8 +589,10 @@ func runChunkedPutWithParts(
 			})
 		}
 		if err := g.Wait(); err != nil {
+			ObservePutTraceStage(ctx, PutTraceStagePromoteStagedShards, promoteStart, PutTraceStageFields{Error: err.Error()})
 			return nil, err
 		}
+		ObservePutTraceStage(ctx, PutTraceStagePromoteStagedShards, promoteStart, PutTraceStageFields{})
 	}
 
 	// 5. Build PutObjectMetaCmd. csb.placements is already SegmentIdx-indexed.
@@ -608,7 +611,10 @@ func runChunkedPutWithParts(
 	// convergence across concurrent completers / idempotent retry is provided by the
 	// deterministic VersionID + the det-vid existence short-circuit in
 	// CompleteMultipartUpload — NOT a done-marker.
-	var commitErr error
+	var (
+		commitErr        error
+		commitTraceStart time.Time
+	)
 	if completeUploadID != "" {
 		// Vid-deterministic recorded blob placement (same-vid convergence): the
 		// recorded NodeIDs must be a function of (bucket,key,det-vid), NOT segment-0's
@@ -660,9 +666,11 @@ func runChunkedPutWithParts(
 		// NON-VERSIONED / Suspended: the latest-only quorum-meta blob is the sole
 		// authority, written FAIL-CLOSED (M3 F7) — mirrors the regular non-versioned
 		// PUT. On failure nothing is committed; the cleanup defer reclaims the shards.
+		commitTraceStart = time.Now()
 		commitErr = csb.writeQuorumMeta(ctx, metaCmd)
 	} else {
 		// Phase 3: commit via per-node quorum meta write (bypasses data_raft).
+		commitTraceStart = time.Now()
 		commitErr = csb.writeQuorumMeta(ctx, PutObjectMetaCmd{
 			Bucket:           bucket,
 			Key:              key,
@@ -684,6 +692,13 @@ func runChunkedPutWithParts(
 			Segments:         segments,
 			Tags:             tags,
 		})
+	}
+	if !commitTraceStart.IsZero() {
+		fields := PutTraceStageFields{}
+		if commitErr != nil {
+			fields.Error = commitErr.Error()
+		}
+		ObservePutTraceStage(ctx, PutTraceStageQuorumMetaWrite, commitTraceStart, fields)
 	}
 	if commitErr != nil {
 		return nil, fmt.Errorf("commit meta: %w", commitErr)

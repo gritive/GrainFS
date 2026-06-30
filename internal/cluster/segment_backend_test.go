@@ -638,6 +638,46 @@ func TestPutObjectChunked_BatchesStagedPromotesByNode(t *testing.T) {
 	}
 }
 
+func TestPutObjectChunked_EmitsPromoteAndQuorumMetaTrace(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "put-trace.jsonl")
+	t.Setenv("GRAINFS_PUT_TRACE_FILE", path)
+	t.Setenv("GRAINFS_NODE_ID", "node-trace")
+	reloadPutTraceSinkForTest()
+	t.Cleanup(reloadPutTraceSinkForTest)
+
+	chunk := testChunkedPutChunkSize
+	payload := bytes.Repeat([]byte("T"), chunk)
+	sp := makeSpool(t, payload)
+	deps := newFakeBackendWithGroups(fourPGFixture())
+	deps.writePeer = func(int) []string { return []string{"node-a", "node-b"} }
+
+	blobIDs := []string{uuid.Must(uuid.NewV7()).String()}
+	csb := newCSBWithTestChunks(deps, blobIDs)
+	csb.stagingTxnID = "txn-trace"
+	csb.promoteStagedBatchFn = func(_ context.Context, _ string, _ string, _ []stagedPromotePair) error {
+		return nil
+	}
+
+	body, err := sp.Open()
+	require.NoError(t, err)
+	defer body.Close()
+	ctx := ContextWithPutTrace(context.Background(), PutTraceRequest{
+		Bucket:      "bucket",
+		Key:         "large.bin",
+		Ingress:     PutTraceIngressLocalLeader,
+		SizeClass:   PutTraceSizeSmall,
+		ForwardMode: PutTraceForwardNone,
+	})
+	_, err = runChunkedPut(ctx, csb, body,
+		"bucket", "large.bin", "v1", "application/octet-stream",
+		nil, "", 0, false, "", nil, nil, nil)
+	require.NoError(t, err)
+
+	events := readPutTraceEvents(t, path)
+	requirePutTraceStage(t, events, PutTraceStagePromoteStagedShards)
+	requirePutTraceStage(t, events, PutTraceStageQuorumMetaWrite)
+}
+
 func TestPutObjectChunked_PromotesStagedNodeBatchesConcurrently(t *testing.T) {
 	chunk := testChunkedPutChunkSize
 	payload := bytes.Repeat([]byte("P"), 2*chunk)

@@ -41,6 +41,7 @@ const (
 	PutTraceStageShardWriteLocalEncClose  PutTraceStage = "shard_write_local_enc_close"
 	PutTraceStageShardWriteLocalEncRename PutTraceStage = "shard_write_local_enc_rename"
 	PutTraceStageShardWriteLocalDirSync   PutTraceStage = "shard_write_local_dirsync"
+	PutTraceStagePromoteStagedShards      PutTraceStage = "promote_staged_shards"
 	PutTraceStageDataRaftProposeMeta      PutTraceStage = "data_raft_propose_meta"
 	PutTraceStageQuorumMetaWrite          PutTraceStage = "quorum_meta_write"
 )
