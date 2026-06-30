@@ -364,6 +364,32 @@ func (r *ForwardReceiver) handlePutObject(dg *DataGroup, args []byte) []byte {
 	return buildObjectReply(obj, bucket)
 }
 
+// buildForwardStreamPutRequest reconstructs the storage.PutObjectRequest for a
+// streamed forwarded PUT. The sender stamps an exact decoded length
+// (decoded_length >= 0) so the request carries SizeHint+SizeHintExact and the
+// backend takes the no-spool streaming path (it wraps body in
+// exactObjectSizeReader itself). When absent (-1) the request is left unsized;
+// since the disk spool was removed, the backend rejects an unsized streamed
+// forward rather than buffering it — production senders always stamp the length.
+func buildForwardStreamPutRequest(pa *raftpb.PutObjectArgs, body io.Reader) storage.PutObjectRequest {
+	req := storage.PutObjectRequest{
+		Bucket:         string(pa.Bucket()),
+		Key:            string(pa.Key()),
+		Body:           body,
+		ContentType:    string(pa.ContentType()),
+		SystemMetadata: storage.ObjectSystemMetadata{SSEAlgorithm: string(pa.SseAlgorithm())},
+		UserMetadata:   decodePutObjectUserMetadata(pa),
+		ContentMD5Hex:  string(pa.ContentMd5Hex()),
+		ACL:            aclPtr(pa.Acl()),
+	}
+	if n := pa.DecodedLength(); n >= 0 {
+		size := n
+		req.SizeHint = &size
+		req.SizeHintExact = true
+	}
+	return req
+}
+
 func (r *ForwardReceiver) handlePutObjectStream(dg *DataGroup, args []byte, body io.Reader) []byte {
 	pa := raftpb.GetRootAsPutObjectArgs(args, 0)
 	bucket := string(pa.Bucket())
@@ -379,16 +405,7 @@ func (r *ForwardReceiver) handlePutObjectStream(dg *DataGroup, args []byte, body
 	ctx = contextWithVersioningState(ctx, pa.VersioningState())
 	ObservePutTraceStage(ctx, PutTraceStageForwardReceiverDispatch, time.Now(), PutTraceStageFields{})
 	stageStart := time.Now()
-	obj, err := dg.Backend().PutObjectWithRequest(ctx, storage.PutObjectRequest{
-		Bucket:         bucket,
-		Key:            key,
-		Body:           body,
-		ContentType:    string(pa.ContentType()),
-		SystemMetadata: storage.ObjectSystemMetadata{SSEAlgorithm: string(pa.SseAlgorithm())},
-		UserMetadata:   decodePutObjectUserMetadata(pa),
-		ContentMD5Hex:  string(pa.ContentMd5Hex()),
-		ACL:            aclPtr(pa.Acl()),
-	})
+	obj, err := dg.Backend().PutObjectWithRequest(ctx, buildForwardStreamPutRequest(pa, body))
 	fields := PutTraceStageFields{}
 	if err != nil {
 		fields.Error = err.Error()

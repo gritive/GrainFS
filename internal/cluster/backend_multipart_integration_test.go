@@ -67,21 +67,22 @@ var _ = Describe("Backend multipart integration", func() {
 		Expect(rec.proposeCount()).To(Equal(0))
 	})
 
-	It("bypasses complete spooling for single-part multipart uploads", func() {
+	It("completes single-part multipart uploads without staging the body to a spool", func() {
+		// The PUT-body spool was removed; multipart complete always streams through
+		// the chunked path. This guards the single-part round-trip and asserts no
+		// put-spool dir is created during complete.
 		up, err := b.CreateMultipartUpload(ctx, "bucket", "mp.bin", "application/octet-stream")
 		Expect(err).NotTo(HaveOccurred())
 		payload := []byte("small-final-part")
 		part, err := b.UploadPart(ctx, "bucket", "mp.bin", up.UploadID, 1, bytes.NewReader(payload), "")
 		Expect(err).NotTo(HaveOccurred())
 
-		Expect(os.MkdirAll(filepath.Dir(b.spoolDir()), 0o700)).To(Succeed())
-		Expect(os.Mkdir(b.spoolDir(), 0o500)).To(Succeed())
-		Expect(os.Chmod(b.spoolDir(), 0o500)).To(Succeed())
-		DeferCleanup(func() { _ = os.Chmod(b.spoolDir(), 0o700) })
-
 		obj, err := b.CompleteMultipartUpload(ctx, "bucket", "mp.bin", up.UploadID, []storage.Part{*part})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(obj.Size).To(Equal(int64(len(payload))))
+
+		_, statErr := os.Stat(filepath.Join(b.root, "tmp", "put-spool"))
+		Expect(os.IsNotExist(statErr)).To(BeTrue(), "multipart complete must not create a put-spool dir")
 
 		rc, _, err := b.GetObject(ctx, "bucket", "mp.bin")
 		Expect(err).NotTo(HaveOccurred())

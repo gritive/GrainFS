@@ -63,6 +63,7 @@ func newTestDistributedBackendDEK(t *testing.T, extraSvcOpts ...ShardServiceOpti
 	svc := NewShardService(backend.root, nil, append([]ShardServiceOption{WithShardDEKKeeper(keeper, clusterID)}, extraSvcOpts...)...)
 	require.NotNil(t, svc.DEKKeeper(), "production shape: DEK keeper must be wired")
 	backend.SetShardService(svc, []string{backend.selfAddr})
+	wireTestShardGroup(backend)
 
 	stopApply := make(chan struct{})
 	go backend.RunApplyLoop(stopApply)

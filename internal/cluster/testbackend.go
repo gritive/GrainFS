@@ -126,6 +126,35 @@ func (s *directFSMMetaBucketStore) AllRecords() map[string]BucketRecord {
 //
 // As of M5 PR 29 the GRAINFS_RAFT_V2 flag is gone; this helper always
 // instantiates a v2 raft node via newRaftNode.
+// singletonTestShardGroupSource is a fixed single-group ShardGroupSource used by
+// NewSingletonBackendForTest so the streaming chunked PUT path has a shard group
+// without a real cluster boot. The group's peers are all the local node.
+type singletonTestShardGroupSource struct {
+	group ShardGroupEntry
+}
+
+func newSingletonTestShardGroupSource(selfAddr string, numShards int) singletonTestShardGroupSource {
+	if numShards < 1 {
+		numShards = 1
+	}
+	peers := make([]string, numShards)
+	for i := range peers {
+		peers[i] = selfAddr
+	}
+	return singletonTestShardGroupSource{group: ShardGroupEntry{ID: "group-0", PeerIDs: peers}}
+}
+
+func (s singletonTestShardGroupSource) ShardGroup(id string) (ShardGroupEntry, bool) {
+	if id == s.group.ID {
+		return s.group, true
+	}
+	return ShardGroupEntry{}, false
+}
+
+func (s singletonTestShardGroupSource) ShardGroups() []ShardGroupEntry {
+	return []ShardGroupEntry{s.group}
+}
+
 func NewSingletonBackendForTest(t singletonBackendTestTB) *DistributedBackend {
 	t.Helper()
 	dir := t.TempDir()
@@ -176,6 +205,11 @@ func NewSingletonBackendForTest(t singletonBackendTestTB) *DistributedBackend {
 	}
 	svc := NewShardService(backend.root, nil, WithShardDEKKeeper(keeper, clusterID))
 	backend.SetShardService(svc, []string{backend.selfAddr})
+	// Wire a single-node ShardGroupSource so the streaming chunked PUT path (which
+	// requires a non-nil shard group — production always wires one) works without a
+	// real cluster boot. Sized to the current EC stripe (1+0 here); callers that
+	// widen the EC config must re-wire a group of matching width.
+	backend.SetShardGroupSource(newSingletonTestShardGroupSource(backend.selfAddr, backend.currentECConfig().NumShards()))
 	// Wire the direct-FSM MetaBucketStore so all bucket-write paths work without
 	// a real meta-Raft cluster. Bucket mutations are applied directly to the
 	// local group-0 FSM, keeping read paths (HeadBucket, etc.) consistent.

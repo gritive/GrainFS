@@ -78,6 +78,9 @@ func newTestGroupBackendWithDB(t clusterTestTB, groupID string) (*GroupBackend, 
 	// Wire the direct-FSM MetaBucketStore so CreateBucket works in tests
 	// without a real meta-Raft cluster.
 	gb.SetMetaBucketStore(newDirectFSMMetaBucketStore(gb.fsm))
+	// The streaming chunked PUT path needs a non-nil ShardGroupSource (production
+	// wires one via the boot path); wire a single-node group over the group's peers.
+	wireTestShardGroup(gb.DistributedBackend)
 
 	t.Cleanup(func() {
 		close(stopApply)

@@ -85,11 +85,20 @@ type segmentPlacement struct {
 	NodeIDs          []string
 	Config           ECConfig
 	ShardSize        int32
+	// LogicalShardSize is the PRE-compression per-data-shard size (ShardSize is
+	// post-compression). Threaded into the commit-time promote so the dir-fsync
+	// class mirrors the write side: a logically-large redundant shard skips the
+	// commit-tail fsync even when it compressed small (#986). 0 ⇒ empty segment.
+	LogicalShardSize int32
 }
 
 type stagedPromotePair struct {
 	stagingKey string
 	finalKey   string
+	// logicalShardSize is the segment's PRE-compression per-shard size for the
+	// promote fsync class (see segmentPlacement.LogicalShardSize). -1 ⇒ unknown
+	// (e.g. decoded from a remote batch-promote, which carries no logical size).
+	logicalShardSize int64
 }
 
 // WriteSegment buffers the chunk, picks a PG for this (bucket,key,idx,blobID),
@@ -168,6 +177,7 @@ func (c *clusterSegmentBackend) WriteSegmentBytes(ctx context.Context, bucket, k
 		Group:           group,
 		Cfg:             cfg,
 		Data:            data,
+		LogicalSize:     originalLen, // pre-compression, for the shard fsync class
 		Weights:         weights,
 		WeightedEnabled: weightedEnabled,
 		StagingTxnID:    c.stagingTxnID,
@@ -180,8 +190,11 @@ func (c *clusterSegmentBackend) WriteSegmentBytes(ctx context.Context, bucket, k
 	// 3. Record placement. Workers receive unique idx, so the slot write
 	// is race-free without a mutex.
 	shardSize := int32(0)
+	logicalShardSize := int32(0)
 	if cfg.DataShards > 0 {
 		shardSize = int32((int64(len(data)) + int64(cfg.DataShards) - 1) / int64(cfg.DataShards))
+		// Pre-compression per-shard size for the commit-time promote fsync class.
+		logicalShardSize = int32((originalLen + int64(cfg.DataShards) - 1) / int64(cfg.DataShards))
 	}
 	c.placements[idx] = segmentPlacement{
 		BlobID:           blobID,
@@ -190,6 +203,7 @@ func (c *clusterSegmentBackend) WriteSegmentBytes(ctx context.Context, bucket, k
 		NodeIDs:          rec.Nodes,
 		Config:           cfg,
 		ShardSize:        shardSize,
+		LogicalShardSize: logicalShardSize,
 	}
 
 	return storage.SegmentRef{
@@ -328,7 +342,7 @@ func (c *clusterSegmentBackend) promoteStagedShardsBatch(ctx context.Context, no
 	}
 	if node == c.b.currentSelfAddr() {
 		for _, pair := range pairs {
-			if err := c.b.shardSvc.PromoteLocalStagedShards(bucket, pair.stagingKey, pair.finalKey); err != nil {
+			if err := c.b.shardSvc.PromoteLocalStagedShards(bucket, pair.stagingKey, pair.finalKey, pair.logicalShardSize); err != nil {
 				return err
 			}
 		}
@@ -361,34 +375,6 @@ func acquireChunkedMultipartCompleteSlot(ctx context.Context) (func(), error) {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-}
-
-// putObjectChunked is the chunked-PUT cluster pipeline: split the spooled
-// body into N segments via storage.SegmentWriter, fan out per-segment EC
-// writes across placement groups (best-effort, defer cleanup on any error),
-// then commit a single PutObjectMetaCmd carrying all per-segment placements.
-// The single raft commit is the atomic point.
-func (b *DistributedBackend) putObjectChunked(
-	ctx context.Context,
-	bucket, key, versionID string,
-	sp *spooledObject,
-	contentType string,
-	userMetadata map[string]string,
-	sseAlgorithm string,
-	acl uint8,
-	modTime int64,
-	preserveModTime bool,
-	expectedETag string,
-	beforeCommit func() error,
-	parts []storage.MultipartPartEntry,
-	tags []storage.Tag,
-) (*storage.Object, error) {
-	body, err := sp.Open()
-	if err != nil {
-		return nil, fmt.Errorf("open spool: %w", err)
-	}
-	defer body.Close()
-	return b.putObjectChunkedReader(ctx, bucket, key, versionID, body, sp.Size, contentType, userMetadata, sseAlgorithm, acl, modTime, preserveModTime, expectedETag, beforeCommit, parts, tags)
 }
 
 func (b *DistributedBackend) putObjectChunkedReader(
@@ -658,7 +644,11 @@ func runChunkedPutWithParts(
 				if _, ok := promotes[node]; !ok {
 					nodeOrder = append(nodeOrder, node)
 				}
-				promotes[node] = append(promotes[node], stagedPromotePair{stagingKey: stagingKey, finalKey: finalKey})
+				promotes[node] = append(promotes[node], stagedPromotePair{
+					stagingKey:       stagingKey,
+					finalKey:         finalKey,
+					logicalShardSize: int64(p.LogicalShardSize),
+				})
 			}
 		}
 		g, promoteCtx := errgroup.WithContext(ctx)

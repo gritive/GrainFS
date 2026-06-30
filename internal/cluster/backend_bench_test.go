@@ -35,6 +35,9 @@ func newECBenchmarkBackend(tb clusterTestTB) *DistributedBackend {
 		allNodes[i] = bk.selfAddr
 	}
 	bk.SetShardService(svc, allNodes)
+	// Re-wire the shard group to the 4+2 stripe width (the default constructor
+	// wired a 1-peer group at EC 1+0 before this widened the config).
+	wireTestShardGroup(bk)
 	require.True(tb, bk.ECActive(), "EC setup must exercise the EC path")
 	return bk
 }
@@ -114,14 +117,12 @@ func BenchmarkPutObjectEC_Chunked10MiB(b *testing.B) {
 	}
 }
 
-// BenchmarkPutObjectEC_Spool2plus2_10MiB measures the all-local SPOOL write path
-// at EC 2+2 / 10 MiB so it is config- and size-matched to
-// putpipeline.BenchmarkPipelinePut10MiB (the STREAM path, also 2+2 / 10 MiB,
-// all-local). The pair isolates the spool double-staging penalty (spool_object +
-// spool_shards) with no network and no EC-width confound — the conservative
-// lower bound on the streaming-EC win (multi-node adds network/ingest overlap on
-// top, common to both). putPipeline is NOT enabled here, so a >1 MiB parity
-// object takes putObjectECSpooled -> writeSpooledShards.
+// BenchmarkPutObjectEC_Spool2plus2_10MiB measures the all-local EC 2+2 / 10 MiB
+// write so it is config- and size-matched to putpipeline.BenchmarkPipelinePut10MiB
+// (also 2+2 / 10 MiB, all-local) with no network and no EC-width confound. The
+// historical spool double-staging path this name refers to has been removed: a
+// sized PutObject (bytes.Reader carries an exact length) now streams straight
+// into writeStreamShards, so this benchmark measures the streaming-EC write.
 func BenchmarkPutObjectEC_Spool2plus2_10MiB(b *testing.B) {
 	bk := newTestDistributedBackend(b)
 	cfg := ECConfig{DataShards: 2, ParityShards: 2}
@@ -204,7 +205,7 @@ func BenchmarkGetObjectEC_ChunkedSegment10MiB(b *testing.B) {
 
 	data := make([]byte, 10<<20)
 	sp := makeSpool(b, data)
-	_, err := bk.putObjectChunked(context.Background(),
+	_, err := bk.putChunked(context.Background(),
 		"bench", "chunked-readkey", "v1", sp, "application/octet-stream",
 		nil, "", 0, 0, false, "", nil, nil, nil)
 	require.NoError(b, err)

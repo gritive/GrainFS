@@ -87,8 +87,10 @@ func TestForwardNativeWire(t *testing.T) {
 		WithReadStreamDialer(readStreamDialer)
 
 	// (1) Write forward round-trip: streamed PutObject lands in the GroupBackend.
+	// The sender stamps the exact decoded length (as boot does via
+	// forwardStreamDecodedLength) so the receiver takes the no-spool streaming path.
 	const objBody = "native-forward-wire-body"
-	putArgs := buildPutObjectArgs("bucket", "wire-key", "text/plain", nil)
+	putArgs := buildPutObjectArgsWithSSE("bucket", "wire-key", "text/plain", nil, "", nil, "", 0, versioningStateUnknown, int64(len(objBody)))
 	reply, err := sender.SendStream(ctx, []string{addr}, "group-1",
 		raftpb.ForwardOpPutObject, putArgs, bytes.NewReader([]byte(objBody)))
 	require.NoError(t, err)

@@ -159,8 +159,20 @@ func (rcv *PutObjectArgs) MutateVersioningState(n byte) bool {
 	return rcv._tab.MutateByteSlot(20, n)
 }
 
+func (rcv *PutObjectArgs) DecodedLength() int64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
+	if o != 0 {
+		return rcv._tab.GetInt64(o + rcv._tab.Pos)
+	}
+	return -1
+}
+
+func (rcv *PutObjectArgs) MutateDecodedLength(n int64) bool {
+	return rcv._tab.MutateInt64Slot(22, n)
+}
+
 func PutObjectArgsStart(builder *flatbuffers.Builder) {
-	builder.StartObject(9)
+	builder.StartObject(10)
 }
 func PutObjectArgsAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -194,6 +206,9 @@ func PutObjectArgsAddAcl(builder *flatbuffers.Builder, acl byte) {
 }
 func PutObjectArgsAddVersioningState(builder *flatbuffers.Builder, versioningState byte) {
 	builder.PrependByteSlot(8, versioningState, 0)
+}
+func PutObjectArgsAddDecodedLength(builder *flatbuffers.Builder, decodedLength int64) {
+	builder.PrependInt64Slot(9, decodedLength, -1)
 }
 func PutObjectArgsEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

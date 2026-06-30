@@ -59,6 +59,10 @@ var _ = Describe("Backend bucket management integration", func() {
 	// CreateBucket routes through MetaBucketStore; groupID comes from resolveCreateGroupID.
 
 	It("passes groupID from router default to MetaBucketStore", func() {
+		// The router-default groupID path only applies when no ShardGroupSource is
+		// wired (resolveCreateGroupID prefers the shard group). Clear the default
+		// test group so this spec exercises the router fallback.
+		b.SetShardGroupSource(nil)
 		mgr := NewDataGroupManager()
 		mgr.Add(NewDataGroup("group-0", []string{"node-0"}))
 		r := NewRouter(mgr)

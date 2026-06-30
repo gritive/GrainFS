@@ -35,6 +35,7 @@ var _ = Describe("Backend object integration", func() {
 		b.SetECConfig(ECConfig{DataShards: 2, ParityShards: 1})
 		keeper, clusterID := testDEKKeeper(GinkgoT())
 		b.SetShardService(NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID)), []string{b.selfAddr, b.selfAddr, b.selfAddr})
+		wireTestShardGroup(b)
 	}
 
 	It("puts and gets objects", func() {
@@ -55,14 +56,13 @@ var _ = Describe("Backend object integration", func() {
 		Expect(gotObj.Size).To(Equal(obj.Size))
 	})
 
-	It("round-trips small streaming parity EC puts via the spooled path", func() {
-		// The EC-memory fast path (which skipped the EC shard spool-to-disk for
-		// small parity puts) was removed; shardGroup==nil test backends now route
-		// through writeSpooledShards. This asserts the round-trip is preserved.
+	It("round-trips small parity EC puts via the streaming chunked path", func() {
+		// The disk spool was removed; a sized body streams straight through the
+		// chunked EC write path. This asserts the round-trip is preserved.
 		configureParityEC()
 
 		payload := bytes.Repeat([]byte("a"), 64<<10)
-		body := io.LimitReader(bytes.NewReader(payload), int64(len(payload)))
+		body := bytes.NewReader(payload)
 		obj, err := b.PutObject(ctx, "bucket", "small-streaming.bin", body, "application/octet-stream")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(obj.Size).To(Equal(int64(len(payload))))
@@ -81,11 +81,12 @@ var _ = Describe("Backend object integration", func() {
 		payload := bytes.Repeat([]byte("x"), 2<<20)
 		sizeHint := int64(len(payload))
 		obj, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{
-			Bucket:      "bucket",
-			Key:         "stream.bin",
-			Body:        backendReaderOnly{Reader: bytes.NewReader(payload)},
-			SizeHint:    &sizeHint,
-			ContentType: "application/octet-stream",
+			Bucket:        "bucket",
+			Key:           "stream.bin",
+			Body:          backendReaderOnly{Reader: bytes.NewReader(payload)},
+			SizeHint:      &sizeHint,
+			SizeHintExact: true,
+			ContentType:   "application/octet-stream",
 		})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(obj.Size).To(Equal(sizeHint))

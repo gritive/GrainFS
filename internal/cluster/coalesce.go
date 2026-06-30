@@ -285,7 +285,7 @@ func (b *DistributedBackend) coalescedSpoolDir() string {
 //
 //  1. HeadObject → snapshot S = current segments.
 //  2. mergeSegmentsOwnerLocal(S) → single coalesced blob on owner disk.
-//  3. planObjectWritePlacement + writeSpooledShards distribute the coalesced
+//  3. planObjectWritePlacement + writeStreamShards distribute the coalesced
 //     blob across k+m peers. shardKey = "<key>/coalesced/<coalescedID>".
 //  4. publishCoalesceBlob CAS-publishes the CoalescedShardRef onto the
 //     quorum-meta manifest blob (owner-gated, off-raft — no FSM propose).
@@ -363,14 +363,24 @@ func (b *DistributedBackend) processCoalesceJobB3(ctx context.Context, job coale
 		Config:           cfg,
 		Placement:        placement,
 	}
-	sp := &spooledObject{Path: merged.Path, Size: merged.Size, ETag: merged.ETag}
+	// Stream the owner-local merged blob straight into the EC stream encoder; its
+	// MD5 ETag was already computed during the merge, so no md5 tee is needed here.
+	mergedSrc, err := os.Open(merged.Path)
+	if err != nil {
+		cleanupMerged()
+		return fmt.Errorf("open merged blob: %w", err)
+	}
 	writer := newECObjectWriter(b.currentSelfAddr(), b.shardSvc, b.currentPeerHealth())
-	if _, err := writer.writeSpooledShards(ctx, plan, b.coalescedSpoolDir(), sp); err != nil {
+	_, ecErr := writer.writeStreamShards(ctx, plan, b.coalescedSpoolDir(), mergedSrc, merged.Size, func() string {
+		return merged.ETag
+	})
+	_ = mergedSrc.Close()
+	if ecErr != nil {
 		cleanupMerged()
 		if placementPlan.TopologyWrite {
-			return topologyShardWriteError(placementPlan.TopologyGroup, placementPlan.Config, err)
+			return topologyShardWriteError(placementPlan.TopologyGroup, placementPlan.Config, ecErr)
 		}
-		return fmt.Errorf("ec write: %w", err)
+		return fmt.Errorf("ec write: %w", ecErr)
 	}
 	// EC shards now contain the merged body while raw segments remain the
 	// metadata source of truth. Drop the owner-local intermediate before

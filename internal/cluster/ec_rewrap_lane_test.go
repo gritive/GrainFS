@@ -31,6 +31,7 @@ func setupECRewrapBackend(t *testing.T) (*DistributedBackend, *encrypt.DEKKeeper
 	backend.selfAddr = selfAddr
 	backend.allNodes = []string{selfAddr, selfAddr, selfAddr}
 	backend.SetECConfig(ECConfig{DataShards: 1, ParityShards: 1})
+	wireTestShardGroup(backend)
 	return backend, keeper
 }
 
@@ -63,7 +64,9 @@ func TestRewrapShardIfStale(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, obj.VersionID)
 
-	canonicalKey := ecObjectShardKey("obj", obj.VersionID)
+	// Chunked PUT stores shards under the per-segment key (key/segments/<blobID>).
+	require.NotEmpty(t, obj.Segments, "chunked PUT must record at least one segment")
+	canonicalKey := "obj/segments/" + obj.Segments[0].BlobID
 	require.Equal(t, uint32(0), shardGenOnDisk(t, backend, "b", canonicalKey, 0), "seeded at gen 0")
 
 	// Rotate the active DEK generation to 1.
@@ -72,8 +75,11 @@ func TestRewrapShardIfStale(t *testing.T) {
 		t.Fatalf("expected active gen 1 after rotate, got %d", active)
 	}
 
-	// First call migrates the stale (gen 0) shard onto the active gen (1).
-	did, err := backend.RewrapShardIfStale("b", "obj", obj.VersionID, 0, 1)
+	// First call migrates the stale (gen 0) shard onto the active gen (1). The
+	// object is chunked, so rewrap targets the per-segment shard key directly
+	// (the production segment-aware path; the whole-object RewrapShardIfStale
+	// convenience does not apply to segmented objects).
+	did, err := backend.RewrapShardIfStaleAt("b", canonicalKey, 0, 1)
 	require.NoError(t, err)
 	assert.True(t, did, "stale shard must be migrated")
 	assert.Equal(t, uint32(1), shardGenOnDisk(t, backend, "b", canonicalKey, 0), "shard now at active gen")
@@ -87,7 +93,7 @@ func TestRewrapShardIfStale(t *testing.T) {
 	assert.Equal(t, content, got, "plaintext preserved across rewrap")
 
 	// Second call is idempotent (already at active gen).
-	did, err = backend.RewrapShardIfStale("b", "obj", obj.VersionID, 0, 1)
+	did, err = backend.RewrapShardIfStaleAt("b", canonicalKey, 0, 1)
 	require.NoError(t, err)
 	assert.False(t, did, "already-migrated shard must be a no-op")
 }

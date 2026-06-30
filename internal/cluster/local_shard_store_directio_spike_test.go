@@ -77,7 +77,7 @@ func TestAtomicShardFileWrite_DirectIOEnabledByDefault(t *testing.T) {
 	path := filepath.Join(dir, "shard_0")
 	payload := bytes.Repeat([]byte{0x42}, 4096)
 
-	err = l.atomicShardFileWrite(context.Background(), dir, path, 0, func(w io.Writer) error {
+	err = l.atomicShardFileWrite(context.Background(), dir, path, 0, -1, func(w io.Writer) error {
 		_, err := w.Write(payload)
 		return err
 	})
@@ -108,7 +108,7 @@ func TestAtomicShardFileWrite_DirectIOCanBeDisabled(t *testing.T) {
 	path := filepath.Join(dir, "shard_0")
 	payload := []byte("direct-io-disabled-payload")
 
-	err = l.atomicShardFileWrite(context.Background(), dir, path, 0, func(w io.Writer) error {
+	err = l.atomicShardFileWrite(context.Background(), dir, path, 0, -1, func(w io.Writer) error {
 		_, err := w.Write(payload)
 		return err
 	})
@@ -137,7 +137,7 @@ func TestAtomicShardFileWrite_DirectIOStreamsDuringWriteBody(t *testing.T) {
 	path := filepath.Join(dir, "shard_0")
 	payload := bytes.Repeat([]byte{0x7c}, 4096)
 
-	err = l.atomicShardFileWrite(context.Background(), dir, path, 0, func(w io.Writer) error {
+	err = l.atomicShardFileWrite(context.Background(), dir, path, 0, -1, func(w io.Writer) error {
 		_, err := w.Write(payload)
 		if err != nil {
 			return err
@@ -184,7 +184,7 @@ func TestAtomicShardFileWrite_DirectIOFallbackWritesExactPayload(t *testing.T) {
 	path := filepath.Join(dir, "shard_0")
 	payload := []byte("direct-io-spike-fallback-payload")
 
-	err = l.atomicShardFileWrite(context.Background(), dir, path, 0, func(w io.Writer) error {
+	err = l.atomicShardFileWrite(context.Background(), dir, path, 0, -1, func(w io.Writer) error {
 		_, err := w.Write(payload)
 		return err
 	})
@@ -215,7 +215,7 @@ func TestAtomicShardFileWrite_DirectIODirectPathTruncatesAlignmentPadding(t *tes
 	path := filepath.Join(dir, "shard_0")
 	payload := bytes.Repeat([]byte{0x5a}, 4097)
 
-	err = l.atomicShardFileWrite(context.Background(), dir, path, 0, func(w io.Writer) error {
+	err = l.atomicShardFileWrite(context.Background(), dir, path, 0, -1, func(w io.Writer) error {
 		_, err := w.Write(payload)
 		return err
 	})

@@ -93,6 +93,13 @@ table PutObjectArgs {
   // / unresolved → receiver falls back to a local read), 1=disabled,
   // 2=enabled. Appended for wire compatibility; old peers read it as 0.
   versioning_state:ubyte;
+  // Exact decoded object length the SENDER already knows (req.SizeHint when
+  // SizeHintExact). Lets a STREAMED forwarded PUT receiver build a sized
+  // request (SizeHint+SizeHintExact) and take the no-spool streaming path
+  // instead of spooling the body to disk. -1 = unknown (old sender / non-exact
+  // hint) → receiver falls back to the spool path. Appended for wire
+  // compatibility; old peers neither write nor read it.
+  decoded_length:long = -1;
 }
 
 table GetObjectArgs {

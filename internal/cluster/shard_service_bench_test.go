@@ -67,7 +67,7 @@ func BenchmarkShardServiceWriteLocalShardStreamStaged5MiBEncrypted(b *testing.B)
 		{
 			name: "sized-staged",
 			put: func(ctx context.Context, svc *ShardService, bucket, stagingKey, finalKey string, shardIdx int, body []byte) error {
-				return svc.WriteLocalShardStreamStagedSizedContext(ctx, bucket, stagingKey, finalKey, shardIdx, bytes.NewReader(body), int64(len(body)))
+				return svc.WriteLocalShardStreamStagedSizedContext(ctx, bucket, stagingKey, finalKey, shardIdx, bytes.NewReader(body), int64(len(body)), -1)
 			},
 		},
 		{

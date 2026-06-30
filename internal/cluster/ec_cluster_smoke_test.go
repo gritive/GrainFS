@@ -61,13 +61,16 @@ func TestECCluster_Smoke_3Node(t *testing.T) {
 	keeper, clusterID := testDEKKeeper(t)
 	svc := NewShardService(backend.root, nil, WithShardDEKKeeper(keeper, clusterID))
 	backend.SetShardService(svc, []string{"self", "self", "self"})
+	wireTestShardGroup(backend)
 
 	content := bytes.Repeat([]byte("ec-smoke-3node-"), 4096)
 	obj, err := backend.PutObject(context.Background(), "ec-smoke", "obj", bytes.NewReader(content), "application/octet-stream")
 	require.NoError(t, err)
 	require.NotEmpty(t, obj.VersionID)
 
-	shardKey := "obj/" + obj.VersionID
+	// Chunked PUT stores shards under the per-segment key (key/segments/<blobID>).
+	require.NotEmpty(t, obj.Segments, "chunked PUT must record at least one segment")
+	shardKey := "obj/segments/" + obj.Segments[0].BlobID
 	require.NoError(t, os.Remove(mustShardPath(backend.shardSvc, "ec-smoke", shardKey, 0)))
 
 	rc, _, err := backend.GetObject(context.Background(), "ec-smoke", "obj")

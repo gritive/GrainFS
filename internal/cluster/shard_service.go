@@ -638,7 +638,10 @@ func decodeStagedPromotePairs(data []byte) ([]stagedPromotePair, error) {
 		if err != nil {
 			return nil, fmt.Errorf("staged promote batch pair %d final key: %w", i, err)
 		}
-		pairs = append(pairs, stagedPromotePair{stagingKey: stagingKey, finalKey: finalKey})
+		// logicalShardSize is not on the wire (the batch encoding carries only the
+		// key pair): -1 ⇒ the receiver falls back to the on-disk shard size for the
+		// fsync class, preserving the pre-#986 remote-promote behavior.
+		pairs = append(pairs, stagedPromotePair{stagingKey: stagingKey, finalKey: finalKey, logicalShardSize: -1})
 		off = next
 	}
 	if off != len(data) {
@@ -1117,7 +1120,7 @@ func (s *ShardService) NativeWriteHandler() transport.ShardWriteHandler {
 		// post-promote read of Key decrypts correctly.
 		if req.StagingKey != "" {
 			if req.StreamSizeKnown {
-				if err := s.WriteLocalShardStreamStagedSizedContext(context.Background(), req.Bucket, req.StagingKey, req.Key, req.ShardIdx, body, req.StreamSize); err != nil {
+				if err := s.WriteLocalShardStreamStagedSizedContext(context.Background(), req.Bucket, req.StagingKey, req.Key, req.ShardIdx, body, req.StreamSize, -1); err != nil {
 					return err
 				}
 				observePutStage("shard_stream_server", "write_local_staged_sized", stageStart)
@@ -1191,8 +1194,8 @@ func (s *ShardService) WriteLocalShardStreamStagedContext(ctx context.Context, b
 
 // WriteLocalShardStreamStagedSizedContext is the known-size variant of staged
 // local shard writes; it streams to stagingKey while sealing with finalKey.
-func (s *ShardService) WriteLocalShardStreamStagedSizedContext(ctx context.Context, bucket, stagingKey, finalKey string, shardIdx int, body io.Reader, streamSize int64) error {
-	return s.local.WriteLocalShardStreamStagedSizedContext(ctx, bucket, stagingKey, finalKey, shardIdx, body, streamSize)
+func (s *ShardService) WriteLocalShardStreamStagedSizedContext(ctx context.Context, bucket, stagingKey, finalKey string, shardIdx int, body io.Reader, streamSize, logicalSize int64) error {
+	return s.local.WriteLocalShardStreamStagedSizedContext(ctx, bucket, stagingKey, finalKey, shardIdx, body, streamSize, logicalSize)
 }
 
 // EncodeEncryptedShardBuffer seals data as a GFSENC3 chunked shard using the DEK
@@ -1228,8 +1231,8 @@ func (s *ShardService) DeleteLocalShards(bucket, key string) error {
 
 // PromoteLocalStagedShards renames a segment's staged shard dirs to their final
 // path (PR1 segment staging).
-func (s *ShardService) PromoteLocalStagedShards(bucket, stagingKey, finalKey string) error {
-	return s.local.PromoteLocalStagedShards(bucket, stagingKey, finalKey)
+func (s *ShardService) PromoteLocalStagedShards(bucket, stagingKey, finalKey string, logicalShardSize int64) error {
+	return s.local.PromoteLocalStagedShards(bucket, stagingKey, finalKey, logicalShardSize)
 }
 
 // --- end facade delegates -------------------------------------------------
@@ -1385,7 +1388,10 @@ func (s *ShardService) handlePromoteStagedBatch(sr *shardRequest) []byte {
 		return s.errorResponse(err.Error())
 	}
 	for _, pair := range pairs {
-		if err := s.PromoteLocalStagedShards(sr.Bucket, pair.stagingKey, pair.finalKey); err != nil {
+		// Remote batch promote: the wire payload carries no logical shard size, so
+		// pass pair.logicalShardSize (decodeStagedPromotePairs sets it to -1) and the
+		// receiver falls back to the on-disk shard size for the fsync class.
+		if err := s.PromoteLocalStagedShards(sr.Bucket, pair.stagingKey, pair.finalKey, pair.logicalShardSize); err != nil {
 			return s.errorResponse(err.Error())
 		}
 	}

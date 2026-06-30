@@ -13,15 +13,11 @@ import (
 // TestSpoolECShardsWritesPlaintext confirms that EC shard spool files contain
 // raw (unencrypted) shard data after the double-encryption removal.
 func TestSpoolECShardsWritesPlaintext(t *testing.T) {
-	b := newTestDistributedBackendDEK(t)
 	dir := t.TempDir()
 	payload := bytes.Repeat([]byte("Q"), 1<<20) // 1 MiB
-	sp, err := b.spoolPutObject(context.Background(), "bkt", bytes.NewReader(payload), false)
-	require.NoError(t, err)
-	defer sp.Cleanup()
 
 	cfg := ECConfig{DataShards: 4, ParityShards: 2}
-	shards, err := spoolECShards(context.Background(), cfg, dir, sp)
+	shards, err := spoolECShardsStream(context.Background(), cfg, dir, bytes.NewReader(payload), int64(len(payload)))
 	require.NoError(t, err)
 	defer shards.Cleanup()
 
@@ -44,16 +40,10 @@ func TestSpoolECShardsWritesPlaintext(t *testing.T) {
 // TestSpoolECShardsZeroSizeIsClean verifies the zero-size path in spoolECShards
 // creates empty shard files without the now-removed domain tracking.
 func TestSpoolECShardsZeroSizeIsClean(t *testing.T) {
-	b := newTestDistributedBackendDEK(t)
 	dir := t.TempDir()
-	// Create a 0-byte spooled object directly — spoolPutObject will succeed.
-	sp, err := b.spoolPutObject(context.Background(), "bkt", bytes.NewReader(nil), false)
-	require.NoError(t, err)
-	defer sp.Cleanup()
-	require.Equal(t, int64(0), sp.Size)
 
 	cfg := ECConfig{DataShards: 4, ParityShards: 2}
-	shards, err := spoolECShards(context.Background(), cfg, dir, sp)
+	shards, err := spoolECShardsStream(context.Background(), cfg, dir, bytes.NewReader(nil), 0)
 	require.NoError(t, err)
 	defer shards.Cleanup()
 

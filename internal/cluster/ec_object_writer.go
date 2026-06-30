@@ -18,7 +18,7 @@ type ecObjectSizedShardStore interface {
 }
 
 type ecObjectStagedSizedShardStore interface {
-	WriteLocalShardStreamStagedSizedContext(ctx context.Context, bucket, stagingKey, finalKey string, shardIdx int, body io.Reader, streamSize int64) error
+	WriteLocalShardStreamStagedSizedContext(ctx context.Context, bucket, stagingKey, finalKey string, shardIdx int, body io.Reader, streamSize, logicalSize int64) error
 }
 
 type ecObjectRemoteStagedSizedShardStore interface {
@@ -158,6 +158,11 @@ type writeSegmentInput struct {
 	Group                  ShardGroupEntry
 	Cfg                    ECConfig
 	Data                   []byte
+	// LogicalSize is the segment's PRE-compression plaintext size. Data may be
+	// the zstd-compressed bytes (#986); LogicalSize is threaded so the shard
+	// fsync class keys off logical size, not the compressed on-disk size. -1 ⇒
+	// unknown (treat on-disk size as logical).
+	LogicalSize int64
 	// Weights is the per-peer disk-capacity weight aligned 1:1 with
 	// Group.PeerIDs (Weights[i] is the weight of Group.PeerIDs[i]). nil ⇒
 	// unweighted HRW. Computed once by the writer (clusterSegmentBackend) so the
@@ -202,7 +207,7 @@ func (w ecObjectWriter) writeOneSegment(ctx context.Context, in writeSegmentInpu
 		SegmentIdx:       in.SegmentIdx,
 		StagingTxnID:     in.StagingTxnID,
 	}
-	res, err := w.writeDataShards(ctx, plan, in.Data)
+	res, err := w.writeDataShards(ctx, plan, in.Data, in.LogicalSize)
 	if err != nil {
 		return PlacementRecord{}, "", "", fmt.Errorf("write segment %d (blob %s): %w", in.SegmentIdx, in.SegmentBlobID, err)
 	}
@@ -214,7 +219,17 @@ func (w ecObjectWriter) writeOneSegment(ctx context.Context, in writeSegmentInpu
 	return rec, res.ETag, in.SegmentBlobID, nil
 }
 
-func (w ecObjectWriter) writeDataShards(ctx context.Context, plan ecObjectWritePlan, data []byte) (ecObjectWriteResult, error) {
+// writeDataShards EC-encodes `data` (post-compression on the chunked segment
+// path) and writes each shard. logicalSize is the segment's PRE-compression
+// plaintext size (-1 when unknown/uncompressed); it is split per-data-shard and
+// threaded to the shard writers purely for the fsync-class decision, so a
+// logically-large but well-compressed redundant shard still skips the
+// commit-tail fsync (EC owns its durability).
+func (w ecObjectWriter) writeDataShards(ctx context.Context, plan ecObjectWritePlan, data []byte, logicalSize int64) (ecObjectWriteResult, error) {
+	perShardLogical := int64(-1)
+	if logicalSize >= 0 && plan.Config.DataShards > 0 {
+		perShardLogical = (logicalSize + int64(plan.Config.DataShards) - 1) / int64(plan.Config.DataShards)
+	}
 	splitStart := time.Now()
 	shards, padding, err := ecSplitBodiesPooled(plan.Config, data)
 	if err != nil {
@@ -230,12 +245,9 @@ func (w ecObjectWriter) writeDataShards(ctx context.Context, plan ecObjectWriteP
 		ShardIndex: plan.SegmentIdx,
 	})
 	header := encodeShardHeader(int64(len(data)))
-	sp := &spooledObject{
-		Size: int64(len(data)),
-		ETag: "", // intentionally empty: caller (WriteSegmentBytes) discards this ETag; segment checksum is xxhash3 via storage.ChecksumOf
-	}
-
-	result, err := w.writeShardReadersWithSize(ctx, plan, sp, func(idx int) (io.Reader, error) {
+	// ETag intentionally empty: caller (WriteSegmentBytes) discards this ETag;
+	// segment checksum is xxhash3 via storage.ChecksumOf.
+	result, err := w.writeShardReadersWithSize(ctx, plan, int64(len(data)), perShardLogical, "", func(idx int) (io.Reader, error) {
 		if idx < 0 || idx >= len(shards) {
 			return nil, fmt.Errorf("ec data shard %d out of range", idx)
 		}
@@ -266,34 +278,52 @@ func (w ecObjectWriter) writeDataShards(ctx context.Context, plan ecObjectWriteP
 	return result, nil
 }
 
-func (w ecObjectWriter) writeSpooledShards(ctx context.Context, plan ecObjectWritePlan, spoolDir string, sp *spooledObject) (ecObjectWriteResult, error) {
+// writeStreamShards feeds a plain one-pass reader + known size straight into the
+// whole-object EC stream encoder (spoolECShardsStream); it never stages the body
+// to a disk temp file. `etagFn` is invoked AFTER the source has
+// been fully consumed by the encoder, so callers can compute the object ETag via
+// an inline md5 tee over `src` and read it at EOF; a nil etagFn yields an empty
+// ETag. The caller owns `src`'s lifecycle (close after this returns).
+func (w ecObjectWriter) writeStreamShards(ctx context.Context, plan ecObjectWritePlan, spoolDir string, src io.Reader, size int64, etagFn func() string) (ecObjectWriteResult, error) {
 	stageStart := time.Now()
-	shards, err := spoolECShards(ctx, plan.Config, spoolDir, sp)
+	shards, err := spoolECShardsStream(ctx, plan.Config, spoolDir, src, size)
 	if err != nil {
 		return ecObjectWriteResult{}, err
 	}
 	observePutStage("ec", "spool_shards", stageStart)
 
-	return w.writeShardReadersWithSizeCleanup(ctx, plan, sp, func(idx int) (io.Reader, error) {
+	etag := ""
+	if etagFn != nil {
+		etag = etagFn()
+	}
+	// Whole-object stream path is never compressed, so the on-disk shard size IS
+	// the logical size for the fsync class: pass -1 (use on-disk).
+	return w.writeShardReadersWithSizeCleanup(ctx, plan, size, -1, etag, func(idx int) (io.Reader, error) {
 		return shards.OpenShard(idx)
 	}, shards.ShardSize, "ec", shards.Cleanup)
 }
 
+// perShardLogicalSize is the segment's PRE-compression per-data-shard size used
+// ONLY for the fsync-class decision (-1 ⇒ unknown/uncompressed ⇒ on-disk size).
 func (w ecObjectWriter) writeShardReadersWithSize(
 	ctx context.Context,
 	plan ecObjectWritePlan,
-	sp *spooledObject,
+	size int64,
+	perShardLogicalSize int64,
+	etag string,
 	openShard func(idx int) (io.Reader, error),
 	shardSize func(idx int) (int64, error),
 	metricPath string,
 ) (ecObjectWriteResult, error) {
-	return w.writeShardReadersWithSizeCleanup(ctx, plan, sp, openShard, shardSize, metricPath, nil)
+	return w.writeShardReadersWithSizeCleanup(ctx, plan, size, perShardLogicalSize, etag, openShard, shardSize, metricPath, nil)
 }
 
 func (w ecObjectWriter) writeShardReadersWithSizeCleanup(
 	ctx context.Context,
 	plan ecObjectWritePlan,
-	sp *spooledObject,
+	size int64,
+	perShardLogicalSize int64,
+	etag string,
 	openShard func(idx int) (io.Reader, error),
 	shardSize func(idx int) (int64, error),
 	metricPath string,
@@ -339,7 +369,7 @@ func (w ecObjectWriter) writeShardReadersWithSizeCleanup(
 		go func() {
 			defer wg.Done()
 			ep := w.endpointFor(node)
-			if werr := ep.WriteShardReader(writeCtx, plan.Bucket, shardKey, stagingShardKey, i, openShard, shardSize); werr != nil {
+			if werr := ep.WriteShardReader(writeCtx, plan.Bucket, shardKey, stagingShardKey, i, perShardLogicalSize, openShard, shardSize); werr != nil {
 				resultCh <- shardWriteResult{shardIdx: i, node: node, err: &ecObjectShardWriteError{shardIdx: i, node: node, err: werr}}
 				return
 			}
@@ -375,8 +405,8 @@ func (w ecObjectWriter) writeShardReadersWithSizeCleanup(
 	}
 	successResult := func(done <-chan struct{}) ecObjectWriteResult {
 		return ecObjectWriteResult{
-			Size:      sp.Size,
-			ETag:      sp.ETag,
+			Size:      size,
+			ETag:      etag,
 			ModTime:   time.Now().Unix(),
 			ShardKey:  shardKey,
 			Placement: cloneStringSlice(plan.Placement),

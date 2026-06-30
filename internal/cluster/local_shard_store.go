@@ -223,7 +223,7 @@ func (l *LocalShardStore) writeLocalShardStaged(ctx context.Context, bucket, sta
 // encryption AAD is derived from aadKey. The two are equal for a normal write and differ for a staged
 // write (pathKey = staging path, aadKey = final logical key).
 func (l *LocalShardStore) writeLocalShardAAD(ctx context.Context, bucket, key, aadKey string, shardIdx int, data []byte) error {
-	return l.writeLocalShardAADStream(ctx, bucket, key, aadKey, shardIdx, bytes.NewReader(data), int64(len(data)))
+	return l.writeLocalShardAADStream(ctx, bucket, key, aadKey, shardIdx, bytes.NewReader(data), int64(len(data)), -1)
 }
 
 // shardCountingReader counts plaintext bytes consumed by the encoder so a short
@@ -251,7 +251,13 @@ func (c *shardCountingReader) Read(p []byte) (int, error) {
 // buffered io.ReadFull path provided. The encoded ciphertext is streamed
 // straight into the shard temp file (atomicShardFileWrite), so no whole
 // encrypted shard is ever materialized as a []byte.
-func (l *LocalShardStore) writeLocalShardAADStream(ctx context.Context, bucket, key, aadKey string, shardIdx int, body io.Reader, sizeHint int64) error {
+// logicalSize is the shard's pre-compression (logical) plaintext size, used ONLY
+// for the fsync-class decision (large+redundant ⇒ EC owns durability, skip
+// fsync). It is distinct from sizeHint, which is the bytes actually streamed in
+// `body` (post-compression on the chunked segment path). Pass -1 when the
+// logical size is unknown/irrelevant (uncompressed paths), keeping the on-disk
+// size as the fsync-class input.
+func (l *LocalShardStore) writeLocalShardAADStream(ctx context.Context, bucket, key, aadKey string, shardIdx int, body io.Reader, sizeHint, logicalSize int64) error {
 	dir, err := l.getShardDir(bucket, key, shardIdx)
 	if err != nil {
 		return err
@@ -286,7 +292,7 @@ func (l *LocalShardStore) writeLocalShardAADStream(ctx context.Context, bucket, 
 	// EncOpen/EncWrite/EncSync/EncClose/EncRename/DirSync stages and owns the
 	// fsync/dir-sync durability; the Encode stage below frames the whole operation
 	// for error attribution and overall timing.
-	werr := l.atomicShardFileWrite(ctx, dir, path, shardIdx, func(w io.Writer) error {
+	werr := l.atomicShardFileWrite(ctx, dir, path, shardIdx, logicalSize, func(w io.Writer) error {
 		if err := eccodec.EncodeEncryptedShard(w, cr, l.segEnc, ShardAADFields(bucket, aadKey, shardIdx), eccodec.DefaultEncryptedChunkSize); err != nil {
 			return err
 		}
@@ -472,14 +478,14 @@ func (l *LocalShardStore) syncDirChain(leaf, stop string) error {
 // stages (EncOpen/EncWrite/EncSync/EncClose/EncRename/DirSync) report the
 // ciphertext bytes written (cw.n); EncOpen fires before any byte is written so it
 // reports 0 — the put-trace sink is a diagnostic-only no-op in production.
-func (l *LocalShardStore) atomicShardFileWrite(ctx context.Context, dir, path string, shardIdx int, writeBody func(w io.Writer) error) error {
+func (l *LocalShardStore) atomicShardFileWrite(ctx context.Context, dir, path string, shardIdx int, logicalSize int64, writeBody func(w io.Writer) error) error {
 	if shardDirectIOEnabled() {
-		return l.atomicShardFileWriteDirectStream(ctx, dir, path, shardIdx, writeBody)
+		return l.atomicShardFileWriteDirectStream(ctx, dir, path, shardIdx, logicalSize, writeBody)
 	}
-	return l.atomicShardFileWriteStandard(ctx, dir, path, shardIdx, writeBody)
+	return l.atomicShardFileWriteStandard(ctx, dir, path, shardIdx, logicalSize, writeBody)
 }
 
-func (l *LocalShardStore) atomicShardFileWriteStandard(ctx context.Context, dir, path string, shardIdx int, writeBody func(w io.Writer) error) error {
+func (l *LocalShardStore) atomicShardFileWriteStandard(ctx context.Context, dir, path string, shardIdx int, logicalSize int64, writeBody func(w io.Writer) error) error {
 	tmp := fmt.Sprintf("%s.%d.%d.tmp", path, os.Getpid(), time.Now().UnixNano())
 	openStart := time.Now()
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
@@ -523,16 +529,16 @@ func (l *LocalShardStore) atomicShardFileWriteStandard(ctx context.Context, dir,
 		ShardTargetClass: "local",
 	})
 
-	return l.finishAtomicShardFileWrite(ctx, dir, path, tmp, f, written, shardIdx)
+	return l.finishAtomicShardFileWrite(ctx, dir, path, tmp, f, written, logicalSize, shardIdx)
 }
 
-func (l *LocalShardStore) atomicShardFileWriteDirectStream(ctx context.Context, dir, path string, shardIdx int, writeBody func(w io.Writer) error) error {
+func (l *LocalShardStore) atomicShardFileWriteDirectStream(ctx context.Context, dir, path string, shardIdx int, logicalSize int64, writeBody func(w io.Writer) error) error {
 	tmp := fmt.Sprintf("%s.%d.%d.tmp", path, os.Getpid(), time.Now().UnixNano())
 	openStart := time.Now()
 	f, err := openDirectShardFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		_ = os.Remove(tmp)
-		return l.atomicShardFileWriteStandard(ctx, dir, path, shardIdx, writeBody)
+		return l.atomicShardFileWriteStandard(ctx, dir, path, shardIdx, logicalSize, writeBody)
 	}
 	ObservePutTraceStage(ctx, PutTraceStageShardWriteLocalEncOpen, openStart, PutTraceStageFields{
 		ShardIndex:       shardIdx,
@@ -575,7 +581,7 @@ func (l *LocalShardStore) atomicShardFileWriteDirectStream(ctx context.Context, 
 		ShardTargetClass: "local",
 	})
 
-	return l.finishAtomicShardFileWrite(ctx, dir, path, tmp, f, written, shardIdx)
+	return l.finishAtomicShardFileWrite(ctx, dir, path, tmp, f, written, logicalSize, shardIdx)
 }
 
 func writeFileFull(f io.Writer, payload []byte) error {
@@ -719,15 +725,27 @@ func (w *directShardStreamWriter) writeAlignedBlocks(p []byte) error {
 	return nil
 }
 
-func (l *LocalShardStore) finishAtomicShardFileWrite(ctx context.Context, dir, path, tmp string, f *os.File, written int64, shardIdx int) error {
+func (l *LocalShardStore) finishAtomicShardFileWrite(ctx context.Context, dir, path, tmp string, f *os.File, written, logicalSize int64, shardIdx int) error {
 	cleanup := func() {
 		_ = f.Close()
 		_ = os.Remove(tmp)
 	}
 
-	// requireFsync is derived from the ciphertext bytes actually written — the same
-	// value the callers previously passed as shardWriteRequiresFsync(len(payload)).
-	requireFsync := l.shardWriteRequiresFsync(int(written))
+	// requireFsync is derived from the shard's LOGICAL (pre-compression) size when
+	// the caller knows it (logicalSize >= 0), else from the ciphertext bytes
+	// actually written. Per-segment zstd (#986) can shrink a logically-large
+	// redundant shard to a few on-disk bytes; classifying on `written` would
+	// mis-bucket it as "small" and fsync it, reintroducing the commit-tail
+	// dir-fsync the EC-durability optimization exists to avoid. The fsync class is
+	// about LOGICAL size (does this shard rely on EC reconstruction for
+	// durability), not how well it compressed. logicalSize < 0 (whole-object EC,
+	// COPY, []byte, unsized paths — none compressed) keeps the on-disk-size
+	// behavior unchanged.
+	fsyncClassLen := int(written)
+	if logicalSize >= 0 {
+		fsyncClassLen = int(logicalSize)
+	}
+	requireFsync := l.shardWriteRequiresFsync(fsyncClassLen)
 
 	// EncSync fsyncs the shard file only when requireFsync is set: for small
 	// shards and for large no-redundancy shards (no parity to reconstruct from).
@@ -821,7 +839,11 @@ func (l *LocalShardStore) finishAtomicShardFileWrite(ctx context.Context, dir, p
 // w.Write(payload); the fsync class is derived from the bytes written, identical
 // to the old caller-passed requireFsync (== shardWriteRequiresFsync(len(payload))).
 func (l *LocalShardStore) writeEncryptedShardFile(ctx context.Context, dir, path string, payload []byte, shardIdx int) error {
-	return l.atomicShardFileWrite(ctx, dir, path, shardIdx, func(w io.Writer) error {
+	// Sealed verbatim path (seal-at-source / EC-repair): the payload IS the
+	// already-encoded shard, so the on-disk bytes are the fsync-class input
+	// (logicalSize -1). This path is the large-object streaming band and never
+	// compresses, so on-disk size mirrors logical size.
+	return l.atomicShardFileWrite(ctx, dir, path, shardIdx, -1, func(w io.Writer) error {
 		_, err := w.Write(payload)
 		return err
 	})
@@ -853,12 +875,20 @@ func (l *LocalShardStore) shardWriteRequiresFsync(payloadLen int) bool {
 // promoteShardRequiresFsync decides whether a staging→final promote must fsync
 // the final dir chain, mirroring shardWriteRequiresFsync on the write side: a
 // large + EC-redundant shard skips it (EC reconstruction + the scrubber own
-// durability), so the synchronous dir-fsync stays off the commit-tail. Sizing is
-// from the on-disk (encrypted) shard file, whose few bytes of AEAD overhead never
-// straddle the 1 MiB boundary in practice. A shard whose size can't be read falls
-// back to fsync — the safe default for the dst-already-present race path, whose
-// shard file may not be present on this dataDir.
-func (l *LocalShardStore) promoteShardRequiresFsync(dst string, d int) bool {
+// durability), so the synchronous dir-fsync stays off the commit-tail.
+// logicalSize is the shard's pre-compression (logical) size threaded from the
+// commit-side placement so the decision mirrors the write side: per-segment zstd
+// (#986) shrinks the on-disk shard, so classifying on the on-disk size would
+// mis-bucket a logically-large redundant shard as "small" and force the very
+// dir-fsync this optimization removes. logicalSize < 0 (unknown — e.g. the remote
+// batch-promote receiver, whose wire payload carries no logical size, or the
+// dst-already-present race path whose shard file may be absent on this dataDir)
+// falls back to the on-disk size, and a shard whose size can't be read falls back
+// to fsync (the safe default).
+func (l *LocalShardStore) promoteShardRequiresFsync(dst string, d int, logicalSize int64) bool {
+	if logicalSize >= 0 {
+		return l.shardWriteRequiresFsync(int(logicalSize))
+	}
 	info, err := os.Stat(filepath.Join(dst, fmt.Sprintf("shard_%d", d)))
 	if err != nil {
 		return true
@@ -893,14 +923,20 @@ func (l *LocalShardStore) WriteLocalShardStreamStagedContext(ctx context.Context
 	return l.writeLocalShardStaged(ctx, bucket, stagingKey, finalKey, shardIdx, data)
 }
 
-func (l *LocalShardStore) WriteLocalShardStreamStagedSizedContext(ctx context.Context, bucket, stagingKey, finalKey string, shardIdx int, body io.Reader, streamSize int64) error {
+// WriteLocalShardStreamStagedSizedContext writes a staged shard of known stream
+// size. logicalSize is the shard's pre-compression (logical) size threaded for
+// the fsync-class decision (per-segment zstd shrinks the on-disk bytes, so the
+// on-disk size would mis-bucket a logically-large redundant shard as "small" and
+// fsync it). Pass -1 when unknown (e.g. the remote shard-write receiver, which
+// has no logical size on the wire) to keep the on-disk-size fsync behavior.
+func (l *LocalShardStore) WriteLocalShardStreamStagedSizedContext(ctx context.Context, bucket, stagingKey, finalKey string, shardIdx int, body io.Reader, streamSize, logicalSize int64) error {
 	if streamSize < 0 {
 		return l.WriteLocalShardStreamStagedContext(ctx, bucket, stagingKey, finalKey, shardIdx, body)
 	}
 	if rawCap := maxRawShardPayload(false); streamSize > rawCap {
 		return fmt.Errorf("shard payload too large: %d", streamSize)
 	}
-	return l.writeLocalShardAADStream(ctx, bucket, stagingKey, finalKey, shardIdx, body, streamSize)
+	return l.writeLocalShardAADStream(ctx, bucket, stagingKey, finalKey, shardIdx, body, streamSize, logicalSize)
 }
 
 func (l *LocalShardStore) writeLocalShardStreamContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader, streamSize int64) error {
@@ -914,7 +950,7 @@ func (l *LocalShardStore) writeLocalShardStreamContext(ctx context.Context, buck
 		if streamSize > rawCap {
 			return fmt.Errorf("shard payload too large: %d", streamSize)
 		}
-		return l.writeLocalShardAADStream(ctx, bucket, key, key, shardIdx, body, streamSize)
+		return l.writeLocalShardAADStream(ctx, bucket, key, key, shardIdx, body, streamSize, -1)
 	}
 	// Unsized path: the length is unknown, so buffer the body bounded by a 64 MiB
 	// memory cap (the overflow check needs the full byte count) and route through
@@ -935,7 +971,11 @@ func (l *LocalShardStore) writeLocalShardStreamContext(ctx context.Context, buck
 // this dataDir) is skipped, and a pre-existing destination (concurrent completer / retry) is treated as
 // done. The shard files keep their final-key AAD (set at staged-write time), so post-promote reads
 // decrypt correctly. PR1 segment staging.
-func (l *LocalShardStore) PromoteLocalStagedShards(bucket, stagingKey, finalKey string) error {
+// logicalShardSize is the segment's pre-compression per-shard size, threaded so
+// the promote dir-fsync class mirrors the write side (see promoteShardRequiresFsync).
+// Pass -1 when unknown (remote batch-promote receiver) to fall back to the on-disk
+// shard size.
+func (l *LocalShardStore) PromoteLocalStagedShards(bucket, stagingKey, finalKey string, logicalShardSize int64) error {
 	// promotedAny guards against committing a manifest that references absent
 	// shards: every node in a segment's placement holds at least one shard, so a
 	// promote that renames nothing AND finds nothing already at the final path
@@ -958,7 +998,7 @@ func (l *LocalShardStore) PromoteLocalStagedShards(bucket, stagingKey, finalKey 
 		// so the final dir entry is visible for read-after-write; only the crash
 		// durability of that entry defers to EC/scrubber. This keeps the promote
 		// round off the PUT commit-tail latency (the dir-fsync was ~all of it).
-		if l.promoteShardRequiresFsync(dst, d) {
+		if l.promoteShardRequiresFsync(dst, d, logicalShardSize) {
 			if err := l.syncDirChain(dst, l.dataDirs[d]); err != nil {
 				return fmt.Errorf("promote staged segment fsync %s: %w", dst, err)
 			}
