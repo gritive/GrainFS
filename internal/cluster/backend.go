@@ -229,7 +229,7 @@ type DistributedBackend struct {
 	qms *QuorumMetaStore
 
 	// chunkedPutChunkSize is a test seam; zero keeps the production default.
-	chunkedPutChunkSize int
+	chunkedPutChunkSize int64
 
 	// bypassBucketCheck skips the HeadBucket pre-check in PutObject. Set by
 	// GroupBackend: bucket existence is guaranteed by the router (design doc

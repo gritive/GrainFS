@@ -22,6 +22,38 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
+// TestAdaptiveChunkSize locks the size-aware chunk policy derived from the GCP
+// size×chunk sweep: small objects stay single-segment (split overhead dominates,
+// e.g. 1MiB PUT dropped 288→157 MB/s when split), mid-size objects split into ~2
+// (10MiB: +13.7% at 2 segments), and large objects cap at DefaultChunkSize so
+// they split naturally without per-segment overhead blowup.
+func TestAdaptiveChunkSize(t *testing.T) {
+	cases := []struct {
+		name         string
+		size         int64
+		wantSegments int
+	}{
+		{"1MiB stays single (split overhead dominates)", 1 << 20, 1},
+		{"9MiB single (below split floor)", 9 << 20, 1},
+		{"10MiB splits to 2 (sweet spot)", 10 << 20, 2},
+		{"20MiB two segments", 20 << 20, 2},
+		{"64MiB four segments at 16MiB cap", 64 << 20, 4},
+		{"unknown size: single chunk", 0, 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			chunk := adaptiveChunkSize(c.size)
+			require.Greater(t, chunk, int64(0))
+			require.LessOrEqual(t, chunk, int64(storage.DefaultChunkSize))
+			segs := 1
+			if c.size > 0 {
+				segs = int((c.size + chunk - 1) / chunk)
+			}
+			require.Equal(t, c.wantSegments, segs)
+		})
+	}
+}
+
 // fakeSegmentBackendDeps wires the four test seams on clusterSegmentBackend.
 // Each closure records calls so individual tests can assert call counts,
 // argument equivalence, and ordering.
@@ -792,9 +824,9 @@ func TestAcquireChunkedMultipartCompleteSlotHonorsContext(t *testing.T) {
 }
 
 func TestChunkedMultipartCompleteChunkSizeCapsDefault(t *testing.T) {
-	require.Equal(t, 8<<20, chunkedMultipartCompleteChunkSize(storage.DefaultChunkSize))
-	require.Equal(t, 4<<20, chunkedMultipartCompleteChunkSize(4<<20))
-	require.Equal(t, 8<<20, chunkedMultipartCompleteChunkSize(0))
+	require.Equal(t, int64(8<<20), chunkedMultipartCompleteChunkSize(storage.DefaultChunkSize))
+	require.Equal(t, int64(4<<20), chunkedMultipartCompleteChunkSize(4<<20))
+	require.Equal(t, int64(8<<20), chunkedMultipartCompleteChunkSize(0))
 }
 
 // errReaderAfter wraps an underlying io.Reader; once the cumulative bytes

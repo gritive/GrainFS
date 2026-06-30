@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.771.0] - 2026-06-30
+
+### Performance
+- **Adaptive chunk size for chunked PUT.** Mid-size objects are now split into
+  ~2 segments instead of landing in a single 16MiB chunk, so the 8-worker
+  SegmentWriter overlaps EC encode and shard writes (read‖EC‖write pipeline)
+  instead of running them serially in one worker. On a 4-node cluster this lifts
+  10MiB PUT throughput ~+13% (391→446 MB/s, 0.95× of MinIO on identical
+  hardware). Small objects stay single-segment (splitting them loses throughput
+  to per-segment overhead) and large objects cap at the default chunk size.
+
 ## [0.0.770.0] - 2026-06-30
 
 ### Performance

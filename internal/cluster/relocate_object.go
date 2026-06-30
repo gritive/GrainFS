@@ -98,7 +98,7 @@ func (b *DistributedBackend) relocateObjectToRedundantGroup(ctx context.Context,
 
 	// Pre-allocate blobIDs + placements sized to the exact segment count, mirroring
 	// putObjectChunked. A 0-byte object still gets one (empty) segment.
-	chunkSize := int64(b.effectiveChunkedPutChunkSize())
+	chunkSize := b.effectiveChunkedPutChunkSize(obj.Size)
 	numSegments := int((obj.Size + chunkSize - 1) / chunkSize)
 	if numSegments < 1 {
 		numSegments = 1

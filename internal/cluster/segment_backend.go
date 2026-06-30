@@ -293,7 +293,7 @@ func segmentStagingShardKey(txnID, blobID string) string {
 	return SegStagingPrefix + "/" + txnID + "/" + blobID
 }
 
-func chunkedMultipartCompleteChunkSize(defaultSize int) int {
+func chunkedMultipartCompleteChunkSize(defaultSize int64) int64 {
 	if defaultSize <= 0 || defaultSize > defaultChunkedMultipartCompleteSize {
 		return defaultChunkedMultipartCompleteSize
 	}
@@ -367,7 +367,7 @@ func (b *DistributedBackend) putObjectChunkedReader(
 	// object still gets one (empty) segment so every simple PUT — including
 	// empty objects — takes this single chunked path (mirrors the multipart
 	// variant + SegmentWriter, which always emits one segment for empty input).
-	chunkSize := int64(b.effectiveChunkedPutChunkSize())
+	chunkSize := b.effectiveChunkedPutChunkSize(size)
 	numSegments := int((size + chunkSize - 1) / chunkSize)
 	if numSegments < 1 {
 		numSegments = 1
@@ -409,7 +409,7 @@ func (b *DistributedBackend) putMultipartObjectChunked(
 	beforeCommit func() error,
 	tags []storage.Tag,
 ) (*storage.Object, error) {
-	chunkSize := int64(chunkedMultipartCompleteChunkSize(b.effectiveChunkedPutChunkSize()))
+	chunkSize := chunkedMultipartCompleteChunkSize(b.effectiveChunkedPutChunkSize(0))
 	numSegments := int((manifest.TotalSize + chunkSize - 1) / chunkSize)
 	if numSegments < 1 {
 		numSegments = 1
@@ -443,11 +443,41 @@ func (b *DistributedBackend) putMultipartObjectChunked(
 		userMetadata, sseAlgorithm, modTime, preserveModTime, expectedETag, beforeCommit, manifest.Parts, tags, uploadID)
 }
 
-func (b *DistributedBackend) effectiveChunkedPutChunkSize() int {
+func (b *DistributedBackend) effectiveChunkedPutChunkSize(objectSize int64) int64 {
 	if b != nil && b.chunkedPutChunkSize > 0 {
 		return b.chunkedPutChunkSize
 	}
-	return storage.DefaultChunkSize
+	return adaptiveChunkSize(objectSize)
+}
+
+// adaptiveChunkSizeFloor: a segment smaller than this is not worth its own EC +
+// shard-write + staging-promote overhead — below it, splitting LOSES throughput
+// (the GCP sweep: a 1MiB PUT fell 288→157 MB/s when forced to 2 segments).
+const adaptiveChunkSizeFloor = 5 << 20 // 5 MiB
+
+// adaptiveChunkSize picks a chunk so a PUT splits into ~2 segments when that
+// helps and stays single-segment when it doesn't, per the size×chunk sweep:
+//   - small objects (chunk would fall below the floor): single segment — the
+//     8-worker SegmentWriter has nothing to parallelize and per-segment overhead
+//     dominates.
+//   - mid objects: split into 2 (objectSize/2) — the sweet spot (read‖EC‖write
+//     pipeline fills without over-splitting; 5-segment was worse than 2).
+//   - large objects: cap at DefaultChunkSize so they split naturally into a
+//     bounded number of segments instead of objectSize/2 ballooning the chunk.
+//
+// objectSize <= 0 (unknown length) keeps the single DefaultChunkSize chunk.
+func adaptiveChunkSize(objectSize int64) int64 {
+	if objectSize <= 0 {
+		return storage.DefaultChunkSize
+	}
+	chunk := objectSize / 2
+	if chunk < adaptiveChunkSizeFloor {
+		return storage.DefaultChunkSize // single segment
+	}
+	if chunk > storage.DefaultChunkSize {
+		return storage.DefaultChunkSize // cap → natural multi-segment
+	}
+	return chunk
 }
 
 // runChunkedPut is the test-injectable core of putObjectChunked. The caller
