@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/cloudwego/hertz/pkg/protocol"
 )
 
 // shardWritePair wires a server transport with a recording native handler and a
@@ -151,6 +153,38 @@ func TestShardWrite_StreamSizeRoundTrips(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("handler not invoked")
+	}
+}
+
+func TestShardWrite_KnownSizeSetsBodyContentLength(t *testing.T) {
+	hreq := protocol.AcquireRequest()
+	defer protocol.ReleaseRequest(hreq)
+
+	payload := []byte("known-size-shard")
+	setShardWriteBody(hreq, ShardWriteRequest{
+		StreamSizeKnown: true,
+		StreamSize:      int64(len(payload)),
+	}, bytes.NewReader(payload))
+
+	if got := hreq.Header.ContentLength(); got != len(payload) {
+		t.Fatalf("ContentLength = %d, want %d", got, len(payload))
+	}
+	if !hreq.IsBodyStream() {
+		t.Fatal("known-size shard body must remain streamed")
+	}
+}
+
+func TestShardWrite_UnknownSizeKeepsChunkedBody(t *testing.T) {
+	hreq := protocol.AcquireRequest()
+	defer protocol.ReleaseRequest(hreq)
+
+	setShardWriteBody(hreq, ShardWriteRequest{}, bytes.NewReader([]byte("unknown-size-shard")))
+
+	if got := hreq.Header.ContentLength(); got != -1 {
+		t.Fatalf("ContentLength = %d, want -1 for unknown-size stream", got)
+	}
+	if !hreq.IsBodyStream() {
+		t.Fatal("unknown-size shard body must remain streamed")
 	}
 }
 

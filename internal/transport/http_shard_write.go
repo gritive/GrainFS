@@ -170,11 +170,11 @@ func (t *HTTPTransport) ShardWrite(ctx context.Context, addr string, req ShardWr
 	defer protocol.ReleaseResponse(hresp)
 	hreq.SetMethod(consts.MethodPost)
 	hreq.SetRequestURI("https://" + addr + httpShardWritePath + "?" + q.Encode())
-	// Streamed request body (size unknown — the put pipeline streams through an
-	// io.Pipe). hertzBodyReader loops past (0,nil) reads (Hertz panics on them).
+	// Streamed request body. hertzBodyReader loops past (0,nil) reads (Hertz
+	// panics on them).
 	// A streamed body is un-retryable by design (httpRetryIf refuses IsBodyStream),
 	// identical to the tunnel CallWithBody semantics.
-	hreq.SetBodyStream(hertzBodyReader{r: body}, -1)
+	setShardWriteBody(hreq, req, body)
 
 	if err := c.Do(ctx, hreq, hresp); err != nil {
 		return fmt.Errorf("shard write %s: %w", addr, err)
@@ -189,4 +189,15 @@ func (t *HTTPTransport) ShardWrite(ctx context.Context, addr string, req ShardWr
 	// Drain (empty on success) so the conn returns to the pool clean.
 	_, _ = io.Copy(io.Discard, hresp.BodyStream())
 	return nil
+}
+
+func setShardWriteBody(hreq *protocol.Request, req ShardWriteRequest, body io.Reader) {
+	bodySize := -1
+	if req.StreamSizeKnown && req.StreamSize >= 0 {
+		const maxInt = int(^uint(0) >> 1)
+		if req.StreamSize <= int64(maxInt) {
+			bodySize = int(req.StreamSize)
+		}
+	}
+	hreq.SetBodyStream(hertzBodyReader{r: body}, bodySize)
 }

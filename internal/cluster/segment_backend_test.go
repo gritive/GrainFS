@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
@@ -622,15 +623,105 @@ func TestPutObjectChunked_BatchesStagedPromotesByNode(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Len(t, calls, 2, "two placement nodes should produce two promote batches, not segment*node calls")
-	require.Equal(t, "node-a", calls[0].node)
-	require.Equal(t, "node-b", calls[1].node)
+	callsByNode := make(map[string][]stagedPromotePair, len(calls))
 	for _, call := range calls {
-		require.Len(t, call.pairs, 2, "each node batch should promote both segment blobs")
-		for i, pair := range call.pairs {
+		callsByNode[call.node] = call.pairs
+	}
+	require.ElementsMatch(t, []string{"node-a", "node-b"}, []string{calls[0].node, calls[1].node})
+	for _, node := range []string{"node-a", "node-b"} {
+		pairs := callsByNode[node]
+		require.Len(t, pairs, 2, "each node batch should promote both segment blobs")
+		for i, pair := range pairs {
 			require.Equal(t, segmentStagingShardKey("txn-promote", blobIDs[i]), pair.stagingKey)
 			require.Equal(t, "large.bin/segments/"+blobIDs[i], pair.finalKey)
 		}
 	}
+}
+
+func TestPutObjectChunked_EmitsPromoteAndQuorumMetaTrace(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "put-trace.jsonl")
+	t.Setenv("GRAINFS_PUT_TRACE_FILE", path)
+	t.Setenv("GRAINFS_NODE_ID", "node-trace")
+	reloadPutTraceSinkForTest()
+	t.Cleanup(reloadPutTraceSinkForTest)
+
+	chunk := testChunkedPutChunkSize
+	payload := bytes.Repeat([]byte("T"), chunk)
+	sp := makeSpool(t, payload)
+	deps := newFakeBackendWithGroups(fourPGFixture())
+	deps.writePeer = func(int) []string { return []string{"node-a", "node-b"} }
+
+	blobIDs := []string{uuid.Must(uuid.NewV7()).String()}
+	csb := newCSBWithTestChunks(deps, blobIDs)
+	csb.stagingTxnID = "txn-trace"
+	csb.promoteStagedBatchFn = func(_ context.Context, _ string, _ string, _ []stagedPromotePair) error {
+		return nil
+	}
+
+	body, err := sp.Open()
+	require.NoError(t, err)
+	defer body.Close()
+	ctx := ContextWithPutTrace(context.Background(), PutTraceRequest{
+		Bucket:      "bucket",
+		Key:         "large.bin",
+		Ingress:     PutTraceIngressLocalLeader,
+		SizeClass:   PutTraceSizeSmall,
+		ForwardMode: PutTraceForwardNone,
+	})
+	_, err = runChunkedPut(ctx, csb, body,
+		"bucket", "large.bin", "v1", "application/octet-stream",
+		nil, "", 0, false, "", nil, nil, nil)
+	require.NoError(t, err)
+
+	events := readPutTraceEvents(t, path)
+	requirePutTraceStage(t, events, PutTraceStagePromoteStagedShards)
+	requirePutTraceStage(t, events, PutTraceStageQuorumMetaWrite)
+}
+
+func TestPutObjectChunked_PromotesStagedNodeBatchesConcurrently(t *testing.T) {
+	chunk := testChunkedPutChunkSize
+	payload := bytes.Repeat([]byte("P"), 2*chunk)
+	sp := makeSpool(t, payload)
+	deps := newFakeBackendWithGroups(fourPGFixture())
+	deps.writePeer = func(int) []string { return []string{"node-a", "node-b"} }
+
+	blobIDs := []string{
+		uuid.Must(uuid.NewV7()).String(),
+		uuid.Must(uuid.NewV7()).String(),
+	}
+	csb := newCSBWithTestChunks(deps, blobIDs)
+	csb.stagingTxnID = "txn-promote-concurrent"
+
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	csb.promoteStagedBatchFn = func(_ context.Context, node, _ string, _ []stagedPromotePair) error {
+		started <- node
+		<-release
+		return nil
+	}
+
+	body, err := sp.Open()
+	require.NoError(t, err)
+	defer body.Close()
+	done := make(chan error, 1)
+	go func() {
+		_, runErr := runChunkedPut(context.Background(), csb, body,
+			"bucket", "large.bin", "v1", "application/octet-stream",
+			nil, "", 0, false, "", nil, nil, nil)
+		done <- runErr
+	}()
+
+	first := <-started
+	var second string
+	select {
+	case second = <-started:
+	case <-time.After(250 * time.Millisecond):
+		close(release)
+		require.Failf(t, "promote batches did not run concurrently", "only %s started before release", first)
+	}
+	require.ElementsMatch(t, []string{"node-a", "node-b"}, []string{first, second})
+	close(release)
+	require.NoError(t, <-done)
 }
 
 func TestPutObjectChunked_RejectsBelowChunkThreshold(t *testing.T) {
