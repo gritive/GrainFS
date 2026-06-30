@@ -706,6 +706,8 @@ func TestPutObjectChunked_EmitsPromoteAndQuorumMetaTrace(t *testing.T) {
 	require.NoError(t, err)
 
 	events := readPutTraceEvents(t, path)
+	requirePutTraceStage(t, events, PutTraceStageSegmentWritePrepare)
+	requirePutTraceStage(t, events, PutTraceStagePromoteStagedNodeBatch)
 	requirePutTraceStage(t, events, PutTraceStagePromoteStagedShards)
 	requirePutTraceStage(t, events, PutTraceStageQuorumMetaWrite)
 }

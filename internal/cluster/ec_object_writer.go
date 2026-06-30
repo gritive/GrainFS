@@ -215,10 +215,20 @@ func (w ecObjectWriter) writeOneSegment(ctx context.Context, in writeSegmentInpu
 }
 
 func (w ecObjectWriter) writeDataShards(ctx context.Context, plan ecObjectWritePlan, data []byte) (ecObjectWriteResult, error) {
+	splitStart := time.Now()
 	shards, padding, err := ecSplitBodiesPooled(plan.Config, data)
 	if err != nil {
+		ObservePutTraceStage(ctx, PutTraceStageECSplit, splitStart, PutTraceStageFields{
+			Bytes:      int64(len(data)),
+			ShardIndex: plan.SegmentIdx,
+			Error:      err.Error(),
+		})
 		return ecObjectWriteResult{}, fmt.Errorf("ec split: %w", err)
 	}
+	ObservePutTraceStage(ctx, PutTraceStageECSplit, splitStart, PutTraceStageFields{
+		Bytes:      int64(len(data)),
+		ShardIndex: plan.SegmentIdx,
+	})
 	header := encodeShardHeader(int64(len(data)))
 	sp := &spooledObject{
 		Size: int64(len(data)),

@@ -323,6 +323,11 @@ func TestECObjectWriter_WriteRemoteShardRecordsTraceBreakdown(t *testing.T) {
 }
 
 func TestECObjectWriter_WriteDataShardsComputesObjectFacts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "put-trace.jsonl")
+	t.Setenv("GRAINFS_PUT_TRACE_FILE", path)
+	reloadPutTraceSinkForTest()
+	t.Cleanup(reloadPutTraceSinkForTest)
+
 	shards := &fakeECObjectWriterShards{}
 	writer := ecObjectWriter{
 		selfID: "node-a",
@@ -338,7 +343,15 @@ func TestECObjectWriter_WriteDataShardsComputesObjectFacts(t *testing.T) {
 		ContentType:      "text/plain",
 	}
 
-	result, err := writer.writeDataShards(context.Background(), plan, []byte("hello"))
+	ctx := ContextWithPutTrace(context.Background(), PutTraceRequest{
+		Bucket:      "bucket",
+		Key:         "object",
+		GroupID:     "group-1",
+		Ingress:     PutTraceIngressLocalLeader,
+		SizeClass:   PutTraceSizeSmall,
+		ForwardMode: PutTraceForwardNone,
+	})
+	result, err := writer.writeDataShards(ctx, plan, []byte("hello"))
 	require.NoError(t, err)
 
 	require.Len(t, shards.bufferedLocalWrites, 1)
@@ -346,6 +359,9 @@ func TestECObjectWriter_WriteDataShardsComputesObjectFacts(t *testing.T) {
 	require.Equal(t, "", result.ETag) // MD5 removed: writeDataShards ETag is discarded at WriteSegmentBytes
 	require.Equal(t, "object/v1", result.ShardKey)
 	require.Equal(t, []string{"node-a"}, result.Placement)
+
+	events := readECObjectWriterTraceEvents(t, path)
+	requireECObjectWriterTraceStage(t, events, PutTraceStageECSplit)
 }
 
 func TestECObjectWriter_WriteDataShardsAllocBytesBounded(t *testing.T) {

@@ -106,13 +106,24 @@ func (c *clusterSegmentBackend) WriteSegment(ctx context.Context, bucket, key st
 // WriteSegmentBytes receives an owned chunk from SegmentWriter's chunker. This
 // avoids re-reading the bytes.Reader with io.ReadAll on the cluster hot path.
 func (c *clusterSegmentBackend) WriteSegmentBytes(ctx context.Context, bucket, key string, idx int, data []byte) (storage.SegmentRef, error) {
+	prepareStart := time.Now()
 	if idx < 0 || idx >= len(c.blobIDs) {
+		ObservePutTraceStage(ctx, PutTraceStageSegmentWritePrepare, prepareStart, PutTraceStageFields{
+			Bytes:      int64(len(data)),
+			ShardIndex: idx,
+			Error:      fmt.Sprintf("segment %d out of range", idx),
+		})
 		return storage.SegmentRef{}, fmt.Errorf("segment %d: out of range (allocated %d)", idx, len(c.blobIDs))
 	}
 
 	// 1. Pick PG for this segment.
 	group, err := c.selectGroup(bucket, key, idx, c.blobIDs[idx])
 	if err != nil {
+		ObservePutTraceStage(ctx, PutTraceStageSegmentWritePrepare, prepareStart, PutTraceStageFields{
+			Bytes:      int64(len(data)),
+			ShardIndex: idx,
+			Error:      err.Error(),
+		})
 		return storage.SegmentRef{}, fmt.Errorf("segment %d: pick PG: %w", idx, err)
 	}
 
@@ -122,6 +133,11 @@ func (c *clusterSegmentBackend) WriteSegmentBytes(ctx context.Context, bucket, k
 	// coordinating writer. writeOneSegment passes it to weighted HRW; the chosen
 	// NodeIDs are recorded and replayed on read, so readers never recompute.
 	weights, weightedEnabled := c.peerWeights(group.PeerIDs)
+	ObservePutTraceStage(ctx, PutTraceStageSegmentWritePrepare, prepareStart, PutTraceStageFields{
+		Bytes:       int64(len(data)),
+		ShardIndex:  idx,
+		ShardTarget: group.ID,
+	})
 	in := writeSegmentInput{
 		Bucket:          bucket,
 		Key:             key,
@@ -254,10 +270,28 @@ func (c *clusterSegmentBackend) deleteShards(ctx context.Context, peer, bucket, 
 	return c.b.shardSvc.DeleteShards(ctx, peer, bucket, shardKey)
 }
 
-func (c *clusterSegmentBackend) promoteStagedShardsBatch(ctx context.Context, node, bucket string, pairs []stagedPromotePair) error {
+func (c *clusterSegmentBackend) promoteStagedShardsBatch(ctx context.Context, node, bucket string, pairs []stagedPromotePair) (err error) {
 	if len(pairs) == 0 {
 		return nil
 	}
+	stageStart := time.Now()
+	targetClass := "remote"
+	if c.promoteStagedBatchFn != nil || c.promoteStagedFn != nil {
+		targetClass = "injected"
+	} else if c.b != nil && node == c.b.currentSelfAddr() {
+		targetClass = "local"
+	}
+	defer func() {
+		fields := PutTraceStageFields{
+			ShardTarget:      node,
+			ShardTargetClass: targetClass,
+			BatchCount:       len(pairs),
+		}
+		if err != nil {
+			fields.Error = err.Error()
+		}
+		ObservePutTraceStage(ctx, PutTraceStagePromoteStagedNodeBatch, stageStart, fields)
+	}()
 	if c.promoteStagedBatchFn != nil {
 		return c.promoteStagedBatchFn(ctx, node, bucket, pairs)
 	}
