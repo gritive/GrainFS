@@ -77,6 +77,7 @@ type SegmentRef struct {
 	ECParity         uint8  // EC parity shard count; 0 for legacy/local segments
 	StripeBytes      uint32 // 0 = contiguous/legacy, >0 = stripe-interleaved chunk size
 	NodeIDs          []string
+	StoredSize       int64 // 0 = uncompressed (Size==stored); >0 = compressed bytes in EC blob
 }
 
 // CoalescedRef identifies one coalesced blob produced by merging a prefix of

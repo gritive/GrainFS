@@ -3,10 +3,13 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"runtime"
 	"testing"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/storage/zstdpool"
 )
 
 // A1 (cluster SizeHint): the cluster chunked-PUT path streams an opaque body
@@ -22,6 +25,17 @@ func TestRunChunkedPut_SizeHintRightSizesChunks(t *testing.T) {
 	blobIDs := []string{uuid.Must(uuid.NewV7()).String()} // 256 KiB < 16 MiB → 1 segment
 	csb := newCSBWithDeps(deps, blobIDs)                  // chunkSize 0 → DefaultChunkSize (16 MiB)
 	csb.sizeHint = int64(objSize)
+
+	// Pin to a single OS thread for the allocation measurement.
+	// WriteSized spawns worker goroutines; with multiple Ps each worker that
+	// lands on a new P pays the zstd encoder cold-start (~17.7 MiB: 16 MiB
+	// hist buffer + ~1.7 MiB encoder struct) before the pooled encoder settles.
+	// This is an allocation test, not a concurrency test, so GOMAXPROCS=1
+	// eliminates the per-P cold-start noise.  A single warmup call then absorbs
+	// the remaining cold-start before the measured window opens.
+	prev := runtime.GOMAXPROCS(1)
+	defer runtime.GOMAXPROCS(prev)
+	_, _ = zstdpool.Compress(payload) // warm encoder on P0 before measuring
 
 	perOp := allocBytesPerRunForTest(t, 5, func() error {
 		_, err := runChunkedPut(context.Background(), csb,

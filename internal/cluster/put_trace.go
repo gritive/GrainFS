@@ -24,6 +24,8 @@ const (
 	PutTraceStageForwardNotLeaderRetry    PutTraceStage = "forward_not_leader_retry"
 	PutTraceStageForwardReceiverDispatch  PutTraceStage = "forward_receiver_dispatch"
 	PutTraceStageReceiverBackendPut       PutTraceStage = "receiver_backend_put"
+	PutTraceStageSegmentWritePrepare      PutTraceStage = "segment_write_prepare"
+	PutTraceStageECSplit                  PutTraceStage = "ec_split"
 	PutTraceStageShardWriteLocal          PutTraceStage = "shard_write_local"
 	PutTraceStageShardWriteRemote         PutTraceStage = "shard_write_remote"
 	PutTraceStageShardWriteRemoteOpen     PutTraceStage = "shard_write_remote_open"
@@ -41,6 +43,7 @@ const (
 	PutTraceStageShardWriteLocalEncClose  PutTraceStage = "shard_write_local_enc_close"
 	PutTraceStageShardWriteLocalEncRename PutTraceStage = "shard_write_local_enc_rename"
 	PutTraceStageShardWriteLocalDirSync   PutTraceStage = "shard_write_local_dirsync"
+	PutTraceStagePromoteStagedNodeBatch   PutTraceStage = "promote_staged_node_batch"
 	PutTraceStagePromoteStagedShards      PutTraceStage = "promote_staged_shards"
 	PutTraceStageDataRaftProposeMeta      PutTraceStage = "data_raft_propose_meta"
 	PutTraceStageQuorumMetaWrite          PutTraceStage = "quorum_meta_write"
@@ -88,6 +91,7 @@ type PutTraceStageFields struct {
 	ShardIndex       int
 	ShardTarget      string
 	ShardTargetClass string
+	BatchCount       int
 	MetaProposeSite  string
 	MetaProposeCount int
 	Error            string
@@ -113,6 +117,7 @@ type PutTraceEvent struct {
 	ShardIndex       int                 `json:"shard_index,omitempty"`
 	ShardTarget      string              `json:"shard_target,omitempty"`
 	ShardTargetClass string              `json:"shard_target_class,omitempty"`
+	BatchCount       int                 `json:"batch_count,omitempty"`
 	MetaProposeSite  string              `json:"meta_propose_site,omitempty"`
 	MetaProposeCount int                 `json:"meta_propose_count,omitempty"`
 	Error            string              `json:"error,omitempty"`
@@ -214,6 +219,7 @@ func ObservePutTraceStage(ctx context.Context, stage PutTraceStage, start time.T
 		ShardIndex:       fields.ShardIndex,
 		ShardTarget:      fields.ShardTarget,
 		ShardTargetClass: fields.ShardTargetClass,
+		BatchCount:       fields.BatchCount,
 		MetaProposeSite:  fields.MetaProposeSite,
 		MetaProposeCount: fields.MetaProposeCount,
 		Error:            fields.Error,

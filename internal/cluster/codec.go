@@ -167,6 +167,7 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 			clusterpb.SegmentMetaEntryAddEcData(b, s.ECData)
 			clusterpb.SegmentMetaEntryAddEcParity(b, s.ECParity)
 			clusterpb.SegmentMetaEntryAddStripeBytes(b, s.StripeBytes)
+			clusterpb.SegmentMetaEntryAddStoredSize(b, s.StoredSize)
 			segOffs[i] = clusterpb.SegmentMetaEntryEnd(b)
 		}
 		clusterpb.PutObjectMetaCmdStartSegmentsVector(b, len(segOffs))
@@ -350,6 +351,7 @@ func decodePutObjectMetaCmd(data []byte) (out PutObjectMetaCmd, err error) {
 				ECData:           se.EcData(),
 				ECParity:         se.EcParity(),
 				StripeBytes:      se.StripeBytes(),
+				StoredSize:       se.StoredSize(),
 			}
 		}
 	}

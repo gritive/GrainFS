@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"sync"
@@ -21,6 +22,58 @@ import (
 	"github.com/gritive/GrainFS/internal/hrw"
 	"github.com/gritive/GrainFS/internal/storage"
 )
+
+// newTestClusterSegmentBackend builds a minimal clusterSegmentBackend suitable
+// for WriteSegmentBytes unit tests: one pre-allocated blob ID, fake seams for
+// group selection and shard writes, no real DistributedBackend required.
+func newTestClusterSegmentBackend(t *testing.T) *clusterSegmentBackend {
+	t.Helper()
+	deps := newFakeBackendWithGroups(fourPGFixture())
+	blobIDs := []string{uuid.Must(uuid.NewV7()).String()}
+	csb := newCSBWithDeps(deps, blobIDs)
+	csb.bucket = "bkt"
+	csb.key = "key"
+	return csb
+}
+
+func TestWriteSegmentBytes_CompressibleSetsStoredSize(t *testing.T) {
+	c := newTestClusterSegmentBackend(t)
+	plaintext := bytes.Repeat([]byte("grainfs zstd segment payload "), 8192) // ~232 KiB, compressible
+	ref, err := c.WriteSegmentBytes(context.Background(), "bkt", "key", 0, append([]byte(nil), plaintext...))
+	if err != nil {
+		t.Fatalf("WriteSegmentBytes: %v", err)
+	}
+	if ref.Size != int64(len(plaintext)) {
+		t.Fatalf("Size must stay plaintext: got %d want %d", ref.Size, int64(len(plaintext)))
+	}
+	if ref.StoredSize <= 0 || ref.StoredSize >= ref.Size {
+		t.Fatalf("StoredSize should be compressed (>0, <Size): got %d", ref.StoredSize)
+	}
+	if want := storage.ChecksumOf(plaintext); !bytes.Equal(ref.Checksum, want) {
+		t.Fatalf("Checksum must be over plaintext")
+	}
+}
+
+func TestWriteSegmentBytes_IncompressibleStoresRaw(t *testing.T) {
+	c := newTestClusterSegmentBackend(t)
+	rnd := make([]byte, 256<<10)
+	// Fixed-seed pseudo-random bytes approximate maximum entropy: the Go PRNG
+	// output has no repeating byte patterns, so zstd finds no back-references
+	// and cannot compress it below the input size (i.e. compressing would
+	// expand). WriteSegmentBytes must detect this and store raw (StoredSize==0).
+	r := rand.New(rand.NewSource(0xdeadbeef)) //nolint:gosec // fixed-seed PRNG, deterministic test data
+	_, _ = r.Read(rnd)
+	ref, err := c.WriteSegmentBytes(context.Background(), "bkt", "key", 0, append([]byte(nil), rnd...))
+	if err != nil {
+		t.Fatalf("WriteSegmentBytes: %v", err)
+	}
+	if ref.StoredSize != 0 {
+		t.Fatalf("incompressible segment must store raw (StoredSize==0): got %d", ref.StoredSize)
+	}
+	if ref.Size != int64(len(rnd)) {
+		t.Fatalf("Size mismatch")
+	}
+}
 
 // TestAdaptiveChunkSize locks the size-aware chunk policy derived from the GCP
 // size×chunk sweep: small objects stay single-segment (split overhead dominates,
@@ -706,6 +759,8 @@ func TestPutObjectChunked_EmitsPromoteAndQuorumMetaTrace(t *testing.T) {
 	require.NoError(t, err)
 
 	events := readPutTraceEvents(t, path)
+	requirePutTraceStage(t, events, PutTraceStageSegmentWritePrepare)
+	requirePutTraceStage(t, events, PutTraceStagePromoteStagedNodeBatch)
 	requirePutTraceStage(t, events, PutTraceStagePromoteStagedShards)
 	requirePutTraceStage(t, events, PutTraceStageQuorumMetaWrite)
 }

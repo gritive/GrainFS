@@ -178,6 +178,7 @@ table SegmentMetaEntry {
   ec_data:uint8 = 0;
   ec_parity:uint8 = 0;
   stripe_bytes:uint32 = 0;
+  stored_size:int64 = 0;      // 0 = uncompressed; >0 = compressed bytes stored in EC
 }
 
 // CreateMultipartUploadCmd, CompleteMultipartCmd, AbortMultipartCmd are removed in

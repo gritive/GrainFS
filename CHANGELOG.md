@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.772.0] - 2026-07-01
+
+### Performance
+- **Per-segment zstd compression on the EC write path.** Large-object (chunked
+  EC) PUTs now zstd-compress each ≤16MiB segment before erasure coding, keeping
+  the smaller of {compressed, raw} so incompressible data is stored as-is and
+  never expands. This reduces disk usage for compressible data; on the standard
+  4-node warp PUT benchmark (10MiB objects) cluster disk usage dropped ~11% with
+  PUT throughput within run-to-run noise. Existing objects read back unchanged,
+  and the S3 ETag is unaffected (it stays the plaintext MD5). Byte-range GETs of
+  compressed objects are served by decompressing the containing segment.
+
 ## [0.0.771.0] - 2026-06-30
 
 ### Performance
