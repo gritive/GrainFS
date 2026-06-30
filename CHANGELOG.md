@@ -3,17 +3,22 @@
 ## [0.0.773.0] - 2026-07-01
 
 ### Performance
-- **Content-MD5 PUTs no longer spool to a temp file.** A PUT carrying a
-  `Content-MD5` header previously buffered the whole body to a disk temp file to
-  compute and validate the digest before any shard write. It now streams the
-  body straight through the chunked EC writer and validates the digest in a
-  pre-commit hook that runs after the body is written to staging but before the
-  metadata commit. A wrong digest still fails with `BadDigest` and leaves no
-  object visible. Removing the temp-file double-staging cuts ~9% of the bytes
-  allocated per PUT at small sizes and ~26% (~4MB) on an 8MiB object, and closes
-  the brief plaintext-at-rest window the spool opened under at-rest encryption.
-  Client-visible behavior is unchanged: a correct digest succeeds, a wrong
-  digest returns 400 BadDigest.
+- **Object writes no longer spool the body to a temp file.** Every PUT used to
+  have a fallback that buffered the whole body to a disk temp file, re-read it,
+  then erasure-coded it — a full extra write+read of the object. That path is
+  gone: all writes now stream straight through the chunked EC writer.
+  - Content-MD5 PUTs are validated in a pre-commit hook (digest computed over the
+    streamed body, checked before the metadata commit) instead of over a spooled
+    copy; a wrong digest still returns 400 BadDigest and leaves no object.
+  - Unknown-length internal writes were taught their size: sized in-memory bodies
+    stream via length detection, pull-through cache-fill and cross-node forwarded
+    streams thread the exact object length (the forward wire frame gained an
+    additive `decoded_length` field), and server-side copy marks its size exact.
+  - EC relocation and coalescing feed the encoder a reader directly instead of
+    staging the source to a temp file.
+  - Removing the double-staging cuts allocations per PUT (~9% at small sizes,
+    ~26%/~4MB on an 8MiB object) and closes the brief plaintext-at-rest window the
+    spool opened under at-rest encryption. Client-visible behavior is unchanged.
 
 ## [0.0.772.0] - 2026-07-01
 
