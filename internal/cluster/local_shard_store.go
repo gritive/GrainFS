@@ -369,8 +369,13 @@ func (l *LocalShardStore) fsyncDir(dir string) error {
 	return syncDir(dir)
 }
 
-func shardDirectIOSpikeEnabled() bool {
-	return os.Getenv(shardDirectIOEnv) == "1"
+func shardDirectIOEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(shardDirectIOEnv))) {
+	case "0", "false", "no", "off", "disable", "disabled":
+		return false
+	default:
+		return true
+	}
 }
 
 // syncDirChain durably LINKS a freshly written shard into the namespace: it
@@ -468,7 +473,7 @@ func (l *LocalShardStore) syncDirChain(leaf, stop string) error {
 // ciphertext bytes written (cw.n); EncOpen fires before any byte is written so it
 // reports 0 — the put-trace sink is a diagnostic-only no-op in production.
 func (l *LocalShardStore) atomicShardFileWrite(ctx context.Context, dir, path string, shardIdx int, writeBody func(w io.Writer) error) error {
-	if shardDirectIOSpikeEnabled() {
+	if shardDirectIOEnabled() {
 		return l.atomicShardFileWriteDirectStream(ctx, dir, path, shardIdx, writeBody)
 	}
 	return l.atomicShardFileWriteStandard(ctx, dir, path, shardIdx, writeBody)

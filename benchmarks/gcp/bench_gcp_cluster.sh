@@ -270,8 +270,8 @@ serve_node() {
   local pprof_flag=""
   if (( pprof_port > 0 )); then pprof_flag="--pprof-port $pprof_port"; fi
   local directio_env=""
-  if [[ "${GRAINFS_SHARD_DIRECT_IO:-0}" == "1" ]]; then
-    directio_env="--setenv=GRAINFS_SHARD_DIRECT_IO=1"
+  if [[ -n "${GRAINFS_SHARD_DIRECT_IO:-}" ]]; then
+    directio_env="--setenv=GRAINFS_SHARD_DIRECT_IO=$GRAINFS_SHARD_DIRECT_IO"
   fi
   local s3_etag_env=""
   if [[ "${GRAINFS_S3_ETAG_MD5:-1}" == "0" ]]; then

@@ -58,7 +58,69 @@ func TestDirectShardStreamWriter_WritesFullBlocksBeforeClose(t *testing.T) {
 	require.Equal(t, []int64{int64(len(payload))}, rec.truncates)
 }
 
-func TestAtomicShardFileWrite_DirectIOSpikeStreamsDuringWriteBody(t *testing.T) {
+func TestAtomicShardFileWrite_DirectIOEnabledByDefault(t *testing.T) {
+	t.Setenv(shardDirectIOEnv, "")
+	origOpenDirect := openDirectShardFile
+	t.Cleanup(func() { openDirectShardFile = origOpenDirect })
+
+	attemptedDirect := false
+	openDirectShardFile = func(path string, flag int, mode os.FileMode) (*os.File, error) {
+		attemptedDirect = true
+		return os.OpenFile(path, flag, mode)
+	}
+
+	bk := newECBenchmarkBackend(t)
+	l := bk.shardSvc.local
+	dir, err := l.getShardDir("b", "direct-default", 0)
+	require.NoError(t, err)
+	require.NoError(t, l.ensureShardDir(dir))
+	path := filepath.Join(dir, "shard_0")
+	payload := bytes.Repeat([]byte{0x42}, 4096)
+
+	err = l.atomicShardFileWrite(context.Background(), dir, path, 0, func(w io.Writer) error {
+		_, err := w.Write(payload)
+		return err
+	})
+	require.NoError(t, err)
+	require.True(t, attemptedDirect, "direct I/O should be the default shard write path")
+
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, payload, got)
+}
+
+func TestAtomicShardFileWrite_DirectIOCanBeDisabled(t *testing.T) {
+	t.Setenv(shardDirectIOEnv, "0")
+	origOpenDirect := openDirectShardFile
+	t.Cleanup(func() { openDirectShardFile = origOpenDirect })
+
+	attemptedDirect := false
+	openDirectShardFile = func(string, int, os.FileMode) (*os.File, error) {
+		attemptedDirect = true
+		return nil, errors.New("direct io should be disabled")
+	}
+
+	bk := newECBenchmarkBackend(t)
+	l := bk.shardSvc.local
+	dir, err := l.getShardDir("b", "direct-disabled", 0)
+	require.NoError(t, err)
+	require.NoError(t, l.ensureShardDir(dir))
+	path := filepath.Join(dir, "shard_0")
+	payload := []byte("direct-io-disabled-payload")
+
+	err = l.atomicShardFileWrite(context.Background(), dir, path, 0, func(w io.Writer) error {
+		_, err := w.Write(payload)
+		return err
+	})
+	require.NoError(t, err)
+	require.False(t, attemptedDirect, "explicit falsey env must disable direct I/O")
+
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, payload, got)
+}
+
+func TestAtomicShardFileWrite_DirectIOStreamsDuringWriteBody(t *testing.T) {
 	t.Setenv(shardDirectIOEnv, "1")
 	origOpenDirect := openDirectShardFile
 	t.Cleanup(func() { openDirectShardFile = origOpenDirect })
@@ -103,7 +165,7 @@ func TestAtomicShardFileWrite_DirectIOSpikeStreamsDuringWriteBody(t *testing.T) 
 	require.Equal(t, payload, got)
 }
 
-func TestAtomicShardFileWrite_DirectIOSpikeFallbackWritesExactPayload(t *testing.T) {
+func TestAtomicShardFileWrite_DirectIOFallbackWritesExactPayload(t *testing.T) {
 	t.Setenv(shardDirectIOEnv, "1")
 	origOpenDirect := openDirectShardFile
 	t.Cleanup(func() { openDirectShardFile = origOpenDirect })
@@ -127,14 +189,14 @@ func TestAtomicShardFileWrite_DirectIOSpikeFallbackWritesExactPayload(t *testing
 		return err
 	})
 	require.NoError(t, err)
-	require.True(t, attemptedDirect, "opt-in direct I/O spike must attempt direct open")
+	require.True(t, attemptedDirect, "direct I/O must attempt direct open when enabled")
 
 	got, err := os.ReadFile(path)
 	require.NoError(t, err)
 	require.Equal(t, payload, got)
 }
 
-func TestAtomicShardFileWrite_DirectIOSpikeDirectPathTruncatesAlignmentPadding(t *testing.T) {
+func TestAtomicShardFileWrite_DirectIODirectPathTruncatesAlignmentPadding(t *testing.T) {
 	t.Setenv(shardDirectIOEnv, "1")
 	origOpenDirect := openDirectShardFile
 	t.Cleanup(func() { openDirectShardFile = origOpenDirect })
@@ -158,7 +220,7 @@ func TestAtomicShardFileWrite_DirectIOSpikeDirectPathTruncatesAlignmentPadding(t
 		return err
 	})
 	require.NoError(t, err)
-	require.True(t, attemptedDirect, "opt-in direct I/O spike must use direct open when available")
+	require.True(t, attemptedDirect, "direct I/O must use direct open when available")
 
 	st, err := os.Stat(path)
 	require.NoError(t, err)
