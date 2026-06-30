@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.770.0] - 2026-06-30
+
+### Performance
+- **Direct shard writes are now the default.** Large EC shard writes use
+  O_DIRECT (page-cache-bypassing, aligned) writes by default. Set
+  `GRAINFS_SHARD_DIRECT_IO=0` to opt back into buffered writes.
+- **Promote skips the directory fsync for large EC-redundant shards.** The
+  staging→final promote at commit no longer fsyncs the final directory chain for
+  large redundant shards — EC reconstruction and the background scrubber own
+  their durability, exactly as the shard write path already skips file fsync.
+  This removes the promote round from the cluster PUT commit-tail latency. The
+  rename stays synchronous, so read-after-write is unchanged.
+- **Staged-shard promotes run in parallel across placement nodes at commit.**
+- **EC shard writes are sized and streamed.** Cluster shard writes send a known
+  content length and stream aligned shard data, reducing write-path buffering.
+
 ## [0.0.769.0] - 2026-06-30
 
 ### Performance
