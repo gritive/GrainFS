@@ -44,7 +44,7 @@ func (s *recordingShardStore) WriteLocalShardStreamStagedContext(_ context.Conte
 	return nil
 }
 
-func (s *recordingShardStore) WriteLocalShardStreamStagedSizedContext(_ context.Context, _ string, stagingKey, finalKey string, _ int, body io.Reader, streamSize int64) error {
+func (s *recordingShardStore) WriteLocalShardStreamStagedSizedContext(_ context.Context, _ string, stagingKey, finalKey string, _ int, body io.Reader, streamSize, _ int64) error {
 	s.record("WriteLocalShardStreamStagedSizedContext")
 	s.stagedStagingKey, s.stagedFinalKey = stagingKey, finalKey
 	s.stagedSize = streamSize
@@ -165,7 +165,7 @@ func TestShardTargetLocalEndpointDelegatesToLocalMethods(t *testing.T) {
 		{
 			name: "buffered write -> WriteLocalShardContext",
 			call: func(t *testing.T, ep shardEndpoint) {
-				err := ep.WriteShardReader(context.Background(), "b", "k", "", 0,
+				err := ep.WriteShardReader(context.Background(), "b", "k", "", 0, -1,
 					func(int) (io.Reader, error) { return strings.NewReader("x"), nil },
 					func(int) (int64, error) { return 1, nil })
 				require.NoError(t, err)
@@ -175,7 +175,7 @@ func TestShardTargetLocalEndpointDelegatesToLocalMethods(t *testing.T) {
 		{
 			name: "unknown-size write -> WriteLocalShardStreamContext",
 			call: func(t *testing.T, ep shardEndpoint) {
-				err := ep.WriteShardReader(context.Background(), "b", "k", "", 0,
+				err := ep.WriteShardReader(context.Background(), "b", "k", "", 0, -1,
 					func(int) (io.Reader, error) { return strings.NewReader("x"), nil }, nil)
 				require.NoError(t, err)
 			},
@@ -236,7 +236,7 @@ func TestShardTargetRemoteEndpointDelegatesToRemoteMethods(t *testing.T) {
 		{
 			name: "buffered write -> WriteShard",
 			call: func(t *testing.T, ep shardEndpoint) {
-				err := ep.WriteShardReader(context.Background(), "b", "k", "", 0,
+				err := ep.WriteShardReader(context.Background(), "b", "k", "", 0, -1,
 					func(int) (io.Reader, error) { return strings.NewReader("x"), nil },
 					func(int) (int64, error) { return 1, nil })
 				require.NoError(t, err)
@@ -246,7 +246,7 @@ func TestShardTargetRemoteEndpointDelegatesToRemoteMethods(t *testing.T) {
 		{
 			name: "unknown-size write -> WriteShardStream",
 			call: func(t *testing.T, ep shardEndpoint) {
-				err := ep.WriteShardReader(context.Background(), "b", "k", "", 0,
+				err := ep.WriteShardReader(context.Background(), "b", "k", "", 0, -1,
 					func(int) (io.Reader, error) { return strings.NewReader("x"), nil }, nil)
 				require.NoError(t, err)
 			},
@@ -322,7 +322,7 @@ func TestShardTargetStagedWriteRoutesAndPreservesAADKey(t *testing.T) {
 		require.True(t, ep.IsLocal())
 		// shardSize is non-nil: staged local writes should preserve the streaming
 		// path while still using the known-size optimization.
-		err := ep.WriteShardReader(context.Background(), "b", finalKey, stagingKey, 0,
+		err := ep.WriteShardReader(context.Background(), "b", finalKey, stagingKey, 0, -1,
 			func(int) (io.Reader, error) { return strings.NewReader("payload"), nil },
 			func(int) (int64, error) { return int64(len("payload")), nil })
 		require.NoError(t, err)
@@ -338,7 +338,7 @@ func TestShardTargetStagedWriteRoutesAndPreservesAADKey(t *testing.T) {
 		store := &recordingShardStore{}
 		ep := newECObjectWriter("self", store, nil).endpointFor("self")
 		require.True(t, ep.IsLocal())
-		err := ep.WriteShardReader(context.Background(), "b", finalKey, stagingKey, 0,
+		err := ep.WriteShardReader(context.Background(), "b", finalKey, stagingKey, 0, -1,
 			func(int) (io.Reader, error) { return strings.NewReader("payload"), nil },
 			func(int) (int64, error) { return 0, errors.New("unknown shard size") })
 		require.NoError(t, err)
@@ -353,7 +353,7 @@ func TestShardTargetStagedWriteRoutesAndPreservesAADKey(t *testing.T) {
 		store := &recordingShardStore{}
 		ep := remoteShardEndpoint{node: "peer", shards: store, writeAttempts: 1}
 		require.False(t, ep.IsLocal())
-		err := ep.WriteShardReader(context.Background(), "b", finalKey, stagingKey, 0,
+		err := ep.WriteShardReader(context.Background(), "b", finalKey, stagingKey, 0, -1,
 			func(int) (io.Reader, error) { return strings.NewReader("payload"), nil },
 			func(int) (int64, error) { return int64(len("payload")), nil })
 		require.NoError(t, err)
@@ -370,7 +370,7 @@ func TestShardTargetStagedWriteRoutesAndPreservesAADKey(t *testing.T) {
 		store := &recordingShardStore{}
 		ep := remoteShardEndpoint{node: "peer", shards: store, writeAttempts: 1}
 		require.False(t, ep.IsLocal())
-		err := ep.WriteShardReader(context.Background(), "b", finalKey, stagingKey, 0,
+		err := ep.WriteShardReader(context.Background(), "b", finalKey, stagingKey, 0, -1,
 			func(int) (io.Reader, error) { return strings.NewReader("payload"), nil },
 			func(int) (int64, error) { return 0, errors.New("unknown shard size") })
 		require.NoError(t, err)
@@ -390,7 +390,7 @@ func TestShardTargetRemoteEndpointMarksPeerHealth(t *testing.T) {
 	t.Run("remote write success marks healthy", func(t *testing.T) {
 		ph := &fakeECObjectPeerHealth{}
 		ep := remoteShardEndpoint{node: "peer", shards: &recordingShardStore{}, peerHealth: ph, writeAttempts: 1}
-		err := ep.WriteShardReader(context.Background(), "b", "k", "", 0,
+		err := ep.WriteShardReader(context.Background(), "b", "k", "", 0, -1,
 			func(int) (io.Reader, error) { return strings.NewReader("x"), nil },
 			func(int) (int64, error) { return 1, nil })
 		require.NoError(t, err)
@@ -403,7 +403,7 @@ func TestShardTargetRemoteEndpointMarksPeerHealth(t *testing.T) {
 		writer := newECObjectWriter("self", &recordingShardStore{}, ph)
 		ep := writer.endpointFor("self")
 		require.True(t, ep.IsLocal())
-		err := ep.WriteShardReader(context.Background(), "b", "k", "", 0,
+		err := ep.WriteShardReader(context.Background(), "b", "k", "", 0, -1,
 			func(int) (io.Reader, error) { return strings.NewReader("x"), nil },
 			func(int) (int64, error) { return 1, nil })
 		require.NoError(t, err)

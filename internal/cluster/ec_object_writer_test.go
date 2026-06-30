@@ -43,7 +43,7 @@ func TestECObjectWriter_CleansWrittenShardsOnWriteFailure(t *testing.T) {
 	}
 	size, etag := int64(11), "etag"
 
-	_, err := writer.writeShardReadersWithSize(context.Background(), plan, size, etag, func(idx int) (io.Reader, error) {
+	_, err := writer.writeShardReadersWithSize(context.Background(), plan, size, -1, etag, func(idx int) (io.Reader, error) {
 		return strings.NewReader("shard"), nil
 	}, nil, "test")
 	require.ErrorIs(t, err, writeErr)
@@ -81,7 +81,7 @@ func TestECObjectWriter_FailsClosedOnShardErrorBeforeQuorumDespiteRemainingCapac
 
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := writer.writeShardReadersWithSize(context.Background(), plan, size, etag, func(idx int) (io.Reader, error) {
+		_, err := writer.writeShardReadersWithSize(context.Background(), plan, size, -1, etag, func(idx int) (io.Reader, error) {
 			return strings.NewReader("shard"), nil
 		}, nil, "test")
 		errCh <- err
@@ -128,7 +128,7 @@ func TestECObjectWriter_ReturnsAfterDataShardQuorumBeforeAllWritesComplete(t *te
 	errCh := make(chan error, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		result, err := writer.writeShardReadersWithSize(ctx, plan, size, etag, func(idx int) (io.Reader, error) {
+		result, err := writer.writeShardReadersWithSize(ctx, plan, size, -1, etag, func(idx int) (io.Reader, error) {
 			return strings.NewReader("shard"), nil
 		}, func(idx int) (int64, error) {
 			return int64(len("shard")), nil
@@ -188,7 +188,7 @@ func TestECObjectWriter_CleansWrittenShardsWhenContextCanceledBeforeQuorum(t *te
 
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := writer.writeShardReadersWithSize(ctx, plan, size, etag, func(idx int) (io.Reader, error) {
+		_, err := writer.writeShardReadersWithSize(ctx, plan, size, -1, etag, func(idx int) (io.Reader, error) {
 			return strings.NewReader("shard"), nil
 		}, func(idx int) (int64, error) {
 			return int64(len("shard")), nil
@@ -233,7 +233,7 @@ func TestECObjectWriteResult_AbortBackgroundWritesStopsSlowRemainingWrites(t *te
 	}
 	size, etag := int64(11), "etag"
 
-	result, err := writer.writeShardReadersWithSize(context.Background(), plan, size, etag, func(idx int) (io.Reader, error) {
+	result, err := writer.writeShardReadersWithSize(context.Background(), plan, size, -1, etag, func(idx int) (io.Reader, error) {
 		return strings.NewReader("shard"), nil
 	}, func(idx int) (int64, error) {
 		return int64(len("shard")), nil
@@ -348,7 +348,7 @@ func TestECObjectWriter_WriteDataShardsComputesObjectFacts(t *testing.T) {
 		SizeClass:   PutTraceSizeSmall,
 		ForwardMode: PutTraceForwardNone,
 	})
-	result, err := writer.writeDataShards(ctx, plan, []byte("hello"))
+	result, err := writer.writeDataShards(ctx, plan, []byte("hello"), -1)
 	require.NoError(t, err)
 
 	require.Len(t, shards.bufferedLocalWrites, 1)
@@ -378,7 +378,7 @@ func TestECObjectWriter_WriteDataShardsAllocBytesBounded(t *testing.T) {
 			Key:       "object",
 			Config:    cfg,
 			Placement: placement,
-		}, data)
+		}, data, -1)
 		require.NoError(t, err)
 		result.waitBackgroundWrites()
 		require.Len(t, shards.streamWrites, cfg.NumShards())
@@ -410,7 +410,7 @@ func TestECObjectWriter_WriteDataShards10MiBAllocBytesBounded(t *testing.T) {
 			Key:       "object",
 			Config:    cfg,
 			Placement: placement,
-		}, data)
+		}, data, -1)
 		require.NoError(t, err)
 		result.waitBackgroundWrites()
 		require.Len(t, shards.streamWrites, cfg.NumShards())
@@ -446,7 +446,7 @@ func BenchmarkECObjectWriterWriteDataShards10MiB(b *testing.B) {
 			Key:       "object",
 			Config:    cfg,
 			Placement: placement,
-		}, data)
+		}, data, -1)
 		require.NoError(tb, err)
 		result.waitBackgroundWrites()
 		require.Len(tb, shards.streamWrites, cfg.NumShards())

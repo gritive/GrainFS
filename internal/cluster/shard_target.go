@@ -36,7 +36,14 @@ type shardEndpoint interface {
 	// correctly. Empty ⇒ legacy direct-to-final write (shardKey is both path and
 	// AAD). Staged writes always stream (the buffered-RPC optimization is skipped)
 	// to keep the receiver-side staging contract on one wire path.
-	WriteShardReader(ctx context.Context, bucket, shardKey, stagingShardKey string, shardIdx int, openShard func(int) (io.Reader, error), shardSize func(int) (int64, error)) error
+	//
+	// logicalShardSize is the shard's PRE-compression (logical) size, threaded for
+	// the fsync-class decision only (per-segment zstd shrinks the on-disk bytes, so
+	// the local writer must classify on logical size to keep a large redundant
+	// shard off the commit-tail fsync). -1 ⇒ unknown (use on-disk size). The remote
+	// impl ignores it: the logical size is not carried on the shard-write wire, so
+	// remote shards keep the on-disk-size classification (cluster follow-up).
+	WriteShardReader(ctx context.Context, bucket, shardKey, stagingShardKey string, shardIdx int, logicalShardSize int64, openShard func(int) (io.Reader, error), shardSize func(int) (int64, error)) error
 	// DeleteShards removes all shards for shardKey on this slot (write cleanup).
 	DeleteShards(ctx context.Context, bucket, shardKey string) error
 
@@ -113,7 +120,7 @@ type localShardStore interface {
 func (e localShardEndpoint) Node() string  { return e.node }
 func (e localShardEndpoint) IsLocal() bool { return true }
 
-func (e localShardEndpoint) WriteShardReader(ctx context.Context, bucket, shardKey, stagingShardKey string, shardIdx int, openShard func(int) (io.Reader, error), shardSize func(int) (int64, error)) error {
+func (e localShardEndpoint) WriteShardReader(ctx context.Context, bucket, shardKey, stagingShardKey string, shardIdx int, logicalShardSize int64, openShard func(int) (io.Reader, error), shardSize func(int) (int64, error)) error {
 	shardStageStart := time.Now()
 
 	// An openShard failure returns before the local trace stage is emitted,
@@ -134,7 +141,7 @@ func (e localShardEndpoint) WriteShardReader(ctx context.Context, bucket, shardK
 		var werr error
 		if knownSize {
 			if sized, ok := e.shards.(ecObjectStagedSizedShardStore); ok {
-				werr = sized.WriteLocalShardStreamStagedSizedContext(ctx, bucket, stagingShardKey, shardKey, shardIdx, body, size)
+				werr = sized.WriteLocalShardStreamStagedSizedContext(ctx, bucket, stagingShardKey, shardKey, shardIdx, body, size, logicalShardSize)
 			} else {
 				werr = e.shards.WriteLocalShardStreamStagedContext(ctx, bucket, stagingShardKey, shardKey, shardIdx, body)
 			}
@@ -258,7 +265,10 @@ func (e remoteShardEndpoint) markHealth(ok bool) {
 	}
 }
 
-func (e remoteShardEndpoint) WriteShardReader(ctx context.Context, bucket, shardKey, stagingShardKey string, shardIdx int, openShard func(int) (io.Reader, error), shardSize func(int) (int64, error)) error {
+func (e remoteShardEndpoint) WriteShardReader(ctx context.Context, bucket, shardKey, stagingShardKey string, shardIdx int, _ int64, openShard func(int) (io.Reader, error), shardSize func(int) (int64, error)) error {
+	// logicalShardSize is intentionally ignored: the shard-write wire carries no
+	// logical size, so the remote receiver classifies the fsync on the on-disk
+	// (compressed) size. Threading it over the wire is a cluster follow-up.
 	shardStageStart := time.Now()
 	werr := e.writeRemoteShard(ctx, openShard, shardSize, shardIdx, bucket, shardKey, stagingShardKey)
 	observePutStage("ec_write_shard", "remote", shardStageStart)

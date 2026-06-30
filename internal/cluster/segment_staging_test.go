@@ -146,7 +146,7 @@ func TestNativeWriteHandler_StagedRequest_WritesStagingWithFinalAAD(t *testing.T
 	require.Error(t, preErr, "staged write must not land at the final path before promote")
 
 	// Promote, then the final-key read (final-key AAD) must succeed byte-identical.
-	require.NoError(t, svc.PromoteLocalStagedShards(bucket, stagingKey, finalKey))
+	require.NoError(t, svc.PromoteLocalStagedShards(bucket, stagingKey, finalKey, -1))
 	got, err := svc.ReadLocalShard(bucket, finalKey, 0)
 	require.NoError(t, err)
 	require.Equal(t, data, got, "receiver must seal with finalKey AAD so the promoted read decrypts")
@@ -183,7 +183,7 @@ func TestNativeWriteHandler_StagedSizedRequestRejectsSizeMismatch(t *testing.T) 
 // written).
 func TestPromoteLocalStagedShards_NothingStaged_Fails(t *testing.T) {
 	svc, _ := newTestShardService(t)
-	err := svc.PromoteLocalStagedShards("b", ".segstaging/txnX/blobX", "obj/segments/blobX")
+	err := svc.PromoteLocalStagedShards("b", ".segstaging/txnX/blobX", "obj/segments/blobX", -1)
 	require.Error(t, err, "promote with no staged or final shards must fail")
 }
 
@@ -205,7 +205,7 @@ func TestPromoteLocalStagedShards_DstAlreadyPresent_StillFsyncs(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(dst, 0o755))
 
-	require.NoError(t, svc.PromoteLocalStagedShards(bucket, ".segstaging/txnP/blobP", finalKey))
+	require.NoError(t, svc.PromoteLocalStagedShards(bucket, ".segstaging/txnP/blobP", finalKey, -1))
 
 	// The dst chain must have been fsynced (durability before commit) even though
 	// nothing was renamed on this call.
@@ -241,7 +241,7 @@ func TestPromoteLocalStagedShards_LargeRedundant_SkipsDirFsync(t *testing.T) {
 		require.NoError(t, os.MkdirAll(sdir, 0o755))
 		require.NoError(t, os.WriteFile(filepath.Join(sdir, fmt.Sprintf("shard_%d", d)), large, 0o644))
 	}
-	require.NoError(t, svc.PromoteLocalStagedShards(bucket, stagingKey, finalKey))
+	require.NoError(t, svc.PromoteLocalStagedShards(bucket, stagingKey, finalKey, -1))
 	require.Zero(t, syncedCount, "large+redundant promote must skip dir-fsync (EC+scrubber own durability, mirrors write path)")
 }
 
@@ -275,7 +275,7 @@ func TestWriteLocalShardStaged_AADIsFinalKey_PromoteReadable(t *testing.T) {
 	require.NoError(t, svc.local.writeLocalShardStaged(ctx, bucket, stagingKey, finalKey, 0, data))
 
 	// Promote: local rename of the staging shard dir(s) to the final path.
-	require.NoError(t, svc.PromoteLocalStagedShards(bucket, stagingKey, finalKey))
+	require.NoError(t, svc.PromoteLocalStagedShards(bucket, stagingKey, finalKey, -1))
 
 	// Reading at the FINAL key (which decrypts with the final-key AAD) must return the bytes —
 	// proving the staged write used the final key as AAD, not the staging key.
@@ -285,16 +285,24 @@ func TestWriteLocalShardStaged_AADIsFinalKey_PromoteReadable(t *testing.T) {
 }
 
 func TestStagedPromotePairsCodec(t *testing.T) {
+	// logicalShardSize is intentionally NOT carried on the wire (the batch encoding
+	// holds only the staging/final key pair), so a real per-shard size on the
+	// sender is dropped and decode yields the -1 "unknown" sentinel — the receiver
+	// then falls back to the on-disk shard size for the promote fsync class (see
+	// decodeStagedPromotePairs / promoteShardRequiresFsync).
 	want := []stagedPromotePair{
-		{stagingKey: ".segstaging/txn/blob-a", finalKey: "obj/segments/blob-a"},
-		{stagingKey: ".segstaging/txn/blob-b", finalKey: "obj/segments/blob-b"},
+		{stagingKey: ".segstaging/txn/blob-a", finalKey: "obj/segments/blob-a", logicalShardSize: 1 << 20},
+		{stagingKey: ".segstaging/txn/blob-b", finalKey: "obj/segments/blob-b", logicalShardSize: 7},
 	}
 	data, err := encodeStagedPromotePairs(want)
 	require.NoError(t, err)
 
 	got, err := decodeStagedPromotePairs(data)
 	require.NoError(t, err)
-	require.Equal(t, want, got)
+	require.Equal(t, []stagedPromotePair{
+		{stagingKey: ".segstaging/txn/blob-a", finalKey: "obj/segments/blob-a", logicalShardSize: -1},
+		{stagingKey: ".segstaging/txn/blob-b", finalKey: "obj/segments/blob-b", logicalShardSize: -1},
+	}, got)
 
 	_, err = decodeStagedPromotePairs(data[:len(data)-1])
 	require.Error(t, err, "truncated batch payload must fail closed")

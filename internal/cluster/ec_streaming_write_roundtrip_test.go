@@ -81,7 +81,7 @@ func TestAtomicShardFileWrite_EncodeErrorLeavesNoFile(t *testing.T) {
 	path := filepath.Join(dir, "shard_0")
 
 	wantErr := errors.New("injected encode failure")
-	err = l.atomicShardFileWrite(context.Background(), dir, path, 0, func(w io.Writer) error {
+	err = l.atomicShardFileWrite(context.Background(), dir, path, 0, -1, func(w io.Writer) error {
 		_, _ = w.Write([]byte("partial"))
 		return wantErr
 	})
@@ -102,7 +102,7 @@ func TestAtomicShardFileWrite_EncodeErrorLeavesNoFile(t *testing.T) {
 // straight into the file.
 func TestWriteLocalShardAADStream_ShortBodyRejected(t *testing.T) {
 	bk := newECBenchmarkBackend(t)
-	err := bk.shardSvc.local.writeLocalShardAADStream(context.Background(), "b", "k", "k", 0, bytes.NewReader([]byte("only-8b!")), 1<<20)
+	err := bk.shardSvc.local.writeLocalShardAADStream(context.Background(), "b", "k", "k", 0, bytes.NewReader([]byte("only-8b!")), 1<<20, -1)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "short read")
 }
