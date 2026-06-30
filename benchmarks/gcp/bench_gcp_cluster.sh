@@ -377,30 +377,70 @@ cluster_pprof_enabled() {
   [[ "$CLUSTER_PPROF" == "1" && -n "${BOOT_PPROF_PORTS:-}" ]]
 }
 
-capture_cluster_cpu_profiles() { # <runidx> <pprof_dir>
+# Captures, per node, one load window aligned with the CPU profile:
+#   cpu/node<i>.pb.gz            — on-CPU profile (PPROF_CPU_SECONDS)
+#   load/node<i>/block.before    — block contention counter at window start
+#   load/node<i>/block.after     — block contention counter at window end
+#   load/node<i>/mutex.before    — mutex contention counter at window start
+#   load/node<i>/mutex.after     — mutex contention counter at window end
+#   load/node<i>/goroutine.pb.gz — goroutine snapshot under load (window end)
+# block/mutex are cumulative counters (grainfs sets rate=1 when --pprof-port>0),
+# so the in-window delta — go tool pprof -base block.before block.after —
+# isolates contention during the load window. This surfaces OFF-CPU waits (disk
+# fsync, inter-node shard transfer, lock serialization) that the CPU profile
+# cannot see: the live limiter for IO-bound PUT. The goroutine snapshot taken at
+# the window end shows where goroutines are parked (e.g. bounded shard-write
+# fan-out) while the box runs <1 core busy.
+capture_cluster_load_profiles() { # <runidx> <pprof_dir>
   local idx="$1" pprof_dir="$2"
   cluster_pprof_enabled || return 0
   mkdir -p "$pprof_dir/cpu"
   local ports=()
   IFS=',' read -ra ports <<<"$BOOT_PPROF_PORTS"
-  log "grainfs-cluster: run=$idx pprof CPU capture ${PPROF_WARMUP_SECONDS}s warmup + ${PPROF_CPU_SECONDS}s"
+  log "grainfs-cluster: run=$idx pprof load capture ${PPROF_WARMUP_SECONDS}s warmup + ${PPROF_CPU_SECONDS}s (cpu+block+mutex+goroutine)"
   local pids=()
   local i
   for i in "${!ports[@]}"; do
     (
-      local n remote out
+      local n port remote_cpu out_cpu node_dir rb
       n="$(node_name "$i")"
-      remote="/tmp/grainfs-cluster-${idx}-cpu-node${i}.pb.gz"
-      out="$pprof_dir/cpu/node${i}.pb.gz"
+      port="${ports[$i]}"
+      node_dir="$pprof_dir/load/node${i}"
+      mkdir -p "$node_dir"
+      remote_cpu="/tmp/grainfs-cluster-${idx}-cpu-node${i}.pb.gz"
+      out_cpu="$pprof_dir/cpu/node${i}.pb.gz"
+      rb="/tmp/gr-${idx}-n${i}"   # remote basename for load profiles
       sleep "$PPROF_WARMUP_SECONDS"
-      ssh_node "$n" "curl -sf 'http://127.0.0.1:${ports[$i]}/debug/pprof/profile?seconds=$PPROF_CPU_SECONDS' -o '$remote' 2>/dev/null && echo pprof-cpu-node${i}-done" || true
+      # window-start contention baselines (cumulative counters)
+      ssh_node "$n" "curl -sf 'http://127.0.0.1:${port}/debug/pprof/block' -o '${rb}-block-before.pb.gz' 2>/dev/null; \
+                     curl -sf 'http://127.0.0.1:${port}/debug/pprof/mutex' -o '${rb}-mutex-before.pb.gz' 2>/dev/null" || true
+      # CPU profile defines the load window (blocking, PPROF_CPU_SECONDS long)
+      ssh_node "$n" "curl -sf 'http://127.0.0.1:${port}/debug/pprof/profile?seconds=$PPROF_CPU_SECONDS' -o '$remote_cpu' 2>/dev/null && echo pprof-cpu-node${i}-done" || true
+      # window-end contention + goroutine snapshots (still under load).
+      # goroutine.pb.gz = aggregated stacks for `go tool pprof`.
+      # goroutine.txt (debug=2) = full per-goroutine stacks WITH wait state/reason
+      # (e.g. "IO wait", "syscall", "chan receive 3 minutes") — this is the only
+      # view that surfaces OFF-CPU syscall waits (disk fsync, network), which the
+      # block/mutex profilers do not record. Count goroutines parked in fsync vs
+      # net vs chan to locate the live PUT limiter.
+      ssh_node "$n" "curl -sf 'http://127.0.0.1:${port}/debug/pprof/block' -o '${rb}-block-after.pb.gz' 2>/dev/null; \
+                     curl -sf 'http://127.0.0.1:${port}/debug/pprof/mutex' -o '${rb}-mutex-after.pb.gz' 2>/dev/null; \
+                     curl -sf 'http://127.0.0.1:${port}/debug/pprof/goroutine' -o '${rb}-goroutine.pb.gz' 2>/dev/null; \
+                     curl -sf 'http://127.0.0.1:${port}/debug/pprof/goroutine?debug=2' -o '${rb}-goroutine.txt' 2>/dev/null" || true
       gcloud compute scp --zone="$ZONE" --project="$PROJECT" --tunnel-through-iap \
-        "$n:$remote" "$out" >/dev/null 2>&1 || log "WARN: cluster CPU profile pull failed for $n"
+        "$n:$remote_cpu" "$out_cpu" >/dev/null 2>&1 || log "WARN: cluster CPU profile pull failed for $n"
+      local pr
+      for pr in block-before block-after mutex-before mutex-after goroutine; do
+        gcloud compute scp --zone="$ZONE" --project="$PROJECT" --tunnel-through-iap \
+          "$n:${rb}-${pr}.pb.gz" "$node_dir/${pr/-/.}.pb.gz" >/dev/null 2>&1 || true
+      done
+      gcloud compute scp --zone="$ZONE" --project="$PROJECT" --tunnel-through-iap \
+        "$n:${rb}-goroutine.txt" "$node_dir/goroutine.txt" >/dev/null 2>&1 || true
     ) &
     pids+=($!)
   done
   wait "${pids[@]}" 2>/dev/null || true
-  log "grainfs-cluster: run=$idx pprof CPU profiles -> $pprof_dir/cpu/"
+  log "grainfs-cluster: run=$idx pprof load profiles -> $pprof_dir/cpu/ + $pprof_dir/load/"
 }
 
 collect_cluster_pprof_snapshots() { # <runidx> <pprof_dir>
@@ -408,14 +448,18 @@ collect_cluster_pprof_snapshots() { # <runidx> <pprof_dir>
   cluster_pprof_enabled || return 0
   local ports=()
   IFS=',' read -ra ports <<<"$BOOT_PPROF_PORTS"
-  log "grainfs-cluster: run=$idx pprof collecting post-warp snapshots"
+  # heap/allocs only: in-use/cumulative allocation counters stay meaningful when
+  # read post-warp. goroutine/mutex/block are captured under load by
+  # capture_cluster_load_profiles (a post-warp idle snapshot would miss the live
+  # limiter).
+  log "grainfs-cluster: run=$idx pprof collecting post-warp heap/allocs snapshots"
   local i prof
   for i in "${!ports[@]}"; do
     local n node_dir
     n="$(node_name "$i")"
     node_dir="$pprof_dir/snap/node${i}"
     mkdir -p "$node_dir"
-    for prof in heap allocs goroutine mutex block; do
+    for prof in heap allocs; do
       local remote="/tmp/grainfs-cluster-${idx}-${prof}-node${i}.pb.gz"
       ssh_node "$n" "curl -sf 'http://127.0.0.1:${ports[$i]}/debug/pprof/$prof' -o '$remote' 2>/dev/null" || true
       gcloud compute scp --zone="$ZONE" --project="$PROJECT" --tunnel-through-iap \
@@ -438,7 +482,7 @@ cmd_grainfs_cluster() { # <runidx>
   log "grainfs-cluster: run=$idx warp via bench_s3_compat_compare.sh external mode"
   local pprof_pid=""
   if cluster_pprof_enabled; then
-    capture_cluster_cpu_profiles "$idx" "$pprof_dir" &
+    capture_cluster_load_profiles "$idx" "$pprof_dir" &
     pprof_pid=$!
   fi
   # push the repo's benchmark scripts to the client (external cluster mode reuses
