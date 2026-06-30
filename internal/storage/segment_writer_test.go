@@ -49,6 +49,22 @@ func TestSegmentWriter_Boundaries(t *testing.T) {
 	}
 }
 
+func TestSegmentWriter_S3FastETagSkipsMD5WhenOptedIn(t *testing.T) {
+	t.Setenv(s3ETagMD5Env, "0")
+	b := newTestLocalBackend(t)
+	data := makePattern(4096 + 7)
+
+	obj, err := writeViaSegmentWriter(b, "test", "fast-etag", bytes.NewReader(data))
+	require.NoError(t, err, "write")
+
+	h := md5.New()
+	h.Write(data)
+	wantMD5 := hex.EncodeToString(h.Sum(nil))
+	require.NotEqual(t, wantMD5, obj.ETag)
+	require.Equal(t, InternalETag(data), obj.ETag)
+	require.Len(t, obj.ETag, 16)
+}
+
 func TestSegmentWriter_UnknownContentLength(t *testing.T) {
 	t.Parallel()
 	b := newTestLocalBackend(t)

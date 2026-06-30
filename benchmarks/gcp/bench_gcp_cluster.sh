@@ -271,7 +271,11 @@ serve_node() {
   if [[ "${GRAINFS_SHARD_DIRECT_IO:-0}" == "1" ]]; then
     directio_env="--setenv=GRAINFS_SHARD_DIRECT_IO=1"
   fi
-  ssh_node "$n" "sudo systemd-run --unit=$UNIT --collect $invite_env $directio_env \
+  local s3_etag_env=""
+  if [[ "${GRAINFS_S3_ETAG_MD5:-1}" == "0" ]]; then
+    s3_etag_env="--setenv=GRAINFS_S3_ETAG_MD5=0"
+  fi
+  ssh_node "$n" "sudo systemd-run --unit=$UNIT --collect $invite_env $directio_env $s3_etag_env \
     $bin serve --data $DATA_DIR --port $HTTP_PORT --node-id p5-node-$idx \
     --raft-addr $ipi:$RAFT_PORT --join-listen-addr $ipi:$JOIN_PORT \
     --raft-heartbeat-interval ${RAFT_HEARTBEAT:-1s} --raft-election-timeout ${RAFT_ELECTION:-3s} \
