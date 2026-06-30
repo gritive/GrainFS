@@ -1,7 +1,6 @@
 package cluster
 
 import (
-	"context"
 	"crypto/md5"
 	"encoding/binary"
 	"fmt"
@@ -19,43 +18,43 @@ var md5Pool = sync.Pool{
 	},
 }
 
-const spoolCopyBufferSize = 1 << 20
-const maxEncryptedSpoolBlobBytes = 2 * spoolCopyBufferSize
-const encryptedSpoolCipherBufferSize = spoolCopyBufferSize + 64
+const partRecordCopyBufferSize = 1 << 20
+const maxEncryptedPartRecordBlobBytes = 2 * partRecordCopyBufferSize
+const encryptedPartRecordCipherBufferSize = partRecordCopyBufferSize + 64
 
-var spoolCopyBufferPool = sync.Pool{
+var partRecordCopyBufferPool = sync.Pool{
 	New: func() any {
-		buf := make([]byte, spoolCopyBufferSize)
+		buf := make([]byte, partRecordCopyBufferSize)
 		return &buf
 	},
 }
 
-var encryptedSpoolCipherBufferPool = sync.Pool{
+var encryptedPartRecordCipherBufferPool = sync.Pool{
 	New: func() any {
-		buf := make([]byte, encryptedSpoolCipherBufferSize)
+		buf := make([]byte, encryptedPartRecordCipherBufferSize)
 		return &buf
 	},
 }
 
-// copyToSpoolChunked copies src to dst while forcing chunked Writes no
-// larger than spoolCopyBufferSize. Callers writing into an encrypted
-// spool record stream must use this helper so the receiver-side
-// maxEncryptedSpoolBlobBytes invariant cannot be tripped by readers
+// copyChunked copies src to dst while forcing chunked Writes no
+// larger than partRecordCopyBufferSize. Callers writing into an encrypted
+// part record stream must use this helper so the receiver-side
+// maxEncryptedPartRecordBlobBytes invariant cannot be tripped by readers
 // that implement WriteTo (e.g. *bytes.Reader) or by upstream HTTP
 // frameworks that hand the body in 5 MiB+ slabs.
-func copyToSpoolChunked(dst io.Writer, src io.Reader) (int64, error) {
-	bp := spoolCopyBufferPool.Get().(*[]byte)
-	defer spoolCopyBufferPool.Put(bp)
+func copyChunked(dst io.Writer, src io.Reader) (int64, error) {
+	bp := partRecordCopyBufferPool.Get().(*[]byte)
+	defer partRecordCopyBufferPool.Put(bp)
 	type readerOnly struct{ io.Reader }
 	return io.CopyBuffer(dst, readerOnly{src}, *bp)
 }
 
-// encryptedSpoolRecordWriter / openSpoolEncryptedRecordFile and the record codec
+// encryptedPartRecordWriter / openEncryptedPartRecordFile and the record codec
 // below stage encrypted multipart PART bytes to disk (UploadPart →
-// openMultipartPart). The PUT-body spool was removed in the spool-elimination
-// epic; this per-record codec remains because multipart parts arrive across
-// separate requests and are fundamentally disk-staged.
-type encryptedSpoolRecordWriter struct {
+// openMultipartPart). The PUT-body disk staging was removed; this per-record
+// codec remains because multipart parts arrive across separate requests and are
+// fundamentally disk-resident.
+type encryptedPartRecordWriter struct {
 	w         io.Writer
 	seam      storage.DataEncryptor
 	domain    string
@@ -64,17 +63,17 @@ type encryptedSpoolRecordWriter struct {
 	aadFields []encrypt.AADField
 }
 
-func (w *encryptedSpoolRecordWriter) Write(p []byte) (int, error) {
+func (w *encryptedPartRecordWriter) Write(p []byte) (int, error) {
 	if uint64(len(p)) > uint64(^uint32(0)) {
-		return 0, fmt.Errorf("encrypted spool record too large: %d", len(p))
+		return 0, fmt.Errorf("encrypted part record too large: %d", len(p))
 	}
-	w.aadFields = spoolRecordAADFieldsInto(w.aadFields, w.domain, w.record)
+	w.aadFields = partRecordAADFieldsInto(w.aadFields, w.domain, w.record)
 	blob, gen, err := w.seam.SealTo(w.cipherBuf[:0], encrypt.DomainSpool, w.aadFields, p)
 	if err != nil {
 		return 0, err
 	}
 	if uint64(len(blob)) > uint64(^uint32(0)) {
-		return 0, fmt.Errorf("encrypted spool blob too large: %d", len(blob))
+		return 0, fmt.Errorf("encrypted part record blob too large: %d", len(blob))
 	}
 	var header [12]byte
 	binary.BigEndian.PutUint32(header[:4], uint32(len(p)))
@@ -94,17 +93,17 @@ func (w *encryptedSpoolRecordWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func openSpoolEncryptedRecordFile(path string, seam storage.DataEncryptor, domain string) (io.ReadCloser, error) {
+func openEncryptedPartRecordFile(path string, seam storage.DataEncryptor, domain string) (io.ReadCloser, error) {
 	if seam == nil {
-		return nil, fmt.Errorf("open encrypted spool: nil seam")
+		return nil, fmt.Errorf("open encrypted part record: nil seam")
 	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	plainRef := spoolCopyBufferPool.Get().(*[]byte)
-	cipherRef := encryptedSpoolCipherBufferPool.Get().(*[]byte)
-	return &encryptedSpoolRecordReader{
+	plainRef := partRecordCopyBufferPool.Get().(*[]byte)
+	cipherRef := encryptedPartRecordCipherBufferPool.Get().(*[]byte)
+	return &encryptedPartRecordReader{
 		f:         f,
 		seam:      seam,
 		domain:    domain,
@@ -115,7 +114,7 @@ func openSpoolEncryptedRecordFile(path string, seam storage.DataEncryptor, domai
 	}, nil
 }
 
-type encryptedSpoolRecordReader struct {
+type encryptedPartRecordReader struct {
 	f         *os.File
 	seam      storage.DataEncryptor
 	domain    string
@@ -129,7 +128,7 @@ type encryptedSpoolRecordReader struct {
 	err       error
 }
 
-func (r *encryptedSpoolRecordReader) Read(p []byte) (int, error) {
+func (r *encryptedPartRecordReader) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
@@ -145,7 +144,7 @@ func (r *encryptedSpoolRecordReader) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-func (r *encryptedSpoolRecordReader) Close() error {
+func (r *encryptedPartRecordReader) Close() error {
 	if len(r.buf) > 0 {
 		clear(r.buf)
 	}
@@ -157,22 +156,22 @@ func (r *encryptedSpoolRecordReader) Close() error {
 	}
 	if r.plainRef != nil {
 		clear((*r.plainRef)[:cap(*r.plainRef)])
-		spoolCopyBufferPool.Put(r.plainRef)
+		partRecordCopyBufferPool.Put(r.plainRef)
 		r.plainRef = nil
 	}
 	if r.cipherRef != nil {
 		clear((*r.cipherRef)[:cap(*r.cipherRef)])
-		encryptedSpoolCipherBufferPool.Put(r.cipherRef)
+		encryptedPartRecordCipherBufferPool.Put(r.cipherRef)
 		r.cipherRef = nil
 	}
 	return r.f.Close()
 }
 
-func (r *encryptedSpoolRecordReader) loadNext() error {
+func (r *encryptedPartRecordReader) loadNext() error {
 	// Reuse the reader-owned plaintext/ciphertext buffers. Safe because the
 	// previous record is fully drained before loadNext is called (Read loops
 	// while len(r.buf)==0) and the plaintext only ever exits via Read's copy.
-	plain, cipher, aadFields, done, err := readSpoolEncryptedRecord(r.f, r.seam, r.domain, r.record, r.plain[:0], r.cipherBuf[:0], r.aadFields)
+	plain, cipher, aadFields, done, err := readEncryptedPartRecord(r.f, r.seam, r.domain, r.record, r.plain[:0], r.cipherBuf[:0], r.aadFields)
 	if err != nil {
 		return err
 	}
@@ -187,31 +186,31 @@ func (r *encryptedSpoolRecordReader) loadNext() error {
 	return nil
 }
 
-func readSpoolEncryptedRecord(r io.Reader, seam storage.DataEncryptor, domain string, record uint64, plainDst, cipherDst []byte, aadDst []encrypt.AADField) (plain, cipher []byte, aadFields []encrypt.AADField, done bool, err error) {
+func readEncryptedPartRecord(r io.Reader, seam storage.DataEncryptor, domain string, record uint64, plainDst, cipherDst []byte, aadDst []encrypt.AADField) (plain, cipher []byte, aadFields []encrypt.AADField, done bool, err error) {
 	var header [12]byte
 	if _, err := io.ReadFull(r, header[:]); err != nil {
 		if err == io.EOF {
 			return nil, cipherDst, aadDst, true, nil
 		}
-		return nil, cipherDst, aadDst, false, fmt.Errorf("read encrypted spool header: %w", err)
+		return nil, cipherDst, aadDst, false, fmt.Errorf("read encrypted part record header: %w", err)
 	}
 	plainLen := binary.BigEndian.Uint32(header[:4])
 	blobLen := binary.BigEndian.Uint32(header[4:8])
 	gen := binary.BigEndian.Uint32(header[8:])
 	if blobLen == 0 {
-		return nil, cipherDst, aadDst, false, fmt.Errorf("read encrypted spool record: empty blob")
+		return nil, cipherDst, aadDst, false, fmt.Errorf("read encrypted part record: empty blob")
 	}
-	if blobLen > maxEncryptedSpoolBlobBytes {
-		return nil, cipherDst, aadDst, false, fmt.Errorf("read encrypted spool record: blob too large: %d", blobLen)
+	if blobLen > maxEncryptedPartRecordBlobBytes {
+		return nil, cipherDst, aadDst, false, fmt.Errorf("read encrypted part record: blob too large: %d", blobLen)
 	}
 	if cap(cipherDst) < int(blobLen) {
 		cipherDst = make([]byte, blobLen)
 	}
 	blob := cipherDst[:blobLen]
 	if _, err := io.ReadFull(r, blob); err != nil {
-		return nil, blob, aadDst, false, fmt.Errorf("read encrypted spool blob: %w", err)
+		return nil, blob, aadDst, false, fmt.Errorf("read encrypted part record blob: %w", err)
 	}
-	aadFields = spoolRecordAADFieldsInto(aadDst, domain, record)
+	aadFields = partRecordAADFieldsInto(aadDst, domain, record)
 	out, err := seam.OpenTo(plainDst[:0], encrypt.DomainSpool, aadFields, gen, blob)
 	clear(blob) // zeroize ciphertext after decrypt; buffer is reused next record
 	if err != nil {
@@ -221,25 +220,30 @@ func readSpoolEncryptedRecord(r io.Reader, seam storage.DataEncryptor, domain st
 		// depth: Go's GCM already zeroes on auth failure, but the AEAD
 		// contract does not guarantee it).
 		clear(plainDst[:cap(plainDst)])
-		return nil, blob, aadFields, false, fmt.Errorf("open encrypted spool record: %w", err)
+		return nil, blob, aadFields, false, fmt.Errorf("open encrypted part record: %w", err)
 	}
 	if len(out) != int(plainLen) {
 		clear(out[:cap(out)])
-		return nil, blob, aadFields, false, fmt.Errorf("open encrypted spool record: plaintext size mismatch")
+		return nil, blob, aadFields, false, fmt.Errorf("open encrypted part record: plaintext size mismatch")
 	}
 	return out, blob, aadFields, false, nil
 }
 
-type readerWithContext struct {
-	ctx context.Context
-	r   io.Reader
-}
-
-func (r readerWithContext) Read(p []byte) (int, error) {
-	select {
-	case <-r.ctx.Done():
-		return 0, r.ctx.Err()
-	default:
-		return r.r.Read(p)
+// partRecordAADFieldsInto binds the per-record domain string (e.g.
+// "cluster-multipart-part:<uploadID>:<n>") AND the record index into the AAD
+// under DomainSpool. Including the record index keeps per-frame positional
+// binding (records within one part file cannot be reordered, duplicated, or
+// spliced without AEAD failure — preserving the old domain+record AAD). The
+// domain string must be identical on write and read; the encrypted
+// multipart-part codec recomputes it deterministically from IDs
+// (uploadID/partNumber) — never from a filesystem path.
+func partRecordAADFieldsInto(dst []encrypt.AADField, domain string, record uint64) []encrypt.AADField {
+	if cap(dst) < 2 {
+		dst = make([]encrypt.AADField, 2)
+	} else {
+		dst = dst[:2]
 	}
+	dst[0] = encrypt.FieldString(domain)
+	dst[1] = encrypt.FieldUint64(record)
+	return dst
 }

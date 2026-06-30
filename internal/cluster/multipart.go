@@ -148,14 +148,14 @@ func (b *DistributedBackend) UploadPart(ctx context.Context, bucket, key, upload
 	defer md5Pool.Put(h)
 	var partWriter io.Writer = f
 	if b.encryptedShardStorage() {
-		partWriter = &encryptedSpoolRecordWriter{
+		partWriter = &encryptedPartRecordWriter{
 			w:      f,
 			seam:   b.shardSvc.segEnc(),
 			domain: clusterMultipartPartDomain(uploadID, partNumber),
 		}
 	}
 	w := io.MultiWriter(partWriter, h)
-	size, err := copyToSpoolChunked(w, r)
+	size, err := copyChunked(w, r)
 	f.Close()
 	if err != nil {
 		os.Remove(partFile)
@@ -612,7 +612,7 @@ func (b *DistributedBackend) ListParts(ctx context.Context, bucket, key, uploadI
 func (b *DistributedBackend) openMultipartPart(uploadID string, partNumber int) (io.ReadCloser, error) {
 	full := b.partPath(uploadID, partNumber)
 	if b.encryptedShardStorage() {
-		return openSpoolEncryptedRecordFile(full, b.shardSvc.segEnc(), clusterMultipartPartDomain(uploadID, partNumber))
+		return openEncryptedPartRecordFile(full, b.shardSvc.segEnc(), clusterMultipartPartDomain(uploadID, partNumber))
 	}
 	return os.Open(full)
 }
