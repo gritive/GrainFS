@@ -16,8 +16,9 @@ removal history.
 - Do not market retired protocol surfaces as shipped behavior. NFSv4, 9P, NBD /
   volume devices, and Iceberg catalog/log-lake support are removal-history
   references only.
-- Use `roadmap`, `future`, or `not currently supported` wording for anything not
-  marked `Supported` or `Partial` in the current docs.
+- Use `not supported` or `not planned` wording for surfaces marked that way in
+  the current docs. Use `roadmap` or `future` only when an accepted roadmap item
+  or owner-approved plan exists.
 - Get owner approval before using any comparison against MinIO, Ceph, SeaweedFS,
   JuiceFS, Garage, cloud S3-compatible storage, or other named products.
 
