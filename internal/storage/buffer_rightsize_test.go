@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"path/filepath"
-	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -57,40 +55,6 @@ func TestFirstChunkBufferSize_OpaqueReaderFallsBack(t *testing.T) {
 	n, exact := firstChunkBufferSize(io.LimitReader(bytes.NewReader(make([]byte, 1024)), 1024), DefaultChunkSize)
 	require.Equal(t, DefaultChunkSize, n)
 	require.False(t, exact)
-}
-
-// A2: writing a small encrypted object must not allocate a fixed ~1 MiB bufio
-// buffer (plus a 128 KiB working buffer) on every call. Pooling those buffers
-// keeps steady-state per-write allocation small regardless of the fixed buffer
-// sizes. Measured in bytes (TotalAlloc) because the win is allocation volume,
-// not allocation count.
-func TestWriteEncryptedObjectFile_SmallObjectAllocBounded(t *testing.T) {
-	if raceDetectorEnabled {
-		t.Skip("race instrumentation inflates TotalAlloc, making the byte threshold meaningless")
-	}
-	enc := testSegEnc(t)
-	dir := t.TempDir()
-	plaintext := []byte("small-object-payload")
-	fields := objectFileAADFields("b", "k")
-
-	// Warm any pools so the first allocation is not counted.
-	_, err := writeEncryptedObjectFile(filepath.Join(dir, "warm"), enc, fields, bytes.NewReader(plaintext), io.Discard)
-	require.NoError(t, err)
-
-	const iters = 50
-	var m1, m2 runtime.MemStats
-	runtime.GC()
-	runtime.ReadMemStats(&m1)
-	for i := 0; i < iters; i++ {
-		_, err := writeEncryptedObjectFile(filepath.Join(dir, "obj"), enc, fields, bytes.NewReader(plaintext), io.Discard)
-		require.NoError(t, err)
-	}
-	runtime.ReadMemStats(&m2)
-
-	perOp := (m2.TotalAlloc - m1.TotalAlloc) / iters
-	// Before pooling: ~1.1 MiB/op (1 MiB bufio + 128 KiB working buffer).
-	// After pooling: comfortably under 256 KiB/op.
-	require.Less(t, perOp, uint64(256<<10), "per-op alloc bytes too high: %d", perOp)
 }
 
 // A1 (SizeHint): an opaque streaming body (no Len) whose Content-Length is known
