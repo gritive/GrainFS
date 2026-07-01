@@ -9,11 +9,10 @@ import (
 	"crypto/md5"
 )
 
-// Composite-ETag utilities for S3 Express AppendObject semantics. Extracted from
-// append.go ahead of the LocalBackend removal: production cluster code
-// (internal/cluster/appendable_object.go) depends on the exported functions
-// below, so they must outlive the LocalBackend test fixture. The unexported
-// helpers are shared with the remaining LocalBackend append glue (same package).
+// Composite-ETag utilities for S3 Express AppendObject semantics. Production
+// cluster code (internal/cluster/appendable_object.go) depends on the exported
+// functions below. The unexported helpers back both the exported wrappers and
+// the in-package append-ETag tests (append_test.go).
 
 // CompositeETag returns the S3-multipart-style composite ETag:
 // md5(concat(callMD5s)) + "-<N>".

@@ -88,7 +88,7 @@ func (b *recordingDstBackend) PutObject(_ context.Context, bucket, key string, r
 	return &storage.Object{Key: key, Size: int64(len(data))}, nil
 }
 
-func newLocalBackend(t *testing.T) storage.Backend {
+func newTestDst(t *testing.T) storage.Backend {
 	t.Helper()
 	return newRecordingDst()
 }
@@ -103,7 +103,7 @@ func TestInjector_CopiesAllObjects(t *testing.T) {
 			},
 		},
 	}
-	dst := newLocalBackend(t)
+	dst := newTestDst(t)
 
 	inj := migration.NewInjector(src, dst)
 	stats, err := inj.Run()
@@ -132,7 +132,7 @@ func TestInjector_SkipsExistingObjects(t *testing.T) {
 			"b": {{key: "existing.txt", content: "src", ct: "text/plain"}},
 		},
 	}
-	dst := newLocalBackend(t)
+	dst := newTestDst(t)
 	require.NoError(t, dst.CreateBucket(context.Background(), "b"))
 	_, err := dst.PutObject(context.Background(), "b", "existing.txt", strings.NewReader("dst"), "text/plain")
 	require.NoError(t, err)
@@ -159,7 +159,7 @@ func TestInjector_MultipleBuckets(t *testing.T) {
 			"beta":  {{key: "b.txt", content: "bbb", ct: "text/plain"}},
 		},
 	}
-	dst := newLocalBackend(t)
+	dst := newTestDst(t)
 
 	inj := migration.NewInjector(src, dst)
 	stats, err := inj.Run()
@@ -213,7 +213,7 @@ func TestInjector_Pagination_MultiPage(t *testing.T) {
 			"b": {{"a.txt", "b.txt"}, {"c.txt"}},
 		},
 	}
-	dst := newLocalBackend(t)
+	dst := newTestDst(t)
 	inj := migration.NewInjector(src, dst)
 	stats, err := inj.Run()
 	require.NoError(t, err)
