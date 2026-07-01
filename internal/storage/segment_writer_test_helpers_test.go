@@ -84,10 +84,11 @@ func (r *errAfterNReader) Read(p []byte) (int, error) {
 }
 
 // writeViaSegmentWriter is the test-side entry point that runs the
-// SegmentWriter pipeline against a LocalBackend and persists the resulting
-// Object record.
-func writeViaSegmentWriter(b *LocalBackend, bucket, key string, r io.Reader) (*Object, error) {
-	w := NewSegmentWriter(localBackendAdapter{b})
+// SegmentWriter pipeline against a byteWriterBackend (an in-package sink) and
+// persists the resulting Object record. It exercises SegmentWriter output
+// (segments/size/ETag) independent of any concrete storage backend.
+func writeViaSegmentWriter(b *byteWriterBackend, bucket, key string, r io.Reader) (*Object, error) {
+	w := NewSegmentWriter(b)
 	obj, err := w.Write(context.Background(), bucket, key, "application/octet-stream", r)
 	if err != nil {
 		return nil, err
@@ -98,9 +99,13 @@ func writeViaSegmentWriter(b *LocalBackend, bucket, key string, r io.Reader) (*O
 	return obj, nil
 }
 
+// byteWriterBackend is an in-memory SegmentWriter sink. It counts reader- vs
+// byte-path segment writes and, via PutObjectRecord/HeadObject, records
+// committed objects so tests can assert that a failed write leaves no record.
 type byteWriterBackend struct {
 	readerCalls int
 	byteCalls   int
+	objects     map[string]*Object
 }
 
 func (b *byteWriterBackend) WriteSegment(ctx context.Context, bucket, key string, idx int, r io.Reader) (SegmentRef, error) {
@@ -115,4 +120,19 @@ func (b *byteWriterBackend) WriteSegment(ctx context.Context, bucket, key string
 func (b *byteWriterBackend) WriteSegmentBytes(ctx context.Context, bucket, key string, idx int, data []byte) (SegmentRef, error) {
 	b.byteCalls++
 	return SegmentRef{BlobID: key, Size: int64(len(data))}, nil
+}
+
+func (b *byteWriterBackend) PutObjectRecord(_ context.Context, bucket, key string, obj *Object) error {
+	if b.objects == nil {
+		b.objects = make(map[string]*Object)
+	}
+	b.objects[bucket+"/"+key] = obj
+	return nil
+}
+
+func (b *byteWriterBackend) HeadObject(_ context.Context, bucket, key string) (*Object, error) {
+	if o, ok := b.objects[bucket+"/"+key]; ok {
+		return o, nil
+	}
+	return nil, ErrObjectNotFound
 }
