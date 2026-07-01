@@ -288,7 +288,13 @@ func ECReconstructStreamTo(w io.Writer, cfg ECConfig, shards []io.Reader) error 
 	return ecReconstructStreamBodiesTo(w, cfg, origSize, bodies)
 }
 
-func newECReconstructStreamReaderWithPrefetch(cfg ECConfig, shards []io.Reader) (*ecReconstructStreamReader, error) {
+// newECReconstructStreamReaderWithPrefetch builds a streaming EC reader. closeShards,
+// if non-nil, releases the underlying shard readers/bodies; it is invoked when the
+// returned reader is closed. For the prefetch path it runs only AFTER the background
+// producers have exited (they must not be mid-Read on a shard body when it is closed —
+// Hertz forbids cross-goroutine CloseBodyStream; see internal/transport/http_shared.go),
+// and it is detached so Close returns promptly instead of blocking on a stalled producer.
+func newECReconstructStreamReaderWithPrefetch(cfg ECConfig, shards []io.Reader, closeShards func()) (*ecReconstructStreamReader, error) {
 	origSize, bodies, err := ecReconstructStreamBodies(cfg, shards)
 	if err != nil {
 		return nil, err
@@ -300,9 +306,14 @@ func newECReconstructStreamReaderWithPrefetch(cfg ECConfig, shards []io.Reader) 
 		}
 		// Single-shard reads (e.g., 1+0 single-node EC) get no parallelism
 		// benefit from the async prefetcher and the extra goroutine hop only
-		// adds latency, so stay on the direct io.MultiReader path.
+		// adds latency, so stay on the direct io.MultiReader path. Reading
+		// happens in the consumer goroutine, so closing shards on Close is safe
+		// synchronously (no concurrent producer).
 		if len(dataReaders) <= 1 {
-			return &ecReconstructStreamReader{reader: io.LimitReader(io.MultiReader(dataReaders...), origSize)}, nil
+			return &ecReconstructStreamReader{
+				reader: io.LimitReader(io.MultiReader(dataReaders...), origSize),
+				close:  syncShardClose(closeShards),
+			}, nil
 		}
 		prefetchers := make([]*asyncPrefetchReader, len(dataReaders))
 		readers := make([]io.Reader, len(dataReaders))
@@ -312,13 +323,23 @@ func newECReconstructStreamReaderWithPrefetch(cfg ECConfig, shards []io.Reader) 
 			readers[i] = p
 		}
 		closeAll := func() error {
-			var firstErr error
+			// Stop the producers without blocking; a producer stalled in
+			// io.ReadFull on a remote shard only unblocks at the idle read
+			// timeout. Wait for them to exit and close the shard bodies in a
+			// detached goroutine so Close returns promptly while preserving the
+			// invariant that bodies are closed only after producers stop reading.
 			for _, p := range prefetchers {
-				if err := p.Close(); err != nil && firstErr == nil {
-					firstErr = err
-				}
+				p.signalStop()
 			}
-			return firstErr
+			go func() {
+				for _, p := range prefetchers {
+					p.awaitDrained()
+				}
+				if closeShards != nil {
+					closeShards()
+				}
+			}()
+			return nil
 		}
 		return &ecReconstructStreamReader{
 			reader: io.LimitReader(io.MultiReader(readers...), origSize),
@@ -333,7 +354,25 @@ func newECReconstructStreamReaderWithPrefetch(cfg ECConfig, shards []io.Reader) 
 		}
 		_ = pw.Close()
 	}()
-	return &ecReconstructStreamReader{reader: pr, close: pr.Close}, nil
+	return &ecReconstructStreamReader{reader: pr, close: func() error {
+		err := pr.Close()
+		if closeShards != nil {
+			closeShards()
+		}
+		return err
+	}}, nil
+}
+
+// syncShardClose adapts a closeShards callback to the reader's close signature,
+// invoking it synchronously (used where no background producer reads the shards).
+func syncShardClose(closeShards func()) func() error {
+	if closeShards == nil {
+		return nil
+	}
+	return func() error {
+		closeShards()
+		return nil
+	}
 }
 
 type ecReconstructStreamReader struct {

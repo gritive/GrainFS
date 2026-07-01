@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.781.0] - 2026-07-02
+
+### Fixed
+- **Aborting an erasure-coded streaming GET no longer stalls the connection until the shard
+  read timeout.** Closing an EC streaming reader mid-read (client abort or partial read) could
+  block for up to the idle shard-read timeout while background prefetch producers finished their
+  in-flight shard reads. Close now signals the producers and returns promptly; shard connections
+  are released in the background once the producers exit, preserving the transport's
+  no-close-while-reading invariant. On abort, the lingering producer and pooled connection clean
+  themselves up at the idle read timeout (bounded).
+
 ## [0.0.780.0] - 2026-07-02
 
 ### Changed
