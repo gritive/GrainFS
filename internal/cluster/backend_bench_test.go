@@ -216,9 +216,6 @@ func BenchmarkGetObjectEC_ChunkedSegment10MiB(b *testing.B) {
 	require.Greater(b, obj.Segments[0].Size, int64(4<<20)) // must be a large, multi-segment object
 
 	store := &clusterSegmentStore{b: bk, bucket: "bench", key: "chunked-readkey", obj: obj}
-	record, err := store.placementRecord(obj.Segments[0])
-	require.NoError(b, err)
-	shardKey := "chunked-readkey/segments/" + obj.Segments[0].BlobID
 
 	for _, tc := range []struct {
 		name string
@@ -233,17 +230,6 @@ func BenchmarkGetObjectEC_ChunkedSegment10MiB(b *testing.B) {
 					_, err = io.Copy(io.Discard, rc)
 					require.NoError(b, rc.Close())
 					require.NoError(b, err)
-				}
-			},
-		},
-		{
-			name: "legacy-readobject-buffered",
-			read: func(b *testing.B) {
-				reader := bk.newECObjectReader()
-				for i := 0; i < b.N; i++ {
-					got, err := reader.ReadObject(context.Background(), "bench", shardKey, record)
-					require.NoError(b, err)
-					require.Len(b, got, len(data))
 				}
 			},
 		},

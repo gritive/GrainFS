@@ -426,31 +426,6 @@ func TestShardService_ReadShardStream_EncryptedStreamsPlaintext(t *testing.T) {
 	require.Equal(t, plaintext, got)
 }
 
-func TestShardService_ReadShardRange_RejectsMediumSingleFrame(t *testing.T) {
-	ctx := context.Background()
-
-	tr1 := transport.MustNewHTTPTransport("test-cluster-psk")
-	tr2 := transport.MustNewHTTPTransport("test-cluster-psk")
-	require.NoError(t, tr1.Listen(ctx, "127.0.0.1:0"))
-	require.NoError(t, tr2.Listen(ctx, "127.0.0.1:0"))
-	defer tr1.Close()
-	defer tr2.Close()
-
-	dir1, dir2 := t.TempDir(), t.TempDir()
-	keeper, clusterID := testDEKKeeper(t)
-	svc1 := NewShardService(dir1, tr1, WithShardDEKKeeper(keeper, clusterID))
-	svc2 := NewShardService(dir2, tr2, WithShardDEKKeeper(keeper, clusterID))
-	tr2.RegisterBufferedRoute(transport.RouteShardRPC, svc2.NativeRPCHandler())
-	tr2.RegisterBufferedRoute(transport.RouteShardRPC, svc2.NativeRPCHandler())
-
-	plaintext := bytes.Repeat([]byte("0123456789abcdefghijklmnopqrstuvwxyz"), 4096)
-	require.NoError(t, svc1.WriteShard(ctx, tr2.LocalAddr(), "bkt", "key", 0, plaintext))
-
-	_, err := svc1.ReadShardRange(ctx, tr2.LocalAddr(), "bkt", "key", 0, 0, 64*1024+1)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "exceeds max")
-}
-
 func TestShardService_RPCWriteReadDelete(t *testing.T) {
 	ctx := context.Background()
 

@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.780.0] - 2026-07-02
+
+### Changed
+- **Retired the dead EC read-path surface left by the streaming-only unification (internal, no user-facing change).**
+  After production erasure-coded reads moved to the streaming `OpenObject`/`ReadAt` path, the buffered
+  read surface survived only in test/bench code. This release removes the one-shot `ReadShardRange`
+  RPC, the buffered `ReadObject`/`readShards` reader and its full-shard collector, the dead
+  `WriteLocalShardContext` interface method, the orphaned buffered `stripeDeinterleave`, and the
+  now-unused endpoint-level `ReadShard` (~800 LOC net). EC reconstruction and peer-health assertions
+  were ported onto the streaming path and a real-`ShardService` reconstruction integration test was
+  added, so coverage is preserved. The in-heap shard cache and its `--shard-cache-size` flag stay —
+  they remain live for ranged GET. No S3 API, CLI, or on-disk format changes.
+
 ## [0.0.779.0] - 2026-07-02
 
 ### Fixed

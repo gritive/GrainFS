@@ -46,8 +46,6 @@ type shardEndpoint interface {
 	// DeleteShards removes all shards for shardKey on this slot (write cleanup).
 	DeleteShards(ctx context.Context, bucket, shardKey string) error
 
-	// ReadShard returns the full shard bytes (buffered).
-	ReadShard(ctx context.Context, bucket, shardKey string, shardIdx int) ([]byte, error)
 	// OpenShardStream opens a streaming reader for the shard.
 	OpenShardStream(ctx context.Context, bucket, shardKey string, shardIdx int) (io.ReadCloser, error)
 	// ReadShardAt reads len(buf) bytes at offset within the shard. offset is the
@@ -105,7 +103,6 @@ type localShardEndpoint struct {
 // covers both the writer's local-write and the reader's local-read needs;
 // *ShardService satisfies it.
 type localShardStore interface {
-	WriteLocalShardContext(ctx context.Context, bucket, key string, shardIdx int, data []byte) error
 	WriteLocalShardStreamContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader) error
 	// WriteLocalShardStreamStagedContext writes a shard to the staging physical
 	// path stagingKey while sealing with finalKey as AAD (PR1 segment staging).
@@ -198,10 +195,6 @@ func (e localShardEndpoint) DeleteShards(_ context.Context, bucket, shardKey str
 	return e.shards.DeleteLocalShards(bucket, shardKey)
 }
 
-func (e localShardEndpoint) ReadShard(_ context.Context, bucket, shardKey string, shardIdx int) ([]byte, error) {
-	return e.shards.ReadLocalShard(bucket, shardKey, shardIdx)
-}
-
 func (e localShardEndpoint) OpenShardStream(_ context.Context, bucket, shardKey string, shardIdx int) (io.ReadCloser, error) {
 	return e.shards.OpenLocalShard(bucket, shardKey, shardIdx)
 }
@@ -233,7 +226,6 @@ type remoteShardStore interface {
 	DeleteShards(ctx context.Context, peer, bucket, key string) error
 	ReadShard(ctx context.Context, peer, bucket, key string, shardIdx int) ([]byte, error)
 	ReadShardStream(ctx context.Context, peer, bucket, key string, shardIdx int) (io.ReadCloser, error)
-	ReadShardRange(ctx context.Context, peer, bucket, key string, shardIdx int, offset, length int64) ([]byte, error)
 	ReadShardRangeStream(ctx context.Context, peer, bucket, key string, shardIdx int, offset, length int64) (io.ReadCloser, error)
 }
 
@@ -380,13 +372,6 @@ func (e remoteShardEndpoint) writeRemoteShard(
 
 func (e remoteShardEndpoint) DeleteShards(ctx context.Context, bucket, shardKey string) error {
 	return e.shards.DeleteShards(ctx, e.node, bucket, shardKey)
-}
-
-// ReadShard does NOT mark peerHealth: its sole caller (readShards) needs
-// cancel-aware marking (a k-of-n early-exit cancellation must not mark the peer
-// unhealthy), which only the caller can distinguish, so it owns the marking.
-func (e remoteShardEndpoint) ReadShard(ctx context.Context, bucket, shardKey string, shardIdx int) ([]byte, error) {
-	return e.shards.ReadShard(ctx, e.node, bucket, shardKey, shardIdx)
 }
 
 // OpenShardStream marks peerHealth at the RPC boundary (success → healthy,

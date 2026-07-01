@@ -186,10 +186,6 @@ func (l *LocalShardStore) WriteLocalShard(bucket, key string, shardIdx int, data
 	return l.writeLocalShard(context.Background(), bucket, key, shardIdx, data)
 }
 
-func (l *LocalShardStore) WriteLocalShardContext(ctx context.Context, bucket, key string, shardIdx int, data []byte) error {
-	return l.writeLocalShard(ctx, bucket, key, shardIdx, data)
-}
-
 // EncodeEncryptedShardBuffer seals data as a GFSENC3 chunked shard using the
 // DEK seam, identical to the normal writeLocalShard format. Used by the
 // scrubber/EC-repair path (DistributedBackend.WriteShard) so repaired shards

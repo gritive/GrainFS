@@ -8,26 +8,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestStripeDeinterleaveBuffered(t *testing.T) {
-	const k, m, stripeBytes = 2, 2, 1 << 20
-	cfg := ECConfig{DataShards: k, ParityShards: m}
-	payload := make([]byte, 4*1024*1024+777)
-	for i := range payload {
-		payload[i] = byte((i * 7) % 251)
-	}
-	bodies := buildInterleavedShards(t, cfg, payload, stripeBytes)
-
-	got, err := stripeDeinterleave(cfg, cloneShards(bodies), stripeBytes, int64(len(payload)))
-	require.NoError(t, err)
-	require.Equal(t, payload, got)
-
-	deg := cloneShards(bodies)
-	deg[0] = nil
-	got2, err := stripeDeinterleave(cfg, deg, stripeBytes, int64(len(payload)))
-	require.NoError(t, err)
-	require.Equal(t, payload, got2)
-}
-
 // buildInterleavedShards mirrors CPUPool: per stripe, ECSplitRaw and append fragment i to shard i.
 func buildInterleavedShards(t *testing.T, cfg ECConfig, payload []byte, stripeBytes int) [][]byte {
 	t.Helper()

@@ -651,7 +651,6 @@ type fakeECObjectWriterLocalWrite struct {
 	bucket   string
 	key      string
 	shardIdx int
-	body     []byte
 }
 
 type fakeECObjectWriterBufferedWrite struct {
@@ -715,10 +714,6 @@ func (f *fakeECObjectWriterShards) WriteShardStreamStaged(ctx context.Context, p
 		finalKey:   finalKey,
 		shardIdx:   shardIdx,
 	})
-	return nil
-}
-
-func (f *fakeECObjectWriterShards) WriteLocalShardContext(_ context.Context, _ string, _ string, _ int, _ []byte) error {
 	return nil
 }
 
@@ -794,10 +789,6 @@ func (f *fakeECObjectWriterShards) ReadShard(context.Context, string, string, st
 
 func (f *fakeECObjectWriterShards) ReadShardStream(context.Context, string, string, string, int) (io.ReadCloser, error) {
 	panic("ReadShardStream: not used by ecObjectWriter")
-}
-
-func (f *fakeECObjectWriterShards) ReadShardRange(context.Context, string, string, string, int, int64, int64) ([]byte, error) {
-	panic("ReadShardRange: not used by ecObjectWriter")
 }
 
 func (f *fakeECObjectWriterShards) ReadShardRangeStream(context.Context, string, string, string, int, int64, int64) (io.ReadCloser, error) {

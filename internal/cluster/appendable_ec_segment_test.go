@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/transport"
 )
 
 // fakeSegmentECOpener records the refs it is asked to reconstruct and returns
@@ -188,6 +189,74 @@ func TestAppendableSegmentReader_ECBaseSegment_Degraded_StreamsViaOpenObject(t *
 		"EC-backed appendable base segment must be parity-reconstructed when data shard is unavailable")
 	require.Greater(t, fetcher.readShardStreamCalls, 0,
 		"must have used ReadShardStream (streaming path, not buffered)")
+}
+
+// TestAppendableSegmentReader_ECBaseSegment_RealShardService exercises
+// ecObjectReader.OpenObject through a real ShardService with on-disk local
+// shard storage and real DEK sealing — the residual coverage gap the
+// fake-fetcher tests don't cover.  All placement nodes resolve to "local-node"
+// (selfID), so every shard read goes through the local on-disk path; no HTTP
+// transport is exercised.
+func TestAppendableSegmentReader_ECBaseSegment_RealShardService(t *testing.T) {
+	keeper, clusterID := testDEKKeeper(t)
+
+	const (
+		selfID   = "local-node"
+		bucket   = "bkt"
+		shardKey = "obj/v1"
+	)
+
+	cfg := ECConfig{DataShards: 4, ParityShards: 2}
+	payload := bytes.Repeat([]byte("real-ec"), 1024) // 7 KiB
+
+	// Split payload into k+m shards; each shard includes the 8-byte size header.
+	shardData, err := ECSplit(cfg, payload)
+	require.NoError(t, err)
+
+	// All placement nodes are selfID so openShardReaders uses localShardEndpoint
+	// → svc.OpenLocalShard — no loopback RPC.
+	nodes := make([]string, cfg.NumShards())
+	for i := range nodes {
+		nodes[i] = selfID
+	}
+	rec := PlacementRecord{Nodes: nodes, K: cfg.DataShards, M: cfg.ParityShards}
+
+	ctx := context.Background()
+
+	t.Run("healthy — all shards present", func(t *testing.T) {
+		svc := NewShardService(t.TempDir(), transport.MustNewHTTPTransport("test-cluster-psk"),
+			WithShardDEKKeeper(keeper, clusterID))
+		for i, s := range shardData {
+			require.NoError(t, svc.WriteLocalShardStreamContext(ctx, bucket, shardKey, i, bytes.NewReader(s)))
+		}
+		reader := ecObjectReader{selfID: selfID, shards: svc, ecConfig: cfg}
+		rc, err := reader.OpenObject(ctx, bucket, shardKey, rec, int64(len(payload)))
+		require.NoError(t, err)
+		defer rc.Close()
+		got, err := io.ReadAll(rc)
+		require.NoError(t, err)
+		require.Equal(t, payload, got,
+			"real ShardService: must reconstruct original bytes from all shards via DEK-sealed on-disk store")
+	})
+
+	t.Run("degraded — data shard 0 missing, parity reconstruction", func(t *testing.T) {
+		svc := NewShardService(t.TempDir(), transport.MustNewHTTPTransport("test-cluster-psk"),
+			WithShardDEKKeeper(keeper, clusterID))
+		for i, s := range shardData {
+			if i == 0 {
+				continue // omit data shard 0 — force EC parity reconstruction
+			}
+			require.NoError(t, svc.WriteLocalShardStreamContext(ctx, bucket, shardKey, i, bytes.NewReader(s)))
+		}
+		reader := ecObjectReader{selfID: selfID, shards: svc, ecConfig: cfg}
+		rc, err := reader.OpenObject(ctx, bucket, shardKey, rec, int64(len(payload)))
+		require.NoError(t, err, "parity reconstruction must succeed when data shard 0 is missing")
+		defer rc.Close()
+		got, err := io.ReadAll(rc)
+		require.NoError(t, err)
+		require.Equal(t, payload, got,
+			"reconstructed bytes must equal original when one data shard is missing")
+	})
 }
 
 // TestSegmentRefIsECBacked pins the discriminator between an EC base segment
