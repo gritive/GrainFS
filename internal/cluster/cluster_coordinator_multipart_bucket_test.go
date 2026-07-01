@@ -26,3 +26,17 @@ func TestClusterCoordinatorListMultipartUploads_MissingBucket(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, uploads)
 }
+
+// TestClusterCoordinatorListMultipartUploads_DelegatesToBaseWhenNoGroups pins the
+// degenerate no-group path: the coordinator delegates straight to c.base (whose
+// own HeadBucket check now runs), rather than the group fan-out. This is the path
+// a minimally-wired coordinator takes, and it must still propagate the base's
+// bucket-not-found error.
+func TestClusterCoordinatorListMultipartUploads_DelegatesToBaseWhenNoGroups(t *testing.T) {
+	base := &fakeBackend{mpuErr: storage.ErrBucketNotFound}
+	c := NewClusterCoordinator(base, nil, nil, nil, "self")
+
+	_, err := c.ListMultipartUploads(context.Background(), "bk", "", 0)
+	require.ErrorIs(t, err, storage.ErrBucketNotFound)
+	require.Equal(t, []string{"ListMultipartUploads:bk::0"}, base.calls)
+}
