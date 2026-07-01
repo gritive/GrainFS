@@ -207,6 +207,18 @@ func buildFakeShards(t testing.TB, fetcher *fakeECObjectShardFetcher, bucket, sh
 	}
 }
 
+// readObjectViaOpen reads the whole object through the production streaming
+// path (OpenObject), the drop-in replacement for the retired buffered ReadObject.
+func readObjectViaOpen(t testing.TB, r ecObjectReader, bucket, shardKey string, rec PlacementRecord, size int64) ([]byte, error) {
+	t.Helper()
+	rc, err := r.OpenObject(context.Background(), bucket, shardKey, rec, size)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	return io.ReadAll(rc)
+}
+
 func TestECObjectReader_ReadObject_AllLocal(t *testing.T) {
 	cfg := ECConfig{DataShards: 2, ParityShards: 1}
 	data := []byte("hello world from EC")
@@ -218,7 +230,7 @@ func TestECObjectReader_ReadObject_AllLocal(t *testing.T) {
 	rec.K = cfg.DataShards
 	rec.M = cfg.ParityShards
 
-	got, err := r.ReadObject(context.Background(), "bucket", "key/v1", rec)
+	got, err := readObjectViaOpen(t, r, "bucket", "key/v1", rec, int64(len(data)))
 	require.NoError(t, err)
 	require.Equal(t, data, got)
 }
@@ -237,7 +249,7 @@ func TestECObjectReader_ReadObject_FallsBackToParityShard(t *testing.T) {
 	rec.K = cfg.DataShards
 	rec.M = cfg.ParityShards
 
-	got, err := r.ReadObject(context.Background(), "bucket", "obj", rec)
+	got, err := readObjectViaOpen(t, r, "bucket", "obj", rec, int64(len(data)))
 	require.NoError(t, err)
 	require.Equal(t, data, got)
 }
@@ -337,7 +349,7 @@ func TestECObjectReader_ReadObject_DeinterleavesStripedObject(t *testing.T) {
 	rec.M = cfg.ParityShards
 	rec.StripeBytes = stripeBytes
 
-	got, err := r.ReadObject(context.Background(), "bucket", "key", rec)
+	got, err := readObjectViaOpen(t, r, "bucket", "key", rec, int64(len(payload)))
 	require.NoError(t, err)
 	require.Equal(t, payload, got)
 }
@@ -471,7 +483,7 @@ func TestECObjectReader_ReadObject_ErrorsWhenNotEnoughShards(t *testing.T) {
 	rec.K = cfg.DataShards
 	rec.M = cfg.ParityShards
 
-	_, err := r.ReadObject(context.Background(), "bucket", "key", rec)
+	_, err := readObjectViaOpen(t, r, "bucket", "key", rec, 0)
 	require.Error(t, err)
 }
 
