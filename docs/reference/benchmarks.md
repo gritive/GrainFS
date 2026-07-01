@@ -148,9 +148,16 @@ instead of buffering small ones) did not regress cluster throughput. The write
 gap to MinIO is off-CPU (shard-write fsync and inter-node transfer latency), not
 compute headroom.
 
+Mixed workload (warp `mixed`, same VM class and settings, 2026-07-01): GrainFS
+cluster sustained 754.35 MiB/s (75.43 obj/s, 0 errors). No MinIO `mixed`
+baseline is published: the distributed MinIO and single-node `mixed` arms
+returned no benchmark data this run (the same warp-harness flakiness seen on
+`stat`/`get` for some targets), so a `vs MinIO` ratio is not available for the
+mixed workload.
+
 Date: 2026-07-01
 Commit: 1ebe22c3 (v0.0.774.0)
-Raw artifacts: `benchmarks/profiles/gcp-v774-matched/`
+Raw artifacts: `benchmarks/profiles/gcp-v774-matched/` (put/get), `gcp-v774-mixed/` (mixed)
 
 ## Existing Benchmark Targets
 
