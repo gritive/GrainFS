@@ -128,27 +128,32 @@ Artifacts:
 
 ### Latest GCP Cluster Encrypted Result
 
-Captured on 2026-07-01 KST in `asia-northeast3-a` with one `n2-standard-4`
+Captured on 2026-07-02 KST in `asia-northeast3-a` with one `n2-standard-4`
 client VM and four `n2-standard-4` storage VMs, 10 MiB object size, 2048 total
 objects, concurrency 32, 1 minute per operation, signed S3 requests, round-robin
 host selection, warm GET over the preceding PUT objects, profiling disabled (no
-observer overhead), and 0 errors. Captured on the all-sizes streaming build
-(v0.0.774.0: every object body streams, no small-object buffering).
+observer overhead), and 0 errors. Captured on the LocalBackend-removal build
+(v0.0.778.0), an internal/test-only change that touches no production read/write
+path — this pass re-ran PUT and GET as a regression check.
 
 | Target            | PUT MiB/s | GET MiB/s | vs MinIO PUT | vs MinIO GET |
 | ----------------- | --------: | --------: | -----------: | -----------: |
-| `GrainFS` cluster |    434.79 |   1834.58 |        0.93x |        1.11x |
-| MinIO distributed |    468.67 |   1646.07 |        1.00x |        1.00x |
+| `GrainFS` cluster |    440.73 |   2271.65 |        0.94x |        0.99x |
+| MinIO distributed |    469.54 |   2290.27 |        1.00x |        1.00x |
 
-Interpretation: GrainFS cluster read throughput is 1.11x of distributed MinIO
-and write throughput is 0.93x. These figures are within run-to-run variance of
-the previous release's cluster result (v0.0.771.0: PUT 446.42, GET 1997.72),
-so the all-sizes streaming change (PUT/GET/forward now stream every object size
-instead of buffering small ones) did not regress cluster throughput. The write
-gap to MinIO is off-CPU (shard-write fsync and inter-node transfer latency), not
-compute headroom.
+Interpretation: GrainFS cluster PUT is 0.94x of distributed MinIO and GET is
+0.99x. GrainFS's own throughput did not regress — PUT 440.73 is within run-to-run
+variance of prior releases (v0.0.774.0: 434.79, v0.0.771.0: 446.42), and GET
+2271.65 is above them. The LocalBackend removal deletes only test-only code and
+changes no production read/write path, so any difference here is run-to-run
+variance, not a code effect. The GET ratio moved from 1.11x (v0.0.774.0) to 0.99x
+because this SPOT run's environment was faster for reads on both targets — MinIO
+GET also jumped (1646 -> 2290, +39%), compressing the ratio; it is not a GrainFS
+read regression (GrainFS GET absolute rose). The write gap to MinIO stays off-CPU
+(shard-write fsync and inter-node transfer latency), not compute headroom.
 
-Mixed workload (warp `mixed`, run isolated as a single-op pass, same VM class and
+Mixed workload (not re-run in the v0.0.778.0 regression pass; last measured on
+v0.0.774.0, warp `mixed` as an isolated single-op pass, same VM class and
 settings, 2026-07-01): GrainFS cluster and distributed MinIO are at parity.
 
 | Target            | `mixed` MiB/s | obj/s | errors | vs MinIO |
@@ -165,9 +170,10 @@ distributed-MinIO and single-node targets. Running `mixed` on its own against a
 clean bucket reproduced 0 errors on both cluster targets, so the failure was the
 prior disk-fill state, not a MinIO- or workload-specific defect.
 
-Date: 2026-07-01
-Commit: 1ad1a174 (v0.0.774.0)
-Raw artifacts: `benchmarks/profiles/gcp-v774-matched/` (put/get), `gcp-v774-mixed2/` (mixed)
+Date: 2026-07-02
+Commit: da0605cd (v0.0.778.0, PR #1004 LocalBackend removal)
+Raw artifacts: `benchmarks/profiles/gcp-lbr-1004/` (put/get). The mixed row is from
+the v0.0.774.0 run (`gcp-v774-mixed2/`), not re-run this pass.
 
 ## Existing Benchmark Targets
 

@@ -153,12 +153,12 @@ Latest GCP single-node `warp` run:
 | `GrainFS` |    215.50 |    437.02 |        1.03x |        0.92x |
 | MinIO     |    209.77 |    472.65 |        1.00x |        1.00x |
 
-Latest GCP 4-node cluster `warp` run (all-sizes streaming, profiling disabled):
+Latest GCP 4-node cluster `warp` run (v0.0.778.0, PUT/GET, profiling disabled):
 
 | Target            | PUT MiB/s | GET MiB/s | vs MinIO PUT | vs MinIO GET |
 | ----------------- | --------: | --------: | -----------: | -----------: |
-| `GrainFS` cluster |    434.79 |   1834.58 |        0.93x |        1.11x |
-| MinIO distributed |    468.67 |   1646.07 |        1.00x |        1.00x |
+| `GrainFS` cluster |    440.73 |   2271.65 |        0.94x |        0.99x |
+| MinIO distributed |    469.54 |   2290.27 |        1.00x |        1.00x |
 
 ## Core Concepts
 
