@@ -104,7 +104,7 @@ Clean Architecture를 따른다. 패키지-레이어 매핑:
 
 ## Tasks
 
-이 프로젝트의 태스크 파일은 `TODOS.md` (루트 디렉토리)입니다.
+이슈/태스크 관리는 **GitHub Projects** (`gritive/projects/2`, GrainFS)에서 합니다 — `gh project item-list 2 --owner gritive`. 루트 `TODOS.md`는 폐기됨(GitHub Projects로 전환). follow-up이 생기면 GitHub Projects #2에 draft issue로 등록한다.
 
 > Coding Behavior Guidelines와 Skill routing은 글로벌 `~/.claude/CLAUDE.md`에서 상속받습니다.
 
