@@ -92,7 +92,7 @@ func TestChunkedSegmentStore_OpenSegmentLargeSegmentStreamsExactBytes(t *testing
 	obj, err := b.HeadObject(context.Background(), bucket, key)
 	require.NoError(t, err)
 	require.Len(t, obj.Segments, 1)
-	require.Greater(t, obj.Segments[0].Size, int64(maxECPooledReadObjectSize))
+	require.Greater(t, obj.Segments[0].Size, int64(4<<20)) // must be a large, streaming-path segment
 
 	store := &clusterSegmentStore{b: b, bucket: bucket, key: key, obj: obj}
 	rc, err := store.OpenSegment(context.Background(), obj.Segments[0])

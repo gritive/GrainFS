@@ -20,8 +20,8 @@ import (
 type shardEndpoint interface {
 	// Node is the placement slot's node id.
 	Node() string
-	// IsLocal reports whether the slot resolves to selfID. Used by the reader's
-	// localDataFastPath / hasLocalDataShard performance checks.
+	// IsLocal reports whether the slot resolves to selfID. Used to choose the
+	// local vs remote shard read/write path.
 	IsLocal() bool
 
 	// WriteShardReader writes shard shardIdx. openShard yields a fresh reader for

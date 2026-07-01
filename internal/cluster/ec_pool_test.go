@@ -105,7 +105,7 @@ func TestECReconstructStreamTo_MissingDataShardAllocBytesBounded(t *testing.T) {
 // on. Non-trivial content (not zeros) so reconstruction is actually exercised.
 func TestECReconstructStreamTo_MissingDataShard_LargeObjectByteIdentical(t *testing.T) {
 	cfg := ECConfig{DataShards: 2, ParityShards: 2}
-	const size = maxECPooledReadObjectSize + 1024*1024 // > 4MiB, multipart-sized
+	const size = 4<<20 + 1024*1024 // 5MiB — exercises the streaming reconstruct path
 	data := make([]byte, size)
 	for i := range data {
 		data[i] = byte(i*31 + 7) // deterministic non-trivial pattern

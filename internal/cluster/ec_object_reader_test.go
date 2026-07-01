@@ -367,7 +367,6 @@ func buildStripedShardsWithHeader(t testing.TB, cfg ECConfig, payload []byte, st
 func TestECObjectReader_OpenObject_StreamsStripedObject(t *testing.T) {
 	const stripeBytes = 1 << 20
 	cfg := ECConfig{DataShards: 2, ParityShards: 2}
-	// >maxECPooledReadObjectSize forces the bounded streaming path (not buffered).
 	payload := make([]byte, 5*1024*1024+321)
 	for i := range payload {
 		payload[i] = byte((i*7 + 3) % 251)
@@ -487,7 +486,6 @@ func TestECObjectReader_ReadAt_StripedRange(t *testing.T) {
 	const stripeBytes = 1 << 20
 	const off, n = 2_500_000, 4096
 	cfg := ECConfig{DataShards: 2, ParityShards: 2}
-	// >maxECPooledReadObjectSize forces the bounded streaming fallback.
 	payload := make([]byte, 4*1024*1024+10)
 	for i := range payload {
 		payload[i] = byte((i*7 + 3) % 251)
@@ -606,15 +604,12 @@ func BenchmarkECObjectReaderOpenObject5MiB(b *testing.B) {
 	}
 }
 
-// BenchmarkECObjectReaderReadObject exercises the readShards path (object <=
-// maxECPooledReadObjectSize → buffered ReadObject → readShards), unlike the
-// 5 MiB OpenObject bench which streams and never enters readShards. Used to
-// confirm the collector decomposition adds no per-read heap allocations
-// (collector is built once per read, mirroring the captured closure frame the
-// refactor replaced).
+// BenchmarkECObjectReaderReadObject exercises the readShards path via ReadObject
+// (test/bench-only; production reads use OpenObject streaming). Used to confirm
+// the collector decomposition adds no per-read heap allocations.
 func BenchmarkECObjectReaderReadObject(b *testing.B) {
 	cfg := ECConfig{DataShards: 2, ParityShards: 2}
-	data := bytes.Repeat([]byte("y"), 64<<10) // well under maxECPooledReadObjectSize
+	data := bytes.Repeat([]byte("y"), 64<<10)
 	fetcher := &fakeECObjectShardFetcher{}
 	buildFakeShards(b, fetcher, "bucket", "key", cfg, data)
 
@@ -872,10 +867,9 @@ func TestComputeAttemptOrder_CacheBypassSpy(t *testing.T) {
 // Step 4: streaming path uses computeAttemptOrder — hot data shard is not opened
 // when a parity shard satisfies k=1.
 func TestOpenShardReaders_BLSwap_StreamingPath(t *testing.T) {
-	// ParityShards=1 with objectSize > maxECPooledReadObjectSize forces the
-	// non-buffered streaming branch and ensures Redundant()=true.
+	// ParityShards=1 ensures Redundant()=true; all object sizes now stream.
 	cfg := ECConfig{DataShards: 1, ParityShards: 1}
-	objectSize := int64(maxECPooledReadObjectSize + 1)
+	objectSize := int64(4<<20 + 1) // 4MiB+1 — arbitrary size for a meaningful payload
 
 	// Build fake shards: shard 0 (data) and shard 1 (parity).
 	fetcher := &fakeECObjectShardFetcher{}
@@ -888,7 +882,6 @@ func TestOpenShardReaders_BLSwap_StreamingPath(t *testing.T) {
 		shards:   fetcher,
 		ecConfig: cfg,
 		bl:       newFakeHot("n0"),
-		// no cache + large object → streaming branch
 	}
 	// shard 0 → node n0 (hot); shard 1 → node n1 (parity, cool)
 	rec := PlacementRecord{Nodes: []string{"n0", "n1"}}
@@ -906,16 +899,12 @@ func TestOpenShardReaders_BLSwap_StreamingPath(t *testing.T) {
 	assert.NotNil(t, readers[1], "parity shard should be opened as primary")
 }
 
-// S1 structural guard: objects larger than maxECPooledReadObjectSize must take
-// the bounded streaming path REGARDLESS of shard-cache capacity. Buffering a
-// large object (all data shards into []byte + cache populate) is the RSS
-// liability this slice removes. The streaming path opens shard streams
-// (ReadShardStream); the buffered path reads whole shards (ReadShard). With a
-// cache that CAN store the object, the old capacity-only gate (cacheCanStore →
-// bufferedShardReaders) used ReadShard; the structural fix must stream instead.
+// TestOpenShardReaders_LargeObject_StreamsEvenWhenCacheFits guards that a
+// redundant EC object uses the streaming open path (ReadShardStream) and NOT the
+// removed buffered path (ReadShard), even when a shard cache is present.
 func TestOpenShardReaders_LargeObject_StreamsEvenWhenCacheFits(t *testing.T) {
 	cfg := ECConfig{DataShards: 1, ParityShards: 1}
-	objectSize := int64(maxECPooledReadObjectSize + 1)
+	objectSize := int64(4<<20 + 1) // 4MiB+1; size no longer affects path choice
 
 	fetcher := &fakeECObjectShardFetcher{}
 	payload := bytes.Repeat([]byte("z"), int(objectSize))
@@ -940,4 +929,97 @@ func TestOpenShardReaders_LargeObject_StreamsEvenWhenCacheFits(t *testing.T) {
 	// must stream even when the cache could store it.
 	require.Zero(t, fetcher.readShardCalls, "large object must NOT use the buffered (ReadShard) path")
 	require.Greater(t, fetcher.readShardStreamCalls, 0, "large object must stream (ReadShardStream)")
+}
+
+// TestOpenShardReaders_SmallObject_StreamsNotBuffers is the TDD guard for Task C:
+// a small redundant-EC object (≤4MiB, under the old maxECPooledReadObjectSize limit)
+// must take the streaming open path (OpenShardStream → ReadShardStream), not the
+// buffered path (readShards → ReadShard). Before Task C this test fails because the
+// small object routes to bufferedShardReaders; after the fork removal it passes.
+func TestOpenShardReaders_SmallObject_StreamsNotBuffers(t *testing.T) {
+	cfg := ECConfig{DataShards: 1, ParityShards: 1}
+	objectSize := int64(4 << 10) // 4KiB — well under old 4MiB limit
+
+	fetcher := &fakeECObjectShardFetcher{}
+	payload := bytes.Repeat([]byte("s"), int(objectSize))
+	buildFakeShards(t, fetcher, "bucket", "key", cfg, payload)
+
+	r := ecObjectReader{
+		selfID:   "node-self", // not in rec.Nodes → all shards are remote
+		shards:   fetcher,
+		ecConfig: cfg,
+	}
+	rec := PlacementRecord{Nodes: []string{"n0", "n1"}}
+	rec.K = cfg.DataShards
+	rec.M = cfg.ParityShards
+
+	_, readers, err := r.openShardReaders(context.Background(), "bucket", "key", rec, objectSize)
+	require.NoError(t, err)
+	defer closeECShardReaders(readers)
+
+	// After Task C, the streaming path (ReadShardStream) handles all object sizes.
+	require.Zero(t, fetcher.readShardCalls, "small redundant object must NOT use the buffered (readShards/ReadShard) path")
+	require.Greater(t, fetcher.readShardStreamCalls, 0, "small redundant object must stream (ReadShardStream)")
+}
+
+// TestOpenShardReaders_SmallDegradedObject_StreamsAndRecovers guards that a
+// small redundant EC object with one missing shard is reconstructed correctly
+// on the streaming path (which handles degraded reads via RS reconstruction).
+// Before Task C this fails because small redundant objects use bufferedShardReaders
+// (readShards path → readShardCalls > 0); after Task C it streams (ReadShardStream).
+func TestOpenShardReaders_SmallDegradedObject_StreamsAndRecovers(t *testing.T) {
+	cfg := ECConfig{DataShards: 1, ParityShards: 1}
+	objectSize := int64(4 << 10) // 4KiB — under old 4MiB limit
+
+	fetcher := &fakeECObjectShardFetcher{
+		remoteErr: map[string]error{
+			"n0": errors.New("shard not available"), // data shard missing
+		},
+	}
+	payload := bytes.Repeat([]byte("d"), int(objectSize))
+	buildFakeShards(t, fetcher, "bucket", "key", cfg, payload)
+
+	r := ecObjectReader{
+		selfID:   "node-self",
+		shards:   fetcher,
+		ecConfig: cfg,
+	}
+	rec := PlacementRecord{Nodes: []string{"n0", "n1"}}
+	rec.K = cfg.DataShards
+	rec.M = cfg.ParityShards
+
+	_, readers, err := r.openShardReaders(context.Background(), "bucket", "key", rec, objectSize)
+	require.NoError(t, err, "degraded read must succeed when parity is available")
+	defer closeECShardReaders(readers)
+
+	require.Zero(t, fetcher.readShardCalls, "degraded small object must NOT use the buffered path")
+	require.Greater(t, fetcher.readShardStreamCalls, 0, "degraded small object must use ReadShardStream")
+}
+
+// TestOpenShardReaders_ZeroSizeObject_Streams guards that a zero-length redundant
+// EC object is handled correctly on the streaming path. Before Task C, objectSize=0
+// satisfies the `<= maxECPooledReadObjectSize` condition and routes to bufferedShardReaders.
+func TestOpenShardReaders_ZeroSizeObject_Streams(t *testing.T) {
+	cfg := ECConfig{DataShards: 1, ParityShards: 1}
+	objectSize := int64(0)
+
+	fetcher := &fakeECObjectShardFetcher{}
+	// Build zero-size shards (header only).
+	buildFakeShards(t, fetcher, "bucket", "key", cfg, []byte{})
+
+	r := ecObjectReader{
+		selfID:   "node-self",
+		shards:   fetcher,
+		ecConfig: cfg,
+	}
+	rec := PlacementRecord{Nodes: []string{"n0", "n1"}}
+	rec.K = cfg.DataShards
+	rec.M = cfg.ParityShards
+
+	_, readers, err := r.openShardReaders(context.Background(), "bucket", "key", rec, objectSize)
+	require.NoError(t, err)
+	defer closeECShardReaders(readers)
+
+	require.Zero(t, fetcher.readShardCalls, "zero-size object must NOT use the buffered path")
+	require.Greater(t, fetcher.readShardStreamCalls, 0, "zero-size object must use ReadShardStream")
 }
