@@ -26,6 +26,24 @@ func (o *Operations) CreateMultipartUploadWithTags(ctx context.Context, bucket, 
 	return o.backend.CreateMultipartUpload(ctx, bucket, key, contentType)
 }
 
+// OrphanMultipartSweepResult reports what an orphan-multipart sweep removed.
+// Removed equals len(RemovedPaths); Errors collects per-entry failures that did
+// not abort the whole sweep.
+type OrphanMultipartSweepResult struct {
+	Removed      int
+	RemovedPaths []string
+	Errors       []string
+}
+
+// OrphanMultipartSweeper is the optional capability a backend exposes when it
+// owns a sweepable multipart staging area. The storage operations facade
+// discovers it through the decorator stack so callers don't reach through
+// wrappers (RecoveryWriteGate, SwappableBackend, ...) to find the
+// filesystem-aware backend.
+type OrphanMultipartSweeper interface {
+	SweepOrphanMultiparts(ctx context.Context, before time.Time) (OrphanMultipartSweepResult, error)
+}
+
 // SweepOrphanMultiparts walks the decorator stack for an OrphanMultipartSweeper
 // and runs the sweep against entries whose mtime is at or before the cutoff.
 // Returns a zero-value result when no sweeper is reachable (no-op for backends
