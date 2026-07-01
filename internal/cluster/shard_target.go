@@ -46,8 +46,6 @@ type shardEndpoint interface {
 	// DeleteShards removes all shards for shardKey on this slot (write cleanup).
 	DeleteShards(ctx context.Context, bucket, shardKey string) error
 
-	// ReadShard returns the full shard bytes (buffered).
-	ReadShard(ctx context.Context, bucket, shardKey string, shardIdx int) ([]byte, error)
 	// OpenShardStream opens a streaming reader for the shard.
 	OpenShardStream(ctx context.Context, bucket, shardKey string, shardIdx int) (io.ReadCloser, error)
 	// ReadShardAt reads len(buf) bytes at offset within the shard. offset is the
@@ -195,10 +193,6 @@ func (e localShardEndpoint) WriteShardReader(ctx context.Context, bucket, shardK
 
 func (e localShardEndpoint) DeleteShards(_ context.Context, bucket, shardKey string) error {
 	return e.shards.DeleteLocalShards(bucket, shardKey)
-}
-
-func (e localShardEndpoint) ReadShard(_ context.Context, bucket, shardKey string, shardIdx int) ([]byte, error) {
-	return e.shards.ReadLocalShard(bucket, shardKey, shardIdx)
 }
 
 func (e localShardEndpoint) OpenShardStream(_ context.Context, bucket, shardKey string, shardIdx int) (io.ReadCloser, error) {
@@ -378,13 +372,6 @@ func (e remoteShardEndpoint) writeRemoteShard(
 
 func (e remoteShardEndpoint) DeleteShards(ctx context.Context, bucket, shardKey string) error {
 	return e.shards.DeleteShards(ctx, e.node, bucket, shardKey)
-}
-
-// ReadShard does NOT mark peerHealth: its sole caller (readShards) needs
-// cancel-aware marking (a k-of-n early-exit cancellation must not mark the peer
-// unhealthy), which only the caller can distinguish, so it owns the marking.
-func (e remoteShardEndpoint) ReadShard(ctx context.Context, bucket, shardKey string, shardIdx int) ([]byte, error) {
-	return e.shards.ReadShard(ctx, e.node, bucket, shardKey, shardIdx)
 }
 
 // OpenShardStream marks peerHealth at the RPC boundary (success → healthy,

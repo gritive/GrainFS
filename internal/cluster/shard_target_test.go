@@ -192,14 +192,6 @@ func TestShardTargetLocalEndpointDelegatesToLocalMethods(t *testing.T) {
 			want: "DeleteLocalShards",
 		},
 		{
-			name: "read -> ReadLocalShard",
-			call: func(t *testing.T, ep shardEndpoint) {
-				_, err := ep.ReadShard(context.Background(), "b", "k", 0)
-				require.NoError(t, err)
-			},
-			want: "ReadLocalShard",
-		},
-		{
 			name: "open -> OpenLocalShard",
 			call: func(t *testing.T, ep shardEndpoint) {
 				rc, err := ep.OpenShardStream(context.Background(), "b", "k", 0)
@@ -261,14 +253,6 @@ func TestShardTargetRemoteEndpointDelegatesToRemoteMethods(t *testing.T) {
 				require.NoError(t, ep.DeleteShards(context.Background(), "b", "k"))
 			},
 			want: "DeleteShards",
-		},
-		{
-			name: "read -> ReadShard",
-			call: func(t *testing.T, ep shardEndpoint) {
-				_, err := ep.ReadShard(context.Background(), "b", "k", 0)
-				require.NoError(t, err)
-			},
-			want: "ReadShard",
 		},
 		{
 			name: "open -> ReadShardStream",

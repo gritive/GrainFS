@@ -651,7 +651,6 @@ type fakeECObjectWriterLocalWrite struct {
 	bucket   string
 	key      string
 	shardIdx int
-	body     []byte
 }
 
 type fakeECObjectWriterBufferedWrite struct {
