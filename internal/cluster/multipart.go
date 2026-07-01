@@ -448,6 +448,13 @@ func (b *DistributedBackend) ListMultipartUploads(ctx context.Context, bucket, p
 	if err := guardInternalBucketObjectOp(bucket); err != nil {
 		return nil, err
 	}
+	// Reject a non-existent bucket with 404 NoSuchBucket, mirroring ListObjectsPage.
+	// A GroupBackend sets bypassBucketCheck=true so this is a no-op on the cluster
+	// fan-out path (the coordinator validates there); it guards the bare-backend and
+	// base-delegate paths.
+	if err := b.HeadBucket(ctx, bucket); err != nil {
+		return nil, err
+	}
 	entries, err := b.scanManifestBlobsCluster(bucket)
 	if err != nil {
 		return nil, err

@@ -8,6 +8,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 )
@@ -64,6 +66,35 @@ func multipartFixture(getTgt func() s3Target, probePrefix string) (testing.TB, s
 }
 
 func runMultipartCases(getTgt func() s3Target) {
+	ginkgo.It("rejects ListMultipartUploads on a non-existent bucket instead of returning an empty 200", func() {
+		t, tgt, client := multipartFixture(getTgt, "mp-nobucket-probe")
+		ctx := context.Background()
+		// A never-created bucket name: uniqueBucket would create it (and attach a
+		// per-bucket admin policy), which we must not do here.
+		//
+		// The backend/coordinator now validate bucket existence, so a missing bucket
+		// is rejected rather than silently returning an empty 200. The exact status
+		// is authz-config-dependent: when the caller can reach the backend for the
+		// bucket, the check surfaces as 404 NoSuchBucket; when the caller has no IAM
+		// grant for it (GrainFS has no wildcard admin — every bucket needs an explicit
+		// per-bucket grant), the IAM authorizer returns 403 AccessDenied first, since
+		// ListObjects/ListObjectVersions/ListMultipartUploads all authorize as
+		// s3auth.ListBucket. Both are acceptable here; the guarantee under test is
+		// that a missing bucket never lists as an empty success. (Whether an
+		// un-granted bucket should be 404 vs 403 is a systemic authz decision tracked
+		// as a separate follow-up.)
+		bucket := bucketNameFor(tgt.name, t.Name(), "mp-nosuchbucket")
+
+		_, err := client.ListMultipartUploads(ctx, &s3.ListMultipartUploadsInput{
+			Bucket: aws.String(bucket),
+		})
+		gomega.Expect(err).To(gomega.HaveOccurred(),
+			"ListMultipartUploads on a non-existent bucket must fail, not return an empty 200")
+		var apiErr smithy.APIError
+		gomega.Expect(errors.As(err, &apiErr)).To(gomega.BeTrue())
+		gomega.Expect(apiErr.ErrorCode()).To(gomega.BeElementOf("NoSuchBucket", "AccessDenied"))
+	})
+
 	ginkgo.It("completes a multipart upload", func() {
 		t, tgt, client := multipartFixture(getTgt, "mp-probe")
 		ctx := context.Background()

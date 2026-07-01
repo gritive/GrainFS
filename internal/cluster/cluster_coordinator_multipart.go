@@ -39,6 +39,16 @@ func (c *ClusterCoordinator) ListMultipartUploads(ctx context.Context, bucket, p
 	}
 	var uploads []*storage.MultipartUpload
 	groups := c.groups.All()
+	// Group leaves set bypassBucketCheck=true, so validate bucket existence once
+	// before fanning out — otherwise a missing bucket returns an empty 200 instead
+	// of 404 NoSuchBucket. Mirrors ListObjectVersions (cluster_coordinator_scan.go).
+	// Gated on len(groups)>0: the degenerate no-group paths delegate to c.base
+	// (which runs its own HeadBucket) and may have no router wired.
+	if len(groups) > 0 {
+		if _, err := c.runtimeState().opRouter.RouteBucket(bucket); err != nil {
+			return nil, err
+		}
+	}
 	for _, dg := range groups {
 		gb := dg.Backend()
 		if gb == nil {

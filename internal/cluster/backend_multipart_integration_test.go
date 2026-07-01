@@ -50,6 +50,12 @@ var _ = Describe("Backend multipart integration", func() {
 		Expect(b.CreateBucket(ctx, "bucket")).To(Succeed())
 	})
 
+	It("returns ErrBucketNotFound listing multipart uploads on a never-created bucket", func() {
+		_, err := b.ListMultipartUploads(ctx, "never-created", "", 0)
+		Expect(errors.Is(err, storage.ErrBucketNotFound)).To(BeTrue(),
+			"ListMultipartUploads must reject a non-existent bucket (S3 404 NoSuchBucket)")
+	})
+
 	It("completes multipart uploads raft-free (no CmdCompleteMultipart propose)", func() {
 		up, err := b.CreateMultipartUpload(ctx, "bucket", "mp.bin", "application/octet-stream")
 		Expect(err).NotTo(HaveOccurred())
