@@ -329,8 +329,22 @@ func (e remoteShardEndpoint) writeRemoteShard(
 				Error:            putTraceErrorString(err),
 			})
 		} else {
+			size, knownSize := int64(-1), false
+			if shardSize != nil {
+				if sz, sizeErr := shardSize(shardIdx); sizeErr == nil {
+					size, knownSize = sz, true
+				}
+			}
 			rpcStart := time.Now()
-			err = e.shards.WriteShardStream(writeCtx, node, bucket, shardKey, shardIdx, readerWithoutWriterTo{Reader: body})
+			if knownSize {
+				if sized, ok := e.shards.(ecObjectRemoteSizedShardStore); ok {
+					err = sized.WriteShardStreamSized(writeCtx, node, bucket, shardKey, shardIdx, readerWithoutWriterTo{Reader: body}, size)
+				} else {
+					err = e.shards.WriteShardStream(writeCtx, node, bucket, shardKey, shardIdx, readerWithoutWriterTo{Reader: body})
+				}
+			} else {
+				err = e.shards.WriteShardStream(writeCtx, node, bucket, shardKey, shardIdx, readerWithoutWriterTo{Reader: body})
+			}
 			ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteRPC, rpcStart, PutTraceStageFields{
 				ShardIndex:       shardIdx,
 				ShardTarget:      node,

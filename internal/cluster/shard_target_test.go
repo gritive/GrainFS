@@ -104,6 +104,13 @@ func (s *recordingShardStore) WriteShardStreamStagedSized(_ context.Context, _ s
 	return nil
 }
 
+func (s *recordingShardStore) WriteShardStreamSized(_ context.Context, _ string, _ string, _ string, _ int, body io.Reader, streamSize int64) error {
+	s.record("WriteShardStreamSized")
+	s.stagedSize = streamSize
+	_, _ = io.Copy(io.Discard, body)
+	return nil
+}
+
 func (s *recordingShardStore) DeleteShards(context.Context, string, string, string) error {
 	s.record("DeleteShards")
 	return nil
@@ -240,14 +247,14 @@ func TestShardTargetRemoteEndpointDelegatesToRemoteMethods(t *testing.T) {
 		want string
 	}{
 		{
-			name: "known-size write -> WriteShardStream",
+			name: "known-size write -> WriteShardStreamSized",
 			call: func(t *testing.T, ep shardEndpoint) {
 				err := ep.WriteShardReader(context.Background(), "b", "k", "", 0, -1,
 					func(int) (io.Reader, error) { return strings.NewReader("x"), nil },
 					func(int) (int64, error) { return 1, nil })
 				require.NoError(t, err)
 			},
-			want: "WriteShardStream",
+			want: "WriteShardStreamSized",
 		},
 		{
 			name: "unknown-size write -> WriteShardStream",

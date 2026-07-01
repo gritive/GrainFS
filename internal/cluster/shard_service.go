@@ -373,6 +373,34 @@ func (s *ShardService) WriteShardStreamStagedSized(ctx context.Context, peer, bu
 	return nil
 }
 
+// WriteShardStreamSized streams a shard to a remote node with a known plaintext
+// size so the receiver can use the bounded sized-write path (short/oversized body
+// detection). streamSize < 0 falls back to the unsized WriteShardStream path.
+func (s *ShardService) WriteShardStreamSized(ctx context.Context, peer, bucket, key string, shardIdx int, body io.Reader, streamSize int64) error {
+	if streamSize < 0 {
+		return s.WriteShardStream(ctx, peer, bucket, key, shardIdx, body)
+	}
+	peerAddr, err := s.resolvePeerAddress(peer)
+	if err != nil {
+		return err
+	}
+	if s.transport == nil {
+		return fmt.Errorf("shard service: no transport")
+	}
+	req := transport.ShardWriteRequest{
+		Bucket:          bucket,
+		Key:             key,
+		ShardIdx:        shardIdx,
+		Sealed:          false,
+		StreamSizeKnown: true,
+		StreamSize:      streamSize,
+	}
+	if err := s.transport.ShardWrite(ctx, peerAddr, req, body); err != nil {
+		return fmt.Errorf("stream sized shard to %s: %w", peerAddr, err)
+	}
+	return nil
+}
+
 // SealedShardTrailerLen is the length of the completeness trailer appended to a
 // streamed sealed-shard body: an 8-byte big-endian count of the payload bytes
 // that precede it. The receiver requires it to reject a TRUNCATED body. Without
@@ -1129,6 +1157,13 @@ func (s *ShardService) NativeWriteHandler() transport.ShardWriteHandler {
 				return err
 			}
 			observePutStage("shard_stream_server", "write_local_staged", stageStart)
+			return nil
+		}
+		if req.StreamSizeKnown {
+			if err := s.WriteLocalShardStreamSizedContext(context.Background(), req.Bucket, req.Key, req.ShardIdx, body, req.StreamSize); err != nil {
+				return err
+			}
+			observePutStage("shard_stream_server", "write_local_sized", stageStart)
 			return nil
 		}
 		if err := s.WriteLocalShardStream(req.Bucket, req.Key, req.ShardIdx, body); err != nil {
