@@ -24,8 +24,7 @@ method they want and the decorated backend stack underneath it.
 
 Introduce a storage operations facade as the upper-layer entry point for
 meaningful storage actions. `storage.Backend` remains the low-level primitive
-implemented by LocalBackend, DistributedBackend, ClusterCoordinator, and
-decorators.
+implemented by DistributedBackend, ClusterCoordinator, and decorators.
 
 The facade owns capability lookup and storage side-effect ordering. Callers
 should stop unwrapping decorated backends directly.
