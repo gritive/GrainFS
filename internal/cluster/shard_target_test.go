@@ -126,11 +126,6 @@ func (s *recordingShardStore) ReadShardStream(context.Context, string, string, s
 	return io.NopCloser(strings.NewReader("remote")), nil
 }
 
-func (s *recordingShardStore) ReadShardRange(_ context.Context, _ string, _ string, _ string, _ int, _ int64, length int64) ([]byte, error) {
-	s.record("ReadShardRange")
-	return bytes.Repeat([]byte("r"), int(length)), nil
-}
-
 func (s *recordingShardStore) ReadShardRangeStream(_ context.Context, _ string, _ string, _ string, _ int, _ int64, length int64) (io.ReadCloser, error) {
 	s.record("ReadShardRangeStream")
 	return io.NopCloser(bytes.NewReader(bytes.Repeat([]byte("r"), int(length)))), nil
@@ -300,7 +295,7 @@ func TestShardTargetRemoteEndpointDelegatesToRemoteMethods(t *testing.T) {
 		{
 			name: "large readat -> ReadShardRangeStream",
 			call: func(t *testing.T, ep shardEndpoint) {
-				_, err := ep.ReadShardAt(context.Background(), "b", "k", 0, 0, make([]byte, maxShardRangeReplyBytes+1))
+				_, err := ep.ReadShardAt(context.Background(), "b", "k", 0, 0, make([]byte, 64<<10+1))
 				require.NoError(t, err)
 			},
 			want: "ReadShardRangeStream",
@@ -441,17 +436,14 @@ func TestWriteShardReader_SmallShard_StreamsNotBuffers(t *testing.T) {
 	require.NotContains(t, spy.calls, "WriteLocalShardContext", "buffered path must be gone")
 }
 
-// TestReadShardAt_SmallRange_StreamsNotBuffers is a TDD regression guard for Task B:
-// a small (≤64KiB) range read must use the streaming RPC (ReadShardRangeStream), not
-// the one-shot buffered RPC (ReadShardRange). Under the old code the 4-byte buf below
-// takes the ReadShardRange branch.
+// TestReadShardAt_SmallRange_StreamsNotBuffers is a regression guard: all range
+// reads (small or large) must use the streaming RPC (ReadShardRangeStream).
 func TestReadShardAt_SmallRange_StreamsNotBuffers(t *testing.T) {
 	spy := &recordingShardStore{}
 	e := remoteShardEndpoint{node: "peer", shards: spy}
-	buf := make([]byte, 8<<10) // 8KiB — under the old 64KiB limit
+	buf := make([]byte, 8<<10) // 8KiB
 	n, err := e.ReadShardAt(context.Background(), "b", "k", 0, 0, buf)
 	require.NoError(t, err)
 	require.Equal(t, len(buf), n)
 	require.Contains(t, spy.calls, "ReadShardRangeStream", "small range must use streaming RPC")
-	require.NotContains(t, spy.calls, "ReadShardRange", "buffered one-shot RPC selection must be gone")
 }

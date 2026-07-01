@@ -86,10 +86,6 @@ func (f *blockingShardFetcher) ReadLocalShardAt(string, string, int, int64, []by
 	panic("ReadLocalShardAt: not used by this characterization test")
 }
 
-func (f *blockingShardFetcher) ReadShardRange(context.Context, string, string, string, int, int64, int64) ([]byte, error) {
-	panic("ReadShardRange: not used by this characterization test")
-}
-
 func (f *blockingShardFetcher) ReadShardRangeStream(context.Context, string, string, string, int, int64, int64) (io.ReadCloser, error) {
 	panic("ReadShardRangeStream: not used by this characterization test")
 }

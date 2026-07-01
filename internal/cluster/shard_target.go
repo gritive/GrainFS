@@ -233,7 +233,6 @@ type remoteShardStore interface {
 	DeleteShards(ctx context.Context, peer, bucket, key string) error
 	ReadShard(ctx context.Context, peer, bucket, key string, shardIdx int) ([]byte, error)
 	ReadShardStream(ctx context.Context, peer, bucket, key string, shardIdx int) (io.ReadCloser, error)
-	ReadShardRange(ctx context.Context, peer, bucket, key string, shardIdx int, offset, length int64) ([]byte, error)
 	ReadShardRangeStream(ctx context.Context, peer, bucket, key string, shardIdx int, offset, length int64) (io.ReadCloser, error)
 }
 

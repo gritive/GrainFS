@@ -796,10 +796,6 @@ func (f *fakeECObjectWriterShards) ReadShardStream(context.Context, string, stri
 	panic("ReadShardStream: not used by ecObjectWriter")
 }
 
-func (f *fakeECObjectWriterShards) ReadShardRange(context.Context, string, string, string, int, int64, int64) ([]byte, error) {
-	panic("ReadShardRange: not used by ecObjectWriter")
-}
-
 func (f *fakeECObjectWriterShards) ReadShardRangeStream(context.Context, string, string, string, int, int64, int64) (io.ReadCloser, error) {
 	panic("ReadShardRangeStream: not used by ecObjectWriter")
 }

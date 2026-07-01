@@ -16,7 +16,7 @@ import (
 // streaming-RESPONSE conventions for the remaining read-shaped families).
 //
 // Wire: GET /shard/read?bucket=<esc>&key=<esc>&idx=<n>[&offset=<n>&length=<n>]
-//   - offset+length BOTH present = bounded range read (ReadShardRange
+//   - offset+length BOTH present = bounded range read (ReadShardRangeStream
 //     semantics); BOTH absent = whole shard (ReadShard); one alone = 400
 //   - success = 200 + raw streaming body (no metadata envelope — the tunnel's
 //     success envelope carried nothing)
