@@ -11,7 +11,12 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-const bufferedObjectBodyLimit = 128 * 1024
+// bufferedObjectBodyLimit is 0: every non-empty object body streams to the
+// client. Only zero-byte objects (Size == 0) take the buffered branch, where
+// streaming versus buffering is equivalent. Buffering small objects previously
+// enabled a SetBodyRaw zero-copy shortcut but held the whole object in RSS;
+// streaming trades that shortcut for a flat, size-independent memory profile.
+const bufferedObjectBodyLimit = 0
 
 type rawBodyReadCloser interface {
 	io.ReadCloser

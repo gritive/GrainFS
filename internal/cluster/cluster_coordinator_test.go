@@ -2246,13 +2246,13 @@ func TestClusterCoordinator_PutObject_StreamForward_AboveBodyCap(t *testing.T) {
 	require.Zero(t, args.BodyLength(), "stream metadata must not embed the object body")
 }
 
-func TestClusterCoordinator_PutObject_StreamForward_AboveFloorBelowMaxBody(t *testing.T) {
+func TestClusterCoordinator_PutObject_StreamForward_SmallBody(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
 	c.forward.WithStreamDialer(d.stream)
-	// Default maxBody (64 MiB) is NOT overridden. The body is far below it but
-	// above the 1 MiB PUT stream floor, so it must stream body-less rather than
-	// buffer the whole body into the args FlatBuffer.
-	body := bytes.Repeat([]byte("z"), minForwardStreamBytes+1024)
+	// With a stream dialer available, every body streams body-less regardless of
+	// size (no minForwardStreamBytes floor) rather than buffering into the args
+	// FlatBuffer — even this small one.
+	body := bytes.Repeat([]byte("z"), 1024)
 	d.streamReplyBy[raftpb.ForwardOpPutObject] = buildObjectReply(
 		&storage.Object{Key: "k", Size: int64(len(body)), ETag: "etag-stream"}, "bk",
 	)
@@ -2270,9 +2270,10 @@ func TestClusterCoordinator_PutObject_StreamForward_AboveFloorBelowMaxBody(t *te
 	require.Zero(t, args.BodyLength(), "stream metadata must not embed the object body")
 }
 
-func TestClusterCoordinator_PutObject_StreamDialerSmallBodyUsesSingleMessage(t *testing.T) {
+func TestClusterCoordinator_PutObject_NoStreamDialerUsesSingleMessage(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
-	c.forward.WithStreamDialer(d.stream)
+	// No stream dialer: the frame path is the only option, so the body rides
+	// inside the args FlatBuffer in a single message regardless of size.
 	body := []byte("small-forward-body")
 	d.replyByOp[raftpb.ForwardOpPutObject] = buildObjectReply(
 		&storage.Object{Key: "k", Size: int64(len(body)), ETag: "etag-put"}, "bk",
@@ -2310,10 +2311,11 @@ func TestClusterCoordinator_UploadPart_StreamForward_AboveBodyCap(t *testing.T) 
 	require.Zero(t, args.BodyLength(), "stream metadata must not embed the part body")
 }
 
-func TestClusterCoordinator_UploadPart_StreamForward_AtForwardStreamFloor(t *testing.T) {
+func TestClusterCoordinator_UploadPart_StreamForward_SmallBody(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
 	c.forward.WithStreamDialer(d.stream)
-	body := bytes.Repeat([]byte("p"), minForwardStreamBytes)
+	// Small part body still streams body-less with a dialer present (no floor).
+	body := bytes.Repeat([]byte("p"), 1024)
 	d.streamReplyBy[raftpb.ForwardOpUploadPart] = buildPartReply(
 		&storage.Part{PartNumber: 1, ETag: "etag-part", Size: int64(len(body))},
 	)
@@ -2329,9 +2331,10 @@ func TestClusterCoordinator_UploadPart_StreamForward_AtForwardStreamFloor(t *tes
 	require.Zero(t, args.BodyLength(), "stream metadata must not embed the part body")
 }
 
-func TestClusterCoordinator_UploadPart_StreamDialerSmallBodyUsesSingleMessage(t *testing.T) {
+func TestClusterCoordinator_UploadPart_NoStreamDialerUsesSingleMessage(t *testing.T) {
 	c, d := setupCoordWithForward(t, "bk", "g1", []string{"a"})
-	c.forward.WithStreamDialer(d.stream)
+	// No stream dialer: the owner-routed frame path carries the body in the args
+	// FlatBuffer in a single message regardless of size.
 	body := []byte("small-part-body")
 	d.replyByOp[raftpb.ForwardOpUploadPart] = buildPartReply(
 		&storage.Part{PartNumber: 1, ETag: "etag-part", Size: int64(len(body))},
@@ -2511,67 +2514,6 @@ func (r *fullThenUnexpectedEOFReader) Read(p []byte) (int, error) {
 	}
 	r.done = true
 	return copy(p, r.body), nil
-}
-
-// newTestClusterCoordinatorForAppend returns a minimal ClusterCoordinator
-// suitable for testing the forward-buffer semaphore path (no real RPC peers).
-func newTestClusterCoordinatorForAppend(t *testing.T) *ClusterCoordinator {
-	t.Helper()
-	return NewClusterCoordinator(&fakeBackend{}, NewDataGroupManager(), nil, nil, "self")
-}
-
-// newTestClusterCoordinatorWithBuffer returns a ClusterCoordinator whose
-// appendForwardBuffer is pre-configured with the given cfg.
-func newTestClusterCoordinatorWithBuffer(t *testing.T, cfg AppendForwardBufferConfig) *ClusterCoordinator {
-	t.Helper()
-	c := newTestClusterCoordinatorForAppend(t)
-	c.SetAppendForwardBufferConfig(cfg)
-	return c
-}
-
-// forwardAppendObjectForTest exercises the semaphore acquire/release on the
-// forward path without requiring a real RPC peer. It reads the body up to
-// c.maxBody (checking the cap), acquires the semaphore, releases it, and
-// returns — short-circuiting the actual SendStream call.
-func (c *ClusterCoordinator) forwardAppendObjectForTest(ctx context.Context, bucket, key string, expectedOffset int64, r io.Reader) error {
-	body, err := io.ReadAll(io.LimitReader(r, c.maxBody+1))
-	if err != nil {
-		return err
-	}
-	if int64(len(body)) > c.maxBody {
-		return storage.ErrEntityTooLarge
-	}
-	bodyLen := int64(len(body))
-	if c.appendForwardBuffer != nil {
-		if err := c.appendForwardBuffer.Acquire(ctx, bodyLen); err != nil {
-			return err
-		}
-		defer c.appendForwardBuffer.Release(bodyLen)
-	}
-	// Semaphore acquired and released — RPC not exercised in unit tests.
-	return nil
-}
-
-func TestAppendForward_MidSizeAccepted(t *testing.T) {
-	c := newTestClusterCoordinatorForAppend(t)
-	body := bytes.Repeat([]byte("m"), 8*1024*1024)
-	err := c.forwardAppendObjectForTest(context.Background(), "b", "k", 0, bytes.NewReader(body))
-	if err != nil {
-		t.Fatalf("8 MiB forward rejected: %v", err)
-	}
-}
-
-func TestAppendForward_BufferSaturation(t *testing.T) {
-	c := newTestClusterCoordinatorWithBuffer(t, AppendForwardBufferConfig{
-		TotalBytes:    8 * 1024 * 1024,
-		MaxPerRequest: 64 * 1024 * 1024,
-	})
-	// Directly hold 6 MiB in the semaphore to simulate an in-flight forward.
-	require.NoError(t, c.appendForwardBuffer.Acquire(context.Background(), 6*1024*1024))
-	// A second 6 MiB forward must be rejected: 6+6 > 8 MiB pool.
-	body2 := bytes.Repeat([]byte("s"), 6*1024*1024)
-	err := c.forwardAppendObjectForTest(context.Background(), "b", "k2", 0, bytes.NewReader(body2))
-	require.ErrorIs(t, err, ErrForwardBufferFull)
 }
 
 // TestClusterCoordinator_ImplementsTagInterfaces is a compile-time assertion

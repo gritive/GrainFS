@@ -27,8 +27,6 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 		"--public-url", "https://sentinel.example.com",
 		"--node-id", "sentinel-node",
 		"--raft-addr", "sentinel-raft:7000",
-		"--cluster-append-forward-buffer-total-bytes", "16777216",
-		"--cluster-append-forward-buffer-max-per-request", "1048576",
 		"--append-size-cap-bytes", "67108864",
 		"--pack-threshold", "31",
 		"--scrub-interval", "7s",
@@ -93,8 +91,6 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 	require.Equal(t, "sentinel-raft:7000", opts.RaftAddr)
 
 	// Cluster transport tuning.
-	require.Equal(t, int64(16777216), opts.AppendForwardBufferTotalBytes)
-	require.Equal(t, int64(1048576), opts.AppendForwardBufferMaxPerRequest)
 	require.Equal(t, int64(67108864), opts.AppendSizeCapBytes)
 
 	// Storage knobs.

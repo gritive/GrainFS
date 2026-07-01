@@ -46,8 +46,6 @@ func serveOptionsFromCmd(cmd *cobra.Command) (serveruntime.ServeOptions, error) 
 	opts.BootstrapExpectTimeout, _ = cmd.Flags().GetDuration("bootstrap-expect-timeout")
 
 	// Cluster transport tuning.
-	opts.AppendForwardBufferTotalBytes, _ = cmd.Flags().GetInt64("cluster-append-forward-buffer-total-bytes")
-	opts.AppendForwardBufferMaxPerRequest, _ = cmd.Flags().GetInt64("cluster-append-forward-buffer-max-per-request")
 	opts.AppendSizeCapBytes, _ = cmd.Flags().GetInt64("append-size-cap-bytes")
 
 	// Storage knobs.

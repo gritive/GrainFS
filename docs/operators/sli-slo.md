@@ -148,8 +148,6 @@ avg(grainfs_node_recovery_duration_seconds)
 - Disk usage > 80% (`grainfs_disk_used_pct{node_id="..."} > 80`)
 - Raft apply lag is sustained on any node/group (`max(grainfs_raft_apply_lag) by (node_id, group) > 0`)
 - Operator state scrape errors are increasing (`sum(increase(grainfs_operator_state_scrape_errors_total[15m])) > 0`)
-- AppendObject forward buffer rejection ratio > 1% over 5 min
-  (`rate(grainfs_cluster_append_forward_buffer_rejected_total[5m]) > 0.01 * rate(grainfs_http_requests_total{handler="append_object"}[5m])`)
 - Orphan segment tombstone backlog growing for 3+ scrub cycles
   (`grainfs_scrub_orphan_segments_found_total - grainfs_scrub_orphan_segments_deleted_total`
   monotonically increasing)
@@ -161,11 +159,6 @@ avg(grainfs_node_recovery_duration_seconds)
 
 ### AppendObject SLI metrics (reference)
 
-- `grainfs_cluster_append_forward_buffer_inflight_bytes` (Gauge) — bytes in flight
-  through the cluster append forward buffer pool. Saturation near
-  `--cluster-append-forward-buffer-total-bytes` triggers SlowDown rejections.
-- `grainfs_cluster_append_forward_buffer_rejected_total` (Counter) — HTTP 503
-  SlowDown count.
 - `grainfs_append_coalesced_depth` (Histogram, buckets 1..1024) — number of
   coalesced entries per object at AppendObject time. Sustained right-shift means
   recoalesce backstop isn't keeping up.

@@ -125,6 +125,13 @@ func TestForwardRuntimeCreateMultipartUploadDecodesFrameReply(t *testing.T) {
 	require.Equal(t, raftpb.ForwardOpCreateMultipartUpload, d.calls[0].op)
 }
 
+// Forward bodies of every size stream now (no minForwardStreamBytes threshold):
+// even a small seekable body takes the stream path rather than a buffered frame.
+func TestShouldStreamForwardBodySmallSeekable(t *testing.T) {
+	body := bytes.NewReader(bytes.Repeat([]byte("x"), 1024))
+	require.True(t, shouldStreamForwardBody(body, DefaultMaxForwardBodyBytes))
+}
+
 func TestForwardRuntimeAppendObjectStreamsBody(t *testing.T) {
 	d := &recordingDialer{streamReplyBy: map[raftpb.ForwardOp][]byte{}}
 	d.streamReplyBy[raftpb.ForwardOpAppendObject] = buildObjectReply(&storage.Object{

@@ -45,8 +45,6 @@ func optionsToConfig(
 	cfg.RaftHeartbeatInterval = opts.RaftHeartbeatInterval
 	cfg.RaftElectionTimeout = opts.RaftElectionTimeout
 
-	cfg.AppendForwardBufferTotalBytes = opts.AppendForwardBufferTotalBytes
-	cfg.AppendForwardBufferMaxPerRequest = opts.AppendForwardBufferMaxPerRequest
 	cfg.AppendSizeCapBytes = opts.AppendSizeCapBytes
 
 	cfg.MeasureReadAmp = opts.MeasureReadAmp

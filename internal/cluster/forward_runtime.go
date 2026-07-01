@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/gritive/GrainFS/internal/compat"
-	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -20,7 +19,6 @@ type forwardRuntime struct {
 	selfID      string
 	selfAliases []string
 	maxBody     int64
-	appendBuf   *appendForwardBuffer
 }
 
 func (r forwardRuntime) readObject(
@@ -400,20 +398,13 @@ func (r forwardRuntime) appendObject(
 	if r.sender == nil || r.sender.streamDialer == nil {
 		return nil, ErrCoordinatorNoRouter
 	}
-	forwardBody, err := readBoundedBody(bodyReader, r.maxBody)
-	if err != nil {
-		return nil, err
-	}
-	bodyLen := int64(len(forwardBody))
-	if r.appendBuf != nil {
-		if err := r.appendBuf.Acquire(ctx, bodyLen); err != nil {
-			metrics.AppendForwardBufferRejectedTotal.Inc()
-			return nil, err
-		}
-		defer r.appendBuf.Release(bodyLen)
-	}
+	// Stream the body straight to the owner (single-attempt forward — see
+	// ClusterCoordinator.AppendObject), never buffering the whole body. The HTTP
+	// append handler (object_append.go) is the only producer of forwarded appends
+	// and already rejects bodies over the 64 MiB cap, so no bounded re-read is
+	// needed here.
 	args := buildAppendObjectForwardArgs(bucket, key, expectedOffset)
-	reply, err := r.sender.SendStreamOwner(ctx, target.Peers, target.GroupID, raftpb.ForwardOpAppendObject, args, bytes.NewReader(forwardBody))
+	reply, err := r.sender.SendStreamOwner(ctx, target.Peers, target.GroupID, raftpb.ForwardOpAppendObject, args, bodyReader)
 	if err != nil {
 		return nil, topologyForwardWriteError(group, err)
 	}

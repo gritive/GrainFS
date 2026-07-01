@@ -710,30 +710,6 @@ append; it is not expected in normal steady-state operation.
 
 ---
 
-### Issue: AppendObject HTTP 503 SlowDown
-
-**Symptoms:** `503 SlowDown` responses on AppendObject requests; clients reporting
-`Retry-After: 1` backoff loops; `grainfs_cluster_append_forward_buffer_rejected_total`
-counter climbing.
-
-**Diagnosis:**
-```bash
-curl http://<node>:9000/metrics | grep -E 'grainfs_cluster_append_forward_buffer_(inflight_bytes|rejected_total)'
-```
-
-`inflight_bytes` near the configured pool size means the forward buffer is
-saturated. This is expected backpressure under sustained high concurrency, but
-chronic saturation means the pool is undersized for the workload.
-
-**Fix:**
-- Increase pool: `--cluster-append-forward-buffer-total-bytes` (default 512 MiB).
-- If individual requests are large, raise per-request cap:
-  `--cluster-append-forward-buffer-max-per-request` (default 64 MiB).
-- If clients want bigger objects, raise per-object cap:
-  `--append-size-cap-bytes` (default 5 TiB).
-- Calibrate with `warp append --concurrent 32 --duration 60s --obj.size '1-16MiB'`
-  and target rejection ratio < 1%.
-
 ### Issue: Disk usage drift on AppendObject buckets
 
 **Symptoms:** disk consumption growing faster than committed object size;

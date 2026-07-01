@@ -21,7 +21,6 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 
-	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -116,9 +115,6 @@ func (s *Server) appendObject(ctx context.Context, c *app.RequestContext, bucket
 		writeXMLError(c, consts.StatusServiceUnavailable, "SlowDown", "append segment cap reached")
 	case errors.Is(err, storage.ErrAppendObjectTooLarge):
 		writeXMLError(c, consts.StatusBadRequest, "EntityTooLarge", "object total size cap exceeded")
-	case errors.Is(err, cluster.ErrForwardBufferFull):
-		c.Response.Header.Set("Retry-After", "1")
-		writeXMLError(c, consts.StatusServiceUnavailable, "SlowDown", "append forward buffer saturated")
 	case errors.As(err, &unsupportedAppend):
 		writeXMLError(c, consts.StatusNotImplemented, "NotImplemented", "backend does not support AppendObject")
 	case err != nil:
