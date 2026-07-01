@@ -151,6 +151,59 @@ func TestObjectMetaCodecRoundTrip(t *testing.T) {
 	assert.Equal(t, orig.SSEAlgorithm, decoded.SSEAlgorithm)
 }
 
+// StoredSize (compressed-bytes length for per-segment zstd) must survive the
+// ObjectMeta SegmentRef wire codec. StoredSize==0 means uncompressed; a
+// non-zero value that differs from Size must round-trip so a future
+// byte-serving read via this path decompresses the correct number of bytes
+// instead of silently reading a compressed segment as plaintext.
+func TestObjectMetaCodec_SegmentStoredSizeRoundTrip(t *testing.T) {
+	orig := objectMeta{
+		Key:              "large/compressible.bin",
+		Size:             32 << 20,
+		ContentType:      "application/octet-stream",
+		ETag:             "etag-plaintext",
+		LastModified:     1700003000,
+		PlacementGroupID: "group-a",
+		ECData:           4,
+		ECParity:         2,
+		Segments: []storage.SegmentRef{
+			{
+				BlobID:           "blob-compressed",
+				Size:             16 << 20, // plaintext bytes
+				Checksum:         []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10},
+				PlacementGroupID: "group-a",
+				ShardSize:        1 << 20,
+				ECData:           4,
+				ECParity:         2,
+				StripeBytes:      64 << 10,
+				StoredSize:       7 << 20, // compressed bytes in the EC blob (< Size)
+			},
+			{
+				BlobID:           "blob-uncompressed",
+				Size:             16 << 20,
+				Checksum:         []byte{0x10, 0x0f, 0x0e, 0x0d, 0x0c, 0x0b, 0x0a, 0x09, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01},
+				PlacementGroupID: "group-a",
+				ShardSize:        1 << 20,
+				ECData:           4,
+				ECParity:         2,
+				StripeBytes:      64 << 10,
+				StoredSize:       0, // incompressible → stored uncompressed
+			},
+		},
+	}
+
+	data, err := marshalObjectMeta(orig)
+	require.NoError(t, err)
+	decoded, err := unmarshalObjectMeta(data)
+	require.NoError(t, err)
+
+	require.Len(t, decoded.Segments, 2)
+	assert.Equal(t, int64(7<<20), decoded.Segments[0].StoredSize, "compressed segment StoredSize must round-trip")
+	assert.Equal(t, int64(0), decoded.Segments[1].StoredSize, "uncompressed segment StoredSize stays 0")
+	// Size (plaintext) stays independent of StoredSize.
+	assert.Equal(t, int64(16<<20), decoded.Segments[0].Size)
+}
+
 func TestSnapshotStateCodecRoundTrip(t *testing.T) {
 	orig := map[string][]byte{
 		"bucket:docs":       []byte("{}"),

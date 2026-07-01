@@ -619,6 +619,9 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) { //nolint:unused // refere
 			if s.StripeBytes != 0 {
 				clusterpb.SegmentRefAddStripeBytes(b, s.StripeBytes)
 			}
+			if s.StoredSize != 0 {
+				clusterpb.SegmentRefAddStoredSize(b, s.StoredSize)
+			}
 			segOffs[i] = clusterpb.SegmentRefEnd(b)
 		}
 		clusterpb.ObjectMetaStartSegmentsVector(b, len(segOffs))
@@ -721,6 +724,7 @@ func unmarshalObjectMeta(data []byte) (objectMeta, error) {
 				ECData:           seg.EcData(),
 				ECParity:         seg.EcParity(),
 				StripeBytes:      seg.StripeBytes(),
+				StoredSize:       seg.StoredSize(),
 				NodeIDs:          nodeIDs,
 			}
 		}

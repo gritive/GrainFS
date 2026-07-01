@@ -266,6 +266,7 @@ table SegmentRef {
   ec_data:uint8 = 0;
   ec_parity:uint8 = 0;
   stripe_bytes:uint32 = 0;
+  stored_size:int64 = 0;  // 0 = uncompressed (size==stored); >0 = compressed bytes in EC blob
 }
 
 table SetBucketVersioningCmd {
