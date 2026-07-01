@@ -3,6 +3,12 @@
 ## [0.0.775.0] - 2026-07-01
 
 ### Fixed
+- **Clarified current cluster-transport wording in operator-facing docs.** The
+  README, production deploy guide, zero-CA join guide, runbook, and docs index
+  now state that live node-to-node traffic is streaming HTTP over TCP with
+  SPKI-pinned mTLS, while QUIC, TCP mux carrier, `--transport`, and `--quic-*`
+  references are historical migration/design context.
+
 - **Segment compressed-size now survives the ObjectMeta wire codec.** The
   `clusterpb.SegmentRef` schema carried no `stored_size` field, so encoding an
   object's segment metadata through this path dropped a segment's compressed
