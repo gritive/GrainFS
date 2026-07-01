@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.777.0] - 2026-07-01
+
+### Added
+- **Launch claims checklist for marketing readiness.** Added a reference checklist that maps public
+  launch wording for S3 compatibility, clients, access control, encryption, cluster durability,
+  operations, performance, and retired protocol surfaces to repo evidence and safe caveats. The README
+  and docs index now link to it so marketing copy and competitive comparisons have an explicit
+  pre-publication evidence gate.
+
 ## [0.0.776.0] - 2026-07-01
 
 ### Changed
