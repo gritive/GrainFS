@@ -8,7 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/cluster"
 )
 
 func BenchmarkPackblob_SaveIndex(b *testing.B) {
@@ -110,8 +110,7 @@ func newBenchPackedBackend(b *testing.B, dir string) *PackedBackend {
 	b.Helper()
 	// Same pattern as newTestPackedBackend (test file :19), but accepts a
 	// b *testing.B and a pre-allocated dir for predictable bench fixtures.
-	inner, err := storage.NewLocalBackend(dir + "/local")
-	require.NoError(b, err)
+	inner := cluster.NewSingletonBackendForTest(b)
 	pb, err := NewPackedBackend(inner, dir+"/blobs", 64*1024)
 	require.NoError(b, err)
 	b.Cleanup(func() { require.NoError(b, pb.Close()) })

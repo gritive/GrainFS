@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/cluster"
 )
 
 // Regression for the in-memory index recovery path. Without LoadIndex() in
@@ -17,10 +17,8 @@ import (
 func TestPackedBackend_NewPackedBackend_LoadsExistingIndex(t *testing.T) {
 	dir := t.TempDir()
 	blobDir := dir + "/blobs"
-	innerDir := dir + "/local"
 
-	inner1, err := storage.NewLocalBackend(innerDir)
-	require.NoError(t, err)
+	inner1 := cluster.NewSingletonBackendForTest(t)
 	pb1, err := NewPackedBackend(inner1, blobDir, 64*1024)
 	require.NoError(t, err)
 	require.NoError(t, pb1.CreateBucket(context.Background(), "b"))
@@ -31,8 +29,7 @@ func TestPackedBackend_NewPackedBackend_LoadsExistingIndex(t *testing.T) {
 	require.NoError(t, inner1.Close())
 
 	// Re-open over the same on-disk state.
-	inner2, err := storage.NewLocalBackend(innerDir)
-	require.NoError(t, err)
+	inner2 := cluster.NewSingletonBackendForTest(t)
 	pb2, err := NewPackedBackend(inner2, blobDir, 64*1024)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = pb2.Close() })

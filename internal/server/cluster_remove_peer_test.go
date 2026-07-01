@@ -22,7 +22,6 @@ import (
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/server/servertest"
-	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // fakeClusterInfo is a static stand-in for the raft adapter. Set fields
@@ -199,10 +198,7 @@ type removePeerHarness struct {
 
 func setupRemovePeerServer(t *testing.T, ci ClusterInfo, mem ClusterMembership) *removePeerHarness {
 	t.Helper()
-	dir := t.TempDir()
-	backend, err := storage.NewLocalBackend(dir)
-	require.NoError(t, err)
-	t.Cleanup(func() { backend.Close() })
+	backend := cluster.NewSingletonBackendForTest(t)
 
 	bopts := badgerutil.SmallOptions(t.TempDir())
 	db, err := badger.Open(bopts)

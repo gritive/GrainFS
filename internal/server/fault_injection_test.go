@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/server/servertest"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -38,13 +39,11 @@ func (e *errorBackend) HeadObject(ctx context.Context, bucket, key string) (*sto
 
 // TestGetObject_BackendError tests that a backend GetObject error returns 500
 func TestGetObject_BackendError(t *testing.T) {
-	tmpDir := t.TempDir()
-	real, err := storage.NewLocalBackend(tmpDir)
-	require.NoError(t, err)
+	real := cluster.NewSingletonBackendForTest(t)
 	require.NoError(t, real.CreateBucket(context.Background(), "test-bucket"))
 
 	data := bytes.Repeat([]byte("X"), 1024)
-	_, err = real.PutObject(context.Background(), "test-bucket", "file.bin", bytes.NewReader(data), "application/octet-stream")
+	_, err := real.PutObject(context.Background(), "test-bucket", "file.bin", bytes.NewReader(data), "application/octet-stream")
 	require.NoError(t, err)
 
 	s := New("127.0.0.1:14870", &errorBackend{Backend: real, getErr: errors.New("disk failure")})
@@ -61,12 +60,10 @@ func TestGetObject_BackendError(t *testing.T) {
 
 // TestHeadObject_BackendError tests that a backend HeadObject error returns 500
 func TestHeadObject_BackendError(t *testing.T) {
-	tmpDir := t.TempDir()
-	real, err := storage.NewLocalBackend(tmpDir)
-	require.NoError(t, err)
+	real := cluster.NewSingletonBackendForTest(t)
 	require.NoError(t, real.CreateBucket(context.Background(), "test-bucket"))
 
-	_, err = real.PutObject(context.Background(), "test-bucket", "file.bin", bytes.NewReader([]byte("hello")), "text/plain")
+	_, err := real.PutObject(context.Background(), "test-bucket", "file.bin", bytes.NewReader([]byte("hello")), "text/plain")
 	require.NoError(t, err)
 
 	s := New("127.0.0.1:14871", &errorBackend{Backend: real, headErr: errors.New("disk failure")})
@@ -87,13 +84,11 @@ func TestHeadObject_BackendError(t *testing.T) {
 // (no buffered-then-ReadFull path), so headers (200 OK) are committed before the
 // body is read — a short read can no longer be upgraded to a 500.
 func TestGetObject_SmallFilePartialReadTruncates(t *testing.T) {
-	tmpDir := t.TempDir()
-	real, err := storage.NewLocalBackend(tmpDir)
-	require.NoError(t, err)
+	real := cluster.NewSingletonBackendForTest(t)
 	require.NoError(t, real.CreateBucket(context.Background(), "test-bucket"))
 
 	data := bytes.Repeat([]byte("S"), 8*1024)
-	_, err = real.PutObject(context.Background(), "test-bucket", "small.bin", bytes.NewReader(data), "application/octet-stream")
+	_, err := real.PutObject(context.Background(), "test-bucket", "small.bin", bytes.NewReader(data), "application/octet-stream")
 	require.NoError(t, err)
 	require.NoError(t, real.SetObjectACL("test-bucket", "small.bin", 1)) // ACLPublicRead
 
@@ -116,14 +111,12 @@ func TestGetObject_SmallFilePartialReadTruncates(t *testing.T) {
 // (which uses SetBodyStream / zero-copy) results in a truncated response.
 // Once headers are sent, we cannot change the status code, so the connection closes early.
 func TestGetObject_LargeFilePartialReadTruncates(t *testing.T) {
-	tmpDir := t.TempDir()
-	real, err := storage.NewLocalBackend(tmpDir)
-	require.NoError(t, err)
+	real := cluster.NewSingletonBackendForTest(t)
 	require.NoError(t, real.CreateBucket(context.Background(), "test-bucket"))
 
 	// 256KiB: above the buffered response threshold, so it uses SetBodyStream.
 	data := bytes.Repeat([]byte("L"), 256*1024)
-	_, err = real.PutObject(context.Background(), "test-bucket", "large.bin", bytes.NewReader(data), "application/octet-stream")
+	_, err := real.PutObject(context.Background(), "test-bucket", "large.bin", bytes.NewReader(data), "application/octet-stream")
 	require.NoError(t, err)
 	require.NoError(t, real.SetObjectACL("test-bucket", "large.bin", 1)) // ACLPublicRead
 
@@ -145,13 +138,11 @@ func TestGetObject_LargeFilePartialReadTruncates(t *testing.T) {
 }
 
 func TestGetObject_LargeFileIgnoresTerminalErrorAfterFullBody(t *testing.T) {
-	tmpDir := t.TempDir()
-	real, err := storage.NewLocalBackend(tmpDir)
-	require.NoError(t, err)
+	real := cluster.NewSingletonBackendForTest(t)
 	require.NoError(t, real.CreateBucket(context.Background(), "test-bucket"))
 
 	data := bytes.Repeat([]byte("F"), 64*1024)
-	_, err = real.PutObject(context.Background(), "test-bucket", "full.bin", bytes.NewReader(data), "application/octet-stream")
+	_, err := real.PutObject(context.Background(), "test-bucket", "full.bin", bytes.NewReader(data), "application/octet-stream")
 	require.NoError(t, err)
 	require.NoError(t, real.SetObjectACL("test-bucket", "full.bin", 1)) // ACLPublicRead
 
@@ -172,9 +163,7 @@ func TestGetObject_LargeFileIgnoresTerminalErrorAfterFullBody(t *testing.T) {
 
 // TestColdDataIntegrity tests that objects are retrieved correctly on first access (no warm cache).
 func TestColdDataIntegrity(t *testing.T) {
-	tmpDir := t.TempDir()
-	backend, err := storage.NewLocalBackend(tmpDir)
-	require.NoError(t, err)
+	backend := cluster.NewSingletonBackendForTest(t)
 	require.NoError(t, backend.CreateBucket(context.Background(), "test-bucket"))
 
 	s := New("127.0.0.1:14874", backend)

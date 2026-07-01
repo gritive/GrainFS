@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/server/servertest"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -52,9 +53,7 @@ func (s *aclParitySpy) HeadObjectVersion(_ context.Context, _, key, versionID st
 // through to 501 (no GetObjectVersion adapter). Post-fix: HeadObjectVersion
 // (private) is used → 403 AccessDenied.
 func TestHandleCopyObject_VersionedSource_OldPrivateVersion_Denied(t *testing.T) {
-	real, err := storage.NewLocalBackend(t.TempDir())
-	require.NoError(t, err)
-	t.Cleanup(func() { real.Close() })
+	real := cluster.NewSingletonBackendForTest(t)
 	require.NoError(t, real.CreateBucket(context.Background(), "src-bkt"))
 	require.NoError(t, real.CreateBucket(context.Background(), "dst-bkt"))
 
@@ -87,9 +86,7 @@ func TestHandleCopyObject_VersionedSource_OldPrivateVersion_Denied(t *testing.T)
 // and together they close the dispatch regression gap: a bug that always routes
 // to HeadObjectVersion would fail this test.
 func TestLoadCopySourceObject_NoVersionID_UsesHeadObject(t *testing.T) {
-	real, err := storage.NewLocalBackend(t.TempDir())
-	require.NoError(t, err)
-	t.Cleanup(func() { real.Close() })
+	real := cluster.NewSingletonBackendForTest(t)
 	require.NoError(t, real.CreateBucket(context.Background(), "src-bkt"))
 
 	spy := &aclParitySpy{Backend: real}
@@ -113,9 +110,7 @@ func TestLoadCopySourceObject_NoVersionID_UsesHeadObject(t *testing.T) {
 // requires auth, so the full UploadPartCopy HTTP flow is not exercised here;
 // the unit assertion on the shared dispatch helper covers both call sites.
 func TestUploadPartCopy_VersionedSource_OldPrivateVersion_Denied(t *testing.T) {
-	real, err := storage.NewLocalBackend(t.TempDir())
-	require.NoError(t, err)
-	t.Cleanup(func() { real.Close() })
+	real := cluster.NewSingletonBackendForTest(t)
 	require.NoError(t, real.CreateBucket(context.Background(), "src-bkt"))
 
 	spy := &aclParitySpy{Backend: real}

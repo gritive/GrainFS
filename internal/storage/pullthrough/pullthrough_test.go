@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/pullthrough"
 )
@@ -33,15 +34,13 @@ func (u *stubUpstream) GetObject(bucket, key string) (io.ReadCloser, *storage.Ob
 	}, nil
 }
 
-func newLocalBackend(t *testing.T) storage.Backend {
+func newTestBackend(t *testing.T) storage.Backend {
 	t.Helper()
-	b, err := storage.NewLocalBackend(t.TempDir())
-	require.NoError(t, err)
-	return b
+	return cluster.NewSingletonBackendForTest(t)
 }
 
 func TestPullThrough_GetObject_LocalHit(t *testing.T) {
-	local := newLocalBackend(t)
+	local := newTestBackend(t)
 	upstream := &stubUpstream{objects: map[string]string{"b/k": "upstream-data"}}
 
 	require.NoError(t, local.CreateBucket(context.Background(), "b"))
@@ -59,7 +58,7 @@ func TestPullThrough_GetObject_LocalHit(t *testing.T) {
 }
 
 func TestPullThrough_GetObject_FetchFromUpstream(t *testing.T) {
-	local := newLocalBackend(t)
+	local := newTestBackend(t)
 	upstream := &stubUpstream{objects: map[string]string{"b/img.png": "upstream-bytes"}}
 
 	require.NoError(t, local.CreateBucket(context.Background(), "b"))
@@ -82,7 +81,7 @@ func TestPullThrough_GetObject_FetchFromUpstream(t *testing.T) {
 }
 
 func TestPullThrough_GetObject_NotFound(t *testing.T) {
-	local := newLocalBackend(t)
+	local := newTestBackend(t)
 	upstream := &stubUpstream{objects: map[string]string{}}
 
 	require.NoError(t, local.CreateBucket(context.Background(), "b"))
@@ -93,8 +92,53 @@ func TestPullThrough_GetObject_NotFound(t *testing.T) {
 		"must return ErrObjectNotFound when neither local nor upstream has the object")
 }
 
+// partialIOInner is a minimal in-memory storage.Backend that ALSO implements
+// storage.PartialIO (WriteAt/ReadAt/Truncate) + PreferWriteAt. It exists to
+// test that pullthrough forwards the PartialIO capability of its inner — the
+// production single-node inner (ClusterCoordinator) provides PartialIO, so a
+// PartialIO-capable inner is the faithful substrate for this forwarding test.
+// The embedded interface panics on any method the test does not exercise.
+type partialIOInner struct {
+	storage.Backend
+	data map[string][]byte
+}
+
+func newPartialIOInner() *partialIOInner { return &partialIOInner{data: map[string][]byte{}} }
+
+func (p *partialIOInner) CreateBucket(context.Context, string) error { return nil }
+func (p *partialIOInner) PreferWriteAt(string) bool                  { return true }
+
+func (p *partialIOInner) WriteAt(_ context.Context, bucket, key string, offset uint64, data []byte) (*storage.Object, error) {
+	k := bucket + "/" + key
+	buf := p.data[k]
+	if end := int(offset) + len(data); end > len(buf) {
+		nb := make([]byte, end)
+		copy(nb, buf)
+		buf = nb
+	}
+	copy(buf[offset:], data)
+	p.data[k] = buf
+	return &storage.Object{Key: key, Size: int64(len(buf))}, nil
+}
+
+func (p *partialIOInner) ReadAt(_ context.Context, bucket, key string, offset int64, buf []byte) (int, error) {
+	d := p.data[bucket+"/"+key]
+	if offset >= int64(len(d)) {
+		return 0, io.EOF
+	}
+	return copy(buf, d[offset:]), nil
+}
+
+func (p *partialIOInner) Truncate(_ context.Context, bucket, key string, size int64) error {
+	k := bucket + "/" + key
+	if d := p.data[k]; int64(len(d)) > size {
+		p.data[k] = d[:size]
+	}
+	return nil
+}
+
 func TestPullThrough_ForwardsPartialIOCapabilities(t *testing.T) {
-	local := newLocalBackend(t)
+	local := newPartialIOInner()
 	require.NoError(t, local.CreateBucket(context.Background(), "__grainfs_test_internal"))
 
 	pt := pullthrough.NewBackend(local, &staticResolver{})
@@ -123,7 +167,7 @@ func (b *recordingPreparedReadAtBackend) ReadAtObject(ctx context.Context, bucke
 }
 
 func TestPullThrough_ReadAtObject_DelegatesToInner(t *testing.T) {
-	local := newLocalBackend(t)
+	local := newTestBackend(t)
 	rec := &recordingPreparedReadAtBackend{Backend: local}
 	pt := pullthrough.NewBackend(rec, &staticResolver{})
 
@@ -163,7 +207,7 @@ func (u *streamingUpstream) GetObject(bucket, key string) (io.ReadCloser, *stora
 // Regression for Known Issue #1: io.ReadAll previously buffered the entire
 // object in memory before writing locally (OOM risk).
 func TestPullthrough_LargeObject_Streaming(t *testing.T) {
-	local := newLocalBackend(t)
+	local := newTestBackend(t)
 	require.NoError(t, local.CreateBucket(context.Background(), "b"))
 
 	// 10MB of zeroes via streaming reader (no buffer materialization)
@@ -195,7 +239,7 @@ func TestPullthrough_LargeObject_Streaming(t *testing.T) {
 // 2-pass streaming fix: the caller MUST receive the full body bytes.
 // In the naive io.Pipe+Discard approach, the caller would get an empty body.
 func TestPullthrough_CallerReceivesFullBody(t *testing.T) {
-	local := newLocalBackend(t)
+	local := newTestBackend(t)
 	require.NoError(t, local.CreateBucket(context.Background(), "b"))
 
 	payload := bytes.Repeat([]byte("grainfs"), 1000) // 7000 bytes
@@ -244,7 +288,7 @@ func (u *errUpstream) GetObject(bucket, key string) (io.ReadCloser, *storage.Obj
 // TestPullthrough_UpstreamErrorMidStream verifies that when upstream fails
 // mid-stream, the caller gets an error and no corrupt entry is left in cache.
 func TestPullthrough_UpstreamErrorMidStream(t *testing.T) {
-	local := newLocalBackend(t)
+	local := newTestBackend(t)
 	require.NoError(t, local.CreateBucket(context.Background(), "b"))
 
 	payload := bytes.Repeat([]byte("x"), 1000)
@@ -325,7 +369,7 @@ func TestPullThrough_CacheFill_SizeMismatch_FailsAndCachesNothing(t *testing.T) 
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			local := newLocalBackend(t)
+			local := newTestBackend(t)
 			require.NoError(t, local.CreateBucket(context.Background(), "b"))
 			inner := &exactSizeEnforcingBackend{Backend: local}
 
@@ -383,7 +427,7 @@ func (r *mapResolver) Resolve(bucket string) (pullthrough.Upstream, bool) {
 // asks the Resolver for an Upstream per request and routes by bucket. Buckets
 // not in the resolver map fall back to local-only (ErrObjectNotFound).
 func TestPullThrough_PerBucketResolver_RoutesByBucket(t *testing.T) {
-	local := newLocalBackend(t)
+	local := newTestBackend(t)
 	require.NoError(t, local.CreateBucket(context.Background(), "a"))
 	require.NoError(t, local.CreateBucket(context.Background(), "b"))
 	require.NoError(t, local.CreateBucket(context.Background(), "c"))
@@ -415,7 +459,7 @@ func TestPullThrough_PerBucketResolver_RoutesByBucket(t *testing.T) {
 }
 
 func TestPullThrough_PutObject_GoesToLocal(t *testing.T) {
-	local := newLocalBackend(t)
+	local := newTestBackend(t)
 	upstream := &stubUpstream{objects: map[string]string{}}
 
 	require.NoError(t, local.CreateBucket(context.Background(), "b"))
@@ -451,7 +495,7 @@ func (b *recordingRequestPutterBackend) PutObjectWithRequest(ctx context.Context
 // the no-spool streaming path instead of staging the body to a temp file. The
 // recording backend captures the request the pullthrough decorator builds.
 func TestPullThrough_CacheFill_ThreadsExactSizeHint(t *testing.T) {
-	local := newLocalBackend(t)
+	local := newTestBackend(t)
 	require.NoError(t, local.CreateBucket(context.Background(), "b"))
 	rec := &recordingRequestPutterBackend{Backend: local}
 

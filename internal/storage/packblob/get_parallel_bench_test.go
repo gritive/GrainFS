@@ -8,8 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/encrypt"
-	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // BenchmarkParallelGetSmallObjects measures the RLock contention on
@@ -126,11 +126,7 @@ func setupPackedBackend(b *testing.B, n int) (*PackedBackend, []string) {
 
 func setupPackedBackendWithEnc(b *testing.B, n int, keeper *encrypt.DEKKeeper) (*PackedBackend, []string) {
 	b.Helper()
-	inner, err := storage.NewLocalBackend(b.TempDir())
-	if err != nil {
-		b.Fatal(err)
-	}
-	b.Cleanup(func() { _ = inner.Close() })
+	inner := cluster.NewSingletonBackendForTest(b)
 
 	opts := PackedBackendOptions{Compress: true}
 	if keeper != nil {

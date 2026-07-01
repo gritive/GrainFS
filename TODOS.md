@@ -1,15 +1,9 @@
 # TODO
 
-- [ ] production-dead `storage.LocalBackend` 제거 (별도 에픽, 접근 결정 대기)
-  - 배경: single-node serve도 `NewDistributedBackendForGroup(group-0)`를 쓰고, `storage.LocalBackend`는
-    production에서 구성되지 않음(test-only, ~3000 LoC + storagepb codec/Badger 영속화). storagepb
-    `SegmentRef`가 `stored_size`를 흘리는 codec #2 gap도 이 백엔드에 속함(현재 라이브 read 미도달).
-  - 걸림돌: ~87개 테스트 파일이 substrate로 사용. 특히 `internal/server/*_test.go` 29개는
-    `setupTestServerWithBackend()`(server_test.go) 경유로 production server-layer(auth/ACL/versioning/
-    lifecycle) 커버리지를 이 백엔드 위에서 검증 → 무작정 삭제 시 커버리지 손실.
-  - 접근 미결(A/B/C): (A) LocalBackend 유지 + codec #2 gap은 note로 / (B) server 테스트를 production
-    단일노드 `DistributedBackend`로 재홈 후 삭제 / (C) 얇은 in-memory test 백엔드 신규 후 삭제.
-    → 별도 spec+plan gate에서 정확한 비용으로 확정 후 진행.
+- [ ] LocalBackend-removal follow-ups (genuine DistributedBackend gaps surfaced while re-homing tests off LocalBackend; the LocalBackend-specific tests that caught them were deleted)
+  - [ ] **ListMultipartUploads bucket-existence**: `GET /<bucket>?uploads` on a non-existent bucket returns `200` (empty `ListMultipartUploadsResult`) instead of `404 NoSuchBucket`. LocalBackend validated bucket existence; `DistributedBackend` does not on the ListMPU path → real S3-compat gap on the single-node production path.
+  - [ ] **EC ranged-GET allocates full body**: a bytes-range GET on a large EC object allocates the whole object rather than just the requested range (LocalBackend's direct-file `ReadAt` did not). Confirm whether inherent to the EC read path or a fixable streaming gap; was previously guarded by `TestGetObjectRange_LargeRangeDoesNotAllocateFullBody`.
+  - [ ] **append-segment wire codec drops `StoredSize`** (pre-existing, same family as the #995 SegmentRef `stored_size` parity fix): `EncodeAppendSegment`/`DecodeAppendSegment` in `internal/storage/append_summary.go` (used live by `internal/cluster/append_side_record.go`) do not serialize `SegmentRef.StoredSize`. Harmless while append-side segments are never per-segment-compressed; add parity before that path can carry compressed segments to avoid reading a compressed blob as plaintext.
 
 - [ ] Streaming-only unification follow-ups (PR #streaming-only, Tasks A/B/C/D)
   - [ ] **ReadShardRange RPC 정리**: `ReadShardRangeStream`으로 통합 후 `ReadShardRange` one-shot RPC는 size-fork에서 호출 없음. 의도적 프로토콜 정리 PR로 server handler(`shard_service.go:721`), server guards(`:444, :1071`), client test(`shard_service_test.go:429-451`), `maxShardRangeReplyBytes` const 삭제 여부 결정.

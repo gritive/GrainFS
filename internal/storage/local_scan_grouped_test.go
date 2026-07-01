@@ -8,42 +8,6 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-func TestLocalBackend_ScanObjectsGrouped_OneVersionPerKey(t *testing.T) {
-	b := newBackend(t)
-	require.NoError(t, b.CreateBucket(ctx(), "b"))
-
-	for _, key := range []string{"a", "c", "b"} {
-		_, err := b.PutObject(ctx(), "b", key, body("payload-"+key), "text/plain")
-		require.NoError(t, err)
-	}
-
-	ch, err := b.ScanObjectsGrouped("b")
-	require.NoError(t, err)
-
-	var groups []storage.ObjectKeyGroup
-	for g := range ch {
-		groups = append(groups, storage.ObjectKeyGroup{
-			Bucket: g.Bucket, Key: g.Key,
-			Versions: append([]storage.ObjectVersionRecord(nil), g.Versions...),
-		})
-	}
-
-	require.Len(t, groups, 3)
-	require.Equal(t, "a", groups[0].Key)
-	require.Equal(t, "b", groups[1].Key)
-	require.Equal(t, "c", groups[2].Key)
-
-	for _, g := range groups {
-		require.Len(t, g.Versions, 1, "LocalBackend is unversioned")
-		v := g.Versions[0]
-		require.True(t, v.IsLatest)
-		require.Empty(t, v.VersionID)
-		require.False(t, v.IsDeleteMarker)
-		require.Positive(t, v.LastModified)
-		require.Positive(t, v.Size)
-	}
-}
-
 func TestLocalBackend_ScanObjectsGrouped_PopulatesTagsAndSize(t *testing.T) {
 	b := newBackend(t)
 	require.NoError(t, b.CreateBucket(ctx(), "b"))

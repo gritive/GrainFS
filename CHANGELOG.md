@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.778.0] - 2026-07-02
+
+### Changed
+- **Removed the production-dead `LocalBackend` storage fixture (internal, no user-facing change).**
+  Single-node `grainfs serve` has run on the cluster `DistributedBackend` (group-0) for some time;
+  `storage.LocalBackend` and its orphaned `storagepb` object-metadata codec were test-only. This
+  release deletes them along with their dead on-disk encrypted-object-file helpers (~9k LOC net),
+  relocates the shared S3-append and append-summary contracts that production cluster code depends on
+  into standalone files, and re-homes every affected test onto the real single-node `DistributedBackend`
+  (or a small in-memory stub where a wrapper test only needs a sink). No S3 API, CLI, or on-disk
+  format behavior changes.
+
 ## [0.0.777.0] - 2026-07-01
 
 ### Added

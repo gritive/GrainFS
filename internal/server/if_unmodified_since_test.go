@@ -9,21 +9,18 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/server/servertest"
-	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // TestGetObject_IfUnmodifiedSince tests that GET returns 412 when the object was
 // modified after the If-Unmodified-Since date (precondition fails).
 func TestGetObject_IfUnmodifiedSince(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	backend, err := storage.NewLocalBackend(tmpDir)
-	require.NoError(t, err)
+	backend := cluster.NewSingletonBackendForTest(t)
 	require.NoError(t, backend.CreateBucket(context.Background(), "test-bucket"))
 
 	data := bytes.Repeat([]byte("U"), 512)
-	_, err = backend.PutObject(context.Background(), "test-bucket", "file.txt", bytes.NewReader(data), "text/plain")
+	_, err := backend.PutObject(context.Background(), "test-bucket", "file.txt", bytes.NewReader(data), "text/plain")
 	require.NoError(t, err)
 	require.NoError(t, backend.SetObjectACL("test-bucket", "file.txt", 1)) // ACLPublicRead
 

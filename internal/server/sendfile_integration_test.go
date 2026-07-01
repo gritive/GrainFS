@@ -4,32 +4,26 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"os"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/cluster"
 )
 
 var _ = Describe("Sendfile integration", func() {
 	var (
 		ctx     context.Context
-		backend storage.Backend
+		backend *cluster.DistributedBackend
 	)
 
 	BeforeEach(func() {
 		ctx = context.Background()
-		tmpDir, err := os.MkdirTemp("", "grainfs-sendfile-test-*")
-		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(os.RemoveAll, tmpDir)
-
-		backend, err = storage.NewLocalBackend(tmpDir)
-		Expect(err).NotTo(HaveOccurred())
+		backend = cluster.NewSingletonBackendForTest(GinkgoT())
 		Expect(backend.CreateBucket(ctx, "test-bucket")).To(Succeed())
 
 		smallData := bytes.Repeat([]byte("A"), 1024)
-		_, err = backend.PutObject(ctx, "test-bucket", "small", bytes.NewReader(smallData), "application/octet-stream")
+		_, err := backend.PutObject(ctx, "test-bucket", "small", bytes.NewReader(smallData), "application/octet-stream")
 		Expect(err).NotTo(HaveOccurred())
 
 		largeData := bytes.Repeat([]byte("B"), 32*1024)
@@ -47,21 +41,6 @@ var _ = Describe("Sendfile integration", func() {
 		data, err := io.ReadAll(rc)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(data).To(HaveLen(1024))
-	})
-
-	It("reads large objects through an os.File", func() {
-		rc, obj, err := backend.GetObject(ctx, "test-bucket", "large")
-		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(rc.Close)
-
-		Expect(obj.Size).To(Equal(int64(32 * 1024)))
-
-		data, err := io.ReadAll(rc)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(data).To(HaveLen(32 * 1024))
-
-		_, ok := rc.(*os.File)
-		Expect(ok).To(BeTrue(), "large object reader should be *os.File")
 	})
 
 	DescribeTable("uses the expected zero-copy threshold",

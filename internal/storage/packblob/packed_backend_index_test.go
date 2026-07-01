@@ -6,7 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/cluster"
 )
 
 func TestPackedBackend_SaveLoadIndex_FB(t *testing.T) {
@@ -14,8 +14,7 @@ func TestPackedBackend_SaveLoadIndex_FB(t *testing.T) {
 	// close it before opening pb2 — the blobDir has an exclusive flock.
 	dir := t.TempDir()
 	blobDir := dir + "/blobs"
-	inner, err := storage.NewLocalBackend(dir + "/local")
-	require.NoError(t, err)
+	inner := cluster.NewSingletonBackendForTest(t)
 	pb, err := NewPackedBackend(inner, blobDir, 64*1024)
 	require.NoError(t, err)
 
@@ -72,9 +71,7 @@ func TestPackedBackend_LoadIndex_MissingFile_TriggersScanAll(t *testing.T) {
 // a fresh t.TempDir() for that side only.
 func newTestPackedBackendSharingDir(t *testing.T, blobDir string) *PackedBackend {
 	t.Helper()
-	innerDir := t.TempDir()
-	inner, err := storage.NewLocalBackend(innerDir + "/local")
-	require.NoError(t, err)
+	inner := cluster.NewSingletonBackendForTest(t)
 	pb, err := NewPackedBackend(inner, blobDir, 64*1024)
 	require.NoError(t, err)
 	t.Cleanup(func() { pb.Close() })

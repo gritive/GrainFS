@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -17,12 +18,9 @@ import (
 // that exercise the multipart sweep capability path. Returns nil if dir
 // already has BadgerDB state we don't want to disturb (callers fall back
 // to ops=nil for tmp-only scenarios).
-func newOpsForTest(t *testing.T, dir string) *storage.Operations {
+func newOpsForTest(t *testing.T, _ string) *storage.Operations {
 	t.Helper()
-	b, err := storage.NewLocalBackend(dir)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = b.Close() })
-	return storage.NewOperations(b)
+	return storage.NewOperations(cluster.NewSingletonBackendForTest(t))
 }
 
 // captureEmitter is a HealEvent sink for assertions; lives here too so the
@@ -137,9 +135,7 @@ func TestStartupRecovery_DeletesOldMultipartPartsWhenOpsCannotReachSweeper(t *te
 	past := time.Now().Add(-25 * time.Hour)
 	require.NoError(t, os.Chtimes(oldUpload, past, past))
 
-	local, err := storage.NewLocalBackend(root)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = local.Close() })
+	local := cluster.NewSingletonBackendForTest(t)
 
 	cap := &captureSrvEmitter{}
 	ops := storage.NewOperations(noMultipartSweepBackend{Backend: local})

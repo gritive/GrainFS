@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/stretchr/testify/require"
 )
@@ -31,8 +32,7 @@ func (erroringVersioner) SetBucketVersioning(string, string) error { return nil 
 // GetBucketVersioningLinearized degrading to a local read — it does NOT surface
 // as an error here.)
 func TestCtxWithBucketVersioningStrictFailsClosedOnFault(t *testing.T) {
-	real, err := storage.NewLocalBackend(t.TempDir())
-	require.NoError(t, err)
+	real := cluster.NewSingletonBackendForTest(t)
 	srv := New("127.0.0.1:0", erroringVersioner{Backend: real})
 
 	_, serr := srv.ctxWithBucketVersioningStrict(context.Background(), "b")
@@ -63,8 +63,7 @@ func (r *recordingVersioner) GetBucketVersioningLinearized(context.Context, stri
 // PLAIN read (never the linearizing barrier, so reads stay available during a
 // group-0 outage), and the MUTATING edge must use the linearized read.
 func TestEdgeResolverSelection(t *testing.T) {
-	real, err := storage.NewLocalBackend(t.TempDir())
-	require.NoError(t, err)
+	real := cluster.NewSingletonBackendForTest(t)
 	rv := &recordingVersioner{Backend: real}
 	srv := New("127.0.0.1:0", rv)
 

@@ -10,16 +10,14 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/server/servertest"
-	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // TestGetObject_ContentLengthHeader verifies Content-Length is set for both
 // the standard path (small files) and the zero-copy path (large files).
 func TestGetObject_ContentLengthHeader(t *testing.T) {
-	tmpDir := t.TempDir()
-	backend, err := storage.NewLocalBackend(tmpDir)
-	require.NoError(t, err)
+	backend := cluster.NewSingletonBackendForTest(t)
 	require.NoError(t, backend.CreateBucket(context.Background(), "test-bucket"))
 
 	cases := []struct {

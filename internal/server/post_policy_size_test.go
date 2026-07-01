@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -32,8 +33,7 @@ func (b *recordingFormPutBackend) PutObjectWithRequest(ctx context.Context, req 
 // the request putFormObject builds.
 func TestPutFormObject_ThreadsExactSize(t *testing.T) {
 	ctx := context.Background()
-	local, err := storage.NewLocalBackend(t.TempDir())
-	require.NoError(t, err)
+	local := cluster.NewSingletonBackendForTest(t)
 	require.NoError(t, local.CreateBucket(ctx, "b"))
 
 	rec := &recordingFormPutBackend{Backend: local}
@@ -41,7 +41,7 @@ func TestPutFormObject_ThreadsExactSize(t *testing.T) {
 
 	const body = "hello form upload body"
 	// size is the authoritative multipart FileHeader.Size for this body.
-	_, err = s.putFormObject(ctx, "b", "k", strings.NewReader(body), "text/plain", int64(len(body)))
+	_, err := s.putFormObject(ctx, "b", "k", strings.NewReader(body), "text/plain", int64(len(body)))
 	require.NoError(t, err)
 
 	require.NotNil(t, rec.lastReq, "form upload must go through PutObjectWithRequest (sized path)")

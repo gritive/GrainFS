@@ -8,8 +8,8 @@ import (
 	"math"
 	"testing"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/encrypt"
-	"github.com/gritive/GrainFS/internal/storage"
 )
 
 func BenchmarkPutObject64KB(b *testing.B) {
@@ -17,11 +17,7 @@ func BenchmarkPutObject64KB(b *testing.B) {
 	payload := bytes.Repeat([]byte("x"), 64*1024)
 
 	b.Run("local-object-files", func(b *testing.B) {
-		backend, err := storage.NewLocalBackend(b.TempDir())
-		if err != nil {
-			b.Fatal(err)
-		}
-		b.Cleanup(func() { _ = backend.Close() })
+		backend := cluster.NewSingletonBackendForTest(b)
 		if err := backend.CreateBucket(ctx, "bench"); err != nil {
 			b.Fatal(err)
 		}
@@ -36,10 +32,7 @@ func BenchmarkPutObject64KB(b *testing.B) {
 	})
 
 	b.Run("packed-blob-compress", func(b *testing.B) {
-		inner, err := storage.NewLocalBackend(b.TempDir())
-		if err != nil {
-			b.Fatal(err)
-		}
+		inner := cluster.NewSingletonBackendForTest(b)
 		packed, err := NewPackedBackend(inner, b.TempDir(), int64(len(payload)+1))
 		if err != nil {
 			b.Fatal(err)
@@ -59,10 +52,7 @@ func BenchmarkPutObject64KB(b *testing.B) {
 	})
 
 	b.Run("packed-blob-no-compress", func(b *testing.B) {
-		inner, err := storage.NewLocalBackend(b.TempDir())
-		if err != nil {
-			b.Fatal(err)
-		}
+		inner := cluster.NewSingletonBackendForTest(b)
 		packed, err := NewPackedBackendWithOptions(inner, b.TempDir(), int64(len(payload)+1), PackedBackendOptions{Compress: false})
 		if err != nil {
 			b.Fatal(err)
@@ -166,11 +156,7 @@ func BenchmarkGetObject64KB(b *testing.B) {
 	payload := bytes.Repeat([]byte("x"), 64*1024)
 
 	b.Run("local-object-files", func(b *testing.B) {
-		backend, err := storage.NewLocalBackend(b.TempDir())
-		if err != nil {
-			b.Fatal(err)
-		}
-		b.Cleanup(func() { _ = backend.Close() })
+		backend := cluster.NewSingletonBackendForTest(b)
 		if err := backend.CreateBucket(ctx, "bench"); err != nil {
 			b.Fatal(err)
 		}
@@ -196,10 +182,7 @@ func BenchmarkGetObject64KB(b *testing.B) {
 	})
 
 	b.Run("packed-blob-no-compress", func(b *testing.B) {
-		inner, err := storage.NewLocalBackend(b.TempDir())
-		if err != nil {
-			b.Fatal(err)
-		}
+		inner := cluster.NewSingletonBackendForTest(b)
 		packed, err := NewPackedBackendWithOptions(inner, b.TempDir(), int64(len(payload)+1), PackedBackendOptions{Compress: false})
 		if err != nil {
 			b.Fatal(err)
@@ -230,10 +213,7 @@ func BenchmarkGetObject64KB(b *testing.B) {
 	})
 
 	b.Run("packed-blob-encrypted-no-compress", func(b *testing.B) {
-		inner, err := storage.NewLocalBackend(b.TempDir())
-		if err != nil {
-			b.Fatal(err)
-		}
+		inner := cluster.NewSingletonBackendForTest(b)
 		packed, err := NewPackedBackendWithOptions(inner, b.TempDir(), int64(len(payload)+1), PackedBackendOptions{
 			Compress:  false,
 			DEKKeeper: newPackblobBenchmarkKeeper(b),

@@ -34,7 +34,7 @@ func TestSegmentWriter_Boundaries(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			b := newTestLocalBackend(t)
+			b := &byteWriterBackend{}
 			data := makePattern(tc.size)
 			obj, err := writeViaSegmentWriter(b, "test", "k-"+tc.name, bytes.NewReader(data))
 			require.NoError(t, err, "write")
@@ -51,7 +51,7 @@ func TestSegmentWriter_Boundaries(t *testing.T) {
 
 func TestSegmentWriter_S3FastETagSkipsMD5WhenOptedIn(t *testing.T) {
 	t.Setenv(s3ETagMD5Env, "0")
-	b := newTestLocalBackend(t)
+	b := &byteWriterBackend{}
 	data := makePattern(4096 + 7)
 
 	obj, err := writeViaSegmentWriter(b, "test", "fast-etag", bytes.NewReader(data))
@@ -67,10 +67,10 @@ func TestSegmentWriter_S3FastETagSkipsMD5WhenOptedIn(t *testing.T) {
 
 func TestSegmentWriter_UnknownContentLength(t *testing.T) {
 	t.Parallel()
-	b := newTestLocalBackend(t)
+	b := &byteWriterBackend{}
 	data := makePattern(4096 + 7)
 	r := iotest.OneByteReader(bytes.NewReader(data))
-	w := NewSegmentWriterWithChunkSize(localBackendAdapter{b}, 1024)
+	w := NewSegmentWriterWithChunkSize(b, 1024)
 	obj, err := w.Write(context.Background(), "test", "drip", "application/octet-stream", r)
 	require.NoError(t, err, "write")
 	require.Len(t, obj.Segments, 5)
@@ -79,10 +79,10 @@ func TestSegmentWriter_UnknownContentLength(t *testing.T) {
 
 func TestSegmentWriter_CustomChunkSize(t *testing.T) {
 	t.Parallel()
-	b := newTestLocalBackend(t)
+	b := &byteWriterBackend{}
 	data := makePattern(4096 + 7)
 
-	w := NewSegmentWriterWithChunkSize(localBackendAdapter{b}, 1024)
+	w := NewSegmentWriterWithChunkSize(b, 1024)
 	obj, err := w.Write(context.Background(), "test", "small-chunks", "application/octet-stream", bytes.NewReader(data))
 	require.NoError(t, err, "write")
 	require.Len(t, obj.Segments, 5)
@@ -115,9 +115,9 @@ func TestSegmentWriter_CustomWorkersBoundsConcurrentWrites(t *testing.T) {
 
 func TestSegmentWriter_StreamErrorMidChunk(t *testing.T) {
 	t.Parallel()
-	b := newTestLocalBackend(t)
+	b := &byteWriterBackend{}
 	r := &errAfterNReader{n: 1024 + 100, err: io.ErrUnexpectedEOF}
-	w := NewSegmentWriterWithChunkSize(localBackendAdapter{b}, 1024)
+	w := NewSegmentWriterWithChunkSize(b, 1024)
 	_, err := w.Write(context.Background(), "test", "boom", "application/octet-stream", r)
 	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
 	_, getErr := b.HeadObject(context.Background(), "test", "boom")

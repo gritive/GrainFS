@@ -1,10 +1,12 @@
 package migration_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -48,11 +50,47 @@ func (s *stubSource) GetObject(bucket, key string) (io.ReadCloser, *storage.Obje
 	return nil, nil, storage.ErrObjectNotFound
 }
 
-func newLocalBackend(t *testing.T) storage.Backend {
+// recordingDstBackend is an in-memory migration destination. The injector only
+// needs CreateBucket / GetObject (skip-existing probe) / PutObject; an in-memory
+// sink tests the injector's copy/skip/pagination logic without depending on a
+// concrete backend's write path (the real migration target is the production
+// cluster backend).
+type recordingDstBackend struct {
+	storage.Backend
+	mu      sync.Mutex
+	objects map[string][]byte
+}
+
+func newRecordingDst() *recordingDstBackend {
+	return &recordingDstBackend{objects: map[string][]byte{}}
+}
+
+func (b *recordingDstBackend) CreateBucket(context.Context, string) error { return nil }
+
+func (b *recordingDstBackend) GetObject(_ context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	data, ok := b.objects[bucket+"/"+key]
+	if !ok {
+		return nil, nil, storage.ErrObjectNotFound
+	}
+	return io.NopCloser(bytes.NewReader(data)), &storage.Object{Key: key, Size: int64(len(data))}, nil
+}
+
+func (b *recordingDstBackend) PutObject(_ context.Context, bucket, key string, r io.Reader, _ string) (*storage.Object, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+	b.mu.Lock()
+	b.objects[bucket+"/"+key] = data
+	b.mu.Unlock()
+	return &storage.Object{Key: key, Size: int64(len(data))}, nil
+}
+
+func newTestDst(t *testing.T) storage.Backend {
 	t.Helper()
-	b, err := storage.NewLocalBackend(t.TempDir())
-	require.NoError(t, err)
-	return b
+	return newRecordingDst()
 }
 
 func TestInjector_CopiesAllObjects(t *testing.T) {
@@ -65,7 +103,7 @@ func TestInjector_CopiesAllObjects(t *testing.T) {
 			},
 		},
 	}
-	dst := newLocalBackend(t)
+	dst := newTestDst(t)
 
 	inj := migration.NewInjector(src, dst)
 	stats, err := inj.Run()
@@ -94,7 +132,7 @@ func TestInjector_SkipsExistingObjects(t *testing.T) {
 			"b": {{key: "existing.txt", content: "src", ct: "text/plain"}},
 		},
 	}
-	dst := newLocalBackend(t)
+	dst := newTestDst(t)
 	require.NoError(t, dst.CreateBucket(context.Background(), "b"))
 	_, err := dst.PutObject(context.Background(), "b", "existing.txt", strings.NewReader("dst"), "text/plain")
 	require.NoError(t, err)
@@ -121,7 +159,7 @@ func TestInjector_MultipleBuckets(t *testing.T) {
 			"beta":  {{key: "b.txt", content: "bbb", ct: "text/plain"}},
 		},
 	}
-	dst := newLocalBackend(t)
+	dst := newTestDst(t)
 
 	inj := migration.NewInjector(src, dst)
 	stats, err := inj.Run()
@@ -175,7 +213,7 @@ func TestInjector_Pagination_MultiPage(t *testing.T) {
 			"b": {{"a.txt", "b.txt"}, {"c.txt"}},
 		},
 	}
-	dst := newLocalBackend(t)
+	dst := newTestDst(t)
 	inj := migration.NewInjector(src, dst)
 	stats, err := inj.Run()
 	require.NoError(t, err)

@@ -8,7 +8,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/cluster"
 )
 
 var _ = Describe("Packblob compression integration", func() {
@@ -21,8 +21,7 @@ var _ = Describe("Packblob compression integration", func() {
 		ctx = context.Background()
 		tmpDir := GinkgoT().TempDir()
 
-		inner, err := storage.NewLocalBackend(tmpDir + "/inner")
-		Expect(err).NotTo(HaveOccurred())
+		inner := cluster.NewSingletonBackendForTest(GinkgoT())
 
 		packed, err := NewPackedBackendWithOptions(inner, tmpDir+"/blobs", 64*1024, PackedBackendOptions{Compress: true})
 		Expect(err).NotTo(HaveOccurred())

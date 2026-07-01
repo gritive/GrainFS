@@ -11,7 +11,6 @@ import (
 	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/protocred"
-	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/stretchr/testify/require"
 )
 
@@ -19,9 +18,7 @@ func TestBootHTTPServerAndAdminWiresBucketWithPolicyProposer(t *testing.T) {
 	dataDir, err := os.MkdirTemp("/tmp", "gf-admin-")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(dataDir) })
-	backend, err := storage.NewLocalBackend(filepath.Join(dataDir, "objects"))
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, backend.Close()) })
+	backend := cluster.NewSingletonBackendForTest(t)
 
 	proposer := &iam.MetaProposer{
 		Propose: func(context.Context, clusterpb.MetaCmdType, []byte) error {
@@ -47,9 +44,7 @@ func TestBootHTTPServerAndAdminWiresProtocolCredentials(t *testing.T) {
 	dataDir, err := os.MkdirTemp("/tmp", "gf-admin-protocred-")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(dataDir) })
-	backend, err := storage.NewLocalBackend(filepath.Join(dataDir, "objects"))
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, backend.Close()) })
+	backend := cluster.NewSingletonBackendForTest(t)
 
 	state := &bootState{
 		cfg: Config{
@@ -76,9 +71,7 @@ func TestBootHTTPServerAndAdminReusesStandaloneProtocolCredentialStore(t *testin
 	dataDir, err := os.MkdirTemp("/tmp", "gf-admin-protocred-standalone-")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(dataDir) })
-	backend, err := storage.NewLocalBackend(filepath.Join(dataDir, "objects"))
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, backend.Close()) })
+	backend := cluster.NewSingletonBackendForTest(t)
 
 	store := protocred.NewStore()
 	state := &bootState{
@@ -105,9 +98,7 @@ func TestBootHTTPServerAndAdminUsesDurableProtocolCredentialsWhenMetaRaftIsWired
 	dataDir, err := os.MkdirTemp("/tmp", "gf-admin-protocred-durable-")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(dataDir) })
-	backend, err := storage.NewLocalBackend(filepath.Join(dataDir, "objects"))
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, backend.Close()) })
+	backend := cluster.NewSingletonBackendForTest(t)
 	metaRaft, err := cluster.NewMetaRaft(cluster.MetaRaftConfig{
 		NodeID:  "node-a",
 		RaftID:  "node-a",

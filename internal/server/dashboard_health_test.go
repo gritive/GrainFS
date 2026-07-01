@@ -11,8 +11,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/server/servertest"
-	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // TestBadgerHealth_Localhost verifies GET /admin/health/badger returns 200+JSON from localhost.
@@ -39,10 +39,7 @@ func TestBadgerHealth_RemoteDenied(t *testing.T) {
 		t.Skip("no non-loopback IPv4 interface found")
 	}
 
-	dir := t.TempDir()
-	backend, err := storage.NewLocalBackend(dir)
-	require.NoError(t, err)
-	t.Cleanup(func() { backend.Close() })
+	backend := cluster.NewSingletonBackendForTest(t)
 
 	port := servertest.FreePort(t)
 	srv := New(fmt.Sprintf("0.0.0.0:%d", port), backend)
@@ -90,10 +87,7 @@ func TestRaftHealth_RemoteDenied(t *testing.T) {
 		t.Skip("no non-loopback IPv4 interface found")
 	}
 
-	dir := t.TempDir()
-	backend, err := storage.NewLocalBackend(dir)
-	require.NoError(t, err)
-	t.Cleanup(func() { backend.Close() })
+	backend := cluster.NewSingletonBackendForTest(t)
 
 	port := servertest.FreePort(t)
 	srv := New(fmt.Sprintf("0.0.0.0:%d", port), backend)

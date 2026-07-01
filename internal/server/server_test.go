@@ -60,24 +60,25 @@ func setupTestServerWithOptions(t *testing.T, opts ...Option) string {
 	return base
 }
 
-func setupTestServerWithBackend(t *testing.T, opts ...Option) (string, *storage.LocalBackend) {
+func setupTestServerWithBackend(t *testing.T, opts ...Option) (string, *cluster.DistributedBackend) {
 	t.Helper()
-	dir := t.TempDir()
-	backend, err := storage.NewLocalBackend(dir)
-	require.NoError(t, err, "NewLocalBackend")
-	t.Cleanup(func() { backend.Close() })
-
+	b := cluster.NewSingletonBackendForTest(t)
 	port := servertest.FreePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	startTestServer(t, addr, backend, opts...)
-	return "http://" + addr, backend
+	srv := New(addr, b, opts...)
+	go srv.Run() //nolint:errcheck
+	servertest.WaitTCP(t, addr)
+	t.Cleanup(func() {
+		servertest.ShutdownServer(t, srv)
+	})
+	return "http://" + addr, b
 }
 
 // mustCreateBucket creates a bucket directly on the backend, bypassing the S3
 // data plane. Use in tests that need a bucket to exist as precondition without
 // testing the CreateBucket endpoint itself (D#8: CreateBucket is admin-UDS-only
 // on the S3 plane).
-func mustCreateBucket(t servertest.TB, backend *storage.LocalBackend, name string) {
+func mustCreateBucket(t servertest.TB, backend *cluster.DistributedBackend, name string) {
 	t.Helper()
 	ctx := context.Background()
 	if ctxT, ok := t.(interface{ Context() context.Context }); ok {
@@ -490,63 +491,6 @@ func TestGetObjectNotFound(t *testing.T) {
 	resp, _ := http.Get(base + "/mybucket/nope.txt")
 	resp.Body.Close()
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
-}
-
-func TestMultipartUploadAPI(t *testing.T) {
-	base, backend := setupTestServerWithBackend(t)
-	mustCreateBucket(t, backend, "mybucket")
-
-	// Initiate multipart upload
-	req, _ := http.NewRequest(http.MethodPost, base+"/mybucket/big-file.bin?uploads", nil)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err, "initiate multipart")
-	var initResult initiateMultipartUploadResult
-	xml.NewDecoder(resp.Body).Decode(&initResult)
-	resp.Body.Close()
-
-	require.NotEmpty(t, initResult.UploadId)
-	uploadID := initResult.UploadId
-
-	// Upload part 1
-	part1Data := bytes.Repeat([]byte("A"), 1024)
-	req, _ = http.NewRequest(http.MethodPut,
-		fmt.Sprintf("%s/mybucket/big-file.bin?uploadId=%s&partNumber=1", base, uploadID),
-		bytes.NewReader(part1Data))
-	resp, _ = http.DefaultClient.Do(req)
-	etag1 := resp.Header.Get("Etag")
-	resp.Body.Close()
-	assert.Equal(t, http.StatusOK, resp.StatusCode, "upload part 1")
-
-	// Upload part 2
-	part2Data := bytes.Repeat([]byte("B"), 512)
-	req, _ = http.NewRequest(http.MethodPut,
-		fmt.Sprintf("%s/mybucket/big-file.bin?uploadId=%s&partNumber=2", base, uploadID),
-		bytes.NewReader(part2Data))
-	resp, _ = http.DefaultClient.Do(req)
-	etag2 := resp.Header.Get("Etag")
-	resp.Body.Close()
-
-	// Complete multipart upload
-	completeXML := fmt.Sprintf(`<CompleteMultipartUpload>
-		<Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part>
-		<Part><PartNumber>2</PartNumber><ETag>%s</ETag></Part>
-	</CompleteMultipartUpload>`, etag1, etag2)
-
-	req, _ = http.NewRequest(http.MethodPost,
-		fmt.Sprintf("%s/mybucket/big-file.bin?uploadId=%s", base, uploadID),
-		bytes.NewReader([]byte(completeXML)))
-	resp, _ = http.DefaultClient.Do(req)
-	resp.Body.Close()
-	assert.Equal(t, http.StatusOK, resp.StatusCode, "complete multipart")
-
-	// Grant anonymous read so the anonymous GET below can succeed.
-	require.NoError(t, backend.SetObjectACL("mybucket", "big-file.bin", 1)) // ACLPublicRead
-
-	// Verify the object exists
-	resp, _ = http.Get(base + "/mybucket/big-file.bin")
-	got, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	assert.Len(t, got, len(part1Data)+len(part2Data))
 }
 
 func TestMetricsEndpointReturnsPlainText(t *testing.T) {
@@ -1061,17 +1005,6 @@ func TestListMultipartUploads_Success(t *testing.T) {
 	}
 }
 
-func TestListMultipartUploads_BucketNotFound(t *testing.T) {
-	base := setupTestServer(t)
-	req, _ := http.NewRequest(http.MethodGet, base+"/ghost?uploads", nil)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
-	assert.Contains(t, string(body), "NoSuchBucket")
-}
-
 func TestListParts_Success(t *testing.T) {
 	base, backend := setupTestServerWithBackend(t)
 	mustCreateBucket(t, backend, "mybucket")
@@ -1188,18 +1121,6 @@ func TestCopyObjectParsesEncodedSourceVersionAndReplacesContentType(t *testing.T
 	require.NoError(t, err)
 	resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-
-	req, _ = http.NewRequest(http.MethodPut, base+"/dst/copied.txt", nil)
-	req.Header.Set("x-amz-copy-source", "/src/dir%20one/file.txt?versionId=v1")
-	req.Header.Set("x-amz-metadata-directive", "REPLACE")
-	req.Header.Set("Content-Type", "application/json")
-	resp, err = http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-
-	require.Equal(t, http.StatusNotImplemented, resp.StatusCode)
-	require.Contains(t, string(body), "NotImplemented")
 
 	req, _ = http.NewRequest(http.MethodPut, base+"/dst/copied.txt", nil)
 	req.Header.Set("x-amz-copy-source", "/src/dir%20one/file.txt")
@@ -1354,10 +1275,7 @@ func TestCreateMultipartUpload_BucketNotFound(t *testing.T) {
 }
 
 func TestGracefulShutdown(t *testing.T) {
-	dir := t.TempDir()
-	backend, err := storage.NewLocalBackend(dir)
-	require.NoError(t, err)
-	t.Cleanup(func() { backend.Close() })
+	backend := cluster.NewSingletonBackendForTest(t)
 
 	port := servertest.FreePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)

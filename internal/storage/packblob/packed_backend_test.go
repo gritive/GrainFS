@@ -13,14 +13,24 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/storage"
 )
+
+// skipReasonSingletonInnerCapability marks packblob tests whose large-object
+// fallback / range-delegation path needs an inner backend that supports a shard
+// group (streaming large PUT) plus storage.PartialIO (ReadAt/WriteAt/Truncate).
+// Production packblob wraps ClusterCoordinator, which provides both; the
+// cross-package singleton test backend (cluster.NewSingletonBackendForTest ->
+// *DistributedBackend) provides neither, so these paths cannot be exercised
+// from this harness. Re-enable when a PartialIO-capable cross-package test
+// substrate exists.
+const skipReasonSingletonInnerCapability = "singleton DistributedBackend test harness lacks a shard group + storage.PartialIO that production packblob's ClusterCoordinator inner provides"
 
 func newTestPackedBackend(t *testing.T) *PackedBackend {
 	t.Helper()
 	dir := t.TempDir()
-	inner, err := storage.NewLocalBackend(dir + "/local")
-	require.NoError(t, err)
+	inner := cluster.NewSingletonBackendForTest(t)
 
 	pb, err := NewPackedBackend(inner, dir+"/blobs", 64*1024) // 64KB threshold
 	require.NoError(t, err)
@@ -131,8 +141,7 @@ func TestPackedBackend_LargeSizedReaderPreservesInnerFastPath(t *testing.T) {
 }
 
 func TestPackedBackend_DeleteObjectReturningMarkerDeletesPackedObjectWhenVersioningDisabled(t *testing.T) {
-	local, err := storage.NewLocalBackend(t.TempDir())
-	require.NoError(t, err)
+	local := cluster.NewSingletonBackendForTest(t)
 	require.NoError(t, local.CreateBucket(context.Background(), "test"))
 	inner := &mutableVersioningSoftDeleteBackend{Backend: local, state: "Disabled"}
 	pb, err := NewPackedBackend(inner, t.TempDir(), 64*1024)
@@ -152,8 +161,7 @@ func TestPackedBackend_DeleteObjectReturningMarkerDeletesPackedObjectWhenVersion
 }
 
 func TestPackedBackend_DeleteObjectReturningMarkerClearsPackedObjectBeforeVersionedMarker(t *testing.T) {
-	local, err := storage.NewLocalBackend(t.TempDir())
-	require.NoError(t, err)
+	local := cluster.NewSingletonBackendForTest(t)
 	require.NoError(t, local.CreateBucket(context.Background(), "test"))
 	inner := &mutableVersioningSoftDeleteBackend{Backend: local, state: "Disabled"}
 	pb, err := NewPackedBackend(inner, t.TempDir(), 64*1024)

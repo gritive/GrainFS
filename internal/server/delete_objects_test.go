@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/server/servertest"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/stretchr/testify/require"
@@ -67,14 +68,11 @@ func TestDeleteObjectsDeletesRequestedKeys(t *testing.T) {
 }
 
 func TestDeleteObjectsDeletesBatchConcurrently(t *testing.T) {
-	dir := t.TempDir()
-	local, err := storage.NewLocalBackend(dir)
-	require.NoError(t, err)
-	t.Cleanup(func() { local.Close() })
+	local := cluster.NewSingletonBackendForTest(t)
 
 	backend := &slowDeleteBackend{
-		LocalBackend: local,
-		delay:        50 * time.Millisecond,
+		Backend: local,
+		delay:   50 * time.Millisecond,
 	}
 	addr := fmt.Sprintf("127.0.0.1:%d", servertest.FreePort(t))
 	startTestServer(t, addr, backend)
@@ -96,7 +94,7 @@ func TestDeleteObjectsDeletesBatchConcurrently(t *testing.T) {
 }
 
 type slowDeleteBackend struct {
-	*storage.LocalBackend
+	storage.Backend
 	delay       time.Duration
 	inFlight    atomic.Int32
 	maxInFlight atomic.Int32
@@ -112,5 +110,5 @@ func (b *slowDeleteBackend) DeleteObject(ctx context.Context, bucket, key string
 	}
 	time.Sleep(b.delay)
 	defer b.inFlight.Add(-1)
-	return b.LocalBackend.DeleteObject(ctx, bucket, key)
+	return b.Backend.DeleteObject(ctx, bucket, key)
 }

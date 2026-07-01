@@ -17,9 +17,9 @@ import (
 
 	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/badgerutil"
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/server/servertest"
-	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // directProposer writes lifecycle changes straight to the store — no Raft
@@ -43,13 +43,9 @@ func (noopLeadership) Subscribe() (<-chan struct{}, func()) {
 	return ch, func() {}
 }
 
-func setupLifecycleServer(t *testing.T) (base string, svc *lifecycle.Service, backend *storage.LocalBackend) {
+func setupLifecycleServer(t *testing.T) (base string, svc *lifecycle.Service, backend *cluster.DistributedBackend) {
 	t.Helper()
-	dir := t.TempDir()
-	var err error
-	backend, err = storage.NewLocalBackend(dir)
-	require.NoError(t, err)
-	t.Cleanup(func() { backend.Close() })
+	backend = cluster.NewSingletonBackendForTest(t)
 
 	dbDir := t.TempDir()
 	opts := badgerutil.SmallOptions(dbDir)

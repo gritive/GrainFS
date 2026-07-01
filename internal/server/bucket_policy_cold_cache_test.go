@@ -6,8 +6,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/s3auth"
-	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // TestColdCacheEnforcesCommittedDenyPolicy is the headline proof: a node whose
@@ -16,10 +16,7 @@ import (
 // bucket-policy. The server's policy store is wired with the pull-on-miss loader
 // via NewOperations, so Allow loads the committed policy from the local backend.
 func TestColdCacheEnforcesCommittedDenyPolicy(t *testing.T) {
-	dir := t.TempDir()
-	backend, err := storage.NewLocalBackend(dir)
-	require.NoError(t, err)
-	t.Cleanup(func() { backend.Close() })
+	backend := cluster.NewSingletonBackendForTest(t)
 
 	ctx := context.Background()
 	require.NoError(t, backend.CreateBucket(ctx, "b"))

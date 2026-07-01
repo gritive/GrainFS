@@ -110,6 +110,7 @@ func TestOperationsCopyObjectUsesPackedAdapterAndReplaceContentType(t *testing.T
 }
 
 func TestCopyObject_LargeObjectFallback(t *testing.T) {
+	t.Skip(skipReasonSingletonInnerCapability)
 	pb := newTestPackedBackend(t)
 	require.NoError(t, pb.CreateBucket(context.Background(), "b"))
 

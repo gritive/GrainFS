@@ -9,18 +9,51 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// copyVersioningSpy embeds a real backend and records, per bucket, the
+// copyDstStub is a minimal in-memory copy destination. copyVersioningSpy embeds
+// it so the source-versioning-stamp assertion — the actual subject — can run
+// without a real backend's object-write path (the singleton DistributedBackend
+// rejects the zero-length streaming copy write for lack of a shard group; the
+// destination write is incidental to this test).
+type copyDstStub struct {
+	storage.Backend
+}
+
+func (copyDstStub) CreateBucket(context.Context, string) error { return nil }
+
+func (copyDstStub) ListBuckets(context.Context) ([]string, error) { return nil, nil }
+
+func (copyDstStub) HeadObject(context.Context, string, string) (*storage.Object, error) {
+	return nil, storage.ErrObjectNotFound
+}
+
+func (copyDstStub) GetObject(context.Context, string, string) (io.ReadCloser, *storage.Object, error) {
+	return nil, nil, storage.ErrObjectNotFound
+}
+
+func (copyDstStub) PutObjectWithRequest(_ context.Context, req storage.PutObjectRequest) (*storage.Object, error) {
+	if req.Body != nil {
+		_, _ = io.Copy(io.Discard, req.Body)
+	}
+	return &storage.Object{Key: req.Key, ContentType: req.ContentType, ETag: "stub-etag", Size: 0}, nil
+}
+
+func (copyDstStub) PutObject(_ context.Context, _, key string, r io.Reader, contentType string) (*storage.Object, error) {
+	if r != nil {
+		_, _ = io.Copy(io.Discard, r)
+	}
+	return &storage.Object{Key: key, ContentType: contentType, ETag: "stub-etag", Size: 0}, nil
+}
+
+// copyVersioningSpy embeds a backend and records, per bucket, the
 // bucket-versioning decision present in the context handed to the source
-// per-version read (GetObjectVersion). It reports an authoritative versioning
-// state PER BUCKET via GetBucketVersioning so a CopyObject from a
-// versioning-enabled SOURCE into a non-versioned DESTINATION can prove the
-// source read is gated by the SOURCE bucket's decision, not the destination's.
+// per-version read (GetObjectVersion / HeadObjectVersion). It reports an
+// authoritative versioning state PER BUCKET via GetBucketVersioning so a
+// CopyObject from a versioning-enabled SOURCE into a non-versioned DESTINATION
+// can prove the source read is gated by the SOURCE bucket's decision, not the
+// destination's.
 type copyVersioningSpy struct {
 	storage.Backend
-	// authoritative state the server edge resolves, keyed by bucket.
-	stateByBucket map[string]string
-	// recorded: was the ctx that reached the source GetObjectVersion stamped
-	// Enabled?
+	stateByBucket        map[string]string
 	srcGetVersionStamped bool
 	srcGetVersionSeen    bool
 }
@@ -51,16 +84,12 @@ func (s *copyVersioningSpy) HeadObjectVersion(ctx context.Context, bucket, key, 
 
 // TestCopySourceReadUsesSourceBucketVersioning proves the SOURCE per-version
 // read is gated by the SOURCE bucket's versioning decision even when the
-// DESTINATION bucket is non-versioned. Pre-fix the copy stamps ctx with the
-// destination's (Disabled) decision and reuses it for the source read, so the
-// source read resolves the wrong gate (RED).
+// DESTINATION bucket is non-versioned. A regression that stamps the
+// destination's (Suspended) decision onto the source read would resolve the
+// wrong gate for a cross-bucket copy and read the wrong object version.
 func TestCopySourceReadUsesSourceBucketVersioning(t *testing.T) {
-	real, err := storage.NewLocalBackend(t.TempDir())
-	require.NoError(t, err)
-	require.NoError(t, real.CreateBucket(context.Background(), "src-bkt"))
-	require.NoError(t, real.CreateBucket(context.Background(), "dst-bkt"))
 	spy := &copyVersioningSpy{
-		Backend: real,
+		Backend: copyDstStub{},
 		stateByBucket: map[string]string{
 			"src-bkt": "Enabled",   // source: versioning-enabled
 			"dst-bkt": "Suspended", // destination: non-versioned
@@ -79,7 +108,7 @@ func TestCopySourceReadUsesSourceBucketVersioning(t *testing.T) {
 		ContentType:       "text/plain",
 	}
 
-	_, err = srv.copyObjectWithMutation(ctx, req)
+	_, err := srv.copyObjectWithMutation(ctx, req)
 	require.NoError(t, err)
 
 	require.True(t, spy.srcGetVersionSeen, "source per-version read must run")

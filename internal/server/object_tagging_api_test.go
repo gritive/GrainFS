@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/stretchr/testify/require"
 )
 
@@ -15,7 +15,7 @@ import (
 // taggingPutBucket creates the bucket directly via the backend (bucket creation
 // is admin-UDS-only on the data plane per D#8, so the HTTP PUT /:bucket path
 // always returns 403).
-func taggingPutBucket(t *testing.T, backend *storage.LocalBackend, bucket string) {
+func taggingPutBucket(t *testing.T, backend *cluster.DistributedBackend, bucket string) {
 	t.Helper()
 	mustCreateBucket(t, backend, bucket)
 }
