@@ -258,7 +258,7 @@ func (r ecObjectReader) computeAttemptOrder(rec PlacementRecord, cfg ECConfig) (
 }
 
 // notEnoughShardsErr builds the shared "not enough shards available" error used
-// by the buffered and streaming read paths.
+// by the streaming read paths.
 func notEnoughShardsErr(available, total, need int) error {
 	return fmt.Errorf("ec get: only %d/%d shards available, need %d", available, total, need)
 }
@@ -305,7 +305,7 @@ func (r ecObjectReader) openShardReaders(ctx context.Context, bucket, shardKey s
 	}
 
 	// Apply BL re-routing: hot data shards are swapped to fallback so parity
-	// is attempted first. Mirrors the same swap used in readShards.
+	// is attempted first (see computeAttemptOrder).
 	primary, fallback := r.computeAttemptOrder(rec, recCfg)
 	for _, i := range primary {
 		openShard(i)
