@@ -34,6 +34,11 @@ New joining nodes do not hand-copy `<data>/keys/0.key`, `<data>/cluster.id`, or
 the cluster transport key. They receive the required sealed bootstrap material
 through the Zero-CA invite flow below.
 
+Current cluster traffic between nodes is streaming HTTP over TCP with
+SPKI-pinned mTLS. QUIC, the old TCP mux carrier, `--transport`, and `--quic-*`
+flags are historical migration artifacts only; they are not production setup
+steps in this guide.
+
 Verify (TTHW ~30s):
 
 ```bash

@@ -17,6 +17,9 @@ workflows.
 ## Operators
 
 Use these when you are deploying, monitoring, recovering, or running drills.
+Current cluster traffic is streaming HTTP over TCP with SPKI-pinned mTLS; QUIC
+and mux-carrier documents listed below are historical design records, not live
+operator setup instructions.
 
 | Need | Document | Type |
 | --- | --- | --- |

@@ -40,6 +40,11 @@ join` command and no `--cluster-key` flag in the current CLI. A fresh leader
 self-generates and seals the cluster transport key; a joining node receives the
 sealed bootstrap material through a single-use invite bundle.
 
+Current node-to-node cluster traffic uses streaming HTTP over TCP with
+SPKI-pinned mTLS. Older design records and changelog entries may mention QUIC,
+TCP mux carriers, `--transport`, or `--quic-*` flags as migration history; those
+are not current operator controls.
+
 Start or restart the leader with a stable Raft address and, for production, a
 stable join-listener address:
 

@@ -13,6 +13,11 @@ through a separate join verb (the bundle is a secret and must not appear in
 argv). For a deterministic / externally-managed cluster transport key, write
 `keys.d/current.key` before boot (see below) — a file path, not an invite.
 
+Current node-to-node cluster traffic is streaming HTTP over TCP with
+SPKI-pinned mTLS. Historical docs and changelog entries may still discuss QUIC,
+TCP mux carriers, `--transport`, or `--quic-*` flags to explain earlier
+migrations; they are not current join-path configuration.
+
 ## Prerequisites
 
 - A running leader with an admin socket, usually `<leader-data>/admin.sock`.

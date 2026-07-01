@@ -42,6 +42,11 @@ export AWS_DEFAULT_REGION=us-east-1
 aws --endpoint-url http://localhost:9000 s3 mb s3://my-bucket
 ```
 
+The current node-to-node cluster transport is streaming HTTP over TCP with
+SPKI-pinned mTLS. Historical QUIC, TCP mux carrier, `--transport`, and
+`--quic-*` wording in design records or old changelog entries is migration
+context, not live runbook guidance.
+
 ### Race condition
 
 If two operators concurrently call `iam sa create` on a fresh cluster, only the first
