@@ -68,6 +68,73 @@ func TestAppendableSegmentReader_ReconstructsECBaseSegment(t *testing.T) {
 		"only the EC-backed segment should route through the segment store")
 }
 
+// realECSegmentOpener wraps an ecObjectReader to satisfy appendSegmentECOpener,
+// so appendableSegmentReader tests can exercise real EC streaming reconstruct
+// (instead of the byte-map fakeSegmentECOpener that bypasses EC entirely).
+type realECSegmentOpener struct {
+	reader  ecObjectReader
+	bucket  string
+	keyBase string // object key prefix; shardKey = keyBase + "/segments/" + blobID
+}
+
+func (s *realECSegmentOpener) OpenSegment(ctx context.Context, ref storage.SegmentRef) (io.ReadCloser, error) {
+	rec := PlacementRecord{
+		Nodes: append([]string(nil), ref.NodeIDs...),
+		K:     int(ref.ECData),
+		M:     int(ref.ECParity),
+	}
+	shardKey := s.keyBase + "/segments/" + ref.BlobID
+	return s.reader.OpenObject(ctx, s.bucket, shardKey, rec, ref.Size)
+}
+
+// TestAppendableSegmentReader_ECBaseSegment_StreamsViaOpenObject asserts that
+// an EC-backed base segment in the appendable read path is reconstructed via
+// the real ecObjectReader.OpenObject streaming path — not the byte-map fake.
+// This exercises the production clusterSegmentStore.OpenSegment→OpenObject call
+// chain for appendable objects whose base segments came from a chunked PUT.
+func TestAppendableSegmentReader_ECBaseSegment_StreamsViaOpenObject(t *testing.T) {
+	cfg := ECConfig{DataShards: 1, ParityShards: 1}
+	payload := bytes.Repeat([]byte("data"), 256) // 1 KiB
+	bucket, objKey, blobID := "bucket", "obj", "ec-base-blob"
+	shardKey := objKey + "/segments/" + blobID
+
+	fetcher := &fakeECObjectShardFetcher{}
+	buildFakeShards(t, fetcher, bucket, shardKey, cfg, payload)
+
+	store := &realECSegmentOpener{
+		reader:  ecObjectReader{selfID: "self", shards: fetcher, ecConfig: cfg},
+		bucket:  bucket,
+		keyBase: objKey,
+	}
+
+	ecRef := &storage.SegmentRef{
+		BlobID:   blobID,
+		Size:     int64(len(payload)),
+		ECData:   uint8(cfg.DataShards),
+		ECParity: uint8(cfg.ParityShards),
+		NodeIDs:  []string{"n0", "n1"},
+	}
+
+	dir := t.TempDir()
+	b := &DistributedBackend{root: dir}
+	reader := &appendableSegmentReader{
+		backend:  b,
+		bucket:   bucket,
+		key:      objKey,
+		paths:    []string{b.segmentBlobPath(bucket, objKey, blobID)},
+		blobIDs:  []string{blobID},
+		kinds:    []byte{appendSegKindSegment},
+		ecRefs:   []*storage.CoalescedRef{nil},
+		segRefs:  []*storage.SegmentRef{ecRef},
+		segStore: store,
+	}
+
+	got, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	require.Equal(t, payload, got,
+		"EC-backed appendable base segment must be streaming-reconstructed via OpenObject")
+}
+
 // TestSegmentRefIsECBacked pins the discriminator between an EC base segment
 // (chunked-PUT bytes) and a plain append blob.
 func TestSegmentRefIsECBacked(t *testing.T) {
