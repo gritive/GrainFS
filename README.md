@@ -113,6 +113,8 @@ See [`docs/operators/deploy-production-cluster.md`](docs/operators/deploy-produc
 
 The compatibility tables use `Supported` only for features covered by e2e,
 conformance, or real client integration tests. Unit tests alone do not qualify.
+Use the [launch claims checklist](docs/reference/launch-claims-checklist.md)
+before publishing public copy or competitive comparisons.
 
 ## Performance
 

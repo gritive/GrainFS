@@ -37,6 +37,7 @@ rules.
 | Need | Document |
 | --- | --- |
 | S3 API and client compatibility | [S3 compatibility](reference/s3-compatibility.md) |
+| Public launch wording and evidence mapping | [Launch claims checklist](reference/launch-claims-checklist.md) |
 | Benchmark methodology | [Benchmarks](reference/benchmarks.md) |
 | Rolling upgrade compatibility | [Rolling upgrade compatibility](reference/rolling-upgrade-compatibility.md) |
 | Retired transport mux rationale | [Historical transport mux versioning](reference/transport-mux-versioning.md) |
