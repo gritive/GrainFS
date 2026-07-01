@@ -429,6 +429,47 @@ func TestECObjectReader_OpenObject_StreamsStripedObjectDegraded(t *testing.T) {
 	require.Equal(t, payload, got)
 }
 
+// TestECObjectReader_OpenObject_StreamsSmallStripedObject guards Task C for the
+// striped code path: a small redundant EC object with StripeBytes>0 and
+// objectSize < 4MiB (under the old maxECPooledReadObjectSize limit) must be
+// reconstructed correctly on the streaming path. Before Task C, small striped
+// redundant objects hit the `bufferedShardReaders` fork (which also satisfies
+// objectSize >= 0 && objectSize <= 4MiB); after Task C they take the streaming
+// open loop + skipReader header-strip + stripe de-interleave reader.
+func TestECObjectReader_OpenObject_StreamsSmallStripedObject(t *testing.T) {
+	const stripeBytes = 512 << 10 // 512KiB stripes
+	cfg := ECConfig{DataShards: 2, ParityShards: 2}
+	// 1.5MiB — well under old 4MiB limit; spans 3 stripes per data shard.
+	payload := make([]byte, 1536*1024+77)
+	for i := range payload {
+		payload[i] = byte((i*13 + 5) % 251)
+	}
+
+	shards := buildStripedShardsWithHeader(t, cfg, payload, stripeBytes)
+	fetcher := &fakeECObjectShardFetcher{localShards: make(map[string][]byte)}
+	for i, shard := range shards {
+		fetcher.localShards[shardCacheKey("bucket", "key", i)] = shard
+	}
+
+	r := ecObjectReader{selfID: "node-a", shards: fetcher, ecConfig: cfg}
+	// Non-self nodes for data shards 0,1 force ReadShardStream (not OpenLocalShard).
+	rec := PlacementRecord{Nodes: []string{"node-b", "node-c", "node-a", "node-a"}}
+	rec.K = cfg.DataShards
+	rec.M = cfg.ParityShards
+	rec.StripeBytes = stripeBytes
+
+	rc, err := r.OpenObject(context.Background(), "bucket", "key", rec, int64(len(payload)))
+	require.NoError(t, err)
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, payload, got, "small striped object must reconstruct to original bytes")
+	// Off-by-8 guard: first bytes must exactly match (catches double-skip or no-skip header bugs).
+	require.Equal(t, payload[:16], got[:16])
+	require.Zero(t, fetcher.readShardCalls, "small striped object must NOT use buffered (ReadShard) path")
+	require.Greater(t, fetcher.readShardStreamCalls, 0, "small striped object must stream (ReadShardStream)")
+}
+
 func TestECObjectReader_ReadObject_ErrorsWhenNotEnoughShards(t *testing.T) {
 	cfg := ECConfig{DataShards: 2, ParityShards: 1}
 	fetcher := &fakeECObjectShardFetcher{} // empty — no shards available
