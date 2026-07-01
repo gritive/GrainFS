@@ -125,6 +125,13 @@ type distributedObjectRangeReader struct {
 }
 
 func (r *distributedObjectRangeReader) ReadAt(offset int64, buf []byte) (int, error) {
+	// Re-gate quarantine on every refill, exactly as the stateless ReadAtObject
+	// path does: an object quarantined mid-stream must still interrupt an
+	// in-flight ranged GET (the fast path only caches the decompressed segment;
+	// it must not narrow the data-integrity gate to GET-start).
+	if err := r.b.quarantineGate(r.bucket, r.key, r.obj.VersionID); err != nil {
+		return 0, err
+	}
 	return r.b.readAtPreparedObjectStore(r.ctx, r.store, r.bucket, r.key, r.obj, r.placementMeta, offset, buf)
 }
 
