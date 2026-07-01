@@ -2,8 +2,9 @@ package storage
 
 import (
 	"context"
-	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestParseLocator(t *testing.T) {
@@ -21,12 +22,8 @@ func TestParseLocator(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			loc := ParseLocator(tt.blobID)
-			if loc.Scheme != tt.wantScheme {
-				t.Fatalf("scheme = %v, want %v", loc.Scheme, tt.wantScheme)
-			}
-			if loc.Ref != tt.wantRef {
-				t.Fatalf("ref = %q, want %q", loc.Ref, tt.wantRef)
-			}
+			require.Equal(t, tt.wantScheme, loc.Scheme, "scheme")
+			require.Equal(t, tt.wantRef, loc.Ref, "ref")
 		})
 	}
 }
@@ -35,9 +32,7 @@ func TestLocalOpenSegmentRejectsCAS(t *testing.T) {
 	b := newTestLocalBackend(t)
 	store := localSegmentStore{b: b, bucket: "bkt", key: "obj"}
 	_, err := store.OpenSegment(context.Background(), SegmentRef{BlobID: "cas://b3-deadbeef", Size: 16})
-	if !errors.Is(err, ErrCASNotImplemented) {
-		t.Fatalf("err = %v, want ErrCASNotImplemented", err)
-	}
+	require.ErrorIs(t, err, ErrCASNotImplemented)
 }
 
 func TestParseLocatorEdgeCases(t *testing.T) {
@@ -53,9 +48,8 @@ func TestParseLocatorEdgeCases(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.blobID, func(t *testing.T) {
 			loc := ParseLocator(tt.blobID)
-			if loc.Scheme != tt.wantScheme || loc.Ref != tt.wantRef {
-				t.Fatalf("ParseLocator(%q) = %+v, want scheme=%v ref=%q", tt.blobID, loc, tt.wantScheme, tt.wantRef)
-			}
+			require.Equal(t, tt.wantScheme, loc.Scheme, "scheme")
+			require.Equal(t, tt.wantRef, loc.Ref, "ref")
 		})
 	}
 }
@@ -63,21 +57,15 @@ func TestParseLocatorEdgeCases(t *testing.T) {
 func TestSegmentKnownPath(t *testing.T) {
 	got := SegmentKnownPath("b1", "dir/obj", "01HXYZ-raw")
 	want := "b1/dir/obj_segments/" + ParseLocator("01HXYZ-raw").Ref
-	if got != want {
-		t.Fatalf("got %q want %q", got, want)
-	}
+	require.Equal(t, want, got)
 }
 
 func TestLocatorStringRoundTrip(t *testing.T) {
 	loc := Locator{Scheme: LocatorCAS, Ref: "b3-0011223344556677"}
-	if got := loc.String(); got != "cas://b3-0011223344556677" {
-		t.Fatalf("CAS String() = %q", got)
-	}
-	if back := ParseLocator(loc.String()); back.Scheme != LocatorCAS || back.Ref != loc.Ref {
-		t.Fatalf("CAS round-trip failed: %+v", back)
-	}
+	require.Equal(t, "cas://b3-0011223344556677", loc.String())
+	back := ParseLocator(loc.String())
+	require.Equal(t, LocatorCAS, back.Scheme)
+	require.Equal(t, loc.Ref, back.Ref)
 	bare := "0192f3c0-aaaa-7bbb-8ccc-000000000001"
-	if got := ParseLocator(bare).String(); got != bare {
-		t.Fatalf("legacy String() = %q, want bare %q", got, bare)
-	}
+	require.Equal(t, bare, ParseLocator(bare).String())
 }

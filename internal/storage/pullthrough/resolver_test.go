@@ -8,6 +8,8 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/iam"
 )
@@ -17,7 +19,7 @@ func TestIAMResolver_MissReturnsFalse(t *testing.T) {
 	r := NewIAMResolver(store)
 
 	if up, ok := r.Resolve("nope"); ok || up != nil {
-		t.Fatalf("Resolve(nope): got (%v, %v) want (nil, false)", up, ok)
+		require.Failf(t, "Resolve(nope)", "got (%v, %v), want (nil, false)", up, ok)
 	}
 }
 
@@ -33,13 +35,10 @@ func TestIAMResolver_HitBuildsAndCachesS3Upstream(t *testing.T) {
 	r := NewIAMResolver(store)
 
 	first, ok := r.Resolve("shared")
-	if !ok || first == nil {
-		t.Fatalf("first Resolve: ok=%v up=%v", ok, first)
-	}
+	require.True(t, ok, "first Resolve")
+	require.NotNil(t, first, "first Resolve")
 	second, _ := r.Resolve("shared")
-	if first != second {
-		t.Errorf("cache miss: Resolve returned different *S3Upstream instances on repeat call")
-	}
+	assert.Same(t, first, second, "cache miss: Resolve returned different *S3Upstream instances on repeat call")
 }
 
 func TestIAMResolver_InvalidatesOnAccessKeyRotation(t *testing.T) {
@@ -62,12 +61,9 @@ func TestIAMResolver_InvalidatesOnAccessKeyRotation(t *testing.T) {
 		CreatedAt: time.Now().UTC(),
 	})
 	second, ok := r.Resolve("shared")
-	if !ok || second == nil {
-		t.Fatalf("post-rotation Resolve: ok=%v up=%v", ok, second)
-	}
-	if first == second {
-		t.Error("cache did not invalidate after access key rotation")
-	}
+	require.True(t, ok, "post-rotation Resolve")
+	require.NotNil(t, second, "post-rotation Resolve")
+	assert.NotSame(t, first, second, "cache did not invalidate after access key rotation")
 }
 
 func TestIAMResolver_InvalidatesOnSecretOnlyRotation(t *testing.T) {
@@ -83,9 +79,8 @@ func TestIAMResolver_InvalidatesOnSecretOnlyRotation(t *testing.T) {
 	r := NewIAMResolver(store)
 
 	first, ok := r.Resolve("rot")
-	if !ok || first == nil {
-		t.Fatalf("first Resolve: ok=%v up=%v", ok, first)
-	}
+	require.True(t, ok, "first Resolve")
+	require.NotNil(t, first, "first Resolve")
 
 	// Same endpoint + same AK; only SecretKey + SecretKeyEnc changed
 	// (typical AWS IAM secret-only rotation).
@@ -98,12 +93,9 @@ func TestIAMResolver_InvalidatesOnSecretOnlyRotation(t *testing.T) {
 		CreatedAt:    time.Now().UTC(),
 	})
 	second, ok := r.Resolve("rot")
-	if !ok || second == nil {
-		t.Fatalf("post-rotation Resolve: ok=%v up=%v", ok, second)
-	}
-	if first == second {
-		t.Error("cache did not invalidate after secret-only rotation: same *S3Upstream pointer returned")
-	}
+	require.True(t, ok, "post-rotation Resolve")
+	require.NotNil(t, second, "post-rotation Resolve")
+	assert.NotSame(t, first, second, "cache did not invalidate after secret-only rotation")
 }
 
 func TestIAMResolver_InvalidatesOnDelete(t *testing.T) {
@@ -114,11 +106,11 @@ func TestIAMResolver_InvalidatesOnDelete(t *testing.T) {
 	})
 	r := NewIAMResolver(store)
 	if _, ok := r.Resolve("shared"); !ok {
-		t.Fatal("seed Resolve")
+		require.Fail(t, "seed Resolve")
 	}
 	store.ApplyBucketUpstreamDeleteForTest("shared")
 	if up, ok := r.Resolve("shared"); ok || up != nil {
-		t.Errorf("Resolve after delete: got (%v, %v) want (nil, false)", up, ok)
+		assert.Failf(t, "Resolve after delete", "got (%v, %v), want (nil, false)", up, ok)
 	}
 }
 
@@ -137,18 +129,18 @@ func TestIAMResolver_BuildFailureLogsWarning(t *testing.T) {
 	})
 	r := NewIAMResolver(store)
 	if _, ok := r.Resolve("shared"); !ok {
-		t.Fatal("Resolve should succeed on valid record")
+		require.Fail(t, "Resolve should succeed on valid record")
 	}
 	if buf.Len() > 0 && strings.Contains(buf.String(), "build upstream failed") {
-		t.Errorf("warning logged on success path: %s", buf.String())
+		assert.Failf(t, "warning logged on success path", "%s", buf.String())
 	}
 	// Negative path: deleted record → silent miss, no warn.
 	store.ApplyBucketUpstreamDeleteForTest("shared")
 	buf.Reset()
 	if _, ok := r.Resolve("shared"); ok {
-		t.Error("Resolve(deleted) should be miss")
+		assert.Fail(t, "Resolve(deleted) should be miss")
 	}
 	if strings.Contains(buf.String(), "build upstream failed") {
-		t.Errorf("warning logged on deleted-record miss path: %s", buf.String())
+		assert.Failf(t, "warning logged on deleted-record miss path", "%s", buf.String())
 	}
 }

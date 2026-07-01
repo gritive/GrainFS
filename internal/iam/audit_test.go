@@ -10,6 +10,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/audit"
 	"github.com/gritive/GrainFS/internal/s3auth"
 )
 
@@ -177,6 +178,61 @@ func TestAuditLogger_RecordAnonAllow_StatusAndAnonymousSA(t *testing.T) {
 	}
 	if got[0].AuthzLatencyUS != 9 {
 		t.Fatalf("latency = %d", got[0].AuthzLatencyUS)
+	}
+}
+
+// TestLogAuditEmitter_RecordAnonAllow_EmitsIamAuthz exercises the full survivor
+// path end-to-end: AuditLogger.RecordAnonAllow (empty saID) → the real
+// NewLogAuditEmitter() zerolog sink. It asserts that an "iam.authz" line is
+// emitted carrying sa_id == audit.AnonSAID. This is the only test that wires
+// the anonymous path through the production emitter (the other AnonAllow test
+// uses a fakeEmitter and never reaches the zerolog line); it guards against the
+// IAM audit survivor regressing when the iceberg audit lake was removed.
+func TestLogAuditEmitter_RecordAnonAllow_EmitsIamAuthz(t *testing.T) {
+	var buf bytes.Buffer
+	prev := log.Logger
+	// AnonAllow emits at debug level (only Deny is info), so the capture
+	// logger must allow debug for the line to be observable.
+	log.Logger = zerolog.New(&buf).Level(zerolog.DebugLevel)
+	t.Cleanup(func() { log.Logger = prev })
+
+	a := NewAuditLogger(NewLogAuditEmitter())
+	a.RecordAnonAllow(context.Background(), "default", "k", s3auth.GetObject, AuditDetails{})
+
+	out := buf.String()
+	if !strings.Contains(out, "iam.authz") {
+		t.Fatalf("expected an iam.authz line, got %q", out)
+	}
+	if !strings.Contains(out, `"sa_id":"`+audit.AnonSAID+`"`) {
+		t.Fatalf("expected sa_id == %q (audit.AnonSAID), got %q", audit.AnonSAID, out)
+	}
+	if !strings.Contains(out, `"status":"anon_allow"`) {
+		t.Fatalf("expected status anon_allow, got %q", out)
+	}
+}
+
+// TestLogAuditEmitter_RecordDeny_EmitsIamAuthz exercises the deny path through
+// the real zerolog sink and asserts an "iam.authz" line carrying the deny
+// status and reason. Deny emits at info level.
+func TestLogAuditEmitter_RecordDeny_EmitsIamAuthz(t *testing.T) {
+	var buf bytes.Buffer
+	prev := log.Logger
+	log.Logger = zerolog.New(&buf).Level(zerolog.InfoLevel)
+	t.Cleanup(func() { log.Logger = prev })
+
+	a := NewAuditLogger(NewLogAuditEmitter())
+	// Empty saID must normalize to audit.AnonSAID even on the deny path.
+	a.RecordDeny(context.Background(), "", "secrets", "k", s3auth.GetObject, "no_grant")
+
+	out := buf.String()
+	if !strings.Contains(out, "iam.authz") {
+		t.Fatalf("expected an iam.authz line, got %q", out)
+	}
+	if !strings.Contains(out, `"sa_id":"`+audit.AnonSAID+`"`) {
+		t.Fatalf("expected sa_id == %q (audit.AnonSAID), got %q", audit.AnonSAID, out)
+	}
+	if !strings.Contains(out, `"status":"deny"`) || !strings.Contains(out, `"reason":"no_grant"`) {
+		t.Fatalf("expected deny status + no_grant reason, got %q", out)
 	}
 }
 

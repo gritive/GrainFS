@@ -11,6 +11,7 @@ import (
 	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/gossip"
 	"github.com/gritive/GrainFS/internal/receipt"
 	"github.com/gritive/GrainFS/internal/resourcewatch"
 	"github.com/gritive/GrainFS/internal/server"
@@ -69,7 +70,7 @@ type HealReceiptWiring struct {
 	api          *receipt.API
 	routingCache *receipt.RoutingCache
 	broadcaster  *cluster.ReceiptBroadcaster
-	gossipSender *cluster.ReceiptGossipSender
+	gossipSender *gossip.ReceiptGossipSender
 }
 
 // Store exposes the receipt store for callers that need to record entries
@@ -122,20 +123,19 @@ func receiptDBOptions(dir string) badger.Options {
 
 // SetupClusterReceipt wires the full Slice 2 stack in cluster mode.
 // PSK comes from opts.PSK if set; callers usually pass --heal-receipt-psk
-// when set, otherwise the resolved cluster transport key. Registers the StreamReceiptQuery
-// handler on the router and wires the routing cache into the gossip
-// receiver. Starts the gossip broadcast goroutine bound to ctx.
+// when set, otherwise the resolved cluster transport key. Registers the
+// /receipt/query handler on the cluster transport and wires the routing cache
+// into the gossip receiver. Starts the gossip broadcast goroutine bound to ctx.
 func SetupClusterReceipt(
 	ctx context.Context,
 	opts ReceiptOptions,
 	dataDir, nodeID string,
 	peers []string,
 	clusterTransport transport.ClusterTransport,
-	router *transport.StreamRouter,
-	gossipReceiver *cluster.GossipReceiver,
+	gossipReceiver *gossip.GossipReceiver,
 	srvOpts []server.Option,
 ) ([]server.Option, *HealReceiptWiring, error) {
-	return setupClusterReceipt(ctx, opts, dataDir, nodeID, peers, nil, clusterTransport, router, gossipReceiver, srvOpts)
+	return setupClusterReceipt(ctx, opts, dataDir, nodeID, peers, nil, clusterTransport, gossipReceiver, srvOpts)
 }
 
 func SetupClusterReceiptWithPeerProvider(
@@ -144,11 +144,10 @@ func SetupClusterReceiptWithPeerProvider(
 	dataDir, nodeID string,
 	peerProvider func() []string,
 	clusterTransport transport.ClusterTransport,
-	router *transport.StreamRouter,
-	gossipReceiver *cluster.GossipReceiver,
+	gossipReceiver *gossip.GossipReceiver,
 	srvOpts []server.Option,
 ) ([]server.Option, *HealReceiptWiring, error) {
-	return setupClusterReceipt(ctx, opts, dataDir, nodeID, nil, peerProvider, clusterTransport, router, gossipReceiver, srvOpts)
+	return setupClusterReceipt(ctx, opts, dataDir, nodeID, nil, peerProvider, clusterTransport, gossipReceiver, srvOpts)
 }
 
 func setupClusterReceipt(
@@ -158,8 +157,7 @@ func setupClusterReceipt(
 	peers []string,
 	peerProvider func() []string,
 	clusterTransport transport.ClusterTransport,
-	router *transport.StreamRouter,
-	gossipReceiver *cluster.GossipReceiver,
+	gossipReceiver *gossip.GossipReceiver,
 	srvOpts []server.Option,
 ) ([]server.Option, *HealReceiptWiring, error) {
 	if !opts.Enabled {
@@ -207,15 +205,15 @@ func setupClusterReceipt(
 
 	routingCache := receipt.NewRoutingCache()
 	var broadcaster *cluster.ReceiptBroadcaster
-	var gossipSender *cluster.ReceiptGossipSender
+	var gossipSender *gossip.ReceiptGossipSender
 	if peerProvider != nil {
 		broadcaster = cluster.NewReceiptBroadcasterWithPeerProvider(clusterTransport, peerProvider, 3*time.Second)
-		gossipSender = cluster.NewReceiptGossipSenderWithPeerProvider(
+		gossipSender = gossip.NewReceiptGossipSenderWithPeerProvider(
 			nodeID, peerProvider, clusterTransport, store, opts.GossipInterval, opts.WindowSize,
 		)
 	} else {
 		broadcaster = cluster.NewReceiptBroadcaster(clusterTransport, peers, 3*time.Second)
-		gossipSender = cluster.NewReceiptGossipSender(
+		gossipSender = gossip.NewReceiptGossipSender(
 			nodeID, peers, clusterTransport, store, opts.GossipInterval, opts.WindowSize,
 		)
 	}
@@ -224,7 +222,9 @@ func setupClusterReceipt(
 	if gossipReceiver != nil {
 		gossipReceiver.SetReceiptCache(routingCache)
 	}
-	router.Handle(transport.StreamReceiptQuery, cluster.NewReceiptQueryHandler(store))
+	// Native /receipt/query buffered route. found/not-found is in-band in the
+	// FB response (invalid requests answer found=false, never an error).
+	clusterTransport.RegisterBufferedRoute(transport.RouteReceiptQuery, cluster.NewReceiptQueryHandler(store))
 
 	go gossipSender.Run(ctx)
 

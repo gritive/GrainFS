@@ -3,9 +3,11 @@
 
 namespace clusterpb;
 
-table Command {
-  type:uint32;
-  data:[ubyte];
+// BytesValue wraps a single [ubyte] so a parent table can carry a
+// vector-of-vectors (FlatBuffers forbids a direct nested-vector field). Mirrors
+// storagepb.BytesValue. Used by PutObjectMetaCmd.append_call_md5s.
+table BytesValue {
+  v_bytes:[ubyte];
 }
 
 // --- ClusterConfig optional-field boxes (Slice 1 of admin-API config) ---
@@ -43,7 +45,7 @@ table ClusterConfig {
   disk_warn_frac:                     DoubleBox;
   disk_critical_frac:                 DoubleBox;
 
-  // Snapshot (object PITR) — interval=0 disables auto-snapshot, hot-toggleable.
+  // Snapshot — interval=0 disables auto-snapshot, hot-toggleable.
   snapshot_interval_ns:               Int64Box;
   snapshot_retain:                    Int32Box;
 
@@ -99,15 +101,6 @@ table MetaClusterConfigPatchCmd {
   bounded_loads_max_stale_ttl_ns:     Int64Box;
 }
 
-table CreateBucketCmd {
-  bucket:string;
-  bypass_reserved:bool = false;
-}
-
-table DeleteBucketCmd {
-  bucket:string;
-}
-
 table PutObjectMetaCmd {
   bucket:string;
   key:string;
@@ -133,6 +126,41 @@ table PutObjectMetaCmd {
   // for backward-compatible readers.
   segments:[SegmentMetaEntry];
   tags:[Tag];
+  stripe_bytes:uint32 = 0;
+  // Phase 3: ACL bitmask (s3auth.ACLGrant). Default 0 = private.
+  // Appended last for backward-compatible reading of old blobs (old decoder
+  // returns acl=0 which is the correct private default).
+  acl:uint8 = 0;
+  // Internal LWW tiebreak for placement re-writes; default 0 = original write.
+  meta_seq:uint64 = 0;
+  // Blob-primary hard-delete tombstone: when true this per-version blob marks the
+  // version as permanently deleted (distinct from is_delete_marker, which is a
+  // soft-delete marker version). A tombstone replaces the data blob at the same
+  // {key}/{vid} path, wins the LWW tie, is excluded from all reads (→404), and is
+  // reconciled/GC'd by the orphan walker. Appended last for backward-compatible
+  // reading of old blobs (absent decodes false = a normal data blob).
+  is_hard_deleted:bool = false;
+  // Slice 1 (append off-raft): coalesced blob refs for appendable objects.
+  // Empty/absent for non-appendable objects (backward-compatible default).
+  coalesced:[CoalescedShardRef];
+  // Slice 1: object was created via AppendObject. Read path uses this to derive
+  // Segments/Coalesced from this blob and dispatch the appendable reader.
+  is_appendable:bool = false;
+  // Slice 1: per-WRITE CAS intent. When true the quorum-meta write-time guard
+  // requires existing.MetaSeq+1 == cand.MetaSeq (mutable-accumulating RMW:
+  // append/coalesce). When false the guard uses LWW (immutable PUT/multipart,
+  // commutative tags/acl, tombstone). Absent decodes false → LWW (unchanged).
+  meta_seq_cas:bool = false;
+  // Slice 2: object is quarantined (corrupt shard or other issue). Stored in
+  // the quorum-meta blob; replaces the legacy FSM quarantine: key. Absent decodes
+  // false = not quarantined (backward-compatible with old blobs).
+  is_quarantined:bool = false;
+  // Slice 2: cause string set at quarantine time (e.g. "corrupt-shard").
+  quarantine_cause:string;
+  // Per-AppendObject-call digest history (one entry per append call). Persisted
+  // so the composite ETag survives a coalesce (which consumes Segments). Empty/absent
+  // for non-appendable objects. Appended last for slot stability.
+  append_call_md5s:[BytesValue];
 }
 
 // SegmentMetaEntry carries the per-segment placement metadata for a chunked
@@ -149,80 +177,12 @@ table SegmentMetaEntry {
   node_ids:[string];
   ec_data:uint8 = 0;
   ec_parity:uint8 = 0;
+  stripe_bytes:uint32 = 0;
+  stored_size:int64 = 0;      // 0 = uncompressed; >0 = compressed bytes stored in EC
 }
 
-table DeleteObjectCmd {
-  bucket:string;
-  key:string;
-  version_id:string;
-}
-
-// DeleteObjectVersionCmd hard-deletes a specific version (no tombstone).
-// Used by lifecycle/scrubber to purge expired versions.
-table DeleteObjectVersionCmd {
-  bucket:string;
-  key:string;
-  version_id:string;
-}
-
-table PutObjectQuarantineCmd {
-  bucket:string;
-  key:string;
-  version_id:string;
-  cause:string;
-  reason:string;
-}
-
-// ResealFSMValuesCmd: reseal a batch of data-group FSM state values (policy:,
-// obj:) from a retired DEK generation onto active_gen. Applied in the
-// serialized apply loop for race-freedom. S7-1a.
-table ResealFSMValuesCmd {
-  keys:[string];
-  active_gen:uint32;
-}
-
-// FSMValueResealDoneCmd: ordering-fence marker proposed by the group leader
-// after DrainFSMValueRewrap returns nil. Every node applies the marker after
-// all preceding CmdResealFSMValues batches (raft ordering), so the per-node
-// post-apply hook fires with the node's store already clean. Gen is a log
-// hint only — the re-Kick is gen-agnostic. S7-1a-2.
-table FSMValueResealDoneCmd {
-  gen:uint32;
-}
-
-table CreateMultipartUploadCmd {
-  upload_id:string;
-  bucket:string;
-  key:string;
-  content_type:string;
-  created_at:int64;
-  placement_group_id:string;
-  tags:[Tag];
-}
-
-table CompleteMultipartCmd {
-  bucket:string;
-  key:string;
-  upload_id:string;
-  size:int64;
-  content_type:string;
-  etag:string;
-  mod_time:int64;
-  version_id:string;
-  placement_group_id:string;
-  ec_data:uint8 = 0;
-  ec_parity:uint8 = 0;
-  node_ids:[string];
-  parts:[MultipartPartEntry];
-  segments:[SegmentMetaEntry];
-  tags:[Tag];
-}
-
-table AbortMultipartCmd {
-  bucket:string;
-  key:string;
-  upload_id:string;
-}
+// CreateMultipartUploadCmd, CompleteMultipartCmd, AbortMultipartCmd are removed in
+// the multipart-off-raft epic (M4). Legacy data-group slots 5/6/7 are not reused.
 
 table SetBucketPolicyCmd {
   bucket:string;
@@ -262,6 +222,9 @@ table ObjectMeta {
   is_appendable:bool = false;
   parts:[MultipartPartEntry];
   tags:[Tag];
+  stripe_bytes:uint32 = 0;
+  // Internal LWW tiebreak for placement re-writes; default 0 = original write.
+  meta_seq:uint64 = 0;
 }
 
 // CoalescedShardRef references one coalesced blob produced by merging a
@@ -285,27 +248,7 @@ table CoalescedShardRef {
   ec_data:uint8 = 0;
   ec_parity:uint8 = 0;
   node_ids:[string];
-}
-
-// CoalesceSegmentsCmd records a single coalesce operation: consume the listed
-// segment blob IDs into a single coalesced blob identified by CoalescedID +
-// ShardKey. ConsumedSegmentIDs MUST match a contiguous prefix of
-// objectMeta.segments at apply time; absent IDs are silently skipped
-// (idempotent on Raft replay).
-//
-// Phase B3 adds EC placement params so the FSM apply stores them on the
-// resulting CoalescedShardRef. placement[] order matches shard index 0..k+m.
-table CoalesceSegmentsCmd {
-  bucket:string;
-  key:string;
-  coalesced_id:string;
-  shard_key:string;
-  size:int64;
-  etag:string;
-  consumed_segment_ids:[string];
-  placement:[string];
-  ec_data:uint8 = 0;
-  ec_parity:uint8 = 0;
+  stripe_bytes:uint32 = 0;
 }
 
 // SegmentRef mirrors storage.SegmentRef — one appendable or chunked-PUT
@@ -322,39 +265,13 @@ table SegmentRef {
   node_ids:[string];
   ec_data:uint8 = 0;
   ec_parity:uint8 = 0;
+  stripe_bytes:uint32 = 0;
+  stored_size:int64 = 0;  // 0 = uncompressed (size==stored); >0 = compressed bytes in EC blob
 }
 
 table SetBucketVersioningCmd {
   bucket:string;
   state:string;
-}
-
-table SetObjectACLCmd {
-  bucket:string;
-  key:string;
-  acl:uint8;
-}
-
-table SetObjectTagsCmd {
-  bucket:string;
-  key:string;
-  version_id:string;
-  tags:[Tag];
-}
-
-// AppendObjectCmd records one appended segment. PlacementGroupID is frozen at
-// propose time — FSM apply derives NodeIDs/EC params from the current
-// ShardGroup record (single source of truth, avoids drift).
-table AppendObjectCmd {
-  bucket:string;
-  key:string;
-  expected_offset:int64;
-  blob_id:string;
-  segment_size:int64;
-  segment_etag:string;
-  placement_group_id:string;
-  version_id:string;
-  modified_unix_sec:int64;
 }
 
 table KeyValue {
@@ -408,71 +325,18 @@ table ReceiptQueryResponseMsg {
   receipt:[ubyte];
 }
 
-table MigrateShardCmd {
-  bucket:string;
-  key:string;
-  version_id:string;
-  src_node:string;
-  dst_node:string;
-}
-
-// PutShardPlacementCmd records that object <bucket>/<key> has its EC shards
-// placed on the given nodes, in order of shardIdx (0..len(node_ids)-1).
-// len(node_ids) = k+m; no hardcoded 6. Phase 18 Cluster EC Slice 1.
-// k and m store the actual EC parameters used for this object (dynamic EC).
-// Default 0 means legacy placement without stored k,m (caller uses global ecConfig).
-table PutShardPlacementCmd {
-  bucket:string;
-  key:string;
-  node_ids:[string];
-  k:int32 = 0;
-  m:int32 = 0;
-}
-
-// DeleteShardPlacementCmd removes the placement record for an object.
-// Typically fan-out with DeleteObject. Phase 18 Cluster EC Slice 1.
-table DeleteShardPlacementCmd {
-  bucket:string;
-  key:string;
-}
-
-table MigrationDoneCmd {
-  bucket:string;
-  key:string;
-  version_id:string;
-  src_node:string;
-  dst_node:string;
-}
-
-table VNodeEntry {
-  token:uint32;
-  node_id:string;
-}
-
-table SetRingCmd {
-  version:uint64;
-  vnodes:[VNodeEntry];
-  vper_node:uint32;
-}
-
-root_type Command;
-
 // PR-B: meta-Raft FSM commands — cluster control plane
 enum MetaCmdType : uint8 {
   NoOp                 = 0,
   AddNode              = 1,
   RemoveNode           = 2,
-  PutShardGroup        = 3,   // shard → Raft 그룹 매핑 (PR-C)
-  SetActivePlan        = 4,   // 진행 중 rebalance plan ID
+  PutShardGroup        = 3,   // shard/placement group registry update
+  Reserved4            = 4,
   PutBucketAssignment  = 5,   // bucket → group_id 영속 매핑 (PR-D)
   SetLoadSnapshot      = 6,   // PR-D: leader 주기적 load commit
-  ProposeRebalancePlan = 7,   // PR-D: rebalancer가 plan 제안
-  AbortPlan            = 8,   // PR-D: timeout / operator 취소 / 완료 마커
-  IcebergCreateNamespace = 9,
-  IcebergDeleteNamespace = 10,
-  IcebergCreateTable = 11,
-  IcebergCommitTable = 12,
-  IcebergDeleteTable = 13,
+  Reserved7            = 7,
+  Reserved8            = 8,
+  // 9-13 reserved — do not reuse (no renumber).
   RotateKeyBegin     = 14,  // 클러스터 키 회전: phase 1 → 2 (operator-distributed next.key SPKI 합의)
   RotateKeySwitch    = 15,  // 회전 phase 2 → 3 (active 인증서를 NEW로 전환)
   RotateKeyDrop      = 16,  // 회전 phase 3 → steady-on-NEW (OLD 폐기, previous.key grace 시작)
@@ -499,12 +363,8 @@ enum MetaCmdType : uint8 {
   MigrationJobStart       = 37, // Migration job: start
   MigrationJobDone        = 38, // Migration job: done
   MigrationJobFailed      = 39, // Migration job: failed
-  NfsExportUpsert         = 40, // NFSv4 multi-export: registry upsert (Phase 1)
-  NfsExportDelete         = 41, // NFSv4 multi-export: registry delete (Phase 1)
-  NfsExportBucketDeleteCascade = 42, // NFSv4 multi-export: bucket delete cascade marker
   CapabilityActivate      = 43, // Rolling-upgrade capability: active persisted feature marker
   MigrationCutover        = 44, // Migration job: mark bucket upstream cutover semantics active
-  NfsExportCreate         = 45, // NFSv4 multi-export: create only, reject existing export
   ConfigPut               = 46, // cluster-wide config: set key=value
   ConfigDelete            = 47, // cluster-wide config: unset key (revert to default)
   DEKRotate               = 48, // DEK key rotation: generate new active generation
@@ -524,10 +384,8 @@ enum MetaCmdType : uint8 {
   CreateBucketWithPolicyAttach = 62, // IAM: atomic create-bucket + attach initial policy to SA (D#13, F#2)
   JWTSigningKeyRotate          = 63, // IAM JWT: generate new signing key, add to dual-key set
   JWTSigningKeyPrune           = 64, // IAM JWT: prune old signing keys past grace period
-  MountSACreate                = 65, // MountSA: create NFS/9P mount service account
-  MountSADelete                = 66, // MountSA: delete NFS/9P mount service account
-  MountSAAttachPolicy          = 67, // MountSA: attach policy to mount SA
-  MountSADetachPolicy          = 68, // MountSA: detach policy from mount SA
+  // 65-68 retired (mount-protocol service-account create/delete/attach/detach) —
+  // Slice C T4. Gap left intentionally; surviving values keep their numbers (no renumber).
   KEKRotate                    = 69, // KEK: install rotated KEK + rewrapped DEKs (Phase B)
   KEKRetire                    = 70, // KEK: mark prior KEK version retired (Phase B)
   KEKPrune                     = 71, // KEK: prune retired KEK version after voter attestation (Phase B)
@@ -548,6 +406,14 @@ enum MetaCmdType : uint8 {
   BeginPresentFlip             = 86, // zero-CA cutover: all voters flip present cert to per-node identity (PR-2a §8c)
   DropClusterKeyAccept         = 87, // zero-CA cutover: irreversibly drops cluster-key from accept-set (PR-2b §8 H2)
   DEKRewrapProgress            = 88, // S6a: per-node DEK-generation rewrap completion ledger
+  PutIndexGroup                = 89, // sharded object index → Raft 그룹 매핑 (data-group과 별개 레지스트리)
+  AddPlacementGeneration       = 90, // Phase 7: placement generation append (topology 증설 epoch 레지스트리)
+  CreateBucket                 = 91, // meta CreateBucket: atomic existence + group assignment (group0-demotion epic)
+  DeleteBucket                 = 92, // meta DeleteBucket: remove bucket record + unassign router (group0-demotion epic)
+  SetBucketVersioning          = 93, // meta SetBucketVersioning: RMW versioning state on existing bucket record
+  SetBucketPolicy              = 94, // meta SetBucketPolicy: RMW policy blob on existing bucket record
+  DeleteBucketPolicy           = 95, // meta DeleteBucketPolicy: idempotent nil-out of bucket record policy
+  RetirePlacementGeneration    = 96, // Phase 7 follow-up: mark a drained placement generation retired
 }
 
 table MetaNodeEntry {
@@ -656,11 +522,11 @@ table MetaDEKVersionSnapshot {
   rewrap_done:[DEKRewrapDoneEntry];
 }
 
-// PR-C: ShardGroupEntry는 데이터 Raft 그룹 멤버십을 기술한다.
+// PR-C: ShardGroupEntry describes placement group membership.
 // bucket→group 매핑(shard_map)은 별도 메타데이터로 관리. key-range sharding 제외.
 table ShardGroupEntry {
   id:string;           // e.g. "group-0"
-  peer_ids:[string];   // 이 데이터 그룹의 Raft voter 노드 ID 목록
+  peer_ids:[string];   // placement group voter node IDs
 }
 
 // PR-C: MetaPutShardGroup 커맨드 — shard group 매핑을 기록·갱신한다.
@@ -668,10 +534,48 @@ table MetaPutShardGroupCmd {
   group:ShardGroupEntry;
 }
 
+// IndexGroupEntry는 sharded object index Raft 그룹 멤버십을 기술한다.
+// ShardGroupEntry(데이터 그룹)와 별개의 레지스트리로, 절대 섞이지 않는다.
+table IndexGroupEntry {
+  id:string;           // e.g. "index-0"
+  peer_ids:[string];   // 이 인덱스 그룹의 Raft voter 노드 ID 목록
+}
+
+// MetaPutIndexGroup 커맨드 — index group 매핑을 기록·갱신한다.
+table MetaPutIndexGroupCmd {
+  group:IndexGroupEntry;
+}
+
+// Phase 7: PlacementGenerationEntry — 한 topology generation의 pinned
+// object→group placement set. epoch는 단조(0=base), group_ids는 이 generation에
+// pinned된 candidate group ID 정렬 리스트. data plane 무관 control-plane 레지스트리.
+table PlacementGenerationEntry {
+  epoch:ulong;
+  group_ids:[string];
+  retired:bool = false;
+}
+
+// Phase 7: MetaAddPlacementGeneration 커맨드 — placement generation 1건을 리스트
+// 끝에 append한다. epoch는 wire에 없음 — apply가 현재 길이로 단조 할당(결정론).
+table MetaAddPlacementGenerationCmd {
+  group_ids:[string];
+}
+
+// Phase 7 follow-up: MetaRetirePlacementGeneration 커맨드 — object drain이 끝난
+// placement generation을 read-probe 대상에서 제외한다. generation record 자체는
+// snapshot/replay audit용으로 남긴다.
+table MetaRetirePlacementGenerationCmd {
+  epoch:ulong;
+}
+
 // PR-D: bucket→group 매핑 엔트리 1건
+// Fields 0 (bucket) and 1 (group_id) are frozen — FlatBuffers no-renumber rule.
+// Fields 2 (versioning) and 3 (policy) are additive; absent decodes as "" / nil.
 table BucketAssignmentEntry {
   bucket:string;
   group_id:string;
+  versioning:string;   // "" = unset (bucket versioning state: "Enabled","Suspended","")
+  policy:[ubyte];      // nil = unset (bucket policy JSON bytes, sealed or raw)
 }
 
 // PR-D: PutBucketAssignment 커맨드
@@ -719,89 +623,9 @@ table LoadStatEntry {
   updated_at_unix:int64;
 }
 
-// PR-D: data 그룹의 voter 이동 계획
-table RebalancePlan {
-  plan_id:string;
-  group_id:string;
-  from_node:string;
-  to_node:string;
-  created_at_unix:int64;
-}
-
 // PR-D: meta leader가 30s마다 gossip 수집 결과를 meta log에 commit
 table MetaSetLoadSnapshotCmd {
   entries:[LoadStatEntry];
-}
-
-// PR-D: rebalancer가 RebalancePlan commit 요청
-table MetaProposeRebalancePlanCmd {
-  plan:RebalancePlan;
-}
-
-enum AbortPlanReason : uint8 {
-  Unknown = 0,
-  Timeout = 1,
-  ExecutionFailed = 2,
-  Completed = 3,
-}
-
-// PR-D: plan timeout / operator 취소 / 완료 마커
-table MetaAbortPlanCmd {
-  plan_id:string;
-  reason:AbortPlanReason;
-}
-
-table IcebergNamespaceEntry {
-  namespace:[string];
-  properties:[KeyValue];
-  warehouse:string;   // v2 (iceberg_schema_version=2); empty = legacy "default"
-}
-
-table IcebergIdentifier {
-  namespace:[string];
-  name:string;
-}
-
-table IcebergTableEntry {
-  identifier:IcebergIdentifier;
-  metadata_location:string;
-  properties:[KeyValue];
-  warehouse:string;   // v2 (iceberg_schema_version=2); empty = legacy "default"
-}
-
-table MetaIcebergCreateNamespaceCmd {
-  request_id:string;
-  namespace:[string];
-  properties:[KeyValue];
-  warehouse:string;
-}
-
-table MetaIcebergDeleteNamespaceCmd {
-  request_id:string;
-  namespace:[string];
-  warehouse:string;
-}
-
-table MetaIcebergCreateTableCmd {
-  request_id:string;
-  identifier:IcebergIdentifier;
-  metadata_location:string;
-  properties:[KeyValue];
-  warehouse:string;
-}
-
-table MetaIcebergCommitTableCmd {
-  request_id:string;
-  identifier:IcebergIdentifier;
-  expected_metadata_location:string;
-  new_metadata_location:string;
-  warehouse:string;
-}
-
-table MetaIcebergDeleteTableCmd {
-  request_id:string;
-  identifier:IcebergIdentifier;
-  warehouse:string;
 }
 
 // 클러스터 키 회전 — 4-phase rolling state machine.
@@ -864,31 +688,6 @@ table MetaRegisterMemberCmd {
   node_key_kek_gen:uint32;
 }
 
-// NFSv4 multi-export registry. Per design doc D2/D3/D5.
-// fsid_major = cluster namespace; fsid_minor = monotonic export id;
-// generation increments on every Upsert so Phase 3 FHs from a prior
-// epoch are auto-stale after remove/re-add.
-table NfsExportConfig {
-  read_only:bool = false;
-  fsid_major:uint64 = 0;
-  fsid_minor:uint64 = 0;
-  generation:uint64 = 0;
-}
-
-table NfsExportUpsertCmd {
-  bucket:string;
-  config:NfsExportConfig;
-}
-
-table NfsExportDeleteCmd {
-  bucket:string;
-}
-
-table NfsExportBucketDeleteCascadeCmd {
-  bucket:string;
-  force:bool = false;
-}
-
 // MetaConfigSnapshot is the GCFG trailer payload: a snapshot of all
 // explicitly-set cluster-wide config key→value pairs (config.Store).
 // Wire position: appended after the IAM trailer (if any) as described by
@@ -934,13 +733,12 @@ table MetaStateSnapshot {
   shard_groups:[ShardGroupEntry];             // PR-C
   bucket_assignments:[BucketAssignmentEntry]; // PR-D
   load_snapshot:[LoadStatEntry];              // PR-D
-  active_plan:RebalancePlan;                  // PR-D; nil = no active plan
-  iceberg_namespaces:[IcebergNamespaceEntry];
-  iceberg_tables:[IcebergTableEntry];
+  reserved_4:[ubyte] (deprecated);            // dead slot (was the removed rebalance active plan); retained for wire stability (no-renumber)
+  reserved_5:[ubyte] (deprecated);            // dead slot (was the removed Iceberg namespaces vector); retained for wire stability (no-renumber)
+  reserved_6:[ubyte] (deprecated);            // dead slot (was the removed Iceberg tables vector); retained for wire stability (no-renumber)
   object_index:[MetaObjectIndexEntry];
   cluster_config:[ubyte];                     // serialized ClusterConfig FBS buffer; empty/missing = no explicit config (legacy)
-  nfs_exports:[NfsExportUpsertCmd];           // NFS export registry rows for snapshot install after log compaction
-  iceberg_schema_version:int = 0;             // 0 = legacy (no warehouse field); 2 = warehouse-aware (D#14 T38)
+  reserved_9:int = 0 (deprecated);            // dead slot (was the removed Iceberg schema-version field); retained for wire stability (no-renumber)
   last_rotation_request_entries:[LastRotationRequestEntry]; // Phase B Task 2: slot 11
   kek_status_entries:[KEKStatusEntry];                      // Phase B Task 2: slot 12
   peers:[PeerEntry];                                        // zero-CA peer registry: slot 13 (Task 5, codex P1)
@@ -948,6 +746,8 @@ table MetaStateSnapshot {
   cluster_key_dropped:bool = false;                        // zero-CA cutover: slot 15 (H3); PR-2 sets it, PR-1 always false
   present_flip_begun:bool = false;                         // zero-CA cutover: slot 16 (PR-2a §8c); set by BeginPresentFlip(86) Apply
   revoked_node_ids:[string];                               // zero-CA revoked-node set: slot 17 (data-group evacuation)
+  index_groups:[IndexGroupEntry];                          // sharded object index registry: slot 18 (separate from shard_groups)
+  placement_generations:[PlacementGenerationEntry];        // Phase 7: topology generation registry: slot 19 (dormant; empty = single-generation legacy)
 }
 
 // PR4: Scrub trigger — operator-initiated cluster-wide EC scrub. Each node's
@@ -985,7 +785,6 @@ enum CompatSeverity : byte {
 enum CompatOperation : byte {
   Unknown = 0,
   MigrationCutover = 1,
-  NfsExportCreate = 2,
   CreateMultipartUpload = 3,
   ListMultipartUploads = 4,
   ListParts = 5,
@@ -1124,50 +923,6 @@ table ChallengeReply {
   message : string;
 }
 
-// ============================================================================
-// MetaCatalogRead (iceberg catalog read RPC)
-// ============================================================================
-
-enum CatalogReadOp : byte {
-  Unknown        = 0,
-  LoadNamespace  = 1,
-  ListNamespaces = 2,
-  LoadTable      = 3,
-  ListTables     = 4,
-}
-
-table CatalogKV { k : string; v : string; }
-
-table CatalogNamespace { parts : [string]; }
-
-table CatalogIdentifier {
-  namespace : [string];
-  name      : string;
-}
-
-table CatalogTable {
-  identifier        : CatalogIdentifier;
-  metadata_location : string;
-  metadata          : [ubyte];     // Iceberg spec JSON, opaque passthrough
-  properties        : [CatalogKV];
-}
-
-table MetaCatalogReadRequest {
-  op         : CatalogReadOp = Unknown;
-  namespace  : [string];
-  identifier : CatalogIdentifier;
-  warehouse  : string;
-}
-
-table MetaCatalogReadReply {
-  error_type    : string;
-  error_message : string;
-  properties    : [CatalogKV];          // op = LoadNamespace
-  namespaces    : [CatalogNamespace];   // op = ListNamespaces
-  loaded_table  : CatalogTable;         // op = LoadTable (renamed from "table" to avoid collision with flatbuffers built-in Table() accessor)
-  tables        : [CatalogIdentifier];  // op = ListTables
-}
-
 // PolicyPut payload: upsert a named policy document.
 table MetaPolicyPutCmd {
   name:string;
@@ -1239,8 +994,8 @@ table MetaBucketPolicyDeleteCmd {
 }
 
 // MetaCreateBucketWithPolicyAttachCmd payload: sequenced bucket-create + IAM-half attach.
-// Bucket creation itself happens in the data-plane FSM (CreateBucket MetaCmd on the data
-// group); this MetaCmd only handles the IAM half: validate SA + policy exist, then attach.
+// Bucket creation is handled by meta-raft bucket records; this payload handles the IAM
+// half: validate SA + policy exist, then attach.
 // attach_sa and attach_policy both empty = policy attach skipped (create-only path, no IAM).
 table MetaCreateBucketWithPolicyAttachCmd {
   bucket:string;
@@ -1310,24 +1065,6 @@ table MetaIAMPolicyStoresSnapshot {
   sa_attachments:[MetaIAMPolicyAttachSAEntry];
   group_attachments:[MetaIAMPolicyAttachGroupEntry];
   bucket_policies:[MetaIAMBucketPolicyEntry];
-  // §A: NFS/9P mount service accounts (T3). Added after the original 5 fields
-  // so pre-§A snapshots decode cleanly (new optional vector fields default to empty).
-  mount_sas:[MetaMountSAEntry];
-  mount_sa_attachments:[MetaIAMPolicyAttachMountSAEntry];
-}
-
-// MetaMountSAEntry: one MountSA record in the IPST snapshot.
-table MetaMountSAEntry {
-  name:string;
-  numeric_uid:uint32;
-  created_at:int64;
-  created_by:string;
-}
-
-// MetaIAMPolicyAttachMountSAEntry: policy attachment snapshot for one MountSA.
-table MetaIAMPolicyAttachMountSAEntry {
-  mount_sa:string;
-  policies:[string];
 }
 
 // Protocol credential durable row. Plaintext secrets are intentionally absent.
@@ -1394,31 +1131,6 @@ table MetaProtocolCredentialRequestEntry {
   operation:string;
   credential_id:string;
   payload_hash:[ubyte];
-}
-
-// MountSACreatePayload: create a NFS/9P mount service account.
-table MountSACreatePayload {
-  name:string;
-  numeric_uid:uint32;
-  created_at:int64;
-  created_by:string;
-}
-
-// MountSADeletePayload: delete a NFS/9P mount service account by name.
-table MountSADeletePayload {
-  name:string;
-}
-
-// MountSAAttachPolicyPayload: attach a policy to a mount SA.
-table MountSAAttachPolicyPayload {
-  mount_sa:string;
-  policy:string;
-}
-
-// MountSADetachPolicyPayload: detach a policy from a mount SA.
-table MountSADetachPolicyPayload {
-  mount_sa:string;
-  policy:string;
 }
 
 // ─── KEK rotation command ─────────────────────────────────────────────────────
@@ -1523,4 +1235,21 @@ table BeginPresentFlipCmd {
 table DropClusterKeyAcceptCmd {
   stamped_voters:[string];
   stamped_config_index:uint64;
+}
+
+// MultipartDone and DeleteMultipartDoneCmd are removed in the multipart-off-raft
+// epic (M4). Legacy data-group slot 43 is not reused.
+
+// MetaCreateBucketCmd (cmd 91): atomic bucket creation — stores existence record
+// and group assignment in a single meta-raft apply.
+table MetaCreateBucketCmd {
+  bucket:string;
+  group_id:string;
+  bypass_reserved:bool;
+}
+
+// MetaDeleteBucketCmd (cmd 92): idempotent bucket deletion — removes existence
+// record and fires onBucketUnassigned callback so every node's router drops it.
+table MetaDeleteBucketCmd {
+  bucket:string;
 }

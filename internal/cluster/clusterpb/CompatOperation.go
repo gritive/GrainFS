@@ -9,7 +9,6 @@ type CompatOperation int8
 const (
 	CompatOperationUnknown               CompatOperation = 0
 	CompatOperationMigrationCutover      CompatOperation = 1
-	CompatOperationNfsExportCreate       CompatOperation = 2
 	CompatOperationCreateMultipartUpload CompatOperation = 3
 	CompatOperationListMultipartUploads  CompatOperation = 4
 	CompatOperationListParts             CompatOperation = 5
@@ -18,7 +17,6 @@ const (
 var EnumNamesCompatOperation = map[CompatOperation]string{
 	CompatOperationUnknown:               "Unknown",
 	CompatOperationMigrationCutover:      "MigrationCutover",
-	CompatOperationNfsExportCreate:       "NfsExportCreate",
 	CompatOperationCreateMultipartUpload: "CreateMultipartUpload",
 	CompatOperationListMultipartUploads:  "ListMultipartUploads",
 	CompatOperationListParts:             "ListParts",
@@ -27,7 +25,6 @@ var EnumNamesCompatOperation = map[CompatOperation]string{
 var EnumValuesCompatOperation = map[string]CompatOperation{
 	"Unknown":               CompatOperationUnknown,
 	"MigrationCutover":      CompatOperationMigrationCutover,
-	"NfsExportCreate":       CompatOperationNfsExportCreate,
 	"CreateMultipartUpload": CompatOperationCreateMultipartUpload,
 	"ListMultipartUploads":  CompatOperationListMultipartUploads,
 	"ListParts":             CompatOperationListParts,

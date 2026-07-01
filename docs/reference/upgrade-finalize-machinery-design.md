@@ -98,8 +98,7 @@ Each `hash*` function iterates its keys in sorted order to ensure determinism.
 
 - `MetaFSM` fields (`buckets`, `objectLatest`, etc.) use `map[string]T`, so the
   implementation must sort keys for every stable field.
-- The hash code must exclude ephemeral fields such as `activePlan` and
-  `loadSnapshot`.
+- The hash code must exclude ephemeral fields such as `loadSnapshot`.
 - Requires a complete inventory of "stable" vs "ephemeral" FSM fields first.
 - A bad hash implementation would produce false positives, disrupting healthy clusters.
 

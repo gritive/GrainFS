@@ -42,7 +42,7 @@ func TestOperationsPutObjectWithACLPinsSwappableBackendAcrossFallback(t *testing
 		},
 	}
 	swappable = NewSwappableBackend(oldBackend)
-	ops := NewOperations(NewCachedBackend(swappable))
+	ops := NewOperations(swappable)
 
 	_, err := ops.PutObjectWithACL(context.Background(), "b", "k", strings.NewReader("data"), "text/plain", 7)
 

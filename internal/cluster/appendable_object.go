@@ -1,17 +1,18 @@
 package cluster
 
 import (
-	"encoding/hex"
+	"fmt"
 	"io"
 
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
 type appendObjectAdmissionInput struct {
-	Existing       *storage.Object
-	ExpectedOffset int64
-	ChunkSize      int64
-	SizeCapBytes   int64
+	Existing             *storage.Object
+	ExistingSegmentCount int
+	ExpectedOffset       int64
+	ChunkSize            int64
+	SizeCapBytes         int64
 }
 
 func planAppendObjectAdmission(in appendObjectAdmissionInput) error {
@@ -24,7 +25,11 @@ func planAppendObjectAdmission(in appendObjectAdmissionInput) error {
 	if in.Existing.Size != in.ExpectedOffset {
 		return storage.ErrAppendOffsetMismatch
 	}
-	if len(in.Existing.Segments) >= storage.MaxAppendSegments {
+	segmentCount := len(in.Existing.Segments)
+	if in.ExistingSegmentCount > 0 {
+		segmentCount = in.ExistingSegmentCount
+	}
+	if segmentCount >= storage.MaxAppendSegments {
 		return storage.ErrAppendCapExceeded
 	}
 	if in.ChunkSize > 0 && in.SizeCapBytes > 0 && in.Existing.Size+in.ChunkSize > in.SizeCapBytes {
@@ -50,7 +55,10 @@ func appendChunkSize(r io.Reader) int64 {
 	return end - cur
 }
 
-type appendObjectCommandInput struct {
+// appendBlobRMWInput carries the inputs for one owner-side blob CAS append.
+// base is the latest-only quorum-meta manifest read at the start of the RMW
+// (absent → baseExists=false, a brand-new appendable object).
+type appendBlobRMWInput struct {
 	Bucket           string
 	Key              string
 	ExpectedOffset   int64
@@ -58,109 +66,203 @@ type appendObjectCommandInput struct {
 	PlacementGroupID string
 	VersionID        string
 	ModifiedUnixSec  int64
+	Base             PutObjectMetaCmd
+	BaseExists       bool
+	SizeCapBytes     int64
+	// NewObjectNodeIDs/ECData/ECParity are the manifest placement for the FIRST
+	// append (baseExists=false). On a subsequent append the base manifest's own
+	// placement is reused (an append never relocates the manifest).
+	NewObjectNodeIDs  []string
+	NewObjectECData   uint8
+	NewObjectECParity uint8
+	UseSideRecords    bool
+	BaseSummary       storage.AppendSummary
+	BaseHasSummary    bool
 }
 
-func buildAppendObjectCommand(in appendObjectCommandInput) AppendObjectCmd {
-	return AppendObjectCmd{
-		Bucket:           in.Bucket,
-		Key:              in.Key,
-		ExpectedOffset:   in.ExpectedOffset,
-		BlobID:           in.Segment.BlobID,
-		SegmentSize:      in.Segment.Size,
-		SegmentETag:      hex.EncodeToString(in.Segment.Checksum),
-		PlacementGroupID: in.PlacementGroupID,
-		VersionID:        in.VersionID,
-		ModifiedUnixSec:  in.ModifiedUnixSec,
-	}
-}
+// planAppendObjectBlobRMWWithSide validates an append against the base manifest and
+// builds the next-generation PutObjectMetaCmd (MetaSeqCAS, MetaSeq=base+1).
+// It lifts the offset/segment-cap/size-cap/placement/composite-ETag/ModTime
+// checks that previously lived in the FSM apply (applyAppendObjectTransition)
+// into the owner-side RMW. The returned cmd is ready for writeQuorumMeta.
+//
+// The offset check (offset == base.Size) is the primary client-retry dedup:
+// BlobID is a fresh UUIDv7 per call (not content-addressed), so a retried
+// append at a stale offset correctly fails the offset check rather than being
+// silently deduped.
+func planAppendObjectBlobRMWWithSide(in appendBlobRMWInput) (PutObjectMetaCmd, storage.AppendSummary, bool, error) {
+	seg := in.Segment
+	useSide := in.UseSideRecords
 
-type appendObjectTransitionInput struct {
-	Existing          *objectMeta
-	ExistingVersionID string
-	Cmd               AppendObjectCmd
-	ModifiedUnixSec   int64
-	CoalesceCfg       CoalesceConfig
-}
-
-type appendObjectTransitionResult struct {
-	Noop            bool
-	SizeCapRejected bool
-}
-
-func applyAppendObjectTransition(in appendObjectTransitionInput) (objectMeta, appendObjectTransitionResult, error) {
-	cmd := in.Cmd
-	existing := in.Existing
-	if existing != nil && cmd.PlacementGroupID != "" && existing.PlacementGroupID != "" &&
-		cmd.PlacementGroupID != existing.PlacementGroupID {
-		return objectMeta{}, appendObjectTransitionResult{}, ErrStalePlacement
-	}
-
-	segDigest, _ := hex.DecodeString(cmd.SegmentETag)
-	seg := storage.SegmentRef{
-		BlobID:   cmd.BlobID,
-		Size:     cmd.SegmentSize,
-		Checksum: segDigest,
-	}
-
-	if appendObjectCommandAlreadyApplied(existing, cmd.BlobID) {
-		return objectMeta{}, appendObjectTransitionResult{Noop: true}, nil
-	}
-
-	if existing == nil {
-		if cmd.ExpectedOffset != 0 {
-			return objectMeta{}, appendObjectTransitionResult{}, storage.ErrAppendOffsetMismatch
+	if !in.BaseExists {
+		if in.ExpectedOffset != 0 {
+			return PutObjectMetaCmd{}, storage.AppendSummary{}, false, storage.ErrAppendOffsetMismatch
 		}
-		return objectMeta{
-			Key:              cmd.Key,
+		if useSide {
+			state, count, err := storage.AppendETagStateAppend(nil, 0, seg.Checksum)
+			if err != nil {
+				return PutObjectMetaCmd{}, storage.AppendSummary{}, false, err
+			}
+			etag, err := storage.CompositeETagFromState(state, count)
+			if err != nil {
+				return PutObjectMetaCmd{}, storage.AppendSummary{}, false, err
+			}
+			cmd := PutObjectMetaCmd{
+				Bucket:           in.Bucket,
+				Key:              in.Key,
+				Size:             seg.Size,
+				ContentType:      "application/octet-stream",
+				ETag:             etag,
+				ModTime:          in.ModifiedUnixSec,
+				VersionID:        in.VersionID,
+				PlacementGroupID: in.PlacementGroupID,
+				NodeIDs:          cloneStringSlice(in.NewObjectNodeIDs),
+				ECData:           in.NewObjectECData,
+				ECParity:         in.NewObjectECParity,
+				IsAppendable:     true,
+				MetaSeqCAS:       true,
+				MetaSeq:          in.Base.MetaSeq + 1,
+			}
+			return cmd, storage.AppendSummary{Size: cmd.Size, SegmentCount: 1, ETagPartCount: count, ETagDigestState: state}, true, nil
+		}
+		return PutObjectMetaCmd{
+			Bucket:           in.Bucket,
+			Key:              in.Key,
 			Size:             seg.Size,
 			ContentType:      "application/octet-stream",
-			ETag:             storage.CompositeETag([][]byte{segDigest}),
-			LastModified:     in.ModifiedUnixSec,
-			PlacementGroupID: cmd.PlacementGroupID,
-			Segments:         []storage.SegmentRef{seg},
+			ETag:             storage.CompositeETag([][]byte{seg.Checksum}),
+			AppendCallMD5s:   [][]byte{append([]byte(nil), seg.Checksum...)},
+			ModTime:          in.ModifiedUnixSec,
+			VersionID:        in.VersionID,
+			PlacementGroupID: in.PlacementGroupID,
+			NodeIDs:          cloneStringSlice(in.NewObjectNodeIDs),
+			ECData:           in.NewObjectECData,
+			ECParity:         in.NewObjectECParity,
+			Segments:         segmentRefsToMetaEntries([]storage.SegmentRef{seg}),
 			IsAppendable:     true,
-		}, appendObjectTransitionResult{}, nil
+			MetaSeqCAS:       true,
+			MetaSeq:          in.Base.MetaSeq + 1, // base absent → 0, so MetaSeq=1
+		}, storage.AppendSummary{}, false, nil
 	}
 
-	if existing.Size != cmd.ExpectedOffset {
-		return objectMeta{}, appendObjectTransitionResult{}, storage.ErrAppendOffsetMismatch
+	base := in.Base
+	// Placement must not have moved since the manifest was written (mirrors the
+	// FSM stale-placement gate in applyAppendObjectTransition).
+	if in.PlacementGroupID != "" && base.PlacementGroupID != "" &&
+		in.PlacementGroupID != base.PlacementGroupID {
+		return PutObjectMetaCmd{}, storage.AppendSummary{}, false, ErrStalePlacement
 	}
-	if len(existing.Segments) >= storage.MaxAppendSegments {
-		return objectMeta{}, appendObjectTransitionResult{}, storage.ErrAppendCapExceeded
+	if base.Size != in.ExpectedOffset {
+		return PutObjectMetaCmd{}, storage.AppendSummary{}, false, storage.ErrAppendOffsetMismatch
 	}
-	if in.CoalesceCfg.SizeCapBytes > 0 && existing.Size+seg.Size > in.CoalesceCfg.SizeCapBytes {
-		return objectMeta{}, appendObjectTransitionResult{SizeCapRejected: true}, storage.ErrAppendObjectTooLarge
+	if useSide && in.BaseHasSummary {
+		baseCoalescedSize := int64(0)
+		for _, c := range in.Base.Coalesced {
+			baseCoalescedSize += c.Size
+		}
+		tailSize := base.Size - baseCoalescedSize
+		if tailSize < 0 {
+			return PutObjectMetaCmd{}, storage.AppendSummary{}, false, fmt.Errorf("append object: invalid manifest with coalesced size %d larger than object size %d", baseCoalescedSize, base.Size)
+		}
+		if in.BaseSummary.Size != tailSize {
+			return PutObjectMetaCmd{}, storage.AppendSummary{}, false, fmt.Errorf("append side summary size %d does not match object tail size %d", in.BaseSummary.Size, tailSize)
+		}
+		if storage.AppendSummaryLogicalAppendCount(in.BaseSummary) >= storage.MaxAppendSegments {
+			return PutObjectMetaCmd{}, storage.AppendSummary{}, false, storage.ErrAppendCapExceeded
+		}
+	} else if len(base.Segments) >= storage.MaxAppendSegments {
+		return PutObjectMetaCmd{}, storage.AppendSummary{}, false, storage.ErrAppendCapExceeded
+	}
+	if in.SizeCapBytes > 0 && base.Size+seg.Size > in.SizeCapBytes {
+		return PutObjectMetaCmd{}, storage.AppendSummary{}, false, storage.ErrAppendObjectTooLarge
 	}
 
-	segs := append(append([]storage.SegmentRef(nil), existing.Segments...), seg)
-	updated := *existing
-	if !updated.IsAppendable {
-		updated.IsAppendable = true
-		if len(updated.Segments) == 0 && len(updated.Coalesced) == 0 && updated.Size > 0 {
-			updated.Coalesced = []CoalescedShardRef{appendBaseCoalescedRef(cmd.Key, in.ExistingVersionID, existing)}
+	next := base
+	next.Bucket = in.Bucket
+	next.Key = in.Key
+	if next.Key == "" {
+		next.Key = in.Key
+	}
+	if next.ContentType == "" {
+		next.ContentType = "application/octet-stream"
+	}
+	// First append onto a plain (non-appendable) PUT: synthesize the base
+	// coalesced ref from the existing manifest so the older bytes remain
+	// readable (mirrors applyAppendObjectTransition). buildPutObjectMeta gives an
+	// objectMeta view of the base cmd so appendBaseCoalescedRef sees the same
+	// EC fields it did on the FSM path.
+	if !base.IsAppendable {
+		if len(base.Segments) == 0 && len(base.Coalesced) == 0 && base.Size > 0 {
+			baseMeta := buildPutObjectMeta(base)
+			next.Coalesced = []CoalescedShardRef{appendBaseCoalescedRef(in.Key, base.VersionID, &baseMeta)}
 		}
 	}
-	updated.Segments = segs
-	updated.Size = existing.Size + seg.Size
-	callDigests := make([][]byte, 0, len(segs))
-	for _, s := range segs {
-		if len(s.Checksum) > 0 {
-			callDigests = append(callDigests, s.Checksum)
-		}
-	}
-	updated.ETag = storage.CompositeETag(callDigests)
-	updated.LastModified = in.ModifiedUnixSec
-	return updated, appendObjectTransitionResult{}, nil
-}
+	next.IsAppendable = true
 
-func appendObjectCommandAlreadyApplied(existing *objectMeta, blobID string) bool {
-	if existing == nil {
-		return false
+	if useSide && in.BaseHasSummary {
+		state, count, err := storage.AppendETagStateAppend(in.BaseSummary.ETagDigestState, in.BaseSummary.ETagPartCount, seg.Checksum)
+		if err != nil {
+			return PutObjectMetaCmd{}, storage.AppendSummary{}, false, err
+		}
+		next.Segments = nil
+		next.Size = base.Size + seg.Size
+		next.AppendCallMD5s = nil
+		next.ETag, err = storage.CompositeETagFromState(state, count)
+		if err != nil {
+			return PutObjectMetaCmd{}, storage.AppendSummary{}, false, err
+		}
+		next.ModTime = in.ModifiedUnixSec
+		next.VersionID = in.VersionID
+		next.PlacementGroupID = in.PlacementGroupID
+		next.MetaSeqCAS = true
+		next.MetaSeq = base.MetaSeq + 1
+		next.IsDeleteMarker = false
+		next.IsHardDeleted = false
+		next.ExpectedETag = ""
+		next.PreserveLatest = false
+		return next, storage.AppendSummary{
+			Size:                 in.BaseSummary.Size + seg.Size,
+			SegmentCount:         in.BaseSummary.SegmentCount + 1,
+			CompactedPrefixCount: in.BaseSummary.CompactedPrefixCount,
+			ETagPartCount:        count,
+			ETagDigestState:      state,
+		}, true, nil
 	}
-	for _, s := range existing.Segments {
-		if s.BlobID == blobID {
-			return true
+
+	// Append the new segment and recompute Size.
+	segs := append(segmentMetaEntriesToRefs(base.Segments), seg)
+	next.Segments = segmentRefsToMetaEntries(segs)
+	next.Size = base.Size + seg.Size
+	// Accumulate the per-call digest history. base.Segments is emptied by a coalesce,
+	// so deriving the ETag from Segments alone would drop the coalesced calls;
+	// base.AppendCallMD5s carries the full history. When the base has no history yet
+	// (first append onto a plain OR chunked PUT), SEED from the base's current segment
+	// checksums so the composite ETag stays byte-identical to the pre-fix value for
+	// that case. Then append this call's digest.
+	callMD5s := make([][]byte, 0, len(base.AppendCallMD5s)+len(base.Segments)+1)
+	if len(base.AppendCallMD5s) > 0 {
+		for _, d := range base.AppendCallMD5s {
+			callMD5s = append(callMD5s, append([]byte(nil), d...))
+		}
+	} else {
+		for _, s := range base.Segments {
+			if len(s.Checksum) > 0 {
+				callMD5s = append(callMD5s, append([]byte(nil), s.Checksum...))
+			}
 		}
 	}
-	return false
+	callMD5s = append(callMD5s, append([]byte(nil), seg.Checksum...))
+	next.AppendCallMD5s = callMD5s
+	next.ETag = storage.CompositeETag(callMD5s)
+	next.ModTime = in.ModifiedUnixSec
+	next.VersionID = in.VersionID
+	next.PlacementGroupID = in.PlacementGroupID
+	next.MetaSeqCAS = true
+	next.MetaSeq = base.MetaSeq + 1
+	// An append never carries forward a delete-marker / hard-delete state.
+	next.IsDeleteMarker = false
+	next.IsHardDeleted = false
+	next.ExpectedETag = ""
+	next.PreserveLatest = false
+	return next, storage.AppendSummary{}, false, nil
 }

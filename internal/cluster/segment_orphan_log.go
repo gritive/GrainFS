@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/dgraph-io/badger/v4"
 	"github.com/gritive/GrainFS/internal/chunkref"
 )
 
@@ -19,13 +18,13 @@ const segmentOrphanPrefix = "sgc:"
 // any group's binary FSM prefix, so FSM.Restore's DropPrefix(groupPrefix) leaves
 // them intact.
 type SegmentOrphanLog struct {
-	db      *badger.DB
+	db      MetadataStore
 	groupID string
 }
 
 // NewSegmentOrphanLog returns a node-local orphan-segment t_zero log bound to
 // the given Badger handle and group.
-func NewSegmentOrphanLog(db *badger.DB, groupID string) *SegmentOrphanLog {
+func NewSegmentOrphanLog(db MetadataStore, groupID string) *SegmentOrphanLog {
 	return &SegmentOrphanLog{db: db, groupID: groupID}
 }
 
@@ -36,11 +35,11 @@ func (l *SegmentOrphanLog) key(c chunkref.ChunkID) []byte {
 // Observe records t_zero=now the FIRST time c is seen unreferenced. Idempotent
 // first-wins: a later Observe never moves t_zero forward.
 func (l *SegmentOrphanLog) Observe(c chunkref.ChunkID, now time.Time) error {
-	return l.db.Update(func(txn *badger.Txn) error {
+	return l.db.Update(func(txn MetadataTxn) error {
 		k := l.key(c)
 		if _, err := txn.Get(k); err == nil {
 			return nil
-		} else if !errors.Is(err, badger.ErrKeyNotFound) {
+		} else if !errors.Is(err, ErrMetaKeyNotFound) {
 			return fmt.Errorf("segment orphan log: get: %w", err)
 		}
 		var buf [8]byte
@@ -55,8 +54,8 @@ func (l *SegmentOrphanLog) Observe(c chunkref.ChunkID, now time.Time) error {
 // Forget removes the orphan record for c. Idempotent: forgetting a non-existent
 // entry is not an error.
 func (l *SegmentOrphanLog) Forget(c chunkref.ChunkID) error {
-	return l.db.Update(func(txn *badger.Txn) error {
-		if err := txn.Delete(l.key(c)); err != nil && !errors.Is(err, badger.ErrKeyNotFound) {
+	return l.db.Update(func(txn MetadataTxn) error {
+		if err := txn.Delete(l.key(c)); err != nil && !errors.Is(err, ErrMetaKeyNotFound) {
 			return fmt.Errorf("segment orphan log: delete: %w", err)
 		}
 		return nil
@@ -70,8 +69,8 @@ func (l *SegmentOrphanLog) Forget(c chunkref.ChunkID) error {
 func (l *SegmentOrphanLog) Reconcile(known map[chunkref.ChunkID]struct{}) error {
 	prefix := []byte(segmentOrphanPrefix + l.groupID + ":")
 	var toDelete [][]byte
-	if err := l.db.View(func(txn *badger.Txn) error {
-		it := txn.NewIterator(badger.IteratorOptions{PrefetchValues: false, Prefix: prefix})
+	if err := l.db.View(func(txn MetadataTxn) error {
+		it := txn.NewIterator(MetaIteratorOptions{Prefix: prefix})
 		defer it.Close()
 		for it.Rewind(); it.Valid(); it.Next() {
 			k := it.Item().KeyCopy(nil)
@@ -87,7 +86,7 @@ func (l *SegmentOrphanLog) Reconcile(known map[chunkref.ChunkID]struct{}) error 
 	if len(toDelete) == 0 {
 		return nil
 	}
-	return l.db.Update(func(txn *badger.Txn) error {
+	return l.db.Update(func(txn MetadataTxn) error {
 		for _, k := range toDelete {
 			if err := txn.Delete(k); err != nil {
 				return fmt.Errorf("segment orphan log: reconcile delete: %w", err)
@@ -102,9 +101,9 @@ func (l *SegmentOrphanLog) Reconcile(known map[chunkref.ChunkID]struct{}) error 
 func (l *SegmentOrphanLog) TombstoneTime(c chunkref.ChunkID) (time.Time, bool, error) {
 	var t time.Time
 	var ok bool
-	err := l.db.View(func(txn *badger.Txn) error {
+	err := l.db.View(func(txn MetadataTxn) error {
 		item, err := txn.Get(l.key(c))
-		if errors.Is(err, badger.ErrKeyNotFound) {
+		if errors.Is(err, ErrMetaKeyNotFound) {
 			return nil
 		}
 		if err != nil {
@@ -124,5 +123,5 @@ func (l *SegmentOrphanLog) TombstoneTime(c chunkref.ChunkID) (time.Time, bool, e
 
 // NewSegmentOrphanLog returns an orphan log bound to this backend's Badger DB and groupID.
 func (b *DistributedBackend) NewSegmentOrphanLog() *SegmentOrphanLog {
-	return NewSegmentOrphanLog(b.db, b.groupID)
+	return NewSegmentOrphanLog(b.store, b.groupID)
 }

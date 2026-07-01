@@ -8,41 +8,25 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/app/server"
 
-	"github.com/gritive/GrainFS/internal/audit"
 	"github.com/gritive/GrainFS/internal/iam"
 	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/scrubber"
-	"github.com/gritive/GrainFS/internal/server/iceberg"
 	"github.com/gritive/GrainFS/internal/server/incidentsvc"
 	"github.com/gritive/GrainFS/internal/server/receiptsvc"
-	"github.com/gritive/GrainFS/internal/server/snapshotsvc"
 	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/gritive/GrainFS/internal/volume"
 )
+
+// Compile-time guard: *iam.AuditLogger MUST satisfy s3auth.AuditEmitterDetailed
+// so RequestAuthorizer.Decide's runtime type assertion succeeds. Both methods take
+// s3auth.AuditAllowDetails (with iam.AuditDetails as a Go type alias).
+var _ s3auth.AuditEmitterDetailed = (*iam.AuditLogger)(nil)
 
 func NewServerStorage(backend storage.Backend, policyStore *CompiledPolicyStore) ServerStorage {
 	return ServerStorage{
-		Ops:           storage.NewOperations(backend, storage.WithPolicyStore(policyStore)),
-		Backend:       backend,
-		VolumeBackend: backend,
-		Snapshotable:  storageSnapshotable(backend),
-		DBProvider:    storageDBProvider(backend),
+		Ops:     storage.NewOperations(backend, storage.WithPolicyStore(policyStore)),
+		Backend: backend,
 	}
-}
-
-func storageSnapshotable(backend storage.Backend) storage.Snapshotable {
-	if snap, ok := backend.(storage.Snapshotable); ok {
-		return snap
-	}
-	return nil
-}
-
-func storageDBProvider(backend storage.Backend) storage.DBProvider {
-	if dbp, ok := unwrapBackend(backend).(storage.DBProvider); ok {
-		return dbp
-	}
-	return nil
 }
 
 // broadcastLoggerOnce guards the global zerolog.Logger setup so it is wired
@@ -80,29 +64,8 @@ func NewWithServerStorage(addr string, ss ServerStorage, policyStore *CompiledPo
 
 	s.wireAlertState()
 	s.wireBroadcastLogger()
-	s.initSnapshotManager(ss)
 
 	h := s.newHertzEngine(addr)
-	s.ensureRuntimeDefaults(ss)
-	s.iceberg = iceberg.NewHandler(iceberg.Deps{
-		Ops:                    s.ops,
-		IAMStore:               s.iamStore,
-		PolicyAuthorizer:       s.policyAuthorizer,
-		JWTKeys:                s.jwtKeys,
-		Catalog:                s.icebergCatalog,
-		AuditInternalAccessKey: s.auditInternalAccessKey,
-		AuditInternalSecretKey: s.auditInternalSecretKey,
-		AuditNodeID:            s.auditNodeID,
-		ClientIP:               s.authoritativeClientIP,
-		MutationDisabled:       s.blockIfMutationDisabled,
-		FeatureAvailable:       func() bool { return s.routeFeatureAvailable(routeFeatureIceberg) },
-		AppendAuditEvent:       func(ctx context.Context, ev audit.S3Event) { s.appendFinalizedAuditEvent(ctx, normalizeAuditEvent(ev)) },
-		AuditSinkConfigured:    s.auditSinkConfigured,
-		RequestID:              RequestIDFromContext,
-		AccessKey:              AccessKeyFromContext,
-		NewRespWriter:          func(c *app.RequestContext) http.ResponseWriter { return newResponseWriter(c) },
-	})
-	s.iceberg.ApplyDiagEnv()
 	s.receipt = receiptsvc.NewHandler(receiptsvc.Deps{
 		API:              s.receiptAPI,
 		FeatureAvailable: func() bool { return s.routeFeatureRoutesVisible(routeFeatureReceipt) },
@@ -112,13 +75,6 @@ func NewWithServerStorage(addr string, ss ServerStorage, policyStore *CompiledPo
 	s.incidentH = incidentsvc.NewHandler(incidentsvc.Deps{
 		IncidentStore:    s.incidentStore,
 		FeatureAvailable: func() bool { return s.routeFeatureRoutesVisible(routeFeatureIncident) },
-	})
-	s.snapshotH = snapshotsvc.NewHandler(snapshotsvc.Deps{
-		SnapMgr:          s.snapMgr,
-		FeatureAvailable: func() bool { return s.routeFeatureAvailable(routeFeatureSnapshot) },
-		MutationDisabled: s.blockIfMutationDisabled,
-		LocalhostOnly:    localhostOnly,
-		EmitEvent:        s.emitEvent,
 	})
 	s.registerRoutes(h)
 	s.hertz = h
@@ -131,10 +87,9 @@ func NewWithServerStorage(addr string, ss ServerStorage, policyStore *CompiledPo
 // dependencies. Call after Options have populated iamStore, iamAudit,
 // policyStore, and policyAuthorizer so the authorizer captures their final values.
 func (s *Server) buildAuthorizer() {
-	var iamStore s3auth.IAMStore
-	if s.iamStore != nil {
-		iamStore = s.iamStore
-	}
+	// authEnabled mirrors the historical gate: the old auth-enabled shim was
+	// constant-true, so authz is enabled iff the IAM store is wired.
+	authEnabled := s.iamStore != nil
 
 	// iamCheck: when a policy authorizer is wired, Layer 1 evaluates
 	// policy.Evaluate for the (saID, bucket, action) triple. Without one
@@ -183,7 +138,7 @@ func (s *Server) buildAuthorizer() {
 	}
 
 	s.authz = s3auth.NewRequestAuthorizer(
-		iamStore,
+		authEnabled,
 		iamCheck,
 		s.policyStore,
 		s.iamAudit,
@@ -236,22 +191,19 @@ func (s *Server) TLSActive() bool {
 	return s.tlsListener.IsTLS()
 }
 
-// VolumeManager exposes the volume manager so callers can construct admin.Deps
-// without round-tripping through New options.
-func (s *Server) VolumeManager() *volume.Manager { return s.volMgr }
-
 // Operations exposes the storage operations facade so external workflows
 // (e.g. serveruntime startup recovery) can invoke decorator-aware capability
 // helpers like SweepOrphanMultiparts without reaching into Server internals.
 func (s *Server) Operations() *storage.Operations { return s.ops }
 
+// PolicyStore returns the compiled bucket-policy store so boot wiring can hook
+// its cache invalidator into the cluster apply path.
+func (s *Server) PolicyStore() *CompiledPolicyStore { return s.policyStore }
+
 // Shutdown gracefully shuts down the server, draining in-flight requests.
 func (s *Server) Shutdown(ctx context.Context) error {
 	err := s.hertz.Shutdown(ctx)
 	s.stopEventWorker()
-	if closer, ok := s.auditSearcher.(interface{ Close() error }); ok {
-		_ = closer.Close()
-	}
 	if s.alerts != nil {
 		s.alerts.Close()
 	}

@@ -2,16 +2,13 @@ package cluster
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"time"
 
-	"github.com/dgraph-io/badger/v4"
-
-	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/metastore"
 	"github.com/gritive/GrainFS/internal/raft"
-	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/gritive/GrainFS/internal/storage/datawal"
 )
 
 type singletonBackendTestTB interface {
@@ -19,6 +16,103 @@ type singletonBackendTestTB interface {
 	Cleanup(func())
 	TempDir() string
 	Fatalf(format string, args ...interface{})
+}
+
+// directFSMMetaBucketStore is a MetaBucketStore implementation for tests and
+// single-node tooling. It applies bucket-mutation commands directly to a local
+// MetaFSM (the meta-raft layer). Record / RecordLinearized / AllRecords read
+// from the MetaFSM so HeadBucket, GetBucketVersioning, GetBucketPolicy, and
+// ListBuckets all see consistent state.
+//
+// Task 12: the group-0 dual-write path is removed. Bucket control-plane is now
+// entirely in meta-raft; all group-0 bucket applies are no-ops.
+type directFSMMetaBucketStore struct {
+	meta *MetaFSM
+}
+
+// newDirectFSMMetaBucketStore returns a MetaBucketStore that applies mutations
+// directly to a fresh MetaFSM. Safe for tests and single-node server starts
+// where no meta-Raft quorum is available.
+func newDirectFSMMetaBucketStore(_ *FSM) MetaBucketStore {
+	return &directFSMMetaBucketStore{meta: NewMetaFSM()}
+}
+
+func (s *directFSMMetaBucketStore) CreateBucket(_ context.Context, bucket, groupID string, bypassReserved bool) error {
+	// MetaFSM.applyCreateBucket requires non-empty groupID; use "local" when
+	// unset (tests / single-node paths that don't assign a data group).
+	if groupID == "" {
+		groupID = "local"
+	}
+	metaRaw, err := encodeMetaCreateBucketCmd(bucket, groupID, bypassReserved)
+	if err != nil {
+		return err
+	}
+	cmd, err := encodeMetaCmd(MetaCmdTypeCreateBucket, metaRaw)
+	if err != nil {
+		return err
+	}
+	return s.meta.applyCmd(cmd)
+}
+
+func (s *directFSMMetaBucketStore) DeleteBucket(_ context.Context, bucket string) error {
+	metaRaw, err := encodeMetaDeleteBucketCmd(bucket)
+	if err != nil {
+		return err
+	}
+	cmd, err := encodeMetaCmd(MetaCmdTypeDeleteBucket, metaRaw)
+	if err != nil {
+		return err
+	}
+	return s.meta.applyCmd(cmd)
+}
+
+func (s *directFSMMetaBucketStore) SetVersioning(_ context.Context, bucket, state string) error {
+	metaRaw, err := encodeMetaSetBucketVersioningCmd(bucket, state)
+	if err != nil {
+		return err
+	}
+	cmd, err := encodeMetaCmd(MetaCmdTypeSetBucketVersioning, metaRaw)
+	if err != nil {
+		return err
+	}
+	return s.meta.applyCmd(cmd)
+}
+
+func (s *directFSMMetaBucketStore) SetPolicy(_ context.Context, bucket string, policy []byte) error {
+	metaRaw, err := encodeMetaSetBucketPolicyCmd(bucket, append([]byte(nil), policy...))
+	if err != nil {
+		return err
+	}
+	cmd, err := encodeMetaCmd(MetaCmdTypeSetBucketPolicy, metaRaw)
+	if err != nil {
+		return err
+	}
+	return s.meta.applyCmd(cmd)
+}
+
+func (s *directFSMMetaBucketStore) DeletePolicy(_ context.Context, bucket string) error {
+	metaRaw, err := encodeMetaDeleteBucketPolicyCmd(bucket)
+	if err != nil {
+		return err
+	}
+	cmd, err := encodeMetaCmd(MetaCmdTypeDeleteBucketPolicy, metaRaw)
+	if err != nil {
+		return err
+	}
+	return s.meta.applyCmd(cmd)
+}
+
+func (s *directFSMMetaBucketStore) Record(bucket string) (BucketRecord, bool) {
+	return s.meta.BucketRecord(bucket)
+}
+
+func (s *directFSMMetaBucketStore) RecordLinearized(_ context.Context, bucket string) (BucketRecord, bool, error) {
+	rec, ok := s.meta.BucketRecord(bucket)
+	return rec, ok, nil
+}
+
+func (s *directFSMMetaBucketStore) AllRecords() map[string]BucketRecord {
+	return s.meta.AllBucketRecords()
 }
 
 // NewSingletonBackendForTest spins up a DistributedBackend as a one-node
@@ -32,20 +126,47 @@ type singletonBackendTestTB interface {
 //
 // As of M5 PR 29 the GRAINFS_RAFT_V2 flag is gone; this helper always
 // instantiates a v2 raft node via newRaftNode.
+// singletonTestShardGroupSource is a fixed single-group ShardGroupSource used by
+// NewSingletonBackendForTest so the streaming chunked PUT path has a shard group
+// without a real cluster boot. The group's peers are all the local node.
+type singletonTestShardGroupSource struct {
+	group ShardGroupEntry
+}
+
+func newSingletonTestShardGroupSource(selfAddr string, numShards int) singletonTestShardGroupSource {
+	if numShards < 1 {
+		numShards = 1
+	}
+	peers := make([]string, numShards)
+	for i := range peers {
+		peers[i] = selfAddr
+	}
+	return singletonTestShardGroupSource{group: ShardGroupEntry{ID: "group-0", PeerIDs: peers}}
+}
+
+func (s singletonTestShardGroupSource) ShardGroup(id string) (ShardGroupEntry, bool) {
+	if id == s.group.ID {
+		return s.group, true
+	}
+	return ShardGroupEntry{}, false
+}
+
+func (s singletonTestShardGroupSource) ShardGroups() []ShardGroupEntry {
+	return []ShardGroupEntry{s.group}
+}
+
 func NewSingletonBackendForTest(t singletonBackendTestTB) *DistributedBackend {
 	t.Helper()
 	dir := t.TempDir()
 
-	metaDir := dir + "/meta"
-	db, err := badger.Open(badgerutil.SmallOptions(metaDir))
-	if err != nil {
-		t.Fatalf("open badger: %v", err)
-	}
+	// Phase 6.5: metadata goes to an in-memory MetadataStore — the contract's
+	// conformance suite pins it to badger semantics, so package tests get the
+	// same behavior without cluster touching badger.
+	store := metastore.NewMemStore()
 
 	cfg := raft.DefaultConfig("test-node", nil)
 	node, closeFn, err := newRaftNode(cfg, dir)
 	if err != nil {
-		db.Close()
 		t.Fatalf("newRaftNode: %v", err)
 	}
 	node.SetTransport(
@@ -71,7 +192,7 @@ func NewSingletonBackendForTest(t singletonBackendTestTB) *DistributedBackend {
 		t.Fatalf("no-peers node must become leader")
 	}
 
-	backend, err := NewDistributedBackend(dir, db, node, nil, false)
+	backend, err := NewDistributedBackend(dir, store, node, nil, false)
 	if err != nil {
 		t.Fatalf("NewDistributedBackend: %v", err)
 	}
@@ -82,13 +203,17 @@ func NewSingletonBackendForTest(t singletonBackendTestTB) *DistributedBackend {
 	if kErr != nil {
 		t.Fatalf("test DEK keeper: %v", kErr)
 	}
-	dwal, err := datawal.Open(backend.root+"/datawal", storage.NewDEKKeeperAdapter(keeper, clusterID), datawal.NamespaceShard)
-	if err != nil {
-		t.Fatalf("open data wal: %v", err)
-	}
-	t.Cleanup(func() { _ = dwal.Close() })
-	svc := NewShardService(backend.root, nil, WithShardDEKKeeper(keeper, clusterID), WithDataWAL(dwal))
+	svc := NewShardService(backend.root, nil, WithShardDEKKeeper(keeper, clusterID))
 	backend.SetShardService(svc, []string{backend.selfAddr})
+	// Wire a single-node ShardGroupSource so the streaming chunked PUT path (which
+	// requires a non-nil shard group — production always wires one) works without a
+	// real cluster boot. Sized to the current EC stripe (1+0 here); callers that
+	// widen the EC config must re-wire a group of matching width.
+	backend.SetShardGroupSource(newSingletonTestShardGroupSource(backend.selfAddr, backend.currentECConfig().NumShards()))
+	// Wire the direct-FSM MetaBucketStore so all bucket-write paths work without
+	// a real meta-Raft cluster. Bucket mutations are applied directly to the
+	// local group-0 FSM, keeping read paths (HeadBucket, etc.) consistent.
+	backend.SetMetaBucketStore(newDirectFSMMetaBucketStore(backend.fsm))
 
 	stopApply := make(chan struct{})
 	go backend.RunApplyLoop(stopApply)
@@ -109,7 +234,6 @@ func NewSingletonBackendForTest(t singletonBackendTestTB) *DistributedBackend {
 		if closeFn != nil {
 			_ = closeFn()
 		}
-		db.Close()
 	})
 
 	return backend

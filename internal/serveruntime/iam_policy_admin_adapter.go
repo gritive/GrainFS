@@ -79,8 +79,6 @@ func (a *iamPolicyAdminAdapter) GroupAffectsPrincipal(ctx context.Context, actor
 
 func (a *iamPolicyAdminAdapter) effectivePolicyNames(ctx context.Context, actor principal.Principal) ([]string, error) {
 	switch actor.Kind {
-	case principal.KindMountSA:
-		return a.stores.Attach.MountSAPolicies(ctx, actor.ID)
 	case principal.KindOIDC:
 		names, err := a.stores.Attach.SAPolicies(ctx, actor.ID)
 		if err != nil {
@@ -161,8 +159,6 @@ func simulatePrincipal(req admin.PolicySimulateRequest) (principal.Principal, er
 	switch principal.Kind(req.PrincipalKind) {
 	case principal.KindServiceAccount:
 		return principal.ServiceAccount(req.PrincipalID), nil
-	case principal.KindMountSA:
-		return principal.MountSA(req.PrincipalID), nil
 	case principal.KindProtocolCredential:
 		return principal.ProtocolCredential(req.PrincipalID, ""), nil
 	case principal.KindOIDC:

@@ -7,6 +7,7 @@ import (
 	"io"
 	"testing"
 
+	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/stretchr/testify/require"
 )
 
@@ -36,7 +37,6 @@ func BenchmarkShardServiceWriteLocalShardStream5MiBEncrypted(b *testing.B) {
 				b.TempDir(),
 				nil,
 				WithShardDEKKeeper(keeper, clusterID),
-				WithShardPackThreshold(65545),
 			)
 
 			b.SetBytes(int64(len(payload)))
@@ -44,6 +44,71 @@ func BenchmarkShardServiceWriteLocalShardStream5MiBEncrypted(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				err := tc.put(context.Background(), svc, "bench", fmt.Sprintf("obj-%d", i), 0, payload)
+				require.NoError(b, err)
+			}
+		})
+	}
+}
+
+func BenchmarkShardServiceWriteLocalShardStreamStaged5MiBEncrypted(b *testing.B) {
+	keeper, clusterID := testDEKKeeper(b)
+	payload := bytes.Repeat([]byte("x"), 5<<20)
+
+	for _, tc := range []struct {
+		name string
+		put  func(context.Context, *ShardService, string, string, string, int, []byte) error
+	}{
+		{
+			name: "unsized-staged",
+			put: func(ctx context.Context, svc *ShardService, bucket, stagingKey, finalKey string, shardIdx int, body []byte) error {
+				return svc.WriteLocalShardStreamStagedContext(ctx, bucket, stagingKey, finalKey, shardIdx, bytes.NewReader(body))
+			},
+		},
+		{
+			name: "sized-staged",
+			put: func(ctx context.Context, svc *ShardService, bucket, stagingKey, finalKey string, shardIdx int, body []byte) error {
+				return svc.WriteLocalShardStreamStagedSizedContext(ctx, bucket, stagingKey, finalKey, shardIdx, bytes.NewReader(body), int64(len(body)), -1)
+			},
+		},
+		{
+			name: "native-unsized-staged",
+			put: func(ctx context.Context, svc *ShardService, bucket, stagingKey, finalKey string, shardIdx int, body []byte) error {
+				return svc.NativeWriteHandler()(transport.ShardWriteRequest{
+					Bucket:     bucket,
+					Key:        finalKey,
+					StagingKey: stagingKey,
+					ShardIdx:   shardIdx,
+				}, bytes.NewReader(body))
+			},
+		},
+		{
+			name: "native-sized-staged",
+			put: func(ctx context.Context, svc *ShardService, bucket, stagingKey, finalKey string, shardIdx int, body []byte) error {
+				return svc.NativeWriteHandler()(transport.ShardWriteRequest{
+					Bucket:          bucket,
+					Key:             finalKey,
+					StagingKey:      stagingKey,
+					ShardIdx:        shardIdx,
+					StreamSizeKnown: true,
+					StreamSize:      int64(len(body)),
+				}, bytes.NewReader(body))
+			},
+		},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			svc := NewShardService(
+				b.TempDir(),
+				nil,
+				WithShardDEKKeeper(keeper, clusterID),
+			)
+
+			b.SetBytes(int64(len(payload)))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				finalKey := fmt.Sprintf("obj-%d/segments/blob", i)
+				stagingKey := fmt.Sprintf(".segstaging/txn-%d/blob", i)
+				err := tc.put(context.Background(), svc, "bench", stagingKey, finalKey, 0, payload)
 				require.NoError(b, err)
 			}
 		})
@@ -62,7 +127,6 @@ func BenchmarkShardServiceOpenLocalShardStream2_5MiB(b *testing.B) {
 		b.TempDir(),
 		nil,
 		WithShardDEKKeeper(keeper, clusterID),
-		WithShardPackThreshold(65545),
 	)
 	require.NoError(b, svc.WriteLocalShardStreamSizedContext(context.Background(), "bench", "obj", 0, bytes.NewReader(payload), int64(len(payload))))
 

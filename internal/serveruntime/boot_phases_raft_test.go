@@ -1,7 +1,6 @@
 package serveruntime
 
 import (
-	"bytes"
 	"context"
 	"testing"
 	"time"
@@ -11,7 +10,7 @@ import (
 )
 
 // raftPhasePrereqs runs every phase up to (but not including) the raft phases:
-// config validate, meta DB open, transport (QUIC + peers + mux).
+// config validate, meta DB open, and cluster transport setup.
 // Returns a state ready for the four raft phases under test.
 func raftPhasePrereqs(t *testing.T) (context.Context, *bootState) {
 	t.Helper()
@@ -26,7 +25,6 @@ func raftPhasePrereqs(t *testing.T) (context.Context, *bootState) {
 	t.Cleanup(cancel)
 
 	require.NoError(t, bootClusterTransport(ctx, state))
-	require.NoError(t, bootPeerConnections(ctx, state))
 	require.NoError(t, bootGroupRaftMux(state))
 	return ctx, state
 }
@@ -57,7 +55,6 @@ func TestBootRaftPhases_OrderingInvariant(t *testing.T) {
 	require.NoError(t, bootMetaRaftWiring(state))
 	require.NotNil(t, state.metaRaft, "metaRaft after Wiring")
 	require.NotNil(t, state.metaTransport, "metaTransport after Wiring")
-	require.NotNil(t, state.nfsExportSvc, "NFS export service after Wiring")
 	assert.Nil(t, state.dgMgr, "DataGroup not yet constructed before its phase")
 	assert.Nil(t, state.clusterRouter, "Router not yet constructed before its phase")
 	assert.Nil(t, state.rotationWorker, "Rotation not yet constructed before its phase")
@@ -67,8 +64,6 @@ func TestBootRaftPhases_OrderingInvariant(t *testing.T) {
 	require.NoError(t, bootDataGroupRouter(state))
 	require.NotNil(t, state.dgMgr, "DataGroupManager after DataGroupRouter phase")
 	require.NotNil(t, state.clusterRouter, "Router after DataGroupRouter phase")
-	// SetDefault("group-0") was applied. ExplicitGroup returns false for
-	// unassigned buckets but the default keeps RouteKey from erroring.
 	if explicit, ok := state.clusterRouter.ExplicitGroup("any-bucket"); ok {
 		t.Errorf("brand-new bucket should not have explicit assignment, got %q", explicit)
 	}
@@ -85,35 +80,8 @@ func TestBootRaftPhases_OrderingInvariant(t *testing.T) {
 	// 4. Only NOW is Start fired. Both callbacks are already wired into
 	//    metaRaft.FSM(); the apply loop cannot fire any event before
 	//    bootMetaRaftStart returns.
-	require.NoError(t, bootMetaRaftStart(ctx, state, nil))
+	require.NoError(t, bootMetaRaftStart(ctx, state))
 	assert.NotNil(t, state.metaRaft.Node(), "node alive after Start")
 	// metaRaft is now live; Close cleanup is on the stack. State.Cleanup
 	// (deferred via t.Cleanup) will tear it down.
-}
-
-// TestPostRestoreCallback_ProxyTrustUpdated — F25 integration:
-// wire cfgStore + proxyTrust + post-restore callback via bootMetaRaftWiring,
-// then simulate a Restore with specific config values and assert the
-// ProxyTrust CIDR set is driven correctly.
-func TestPostRestoreCallback_ProxyTrustUpdated(t *testing.T) {
-	_, state := raftPhasePrereqs(t)
-	state.bannerWriter = &bytes.Buffer{} // suppress stdout in test
-
-	require.NoError(t, bootMetaRaftWiring(state))
-	require.NotNil(t, state.cfgStore)
-	require.NotNil(t, state.proxyTrust)
-
-	// Simulate Restore installing trusted-proxy.cidr.
-	state.cfgStore.Restore(map[string]string{
-		"trusted-proxy.cidr": "10.0.0.0/8,192.168.0.0/16",
-	})
-
-	// F25: ProxyTrust must reflect the restored CIDR. With 10.0.0.0/8 trusted,
-	// a request from 10.1.2.3 with valid forwarding headers should unwrap to
-	// the forwarded-for IP (1.2.3.4), proving the source is now in the trusted
-	// set. Before Restore the CIDR set was empty, so Authoritative would have
-	// returned the raw remote address unchanged.
-	gotIP, ok := state.proxyTrust.Authoritative("10.1.2.3", "proto=https;for=1.2.3.4", "", "")
-	assert.True(t, ok, "Authoritative must succeed for trusted source with valid headers")
-	assert.Equal(t, "1.2.3.4", gotIP, "ProxyTrust must reflect restored CIDRs after Restore")
 }

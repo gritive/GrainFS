@@ -30,40 +30,30 @@ type ServeOptions struct {
 	JoinListenAddr string // --join-listen-addr
 	ClusterKey     string // resolved cluster transport key (disk / self-seed / invite-join)
 
+	// --- Cluster bootstrap (Option B: uniform genesis seeding) ---
+	BootstrapExpectNodes   int           // --bootstrap-expect-nodes (0/unset = seed-immediately)
+	BootstrapExpectTimeout time.Duration // --bootstrap-expect-timeout
+
 	// --- Cluster transport tuning ---
-	AppendForwardBufferTotalBytes    int64         // --cluster-append-forward-buffer-total-bytes
-	AppendForwardBufferMaxPerRequest int64         // --cluster-append-forward-buffer-max-per-request
-	AppendSizeCapBytes               int64         // --append-size-cap-bytes
-	MuxPoolSize                      int           // --mux-pool
-	MuxFlushWindow                   time.Duration // --mux-flush
+	AppendSizeCapBytes int64 // --append-size-cap-bytes
 
 	// --- Storage knobs ---
-	PackThreshold      int   // --pack-threshold
-	ShardPackThreshold int   // --shard-pack-threshold
-	DirectIO           bool  // --direct-io
-	MeasureReadAmp     bool  // --measure-read-amp
-	BlockCacheSize     int64 // --block-cache-size
-	ShardCacheSize     int64 // --shard-cache-size
-
-	// --- Protocols ---
-	NFS4Port           int           // --nfs4-port
-	NFSWriteBufferDir  string        // --nfs-write-buffer-dir
-	NFSWriteBufferIdle time.Duration // --nfs-write-buffer-idle
-	NBDPort            int           // --nbd-port
-	P9Bind             string        // --9p-bind
-	P9Port             int           // --9p-port
+	PackThreshold  int   // --pack-threshold
+	MeasureReadAmp bool  // --measure-read-amp
+	ShardCacheSize int64 // --shard-cache-size
 
 	// --- Intervals ---
-	ScrubInterval            time.Duration // --scrub-interval
-	ScrubOrphanAge           time.Duration // --scrub-orphan-age
-	SegmentGCRetention       time.Duration // --segment-gc-retention
-	ReshardInterval          time.Duration // --reshard-interval
-	DataGroupRefreshInterval time.Duration // --datagroup-refresh-interval
-	DegradedInterval         time.Duration // --degraded-check-interval
-	LifecycleInterval        time.Duration // --lifecycle-interval
-	RaftLogGCInterval        time.Duration // --raft-log-gc-interval
-	RaftHeartbeatInterval    time.Duration // --raft-heartbeat-interval
-	RaftElectionTimeout      time.Duration // --raft-election-timeout
+	ScrubInterval             time.Duration // --scrub-interval
+	ScrubOrphanAge            time.Duration // --scrub-orphan-age
+	SegmentGCRetention        time.Duration // --segment-gc-retention
+	ECRedundancyUpgrade       bool          // --ec-redundancy-upgrade
+	ECRedundancyUpgradeMax    int           // --ec-redundancy-upgrade-max
+	ECRedundancyUpgradeMinAge time.Duration // --ec-redundancy-upgrade-min-age
+	DegradedInterval          time.Duration // --degraded-check-interval
+	LifecycleInterval         time.Duration // --lifecycle-interval
+	RaftLogGCInterval         time.Duration // --raft-log-gc-interval
+	RaftHeartbeatInterval     time.Duration // --raft-heartbeat-interval
+	RaftElectionTimeout       time.Duration // --raft-election-timeout
 
 	// --- Heal Receipt ---
 	HealReceiptEnabled        bool          // --heal-receipt-enabled
@@ -71,10 +61,6 @@ type ServeOptions struct {
 	HealReceiptRetention      time.Duration // --heal-receipt-retention
 	HealReceiptGossipInterval time.Duration // --heal-receipt-gossip-interval
 	HealReceiptWindow         int           // --heal-receipt-window
-
-	// --- Audit ---
-	AuditIceberg        bool          // --audit-iceberg
-	AuditCommitInterval time.Duration // --audit-commit-interval
 
 	// --- At-rest KEK protection (opt-in; default plaintext) ---
 	KEKProtector          string // --kek-protector (plaintext|env)

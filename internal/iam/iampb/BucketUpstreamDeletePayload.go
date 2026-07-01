@@ -49,11 +49,26 @@ func (rcv *BucketUpstreamDeletePayload) Bucket() []byte {
 	return nil
 }
 
+func (rcv *BucketUpstreamDeletePayload) Generation() uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
+	if o != 0 {
+		return rcv._tab.GetUint64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *BucketUpstreamDeletePayload) MutateGeneration(n uint64) bool {
+	return rcv._tab.MutateUint64Slot(6, n)
+}
+
 func BucketUpstreamDeletePayloadStart(builder *flatbuffers.Builder) {
-	builder.StartObject(1)
+	builder.StartObject(2)
 }
 func BucketUpstreamDeletePayloadAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
+}
+func BucketUpstreamDeletePayloadAddGeneration(builder *flatbuffers.Builder, generation uint64) {
+	builder.PrependUint64Slot(1, generation, 0)
 }
 func BucketUpstreamDeletePayloadEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

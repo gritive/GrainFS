@@ -100,13 +100,13 @@ func TestAuthorize_SAWithReadonlyPolicy(t *testing.T) {
 
 func TestAuthorizePrincipal_OIDCGroupPolicyAllows(t *testing.T) {
 	a, ps, pa, _ := newTestAuthorizer(t, false, false)
-	require.NoError(t, ps.Put(context.Background(), "credential-admin", []byte(`{"Statement":[{"Effect":"Allow","Action":"grainfs:CredentialCreate","Resource":"protocol-credential/nbd/volume/devdisk"}]}`), true))
+	require.NoError(t, ps.Put(context.Background(), "credential-admin", []byte(`{"Statement":[{"Effect":"Allow","Action":"grainfs:CredentialCreate","Resource":"protocol-credential/s3/bucket/devdisk"}]}`), true))
 	require.NoError(t, pa.AttachToGroup(context.Background(), "oidc:example:storage-admins", "credential-admin"))
 
 	actor := principal.OIDC("https://idp.example.com/", "alice", "oidc:example:alice", []string{"oidc:example:storage-admins"})
 	got := a.AuthorizePrincipal(context.Background(), actor, "", policy.RequestContext{
 		Action:   "grainfs:CredentialCreate",
-		Resource: "protocol-credential/nbd/volume/devdisk",
+		Resource: "protocol-credential/s3/bucket/devdisk",
 	})
 
 	require.Equal(t, policy.DecisionAllow, got.Decision, got.Reason)
@@ -130,7 +130,7 @@ func TestAuthorizePrincipal_UnsupportedKindDeny(t *testing.T) {
 	a, _, _, _ := newTestAuthorizer(t, false, false)
 	got := a.AuthorizePrincipal(context.Background(), principal.Principal{Kind: "unknown", ID: "x"}, "", policy.RequestContext{
 		Action:   "grainfs:CredentialCreate",
-		Resource: "protocol-credential/nbd/volume/devdisk",
+		Resource: "protocol-credential/s3/bucket/devdisk",
 	})
 
 	require.Equal(t, policy.DecisionDeny, got.Decision)
@@ -182,9 +182,6 @@ type errStore struct{ err error }
 func (e *errStore) SAPolicies(_ context.Context, _ string) ([]string, error)    { panic("not called") }
 func (e *errStore) SAGroups(_ context.Context, _ string) ([]string, error)      { panic("not called") }
 func (e *errStore) GroupPolicies(_ context.Context, _ string) ([]string, error) { panic("not called") }
-func (e *errStore) MountSAPolicies(_ context.Context, _ string) ([]string, error) {
-	panic("not called")
-}
 func (e *errStore) PolicyDoc(_ context.Context, _ string) (*policy.Document, error) {
 	panic("not called")
 }

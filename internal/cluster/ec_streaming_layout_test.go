@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"os"
 	"testing"
 
 	"github.com/klauspost/reedsolomon"
@@ -60,11 +59,7 @@ func TestSpoolECShardsWritesLinearLayout(t *testing.T) {
 	cfg := ECConfig{DataShards: 2, ParityShards: 2}
 	input := append(bytes.Repeat([]byte{'A'}, 5<<20), bytes.Repeat([]byte{'B'}, 5<<20)...)
 	tmpDir := t.TempDir()
-	spoolPath := tmpDir + "/spool.bin"
-	require.NoError(t, os.WriteFile(spoolPath, input, 0o600))
-	sp := &spooledObject{Path: spoolPath, Size: int64(len(input))}
-	defer sp.Cleanup()
-	out, err := spoolECShards(context.Background(), cfg, tmpDir, sp)
+	out, err := spoolECShardsStream(context.Background(), cfg, tmpDir, bytes.NewReader(input), int64(len(input)))
 	require.NoError(t, err)
 	defer out.Cleanup()
 	for i := 0; i < cfg.DataShards; i++ {
@@ -88,13 +83,14 @@ func TestClusterPutGet_10MiB_2plus2_RoundTrip(t *testing.T) {
 	backend := NewSingletonBackendForTest(t)
 	shardDir := t.TempDir()
 	keeper, clusterID := testDEKKeeper(t)
-	backend.shardSvc = NewShardService(shardDir, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	backend.shardSvc = NewShardService(shardDir, nil, WithShardDEKKeeper(keeper, clusterID))
 
 	// 4 "nodes" all pointing at self → 2+2 IsActive(4)=true, all shards local.
 	const selfAddr = "self"
 	backend.selfAddr = selfAddr
 	backend.allNodes = []string{selfAddr, selfAddr, selfAddr, selfAddr}
 	backend.SetECConfig(ECConfig{DataShards: 2, ParityShards: 2})
+	wireTestShardGroup(backend)
 
 	require.NoError(t, backend.CreateBucket(context.Background(), "b"))
 	input := makeABPayload(5 << 20)
@@ -144,12 +140,7 @@ func TestEcReconstructMissingDataStreamTo_LinearLayout(t *testing.T) {
 	input := append(bytes.Repeat([]byte{'A'}, 5<<20), bytes.Repeat([]byte{'B'}, 5<<20)...)
 
 	tmpDir := t.TempDir()
-	spoolPath := tmpDir + "/spool.bin"
-	require.NoError(t, os.WriteFile(spoolPath, input, 0o600))
-	sp := &spooledObject{Path: spoolPath, Size: int64(len(input))}
-	defer sp.Cleanup()
-
-	out, err := spoolECShards(context.Background(), cfg, tmpDir, sp)
+	out, err := spoolECShardsStream(context.Background(), cfg, tmpDir, bytes.NewReader(input), int64(len(input)))
 	require.NoError(t, err)
 	defer out.Cleanup()
 
@@ -201,12 +192,13 @@ func TestClusterMultipart_10MiB_2plus2_RoundTrip(t *testing.T) {
 	backend := NewSingletonBackendForTest(t)
 	shardDir := t.TempDir()
 	keeper, clusterID := testDEKKeeper(t)
-	backend.shardSvc = NewShardService(shardDir, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	backend.shardSvc = NewShardService(shardDir, nil, WithShardDEKKeeper(keeper, clusterID))
 
 	const selfAddr = "self"
 	backend.selfAddr = selfAddr
 	backend.allNodes = []string{selfAddr, selfAddr, selfAddr, selfAddr}
 	backend.SetECConfig(ECConfig{DataShards: 2, ParityShards: 2})
+	wireTestShardGroup(backend)
 
 	ctx := context.Background()
 	require.NoError(t, backend.CreateBucket(ctx, "b"))
@@ -218,9 +210,9 @@ func TestClusterMultipart_10MiB_2plus2_RoundTrip(t *testing.T) {
 	mu, err := backend.CreateMultipartUpload(ctx, "b", "k", "application/octet-stream")
 	require.NoError(t, err)
 
-	p1, err := backend.UploadPart(ctx, "b", "k", mu.UploadID, 1, bytes.NewReader(part1))
+	p1, err := backend.UploadPart(ctx, "b", "k", mu.UploadID, 1, bytes.NewReader(part1), "")
 	require.NoError(t, err)
-	p2, err := backend.UploadPart(ctx, "b", "k", mu.UploadID, 2, bytes.NewReader(part2))
+	p2, err := backend.UploadPart(ctx, "b", "k", mu.UploadID, 2, bytes.NewReader(part2), "")
 	require.NoError(t, err)
 
 	_, err = backend.CompleteMultipartUpload(ctx, "b", "k", mu.UploadID, []storage.Part{

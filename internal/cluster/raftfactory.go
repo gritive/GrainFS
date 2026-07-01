@@ -2,22 +2,9 @@ package cluster
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 
-	badger "github.com/dgraph-io/badger/v4"
-
-	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/raft"
 )
-
-var (
-	raftV2LogPrefix    = []byte("raft/v2/log/")
-	raftV2StablePrefix = []byte("raft/v2/hardstate/")
-	raftV2SnapPrefix   = []byte("raft/v2/snap/")
-)
-
-const raftV2StoreSubdir = "raft-v2"
 
 type RaftV2StoreOptions struct {
 	EncryptionKey []byte
@@ -51,14 +38,14 @@ func newRaftNodeV2WithStoreOptions(rcfg raft.Config, v2StoreDir string, opts Raf
 
 	var closeFn func() error
 	if v2StoreDir != "" {
-		db, ls, ss, sn, err := openRaftV2Stores(v2StoreDir, opts)
+		ls, ss, sn, dbClose, err := raft.OpenV2Stores(v2StoreDir, opts.EncryptionKey)
 		if err != nil {
 			return nil, nil, fmt.Errorf("raft open stores: %w", err)
 		}
 		v2cfg.LogStore = ls
 		v2cfg.StableStore = ss
 		v2cfg.SnapshotStore = sn
-		closeFn = db.Close
+		closeFn = dbClose
 	}
 
 	n, err := raft.NewNode(v2cfg)
@@ -77,39 +64,4 @@ func NewRaftV2NodeForServeruntime(rcfg raft.Config, raftDir string) (RaftNode, f
 
 func NewRaftV2NodeForServeruntimeWithStoreOptions(rcfg raft.Config, raftDir string, opts RaftV2StoreOptions) (RaftNode, func() error, error) {
 	return newRaftNodeV2WithStoreOptions(rcfg, raftDir, opts)
-}
-
-func openRaftV2Stores(dir string, opts RaftV2StoreOptions) (*badger.DB, raft.LogStore, raft.StableStore, raft.SnapshotStore, error) {
-	storeDir := filepath.Join(dir, raftV2StoreSubdir)
-	if err := os.MkdirAll(storeDir, 0o755); err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("mkdir %s: %w", storeDir, err)
-	}
-	bopts := badgerutil.RaftLogOptions(storeDir, true)
-	var err error
-	if len(opts.EncryptionKey) > 0 {
-		bopts, err = badgerutil.RaftLogEncryptedOptions(storeDir, true, opts.EncryptionKey)
-		if err != nil {
-			return nil, nil, nil, nil, err
-		}
-	}
-	db, err := badger.Open(bopts)
-	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("open badger %s: %w", storeDir, err)
-	}
-	ls, err := raft.NewBadgerLogStore(db, raftV2LogPrefix)
-	if err != nil {
-		_ = db.Close()
-		return nil, nil, nil, nil, fmt.Errorf("NewBadgerLogStore: %w", err)
-	}
-	ss, err := raft.NewBadgerStableStore(db, raftV2StablePrefix)
-	if err != nil {
-		_ = db.Close()
-		return nil, nil, nil, nil, fmt.Errorf("NewBadgerStableStore: %w", err)
-	}
-	sn, err := raft.NewBadgerSnapshotStore(db, raftV2SnapPrefix)
-	if err != nil {
-		_ = db.Close()
-		return nil, nil, nil, nil, fmt.Errorf("NewBadgerSnapshotStore: %w", err)
-	}
-	return db, ls, ss, sn, nil
 }

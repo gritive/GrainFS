@@ -1,15 +1,15 @@
 package cluster
 
 // Phase 18 Cluster EC: production EC helpers shared by PutObject/GetObject.
-// Placement formula matches internal/cluster/ecspike/ intentionally — the spike
-// validated this choice. When cluster size N == k+m, each key's shards land on
-// N distinct nodes.
+// Intra-group shard placement uses weighted Rendezvous Hashing (see
+// selectShardPlacement / internal/hrw); the writer records the chosen NodeIDs in
+// segment metadata and readers replay them, so placement is computed exactly
+// once per write.
 
 import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"path/filepath"
 	"sync"
@@ -82,27 +82,6 @@ func EffectiveConfig(n int, target ECConfig) ECConfig {
 	return target
 }
 
-// Placement returns the node index (into the ordered node slice) that holds
-// shardIdx for the given key. Formula: (FNV32(key) + shardIdx) mod N.
-// When shardCount == N, all shards for a key land on N distinct nodes.
-func Placement(key string, shardIdx, numNodes int) int {
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(key))
-	return (int(h.Sum32()) + shardIdx) % numNodes
-}
-
-// PlacementForNodes returns the ordered list of nodeIDs responsible for each
-// shardIdx of the given key. Length equals cfg.NumShards().
-// nodes must be deterministically ordered across the cluster (sorted).
-func PlacementForNodes(cfg ECConfig, nodes []string, key string) []string {
-	n := cfg.NumShards()
-	out := make([]string, n)
-	for i := 0; i < n; i++ {
-		out[i] = nodes[Placement(key, i, len(nodes))]
-	}
-	return out
-}
-
 // shardHeaderSize is the per-shard prefix that records original object size
 // so Reconstruct can call reedsolomon.Join(writer, shards, dataLen).
 const shardHeaderSize = 8
@@ -167,6 +146,50 @@ func ecSplitBodies(cfg ECConfig, data []byte) ([][]byte, error) {
 	return shards, nil
 }
 
+func ecSplitBodiesPooled(cfg ECConfig, data []byte) ([][]byte, [][]byte, error) {
+	n := cfg.NumShards()
+	if len(data) == 0 {
+		return make([][]byte, n), nil, nil
+	}
+	enc, err := getEncoder(cfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("ec encoder: %w", err)
+	}
+	perShard := ecSplitBackingSize(cfg, len(data)) / n
+	fullShards := len(data) / perShard
+	paddingCount := n - fullShards
+	padding := getECSplitPaddingShards(paddingCount, perShard)
+
+	shards := make([][]byte, n)
+	remaining := data
+	for i := 0; i < fullShards; i++ {
+		shards[i] = remaining[:perShard:perShard]
+		remaining = remaining[perShard:]
+	}
+	for i := 0; i < paddingCount; i++ {
+		pad := padding[i]
+		if fullShards+i < cfg.DataShards {
+			clear(pad)
+		}
+		if i == 0 && len(remaining) > 0 {
+			copy(pad, remaining)
+		}
+		shards[fullShards+i] = pad
+	}
+	if err := enc.Encode(shards); err != nil {
+		putECSplitPaddingShards(padding)
+		return nil, nil, fmt.Errorf("ec encode: %w", err)
+	}
+	return shards, padding, nil
+}
+
+func ecSplitBackingSize(cfg ECConfig, dataLen int) int {
+	if dataLen <= 0 || cfg.DataShards <= 0 {
+		return 0
+	}
+	return ((dataLen + cfg.DataShards - 1) / cfg.DataShards) * cfg.NumShards()
+}
+
 // ecSplitRawInto is the allocation-reusing variant of ecSplitBodies: instead
 // of letting reedsolomon.Split allocate a fresh shard matrix per call (~1 MiB
 // for a 1 MiB stripe — the largest single PUT-path allocation), it lays the
@@ -185,7 +208,7 @@ func ecSplitRawInto(cfg ECConfig, data []byte, dst []byte) (shards [][]byte, bac
 	if err != nil {
 		return nil, dst, fmt.Errorf("ec encoder: %w", err)
 	}
-	perShard := (len(data) + cfg.DataShards - 1) / cfg.DataShards
+	perShard := ecSplitBackingSize(cfg, len(data)) / n
 	total := perShard * n
 	if cap(dst) < total {
 		dst = make([]byte, total)
@@ -204,28 +227,17 @@ func ecSplitRawInto(cfg ECConfig, data []byte, dst []byte) (shards [][]byte, bac
 	return shards, dst, nil
 }
 
-// ECSplitRawInto is the exported wrapper over ecSplitRawInto for the
-// putpipeline actors. The returned shards alias the returned backing slice;
-// the caller pools the backing and must not recycle it until every shard has
-// been consumed. dst may be nil (a fresh backing is allocated).
+// ECSplitRawInto is the exported wrapper over ecSplitRawInto. The returned
+// shards alias the returned backing slice; the caller pools the backing and
+// must not recycle it until every shard has been consumed. dst may be nil (a
+// fresh backing is allocated).
 func ECSplitRawInto(cfg ECConfig, data []byte, dst []byte) (shards [][]byte, backing []byte, err error) {
 	return ecSplitRawInto(cfg, data, dst)
 }
 
-// ECSplitWithEncode is the exported wrapper for callers outside the
-// cluster package (the putpipeline actors). It returns k+m shards in
-// the same format as ECSplit: each shard is prefixed with an 8-byte
-// big-endian original-size header so the EC reader (ecReconstructStreamBodies)
-// can recover the exact byte count after decryption.
-func ECSplitWithEncode(cfg ECConfig, data []byte) ([][]byte, error) {
-	return ECSplit(cfg, data)
-}
-
 // ECSplitRaw is the header-less variant: returns k+m shard byte slices
-// WITHOUT the 8-byte size header. The actor pipeline calls this per
-// stripe because each shard file's size header is written ONCE per
-// object (at the head of each shard's chunked writer in
-// CPUPool.registerPut) using the full body size — not per-stripe.
+// WITHOUT the 8-byte size header, for callers that write the size header
+// once per shard file (not per stripe).
 func ECSplitRaw(cfg ECConfig, data []byte) ([][]byte, error) {
 	return ecSplitBodies(cfg, data)
 }
@@ -281,11 +293,6 @@ func ECReconstructStreamTo(w io.Writer, cfg ECConfig, shards []io.Reader) error 
 		return nil
 	}
 	return ecReconstructStreamBodiesTo(w, cfg, origSize, bodies)
-}
-
-//nolint:unused // referenced by ec_test.go.
-func newECReconstructStreamReader(cfg ECConfig, shards []io.Reader) (*ecReconstructStreamReader, error) {
-	return newECReconstructStreamReaderWithPrefetch(cfg, shards, true)
 }
 
 func newECReconstructStreamReaderWithPrefetch(cfg ECConfig, shards []io.Reader, allowPooledDataShardRead bool) (*ecReconstructStreamReader, error) {

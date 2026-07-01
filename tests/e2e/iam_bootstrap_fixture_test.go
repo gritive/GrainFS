@@ -27,8 +27,6 @@ func startUnbootstrappedSingleNode(t testing.TB) (dataDir, s3URL, adminSock stri
 	cmd := exec.Command(getBinary(), "serve",
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", port),
-		"--nfs4-port", fmt.Sprintf("%d", freePort()),
-		"--nbd-port", fmt.Sprintf("%d", freePort()),
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	)

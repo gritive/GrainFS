@@ -29,15 +29,13 @@ func mustShardDir(s *ShardService, bucket, key string, idx int) string {
 	return d
 }
 
-// newTraversalTestShardService builds a ShardService with shard-pack disabled
-// (default packThreshold 0 ⇒ shardPack nil), so writeLocalShard takes the
-// per-file branch that maps the object key into a filesystem path — the
-// path-traversal vector.
+// newTraversalTestShardService builds a ShardService whose writeLocalShard maps
+// the object key into a filesystem path — the path-traversal vector.
 func newTraversalTestShardService(t *testing.T) (*ShardService, string) {
 	t.Helper()
 	root := t.TempDir()
 	keeper, clusterID := testDEKKeeper(t)
-	svc := NewShardService(root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(root, nil, WithShardDEKKeeper(keeper, clusterID))
 	return svc, root
 }
 
@@ -74,7 +72,7 @@ func TestReadLocalShard_RejectsKeyEscapingShardRoot(t *testing.T) {
 func TestWriteLocalShard_RejectsKeyEscapingShardRoot(t *testing.T) {
 	svc, root := newTraversalTestShardService(t)
 
-	err := svc.writeLocalShard(context.Background(), "bucket", "../../../escape", 0, []byte("malicious"))
+	err := svc.local.writeLocalShard(context.Background(), "bucket", "../../../escape", 0, []byte("malicious"))
 	require.Error(t, err, "writeLocalShard must reject a key that escapes the shard root")
 
 	escaped := filepath.Join(filepath.Dir(root), "escape")
@@ -105,7 +103,7 @@ func TestShardPathUnderDataDir_RejectsEscapingBucket(t *testing.T) {
 		"a traversal bucket must not be reported as contained")
 
 	// A write with a traversal bucket must not materialize a shard outside root.
-	werr := svc.writeLocalShard(context.Background(), "..", "obj", 0, []byte("malicious"))
+	werr := svc.local.writeLocalShard(context.Background(), "..", "obj", 0, []byte("malicious"))
 	require.Error(t, werr, "writeLocalShard must reject a traversal bucket")
 	escaped := filepath.Join(filepath.Dir(root), "obj")
 	_, statErr := os.Stat(escaped)
@@ -126,4 +124,24 @@ func TestShardPathUnderDataDir_RejectsSeparatorBucket(t *testing.T) {
 	p, err := svc.getShardPath("bucket", "a/b/c", 0)
 	require.NoError(t, err, "a flat bucket with a nested key must be accepted")
 	require.True(t, svc.ShardPathUnderDataDir("bucket", 0, p))
+}
+
+// TestDeleteLocalShards_RejectsEscapingKey asserts the containment guard added to
+// DeleteLocalShards: a key with ".." segments that would escape {dataDir}/{bucket}
+// must be rejected with an error, and no path outside the shard root may be removed.
+// This mirrors the guard already present in deleteQuorumMetaLocal.
+func TestDeleteLocalShards_RejectsEscapingKey(t *testing.T) {
+	svc, root := newTraversalTestShardService(t)
+
+	// A key designed to escape: "../../escape" from {dataDir}/bucket/key → outside root.
+	err := svc.DeleteLocalShards("bucket", "../../escape")
+	require.Error(t, err, "DeleteLocalShards must reject a key that escapes the shard root")
+
+	// Nothing may have been created or removed outside the shard root.
+	escaped := filepath.Join(filepath.Dir(filepath.Dir(root)), "escape")
+	_, statErr := os.Stat(escaped)
+	require.Truef(t, os.IsNotExist(statErr), "no path may be removed outside the shard root; found %s", escaped)
+
+	// Benign key must still work (no regression).
+	require.NoError(t, svc.DeleteLocalShards("bucket", "a/b/c"), "benign key must be accepted by DeleteLocalShards")
 }

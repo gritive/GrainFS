@@ -3,16 +3,11 @@ package serveruntime
 import (
 	"context"
 	"fmt"
-	"net"
-	"path/filepath"
-	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/alerts"
-	"github.com/gritive/GrainFS/internal/audit"
 	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
@@ -20,7 +15,6 @@ import (
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/iam/pdp"
-	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/incident"
 	"github.com/gritive/GrainFS/internal/incident/badgerstore"
 	"github.com/gritive/GrainFS/internal/lifecycle"
@@ -29,27 +23,26 @@ import (
 	"github.com/gritive/GrainFS/internal/resourcewatch"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/server"
+	"github.com/gritive/GrainFS/internal/server/alertssvc"
 	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/gritive/GrainFS/internal/transport"
 )
 
 // bootSrvOptsAndReceipt assembles the slice of server.Option that will be
 // passed to server.New. It also wires the disk collector's threshold callback
 // (now that clusterAlerts exists), the heal-receipt stack, the incident
-// recorder + resource guards, the lifecycle manager, and the volume manager.
+// recorder + resource guards, and the lifecycle manager.
 //
 // Inputs:  state.cfg (many flags), state.metaRaft, state.peers, state.nodeID,
 //
 //	state.distBackend, state.db, state.backend, state.diskCollector,
-//	state.balancerProposer, state.metaForwardSender, state.metaReadSender,
+//	state.balancerProposer, state.metaForwardSender,
 //	state.clusterTransport, state.streamRouter, state.gossipReceiver,
 //	state.roleRegistry, state.recoveryReadOnly, state.shardCache,
 //	state.joinMode.
 //
 // Outputs: state.srvOpts, state.clusterAlerts, state.receiptWiring,
 //
-//	state.incidentRecorder, state.lifecycleMgr, state.volMgr,
-//	state.mutationGate.
+//	state.incidentRecorder, state.lifecycleMgr, state.mutationGate.
 //
 // Cleanup: receiptWiring.Close, incidentDB.Close + DeregisterDB are all
 // registered via state.AddCleanup so behavior matches the original `defer`
@@ -84,7 +77,7 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 	if state.dekKeeper != nil {
 		alertDecrypter = storage.NewDEKKeeperAdapter(state.dekKeeper, state.clusterID)
 	}
-	state.clusterAlerts = server.NewAlertsStateWithConfig(
+	state.clusterAlerts = alertssvc.NewStateWithConfig(
 		state.metaRaft.FSM().ClusterConfig(),
 		alertDecrypter,
 		[]encrypt.AADField{encrypt.FieldString(cluster.ClusterConfigAlertSecretField)},
@@ -137,43 +130,11 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 			WithCapabilityGate(state.capabilityGate).
 			WithDataGroups(state.dgMgr)),
 		server.WithClusterMembership(NewRaftMembership(metaRaft.Node(), metaRaft.FSM())),
+		server.WithExpandPlacement(makeExpandPlacementFunc(state.clusterCoord, metaRaft)),
+		server.WithRetirePlacementGeneration(makeRetirePlacementGenerationFunc(metaRaft)),
 		server.WithEventStore(eventstore.New(state.db)),
 		server.WithAlerts(clusterAlerts),
 		server.WithDataDir(dataDir),
-		server.WithSnapshotKEK(state.kekStore, [16]byte(state.clusterID)),
-	}
-	// Share the auto-snapshotter's Manager (built in bootBackendWrap, which runs
-	// before this phase) so the HTTP snapshot/PITR handlers and the auto-snapshotter
-	// use ONE Manager / one nextSeq. WithSnapshotEncryptor + WithSnapshotKEK above
-	// stay as the self-construction fallback for the nil-objSnapMgr edge
-	// (objSnapMgr != nil iff an auto writer is running, so the fallback never
-	// produces a second writer).
-	if state.objSnapMgr != nil {
-		srvOpts = append(srvOpts, server.WithSnapshotManager(state.objSnapMgr))
-	}
-	var metaCatalog *cluster.MetaCatalog
-	if len(peers) == 0 && !cfg.RaftAddrExplicit && !state.inviteJoinMode {
-		legacyStore := icebergcatalog.NewStore(state.db, "s3://grainfs-tables/warehouse")
-		metaCatalog = cluster.NewMetaCatalog(metaRaft, state.backend, "s3://grainfs-tables/warehouse")
-		if err := MigrateLegacySingletonIcebergCatalog(ctx, legacyStore, metaCatalog, state.backend); err != nil {
-			return fmt.Errorf("migrate singleton Iceberg catalog: %w", err)
-		}
-	} else {
-		metaForward := func(ctx context.Context, command []byte) error {
-			return state.metaForwardSender.Send(ctx, MetaProposalTargets(metaRaft.Node().LeaderID(), peers), command)
-		}
-		metaReadTargets := func() []string {
-			return MetaProposalTargets(metaRaft.Node().LeaderID(), peers)
-		}
-		metaCatalog = cluster.NewMetaCatalogWithForwarders(metaRaft, state.backend, "s3://grainfs-tables/warehouse", metaForward, state.metaReadSender, metaReadTargets)
-	}
-	srvOpts = append(srvOpts, server.WithIcebergCatalog(metaCatalog))
-	srvOpts = append(srvOpts, server.WithJWTKeySet(metaRaft.FSM().JWTKeySet()))
-	// §5 T45: ProxyTrust is constructed in bootMetaRaftWiring and its CIDRs are
-	// driven by the OnTrustedProxyCIDR reload hook. Pass it to the Server so
-	// authoritativeClientIP can validate Forwarded / X-Forwarded-*.
-	if state.proxyTrust != nil {
-		srvOpts = append(srvOpts, server.WithProxyTrust(state.proxyTrust))
 	}
 	srvOpts = append(srvOpts, cfg.AuthOpts...)
 	if ensureProtocolCredentialStore(state) != nil {
@@ -186,7 +147,7 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 	// policy.Evaluate. Both iamPolicyStores and cfgStore are guaranteed non-nil
 	// by the fail-fast guards at the top of this function.
 	policyAuthz := s3auth.NewAuthorizer(state.iamPolicyStores.Resolver, state.cfgStore)
-	// Always install the PDP decorator on the S3/Iceberg data plane; it is a pure
+	// Always install the PDP decorator on the S3 data plane; it is a pure
 	// pass-through unless iam.pdp + data_plane.enabled are set (read per request
 	// from the cfg store), so hot-enable works with no dependency rebuild.
 	dataPlanePDP := pdp.NewDecorator(policyAuthz, state.cfgStore, ensurePDPTokenSource(state), "data_plane")
@@ -212,7 +173,7 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 	}
 	newSrvOpts, receiptWiring, err := SetupClusterReceiptWithPeerProvider(
 		ctx, rcptOpts, dataDir, nodeID, receiptPeerProvider,
-		state.clusterTransport, state.streamRouter, state.gossipReceiver, srvOpts,
+		state.clusterTransport, state.gossipReceiver, srvOpts,
 	)
 	if err != nil {
 		return fmt.Errorf("heal-receipt wiring: %w", err)
@@ -264,7 +225,14 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 	// Bucket Lifecycle Policy (ADR 0011): replicate via meta-Raft FSM,
 	// executor leader-only.
 	if cfg.LifecycleInterval > 0 {
-		lstore := lifecycle.NewStore(state.distBackend.FSMDB())
+		if state.sharedFSMStore == nil {
+			return fmt.Errorf("lifecycle: shared FSM store not opened (boot ordering)")
+		}
+		// Phase 6.5 S3: the lifecycle store shares the FSM-state DB, routed
+		// through the MetadataStore contract (serveruntime owns the raw handle
+		// lifecycle; the backend no longer exposes it).
+		lstore := lifecycle.NewStore(state.sharedFSMStore)
+		state.lifecycleStore = lstore
 		prop := &cluster.LifecycleProposer{Propose: state.metaRaft.Propose}
 		// Use Node() (interface) — not RaftNode() (v1 concrete) — so the
 		// v2 adapter resolves under M5 PR 28 serveruntime=v2 default.
@@ -286,7 +254,10 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 		srvOpts = append(srvOpts, server.WithLifecycleService(state.lifecycleSvc))
 	}
 
-	mstore := migration.NewJobStore(state.distBackend.FSMDB())
+	if state.sharedFSMStore == nil {
+		return fmt.Errorf("migration: shared FSM store not opened (boot ordering)")
+	}
+	mstore := migration.NewJobStore(state.sharedFSMStore)
 	state.metaRaft.FSM().SetMigration(mstore)
 	if state.capabilityGate == nil {
 		state.capabilityGate = cluster.NewCapabilityGate(compat.DefaultRegistry, capabilityEvidenceTTL(state))
@@ -312,12 +283,7 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 		state.migrationSvc = migration.NewService(mstore, mprop, mlead, nil, nil, cfg.MigrationInterval)
 	}
 
-	volMgr, blockCache, err := BuildVolumeManager(VolumeManagerOptions{BlockCacheSize: cfg.BlockCacheSize}, dataDir, state.backend)
-	if err != nil {
-		return fmt.Errorf("volume manager: %w", err)
-	}
-	state.volMgr = volMgr
-	srvOpts = append(srvOpts, server.WithVolumeManager(volMgr), server.WithBlockCache(blockCache), server.WithShardCache(state.shardCache))
+	srvOpts = append(srvOpts, server.WithShardCache(state.shardCache))
 	// A joiner (legacy joinMode OR zero-CA inviteJoinMode) must NOT install the
 	// group-0 DistributedBackend read-index fence: it is not the group-0 leader
 	// and has no usable legacy peers, so ReadIndex returns ErrNotLeader and GETs
@@ -330,7 +296,6 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 	srvOpts = append(srvOpts, server.WithRaftSnapshotter(state.distBackend))
 
 	state.distBackend.RegisterReadIndexHandler()
-	state.distBackend.RegisterProposeForwardHandler()
 
 	state.mutationGate = server.NewMutationGate(nil)
 	if state.recoveryReadOnly {
@@ -338,110 +303,6 @@ func bootSrvOptsAndReceipt(ctx context.Context, state *bootState) error {
 	}
 	srvOpts = append(srvOpts, server.WithMutationGate(state.mutationGate))
 
-	if cfg.AuditIceberg {
-		auditOutbox, err := audit.OpenOutbox(filepath.Join(cfg.DataDir, "audit-outbox"))
-		if err != nil {
-			return fmt.Errorf("audit outbox: %w", err)
-		}
-		state.AddCleanup(func() { _ = auditOutbox.Close() })
-		// Seed and publish: SetDenyOnly runs against the local var BEFORE the
-		// outbox pointer becomes visible on state.auditOutbox, so a concurrent
-		// reload hook from Raft Apply either (a) fires before publication and
-		// silently no-ops on the still-nil pointer, leaving state.auditOutbox
-		// at the boot-time snapshot value when publication completes, or (b)
-		// fires after publication and wins. Case (a) is a narrow lost-update
-		// window during boot (a fresh true that arrived via Raft replay between
-		// GetBool and the publish would be clobbered by the boot snapshot),
-		// but at boot phase Raft Apply has not yet replayed config writes —
-		// the hook subscription was just registered in bootMetaRaftWiring.
-		// If this assumption breaks (e.g. boot ordering changes), wrap the
-		// publish + seed in an atomic.Pointer-based handle that the hook can
-		// CAS against.
-		if v, ok := state.cfgStore.GetBool("audit.deny-only"); ok {
-			auditOutbox.SetDenyOnly(v)
-		}
-		state.auditOutbox = auditOutbox
-		auditAccessKey := "AKGFAUDIT" + strings.ReplaceAll(uuid.NewString(), "-", "")
-		auditSecretKey := uuid.NewString() + uuid.NewString()
-		srvOpts = append(srvOpts,
-			server.WithAuditOutbox(auditOutbox),
-			server.WithAuditNodeID(nodeID),
-			server.WithAuditInternalCredentials(auditAccessKey, auditSecretKey),
-		)
-		if endpoint := auditSearchEndpoint(cfg.Addr); endpoint != "" {
-			searcher := audit.NewDuckDBSearcher(audit.DuckDBSearchConfig{
-				Endpoint:  endpoint,
-				AccessKey: auditAccessKey,
-				SecretKey: auditSecretKey,
-			})
-			srvOpts = append(srvOpts, server.WithAuditSearcher(searcher))
-			state.auditSearchWarmup = searcher.Warmup
-			state.auditSearcher = searcher
-		} else {
-			log.Warn().Str("addr", cfg.Addr).Msg("audit search disabled: HTTP address does not resolve to a stable local endpoint")
-		}
-		// Best-effort eager bootstrap; lazy bootstrap in commit() handles the rest.
-		if err := audit.Bootstrap(ctx, metaCatalog, state.backend); err != nil {
-			log.Warn().Err(err).Msg("audit bootstrap deferred to first commit cycle")
-		}
-		interval := cfg.AuditCommitInterval
-		if interval == 0 {
-			interval = 60 * time.Second
-		}
-		shipFn := func(ctx context.Context, events []audit.S3Event) error {
-			payload, err := audit.EncodeS3Batch(events)
-			if err != nil {
-				return err
-			}
-			targets := MetaProposalTargets(metaRaft.Node().LeaderID(), peers)
-			if len(targets) == 0 {
-				return fmt.Errorf("audit ship: no leader elected")
-			}
-			return state.clusterTransport.Send(ctx, targets[0], &transport.Message{
-				Type:    transport.StreamAuditShip,
-				Payload: payload,
-			})
-		}
-		committer := audit.NewCommitter(audit.CommitterConfig{
-			Outbox:       auditOutbox,
-			Catalog:      metaCatalog,
-			Backend:      state.backend,
-			IsLeader:     func() bool { return metaRaft.IsLeader() },
-			ShipToLeader: shipFn,
-			NodeID:       nodeID,
-			Interval:     interval,
-		})
-		state.streamRouter.Handle(transport.StreamAuditShip, func(req *transport.Message) *transport.Message {
-			events, err := audit.DecodeS3Batch(req.Payload)
-			if err != nil {
-				return transport.NewErrorResponse(req, transport.StatusError, err)
-			}
-			if err := committer.AppendFromFollower(context.Background(), events); err != nil {
-				return transport.NewErrorResponse(req, transport.StatusError, err)
-			}
-			return transport.NewResponse(req, nil)
-		})
-		commitCtx, commitCancel := context.WithCancel(ctx)
-		state.AddCleanup(commitCancel)
-		go committer.Run(commitCtx)
-		log.Info().
-			Str("table", audit.Namespace+"."+audit.TableS3).
-			Str("commit_interval", interval.String()).
-			Msg("audit subsystem enabled")
-	}
-
 	state.srvOpts = srvOpts
 	return nil
-}
-
-func auditSearchEndpoint(addr string) string {
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil || port == "" || port == "0" {
-		return ""
-	}
-	switch strings.Trim(host, "[]") {
-	case "", "0.0.0.0", "::":
-		host = "127.0.0.1"
-	}
-	return "http://" + net.JoinHostPort(host, port)
 }

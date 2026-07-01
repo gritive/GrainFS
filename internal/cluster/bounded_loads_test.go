@@ -7,11 +7,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 
+	"github.com/gritive/GrainFS/internal/gossip"
 	"github.com/gritive/GrainFS/internal/metrics"
 )
 
 func TestBoundedLoads_EmptySnapshot(t *testing.T) {
-	store := NewNodeStatsStore(2 * time.Minute)
+	store := gossip.NewNodeStatsStore(2 * time.Minute)
 	bl := NewBoundedLoads(store, BoundedLoadsParams{C: 1.25, CLow: 1.0})
 
 	snap := bl.Snapshot()
@@ -20,16 +21,16 @@ func TestBoundedLoads_EmptySnapshot(t *testing.T) {
 }
 
 func TestBoundedLoads_IsHotMissingNode(t *testing.T) {
-	store := NewNodeStatsStore(2 * time.Minute)
+	store := gossip.NewNodeStatsStore(2 * time.Minute)
 	bl := NewBoundedLoads(store, BoundedLoadsParams{C: 1.25, CLow: 1.0})
 	assert.False(t, bl.IsHot("missing-node"))
 }
 
 func TestBoundedLoads_RefreshComputesAvg(t *testing.T) {
-	store := NewNodeStatsStore(2 * time.Minute)
-	store.Set(NodeStats{NodeID: "n1", RequestsPerSec: 100})
-	store.Set(NodeStats{NodeID: "n2", RequestsPerSec: 200})
-	store.Set(NodeStats{NodeID: "n3", RequestsPerSec: 300})
+	store := gossip.NewNodeStatsStore(2 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "n1", RequestsPerSec: 100})
+	store.Set(gossip.NodeStats{NodeID: "n2", RequestsPerSec: 200})
+	store.Set(gossip.NodeStats{NodeID: "n3", RequestsPerSec: 300})
 
 	bl := NewBoundedLoads(store, BoundedLoadsParams{C: 1.25, CLow: 1.0})
 	bl.Refresh()
@@ -44,35 +45,35 @@ func TestBoundedLoads_RefreshComputesAvg(t *testing.T) {
 }
 
 func TestBoundedLoads_Hysteresis(t *testing.T) {
-	store := NewNodeStatsStore(2 * time.Minute)
+	store := gossip.NewNodeStatsStore(2 * time.Minute)
 	// Baseline: n1=120, n2=100, n3=80 → avg=100, high=125, low=100.
-	store.Set(NodeStats{NodeID: "n1", RequestsPerSec: 120})
-	store.Set(NodeStats{NodeID: "n2", RequestsPerSec: 100})
-	store.Set(NodeStats{NodeID: "n3", RequestsPerSec: 80})
+	store.Set(gossip.NodeStats{NodeID: "n1", RequestsPerSec: 120})
+	store.Set(gossip.NodeStats{NodeID: "n2", RequestsPerSec: 100})
+	store.Set(gossip.NodeStats{NodeID: "n3", RequestsPerSec: 80})
 
 	bl := NewBoundedLoads(store, BoundedLoadsParams{C: 1.25, CLow: 1.0})
 	bl.Refresh()
 	assert.False(t, bl.IsHot("n1"), "baseline: n1 (120) should not be hot at high=125")
 
 	// Spike n1 above high → enters hot.
-	store.Set(NodeStats{NodeID: "n1", RequestsPerSec: 200})
+	store.Set(gossip.NodeStats{NodeID: "n1", RequestsPerSec: 200})
 	bl.Refresh()
 	assert.True(t, bl.IsHot("n1"), "after spike: n1 should be hot")
 
 	// Drop n1 to sticky zone (between low and high) → stays hot.
-	store.Set(NodeStats{NodeID: "n1", RequestsPerSec: 115})
+	store.Set(gossip.NodeStats{NodeID: "n1", RequestsPerSec: 115})
 	bl.Refresh()
 	assert.True(t, bl.IsHot("n1"), "sticky zone: n1 should stay hot until rps < low")
 
 	// Drop n1 below low → exits hot.
-	store.Set(NodeStats{NodeID: "n1", RequestsPerSec: 50})
+	store.Set(gossip.NodeStats{NodeID: "n1", RequestsPerSec: 50})
 	bl.Refresh()
 	assert.False(t, bl.IsHot("n1"), "after recovery: n1 should not be hot")
 }
 
 func TestBoundedLoads_RefreshIfStaleSingleflight(t *testing.T) {
-	store := NewNodeStatsStore(2 * time.Minute)
-	store.Set(NodeStats{NodeID: "n1", RequestsPerSec: 100})
+	store := gossip.NewNodeStatsStore(2 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "n1", RequestsPerSec: 100})
 
 	bl := NewBoundedLoads(store, BoundedLoadsParams{C: 1.25, CLow: 1.0, MaxStale: 60 * time.Second})
 	bl.Refresh()
@@ -84,7 +85,7 @@ func TestBoundedLoads_RefreshIfStaleSingleflight(t *testing.T) {
 	assert.Same(t, first, second, "dataVersion unchanged: snapshot pointer should be reused")
 
 	// 데이터 갱신 → reload.
-	store.Set(NodeStats{NodeID: "n2", RequestsPerSec: 200})
+	store.Set(gossip.NodeStats{NodeID: "n2", RequestsPerSec: 200})
 	bl.RefreshIfStale()
 	third := bl.Snapshot()
 	assert.NotSame(t, first, third, "dataVersion changed: snapshot should be refreshed")
@@ -92,9 +93,9 @@ func TestBoundedLoads_RefreshIfStaleSingleflight(t *testing.T) {
 }
 
 func TestBoundedLoads_RefreshEmitsMetrics(t *testing.T) {
-	store := NewNodeStatsStore(2 * time.Minute)
-	store.Set(NodeStats{NodeID: "m1", RequestsPerSec: 100})
-	store.Set(NodeStats{NodeID: "m2", RequestsPerSec: 200})
+	store := gossip.NewNodeStatsStore(2 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "m1", RequestsPerSec: 100})
+	store.Set(gossip.NodeStats{NodeID: "m2", RequestsPerSec: 200})
 	bl := NewBoundedLoads(store, BoundedLoadsParams{C: 1.25, CLow: 1.0})
 	bl.Refresh()
 	assert.Equal(t, 150.0, testutil.ToFloat64(metrics.ClusterBLAvgRPS))
@@ -111,16 +112,16 @@ func TestBoundedLoads_HotTransitionCount(t *testing.T) {
 
 	before := testutil.ToFloat64(metrics.ClusterBLHotStateTransitions.WithLabelValues(target, "enter"))
 
-	store := NewNodeStatsStore(2 * time.Minute)
-	store.Set(NodeStats{NodeID: baselineA, RequestsPerSec: 100})
-	store.Set(NodeStats{NodeID: baselineB, RequestsPerSec: 100})
-	store.Set(NodeStats{NodeID: target, RequestsPerSec: 100})
+	store := gossip.NewNodeStatsStore(2 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: baselineA, RequestsPerSec: 100})
+	store.Set(gossip.NodeStats{NodeID: baselineB, RequestsPerSec: 100})
+	store.Set(gossip.NodeStats{NodeID: target, RequestsPerSec: 100})
 	bl := NewBoundedLoads(store, BoundedLoadsParams{C: 1.25, CLow: 1.0})
 	bl.Refresh()
 	// avg=100, high=125 → target (100) not hot
 
 	// Spike target well above high threshold: avg≈(100+100+500)/3≈233, high≈292 → 500>292 → enter
-	store.Set(NodeStats{NodeID: target, RequestsPerSec: 500})
+	store.Set(gossip.NodeStats{NodeID: target, RequestsPerSec: 500})
 	bl.Refresh()
 
 	after := testutil.ToFloat64(metrics.ClusterBLHotStateTransitions.WithLabelValues(target, "enter"))
@@ -142,9 +143,9 @@ func (p *mutableParams) BoundedLoadsMaxStaleTTL() time.Duration { return p.maxSt
 func TestBoundedLoads_LiveCTuning(t *testing.T) {
 	// Verify high/low thresholds reflect cfg values live (no snapshot at construction).
 	// Assert thresholds directly to avoid hysteresis sticky-band interference.
-	store := NewNodeStatsStore(2 * time.Minute)
-	store.Set(NodeStats{NodeID: "live-c-a", RequestsPerSec: 100})
-	store.Set(NodeStats{NodeID: "live-c-b", RequestsPerSec: 300})
+	store := gossip.NewNodeStatsStore(2 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "live-c-a", RequestsPerSec: 100})
+	store.Set(gossip.NodeStats{NodeID: "live-c-b", RequestsPerSec: 300})
 	// avg = 200
 
 	p := &mutableParams{c: 1.25, cLow: 1.0, maxStale: time.Minute}
@@ -166,8 +167,8 @@ func TestBoundedLoads_LiveCTuning(t *testing.T) {
 
 func TestBoundedLoads_LiveMaxStaleTuning(t *testing.T) {
 	// Verify RefreshIfStale honors the live MaxStale value.
-	store := NewNodeStatsStore(2 * time.Minute)
-	store.Set(NodeStats{NodeID: "live-ms-only", RequestsPerSec: 100})
+	store := gossip.NewNodeStatsStore(2 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "live-ms-only", RequestsPerSec: 100})
 
 	p := &mutableParams{c: 1.25, cLow: 1.0, maxStale: time.Hour}
 	bl := NewBoundedLoads(store, p)

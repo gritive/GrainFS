@@ -14,6 +14,18 @@ type ShardGroupSource interface {
 	ShardGroups() []ShardGroupEntry
 }
 
+// metaNodeCount returns the cluster member-node count from a ShardGroupSource that
+// also exposes the meta-FSM node registry (Nodes()), or 0 when it does not (test
+// stubs). 0 disables the placement-redundancy gate (treated as a single-node
+// cluster), so stubs that only implement ShardGroup/ShardGroups keep legacy
+// behaviour. *MetaFSM implements Nodes(), so production always gets the real count.
+func metaNodeCount(src ShardGroupSource) int {
+	if ns, ok := src.(interface{ Nodes() []MetaNodeEntry }); ok {
+		return len(ns.Nodes())
+	}
+	return 0
+}
+
 // shardGroupSource is the unexported alias used by lookupForwardTarget. Older
 // callers can keep the unexported type; new code uses ShardGroupSource.
 //

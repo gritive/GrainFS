@@ -12,7 +12,6 @@
 package storage
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/hex"
@@ -34,7 +33,6 @@ import (
 	"github.com/gritive/GrainFS/internal/chunkref"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/metrics/readamp"
-	"github.com/gritive/GrainFS/internal/storage/datawal"
 )
 
 // localTraceEnabled activates per-stage PutObject/HeadObject latency logging.
@@ -43,33 +41,18 @@ var localTraceEnabled = os.Getenv("GRAINFS_VOLUME_TRACE") == "1"
 
 // LocalBackend stores objects as flat files on disk with BadgerDB for metadata.
 type LocalBackend struct {
-	metaDir          string
-	dataRoots        []string
-	db               *badger.DB
-	segEnc           DataEncryptor // object/segment file data-at-rest seam
-	clusterID        [16]byte      // zero sentinel in D-seg-local; real ID in D-seg-ec
-	dataWAL          DataWAL
-	dataWALDir       string
-	replayingDataWAL bool
-}
-
-type DataWAL interface {
-	Append(context.Context, datawal.Record) (uint64, error)
-	AppendReader(context.Context, datawal.Record, io.Reader) (uint64, error)
-	Flush() error
-	Dir() string
+	metaDir   string
+	dataRoots []string
+	db        *badger.DB
+	segEnc    DataEncryptor // object/segment file data-at-rest seam
+	clusterID [16]byte      // zero sentinel in D-seg-local; real ID in D-seg-ec
 }
 
 var (
 	_ Backend            = (*LocalBackend)(nil)
 	_ UserMetadataPutter = (*LocalBackend)(nil)
 	_ PartialIO          = (*LocalBackend)(nil)
-	_ Truncatable        = (*LocalBackend)(nil)
 )
-
-// DB exposes the underlying BadgerDB for shared use (lifecycle, events).
-// DB exposes the underlying BadgerDB for shared use (lifecycle, events).
-func (b *LocalBackend) DB() *badger.DB { return b.db }
 
 // NewLocalBackend creates a new local storage backend.
 func NewLocalBackend(root string) (*LocalBackend, error) {
@@ -81,35 +64,6 @@ func NewMultiRootLocalBackend(metaDir string, dataRoots []string) (*LocalBackend
 		return nil, fmt.Errorf("multi-root local backend requires at least one data root")
 	}
 	return newLocalBackend(metaDir, dataRoots)
-}
-
-func NewMultiRootLocalBackendWithDataWAL(metaDir string, dataRoots []string, dwal DataWAL) (*LocalBackend, error) {
-	if len(dataRoots) == 0 {
-		return nil, fmt.Errorf("multi-root local backend requires at least one data root")
-	}
-	if dwal == nil {
-		return nil, fmt.Errorf("multi-root local backend data wal requires wal")
-	}
-	b, err := newLocalBackend(metaDir, dataRoots)
-	if err != nil {
-		return nil, err
-	}
-	b.dataWAL = dwal
-	b.dataWALDir = dwal.Dir()
-	return b, nil
-}
-
-func NewLocalBackendWithDataWAL(root string, dwal DataWAL) (*LocalBackend, error) {
-	if dwal == nil {
-		return nil, fmt.Errorf("local backend data wal requires wal")
-	}
-	b, err := newLocalBackend(root, []string{root})
-	if err != nil {
-		return nil, err
-	}
-	b.dataWAL = dwal
-	b.dataWALDir = dwal.Dir()
-	return b, nil
 }
 
 // NewLocalBackendWithDEKKeeper builds a LocalBackend whose object/segment
@@ -124,24 +78,6 @@ func NewLocalBackendWithDEKKeeper(root string, keeper *encrypt.DEKKeeper, cluste
 		copy(b.clusterID[:], clusterID)
 		b.segEnc = NewDEKKeeperAdapter(keeper, b.clusterID[:])
 	}
-	return b, nil
-}
-
-// NewLocalBackendWithDEKKeeperAndDataWAL builds a DEKKeeper-backed LocalBackend
-// (see NewLocalBackendWithDEKKeeper) wired to a DataWAL. The DataWAL's record
-// sealer MUST wrap the SAME keeper instance (NewDEKKeeper randomizes the DEK),
-// so RecoverDataWAL — which seals/opens WAL records via b.segEnc — can decrypt
-// what the WAL wrote. clusterID MUST be 16 bytes.
-func NewLocalBackendWithDEKKeeperAndDataWAL(root string, keeper *encrypt.DEKKeeper, clusterID []byte, dwal DataWAL) (*LocalBackend, error) {
-	if dwal == nil {
-		return nil, fmt.Errorf("local backend data wal requires wal")
-	}
-	b, err := NewLocalBackendWithDEKKeeper(root, keeper, clusterID)
-	if err != nil {
-		return nil, err
-	}
-	b.dataWAL = dwal
-	b.dataWALDir = dwal.Dir()
 	return b, nil
 }
 
@@ -163,10 +99,9 @@ func newLocalBackend(metaDir string, dataRoots []string) (*LocalBackend, error) 
 	// Badger meta is stored as plaintext; the data-at-rest seam is b.segEnc
 	// (a DEKKeeperAdapter on the DEK path), wired by the DEKKeeper constructors.
 	b := &LocalBackend{
-		metaDir:    metaDir,
-		dataRoots:  dataRoots,
-		db:         db,
-		dataWALDir: filepath.Join(metaDir, "datawal"),
+		metaDir:   metaDir,
+		dataRoots: dataRoots,
+		db:        db,
 	}
 	return b, nil
 }
@@ -196,26 +131,6 @@ func (b *LocalBackend) objectPath(bucket, key string) string {
 	_, _ = h.Write([]byte(key))
 	targetRoot := b.dataRoots[int(h.Sum32())%len(b.dataRoots)]
 	return filepath.Join(targetRoot, "data", bucket, key)
-}
-
-// OpenLocalReplica returns a ReadCloser for the locally-stored copy of an
-// object. It does NOT fall back to peers (there are none in solo mode) and
-// returns os.ErrNotExist when the file is missing — the contract scrubber
-// verifiers rely on.
-func (b *LocalBackend) OpenLocalReplica(bucket, key string) (io.ReadCloser, error) {
-	obj, err := b.HeadObject(context.Background(), bucket, key)
-	if err != nil {
-		return nil, err
-	}
-	if obj.Segments != nil {
-		rc, _, err := b.GetObject(context.Background(), bucket, key)
-		return rc, err
-	}
-	objPath := b.objectPath(bucket, key)
-	if b.segEnc != nil {
-		return openEncryptedObjectFile(objPath, b.segEnc, objectFileAADFields(bucket, key), obj.Size)
-	}
-	return os.Open(objPath)
 }
 
 func (b *LocalBackend) CreateBucket(ctx context.Context, bucket string) error {
@@ -354,7 +269,15 @@ func (b *LocalBackend) PutObjectWithRequest(ctx context.Context, req PutObjectRe
 	// error the partially-written segment blobs become orphans and are
 	// reclaimed by the scrubber.
 	w := NewSegmentWriter(localBackendAdapter{b})
-	obj, err := w.Write(ctx, bucket, key, req.ContentType, req.Body)
+	// SizeHint (request Content-Length) right-sizes the first/streaming chunk
+	// buffers when req.Body cannot be size-sniffed (opaque HTTP stream, packblob
+	// passthrough io.MultiReader). It is advisory — WriteSized still writes a
+	// body that outruns the hint in full.
+	sizeHint := int64(-1)
+	if req.SizeHint != nil {
+		sizeHint = *req.SizeHint
+	}
+	obj, err := w.WriteSized(ctx, bucket, key, req.ContentType, req.Body, sizeHint)
 	if err != nil {
 		return nil, fmt.Errorf("write segments: %w", err)
 	}
@@ -365,6 +288,10 @@ func (b *LocalBackend) PutObjectWithRequest(ctx context.Context, req PutObjectRe
 	obj.SSEAlgorithm = req.SystemMetadata.SSEAlgorithm
 	if req.ACL != nil {
 		obj.ACL = *req.ACL
+	}
+
+	if req.ContentMD5Hex != "" && obj.ETag != "" && obj.ETag != req.ContentMD5Hex {
+		return nil, fmt.Errorf("%w: client %s, body %s", ErrContentMD5Mismatch, req.ContentMD5Hex, obj.ETag)
 	}
 
 	if err := b.PutObjectRecord(ctx, bucket, key, obj); err != nil {
@@ -381,10 +308,9 @@ func (b *LocalBackend) PutObjectWithRequest(ctx context.Context, req PutObjectRe
 
 func (b *LocalBackend) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *Object, error) {
 	// Backend boundary readamp: every disk-touching GetObject feeds
-	// the simulator. CachedBackend sits in front of us, so callers
-	// that hit the object cache never reach this point. The hit-rate
-	// curve at this tracker therefore answers exactly what UBC would
-	// have caught beyond the existing object cache.
+	// the simulator. Callers that hit an in-front object cache never
+	// reach this point. The hit-rate curve at this tracker therefore
+	// answers exactly what UBC would have caught beyond any object cache.
 	readamp.RecordBackendObject(bucket, key)
 	obj, err := b.HeadObject(ctx, bucket, key)
 	if err != nil {
@@ -415,14 +341,13 @@ func (b *LocalBackend) GetObject(ctx context.Context, bucket, key string) (io.Re
 			}
 			return f, obj, nil
 		}
-		// Multi-segment: stream via the parallel SegmentReader.
+		// Multi-segment: stream sequentially without materializing each segment.
 		store := localSegmentStore{b: b, bucket: bucket, key: key}
-		return io.NopCloser(NewSegmentReader(store, obj.Segments)), obj, nil
+		return NewStreamingSegmentReader(store, obj.Segments), obj, nil
 	}
 
-	// Legacy single-file path for objects predating segments (e.g.
-	// __grainfs_volumes Volume Device blocks written via WriteAt). Range
-	// GETs and Volume Device reads keep using ReadAt directly.
+	// Legacy single-file path for WriteAt-created fixture objects. Range GETs
+	// keep using ReadAt directly.
 	if b.segEnc != nil {
 		rc, err := openEncryptedObjectFile(b.objectPath(bucket, key), b.segEnc, objectFileAADFields(bucket, key), obj.Size)
 		if err != nil {
@@ -456,7 +381,14 @@ func (b *LocalBackend) HeadObject(ctx context.Context, bucket, key string) (*Obj
 	err := b.db.View(func(txn *badger.Txn) error {
 		val, err := getBadgerValue(txn, b.objectMetaKey(bucket, key))
 		if err == nil {
-			return unmarshalObjectInto(val, &obj)
+			if err := unmarshalObjectInto(val, &obj); err != nil {
+				return err
+			}
+			if obj.IsAppendable && obj.Size > 0 && len(obj.Segments) == 0 {
+				_, _, err := b.hydrateAppendSideSegmentsInTxn(txn, bucket, key, &obj)
+				return err
+			}
+			return nil
 		}
 		if err != badger.ErrKeyNotFound {
 			return err
@@ -575,7 +507,7 @@ func (b *LocalBackend) GetObjectTags(bucket, key, versionID string) ([]Tag, erro
 	return result, err
 }
 
-// Truncate implements storage.Truncatable.
+// Truncate implements the storage.PartialIO Truncate method.
 func (b *LocalBackend) Truncate(ctx context.Context, bucket, key string, size int64) error {
 	obj, err := b.HeadObject(ctx, bucket, key)
 	if err == nil && obj.Segments != nil {
@@ -601,19 +533,6 @@ func (b *LocalBackend) Truncate(ctx context.Context, bucket, key string, size in
 	}
 	if err != nil {
 		if !errors.Is(err, ErrObjectNotFound) {
-			return err
-		}
-	}
-	if b.dataWAL != nil && !b.replayingDataWAL {
-		if _, err := b.dataWAL.Append(ctx, datawal.Record{
-			Op:     datawal.OpObjectTruncate,
-			Bucket: bucket,
-			Key:    key,
-			Size:   size,
-		}); err != nil {
-			return err
-		}
-		if err := b.dataWAL.Flush(); err != nil {
 			return err
 		}
 	}
@@ -672,22 +591,6 @@ func (b *LocalBackend) WriteAt(ctx context.Context, bucket, key string, offset u
 	}
 	if existingErr != nil && !errors.Is(existingErr, ErrObjectNotFound) {
 		return nil, existingErr
-	}
-
-	if b.dataWAL != nil && !b.replayingDataWAL {
-		if _, err := b.dataWAL.Append(ctx, datawal.Record{
-			Op:      datawal.OpObjectWriteAt,
-			Bucket:  bucket,
-			Key:     key,
-			Offset:  int64(offset),
-			Size:    int64(len(data)),
-			Payload: data,
-		}); err != nil {
-			return nil, err
-		}
-		if err := b.dataWAL.Flush(); err != nil {
-			return nil, err
-		}
 	}
 
 	objPath := b.objectPath(bucket, key)
@@ -931,8 +834,8 @@ func writeZeros(w io.Writer, n int64) error {
 //
 // Segment-backed objects (every object produced by PutObject since Task 1.6)
 // walk obj.Segments and dispatch a per-segment pread for each overlapping
-// segment. Legacy single-file objects (Volume Device blocks via WriteAt) still
-// pread the flat backing file.
+// segment. Legacy single-file objects created through WriteAt still pread the
+// flat backing file.
 func (b *LocalBackend) ReadAt(ctx context.Context, bucket, key string, offset int64, buf []byte) (int, error) {
 	_ = ctx
 	if len(buf) == 0 {
@@ -942,15 +845,15 @@ func (b *LocalBackend) ReadAt(ctx context.Context, bucket, key string, offset in
 	if err != nil {
 		// Preserve the os.Open-style "file not found" contract that
 		// callers (and tests) rely on via os.IsNotExist. The legacy ReadAt
-		// returned *os.PathError from os.Open; emit one here so wrappers
-		// like CachedBackend continue to satisfy os.IsNotExist.
+		// returned *os.PathError from os.Open; emit one here so all
+		// wrapping backends continue to satisfy os.IsNotExist.
 		if errors.Is(err, ErrObjectNotFound) {
 			return 0, &os.PathError{Op: "open", Path: b.objectPath(bucket, key), Err: os.ErrNotExist}
 		}
 		return 0, err
 	}
 
-	// Legacy single-file path: pre-segment objects (Volume Device blocks).
+	// Legacy single-file path: WriteAt-created fixture objects.
 	if obj.Segments == nil {
 		objPath := b.objectPath(bucket, key)
 		if b.segEnc != nil {
@@ -1051,90 +954,8 @@ func (b *LocalBackend) PreferWriteAt(bucket string) bool {
 	return b.segEnc == nil && IsInternalBucket(bucket)
 }
 
-func (b *LocalBackend) RecoverDataWAL(ctx context.Context) error {
-	b.replayingDataWAL = true
-	defer func() { b.replayingDataWAL = false }()
-	var sealer datawal.RecordSealer
-	if b.segEnc != nil {
-		// b.segEnc is the data-at-rest seam (a *DEKKeeperAdapter on the DEK
-		// path); it satisfies datawal.RecordSealer and opens DEK-sealed WAL
-		// records written under the same keeper.
-		sealer = b.segEnc
-	}
-	return datawal.Recover(ctx, b.dataWALDir, 0, sealer, datawal.NamespaceNode, localDataWALMaterializer{b: b})
-}
-
-type localDataWALMaterializer struct {
-	b *LocalBackend
-}
-
-func (m localDataWALMaterializer) HasReplacement(ctx context.Context, rec datawal.Record) (bool, error) {
-	_ = ctx
-	if rec.Op != datawal.OpSegmentPut {
-		return false, nil
-	}
-
-	path := m.b.segmentPath(rec.Bucket, rec.Key, rec.Target)
-	if m.b.segEnc == nil {
-		info, err := os.Stat(path)
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		if err != nil {
-			return false, err
-		}
-		return info.Size() == rec.Size, nil
-	}
-
-	rc, err := openEncryptedObjectFile(path, m.b.segEnc, segmentFileAADFields(rec.Bucket, rec.Key, rec.Target), rec.Size)
-	if os.IsNotExist(err) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	defer rc.Close()
-	got, err := io.ReadAll(rc)
-	if err != nil {
-		return false, err
-	}
-	return bytes.Equal(got, rec.Payload), nil
-}
-
-func (m localDataWALMaterializer) Materialize(ctx context.Context, rec datawal.Record) error {
-	switch rec.Op {
-	case datawal.OpSegmentPut:
-		path := m.b.segmentPath(rec.Bucket, rec.Key, rec.Target)
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			return err
-		}
-		if m.b.segEnc != nil {
-			if _, err := writeEncryptedObjectFile(path, m.b.segEnc, segmentFileAADFields(rec.Bucket, rec.Key, rec.Target), bytes.NewReader(rec.Payload), io.Discard); err != nil {
-				// Drop the partial so WAL recovery re-materializes cleanly
-				// instead of trying to decrypt a half-written segment. Mirrors
-				// WriteSegmentBlob's cleanup; matters once D-seg-ec's
-				// DEKKeeperAdapter makes gen-pinning failures reachable.
-				_ = os.Remove(path)
-				return err
-			}
-			return nil
-		}
-		return os.WriteFile(path, rec.Payload, 0o644)
-	case datawal.OpObjectWriteAt:
-		_, err := m.b.WriteAt(ctx, rec.Bucket, rec.Key, uint64(rec.Offset), rec.Payload)
-		return err
-	case datawal.OpObjectTruncate:
-		return m.b.Truncate(ctx, rec.Bucket, rec.Key, rec.Size)
-	default:
-		return nil
-	}
-}
-
-// Sync implements storage.Syncable.
+// Sync fsyncs the on-disk state for a specific object.
 func (b *LocalBackend) Sync(bucket, key string) error {
-	if b.dataWAL != nil {
-		return b.dataWAL.Flush()
-	}
 	obj, err := b.HeadObject(context.Background(), bucket, key)
 	if err != nil {
 		return err
@@ -1165,7 +986,7 @@ func (b *LocalBackend) DeleteObject(ctx context.Context, bucket, key string) err
 		return err
 	}
 
-	// Legacy single-file blob (Volume Device / pre-segment objects).
+	// Legacy single-file blob (WriteAt-created fixture objects).
 	os.Remove(b.objectPath(bucket, key))
 	// Segment blobs from segmented PUTs live under <key>_segments/.
 	os.RemoveAll(b.objectPath(bucket, key) + "_segments")
@@ -1186,6 +1007,9 @@ func (b *LocalBackend) DeleteObject(ctx context.Context, bucket, key string) err
 			if err := store.RemoveRef(m, chunkref.ChunkID(c), now); err != nil {
 				return err
 			}
+		}
+		if err := b.deleteAppendSideRecordsInTxn(txn, bucket, key, prev.VersionID, now); err != nil {
+			return err
 		}
 		return txn.Delete(mk)
 	})
@@ -1476,6 +1300,7 @@ func (b *LocalBackend) CopyObject(srcBucket, srcKey, dstBucket, dstKey string) (
 		Bucket:         dstBucket,
 		Key:            dstKey,
 		Body:           rc,
+		SizeHint:       &obj.Size,
 		ContentType:    obj.ContentType,
 		UserMetadata:   obj.UserMetadata,
 		SystemMetadata: ObjectSystemMetadata{SSEAlgorithm: obj.SSEAlgorithm},
@@ -1557,145 +1382,6 @@ func (b *LocalBackend) DeleteBucketPolicy(bucket string) error {
 		}
 		return err
 	})
-}
-
-// ListAllObjects implements Snapshotable: scans all object metadata across all buckets.
-func (b *LocalBackend) ListAllObjects() ([]SnapshotObject, error) {
-	var objs []SnapshotObject
-	err := b.db.View(func(txn *badger.Txn) error {
-		prefix := []byte("obj:")
-		it := txn.NewIterator(badger.DefaultIteratorOptions)
-		defer it.Close()
-		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
-			rawKey := string(it.Item().Key())
-			rest := rawKey[len("obj:"):]
-			slashIdx := len(rest)
-			for i, c := range rest {
-				if c == '/' {
-					slashIdx = i
-					break
-				}
-			}
-			bucket := rest[:slashIdx]
-			key := rest[slashIdx+1:]
-
-			item := it.Item()
-			var obj Object
-			if err := item.Value(func(val []byte) error {
-				plain, err := openBadgerValue(val)
-				if err != nil {
-					return err
-				}
-				return unmarshalObjectInto(plain, &obj)
-			}); err != nil {
-				return err
-			}
-			var segments []SegmentRef
-			if len(obj.Segments) > 0 {
-				segments = append(segments, obj.Segments...)
-			}
-			objs = append(objs, SnapshotObject{
-				Bucket:       bucket,
-				Key:          key,
-				ETag:         obj.ETag,
-				Size:         obj.Size,
-				ContentType:  obj.ContentType,
-				Modified:     obj.LastModified,
-				SSEAlgorithm: obj.SSEAlgorithm,
-				Segments:     segments,
-				Tags:         obj.Tags,
-			})
-		}
-		return nil
-	})
-	return objs, err
-}
-
-// RestoreObjects implements Snapshotable: replaces current object metadata with snapshot state.
-// Objects whose blobs no longer exist on disk are reported as stale.
-func (b *LocalBackend) RestoreObjects(objects []SnapshotObject) (int, []StaleBlob, error) {
-	// Build lookup set of (bucket/key) from snapshot
-	inSnapshot := make(map[string]bool, len(objects))
-	for _, o := range objects {
-		inSnapshot["obj:"+o.Bucket+"/"+o.Key] = true
-	}
-
-	// Delete metadata for objects not in snapshot
-	if err := b.db.Update(func(txn *badger.Txn) error {
-		prefix := []byte("obj:")
-		opts := badger.DefaultIteratorOptions
-		opts.PrefetchValues = false
-		it := txn.NewIterator(opts)
-		var toDelete [][]byte
-		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
-			if !inSnapshot[string(it.Item().Key())] {
-				cp := make([]byte, len(it.Item().Key()))
-				copy(cp, it.Item().Key())
-				toDelete = append(toDelete, cp)
-			}
-		}
-		it.Close()
-		for _, k := range toDelete {
-			if err := txn.Delete(k); err != nil {
-				return err
-			}
-		}
-		return nil
-	}); err != nil {
-		return 0, nil, fmt.Errorf("remove obsolete objects: %w", err)
-	}
-
-	var stale []StaleBlob
-	var count int
-	ctx := context.Background()
-	for _, snap := range objects {
-		// Ensure bucket exists
-		if err := b.CreateBucket(ctx, snap.Bucket); err != nil && !errors.Is(err, ErrBucketAlreadyExists) {
-			return count, stale, fmt.Errorf("ensure bucket %s: %w", snap.Bucket, err)
-		}
-		// Check blob(s) exist on disk. Phase 1.6 routes every object through
-		// SegmentWriter, so chunked objects live under <key>_segments/<blob_id>
-		// rather than at objectPath. We honor three cases in priority order:
-		//   (a) snap.Segments non-empty → verify every segment blob path.
-		//   (b) Legacy single-file path (pre-Phase-1 snapshot or size==0
-		//       degenerate restore) → verify objectPath.
-		//   (c) snap.Size == 0 and no segments → metadata-only, tolerate.
-		isStale := false
-		switch {
-		case len(snap.Segments) > 0:
-			for _, seg := range snap.Segments {
-				if _, err := os.Stat(b.segmentPath(snap.Bucket, snap.Key, seg.BlobID)); os.IsNotExist(err) {
-					isStale = true
-					break
-				}
-			}
-		case snap.Size > 0:
-			if _, err := os.Stat(b.objectPath(snap.Bucket, snap.Key)); os.IsNotExist(err) {
-				isStale = true
-			}
-		}
-		if isStale {
-			stale = append(stale, StaleBlob{Bucket: snap.Bucket, Key: snap.Key, ExpectedETag: snap.ETag})
-			continue
-		}
-		// Restore metadata, including segment refs so GetObject can locate the blobs.
-		var segments []SegmentRef
-		if len(snap.Segments) > 0 {
-			segments = append(segments, snap.Segments...)
-		}
-		obj := &Object{Key: snap.Key, Size: snap.Size, ContentType: snap.ContentType, ETag: snap.ETag, LastModified: snap.Modified, SSEAlgorithm: snap.SSEAlgorithm, Segments: segments, Tags: snap.Tags}
-		meta, err := marshalObject(obj)
-		if err != nil {
-			return count, stale, fmt.Errorf("marshal %s/%s: %w", snap.Bucket, snap.Key, err)
-		}
-		if err := b.db.Update(func(txn *badger.Txn) error {
-			return setBadgerValue(txn, b.objectMetaKey(snap.Bucket, snap.Key), meta)
-		}); err != nil {
-			return count, stale, fmt.Errorf("restore %s/%s: %w", snap.Bucket, snap.Key, err)
-		}
-		count++
-	}
-	return count, stale, nil
 }
 
 var local64KBPool = sync.Pool{

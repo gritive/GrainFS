@@ -11,6 +11,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/s3auth"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 func (s *Server) getObjectRangeReadAt(ctx context.Context, c *app.RequestContext, bucket, key, rangeHeader string) bool {
@@ -46,6 +47,9 @@ func (s *Server) getObjectRangeReadAt(ctx context.Context, c *app.RequestContext
 	c.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, obj.Size))
 	c.Header("Content-Length", strconv.FormatInt(length, 10))
 	c.Set(auditBytesOutKey, length)
+	if s.serveStripedRange(ctx, c, bucket, key, obj, start, length) {
+		return true
+	}
 	c.Response.SetBodyStream(&readAtRangeReader{
 		ctx:     ctx,
 		backend: reader,
@@ -55,6 +59,27 @@ func (s *Server) getObjectRangeReadAt(ctx context.Context, c *app.RequestContext
 		offset:  start,
 		length:  length,
 	}, int(length))
+	c.Status(consts.StatusPartialContent)
+	return true
+}
+
+// serveStripedRange serves a byte range from a single sequential object stream
+// when the object is stripe-interleaved (obj.StripeBytes > 0), avoiding the
+// O(N^2) re-open/re-discard amplification the ReadAt-based readAtRangeReader
+// incurs on striped objects. Returns false (caller falls back to ReadAt) for
+// contiguous objects, whose ReadAt does efficient segment-overlap reads. The
+// version is pinned via loadObjectForGet so the streamed body matches the headers
+// computed from the HEAD object.
+func (s *Server) serveStripedRange(ctx context.Context, c *app.RequestContext, bucket, key string, obj *storage.Object, start, length int64) bool {
+	if obj == nil || obj.StripeBytes == 0 {
+		return false
+	}
+	rc, _, err := s.loadObjectForGet(ctx, bucket, key, obj.VersionID)
+	if err != nil {
+		mapError(c, err)
+		return true
+	}
+	c.Response.SetBodyStream(&streamingRangeReader{rc: rc, skip: start, remaining: length}, int(length))
 	c.Status(consts.StatusPartialContent)
 	return true
 }
@@ -109,6 +134,9 @@ func (s *Server) getObjectPartNumberReadAt(ctx context.Context, c *app.RequestCo
 	c.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, obj.Size))
 	c.Header("Content-Length", strconv.FormatInt(length, 10))
 	c.Set(auditBytesOutKey, length)
+	if s.serveStripedRange(ctx, c, bucket, key, obj, start, length) {
+		return true
+	}
 	c.Response.SetBodyStream(&readAtRangeReader{
 		ctx:     ctx,
 		backend: reader,

@@ -10,7 +10,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -46,6 +45,25 @@ type inviteJoinNode struct {
 	httpURL  string
 	cmd      *exec.Cmd
 	logPath  string
+
+	// 4b-2 deadlock test: when >0, the serve invocation gets
+	// --object-index-groups / --bootstrap-expect-nodes (deferred N>1 sharded
+	// object index). Zero ⇒ flags omitted ⇒ existing tests byte-identical.
+	indexGroups int
+	expectNodes int
+}
+
+// indexFlags returns the deferred sharded-index serve flags for this node, or
+// nil when unset. Declared on EVERY node (leader + joiners) because the deferred
+// uniform-RF seed lifecycle requires --bootstrap-expect-nodes on all of them.
+func (n *inviteJoinNode) indexFlags() []string {
+	if n.indexGroups <= 0 && n.expectNodes <= 0 {
+		return nil
+	}
+	return []string{
+		"--object-index-groups", fmt.Sprintf("%d", n.indexGroups),
+		"--bootstrap-expect-nodes", fmt.Sprintf("%d", n.expectNodes),
+	}
 }
 
 const inviteJoinClusterKey = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
@@ -74,8 +92,6 @@ func startInviteLeader(t testing.TB, clusterKey string) *inviteJoinNode {
 		"--raft-addr", fmt.Sprintf("127.0.0.1:%d", n.raftPort),
 		"--join-listen-addr", fmt.Sprintf("127.0.0.1:%d", n.joinPort),
 		"--node-id", n.nodeID,
-		"--nfs4-port", "0",
-		"--nbd-port", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	}
@@ -111,17 +127,64 @@ func restartInviteJoiner(t testing.TB, n *inviteJoinNode, bundle string) {
 }
 
 func (n *inviteJoinNode) joinerArgs() []string {
-	return []string{
+	return append([]string{
 		"serve",
 		"--data", n.dataDir,
 		"--port", fmt.Sprintf("%d", n.httpPort),
 		"--raft-addr", fmt.Sprintf("127.0.0.1:%d", n.raftPort),
 		"--node-id", n.nodeID,
-		"--nfs4-port", "0",
-		"--nbd-port", "0",
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
+	}, n.indexFlags()...)
+}
+
+// startInviteLeaderIndexed boots a genesis leader with the deferred sharded
+// object-index flags (--object-index-groups / --bootstrap-expect-nodes). Unlike
+// startInviteLeader it does NOT wait for the S3 port: at N>1 deferred the leader
+// blocks in bootIndexGroupsPostSeed (after admin.sock opens) until the target
+// node count joins, so S3 only comes up once the cluster forms. Callers wait on
+// admin.sock (e.g. bootstrapAdminResultViaUDSForTestMain) instead.
+func startInviteLeaderIndexed(t testing.TB, clusterKey string, indexGroups, expectNodes int) *inviteJoinNode {
+	n := &inviteJoinNode{
+		nodeID:      "leader",
+		dataDir:     shortTempDir(t),
+		httpPort:    freePort(),
+		raftPort:    freePort(),
+		joinPort:    freePort(),
+		indexGroups: indexGroups,
+		expectNodes: expectNodes,
 	}
+	n.httpURL = fmt.Sprintf("http://127.0.0.1:%d", n.httpPort)
+	gomega.Expect(transport.NewKeystore(n.dataDir).WriteCurrent(clusterKey)).To(gomega.Succeed())
+	args := append([]string{
+		"serve",
+		"--data", n.dataDir,
+		"--port", fmt.Sprintf("%d", n.httpPort),
+		"--raft-addr", fmt.Sprintf("127.0.0.1:%d", n.raftPort),
+		"--join-listen-addr", fmt.Sprintf("127.0.0.1:%d", n.joinPort),
+		"--node-id", n.nodeID,
+		"--scrub-interval", "0",
+		"--lifecycle-interval", "0",
+	}, n.indexFlags()...)
+	startInviteProc(t, n, args, nil)
+	return n
+}
+
+// startInviteJoinerIndexed boots a secret-less joiner carrying the same deferred
+// sharded object-index flags (required on every node for the uniform-RF seed).
+func startInviteJoinerIndexed(t testing.TB, nodeID, dataDir, bundle string, indexGroups, expectNodes int) *inviteJoinNode {
+	n := &inviteJoinNode{
+		nodeID:      nodeID,
+		dataDir:     dataDir,
+		httpPort:    freePort(),
+		raftPort:    freePort(),
+		indexGroups: indexGroups,
+		expectNodes: expectNodes,
+	}
+	n.httpURL = fmt.Sprintf("http://127.0.0.1:%d", n.httpPort)
+	env := append(os.Environ(), inviteBundleEnvKey+"="+bundle)
+	startInviteProc(t, n, n.joinerArgs(), env)
+	return n
 }
 
 func startInviteProc(t testing.TB, n *inviteJoinNode, args []string, env []string) {
@@ -175,21 +238,17 @@ func runRevokeNode(t testing.TB, leaderDataDir, nodeID string) {
 	}
 }
 
-// dataGroupHasVoter reports whether nodeID appears in ANY data-group's REAL raft
-// voter set (raft_voters), aggregated across every supplied admin socket.
-// raft_voters is admin-UDS-only (the `cluster health` route), so we shell out to
-// the CLI per node (mirrors runRevokeNode). Aggregation is required because a
-// node's health only carries REAL config for groups where it has an instantiated
-// raft member; a group led purely by joiners reads empty on the leader.
+// dataGroupHasPeer reports whether nodeID appears in any data-group placement
+// roster (peer_ids), aggregated across every supplied admin socket.
 //
 // We use .Output() (stdout only): the daemon logs to stderr, and merging it would
 // corrupt the JSON and silently turn this into a constant false.
-func dataGroupHasVoter(t testing.TB, adminSocks []string, nodeID string) bool {
+func dataGroupHasPeer(t testing.TB, adminSocks []string, nodeID string) bool {
 	t.Helper()
 	type dgHealth struct {
 		DataGroups *struct {
 			Groups []struct {
-				RaftVoters []string `json:"raft_voters"`
+				PeerIDs []string `json:"peer_ids"`
 			} `json:"groups"`
 		} `json:"data_groups"`
 	}
@@ -203,7 +262,7 @@ func dataGroupHasVoter(t testing.TB, adminSocks []string, nodeID string) bool {
 			continue
 		}
 		for _, g := range h.DataGroups.Groups {
-			if containsString(g.RaftVoters, nodeID) {
+			if containsString(g.PeerIDs, nodeID) {
 				return true
 			}
 		}
@@ -222,68 +281,8 @@ func dumpDataGroupHealth(adminSocks []string) string {
 	return b.String()
 }
 
-// dgRow is the aggregated REAL-config view of one data group: its elected
-// leader (node id) and voter set (node ids).
-type dgRow struct {
-	groupID  string
-	leaderID string
-	voters   []string
-}
-
-// dataGroupRows aggregates each data group's REAL raft config across every admin
-// socket, keyed by group id. Only the group LEADER's health row carries an
-// authoritative leader_id + full voter set, so for each group we keep the row
-// that names a leader (preferring the one with the most voters). raft_voters is
-// normalized to node ids at the surface; leader_id is the data-group raft
-// LeaderID, which is itself a node id (data-group Server.ID IS the node id).
-func dataGroupRows(t testing.TB, adminSocks []string) map[string]dgRow {
-	t.Helper()
-	type wire struct {
-		GroupID    string   `json:"group_id"`
-		RaftVoters []string `json:"raft_voters"`
-		LeaderID   string   `json:"leader_id"`
-	}
-	type dgHealth struct {
-		DataGroups *struct {
-			Groups []wire `json:"groups"`
-		} `json:"data_groups"`
-	}
-	best := map[string]dgRow{}
-	for _, sock := range adminSocks {
-		out, err := exec.Command(getBinary(), "cluster", "--endpoint", sock, "--format", "json", "health").Output()
-		if err != nil {
-			continue
-		}
-		var h dgHealth
-		if json.Unmarshal(out, &h) != nil || h.DataGroups == nil {
-			continue
-		}
-		for _, g := range h.DataGroups.Groups {
-			cand := dgRow{groupID: g.GroupID, leaderID: g.LeaderID, voters: g.RaftVoters}
-			cur, ok := best[g.GroupID]
-			switch {
-			case !ok:
-			case cand.leaderID != "" && cur.leaderID == "":
-			case cand.leaderID == "" && cur.leaderID != "":
-				continue // never downgrade a leader-bearing row to a leaderless one
-			case len(cand.voters) <= len(cur.voters):
-				continue
-			}
-			best[g.GroupID] = cand
-		}
-	}
-	return best
-}
-
-// logHasLine reports whether the daemon log file at path contains substr. Used
-// to confirm from a node's OWN log that a specific evacuation code path fired.
-func logHasLine(path, substr string) bool {
-	b, err := os.ReadFile(path)
-	return err == nil && strings.Contains(string(b), substr)
-}
-
 // shardGroupPeersContain reports whether nodeID appears in any shard-group's
-// peer_ids mirror, read from the public /api/cluster/status of the given node.
+// peer_ids roster, read from the public /api/cluster/status of the given node.
 func shardGroupPeersContain(t testing.TB, base, nodeID string) bool {
 	t.Helper()
 	s := getStatusJSON(t, base)
@@ -384,54 +383,50 @@ func newPhase1Material(t testing.TB, leader *inviteJoinNode, nodeID string) (pha
 	}, clusterID
 }
 
-// sendPhase1 frames + writes req onto stream and reads/decodes the framed reply.
-// A rejected Phase-1 is written as a framed JoinReply{Accepted:false} by the
-// leader's HandleJoinStream, so the reply is always decodable. A torn-down stream
-// surfaces as a non-nil error, which callers also treat as a reject.
-func sendPhase1(stream interface {
-	io.Reader
-	Write([]byte) (int, error)
-	Close() error
-}, req cluster.JoinRequest) (cluster.JoinReply, error) {
-	blob, err := cluster.EncodeJoinRequest(req)
+// dialPhase1WithBindFn dials the HTTP join listener once and sends a Phase-1
+// request built from signBind. signBind receives the live session's RFC5705
+// channel binding (the leader reconstructs over the SAME session's server-side
+// exporter) and returns the bind value to SIGN over — so a test can sign over a
+// DIFFERENT value (a forged bind, or another session's bind) to drive the
+// rejection path. A rejected Phase-1 is a decodable JoinReply{Accepted:false};
+// a torn-down request surfaces as a non-nil error (callers treat both as reject).
+// Returns the reply, the live session binding observed, and any transport error.
+func dialPhase1WithBindFn(ctx context.Context, t testing.TB, leader *inviteJoinNode, joinerName string, signBind func(liveBind []byte) []byte) (cluster.JoinReply, []byte, error) {
+	m, clusterID := newPhase1Material(t, leader, joinerName)
+	var liveBind []byte
+	replyBlob, err := transport.DialJoinHTTP(ctx, m.bundle.SeedAddr, m.bundle.SeedSPKI, m.tlsCert,
+		func(b []byte) ([]byte, error) {
+			liveBind = append([]byte(nil), b...)
+			return cluster.EncodeJoinRequest(buildSignedPhase1(m, clusterID, signBind(b)))
+		})
 	if err != nil {
-		return cluster.JoinReply{}, err
+		return cluster.JoinReply{}, liveBind, err
 	}
-	if _, err := stream.Write(transport.JoinPutField(nil, blob)); err != nil {
-		return cluster.JoinReply{}, err
-	}
-	_ = stream.Close()
-	fields, err := transport.JoinReadFields(stream, 1)
+	reply, err := cluster.DecodeJoinReply(replyBlob)
 	if err != nil {
-		return cluster.JoinReply{}, err
+		return cluster.JoinReply{}, liveBind, err
 	}
-	reply, err := cluster.DecodeJoinReply(fields[0])
-	if err != nil {
-		return cluster.JoinReply{}, err
-	}
-	return *reply, nil
+	return *reply, liveBind, nil
 }
 
 // relayPhase1AcrossSessions opens session A (capturing bindA), signs a Phase-1
-// transcript over bindA, then sends the session-A-signed request onto a SECOND
+// transcript over bindA, then sends the session-A-signed request on a SECOND
 // session B. The leader reconstructs the transcript with B's server-side exporter
-// (≠ bindA), so BOTH signatures fail → reject. This is the test that actually
-// proves channel binding rather than mere signature verification.
+// (≠ bindA), so BOTH signatures fail → reject. This proves channel binding
+// rather than mere signature verification.
 func relayPhase1AcrossSessions(ctx context.Context, t testing.TB, leader *inviteJoinNode) (cluster.JoinReply, []byte, []byte, error) {
-	m, clusterID := newPhase1Material(t, leader, "relay-joiner")
+	// Session A uses its OWN independent invite/identity; we sign over its own
+	// live bind (a valid Phase-1) purely to capture a real session exporter
+	// (bindA). Its reply is discarded — only bindA is reused below. Because it is
+	// a separate invite, accepting it does not touch session B's invite.
+	_, bindA, _ := dialPhase1WithBindFn(ctx, t, leader, "relay-session-a",
+		func(live []byte) []byte { return live })
+	gomega.Expect(bindA).To(gomega.HaveLen(32), "session A bind")
 
-	streamA, bindA, closeA, err := transport.DialJoinTCP(ctx, m.bundle.SeedAddr, m.bundle.SeedSPKI, m.tlsCert)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "session A dial")
-	defer func() { _ = closeA() }()
-	_ = streamA // session A is opened only to capture its live exporter (bindA).
-
-	reqA := buildSignedPhase1(m, clusterID, bindA)
-
-	streamB, bindB, closeB, err := transport.DialJoinTCP(ctx, m.bundle.SeedAddr, m.bundle.SeedSPKI, m.tlsCert)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "session B dial")
-	defer func() { _ = closeB() }()
-
-	reply, sendErr := sendPhase1(streamB, reqA)
+	// Session B: sign over bindA (session A's exporter), send on session B. The
+	// leader reconstructs over B's exporter (bindB ≠ bindA) → reject.
+	reply, bindB, sendErr := dialPhase1WithBindFn(ctx, t, leader, "relay-joiner",
+		func([]byte) []byte { return bindA })
 	return reply, bindA, bindB, sendErr
 }
 
@@ -439,14 +434,9 @@ func relayPhase1AcrossSessions(ctx context.Context, t testing.TB, leader *invite
 // NOT any live session exporter, dials once, and sends it on the SAME session.
 // The leader reconstructs over the real session exporter → signatures fail.
 func dialPhase1WithForgedBind(ctx context.Context, t testing.TB, leader *inviteJoinNode, forged []byte) (cluster.JoinReply, error) {
-	m, clusterID := newPhase1Material(t, leader, "forged-bind-joiner")
-
-	stream, _, closeConn, err := transport.DialJoinTCP(ctx, m.bundle.SeedAddr, m.bundle.SeedSPKI, m.tlsCert)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "forged-bind dial")
-	defer func() { _ = closeConn() }()
-
-	req := buildSignedPhase1(m, clusterID, forged)
-	return sendPhase1(stream, req)
+	reply, _, err := dialPhase1WithBindFn(ctx, t, leader, "forged-bind-joiner",
+		func([]byte) []byte { return forged })
+	return reply, err
 }
 
 // isBindingReject asserts the Phase-1 request was DELIVERED and a framed reply
@@ -542,6 +532,77 @@ var _ = ginkgo.Describe("Zero-CA invite-join", func() {
 				"GetObject through the invite-joined node must return the PUT bytes")
 		})
 
+		// 4b-2 boot-ordering deadlock: at N>1 with deferred seed
+		// (--bootstrap-expect-nodes), the index-group façade phase used to block
+		// BEFORE admin.sock opened — but invite-join joiners need a bundle minted
+		// on admin.sock to join → quorum → deferred index seed. That deadlocked
+		// boot ("boot index groups: only 0/N index groups visible after 30s").
+		// The fix relocates the phase to AFTER admin.sock opens. RED-on-revert:
+		// reverting run.go/index_group_boot.go makes admin.sock never appear here.
+		ginkgo.It("opens the admin socket at N>1 deferred-seed (no boot deadlock)", func() {
+			t := ginkgo.GinkgoTB()
+			leader := startInviteLeaderIndexed(t, inviteJoinClusterKey, 4 /*indexGroups*/, 2 /*expectNodes*/)
+			adminSock := filepath.Join(leader.dataDir, "admin.sock")
+			gomega.Eventually(func() bool {
+				_, err := os.Stat(adminSock)
+				return err == nil
+			}, 25*time.Second, 250*time.Millisecond).Should(gomega.BeTrue(),
+				"admin.sock must open at N>1 deferred — pre-fix it never appears (index-group boot deadlock)")
+			// The 2nd node never joins, so the cluster intentionally never fully
+			// forms (S3 stays down); the admin-socket appearance is the discriminator.
+		})
+
+		// Full path: a 2-node invite-join cluster at N>1 deferred forms and
+		// round-trips an S3 PUT/GET — proving the façade is assembled before S3
+		// serves (a GET-after-PUT through the sharded index would miss if writes
+		// had routed to the meta-FSM placeholder for reads but not writes, or vice
+		// versa — the divergent-rewire correctness hazard). It does NOT assert that
+		// sharding is *perf-engaged* vs a self-consistent total fallback to the
+		// meta-FSM placeholder (both rewires happen in one bootIndexGroupsPostSeed
+		// call, so divergence is structurally impossible); engagement (the
+		// meta_index_propose inflation drop) is the 4b-2 GCP bench's job, not this
+		// correctness test's.
+		ginkgo.It("forms a 2-node invite-join deferred N>1 cluster and round-trips S3 PUT/GET", func() {
+			t := ginkgo.GinkgoTB()
+			leader := startInviteLeaderIndexed(t, inviteJoinClusterKey, 4, 2)
+			// bootstrap waits on admin.sock (the leader blocks in the relocated
+			// index phase until the joiner arrives, so S3 is not up yet).
+			admin, err := bootstrapAdminResultViaUDSForTestMain(leader.dataDir, 30*time.Second)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred(), "bootstrap admin SA via admin.sock")
+			ak, sk, saID := admin.AccessKey, admin.SecretKey, admin.SAID
+
+			bundle := mintInvite(t, leader.dataDir)
+
+			joinerDir := shortTempDir(t)
+			joiner := startInviteJoinerIndexed(t, "joiner", joinerDir, bundle, 4, 2)
+
+			// The 2nd join trips the deferred seed → quorum → index+shard groups
+			// seed → both nodes' index phase unblocks → S3 comes up.
+			waitForVoter(t, leader.httpURL, "joiner", 120*time.Second)
+			waitForPort(t, joiner.httpPort, 90*time.Second)
+
+			bucket := "invite-join-n2-index"
+			gomega.Expect(adminCreateBucketWithPolicyAttachAny(
+				[]string{leader.dataDir}, saID, bucket, 60*time.Second)).To(gomega.Succeed())
+
+			joinerCli := s3ClientFor(joiner.httpURL, ak, sk)
+			gomega.Expect(waitForIAMReady(joinerCli, 60*time.Second)).To(gomega.Succeed())
+
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			ginkgo.DeferCleanup(cancel)
+
+			body := []byte("invite-join N>1 deferred round-trip payload")
+			key := "n2-index-roundtrip.txt"
+			gomega.Eventually(func() error {
+				return tryPutObject(ctx, joinerCli, bucket, key, body)
+			}, 30*time.Second, 500*time.Millisecond).Should(gomega.Succeed(),
+				"PutObject through the joiner must succeed at N>1 deferred")
+			gomega.Eventually(func() ([]byte, error) {
+				return getObjectBytes(ctx, joinerCli, bucket, key)
+			}, 30*time.Second, 500*time.Millisecond).Should(gomega.Equal(body),
+				"GetObject must return the PUT bytes — façade assembled before S3 serves")
+		})
+
 		ginkgo.It("runs complete-cutover and accepts a post-drop invite-join without a shared PSK", func() {
 			t := ginkgo.GinkgoTB()
 			leader := startInviteLeader(t, inviteJoinClusterKey)
@@ -628,11 +689,10 @@ var _ = ginkgo.Describe("Zero-CA invite-join", func() {
 				"revoked node must not rejoin")
 		})
 
-		// Proves the data-group evacuation feature (Tasks 1-7): revoking a node
-		// EVICTS it from the REAL data-group raft voter sets (raft_voters), not just
-		// the peer_ids mirror. raft_voters is admin-UDS-only, so dataGroupHasVoter
-		// shells out to `cluster --format json health` on each node's admin socket.
-		ginkgo.It("evicts a revoked node from data-group voter sets", func() {
+		// Proves the data-group evacuation feature: revoking a node evicts it from
+		// shard-group placement rosters (peer_ids), the source of truth for EC shard
+		// fan-out after per-group raft membership mirroring was removed.
+		ginkgo.It("evicts a revoked node from data-group placement rosters", func() {
 			t := ginkgo.GinkgoTB()
 			leader := startInviteLeader(t, inviteJoinClusterKey)
 			admin, err := bootstrapAdminResultViaUDSForTestMain(leader.dataDir, 30*time.Second)
@@ -677,134 +737,27 @@ var _ = ginkgo.Describe("Zero-CA invite-join", func() {
 				return tryPutObject(ctx, cli, bucket, "evac.txt", []byte("evac payload"))
 			}, 60*time.Second, time.Second).Should(gomega.Succeed())
 
-			// LOAD-BEARING PRECONDITION: evac-joiner-1 IS a REAL data-group voter
+			// LOAD-BEARING PRECONDITION: evac-joiner-1 is in a data-group roster
 			// before revoke (else the post-revoke BeFalse is vacuous). On a miss,
 			// dump every socket's health so a placement skew is diagnosable in one run.
 			gomega.Eventually(func() bool {
-				return dataGroupHasVoter(t, adminSocks, "evac-joiner-1")
+				return dataGroupHasPeer(t, adminSocks, "evac-joiner-1")
 			}, 90*time.Second, time.Second).Should(gomega.BeTrue(),
-				"PRECONDITION: evac-joiner-1 must be a REAL data-group voter before revoke; health dump:\n"+dumpDataGroupHealth(adminSocks))
+				"PRECONDITION: evac-joiner-1 must be a data-group placement peer before revoke; health dump:\n"+dumpDataGroupHealth(adminSocks))
 
 			runRevokeNode(t, leader.dataDir, "evac-joiner-1")
 
-			// THE FIX: evac-joiner-1 disappears from every REAL data-group voter set
-			// across the survivors (its own stale local view is excluded).
+			// THE FIX: evac-joiner-1 disappears from every survivor-visible
+			// data-group placement roster.
 			gomega.Eventually(func() bool {
-				return dataGroupHasVoter(t, survivorSocks, "evac-joiner-1")
+				return dataGroupHasPeer(t, survivorSocks, "evac-joiner-1")
 			}, 120*time.Second, time.Second).Should(gomega.BeFalse(),
-				"revoked node must be evicted from all data-group REAL voter sets; survivor health dump:\n"+dumpDataGroupHealth(survivorSocks))
+				"revoked node must be evicted from all survivor data-group placement rosters; survivor health dump:\n"+dumpDataGroupHealth(survivorSocks))
 
-			// And the persisted peer_ids mirror converges (consequence of the real
-			// ChangeMembership the evacuation controller drives).
+			// And the public status view converges to the same roster.
 			gomega.Eventually(func() bool {
 				return shardGroupPeersContain(t, leader.httpURL, "evac-joiner-1")
 			}, 120*time.Second, time.Second).Should(gomega.BeFalse())
-		})
-
-		// Regression guard for the revoked-data-group-LEADER self-eviction path.
-		// The eviction test above revokes a FOLLOWER, so it never exercises
-		// EvacuateVoter's `revokedID == localNodeID` branch. That branch calls
-		// node.TransferLeadership() DIRECTLY: v2 PeerMatchIndex is unobservable
-		// ((0,false)), so the old pre-wait would time out and strand a revoked
-		// leader in raft_voters forever (the bug #652 fixed). Here we read the
-		// seeded group's elected leader and revoke THAT node, deterministically
-		// forcing the self-transfer path regardless of who won the election.
-		ginkgo.It("evicts a revoked node that LEADS its data group (leadership self-transfer)", func() {
-			t := ginkgo.GinkgoTB()
-			leader := startInviteLeader(t, inviteJoinClusterKey)
-			admin, err := bootstrapAdminResultViaUDSForTestMain(leader.dataDir, 30*time.Second)
-			gomega.Expect(err).NotTo(gomega.HaveOccurred(), "bootstrap admin SA")
-			ak, sk, saID := admin.AccessKey, admin.SecretKey, admin.SAID
-
-			// nodeID -> node so we can reach each node's admin socket and its
-			// daemon log (to confirm the self-transfer path from the leader's log).
-			nodeByID := map[string]*inviteJoinNode{"leader": leader}
-			adminSocks := []string{filepath.Join(leader.dataDir, "admin.sock")}
-			// Three joiners → the seeded group can reach RF≥3, so revoking its
-			// leader exercises leadership-transfer, NOT the 2-voter quorum-strand
-			// limitation ([P3], a different failure mode).
-			for _, id := range []string{"evac-joiner-1", "evac-joiner-2", "evac-spare"} {
-				b := mintInvite(t, leader.dataDir)
-				jd := shortTempDir(t)
-				j := startInviteJoiner(t, id, jd, b)
-				waitForVoter(t, leader.httpURL, id, 90*time.Second)
-				waitForPort(t, j.httpPort, 60*time.Second)
-				nodeByID[id] = j
-				adminSocks = append(adminSocks, filepath.Join(jd, "admin.sock"))
-			}
-
-			// PUT an object so the bucket's data group gains real raft membership.
-			bucket := "evac-leader-bucket"
-			gomega.Expect(adminCreateBucketWithPolicyAttachAny(
-				[]string{leader.dataDir}, saID, bucket, 60*time.Second)).To(gomega.Succeed())
-			cli := s3ClientFor(leader.httpURL, ak, sk)
-			gomega.Expect(waitForIAMReady(cli, 60*time.Second)).To(gomega.Succeed())
-			gomega.Eventually(func() error {
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				defer cancel()
-				return tryPutObject(ctx, cli, bucket, "evac.txt", []byte("evac payload"))
-			}, 60*time.Second, time.Second).Should(gomega.Succeed())
-
-			// PRECONDITION: the seeded group has an elected leader and ≥3 voters.
-			// We target whichever node is the leader (read, don't force).
-			var groupID, leaderID string
-			gomega.Eventually(func() bool {
-				for gid, row := range dataGroupRows(t, adminSocks) {
-					if row.leaderID != "" && len(row.voters) >= 3 &&
-						containsString(row.voters, "evac-joiner-1") {
-						groupID, leaderID = gid, row.leaderID
-						return true
-					}
-				}
-				return false
-			}, 90*time.Second, time.Second).Should(gomega.BeTrue(),
-				"PRECONDITION: seeded data group needs an elected leader + ≥3 voters; health:\n"+dumpDataGroupHealth(adminSocks))
-			ginkgo.GinkgoWriter.Printf("seeded group=%s elected leader=%s\n", groupID, leaderID)
-			gomega.Expect(nodeByID).To(gomega.HaveKey(leaderID),
-				"leader_id %q must be a known node id (not an unresolved address)", leaderID)
-			revokedNode := nodeByID[leaderID]
-
-			// revoke-node removes the target from meta-Raft (RemoveVoter), which is
-			// leader-only, so it MUST be issued against the meta-Raft leader — the
-			// genesis node here. The data-group leader we target is usually genesis
-			// itself; a Raft leader can remove itself (commit a config excluding
-			// self, then step down), so this is uniform whether the target is the
-			// genesis node or a joiner.
-			issuerDir := leader.dataDir
-			revokedSock := filepath.Join(revokedNode.dataDir, "admin.sock")
-			survivorSocks := make([]string, 0, len(adminSocks))
-			for _, s := range adminSocks {
-				if s != revokedSock {
-					survivorSocks = append(survivorSocks, s)
-				}
-			}
-
-			runRevokeNode(t, issuerDir, leaderID)
-
-			// THE FIX: the revoked leader steps down via direct TransferLeadership,
-			// a survivor takes over and removes it. Assert it leaves every
-			// survivor's REAL voter set. (Reverting the fix strands it here.)
-			gomega.Eventually(func() bool {
-				return dataGroupHasVoter(t, survivorSocks, leaderID)
-			}, 120*time.Second, time.Second).Should(gomega.BeFalse(),
-				"revoked data-group LEADER must be evicted from all survivor voter sets; health:\n"+dumpDataGroupHealth(survivorSocks))
-
-			// And the group is not left leaderless: a new, non-revoked leader
-			// emerges (intent: leadership actually transferred).
-			gomega.Eventually(func() bool {
-				row, ok := dataGroupRows(t, survivorSocks)[groupID]
-				return ok && row.leaderID != "" && row.leaderID != leaderID
-			}, 120*time.Second, time.Second).Should(gomega.BeTrue(),
-				"seeded group must elect a new non-revoked leader; health:\n"+dumpDataGroupHealth(survivorSocks))
-
-			// Direct path evidence: the revoked node's OWN daemon log shows its
-			// evacuator hit the self-eviction branch (revokedID == localNodeID →
-			// TransferLeadership). This pins the test to the exact code path, not
-			// just its black-box outcome above.
-			gomega.Eventually(func() bool {
-				return logHasLine(revokedNode.logPath, "evacuator: leadership transferred")
-			}, 120*time.Second, time.Second).Should(gomega.BeTrue(),
-				"revoked leader's evacuator must log the self-transfer (revokedID==localNodeID branch)")
 		})
 	})
 

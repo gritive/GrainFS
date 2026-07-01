@@ -19,17 +19,6 @@ type hotChecker interface {
 	IsHot(nodeID string) bool
 }
 
-// ecObjectShardFetcher abstracts local and remote shard I/O for EC reads.
-type ecObjectShardFetcher interface {
-	ReadLocalShard(bucket, key string, shardIdx int) ([]byte, error)
-	ReadShard(ctx context.Context, peer, bucket, key string, shardIdx int) ([]byte, error)
-	OpenLocalShard(bucket, key string, shardIdx int) (io.ReadCloser, error)
-	ReadShardStream(ctx context.Context, peer, bucket, key string, shardIdx int) (io.ReadCloser, error)
-	ReadLocalShardAt(bucket, key string, shardIdx int, offset int64, buf []byte) (int, error)
-	ReadShardRange(ctx context.Context, peer, bucket, key string, shardIdx int, offset, length int64) ([]byte, error)
-	ReadShardRangeStream(ctx context.Context, peer, bucket, key string, shardIdx int, offset, length int64) (io.ReadCloser, error)
-}
-
 // ecObjectShardCache abstracts the shard LRU cache for EC reads.
 type ecObjectShardCache interface {
 	Peek(key string) ([]byte, bool)
@@ -40,7 +29,7 @@ type ecObjectShardCache interface {
 }
 
 // Verify that concrete types satisfy the interfaces at compile time.
-var _ ecObjectShardFetcher = (*ShardService)(nil)
+var _ ecShardStore = (*ShardService)(nil)
 var _ ecObjectShardCache = (*shardcache.Cache)(nil)
 
 // ecObjectReader reconstructs EC-encoded objects from their constituent shards.
@@ -48,7 +37,7 @@ var _ ecObjectShardCache = (*shardcache.Cache)(nil)
 // DistributedBackend fields it already holds.
 type ecObjectReader struct {
 	selfID     string
-	shards     ecObjectShardFetcher
+	shards     ecShardStore
 	peerHealth ecObjectPeerHealth // nil = disabled
 	cache      ecObjectShardCache // nil = disabled
 	ecConfig   ECConfig           // cluster-level fallback; per-object rec overrides
@@ -64,6 +53,20 @@ func (r ecObjectReader) ReadObject(ctx context.Context, bucket, shardKey string,
 	recCfg, shards, err := r.readShards(ctx, bucket, shardKey, rec)
 	if err != nil {
 		return nil, err
+	}
+	if rec.StripeBytes > 0 {
+		// Stripe-interleaved objects: ecReconstructBodies yields the same
+		// origSize (first present shard's header) and header-stripped bodies
+		// that ECReconstruct uses, so de-interleave matches the contiguous
+		// path's size source exactly.
+		origSize, bodies, err := ecReconstructBodies(recCfg, shards)
+		if err != nil {
+			return nil, err
+		}
+		if origSize == 0 {
+			return []byte{}, nil
+		}
+		return stripeDeinterleave(recCfg, bodies, rec.StripeBytes, origSize)
 	}
 	return ECReconstruct(recCfg, shards)
 }
@@ -81,6 +84,32 @@ func (r ecObjectReader) OpenObject(ctx context.Context, bucket, shardKey string,
 			readers[i] = shard
 		}
 	}
+
+	if rec.StripeBytes > 0 {
+		// Stripe-interleaved objects: the contiguous stream path strips the
+		// 8-byte shard header inside ecReconstructStreamBodies, which the
+		// de-interleave path bypasses. Skip the header on each present reader
+		// (lazily, no eager blocking read) before handing bodies to the bounded
+		// de-interleave reader. skipReader is not an io.Closer, so the stripe
+		// reader's Close is a no-op on it — the underlying shardReaders are
+		// closed exactly once by closeECShardReaders below.
+		for i, shard := range readers {
+			if shard != nil {
+				readers[i] = &skipReader{r: shard, skip: shardHeaderSize}
+			}
+		}
+		rc, err := newStripeDeinterleaveStreamReader(recCfg, readers, int(rec.StripeBytes), objectSize)
+		if err != nil {
+			closeECShardReaders(shardReaders)
+			return nil, err
+		}
+		return &multiReadCloser{Reader: rc, close: func() error {
+			err := rc.Close()
+			closeECShardReaders(shardReaders)
+			return err
+		}}, nil
+	}
+
 	rc, err := newECReconstructStreamReaderWithPrefetch(recCfg, readers, r.hasLocalDataShard(rec, recCfg))
 	if err != nil {
 		closeECShardReaders(shardReaders)
@@ -96,6 +125,11 @@ func (r ecObjectReader) OpenObject(ctx context.Context, bucket, shardKey string,
 // ReadAt reads len(buf) bytes at offset within the EC object without
 // reconstructing the full object.
 func (r ecObjectReader) ReadAt(ctx context.Context, bucket, shardKey string, rec PlacementRecord, objectSize, offset int64, buf []byte) (int, error) {
+	if rec.StripeBytes > 0 {
+		// Interleaved layout: the contiguous offset→shard mapping below is wrong.
+		// Delegate to a bounded stream-fallback that de-interleaves on the fly.
+		return r.readAtStripedStreaming(ctx, bucket, shardKey, rec, objectSize, offset, buf)
+	}
 	if r.shards == nil {
 		return 0, fmt.Errorf("shard service unavailable")
 	}
@@ -147,6 +181,32 @@ func (r ecObjectReader) ReadAt(ctx context.Context, bucket, shardKey string, rec
 		}
 	}
 	return done, nil
+}
+
+// readAtStripedStreaming serves a Range read of a stripe-interleaved object by
+// opening the bounded de-interleave stream, discarding `offset` bytes, and
+// filling buf. The stream reader buffers at most one stripe, so memory stays
+// bounded. (The offset→stripe seek optimization is a deferred follow-up.)
+func (r ecObjectReader) readAtStripedStreaming(ctx context.Context, bucket, shardKey string, rec PlacementRecord, objectSize, offset int64, buf []byte) (int, error) {
+	rc, err := r.OpenObject(ctx, bucket, shardKey, rec, objectSize)
+	if err != nil {
+		return 0, err
+	}
+	defer rc.Close()
+	if offset > 0 {
+		if _, err := io.CopyN(io.Discard, rc, offset); err != nil {
+			return 0, fmt.Errorf("striped range seek: %w", err)
+		}
+	}
+	want := len(buf)
+	if rem := objectSize - offset; int64(want) > rem {
+		want = int(rem)
+	}
+	n, err := io.ReadFull(rc, buf[:want])
+	if err == io.ErrUnexpectedEOF || err == io.EOF {
+		err = nil
+	}
+	return n, err
 }
 
 // computeAttemptOrder returns primary and fallback shard idx lists.
@@ -222,10 +282,199 @@ func (r ecObjectReader) computeAttemptOrder(rec PlacementRecord, cfg ECConfig) (
 	return primary, fallback
 }
 
+// shardResult is one shard-read outcome flowing back from a fetch goroutine to
+// the single-threaded consume loop.
+type shardResult struct {
+	idx      int
+	data     []byte
+	err      error
+	peer     string // non-empty for remote reads; empty for local/selfID reads
+	peerOK   bool   // true if remote read succeeded (only valid when peer != "")
+	canceled bool   // true if k-of-n early-exit caused the cancellation error
+}
+
+// ecShardCollector holds the mutable shard-collection state for one readShards
+// call. All mutation of shards/cached/available happens single-threaded in the
+// consume loop (cachePrepass / applyResult); dispatched goroutines do I/O and
+// channel-send ONLY and never touch these fields.
+type ecShardCollector struct {
+	r        ecObjectReader // endpointFor, cache, peerHealth, shards
+	recCfg   ECConfig
+	bucket   string
+	shardKey string
+	rec      PlacementRecord
+
+	shards    [][]byte // output buffer (len == NumShards)
+	cached    []bool
+	available int
+}
+
+// cachePrepass satisfies shards from the cache to avoid disk/network I/O and
+// returns true when K data shards are available (the read is fully served from
+// cache). No-op when the reader has no cache.
+//
+// Cache-Get accounting (observable via readamp + cache spies) is split exactly
+// as the original: when Peek already satisfies K, only the FIRST K of the Peeked
+// indices are RecordECShard+Get-promoted; otherwise every Peeked index is
+// promoted and then non-cached indices are Get-probed in order until K.
+func (c *ecShardCollector) cachePrepass() bool {
+	if c.r.cache == nil {
+		return false
+	}
+	cachedIdx := make([]int, 0, len(c.rec.Nodes))
+	for i := range c.rec.Nodes {
+		if data, ok := c.r.cache.Peek(shardCacheKey(c.bucket, c.shardKey, i)); ok {
+			c.shards[i] = data
+			c.cached[i] = true
+			cachedIdx = append(cachedIdx, i)
+			c.available++
+		}
+	}
+	if c.available >= c.recCfg.DataShards {
+		for _, i := range cachedIdx[:c.recCfg.DataShards] {
+			readamp.RecordECShard(shardCacheKey(c.bucket, c.shardKey, i))
+			_, _ = c.r.cache.Get(shardCacheKey(c.bucket, c.shardKey, i))
+		}
+		return true
+	}
+	for _, i := range cachedIdx {
+		readamp.RecordECShard(shardCacheKey(c.bucket, c.shardKey, i))
+		_, _ = c.r.cache.Get(shardCacheKey(c.bucket, c.shardKey, i))
+	}
+	for i := range c.rec.Nodes {
+		if !c.cached[i] {
+			// A cache miss means this request will fall through to
+			// ReadShard/ReadLocalShard for that shard.
+			readamp.RecordECShard(shardCacheKey(c.bucket, c.shardKey, i))
+			if data, ok := c.r.cache.Get(shardCacheKey(c.bucket, c.shardKey, i)); ok {
+				c.shards[i] = data
+				c.cached[i] = true
+				c.available++
+			}
+			if c.available == c.recCfg.DataShards {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// markPeerHealth records peer health for a remote read result. A result whose
+// error is our own k-of-n early-exit cancellation (canceled==true) is skipped:
+// the peer did not actually fail.
+func (c *ecShardCollector) markPeerHealth(res shardResult) {
+	if res.peer != "" && c.r.peerHealth != nil && !res.canceled {
+		if res.peerOK {
+			c.r.peerHealth.MarkHealthy(res.peer)
+		} else {
+			c.r.peerHealth.MarkUnhealthy(res.peer)
+		}
+	}
+}
+
+// applyResult marks peer health and, for a successful read, stores the shard
+// (write-guarded so late results arriving after K is reached do not overwrite),
+// populates the cache, and bumps available. Returns true on a successful read.
+func (c *ecShardCollector) applyResult(res shardResult) bool {
+	c.markPeerHealth(res)
+	if res.err != nil || res.data == nil {
+		return false
+	}
+	if c.available < c.recCfg.DataShards {
+		c.shards[res.idx] = res.data
+	}
+	if c.r.cache != nil {
+		c.r.cache.Put(shardCacheKey(c.bucket, c.shardKey, res.idx), res.data)
+	}
+	c.available++
+	return true
+}
+
+// fetchShards fans out reads for the given shard indices and consumes results in
+// a single-threaded loop. When stopAtK is set and K is reached, it cancels the
+// remaining in-flight remote reads and drains their results (still marking peer
+// health, but skipping peers canceled by our own cancel).
+//
+// The two-context structure is load-bearing: local reads run on the parent ctx
+// and run to completion; remote reads run on a shardCtx derived from a
+// cancelable readCtx, so cancel() aborts only in-flight remote reads and only
+// remote results can be flagged canceled. resultCh is sized to len(indices) so a
+// goroutine can always non-blocking-send even after an early-return drain.
+func (c *ecShardCollector) fetchShards(ctx context.Context, indices []int, stopAtK bool) {
+	if len(indices) == 0 || c.available >= c.recCfg.DataShards {
+		return
+	}
+	readCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	resultCh := make(chan shardResult, len(indices))
+	dispatched := 0
+	for _, i := range indices {
+		if c.cached[i] || c.shards[i] != nil {
+			continue
+		}
+		i, node := i, c.rec.Nodes[i]
+		if c.r.cache == nil {
+			readamp.RecordECShard(shardCacheKey(c.bucket, c.shardKey, i))
+		}
+		dispatched++
+		go func() {
+			ep := c.r.endpointFor(node)
+			var data []byte
+			var err error
+			var peer string
+			var peerOK, canceled bool
+			if ep.IsLocal() {
+				data, err = ep.ReadShard(ctx, c.bucket, c.shardKey, i)
+			} else {
+				peer = node
+				shardCtx, shardCancel := context.WithTimeout(readCtx, shardRPCTimeout)
+				defer shardCancel()
+				data, err = ep.ReadShard(shardCtx, c.bucket, c.shardKey, i)
+				if err != nil {
+					if errors.Is(err, context.Canceled) && readCtx.Err() != nil {
+						canceled = true
+					}
+				} else {
+					peerOK = true
+				}
+			}
+			resultCh <- shardResult{idx: i, data: data, err: err, peer: peer, peerOK: peerOK, canceled: canceled}
+		}()
+	}
+	if dispatched == 0 {
+		return
+	}
+
+	for j := 0; j < dispatched; j++ {
+		res := <-resultCh
+		if c.applyResult(res) && stopAtK && c.available == c.recCfg.DataShards {
+			cancel()
+			for k := j + 1; k < dispatched; k++ {
+				select {
+				case drained := <-resultCh:
+					c.markPeerHealth(drained)
+				case <-ctx.Done():
+					return
+				}
+			}
+			return
+		}
+	}
+}
+
+// notEnoughShardsErr builds the shared "not enough shards available" error used
+// by the buffered and streaming read paths.
+func notEnoughShardsErr(available, total, need int) error {
+	return fmt.Errorf("ec get: only %d/%d shards available, need %d", available, total, need)
+}
+
 // readShards collects the k-of-n data shards needed to reconstruct the object.
 //
 // Strategy: satisfy data shards first to avoid healthy-path parity fanout; fall
-// back to parity shards only when data shards are unavailable.
+// back to parity shards only when data shards are unavailable. It is the thin
+// orchestrator over an ecShardCollector: validate, cache pre-pass, then
+// primary→fallback fan-out.
 func (r ecObjectReader) readShards(ctx context.Context, bucket, shardKey string, rec PlacementRecord) (ECConfig, [][]byte, error) {
 	recCfg := rec.ECConfigOrFallback(r.ecConfig)
 	if len(rec.Nodes) != recCfg.NumShards() {
@@ -235,182 +484,35 @@ func (r ecObjectReader) readShards(ctx context.Context, bucket, shardKey string,
 		return ECConfig{}, nil, fmt.Errorf("shard service unavailable")
 	}
 
-	shards := make([][]byte, len(rec.Nodes))
-	available := 0
-	cached := make([]bool, len(rec.Nodes))
+	c := ecShardCollector{
+		r:        r,
+		recCfg:   recCfg,
+		bucket:   bucket,
+		shardKey: shardKey,
+		rec:      rec,
+		shards:   make([][]byte, len(rec.Nodes)),
+		cached:   make([]bool, len(rec.Nodes)),
+	}
 
 	// Cache pre-pass: satisfy from cache to avoid disk/network I/O.
-	if r.cache != nil {
-		cachedIdx := make([]int, 0, len(rec.Nodes))
-		for i := range rec.Nodes {
-			if data, ok := r.cache.Peek(shardCacheKey(bucket, shardKey, i)); ok {
-				shards[i] = data
-				cached[i] = true
-				cachedIdx = append(cachedIdx, i)
-				available++
-			}
-		}
-		if available >= recCfg.DataShards {
-			for _, i := range cachedIdx[:recCfg.DataShards] {
-				readamp.RecordECShard(shardCacheKey(bucket, shardKey, i))
-				_, _ = r.cache.Get(shardCacheKey(bucket, shardKey, i))
-			}
-			return recCfg, shards, nil
-		}
-		for _, i := range cachedIdx {
-			readamp.RecordECShard(shardCacheKey(bucket, shardKey, i))
-			_, _ = r.cache.Get(shardCacheKey(bucket, shardKey, i))
-		}
-		for i := range rec.Nodes {
-			if !cached[i] {
-				// A cache miss means this request will fall through to
-				// ReadShard/ReadLocalShard for that shard.
-				readamp.RecordECShard(shardCacheKey(bucket, shardKey, i))
-				if data, ok := r.cache.Get(shardCacheKey(bucket, shardKey, i)); ok {
-					shards[i] = data
-					cached[i] = true
-					available++
-				}
-				if available == recCfg.DataShards {
-					return recCfg, shards, nil
-				}
-			}
-		}
-	}
-
-	type shardResult struct {
-		idx      int
-		data     []byte
-		err      error
-		peer     string // non-empty for remote reads; empty for local/selfID reads
-		peerOK   bool   // true if remote read succeeded (only valid when peer != "")
-		canceled bool   // true if k-of-n early-exit caused the cancellation error
-	}
-
-	markPeerHealth := func(res shardResult) {
-		if res.peer != "" && r.peerHealth != nil && !res.canceled {
-			if res.peerOK {
-				r.peerHealth.MarkHealthy(res.peer)
-			} else {
-				r.peerHealth.MarkUnhealthy(res.peer)
-			}
-		}
-	}
-
-	applyShardResult := func(res shardResult) bool {
-		markPeerHealth(res)
-		if res.err != nil || res.data == nil {
-			return false
-		}
-		if available < recCfg.DataShards {
-			shards[res.idx] = res.data
-		}
-		if r.cache != nil {
-			r.cache.Put(shardCacheKey(bucket, shardKey, res.idx), res.data)
-		}
-		available++
-		return true
-	}
-
-	selfID := r.selfID
-	fetchShards := func(indices []int, stopAtK bool) {
-		if len(indices) == 0 || available >= recCfg.DataShards {
-			return
-		}
-		readCtx, cancel := context.WithCancel(ctx)
-		defer cancel()
-
-		resultCh := make(chan shardResult, len(indices))
-		dispatched := 0
-		for _, i := range indices {
-			if cached[i] || shards[i] != nil {
-				continue
-			}
-			i, node := i, rec.Nodes[i]
-			if r.cache == nil {
-				readamp.RecordECShard(shardCacheKey(bucket, shardKey, i))
-			}
-			dispatched++
-			go func() {
-				var data []byte
-				var err error
-				var peer string
-				var peerOK, canceled bool
-				if node == selfID {
-					data, err = r.shards.ReadLocalShard(bucket, shardKey, i)
-				} else {
-					peer = node
-					shardCtx, shardCancel := context.WithTimeout(readCtx, shardRPCTimeout)
-					defer shardCancel()
-					data, err = r.shards.ReadShard(shardCtx, node, bucket, shardKey, i)
-					if err != nil {
-						if errors.Is(err, context.Canceled) && readCtx.Err() != nil {
-							canceled = true
-						}
-					} else {
-						peerOK = true
-					}
-				}
-				resultCh <- shardResult{idx: i, data: data, err: err, peer: peer, peerOK: peerOK, canceled: canceled}
-			}()
-		}
-		if dispatched == 0 {
-			return
-		}
-
-		for j := 0; j < dispatched; j++ {
-			res := <-resultCh
-			if applyShardResult(res) && stopAtK && available == recCfg.DataShards {
-				cancel()
-				for k := j + 1; k < dispatched; k++ {
-					select {
-					case drained := <-resultCh:
-						markPeerHealth(drained)
-					case <-ctx.Done():
-						return
-					}
-				}
-				return
-			}
-		}
+	if c.cachePrepass() {
+		return recCfg, c.shards, nil
 	}
 
 	// Determine primary and fallback shard indices, swapping hot data shards to
 	// parity when BoundedLoads is active.
 	primary, fallback := r.computeAttemptOrder(rec, recCfg)
 
-	// Local primary-shard fast path: if all primary shards are local-or-cached,
-	// read them without spinning up goroutines.
-	localDataFastPath := true
-	for _, i := range primary {
-		if !cached[i] && rec.Nodes[i] != selfID {
-			localDataFastPath = false
-			break
-		}
+	// Try data (primary) shards first; fall back to parity only when they do not
+	// satisfy K. fetchShards no-ops once K is reached (its entry guard returns
+	// when available >= DataShards), so the fallback call is a cheap early-out on
+	// the healthy path.
+	c.fetchShards(ctx, primary, false)
+	c.fetchShards(ctx, fallback, true)
+	if c.available < recCfg.DataShards {
+		return ECConfig{}, nil, notEnoughShardsErr(c.available, len(rec.Nodes), recCfg.DataShards)
 	}
-	if !localDataFastPath {
-		fetchShards(primary, false)
-		if available < recCfg.DataShards {
-			fetchShards(fallback, true)
-			if available < recCfg.DataShards {
-				return ECConfig{}, nil, fmt.Errorf("ec get: only %d/%d shards available, need %d",
-					available, len(rec.Nodes), recCfg.DataShards)
-			}
-		}
-		return recCfg, shards, nil
-	}
-
-	fetchShards(primary, false)
-	if available >= recCfg.DataShards {
-		return recCfg, shards, nil
-	}
-
-	fetchShards(fallback, true)
-	if available < recCfg.DataShards {
-		return ECConfig{}, nil, fmt.Errorf("ec get: only %d/%d shards available, need %d",
-			available, len(rec.Nodes), recCfg.DataShards)
-	}
-	return recCfg, shards, nil
+	return recCfg, c.shards, nil
 }
 
 // openShardReaders opens streaming readers for the shards needed to reconstruct
@@ -440,9 +542,9 @@ func (r ecObjectReader) openShardReaders(ctx context.Context, bucket, shardKey s
 	available := 0
 	openShard := func(i int) bool {
 		readamp.RecordECShard(shardCacheKey(bucket, shardKey, i))
-		node := rec.Nodes[i]
-		if node == r.selfID {
-			rc, err := r.shards.OpenLocalShard(bucket, shardKey, i)
+		ep := r.endpointFor(rec.Nodes[i])
+		if ep.IsLocal() {
+			rc, err := ep.OpenShardStream(ctx, bucket, shardKey, i)
 			if err != nil {
 				return false
 			}
@@ -452,16 +554,10 @@ func (r ecObjectReader) openShardReaders(ctx context.Context, bucket, shardKey s
 		}
 
 		shardCtx, shardCancel := context.WithTimeout(ctx, shardRPCTimeout)
-		rc, err := r.shards.ReadShardStream(shardCtx, node, bucket, shardKey, i)
+		rc, err := ep.OpenShardStream(shardCtx, bucket, shardKey, i)
 		if err != nil {
 			shardCancel()
-			if r.peerHealth != nil {
-				r.peerHealth.MarkUnhealthy(node)
-			}
 			return false
-		}
-		if r.peerHealth != nil {
-			r.peerHealth.MarkHealthy(node)
 		}
 		shardReaders[i] = &multiReadCloser{Reader: rc, close: func() error {
 			err := rc.Close()
@@ -489,8 +585,7 @@ func (r ecObjectReader) openShardReaders(ctx context.Context, bucket, shardKey s
 	}
 	if available < recCfg.DataShards {
 		closeECShardReaders(shardReaders)
-		return ECConfig{}, nil, fmt.Errorf("ec get: only %d/%d shards available, need %d",
-			available, len(rec.Nodes), recCfg.DataShards)
+		return ECConfig{}, nil, notEnoughShardsErr(available, len(rec.Nodes), recCfg.DataShards)
 	}
 	return recCfg, shardReaders, nil
 }
@@ -522,42 +617,14 @@ func (r ecObjectReader) readDataShardAt(ctx context.Context, bucket, shardKey, n
 			return copy(buf, data), nil
 		}
 	}
-	if node == r.selfID {
-		return r.shards.ReadLocalShardAt(bucket, shardKey, shardIdx, shardHeaderSize+shardOffset, buf)
+	ep := r.endpointFor(node)
+	if ep.IsLocal() {
+		return ep.ReadShardAt(ctx, bucket, shardKey, shardIdx, shardHeaderSize+shardOffset, buf)
 	}
 
 	shardCtx, shardCancel := context.WithTimeout(ctx, shardRPCTimeout)
 	defer shardCancel()
-	if len(buf) <= maxShardRangeReplyBytes {
-		data, err := r.shards.ReadShardRange(shardCtx, node, bucket, shardKey, shardIdx, shardHeaderSize+shardOffset, int64(len(buf)))
-		if err != nil {
-			if r.peerHealth != nil {
-				r.peerHealth.MarkUnhealthy(node)
-			}
-			return 0, err
-		}
-		if r.peerHealth != nil {
-			r.peerHealth.MarkHealthy(node)
-		}
-		n := copy(buf, data)
-		if n != len(buf) || n != len(data) {
-			return n, io.ErrUnexpectedEOF
-		}
-		r.cacheReadAtRange(rangeCacheKey, buf[:n], n, len(buf), nil)
-		return n, nil
-	}
-	rc, err := r.shards.ReadShardRangeStream(shardCtx, node, bucket, shardKey, shardIdx, shardHeaderSize+shardOffset, int64(len(buf)))
-	if err != nil {
-		if r.peerHealth != nil {
-			r.peerHealth.MarkUnhealthy(node)
-		}
-		return 0, err
-	}
-	defer rc.Close()
-	if r.peerHealth != nil {
-		r.peerHealth.MarkHealthy(node)
-	}
-	n, err := io.ReadFull(rc, buf)
+	n, err := ep.ReadShardAt(shardCtx, bucket, shardKey, shardIdx, shardHeaderSize+shardOffset, buf)
 	r.cacheReadAtRange(rangeCacheKey, buf[:n], n, len(buf), err)
 	return n, err
 }
@@ -574,11 +641,36 @@ func (r ecObjectReader) cacheReadAtRange(key string, data []byte, n, want int, e
 // hasLocalDataShard reports whether any of the K data shards is stored on self.
 func (r ecObjectReader) hasLocalDataShard(rec PlacementRecord, cfg ECConfig) bool {
 	for i := 0; i < cfg.DataShards && i < len(rec.Nodes); i++ {
-		if rec.Nodes[i] == r.selfID {
+		if r.endpointFor(rec.Nodes[i]).IsLocal() {
 			return true
 		}
 	}
 	return false
+}
+
+// skipReader discards the first `skip` bytes from the underlying reader before
+// passing subsequent reads through. It skips lazily (no eager blocking read) so
+// shard readers are not forced to materialize their header until first Read.
+// It deliberately does NOT implement io.Closer: the underlying shard readers
+// are owned and closed elsewhere (closeECShardReaders).
+type skipReader struct {
+	r    io.Reader
+	skip int
+}
+
+func (s *skipReader) Read(p []byte) (int, error) {
+	for s.skip > 0 {
+		n := s.skip
+		if n > len(p) {
+			n = len(p)
+		}
+		m, err := s.r.Read(p[:n])
+		s.skip -= m
+		if err != nil {
+			return 0, err
+		}
+	}
+	return s.r.Read(p)
 }
 
 func closeECShardReaders(shards []io.ReadCloser) {

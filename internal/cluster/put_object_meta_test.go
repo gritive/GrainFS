@@ -1,13 +1,39 @@
 package cluster
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
-	"github.com/dgraph-io/badger/v4"
-
 	"github.com/gritive/GrainFS/internal/storage"
 )
+
+// checkPutObjectExpectedETag verifies that the current FSM object ETag matches
+// expectedETag before a conditional metadata write. Its sole production caller
+// (applyPutObjectMeta) was retired in data-plane raft-free Slice 2, so it now
+// lives here as a test helper for FSM-level CAS tests.
+func (f *FSM) checkPutObjectExpectedETag(txn MetadataTxn, bucket, key, expectedETag string) error {
+	if expectedETag == "" {
+		return nil
+	}
+	item, err := txn.Get(f.keys.ObjectMetaKey(bucket, key))
+	if err != nil {
+		return fmt.Errorf("put object meta CAS: read current meta: %w", err)
+	}
+	val, err := f.itemValueCopy(item)
+	if err != nil {
+		return fmt.Errorf("put object meta CAS: read current meta value: %w", err)
+	}
+	current, err := unmarshalObjectMeta(val)
+	if err != nil {
+		return fmt.Errorf("put object meta CAS: decode current meta: %w", err)
+	}
+	if current.ETag != expectedETag {
+		return fmt.Errorf("put object meta CAS: etag changed for %s/%s: got %q, want %q: %w",
+			bucket, key, current.ETag, expectedETag, ErrPutObjectMetaCAS)
+	}
+	return nil
+}
 
 func TestBuildPutObjectMeta(t *testing.T) {
 	cmd := PutObjectMetaCmd{
@@ -83,7 +109,7 @@ func TestCheckPutObjectExpectedETag(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := f.db.View(func(txn *badger.Txn) error {
+			err := f.db.View(func(txn MetadataTxn) error {
 				return f.checkPutObjectExpectedETag(txn, "b", "k", tt.expected)
 			})
 			if tt.wantErrSub == "" {
@@ -102,7 +128,7 @@ func TestCheckPutObjectExpectedETag(t *testing.T) {
 func TestCheckPutObjectExpectedETagMissingCurrentFails(t *testing.T) {
 	f := newCoalesceTestFSM(t)
 
-	err := f.db.View(func(txn *badger.Txn) error {
+	err := f.db.View(func(txn MetadataTxn) error {
 		return f.checkPutObjectExpectedETag(txn, "b", "missing", "etag")
 	})
 	if err == nil || !strings.Contains(err.Error(), "read current meta") {

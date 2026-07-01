@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/dgraph-io/badger/v4"
@@ -18,11 +20,12 @@ import (
 var _ = Describe("Backend object API integration", func() {
 	var (
 		b   *DistributedBackend
+		db  *badger.DB
 		ctx context.Context
 	)
 
 	BeforeEach(func() {
-		b = newTestDistributedBackend(GinkgoT())
+		b, db = newTestDistributedBackendWithDB(GinkgoT())
 		ctx = context.Background()
 		Expect(b.CreateBucket(ctx, "bucket")).To(Succeed())
 	})
@@ -31,7 +34,7 @@ var _ = Describe("Backend object API integration", func() {
 		up, err := b.CreateMultipartUpload(ctx, "bucket", "mp.bin", "application/octet-stream")
 		Expect(err).NotTo(HaveOccurred())
 		payload := bytes.Repeat([]byte("x"), 64<<10)
-		part, err := b.UploadPart(ctx, "bucket", "mp.bin", up.UploadID, 1, bytes.NewReader(payload))
+		part, err := b.UploadPart(ctx, "bucket", "mp.bin", up.UploadID, 1, bytes.NewReader(payload), "")
 		Expect(err).NotTo(HaveOccurred())
 		_, err = b.CompleteMultipartUpload(ctx, "bucket", "mp.bin", up.UploadID, []storage.Part{*part})
 		Expect(err).NotTo(HaveOccurred())
@@ -42,7 +45,7 @@ var _ = Describe("Backend object API integration", func() {
 		Expect(obj.ECParity).To(Equal(uint8(0)))
 		Expect(obj.NodeIDs).To(Equal([]string{b.selfAddr}))
 
-		Expect(b.db.Update(func(txn *badger.Txn) error {
+		Expect(db.Update(func(txn *badger.Txn) error {
 			if err := txn.Delete(b.ks().ObjectMetaKey("bucket", "mp.bin")); err != nil && err != badger.ErrKeyNotFound {
 				return err
 			}
@@ -54,6 +57,11 @@ var _ = Describe("Backend object API integration", func() {
 			}
 			return nil
 		})).To(Succeed())
+		// The multipart fix also commits to quorum-meta; remove that file too so
+		// the "metadata is no longer stored" premise holds and HeadObject falls
+		// through to the prepared EC placement read below.
+		qmetaPath := filepath.Join(b.root, "shards", quorumMetaSubDir, "bucket", "mp.bin")
+		Expect(os.Remove(qmetaPath)).To(Succeed())
 		_, err = b.HeadObject(ctx, "bucket", "mp.bin")
 		Expect(err).To(MatchError(storage.ErrObjectNotFound))
 

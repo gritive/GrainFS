@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/gossip"
 )
 
 // TestBalancerProposer_HotReload_TriggerPct asserts that a cluster_config
@@ -23,11 +25,11 @@ func TestBalancerProposer_HotReload_TriggerPct(t *testing.T) {
 	cfg.imbalanceTriggerPct.Store(20.0)
 	cfg.imbalanceStopPct.Store(5.0)
 
-	store := NewNodeStatsStore(1 * time.Minute)
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
 	// Two peers with a 15pp imbalance — below the 20% trigger initially.
 	// JoinedAt left zero so anyNodeInGracePeriod() is false (no 1.5× boost).
-	store.Set(NodeStats{NodeID: "node-a", DiskUsedPct: 60.0})
-	store.Set(NodeStats{NodeID: "node-b", DiskUsedPct: 45.0})
+	store.Set(gossip.NodeStats{NodeID: "node-a", DiskUsedPct: 60.0})
+	store.Set(gossip.NodeStats{NodeID: "node-b", DiskUsedPct: 45.0})
 
 	node := &mockRaftNode{state: 2, nodeID: "node-a", peerIDs: []string{"node-b"}}
 	p := NewBalancerProposer("node-a", store, node, cfg)

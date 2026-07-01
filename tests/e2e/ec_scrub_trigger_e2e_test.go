@@ -47,7 +47,6 @@ var _ = ginkgo.Describe("EC scrub trigger", func() {
 		ginkgo.BeforeEach(func() {
 			c = startE2ECluster(ginkgo.GinkgoTB(), e2eClusterOptions{
 				Nodes: 3, Mode: ClusterModeStaticPeers, LogPrefix: "ec-scrub-trigger",
-				DisableNFS: true, DisableNBD: true,
 			})
 		})
 

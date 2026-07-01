@@ -3,7 +3,6 @@ package cluster
 import (
 	"bytes"
 	"context"
-	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -34,7 +33,8 @@ var _ = Describe("Backend EC object integration", func() {
 		// Reuse the backend's existing keeper so FSM-sealed meta written before
 		// this reconfigure (e.g. legacy-convert tests) stays decryptable.
 		keeper, clusterID := b.shardSvc.DEKKeeper(), b.shardSvc.ClusterID()
-		b.SetShardService(NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID)), nodes)
+		b.SetShardService(NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID)), nodes)
+		wireTestShardGroup(b)
 	}
 
 	It("rejects an object key that escapes the shard data root", func() {
@@ -53,11 +53,11 @@ var _ = Describe("Backend EC object integration", func() {
 		Expect(os.IsNotExist(statErr)).To(BeTrue(), "no shard dir may escape the data dir: %s", escaped)
 	})
 
-	It("spools large parity EC shard encoding to disk", func() {
+	It("round-trips large parity EC objects via the streaming chunked path", func() {
 		configureEC(ECConfig{DataShards: 2, ParityShards: 1})
 
 		payload := bytes.Repeat([]byte("b"), 2<<20)
-		body := io.LimitReader(bytes.NewReader(payload), int64(len(payload)))
+		body := bytes.NewReader(payload)
 		obj, err := b.PutObject(ctx, "bucket", "large-spooled.bin", body, "application/octet-stream")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(obj.Size).To(Equal(int64(len(payload))))
@@ -70,16 +70,13 @@ var _ = Describe("Backend EC object integration", func() {
 		Expect(closeErr).NotTo(HaveOccurred())
 		Expect(got).To(Equal(payload))
 		Expect(gotObj.ETag).To(Equal(obj.ETag))
-
-		_, err = os.Stat(b.ecSpoolDir())
-		Expect(err).NotTo(HaveOccurred())
 	})
 
-	It("preserves user metadata when EC shard encoding is spooled", func() {
+	It("preserves user metadata for EC objects on the streaming chunked path", func() {
 		configureEC(ECConfig{DataShards: 2, ParityShards: 1})
 
 		payload := bytes.Repeat([]byte("a"), 64<<10)
-		body := io.LimitReader(bytes.NewReader(payload), int64(len(payload)))
+		body := bytes.NewReader(payload)
 		obj, err := b.PutObjectWithUserMetadata(
 			ctx,
 			"bucket",
@@ -96,112 +93,19 @@ var _ = Describe("Backend EC object integration", func() {
 		Expect(gotObj.UserMetadata).To(Equal(map[string]string{"x-amz-meta-owner": "me"}))
 	})
 
-	It("converts legacy objects to EC with spooled shard encoding", func() {
-		payload := bytes.Repeat([]byte("convert-spooled-"), 4096)
-		key := "legacy.bin"
-		versionID := ""
-		path := b.objectPath("bucket", key)
-		Expect(os.MkdirAll(filepath.Dir(path), 0o755)).To(Succeed())
-		Expect(os.WriteFile(path, payload, 0o600)).To(Succeed())
+	// "rejects stale PutObjectMeta expected ETag updates" was removed: the
+	// conditional-PUT (ExpectedETag) FSM CAS it exercised is retired under
+	// blob-primary — object metadata writes have no raft propose and the only
+	// ExpectedETag caller (object relocation) relies on the blob LWW
+	// (preserve-old-ModTime), not an FSM CAS (quorum_meta.go / relocate_object.go).
+	// The test-only checkPutObjectExpectedETag helper is still unit-tested in
+	// isolation in put_object_meta_test.go; there is no blob analogue to assert
+	// end-to-end via headObjectMeta (which now reads only blobs).
 
-		raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
-			Bucket:      "bucket",
-			Key:         key,
-			VersionID:   versionID,
-			Size:        int64(len(payload)),
-			ContentType: "application/octet-stream",
-			ETag:        backendMD5Hex(payload),
-			ModTime:     1,
-		})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(b.fsm.Apply(raw)).To(Succeed())
-
-		configureEC(ECConfig{DataShards: 2, ParityShards: 1})
-
-		Expect(b.ConvertObjectToEC(ctx, "bucket", key)).To(Succeed())
-
-		_, err = os.Stat(b.ecSpoolDir())
-		Expect(err).NotTo(HaveOccurred())
-		_, err = os.Stat(path)
-		Expect(os.IsNotExist(err)).To(BeTrue())
-
-		rc, gotObj, err := b.GetObject(ctx, "bucket", key)
-		Expect(err).NotTo(HaveOccurred())
-		got, readErr := io.ReadAll(rc)
-		closeErr := rc.Close()
-		Expect(readErr).NotTo(HaveOccurred())
-		Expect(closeErr).NotTo(HaveOccurred())
-		Expect(got).To(Equal(payload))
-		Expect(gotObj.VersionID).To(Equal(versionID))
-		Expect(gotObj.LastModified).To(Equal(int64(1)))
-
-		_, placementMeta, err := b.headObjectMeta(ctx, "bucket", key)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(placementMeta.ECData).To(Equal(uint8(2)))
-		Expect(placementMeta.ECParity).To(Equal(uint8(1)))
-	})
-
-	It("rejects stale PutObjectMeta expected ETag updates", func() {
-		putMeta := func(etag string, ecData, ecParity uint8, expectedETag string) error {
-			GinkgoHelper()
-			raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
-				Bucket:       "bucket",
-				Key:          "race.bin",
-				Size:         1,
-				ContentType:  "application/octet-stream",
-				ETag:         etag,
-				ModTime:      1,
-				ECData:       ecData,
-				ECParity:     ecParity,
-				ExpectedETag: expectedETag,
-			})
-			Expect(err).NotTo(HaveOccurred())
-			return b.fsm.Apply(raw)
-		}
-
-		Expect(putMeta("old", 0, 0, "")).To(Succeed())
-		Expect(putMeta("new", 0, 0, "")).To(Succeed())
-		Expect(putMeta("old", 2, 1, "old")).To(HaveOccurred())
-
-		obj, placementMeta, err := b.headObjectMeta(ctx, "bucket", "race.bin")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(obj.ETag).To(Equal("new"))
-		Expect(placementMeta.ECData).To(Equal(uint8(0)))
-		Expect(placementMeta.ECParity).To(Equal(uint8(0)))
-	})
-
-	DescribeTable("cleans written shards when EC commit aborts before metadata",
-		func(cfg ECConfig) {
-			configureEC(cfg)
-
-			payload := bytes.Repeat([]byte("abort-before-commit-"), 1024)
-			sp, err := b.spoolPutObject(ctx, "bucket", bytes.NewReader(payload))
-			Expect(err).NotTo(HaveOccurred())
-			defer sp.Cleanup()
-
-			errChanged := errors.New("metadata changed")
-			_, err = b.putObjectECSpooledWithOptionalModTime(
-				ctx,
-				"bucket",
-				"abort.bin",
-				"",
-				sp,
-				"application/octet-stream",
-				nil,
-				"",
-				1,
-				true,
-				"",
-				func() error { return errChanged },
-				nil,
-				nil,
-				"",
-			)
-			Expect(err).To(MatchError(errChanged))
-			_, err = b.shardSvc.ReadLocalShard("bucket", "abort.bin", 0)
-			Expect(os.IsNotExist(err)).To(BeTrue())
-		},
-		Entry("parity", ECConfig{DataShards: 2, ParityShards: 1}),
-		Entry("single-local", ECConfig{DataShards: 1, ParityShards: 0}),
-	)
+	// "cleans written shards when EC commit aborts before metadata" was removed
+	// with the EC-spooled whole-object write path. The streaming chunked PUT is
+	// now the only write path; its commit-abort shard reclamation (Content-MD5
+	// mismatch → beforeCommit abort → staged-shard cleanup) is covered by
+	// object_put_md5_test.go (TestPutObject_SizedContentMD5_Mismatch_NoLeak via
+	// finalShardFileCount, and TestRunChunkedPut_BeforeCommitError_ReclaimsStagedShards).
 })

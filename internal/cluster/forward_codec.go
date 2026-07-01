@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"errors"
 	"io"
 
@@ -24,15 +25,71 @@ var errInternalReply = errors.New("forward: internal reply error")
 // Production serve wiring streams PutObject/UploadPart bodies separately on
 // StreamGroupForwardBody.
 
+// Wire tri-state for PutObjectArgs.versioning_state. 0 (the FlatBuffers
+// default / absent on old peers) means "unknown" → the receiver falls back to
+// a local read. 1/2 are authoritative decisions resolved at the S3 edge.
+const (
+	versioningStateUnknown  byte = 0
+	versioningStateDisabled byte = 1
+	versioningStateEnabled  byte = 2
+)
+
+// versioningStateFromContext maps a stamped versioning decision to its wire
+// tri-state. Unresolved context (no edge layer stamped it) encodes as unknown.
+func versioningStateFromContext(ctx context.Context) byte {
+	enabled, resolved := bucketVersioningFromContext(ctx)
+	if !resolved {
+		return versioningStateUnknown
+	}
+	if enabled {
+		return versioningStateEnabled
+	}
+	return versioningStateDisabled
+}
+
+// contextWithVersioningState applies a received wire tri-state to the context.
+// Unknown leaves the context unresolved so the receiver's commit path falls
+// back to a local read (only reachable from an old peer that omits the field).
+func contextWithVersioningState(ctx context.Context, state byte) context.Context {
+	switch state {
+	case versioningStateEnabled:
+		return ContextWithBucketVersioning(ctx, true)
+	case versioningStateDisabled:
+		return ContextWithBucketVersioning(ctx, false)
+	default:
+		return ctx
+	}
+}
+
 // --- Args builders (request side) ---
 
-func buildPutObjectArgsWithSSE(bucket, key, contentType string, body []byte, sseAlgorithm string) []byte {
+func buildPutObjectArgsWithSSE(bucket, key, contentType string, body []byte, sseAlgorithm string, userMetadata map[string]string, contentMD5Hex string, acl uint8, versioningState byte, decodedLength int64) []byte {
 	b := flatbuffers.NewBuilder(putObjectArgsBuilderSize(bucket, key, contentType, sseAlgorithm, len(body)))
 	bk := b.CreateString(bucket)
 	k := b.CreateString(key)
 	ct := b.CreateString(contentType)
 	sse := b.CreateString(sseAlgorithm)
+	md5 := b.CreateString(contentMD5Hex)
 	bodyOff := b.CreateByteVector(body)
+	// user_metadata as a [Tag] vector — children created BEFORE the table start
+	// (FlatBuffers rule), same pattern as buildSetObjectTagsArgs.
+	var umVec flatbuffers.UOffsetT
+	if len(userMetadata) > 0 {
+		offs := make([]flatbuffers.UOffsetT, 0, len(userMetadata))
+		for mk, mv := range userMetadata {
+			kOff := b.CreateString(mk)
+			vOff := b.CreateString(mv)
+			raftpb.TagStart(b)
+			raftpb.TagAddKey(b, kOff)
+			raftpb.TagAddValue(b, vOff)
+			offs = append(offs, raftpb.TagEnd(b))
+		}
+		raftpb.PutObjectArgsStartUserMetadataVector(b, len(offs))
+		for i := len(offs) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(offs[i])
+		}
+		umVec = b.EndVector(len(offs))
+	}
 	raftpb.PutObjectArgsStart(b)
 	raftpb.PutObjectArgsAddBucket(b, bk)
 	raftpb.PutObjectArgsAddKey(b, k)
@@ -41,8 +98,38 @@ func buildPutObjectArgsWithSSE(bucket, key, contentType string, body []byte, sse
 	if sseAlgorithm != "" {
 		raftpb.PutObjectArgsAddSseAlgorithm(b, sse)
 	}
+	if umVec != 0 {
+		raftpb.PutObjectArgsAddUserMetadata(b, umVec)
+	}
+	if contentMD5Hex != "" {
+		raftpb.PutObjectArgsAddContentMd5Hex(b, md5)
+	}
+	if acl != 0 {
+		raftpb.PutObjectArgsAddAcl(b, acl)
+	}
+	if versioningState != versioningStateUnknown {
+		raftpb.PutObjectArgsAddVersioningState(b, versioningState)
+	}
+	if decodedLength >= 0 {
+		raftpb.PutObjectArgsAddDecodedLength(b, decodedLength)
+	}
 	b.Finish(raftpb.PutObjectArgsEnd(b))
 	return b.FinishedBytes()
+}
+
+// forwardStreamDecodedLength returns the exact decoded object length to stamp on
+// a STREAMED PutObjectArgs frame, or -1 (unknown) when the request carries no
+// verified size. Only an EXACT hint (SizeHintExact) is threaded: an advisory
+// hint stamped as exact would make the receiver's exactObjectSizeReader reject a
+// valid body. The spool fallback is gone: a -1 (old-sender) streamed forward now
+// makes the receiver build an unsized request, which errors (no size, no spool).
+// Forward-stream PUTs therefore require every node upgraded — an accepted
+// rolling-upgrade deploy constraint, not a runtime fallback.
+func forwardStreamDecodedLength(req storage.PutObjectRequest) int64 {
+	if req.SizeHint != nil && req.SizeHintExact && *req.SizeHint >= 0 {
+		return *req.SizeHint
+	}
+	return -1
 }
 
 func putObjectArgsBuilderSize(bucket, key, contentType, sseAlgorithm string, bodyLen int) int {
@@ -50,13 +137,34 @@ func putObjectArgsBuilderSize(bucket, key, contentType, sseAlgorithm string, bod
 	return bodyLen + len(bucket) + len(key) + len(contentType) + len(sseAlgorithm) + tableOverhead
 }
 
-func buildGetObjectArgs(bucket, key string) []byte {
+// decodePutObjectUserMetadata reconstructs the user-metadata map from a
+// forwarded PutObjectArgs' Tag vector. Returns nil when none (matching a
+// metadata-less local PUT).
+func decodePutObjectUserMetadata(pa *raftpb.PutObjectArgs) map[string]string {
+	n := pa.UserMetadataLength()
+	if n == 0 {
+		return nil
+	}
+	m := make(map[string]string, n)
+	var tag raftpb.Tag
+	for i := 0; i < n; i++ {
+		if pa.UserMetadata(&tag, i) {
+			m[string(tag.Key())] = string(tag.Value())
+		}
+	}
+	return m
+}
+
+func buildGetObjectArgs(bucket, key string, versioningState byte) []byte {
 	b := flatbuffers.NewBuilder(64)
 	bk := b.CreateString(bucket)
 	k := b.CreateString(key)
 	raftpb.GetObjectArgsStart(b)
 	raftpb.GetObjectArgsAddBucket(b, bk)
 	raftpb.GetObjectArgsAddKey(b, k)
+	if versioningState != versioningStateUnknown {
+		raftpb.GetObjectArgsAddVersioningState(b, versioningState)
+	}
 	b.Finish(raftpb.GetObjectArgsEnd(b))
 	return b.FinishedBytes()
 }
@@ -74,7 +182,7 @@ func buildReadAtArgs(bucket, key string, offset, length int64) []byte {
 	return b.FinishedBytes()
 }
 
-func buildGetObjectVersionArgs(bucket, key, versionID string) []byte {
+func buildGetObjectVersionArgs(bucket, key, versionID string, versioningState byte) []byte {
 	b := flatbuffers.NewBuilder(96)
 	bk := b.CreateString(bucket)
 	k := b.CreateString(key)
@@ -83,11 +191,14 @@ func buildGetObjectVersionArgs(bucket, key, versionID string) []byte {
 	raftpb.GetObjectVersionArgsAddBucket(b, bk)
 	raftpb.GetObjectVersionArgsAddKey(b, k)
 	raftpb.GetObjectVersionArgsAddVersionId(b, vid)
+	if versioningState != versioningStateUnknown {
+		raftpb.GetObjectVersionArgsAddVersioningState(b, versioningState)
+	}
 	b.Finish(raftpb.GetObjectVersionArgsEnd(b))
 	return b.FinishedBytes()
 }
 
-func buildHeadObjectVersionArgs(bucket, key, versionID string) []byte {
+func buildHeadObjectVersionArgs(bucket, key, versionID string, versioningState byte) []byte {
 	b := flatbuffers.NewBuilder(96)
 	bk := b.CreateString(bucket)
 	k := b.CreateString(key)
@@ -96,17 +207,23 @@ func buildHeadObjectVersionArgs(bucket, key, versionID string) []byte {
 	raftpb.HeadObjectVersionArgsAddBucket(b, bk)
 	raftpb.HeadObjectVersionArgsAddKey(b, k)
 	raftpb.HeadObjectVersionArgsAddVersionId(b, vid)
+	if versioningState != versioningStateUnknown {
+		raftpb.HeadObjectVersionArgsAddVersioningState(b, versioningState)
+	}
 	b.Finish(raftpb.HeadObjectVersionArgsEnd(b))
 	return b.FinishedBytes()
 }
 
-func buildHeadObjectArgs(bucket, key string) []byte {
+func buildHeadObjectArgs(bucket, key string, versioningState byte) []byte {
 	b := flatbuffers.NewBuilder(64)
 	bk := b.CreateString(bucket)
 	k := b.CreateString(key)
 	raftpb.HeadObjectArgsStart(b)
 	raftpb.HeadObjectArgsAddBucket(b, bk)
 	raftpb.HeadObjectArgsAddKey(b, k)
+	if versioningState != versioningStateUnknown {
+		raftpb.HeadObjectArgsAddVersioningState(b, versioningState)
+	}
 	b.Finish(raftpb.HeadObjectArgsEnd(b))
 	return b.FinishedBytes()
 }
@@ -140,23 +257,7 @@ func buildSetObjectTagsArgs(bucket, key, versionID string, tags []storage.Tag) [
 	k := b.CreateString(key)
 	vid := b.CreateString(versionID)
 
-	var tagsVec flatbuffers.UOffsetT
-	if len(tags) > 0 {
-		offs := make([]flatbuffers.UOffsetT, len(tags))
-		for i, t := range tags {
-			kOff := b.CreateString(t.Key)
-			vOff := b.CreateString(t.Value)
-			raftpb.TagStart(b)
-			raftpb.TagAddKey(b, kOff)
-			raftpb.TagAddValue(b, vOff)
-			offs[i] = raftpb.TagEnd(b)
-		}
-		raftpb.SetObjectTagsArgsStartTagsVector(b, len(offs))
-		for i := len(offs) - 1; i >= 0; i-- {
-			b.PrependUOffsetT(offs[i])
-		}
-		tagsVec = b.EndVector(len(offs))
-	}
+	tagsVec := appendForwardTagsVector(b, tags, raftpb.SetObjectTagsArgsStartTagsVector)
 
 	raftpb.SetObjectTagsArgsStart(b)
 	raftpb.SetObjectTagsArgsAddBucket(b, bk)
@@ -179,6 +280,23 @@ func buildGetObjectTagsArgs(bucket, key, versionID string) []byte {
 	raftpb.GetObjectTagsArgsAddKey(b, k)
 	raftpb.GetObjectTagsArgsAddVersionId(b, vid)
 	b.Finish(raftpb.GetObjectTagsArgsEnd(b))
+	return b.FinishedBytes()
+}
+
+func buildSetObjectQuarantineArgs(bucket, key, versionID, cause, reason string) []byte {
+	b := flatbuffers.NewBuilder(256)
+	bk := b.CreateString(bucket)
+	bkey := b.CreateString(key)
+	bvid := b.CreateString(versionID)
+	bcause := b.CreateString(cause)
+	breason := b.CreateString(reason)
+	raftpb.SetObjectQuarantineArgsStart(b)
+	raftpb.SetObjectQuarantineArgsAddBucket(b, bk)
+	raftpb.SetObjectQuarantineArgsAddKey(b, bkey)
+	raftpb.SetObjectQuarantineArgsAddVersionId(b, bvid)
+	raftpb.SetObjectQuarantineArgsAddCause(b, bcause)
+	raftpb.SetObjectQuarantineArgsAddReason(b, breason)
+	b.Finish(raftpb.SetObjectQuarantineArgsEnd(b))
 	return b.FinishedBytes()
 }
 
@@ -210,7 +328,7 @@ func buildDeleteObjectVersionArgs(bucket, key, versionID string) []byte {
 	return b.FinishedBytes()
 }
 
-func buildListObjectsArgs(bucket, prefix, marker string, maxKeys int32) []byte {
+func buildListObjectsArgs(bucket, prefix, marker string, maxKeys int32, versioningState byte) []byte {
 	b := flatbuffers.NewBuilder(64)
 	bk := b.CreateString(bucket)
 	pf := b.CreateString(prefix)
@@ -225,11 +343,14 @@ func buildListObjectsArgs(bucket, prefix, marker string, maxKeys int32) []byte {
 	if mk != 0 {
 		raftpb.ListObjectsArgsAddMarker(b, mk)
 	}
+	if versioningState != versioningStateUnknown {
+		raftpb.ListObjectsArgsAddVersioningState(b, versioningState)
+	}
 	b.Finish(raftpb.ListObjectsArgsEnd(b))
 	return b.FinishedBytes()
 }
 
-func buildListObjectVersionsArgs(bucket, prefix string, maxKeys int32) []byte {
+func buildListObjectVersionsArgs(bucket, prefix string, maxKeys int32, versioningState byte) []byte {
 	b := flatbuffers.NewBuilder(64)
 	bk := b.CreateString(bucket)
 	pf := b.CreateString(prefix)
@@ -237,17 +358,23 @@ func buildListObjectVersionsArgs(bucket, prefix string, maxKeys int32) []byte {
 	raftpb.ListObjectVersionsArgsAddBucket(b, bk)
 	raftpb.ListObjectVersionsArgsAddPrefix(b, pf)
 	raftpb.ListObjectVersionsArgsAddMaxKeys(b, maxKeys)
+	if versioningState != versioningStateUnknown {
+		raftpb.ListObjectVersionsArgsAddVersioningState(b, versioningState)
+	}
 	b.Finish(raftpb.ListObjectVersionsArgsEnd(b))
 	return b.FinishedBytes()
 }
 
-func buildWalkObjectsArgs(bucket, prefix string) []byte {
+func buildWalkObjectsArgs(bucket, prefix string, versioningState byte) []byte {
 	b := flatbuffers.NewBuilder(64)
 	bk := b.CreateString(bucket)
 	pf := b.CreateString(prefix)
 	raftpb.WalkObjectsArgsStart(b)
 	raftpb.WalkObjectsArgsAddBucket(b, bk)
 	raftpb.WalkObjectsArgsAddPrefix(b, pf)
+	if versioningState != versioningStateUnknown {
+		raftpb.WalkObjectsArgsAddVersioningState(b, versioningState)
+	}
 	b.Finish(raftpb.WalkObjectsArgsEnd(b))
 	return b.FinishedBytes()
 }
@@ -263,23 +390,7 @@ func buildCreateMultipartUploadArgs(bucket, key, contentType string, tags []stor
 	k := b.CreateString(key)
 	ct := b.CreateString(contentType)
 
-	var tagsVec flatbuffers.UOffsetT
-	if len(tags) > 0 {
-		offs := make([]flatbuffers.UOffsetT, len(tags))
-		for i, t := range tags {
-			kOff := b.CreateString(t.Key)
-			vOff := b.CreateString(t.Value)
-			raftpb.TagStart(b)
-			raftpb.TagAddKey(b, kOff)
-			raftpb.TagAddValue(b, vOff)
-			offs[i] = raftpb.TagEnd(b)
-		}
-		raftpb.CreateMultipartUploadArgsStartTagsVector(b, len(offs))
-		for i := len(offs) - 1; i >= 0; i-- {
-			b.PrependUOffsetT(offs[i])
-		}
-		tagsVec = b.EndVector(len(offs))
-	}
+	tagsVec := appendForwardTagsVector(b, tags, raftpb.CreateMultipartUploadArgsStartTagsVector)
 
 	raftpb.CreateMultipartUploadArgsStart(b)
 	raftpb.CreateMultipartUploadArgsAddBucket(b, bk)
@@ -292,11 +403,12 @@ func buildCreateMultipartUploadArgs(bucket, key, contentType string, tags []stor
 	return b.FinishedBytes()
 }
 
-func buildUploadPartArgs(bucket, key, uploadID string, partNumber int32, body []byte) []byte {
+func buildUploadPartArgs(bucket, key, uploadID string, partNumber int32, body []byte, contentMD5Hex string) []byte {
 	b := flatbuffers.NewBuilder(uploadPartArgsBuilderSize(bucket, key, uploadID, len(body)))
 	bk := b.CreateString(bucket)
 	k := b.CreateString(key)
 	u := b.CreateString(uploadID)
+	md5 := b.CreateString(contentMD5Hex)
 	bodyOff := b.CreateByteVector(body)
 	raftpb.UploadPartArgsStart(b)
 	raftpb.UploadPartArgsAddBucket(b, bk)
@@ -304,6 +416,9 @@ func buildUploadPartArgs(bucket, key, uploadID string, partNumber int32, body []
 	raftpb.UploadPartArgsAddUploadId(b, u)
 	raftpb.UploadPartArgsAddPartNumber(b, partNumber)
 	raftpb.UploadPartArgsAddBody(b, bodyOff)
+	if contentMD5Hex != "" {
+		raftpb.UploadPartArgsAddContentMd5Hex(b, md5)
+	}
 	b.Finish(raftpb.UploadPartArgsEnd(b))
 	return b.FinishedBytes()
 }
@@ -313,7 +428,7 @@ func uploadPartArgsBuilderSize(bucket, key, uploadID string, bodyLen int) int {
 	return bodyLen + len(bucket) + len(key) + len(uploadID) + tableOverhead
 }
 
-func buildCompleteMultipartUploadArgs(bucket, key, uploadID string, parts []storage.Part) []byte {
+func buildCompleteMultipartUploadArgs(bucket, key, uploadID string, parts []storage.Part, versioningState byte) []byte {
 	b := flatbuffers.NewBuilder(128)
 	bk := b.CreateString(bucket)
 	k := b.CreateString(key)
@@ -337,6 +452,7 @@ func buildCompleteMultipartUploadArgs(bucket, key, uploadID string, parts []stor
 	raftpb.CompleteMultipartUploadArgsAddKey(b, k)
 	raftpb.CompleteMultipartUploadArgsAddUploadId(b, u)
 	raftpb.CompleteMultipartUploadArgsAddParts(b, partsVec)
+	raftpb.CompleteMultipartUploadArgsAddVersioningState(b, versioningState)
 	b.Finish(raftpb.CompleteMultipartUploadArgsEnd(b))
 	return b.FinishedBytes()
 }
@@ -424,10 +540,11 @@ func appendPartsVector(b *flatbuffers.Builder, parts []storage.MultipartPartEntr
 // appendForwardTagsVector encodes []storage.Tag as a Tag FlatBuffers vector
 // using the provided parent-table startVector func (one of
 // ForwardObjectMetaStartTagsVector / ForwardObjectVersionMetaStartTagsVector /
-// ForwardReplyStartTagsVector). Mirrors appendPartsVector and the codec.go
-// buildTagsVector helper — note the FBS Tag tables here come from raftpb
-// (forward path), not clusterpb. MUST be invoked BEFORE the parent table's
-// Start on the same builder.
+// ForwardReplyStartTagsVector / SetObjectTagsArgsStartTagsVector /
+// CreateMultipartUploadArgsStartTagsVector). Mirrors appendPartsVector and the
+// codec.go buildTagsVector helper — note the FBS Tag tables here come from
+// raftpb (forward path), not clusterpb. MUST be invoked BEFORE the parent
+// table's Start on the same builder.
 func appendForwardTagsVector(b *flatbuffers.Builder, tags []storage.Tag, startVec func(*flatbuffers.Builder, int) flatbuffers.UOffsetT) flatbuffers.UOffsetT {
 	if len(tags) == 0 {
 		return 0
@@ -803,6 +920,8 @@ func parseReplyStatus(reply []byte) error {
 		return ErrNoReachablePeer
 	case raftpb.ForwardStatusNotVoter:
 		return ErrUnknownGroup
+	case raftpb.ForwardStatusBadDigest:
+		return storage.ErrContentMD5Mismatch
 	default:
 		return errInternalReply
 	}

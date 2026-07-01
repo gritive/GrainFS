@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/gossip"
 )
 
 // fakeDiskCfg is a hot-reloadable DiskCfgReader for tests. Fractions are
@@ -32,8 +34,8 @@ func (c *fakeDiskCfg) Set(warn, crit float64) {
 }
 
 func TestDiskCollector_CollectUpdatesStore(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "n1"})
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "n1"})
 
 	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second, nil)
 	dc.SetStatFunc(func(string) (float64, uint64) { return 80.0, 5000 })
@@ -47,8 +49,8 @@ func TestDiskCollector_CollectUpdatesStore(t *testing.T) {
 }
 
 func TestDiskCollector_SetStatFunc_OverridesDefault(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "n1"})
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "n1"})
 
 	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second, nil)
 
@@ -66,7 +68,7 @@ func TestDiskCollector_SetStatFunc_OverridesDefault(t *testing.T) {
 }
 
 func TestDiskCollector_CollectNoopIfNodeNotInStore(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
 
 	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second, nil)
 	dc.SetStatFunc(func(string) (float64, uint64) { return 80.0, 5000 })
@@ -76,8 +78,8 @@ func TestDiskCollector_CollectNoopIfNodeNotInStore(t *testing.T) {
 }
 
 func TestDiskCollector_Collect_SkipsOnZeroStats(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "n1", DiskUsedPct: 50.0})
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "n1", DiskUsedPct: 50.0})
 
 	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second, nil)
 	dc.SetStatFunc(func(string) (float64, uint64) { return 0, 0 })
@@ -89,8 +91,8 @@ func TestDiskCollector_Collect_SkipsOnZeroStats(t *testing.T) {
 }
 
 func TestDiskCollector_Collect_ClampsNegativeUsedPct(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "n1"})
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "n1"})
 
 	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second, nil)
 	dc.SetStatFunc(func(string) (float64, uint64) { return -10.0, 1000 })
@@ -102,8 +104,8 @@ func TestDiskCollector_Collect_ClampsNegativeUsedPct(t *testing.T) {
 }
 
 func TestDiskCollector_Collect_ClampsOverHundredUsedPct(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "n1"})
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "n1"})
 
 	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second, nil)
 	dc.SetStatFunc(func(string) (float64, uint64) { return 150.0, 1000 })
@@ -115,8 +117,8 @@ func TestDiskCollector_Collect_ClampsOverHundredUsedPct(t *testing.T) {
 }
 
 func TestDiskCollector_RunCallsCollectOnInterval(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "n1"})
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "n1"})
 
 	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Millisecond, nil)
 
@@ -143,8 +145,8 @@ type thresholdCall struct {
 }
 
 func TestDiskCollector_Threshold_FiresOnceOnEntry(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "n1"})
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "n1"})
 
 	// Defaults: 0.80 warn, 0.90 critical (matches DefaultClusterDiskWarnFrac/CriticalFrac).
 	cfg := newFakeDiskCfg(0.80, 0.90)
@@ -181,8 +183,8 @@ func TestDiskCollector_Threshold_FiresOnceOnEntry(t *testing.T) {
 
 func TestDiskCollector_Threshold_NoCallback_NoOp(t *testing.T) {
 	// Unset callback must not panic at any disk percentage.
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "n1"})
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "n1"})
 	cfg := newFakeDiskCfg(0.80, 0.90)
 	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second, cfg)
 	dc.SetStatFunc(func(string) (float64, uint64) { return 95.0, 100 })
@@ -193,8 +195,8 @@ func TestDiskCollector_Threshold_NilCfg_NoOp(t *testing.T) {
 	// nil cfg disables threshold callback entirely (used by standalone balancer
 	// collector which only emits stats). Must not panic and must not invoke the
 	// callback.
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "n1"})
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "n1"})
 	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second, nil)
 	var called bool
 	dc.SetOnThreshold(func(DiskThresholdLevel, float64, uint64) { called = true })
@@ -207,8 +209,8 @@ func TestDiskCollector_Threshold_HotReload(t *testing.T) {
 	// Pin the rotation contract: a cluster-config PATCH that tightens the
 	// thresholds is observed on the next collect tick — no restart, no
 	// re-construction.
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "n1"})
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "n1"})
 
 	cfg := newFakeDiskCfg(0.80, 0.90)
 	dc := NewDiskCollector("n1", "/tmp", store, 10*time.Second, cfg)

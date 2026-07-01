@@ -3,7 +3,6 @@ package e2e
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -604,28 +603,6 @@ func iamKeyCreateScoped(t testing.TB, sock, saID string, buckets []string) iamKe
 	iamDo(t, sock, "POST", "/v1/iam/sa/"+saID+"/key",
 		map[string]any{"buckets": buckets}, &out)
 	return out
-}
-
-// iamAdminRaw issues a raw admin UDS request and returns (statusCode, body).
-// Unlike iamDo it does NOT fatal on 4xx so callers can assert error cases.
-func iamAdminRaw(t testing.TB, sock, method, path string, body any) (int, []byte) {
-	t.Helper()
-	var rdr io.Reader
-	if body != nil {
-		buf, err := json.Marshal(body)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "iamAdminRaw: marshal")
-		rdr = bytes.NewReader(buf)
-	}
-	req, err := http.NewRequestWithContext(context.Background(), method, "http://unix"+path, rdr)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "iamAdminRaw: build request")
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := iamUDSClient(sock).Do(req)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "iamAdminRaw: %s %s", method, path)
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-	return resp.StatusCode, respBody
 }
 
 func grepIAMControlPlaneDataDir(t testing.TB, root, needle string) []string {

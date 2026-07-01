@@ -3,24 +3,15 @@ package cluster
 // Scrubbable interface implementation for DistributedBackend. Exposes the
 // scrubber.ShardOwner, scrubber.ShardRepairer, and related contracts so the
 // cluster-mode scrubber can verify locally-assigned shards and repair missing
-// ones via RepairShard.
-//
-// Open issues:
-//   - IterObjectMetas parses versioned `obj:{bucket}/{key}/{versionID}` keys
-//     with a first-slash split, folding the versionID into the key. ScanObjects
-//     sidesteps the issue entirely by iterating `lat:` pointers instead.
+// ones via RepairShard. The scrub object set is derived from the off-raft
+// quorum-meta blob store (scanObjectsBlobAuth / scanQuorumMeta), not the FSM.
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
-	"sync"
 	"time"
-
-	"github.com/dgraph-io/badger/v4"
 
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -31,17 +22,11 @@ import (
 // this backend instance only. Lock state lives on the backend so multiple
 // backends in the same process (tests, future multi-tenant) do not alias.
 func (b *DistributedBackend) acquireShardWriteLock(bucket, key string) func() {
-	lockKey := bucket + "\x00" + key
-	mu, _ := b.shardLocks.LoadOrStore(lockKey, &sync.RWMutex{})
-	mu.Lock()
-	return func() { mu.Unlock() }
+	return b.shardLocks.lockWrite(bucket + "\x00" + key)
 }
 
 func (b *DistributedBackend) acquireShardReadLock(bucket, key string) func() {
-	lockKey := bucket + "\x00" + key
-	mu, _ := b.shardLocks.LoadOrStore(lockKey, &sync.RWMutex{})
-	mu.RLock()
-	return func() { mu.RUnlock() }
+	return b.shardLocks.lockRead(bucket + "\x00" + key)
 }
 
 // ScanObjects streams one scrubber.ObjectRecord per live EC object in the
@@ -65,57 +50,130 @@ func (b *DistributedBackend) ScanObjects(bucket string) (<-chan scrubber.ObjectR
 		return ch, nil
 	}
 
-	dataShards := b.currentECConfig().DataShards
-	parityShards := b.currentECConfig().ParityShards
+	// blob-authoritative: the FSM lat: walk is non-authoritative for plain versioned
+	// objects. Enumerate the EC scrub set from the per-version blob authority
+	// (LOCAL, latest-per-key) + local EC carve-out. The STRICT scan runs EAGERLY
+	// so a corrupt-blob error surfaces synchronously — ScanObjects returns
+	// (chan, error) before the goroutine, so a mid-stream error cannot be reported.
+	on, serr := b.blobAuthReadOn(bucket)
+	if serr != nil {
+		return nil, serr // fail closed
+	}
+	if on {
+		recs, rerr := b.scanObjectsBlobAuth(bucket)
+		if rerr != nil {
+			return nil, rerr
+		}
+		go func() {
+			defer close(ch)
+			for _, rec := range recs {
+				ch <- rec
+			}
+		}()
+		return ch, nil
+	}
 
+	// Non-versioned/Suspended bucket: regular-PUT EC objects are written to the
+	// latest-only quorum-meta blob (never the FSM), so enumerate the EC scrub set
+	// from there. Repair-only: this adds no deletion path.
 	go func() {
 		defer close(ch)
-		rawLatPrefix := []byte("lat:" + bucket + "/")
-
-		_ = b.db.View(func(txn *badger.Txn) error {
-			return b.ks().scanGroupPrefix(txn, rawLatPrefix, func(raw []byte, item *badger.Item) error {
-				key := string(raw[len(rawLatPrefix):])
-
-				var versionID string
-				if err := item.Value(func(v []byte) error {
-					versionID = string(v)
-					return nil
-				}); err != nil || versionID == "" {
-					return nil
-				}
-
-				metaItem, err := txn.Get(b.ks().ObjectMetaKeyV(bucket, key, versionID))
-				if err != nil {
-					return nil
-				}
-				var meta objectMeta
-				v, err := b.itemValueCopy(metaItem)
-				if err != nil {
-					return nil
-				}
-				meta, err = unmarshalObjectMeta(v)
-				if err != nil {
-					return nil
-				}
-				if meta.ETag == deleteMarkerETag {
-					return nil // tombstone — no shards to scrub
-				}
-
-				ch <- scrubber.ObjectRecord{
-					Bucket:       bucket,
-					Key:          key,
-					VersionID:    versionID,
-					DataShards:   dataShards,
-					ParityShards: parityShards,
-					ETag:         meta.ETag,
-					LastModified: meta.LastModified,
-				}
-				return nil
-			})
-		})
+		for _, rec := range b.quorumMetaScrubRecords(bucket, nil) {
+			ch <- rec
+		}
 	}()
 
 	return ch, nil
+}
+
+// quorumMetaScrubRecords returns scrubber.ObjectRecords for quorum-meta-stored
+// objects whose key is not already in seen (the FSM lat: walk, which wins).
+// Tombstones and non-EC entries are skipped — they have no EC shards to scrub.
+// Safe when the shard service is absent (returns nil). Repair-only: callers use
+// the records to verify/repair shards, never to delete.
+func (b *DistributedBackend) quorumMetaScrubRecords(bucket string, seen map[string]struct{}) []scrubber.ObjectRecord {
+	if b.shardSvc == nil {
+		return nil
+	}
+	cmds, err := b.shardSvc.ScanQuorumMetaBucket(bucket, "")
+	if err != nil {
+		return nil // best-effort: a quorum-meta read error must not abort the lat: scrub
+	}
+	var recs []scrubber.ObjectRecord
+	for _, cmd := range cmds {
+		if _, dup := seen[cmd.Key]; dup {
+			continue
+		}
+		if cmd.IsDeleteMarker || cmd.ETag == deleteMarkerETag {
+			continue // tombstone — no shards to scrub
+		}
+		if cmd.ECData == 0 {
+			continue // non-EC object — no EC shards
+		}
+		// LastModified: ObjectRecord documents this as Unix seconds for the
+		// lifecycle worker; the scrub/repair path consumes only
+		// bucket/key/version/ETag, so the unit of ModTime here cannot affect
+		// repair correctness.
+		recs = append(recs, scrubber.ObjectRecord{
+			Bucket:       cmd.Bucket,
+			Key:          cmd.Key,
+			VersionID:    cmd.VersionID,
+			DataShards:   int(cmd.ECData),
+			ParityShards: int(cmd.ECParity),
+			ETag:         cmd.ETag,
+			LastModified: cmd.ModTime,
+		})
+	}
+	return recs
+}
+
+// scanObjectsBlobAuth builds the blob-authoritative EC scrub record set: the live
+// latest-per-key EC object from the LOCAL per-version blob authority (strict,
+// fail-closed) + local EC carve-out FSM records. Latest-version-per-key,
+// repair-only, local-node — the same model as the off-path lat: walk + quorum
+// merge, repointed to the blob authority. Reports each object's OWN EC profile
+// (a genesis 1+0 object stays 1+0) so the redundancy-upgrade sweep still sees it.
+func (b *DistributedBackend) scanObjectsBlobAuth(bucket string) ([]scrubber.ObjectRecord, error) {
+	if b.shardSvc == nil {
+		return nil, nil
+	}
+	// Local all-version blobs, STRICT (a corrupt/undecodable blob fails closed).
+	cmds, err := b.shardSvc.scanQuorumMetaVersionsBucketAllStrict(bucket, "")
+	if err != nil {
+		return nil, fmt.Errorf("scan objects (blob-authority): %w", err)
+	}
+	// Hard-delete tombstones have no live shards to scrub: drop them before the
+	// per-key collapse so a hard-deleted latest falls to its live predecessor.
+	cmds = dropHardDeletedVersions(cmds)
+	// Collapse to latest per key by the full ModTime-primary LWW comparator
+	// (quorumMetaCmdWins: higher ModTime; tie → higher VID; tie → higher MetaSeq;
+	// tombstone tier) so the winner is deterministic regardless of scan order and
+	// matches deriveLatestVersion (mirrors readQuorumMetaVersions).
+	latest := map[string]PutObjectMetaCmd{}
+	for _, c := range cmds {
+		if ex, ok := latest[c.Key]; !ok || quorumMetaCmdWins(c, ex) {
+			latest[c.Key] = c
+		}
+	}
+	var recs []scrubber.ObjectRecord
+	for _, c := range latest {
+		if c.IsDeleteMarker || c.ETag == deleteMarkerETag {
+			continue // delete-marker latest — no shards to scrub
+		}
+		if c.ECData == 0 {
+			continue // non-EC object — no EC shards
+		}
+		recs = append(recs, scrubber.ObjectRecord{
+			Bucket:       bucket,
+			Key:          c.Key,
+			VersionID:    c.VersionID,
+			DataShards:   int(c.ECData),
+			ParityShards: int(c.ECParity),
+			ETag:         c.ETag,
+			LastModified: c.ModTime,
+		})
+	}
+	return recs, nil
 }
 
 // ObjectExists returns true if key resolves to a live (non-tombstone)
@@ -191,12 +249,6 @@ func (b *DistributedBackend) readShardIntegrity(bucket, key, versionID string, s
 		}
 		if filepath.Clean(path) != filepath.Clean(canonicalPath) {
 			return scrubber.ShardIntegrityResult{}, fmt.Errorf("read shard: path %q is not the canonical location %q for %s/%s/%d", path, canonicalPath, bucket, canonicalKey, shardIdx)
-		}
-		if data, found, err := b.shardSvc.ReadLocalShardFromPack(bucket, canonicalKey, shardIdx); found || err != nil {
-			if err != nil {
-				return scrubber.ShardIntegrityResult{}, err
-			}
-			return scrubber.ShardIntegrityResult{Payload: data, Status: scrubber.ShardIntegrityVerified}, nil
 		}
 		raw, err := os.ReadFile(path)
 		if err != nil {
@@ -284,16 +336,6 @@ func (b *DistributedBackend) WriteShard(bucket, key, versionID string, shardIdx 
 // write lock. encoded is the already-sealed shard payload; path is the canonical
 // standalone on-disk location for the standalone branch.
 func (b *DistributedBackend) writeEncodedShard(bucket, canonicalKey string, shardIdx int, path string, encoded []byte) error {
-	// If the shard currently lives in the pack, repair INTO the pack: the
-	// pack-first read preference (readShardIntegrity) would otherwise shadow a
-	// standalone shard_N file with the stale/corrupt pack entry, so the repair
-	// would have no effect. The pack index is last-wins, so this supersedes the
-	// stale entry. A non-pack-resident shard falls through to the file write.
-	if repaired, err := b.shardSvc.RepairShardInPackIfResident(bucket, canonicalKey, shardIdx, encoded); err != nil {
-		return fmt.Errorf("repair shard in pack: %w", err)
-	} else if repaired {
-		return nil
-	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("mkdir shard dir: %w", err)
 	}
@@ -391,7 +433,7 @@ func (b *DistributedBackend) ScanObjectsGrouped(bucket string) (<-chan storage.O
 	go func() {
 		defer close(out)
 		// maxKeys=0 disables truncation in ListObjectVersions.
-		versions, err := b.ListObjectVersions(bucket, "", 0)
+		versions, err := b.ListObjectVersions(context.Background(), bucket, "", 0)
 		if err != nil {
 			return
 		}
@@ -432,46 +474,39 @@ func (b *DistributedBackend) ScanObjectsGrouped(bucket string) (<-chan storage.O
 }
 
 // ScanLocalMultipartUploads enumerates in-progress multipart uploads in the
-// given bucket on THIS node by iterating the local `mpu:` keyspace. Each
-// cluster node enumerates its own stranded uploads — there is no cross-node
-// MPU aggregation by design (see lifecycle-minio-parity-design.md).
+// given bucket on THIS node by walking the LOCAL .qmeta_mpu/{bucket} manifest
+// replicas (M2b). Each owning-group voter holds the manifests local to it, so
+// every node enumerates its own stranded uploads — there is no cross-node MPU
+// aggregation by design (see lifecycle-minio-parity-design.md). The lifecycle
+// MPU worker runs on every node and aborts via the idempotent deleteManifestBlob,
+// so a K-fold duplicate abort across the owning group's voters is a harmless
+// no-op (mirrors the per-group FSM mpu: model this replaces).
 //
-// Mirrors ListMultipartUploads's iteration pattern but filters by bucket and
-// emits MultipartUploadRecord for the lifecycle worker.
+// Emits MultipartUploadRecord (InitiatedAt = manifest CreatedAt) for the worker.
 func (b *DistributedBackend) ScanLocalMultipartUploads(bucket string) (<-chan storage.MultipartUploadRecord, error) {
 	if err := b.HeadBucket(context.Background(), bucket); err != nil {
 		return nil, err
 	}
 	out := make(chan storage.MultipartUploadRecord, 16)
-	bucketBytes := []byte(bucket)
 	go func() {
 		defer close(out)
-		_ = b.db.View(func(txn *badger.Txn) error {
-			return b.ks().scanGroupPrefix(txn, []byte("mpu:"), func(rawKey []byte, item *badger.Item) error {
-				raw, err := b.itemValueCopy(item)
-				if err != nil {
-					return err
-				}
-				meta, err := unmarshalClusterMultipartMeta(raw)
-				if err != nil {
-					return fmt.Errorf("unmarshal clusterMultipartMeta: %w", err)
-				}
-				if meta.Bucket == "" || meta.Key == "" {
-					return nil
-				}
-				if !bytes.Equal([]byte(meta.Bucket), bucketBytes) {
-					return nil
-				}
-				uploadID := strings.TrimPrefix(string(rawKey), "mpu:")
-				out <- storage.MultipartUploadRecord{
-					Bucket:      meta.Bucket,
-					Key:         meta.Key,
-					UploadID:    uploadID,
-					InitiatedAt: meta.CreatedAt,
-				}
-				return nil
-			})
-		})
+		entries, err := b.scanManifestBlobsLocalStrict(bucket)
+		if err != nil {
+			b.logger.Error().Str("bucket", bucket).Err(err).Msg("scan local multipart manifests")
+			return
+		}
+		for _, e := range entries {
+			m := e.Meta
+			if m.Bucket == "" || m.Key == "" || m.Bucket != bucket {
+				continue
+			}
+			out <- storage.MultipartUploadRecord{
+				Bucket:      m.Bucket,
+				Key:         m.Key,
+				UploadID:    e.UploadID,
+				InitiatedAt: m.CreatedAt,
+			}
+		}
 	}()
 	return out, nil
 }

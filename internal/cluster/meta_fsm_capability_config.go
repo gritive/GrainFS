@@ -85,9 +85,6 @@ func (f *MetaFSM) CapabilityEvidence(nodeID string, now time.Time) compat.Eviden
 	if f.iamApplier != nil && f.migrationStore != nil {
 		caps[compat.CapabilityMigrationCutoverV1] = true
 	}
-	if f.exportStore != nil {
-		caps[compat.CapabilityNfsExportCreateV1] = true
-	}
 	caps[compat.CapabilityMultipartListingV1] = true
 	// Advertise the KEK envelope lifecycle capability once the cluster KEK
 	// store is wired (same readiness signal MetaKEKRotateCmd Apply checks).

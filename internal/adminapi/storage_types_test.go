@@ -1,50 +1,46 @@
-package adminapi
+package adminapi_test
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/adminapi"
 )
 
+// TestStorageBucketSummaryJSONShape asserts the post-NFS JSON shape of
+// StorageBucketSummary: only "name" and "has_upstream" fields (no nfs_export).
 func TestStorageBucketSummaryJSONShape(t *testing.T) {
-	payload, err := json.Marshal(StorageBucketSummary{
-		Name:        "logs",
+	s := adminapi.StorageBucketSummary{
+		Name:        "my-bucket",
 		HasUpstream: true,
-		NFSExport: &StorageBucketNFSExport{
-			Registered: true,
-			ReadOnly:   true,
-			Generation: 7,
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
-	got := string(payload)
-	want := `{"name":"logs","has_upstream":true,"nfs_export":{"registered":true,"read_only":true,"generation":7}}`
-	if got != want {
-		t.Fatalf("json = %s, want %s", got, want)
-	}
+	b, err := json.Marshal(s)
+	require.NoError(t, err)
+
+	got := string(b)
+	require.Contains(t, got, `"name":"my-bucket"`)
+	require.Contains(t, got, `"has_upstream":true`)
+	require.False(t, strings.Contains(got, "nfs_export"),
+		"nfs_export field must not appear in StorageBucketSummary JSON: %s", got)
 }
 
-func TestStorageProtocolStatusJSONShape(t *testing.T) {
-	payload, err := json.Marshal(StorageProtocolStatusResp{
-		NFS4: ProtocolEndpointStatus{Enabled: true, Port: 2049},
-		NBD:  ProtocolEndpointStatus{Enabled: false},
-		P9:   ProtocolEndpointStatus{Enabled: true, Bind: "127.0.0.1", Port: 564},
-	})
-	if err != nil {
-		t.Fatal(err)
+// TestListStorageBucketsRespJSONShape asserts the wrapping type marshals cleanly.
+func TestListStorageBucketsRespJSONShape(t *testing.T) {
+	r := adminapi.ListStorageBucketsResp{
+		Buckets: []adminapi.StorageBucketSummary{
+			{Name: "a", HasUpstream: false},
+			{Name: "b", HasUpstream: true},
+		},
 	}
-	var decoded StorageProtocolStatusResp
-	if err := json.Unmarshal(payload, &decoded); err != nil {
-		t.Fatal(err)
-	}
-	if !decoded.NFS4.Enabled || decoded.NFS4.Port != 2049 {
-		t.Fatalf("nfs4 decoded = %+v", decoded.NFS4)
-	}
-	if decoded.NBD.Enabled {
-		t.Fatalf("nbd decoded = %+v", decoded.NBD)
-	}
-	if decoded.P9.Bind != "127.0.0.1" || decoded.P9.Port != 564 {
-		t.Fatalf("p9 decoded = %+v", decoded.P9)
-	}
+	b, err := json.Marshal(r)
+	require.NoError(t, err)
+
+	got := string(b)
+	require.Contains(t, got, `"name":"a"`)
+	require.Contains(t, got, `"name":"b"`)
+	require.False(t, strings.Contains(got, "nfs_export"),
+		"nfs_export field must not appear in ListStorageBucketsResp JSON: %s", got)
 }

@@ -3,7 +3,8 @@ package serveruntime
 import (
 	"context"
 	"fmt"
-	"path/filepath"
+	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -12,10 +13,8 @@ import (
 	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/cluster"
-	"github.com/gritive/GrainFS/internal/cluster/putpipeline"
+	"github.com/gritive/GrainFS/internal/gossip"
 	"github.com/gritive/GrainFS/internal/metrics/readamp"
-	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/gritive/GrainFS/internal/storage/datawal"
 	"github.com/gritive/GrainFS/internal/storage/directio"
 	"github.com/gritive/GrainFS/internal/transport"
 )
@@ -43,30 +42,31 @@ func warnIfReducedDataFsync() {
 // assignments the FSM has so far, then flip the router into "explicit-only"
 // mode (post-seed: every bucket must have an explicit assignment).
 //
-// ShardService: applies cfg-driven options (DirectIO, MeasureReadAmp,
-// AddressBook), then constructs the service. effectiveEC is captured here
+// ShardService: applies cfg-driven options (MeasureReadAmp, AddressBook), then
+// constructs the service. effectiveEC is captured here
 // because seedGroups (cluster size * 4, min 8) is the durability headroom
 // computation that downstream phases need to reuse for per-group EC.
 func bootShardService(ctx context.Context, state *bootState) error {
 	// Warn if the data-plane fsync policy (GRAINFS_FSYNC_MODE) has been weakened.
 	warnIfReducedDataFsync()
-	// Open the data WAL before any cluster shard service is constructed so that
-	// (a) WithDataWAL receives a live appender, and (b) RecoverDataWAL runs
-	// before bootStreamRouter registers transport handlers that would otherwise
-	// surface partially-recovered state to peers.
-	state.dataWALDir = filepath.Join(state.cfg.DataDir, "datawal")
-	sealer, err := dataWALSealerForState(state)
-	if err != nil {
-		return err
-	}
-	dw, err := datawal.Open(state.dataWALDir, sealer, datawal.NamespaceShard)
-	if err != nil {
-		return fmt.Errorf("open data WAL: %w", err)
-	}
-	state.dataWAL = dw
-	state.AddCleanup(func() { _ = dw.Close() })
+	// The shard WAL was removed in S4 (WAL-removal epic). Shard durability is
+	// now established at write time: small/no-redundancy shards fsync directly,
+	// large redundant shards rely on EC reconstruction + the background scrubber.
+	// Boot no longer opens, wires, or replays a shard WAL.
 
 	clusterSize := 1 + len(state.peers)
+	// Option B (uniform genesis seeding): a solo genesis node that declares a
+	// target size via --bootstrap-expect-nodes derives its EC width and seed
+	// group count from the DECLARED target N, not the solo size of 1, so every
+	// boot consumer (balancer/backend/DEK/router) latches the final uniform EC.
+	// The actual seed is deferred to seed-on-quorum in the post-join hook.
+	deferGenesisSeed := !state.inviteJoinMode &&
+		len(state.metaRaft.FSM().ShardGroups()) == 0 &&
+		state.cfg.BootstrapExpectNodes > 1 &&
+		clusterSize == 1
+	if deferGenesisSeed {
+		clusterSize = state.cfg.BootstrapExpectNodes
+	}
 	seedGroups := seedGroupCountForClusterSize(clusterSize)
 
 	var ecWidth int
@@ -112,32 +112,45 @@ func bootShardService(ctx context.Context, state *bootState) error {
 		}
 		addNodeCancel()
 
-		if err := SeedInitialShardGroups(ctx, state.metaRaft, state.nodeID, state.raftAddr, state.peers, seedGroups, normalGroupVoters); err != nil {
-			return err
+		if deferGenesisSeed {
+			// Defer the seed until --bootstrap-expect-nodes have joined. Leave the
+			// router closed (no groups to route to) so writes are rejected until
+			// seed-on-quorum fires in the leader-side post-join hook
+			// (handleDeferredSeed). The "pending" condition is DERIVED there from
+			// the flag + replicated group count + live nodes, so no in-process flag
+			// is needed and the decision survives a leader change mid-bootstrap.
+			log.Warn().
+				Int("expect_nodes", state.cfg.BootstrapExpectNodes).
+				Int("seed_groups", seedGroups).
+				Int("k", state.effectiveEC.DataShards).
+				Int("m", state.effectiveEC.ParityShards).
+				Msg("Option B: deferring genesis shard-group seed until target node count joins (uniform EC)")
+		} else {
+			if err := SeedInitialShardGroups(ctx, state.metaRaft, state.nodeID, state.raftAddr, state.peers, seedGroups, normalGroupVoters); err != nil {
+				return err
+			}
+			if err := WaitForShardGroupCount(ctx, state.metaRaft.FSM(), seedGroups, 30*time.Second); err != nil {
+				return err
+			}
+			state.clusterRouter.Sync(state.metaRaft.FSM().BucketAssignments())
+			state.clusterRouter.SetRequireExplicitAssignments(true)
 		}
-		if err := WaitForShardGroupCount(ctx, state.metaRaft.FSM(), seedGroups, 30*time.Second); err != nil {
-			return err
-		}
-		state.clusterRouter.Sync(state.metaRaft.FSM().BucketAssignments())
-		state.clusterRouter.SetRequireExplicitAssignments(true)
 	}
 
-	state.dataWALRepairCollector = cluster.NewDataWALRepairCollector()
 	shardSvcOpts := []cluster.ShardServiceOption{
-		cluster.WithDataWAL(state.dataWAL),
 		// Single-node (ParityShards==0) has no EC redundancy, so a large
 		// metadata-only shard write must fsync the shard file directly — read
 		// live so a later EC reconfig is honored.
 		cluster.WithNoRedundancy(func() bool { return state.effectiveEC.ParityShards == 0 }),
-		cluster.WithDataWALRepairSink(state.dataWALRepairCollector),
 	}
-	if state.cfg.DirectIO {
-		shardSvcOpts = append(shardSvcOpts, cluster.WithDirectIO())
-		log.Info().Msg("direct I/O enabled for local shard writes (page cache bypass)")
-	}
-	if state.cfg.ShardPackThreshold > 0 {
-		shardSvcOpts = append(shardSvcOpts, cluster.WithShardPackThreshold(state.cfg.ShardPackThreshold))
-		log.Info().Int("threshold", state.cfg.ShardPackThreshold).Msg("cluster shard pack requested")
+	// Shard-packing is disabled (S3): a durable pack index was never built, so
+	// per-blob fsync cannot replace the WAL-replay-reconstructed index. Refuse to
+	// boot when it is explicitly enabled via the env var, so no operator silently
+	// relies on packing.
+	if env := os.Getenv("GRAINFS_SHARD_PACK_THRESHOLD"); env != "" {
+		if n, perr := strconv.Atoi(env); perr == nil && n > 0 {
+			return fmt.Errorf("shard-packing is disabled (GRAINFS_SHARD_PACK_THRESHOLD=%d): a durable pack index is not implemented; unset the env to boot", n)
+		}
 	}
 	if state.cfg.MeasureReadAmp {
 		readamp.Enable()
@@ -149,62 +162,24 @@ func bootShardService(ctx context.Context, state *bootState) error {
 	}
 	shardSvcOpts = append(shardSvcOpts, cluster.WithShardDEKKeeper(state.dekKeeper, state.clusterID))
 	state.shardSvc = cluster.NewMultiRootShardService(state.cfg.DataDirs, state.clusterTransport, shardSvcOpts...)
-	// Stop the shard-pack actor goroutine (spawned when a WAL is wired) on
-	// shutdown. Registered after the data WAL cleanup so the LIFO cleanup stack
-	// closes the shard service first — the actor must not write into a WAL that
-	// has already been closed.
 	state.AddCleanup(func() { _ = state.shardSvc.Close() })
 
-	// Replay the data WAL into the shard service before bootStreamRouter
-	// registers transport handlers; this keeps peers from observing partially-
-	// recovered local shard state.
-	if state.shardSvc != nil {
-		if err := state.shardSvc.RecoverDataWAL(ctx); err != nil {
-			return fmt.Errorf("recover shard data WAL: %w", err)
-		}
-	}
 	return nil
 }
 
-func dataWALSealerForState(state *bootState) (datawal.RecordSealer, error) {
-	switch {
-	case state.dekKeeper != nil:
-		if len(state.clusterID) != 16 {
-			return nil, fmt.Errorf("data WAL DEK sealer requires 16-byte clusterID, got %d", len(state.clusterID))
-		}
-		return storage.NewDEKKeeperAdapter(state.dekKeeper, state.clusterID), nil
-	default:
-		return nil, nil
-	}
-}
-
-// bootStreamRouter sets up the transport stream multiplexer (Raft RPCs on the
-// Control stream, Shard RPCs on the Data stream) and registers the body
-// handlers that consume body streams directly off the cluster transport. Then
-// fires raft.Node.Start to begin the apply loop on the data-plane raft.
-//
-// The body handler registration is critical: without it, every
-// StreamShardWriteBody falls through the catch-all router (router.Dispatch
-// only sees per-message handlers, not body streams), the stream closes
-// without a response, and the caller sees "decode response: read header:
-// EOF". The pre-2024-fix bug here meant N×replication produced only the
-// leader's local copy.
-//
-// node.Start fires the data-plane raft apply loop. After this returns,
-// distBackend.RunApplyLoop (started in bootOwnedGroupsAndEC) will see
-// applied entries flow.
-func bootStreamRouterShell(state *bootState) {
-	if state.streamRouter == nil {
-		state.streamRouter = transport.NewStreamRouter()
-		state.clusterTransport.SetStreamHandler(state.streamRouter.Dispatch)
-	}
-}
-
-func bootStreamRouter(state *bootState) error {
-	bootStreamRouterShell(state)
-	state.streamRouter.Handle(transport.StreamData, state.shardSvc.HandleRPC())
-	state.clusterTransport.HandleBody(transport.StreamShardWriteBody, state.shardSvc.HandleWriteBody())
-	state.clusterTransport.HandleRead(transport.StreamShardReadBody, state.shardSvc.HandleReadBody())
+// bootShardRoutes registers the shard data-plane handlers on the cluster
+// transport's native routes. (raft.Node.Start moved to run.go, immediately
+// after the Raft RPC bridge wiring: it must precede invite-join Phase-2 or the
+// joiner deadlocks on the leader's AddVoter AppendEntries — see the comment at
+// the Start site.)
+func bootShardRoutes(state *bootState) error {
+	// Native /shard/rpc buffered route — carries every buffered shard op
+	// (Write/Read/ReadRange/Delete/quorum-meta/Ping).
+	state.clusterTransport.RegisterBufferedRoute(transport.RouteShardRPC, state.shardSvc.NativeRPCHandler())
+	// Native /shard/write route (Phase 8 N6).
+	state.clusterTransport.RegisterShardWriteHandler(state.shardSvc.NativeWriteHandler())
+	// Native /shard/read route (Phase 8 N7-1).
+	state.clusterTransport.RegisterShardReadHandler(state.shardSvc.NativeReadHandler())
 	// Phase B1: node-level append-segment peer-fetch handler. Each node
 	// hosts multiple group backends — the request payload carries groupID
 	// so the handler resolves the right per-group root via DataGroupManager.
@@ -212,9 +187,6 @@ func bootStreamRouter(state *bootState) error {
 	// to the manager AFTER this registration (bootOwnedGroupsAndEC).
 	cluster.RegisterAppendSegmentHandler(state.clusterTransport, dataGroupAppendSegmentLookup{m: state.dgMgr})
 
-	state.node.Start()
-	// state.node.Close() goes through the cluster.RaftNode interface.
-	state.AddCleanup(func() { state.node.Close() })
 	return nil
 }
 
@@ -314,7 +286,7 @@ func refreshRuntimeTopologyFromMetaNodes(state *bootState, nodes []cluster.MetaN
 	}
 }
 
-// ownedGroupsState is the per-group multi-raft tracking struct. Held outside
+// ownedGroupsState tracks locally instantiated shard groups. Held outside
 // bootOwnedGroupsAndEC because the shutdown hook (registered via AddCleanup
 // inside the phase) needs to access it after the phase returns.
 type ownedGroupsState struct {
@@ -327,7 +299,7 @@ type ownedGroupsState struct {
 
 // bootOwnedGroupsAndEC is the largest storage runtime phase. It wires the
 // distributed backend, the legacy group-0 wrapper, the shard cache, the
-// rebalancer, the per-group multi-raft instantiation loop, and the
+// revoked-node roster reconciler, the per-group local instantiation loop, and the
 // shutdown hook that drains every owned group on cleanup.
 //
 // Phase ordering is critical here:
@@ -335,10 +307,7 @@ type ownedGroupsState struct {
 //     wrap → dgMgr.Add. group-0 has the legacy single-backend semantics.
 //  2. distBackend.SetRouter + SetShardGroupSource. Routing wired before
 //     any per-group instantiation can fire.
-//  3. Rebalancer + SetOnRebalancePlan callback (race-free: meta-raft is
-//     already Started by PR 4, so this MUST register before any rebalance
-//     plan apply commits — the callback is set before any future plan
-//     proposal.).
+//  3. Revoked-node roster reconciler + SetOnNodeRevoked callback.
 //  4. ownedGroups loop: synchronous cold-start instantiation for entries
 //     already in FSM (records startup decisions on Badger role failures
 //     before the server accepts traffic), then SetOnShardGroupAdded
@@ -347,10 +316,11 @@ type ownedGroupsState struct {
 //     accepting new instantiations, mark shuttingDown, wait for in-flight
 //     goroutines, then close every owned group in parallel with 5s timeout.
 //
-// recordStartupDecision is plumbed via parameter (rather than method on
-// bootState) because it's a closure over startupDecisions that the run.go
-// body reads for the boot summary; passing it in keeps the phase signature
-// honest about what's mutated.
+// Startup decisions on Badger role failures are recorded via
+// recordBadgerStartupDecision(state, ...) — it appends to state.startupDecisions,
+// which the boot summary reads. (Slice 1 collapsed the former
+// recordStartupDecision closure parameter into this direct call so the phase
+// fits the uniform bootSequence() signature.)
 
 // instantiateGroupWithConfig is the canonical entry point for booting a
 // per-server GroupBackend in this runtime. It bundles InstantiateLocalGroup
@@ -366,31 +336,25 @@ func (state *bootState) instantiateGroupWithConfig(glc cluster.GroupLifecycleCon
 	}
 	gb.SetCoalesceConfig(state.coalesceCfg)
 	gb.SetShardGroupSource(state.metaRaft.FSM())
-	// Inject the actor pipeline (constructed once at boot in
-	// bootOwnedGroupsAndEC) into every group's DistributedBackend so
-	// PUTs routed to non-group-0 groups also dispatch through the
-	// pipeline. The pipeline owns long-lived actor goroutines shared
-	// across groups.
-	if state.putPipeline != nil {
-		// Enabled in prod (F1 durability review closed): Put() now blocks on
-		// shard durability before returning, so the metadata propose cannot
-		// precede shard fsync, and the drive-write path rejects ".." key
-		// traversal. Dispatch is still bounded to all-local EC placements.
-		gb.SetPutPipeline(state.putPipeline, true)
-	}
 	return gb, nil
 }
 
-func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDecision func(badgerrole.Decision)) error {
+func bootOwnedGroupsAndEC(ctx context.Context, state *bootState) error {
 	// group-0 main backend: FSM state lives in the per-node shared FSM-state
 	// DB under the "group-0" keyspace prefix (C2 P3). The shared DB is owned
 	// by bootOpenSharedFSMDB; this backend opens in shared mode (Close no-ops
 	// the DB close).
-	distBackend, err := cluster.NewDistributedBackendForGroup(state.cfg.DataDir, state.sharedFSMDB, state.node, "group-0")
+	distBackend, err := cluster.NewDistributedBackendForGroup(state.cfg.DataDir, state.sharedFSMStore, state.node, "group-0")
 	if err != nil {
 		return fmt.Errorf("failed to initialize distributed storage: %w", err)
 	}
 	state.distBackend = distBackend
+	// Close stops the coalesce worker + backstop scanner goroutines; in
+	// shared mode it never touches the store. Registered AFTER the shared
+	// FSM DB's cleanup, so LIFO order stops these goroutines BEFORE the DB
+	// they read closes (otherwise they outlive shutdown and can panic on a
+	// closed BadgerDB — pre-existing gap surfaced by the Phase 6.5 S3 review).
+	state.AddCleanup(func() { _ = distBackend.Close() })
 
 	allNodes := runtimeTopologyNodes(state.nodeID, state.raftAddr, state.peers, state.metaRaft.FSM().Nodes())
 	distBackend.SetShardService(state.shardSvc, allNodes)
@@ -398,33 +362,6 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 	state.shardCache = shardcache.New(state.cfg.ShardCacheSize)
 	distBackend.SetShardCache(state.shardCache)
 	log.Info().Int64("bytes", state.cfg.ShardCacheSize).Msg("ec shard cache configured")
-
-	// Wire the single-node PUT actor pipeline BEFORE the ownedGroups loop
-	// instantiates additional groups — instantiateGroupWithConfig picks
-	// state.putPipeline up from here and injects it on every group's
-	// DistributedBackend (groups are created later for non-group-0
-	// placements). The pipeline owns long-lived actor goroutines shared
-	// across all groups.
-	// R1/R3: wire the PUT pipeline only when the gen-aware DEK keeper exists.
-	if state.dekKeeper != nil && len(state.shardSvc.DataDirs()) > 0 && state.effectiveEC.NumShards() > 0 {
-		pipeline := putpipeline.New(putpipeline.Config{
-			DataDirs:  state.shardSvc.DataDirs(),
-			DEKKeeper: state.dekKeeper,
-			ClusterID: state.clusterID,
-			ECConfig:  state.effectiveEC,
-			WAL:       shardServiceWALAdapter{s: state.shardSvc},
-		})
-		state.putPipeline = pipeline
-		// Enabled in prod (F1 durability review closed): Put() blocks on shard
-		// durability before returning and the drive-write path rejects ".."
-		// key traversal. Dispatch stays bounded to all-local EC placements.
-		distBackend.SetPutPipeline(pipeline, true)
-		log.Info().
-			Int("drives", len(state.shardSvc.DataDirs())).
-			Int("k", state.effectiveEC.DataShards).
-			Int("m", state.effectiveEC.ParityShards).
-			Msg("put actor pipeline wired")
-	}
 
 	group0Backend := cluster.WrapDistributedBackend("group-0", distBackend)
 	group0 := cluster.NewDataGroupWithBackend(
@@ -436,31 +373,10 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 	distBackend.SetRouter(state.clusterRouter)
 	distBackend.SetShardGroupSource(state.metaRaft.FSM())
 
-	rebalancerCfg := cluster.DefaultRebalancerConfig()
-	rebalancer := cluster.NewRebalancer(state.nodeID, state.metaRaft, state.dgMgr, rebalancerCfg)
-	rebalancer.SetGroupRebalancer(
-		cluster.NewDataGroupPlanExecutor(state.nodeID, state.dgMgr, state.metaRaft.FSM(), state.metaRaft),
-	)
-	state.metaRaft.FSM().SetOnRebalancePlan(func(plan *cluster.RebalancePlan) {
-		if state.inviteJoinMode {
-			return
-		}
-		execCtx, execCancel := context.WithTimeout(ctx, rebalancerCfg.PlanTimeout)
-		go func() {
-			defer execCancel()
-			if err := rebalancer.ExecutePlan(execCtx, plan); err != nil {
-				log.Error().Err(err).Str("plan_id", plan.PlanID).Msg("rebalancer: ExecutePlan failed")
-			}
-		}()
-	})
-	go rebalancer.Run(ctx)
-	state.rebalancer = rebalancer
-
-	evacExec := cluster.NewDataGroupPlanExecutor(state.nodeID, state.dgMgr, state.metaRaft.FSM(), state.metaRaft)
 	loadPick := func(groupID string, exclude map[string]struct{}) (string, bool) {
 		members := map[string]struct{}{}
-		if dg := state.dgMgr.Get(groupID); dg != nil {
-			for _, p := range dg.PeerIDs() {
+		if sg, ok := state.metaRaft.FSM().ShardGroup(groupID); ok {
+			for _, p := range sg.PeerIDs {
 				members[p] = struct{}{}
 			}
 		}
@@ -478,13 +394,11 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 			return 0, false
 		}, exclude)
 	}
-	evacuator := cluster.NewDataGroupEvacuator(state.nodeID, state.metaRaft.FSM(), state.dgMgr, evacExec, loadPick, 30*time.Second)
+	evacuator := cluster.NewDataGroupEvacuator(state.metaRaft.FSM(), state.metaRaft, loadPick, 30*time.Second)
 	state.metaRaft.FSM().SetOnNodeRevoked(func(string) { evacuator.Wake() })
-	// Run UNCONDITIONALLY on every node (mirror the ungated `go rebalancer.Run(ctx)`).
-	// LOAD-BEARING: data groups are led by invite-JOINED nodes, and only that group's
-	// leader can issue the data-raft ChangeMembership that evicts a revoked voter.
-	// Gating on joinMode would make joiner-led groups never evict. The single-node /
-	// leads-no-foreign-group case is a true no-op via empty led-targets, not a boot gate.
+	// Run unconditionally on every node. The reconciler proposes meta-FSM roster
+	// updates through ProposeShardGroupForwarding, so it does not depend on
+	// per-group raft leadership or on the local node hosting a target group.
 	go evacuator.Run(ctx)
 	state.evacuator = evacuator
 
@@ -528,22 +442,16 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 			NodeID:           groupNodeID,
 			DataDir:          state.cfg.DataDir,
 			ShardSvc:         state.shardSvc,
-			Transport:        state.groupRaftMux.ForGroup(entry.ID),
-			AddrBook:         state.metaRaft.FSM(),
 			EC:               ecConfigForShardGroup(entry, state.effectiveEC),
 			ElectionTimeout:  state.cfg.RaftElectionTimeout,
 			HeartbeatTimeout: state.cfg.RaftHeartbeatInterval,
-			FSMStore:         state.sharedFSMDB,
+			FSMStore:         state.sharedFSMStore,
 		}
 		gb, err := state.instantiateGroupWithConfig(glc, entry)
 		if err != nil {
 			return fmt.Errorf("group %s: instantiate local group: %w", entry.ID, err)
 		}
 		gb.SetShardCache(state.shardCache)
-		// Register the group's raft handler on the per-server mux. As of M5
-		// PR 29 the v1 dispatch is gone — the group's raft node is always
-		// the cluster-layer v2 adapter, satisfying raft.RaftV2Handler.
-		state.groupRaftMux.Register(entry.ID, gb.Node())
 		state.dgMgr.Add(cluster.NewDataGroupWithBackend(entry.ID, entry.PeerIDs, gb))
 		go gb.RunApplyLoop(state.stopApply)
 		owned.mu.Lock()
@@ -574,7 +482,7 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 	})
 	for _, entry := range state.metaRaft.FSM().ShardGroups() {
 		if err := instantiateOwnedIfNeeded(entry); err != nil {
-			recordStartupDecision(badgerrole.Decision{
+			recordBadgerStartupDecision(state, badgerrole.Decision{
 				Role:    badgerrole.RoleGroupState,
 				GroupID: entry.ID,
 				Status:  badgerrole.DecisionOpenFailed,
@@ -611,7 +519,7 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 		wg.Wait()
 	})
 
-	state.loadReporterStor = cluster.NewNodeStatsStore(cluster.DefaultLoadReportInterval * 3)
+	state.loadReporterStor = gossip.NewNodeStatsStore(cluster.DefaultLoadReportInterval * 3)
 	state.loadReporter = cluster.NewLoadReporter(state.nodeID, state.loadReporterStor, state.metaRaft, cluster.DefaultLoadReportInterval)
 	go state.loadReporter.Run(ctx)
 
@@ -624,24 +532,4 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState, recordStartupDe
 		Int("cluster_size", len(allNodes)).Msg("cluster EC configured")
 
 	return nil
-}
-
-// shardServiceWALAdapter exposes ShardService.AppendShardMetadataBatch
-// as putpipeline.ShardWALAppender so the actor pipeline can pay one
-// fsync per PUT inside the WAL in place of N per-shard fsyncs.
-type shardServiceWALAdapter struct {
-	s *cluster.ShardService
-}
-
-func (a shardServiceWALAdapter) AppendBatch(ctx context.Context, records []putpipeline.ShardWALRecord) (bool, error) {
-	converted := make([]cluster.ShardMetadataWALRecord, len(records))
-	for i, r := range records {
-		converted[i] = cluster.ShardMetadataWALRecord{
-			Bucket:   r.Bucket,
-			Key:      r.Key,
-			ShardIdx: r.ShardIdx,
-			Size:     r.Size,
-		}
-	}
-	return a.s.AppendShardMetadataBatch(ctx, converted)
 }

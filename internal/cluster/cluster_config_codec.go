@@ -101,8 +101,6 @@ func EncodeClusterConfigPatchInner(p ClusterConfigPatch) ([]byte, error) {
 	gossipOff := boxDur(p.BalancerGossipInterval)
 	diskWarnOff := boxF64(p.DiskWarnFrac)
 	diskCritOff := boxF64(p.DiskCriticalFrac)
-	snapIntervalOff := boxDur(p.SnapshotInterval)
-	snapRetainOff := boxI32(p.SnapshotRetain)
 	weightedHRWOff := boxBool(p.WeightedHRWEnabled)
 	blEnabledOff := boxBool(p.BoundedLoadsEnabled)
 	blCOff := boxF64(p.BoundedLoadsC)
@@ -152,12 +150,6 @@ func EncodeClusterConfigPatchInner(p ClusterConfigPatch) ([]byte, error) {
 	}
 	if diskCritOff != 0 {
 		clusterpb.MetaClusterConfigPatchCmdAddDiskCriticalFrac(b, diskCritOff)
-	}
-	if snapIntervalOff != 0 {
-		clusterpb.MetaClusterConfigPatchCmdAddSnapshotIntervalNs(b, snapIntervalOff)
-	}
-	if snapRetainOff != 0 {
-		clusterpb.MetaClusterConfigPatchCmdAddSnapshotRetain(b, snapRetainOff)
 	}
 	if resetKeysOff != 0 {
 		clusterpb.MetaClusterConfigPatchCmdAddResetKeys(b, resetKeysOff)
@@ -262,14 +254,6 @@ func DecodeClusterConfigPatchCmd(data []byte) (ClusterConfigPatch, error) {
 		v := b.V()
 		p.DiskCriticalFrac = &v
 	}
-	if b := t.SnapshotIntervalNs(nil); b != nil {
-		d := time.Duration(b.V())
-		p.SnapshotInterval = &d
-	}
-	if b := t.SnapshotRetain(nil); b != nil {
-		v := b.V()
-		p.SnapshotRetain = &v
-	}
 	if b := t.WeightedHrwEnabled(nil); b != nil {
 		v := b.V()
 		p.WeightedHRWEnabled = &v
@@ -365,8 +349,6 @@ func serializeClusterConfig(c *ClusterConfig) []byte {
 	gossipOff := boxDur(s.balancerGossipInterval)
 	diskWarnOff := boxF64(s.diskWarnFrac)
 	diskCritOff := boxF64(s.diskCriticalFrac)
-	snapIntervalOff := boxDur(s.snapshotInterval)
-	snapRetainOff := boxI32(s.snapshotRetain)
 	weightedHRWOff := boxBool(s.weightedHRWEnabled)
 	blEnabledOff := boxBool(s.boundedLoadsEnabled)
 	blCOff := boxF64(s.boundedLoadsC)
@@ -418,12 +400,6 @@ func serializeClusterConfig(c *ClusterConfig) []byte {
 	}
 	if diskCritOff != 0 {
 		clusterpb.ClusterConfigAddDiskCriticalFrac(b, diskCritOff)
-	}
-	if snapIntervalOff != 0 {
-		clusterpb.ClusterConfigAddSnapshotIntervalNs(b, snapIntervalOff)
-	}
-	if snapRetainOff != 0 {
-		clusterpb.ClusterConfigAddSnapshotRetain(b, snapRetainOff)
 	}
 	if weightedHRWOff != 0 {
 		clusterpb.ClusterConfigAddWeightedHrwEnabled(b, weightedHRWOff)
@@ -521,14 +497,6 @@ func deserializeClusterConfig(buf []byte) (*clusterConfigSnap, error) {
 	if b := t.DiskCriticalFrac(nil); b != nil {
 		v := b.V()
 		snap.diskCriticalFrac = &v
-	}
-	if b := t.SnapshotIntervalNs(nil); b != nil {
-		d := time.Duration(b.V())
-		snap.snapshotInterval = &d
-	}
-	if b := t.SnapshotRetain(nil); b != nil {
-		v := b.V()
-		snap.snapshotRetain = &v
 	}
 	if b := t.WeightedHrwEnabled(nil); b != nil {
 		v := b.V()

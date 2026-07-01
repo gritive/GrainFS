@@ -106,29 +106,63 @@ func marshalObject(obj *Object) ([]byte, error) {
 		}
 		appendMD5sOff = b.EndVector(len(md5Offs))
 	}
-	var tagsOff flatbuffers.UOffsetT
-	if len(obj.Tags) > 0 {
-		var tagOffs []flatbuffers.UOffsetT
-		var localTagOffs [32]flatbuffers.UOffsetT
-		if len(obj.Tags) <= len(localTagOffs) {
-			tagOffs = localTagOffs[:len(obj.Tags)]
+	var coalescedOff flatbuffers.UOffsetT
+	if len(obj.Coalesced) > 0 {
+		var coalOffs []flatbuffers.UOffsetT
+		var localCoalOffs [32]flatbuffers.UOffsetT
+		if len(obj.Coalesced) <= len(localCoalOffs) {
+			coalOffs = localCoalOffs[:len(obj.Coalesced)]
 		} else {
-			tagOffs = make([]flatbuffers.UOffsetT, len(obj.Tags))
+			coalOffs = make([]flatbuffers.UOffsetT, len(obj.Coalesced))
 		}
-		for i, t := range obj.Tags {
-			kOff := b.CreateString(t.Key)
-			vOff := b.CreateString(t.Value)
-			storagepb.TagStart(b)
-			storagepb.TagAddKey(b, kOff)
-			storagepb.TagAddValue(b, vOff)
-			tagOffs[i] = storagepb.TagEnd(b)
+		for i := len(obj.Coalesced) - 1; i >= 0; i-- {
+			c := obj.Coalesced[i]
+			idOff := b.CreateString(c.CoalescedID)
+			etagOff := b.CreateString(c.ETag)
+			var shardKeyOff flatbuffers.UOffsetT
+			if c.ShardKey != "" {
+				shardKeyOff = b.CreateString(c.ShardKey)
+			}
+			var nodeIDsOff flatbuffers.UOffsetT
+			if len(c.NodeIDs) > 0 {
+				nodeOffs := make([]flatbuffers.UOffsetT, len(c.NodeIDs))
+				for j := len(c.NodeIDs) - 1; j >= 0; j-- {
+					nodeOffs[j] = b.CreateString(c.NodeIDs[j])
+				}
+				storagepb.CoalescedRefStartNodeIdsVector(b, len(nodeOffs))
+				for j := len(nodeOffs) - 1; j >= 0; j-- {
+					b.PrependUOffsetT(nodeOffs[j])
+				}
+				nodeIDsOff = b.EndVector(len(nodeOffs))
+			}
+			storagepb.CoalescedRefStart(b)
+			storagepb.CoalescedRefAddCoalescedId(b, idOff)
+			storagepb.CoalescedRefAddSize(b, c.Size)
+			storagepb.CoalescedRefAddEtag(b, etagOff)
+			if shardKeyOff != 0 {
+				storagepb.CoalescedRefAddShardKey(b, shardKeyOff)
+			}
+			if c.ECData != 0 {
+				storagepb.CoalescedRefAddEcData(b, c.ECData)
+			}
+			if c.ECParity != 0 {
+				storagepb.CoalescedRefAddEcParity(b, c.ECParity)
+			}
+			if c.StripeBytes != 0 {
+				storagepb.CoalescedRefAddStripeBytes(b, c.StripeBytes)
+			}
+			if nodeIDsOff != 0 {
+				storagepb.CoalescedRefAddNodeIds(b, nodeIDsOff)
+			}
+			coalOffs[i] = storagepb.CoalescedRefEnd(b)
 		}
-		storagepb.ObjectStartTagsVector(b, len(tagOffs))
-		for i := len(tagOffs) - 1; i >= 0; i-- {
-			b.PrependUOffsetT(tagOffs[i])
+		storagepb.ObjectStartCoalescedVector(b, len(coalOffs))
+		for i := len(coalOffs) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(coalOffs[i])
 		}
-		tagsOff = b.EndVector(len(tagOffs))
+		coalescedOff = b.EndVector(len(coalOffs))
 	}
+	tagsOff := buildTagsVector(b, obj.Tags, storagepb.ObjectStartTagsVector)
 	storagepb.ObjectStart(b)
 	storagepb.ObjectAddKey(b, keyOff)
 	storagepb.ObjectAddSize(b, obj.Size)
@@ -156,6 +190,9 @@ func marshalObject(obj *Object) ([]byte, error) {
 	}
 	if tagsOff != 0 {
 		storagepb.ObjectAddTags(b, tagsOff)
+	}
+	if coalescedOff != 0 {
+		storagepb.ObjectAddCoalesced(b, coalescedOff)
 	}
 	root := storagepb.ObjectEnd(b)
 	b.Finish(root)
@@ -241,15 +278,35 @@ func unmarshalObjectInto(data []byte, dst *Object) (err error) {
 		}
 		dst.AppendCallMD5s = md5s
 	}
-	if n := t.TagsLength(); n > 0 {
-		tags := make([]Tag, n)
-		var tag storagepb.Tag
+	if n := t.CoalescedLength(); n > 0 {
+		coalesced := make([]CoalescedRef, n)
+		var c storagepb.CoalescedRef
 		for i := 0; i < n; i++ {
-			if t.Tags(&tag, i) {
-				tags[i] = Tag{Key: string(tag.Key()), Value: string(tag.Value())}
+			if !t.Coalesced(&c, i) {
+				continue
+			}
+			var nodeIDs []string
+			if c.NodeIdsLength() > 0 {
+				nodeIDs = make([]string, c.NodeIdsLength())
+				for j := 0; j < c.NodeIdsLength(); j++ {
+					nodeIDs[j] = string(c.NodeIds(j))
+				}
+			}
+			coalesced[i] = CoalescedRef{
+				CoalescedID: string(c.CoalescedId()),
+				Size:        c.Size(),
+				ETag:        string(c.Etag()),
+				ShardKey:    string(c.ShardKey()),
+				ECData:      c.EcData(),
+				ECParity:    c.EcParity(),
+				StripeBytes: c.StripeBytes(),
+				NodeIDs:     nodeIDs,
 			}
 		}
-		dst.Tags = tags
+		dst.Coalesced = coalesced
+	}
+	if n := t.TagsLength(); n > 0 {
+		dst.Tags = readTagsVector(n, t.Tags)
 	}
 	return nil
 }
@@ -306,35 +363,69 @@ func readUserMetadata(n int, at func(*storagepb.UserMetadata, int) bool) map[str
 	return out
 }
 
+// buildTagsVector encodes []Tag as a storagepb.Tag FlatBuffers vector using the
+// provided parent-table startVector func (e.g. storagepb.ObjectStartTagsVector /
+// storagepb.MultipartMetaStartTagsVector). Returns 0 when len==0 so callers can
+// guard the Add call. Tag child tables MUST be built BEFORE the parent table's
+// Start.
+//
+// Keeps its OWN [32]flatbuffers.UOffsetT stack-local so that for ≤32 tags the
+// offset slice does not escape to the heap (zero-alloc hot path). Do NOT switch
+// to make() — that would reintroduce a per-call allocation. Verified with
+// `go build -gcflags=-m=2 ./internal/storage` (localTagOffs does not escape).
+func buildTagsVector(b *flatbuffers.Builder, tags []Tag, startVec func(*flatbuffers.Builder, int) flatbuffers.UOffsetT) flatbuffers.UOffsetT {
+	if len(tags) == 0 {
+		return 0
+	}
+	var tagOffs []flatbuffers.UOffsetT
+	var localTagOffs [32]flatbuffers.UOffsetT
+	if len(tags) <= len(localTagOffs) {
+		tagOffs = localTagOffs[:len(tags)]
+	} else {
+		tagOffs = make([]flatbuffers.UOffsetT, len(tags))
+	}
+	for i, t := range tags {
+		kOff := b.CreateString(t.Key)
+		vOff := b.CreateString(t.Value)
+		storagepb.TagStart(b)
+		storagepb.TagAddKey(b, kOff)
+		storagepb.TagAddValue(b, vOff)
+		tagOffs[i] = storagepb.TagEnd(b)
+	}
+	startVec(b, len(tagOffs))
+	for i := len(tagOffs) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(tagOffs[i])
+	}
+	return b.EndVector(len(tagOffs))
+}
+
+// readTagsVector decodes a storagepb.Tag vector via the accessor (length,
+// element-by-mutating-receiver). Pre-allocates make([]Tag, length) and assigns
+// by index, leaving a zero-value Tag for any element whose accessor returns
+// false (sparse-skip). This mirrors the cluster readTagsVector length semantics
+// — NOT forward's append-and-shrink readForwardTagsVector. Returns nil when
+// length==0 so untagged objects keep a nil Tags slice.
+func readTagsVector(length int, get func(*storagepb.Tag, int) bool) []Tag {
+	if length == 0 {
+		return nil
+	}
+	out := make([]Tag, length)
+	var tag storagepb.Tag
+	for i := 0; i < length; i++ {
+		if get(&tag, i) {
+			out[i] = Tag{Key: string(tag.Key()), Value: string(tag.Value())}
+		}
+	}
+	return out
+}
+
 func marshalMultipartMeta(m *multipartMeta) ([]byte, error) {
 	b := storageBuilderPool.Get()
 	uidOff := b.CreateString(m.UploadID)
 	bucketOff := b.CreateString(m.Bucket)
 	keyOff := b.CreateString(m.Key)
 	ctOff := b.CreateString(m.ContentType)
-	var tagsOff flatbuffers.UOffsetT
-	if len(m.Tags) > 0 {
-		var tagOffs []flatbuffers.UOffsetT
-		var localTagOffs [32]flatbuffers.UOffsetT
-		if len(m.Tags) <= len(localTagOffs) {
-			tagOffs = localTagOffs[:len(m.Tags)]
-		} else {
-			tagOffs = make([]flatbuffers.UOffsetT, len(m.Tags))
-		}
-		for i, t := range m.Tags {
-			kOff := b.CreateString(t.Key)
-			vOff := b.CreateString(t.Value)
-			storagepb.TagStart(b)
-			storagepb.TagAddKey(b, kOff)
-			storagepb.TagAddValue(b, vOff)
-			tagOffs[i] = storagepb.TagEnd(b)
-		}
-		storagepb.MultipartMetaStartTagsVector(b, len(tagOffs))
-		for i := len(tagOffs) - 1; i >= 0; i-- {
-			b.PrependUOffsetT(tagOffs[i])
-		}
-		tagsOff = b.EndVector(len(tagOffs))
-	}
+	tagsOff := buildTagsVector(b, m.Tags, storagepb.MultipartMetaStartTagsVector)
 	storagepb.MultipartMetaStart(b)
 	storagepb.MultipartMetaAddUploadId(b, uidOff)
 	storagepb.MultipartMetaAddBucket(b, bucketOff)
@@ -372,14 +463,7 @@ func unmarshalMultipartMeta(data []byte) (m *multipartMeta, err error) {
 		CreatedAt:   t.CreatedAt(),
 	}
 	if n := t.TagsLength(); n > 0 {
-		tags := make([]Tag, n)
-		var tag storagepb.Tag
-		for i := 0; i < n; i++ {
-			if t.Tags(&tag, i) {
-				tags[i] = Tag{Key: string(tag.Key()), Value: string(tag.Value())}
-			}
-		}
-		out.Tags = tags
+		out.Tags = readTagsVector(n, t.Tags)
 	}
 	return out, nil
 }

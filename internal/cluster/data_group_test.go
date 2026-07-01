@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/raft"
@@ -206,4 +207,59 @@ func (n *dataGroupHealthNode) LastLogIndex() uint64              { return n.last
 func (n *dataGroupHealthNode) PeerMatchIndex(peer string) (uint64, bool) {
 	v, ok := n.match[peer]
 	return v, ok
+}
+
+// TestDataGroupManager_SetMetaBucketStore_WiresAllOwnedBackends is the
+// regression guard for the group-0 demotion wiring gap: the meta-bucket seam
+// (bucket versioning/policy) must reach EVERY owned data-group backend, not just
+// group-0. Without it, a data-plane read (e.g. PutObject's previous-object
+// HeadObject) routed to a non-group-0 owned group hits a nil MetaBucketStore and
+// fails 500 "MetaBucketStore not wired".
+func TestDataGroupManager_SetMetaBucketStore_WiresAllOwnedBackends(t *testing.T) {
+	mgr := NewDataGroupManager()
+	gb0 := &GroupBackend{DistributedBackend: &DistributedBackend{}}
+	mgr.Add(NewDataGroupWithBackend("group-0", nil, gb0))
+	require.Nil(t, gb0.MetaBucketStore(), "precondition: backend starts unwired")
+
+	mbs := newDirectFSMMetaBucketStore(nil)
+	mgr.SetMetaBucketStore(mbs)
+	require.NotNil(t, gb0.MetaBucketStore(), "an already-registered owned group backend must be wired")
+
+	// A group added AFTER SetMetaBucketStore (dynamic AddGroup / evacuation /
+	// placeholder→real swap) must also receive the seam.
+	gb1 := &GroupBackend{DistributedBackend: &DistributedBackend{}}
+	mgr.Add(NewDataGroupWithBackend("group-1", nil, gb1))
+	require.NotNil(t, gb1.MetaBucketStore(), "a group added after SetMetaBucketStore must be wired")
+
+	// A placeholder group (nil backend) must not panic.
+	require.NotPanics(t, func() {
+		mgr.Add(NewDataGroupWithBackend("group-2", nil, nil))
+	})
+}
+
+func TestDataGroupManager_SetGCFreshnessGate_WiresAllOwnedBackends(t *testing.T) {
+	mgr := NewDataGroupManager()
+	gb0 := &GroupBackend{DistributedBackend: &DistributedBackend{}}
+	mgr.Add(NewDataGroupWithBackend("group-0", nil, gb0))
+
+	mgr.SetGCFreshnessGate(func(context.Context) bool { return false })
+	require.False(t, gb0.CaughtUp(context.Background()))
+
+	gb1 := &GroupBackend{DistributedBackend: &DistributedBackend{}}
+	mgr.Add(NewDataGroupWithBackend("group-1", nil, gb1))
+	require.False(t, gb1.CaughtUp(context.Background()))
+
+	mgr.SetGCFreshnessGate(func(context.Context) bool { return true })
+	require.True(t, gb0.CaughtUp(context.Background()))
+	require.True(t, gb1.CaughtUp(context.Background()))
+
+	mgr.SetGCFreshnessGate(nil)
+	require.True(t, gb0.CaughtUp(context.Background()), "nil gate restores legacy nil-node behavior")
+	gb2 := &GroupBackend{DistributedBackend: &DistributedBackend{}}
+	mgr.Add(NewDataGroupWithBackend("group-2", nil, gb2))
+	require.True(t, gb2.CaughtUp(context.Background()), "future groups inherit the cleared gate")
+
+	require.NotPanics(t, func() {
+		mgr.Add(NewDataGroupWithBackend("group-3", nil, nil))
+	})
 }

@@ -80,7 +80,7 @@ func TestRaftV2Smoke_BootstrapProposeRoundtrip(t *testing.T) {
 func TestRaftV2StoresEncryptedReopen(t *testing.T) {
 	dir := t.TempDir()
 	key := bytes.Repeat([]byte{0x42}, 32)
-	db, logs, _, _, err := openRaftV2Stores(dir, RaftV2StoreOptions{EncryptionKey: key})
+	logs, _, _, dbClose, err := raft.OpenV2Stores(dir, key)
 	require.NoError(t, err)
 	require.NoError(t, logs.Append([]raft.LogEntry{{
 		Term:    1,
@@ -88,15 +88,15 @@ func TestRaftV2StoresEncryptedReopen(t *testing.T) {
 		Type:    raft.LogEntryCommand,
 		Command: []byte("encrypted-log-entry"),
 	}}))
-	require.NoError(t, db.Close())
+	require.NoError(t, dbClose())
 
-	db, logs, _, _, err = openRaftV2Stores(dir, RaftV2StoreOptions{EncryptionKey: key})
+	logs, _, _, dbClose, err = raft.OpenV2Stores(dir, key)
 	require.NoError(t, err)
 	got, err := logs.Entry(1)
 	require.NoError(t, err)
 	require.Equal(t, []byte("encrypted-log-entry"), got.Command)
-	require.NoError(t, db.Close())
+	require.NoError(t, dbClose())
 
-	_, _, _, _, err = openRaftV2Stores(dir, RaftV2StoreOptions{EncryptionKey: bytes.Repeat([]byte{0x24}, 32)})
+	_, _, _, _, err = raft.OpenV2Stores(dir, bytes.Repeat([]byte{0x24}, 32))
 	require.Error(t, err)
 }

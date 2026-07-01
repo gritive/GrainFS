@@ -38,6 +38,21 @@ func (s *Server) getObject(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
+	// Object Lock retention / legal-hold are not implemented. These sub-resources
+	// have no dedicated route, so without this dispatch they fall through to a
+	// plain object GET and return the object body bytes (mis-delivered as the
+	// retention/legal-hold document). Reject with 501, before any object load
+	// (the read-index availability gate above still applies first, matching the
+	// degraded-mode ordering on the PUT path).
+	if c.QueryArgs().Has("retention") {
+		s.getObjectRetention(ctx, c)
+		return
+	}
+	if c.QueryArgs().Has("legal-hold") {
+		s.getObjectLegalHold(ctx, c)
+		return
+	}
+
 	// GET /:bucket/:key?uploadId=<id> — list parts for one in-progress multipart.
 	// Checked before versionId / Range because S3 routes the request to ListParts
 	// whenever uploadId is present, even when other query strings appear.

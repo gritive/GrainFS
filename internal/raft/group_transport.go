@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/gritive/GrainFS/internal/transport"
@@ -26,46 +25,30 @@ type RaftV2Handler interface {
 	HandleAppendEntries(args *AppendEntriesArgs) *AppendEntriesReply
 }
 
-// GroupRaftMux multiplexes per-group raft RPCs over the StreamGroupRaft
-// stream type. A single mux instance is shared across all per-group raft nodes
-// on a server; incoming RPCs are dispatched to the correct node by group ID.
+// GroupRaftMux dispatches per-group raft RPCs over the StreamGroupRaft stream
+// type. A single instance is shared across all per-group raft nodes on a server;
+// incoming RPCs are dispatched to the correct node by group ID, and outbound
+// RPCs go through transport.Call (one request/response per RPC).
 //
 // Wire prefix: [4B BE groupIDLen][groupID bytes][raft RPC FlatBuffers payload]
 //
-// Mux mode (see group_transport_mux.go) is enabled at startup: sends use a
-// persistent RaftConn and entries-empty AppendEntries calls are coalesced
-// per peer via HeartbeatCoalescer.
-//
 // nodes stores RaftV2Handler. Both v1 (*Node) and the cluster-layer v2 adapter
-// satisfy that interface, so the dispatch sites (handleRPC,
-// handleMuxRequest, dispatchToLocalGroup) are agnostic to which raft engine
-// owns the group. Senders are unaffected — the wire format is byte-identical.
+// satisfy that interface, so the dispatch site (handleRPC) is agnostic to which
+// raft engine owns the group.
 type GroupRaftMux struct {
-	tr    muxDriverTransport
+	tr    raftRPCTransport
 	nodes sync.Map // string(groupID) → RaftV2Handler
-
-	// metaNode is the meta-raft node registered for the magic groupID
-	// metaGroupID ("__meta__"). Atomic so receiver paths
-	// (handleMuxRequest, dispatchToLocalGroup) can read without locking.
-	// Set via RegisterMetaNode; nil until then.
-	metaNode atomic.Pointer[Node]
-
-	// Mux mode state. Set by EnableMux. When muxEnabled is false, all sends
-	// use the legacy per-message tr.Call path.
-	muxEnabled         atomic.Bool
-	muxPoolSize        int
-	muxFlushWindow     time.Duration
-	muxBulkLaneStreams int // 0 = single lane (QUIC default); TCP wiring (S4) sets a split
-	muxRegisterOnce    sync.Once
-	muxMu              sync.RWMutex
-	muxPeers           map[string]*muxPeerState
 }
 
-// NewGroupRaftMux creates a mux and registers its incoming RPC handler on
-// the cluster transport. The mux must outlive all registered nodes.
-func NewGroupRaftMux(tr muxDriverTransport) *GroupRaftMux {
-	m := &GroupRaftMux{tr: tr, muxPeers: make(map[string]*muxPeerState)}
-	tr.Handle(transport.StreamGroupRaft, m.handleRPC)
+// NewGroupRaftMux creates the dispatcher and registers its incoming RPC handler
+// on the cluster transport. It must outlive all registered nodes.
+func NewGroupRaftMux(tr raftRPCTransport) *GroupRaftMux {
+	m := &GroupRaftMux{tr: tr}
+	// Native /raft/group/rpc buffered route. The payload keeps the
+	// [4B groupIDLen][groupID][raftRPC] prefix; a short header / unknown group
+	// / decode failure maps to a 500 exactly as the tunnel's nil-response
+	// StatusError did.
+	tr.RegisterBufferedRoute(transport.RouteRaftGroupRPC, m.handleRPC)
 	return m
 }
 
@@ -88,15 +71,6 @@ func (m *GroupRaftMux) Register(groupID string, h RaftV2Handler) {
 		panic(fmt.Sprintf("GroupRaftMux.Register: nil handler for groupID %q", groupID))
 	}
 	m.nodes.Store(groupID, h)
-}
-
-// RegisterMetaNode wires the meta-raft node onto the shared mux. Idempotent;
-// the last registration wins. Called by NewMetaRaftTransport so the
-// receiver-side __meta__ branch has somewhere to dispatch before
-// EnableMux installs the accept handler. Passing nil is treated as
-// deregistration (used by tests during teardown).
-func (m *GroupRaftMux) RegisterMetaNode(node *Node) {
-	m.metaNode.Store(node)
 }
 
 // ForGroup returns a GroupRaftSender for the given group. The returned sender
@@ -125,41 +99,41 @@ func extractGroupID(buf []byte) (groupID string, payload []byte, err error) {
 	return string(buf[4 : 4+gidLen]), buf[4+gidLen:], nil
 }
 
-func (m *GroupRaftMux) handleRPC(req *transport.Message) *transport.Message {
-	groupID, payload, err := extractGroupID(req.Payload)
+func (m *GroupRaftMux) handleRPC(reqPayload []byte) ([]byte, error) {
+	groupID, payload, err := extractGroupID(reqPayload)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("group raft RPC: bad request")
 	}
 	v, ok := m.nodes.Load(groupID)
 	if !ok {
-		return nil
+		return nil, fmt.Errorf("group raft RPC: unknown group")
 	}
 	node := v.(RaftV2Handler)
 
 	rpcType, data, err := decodeRPC(payload)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("group raft RPC: bad request")
 	}
 	var replyEnv []byte
 	switch rpcType {
 	case rpcTypeRequestVote:
 		args, err := decodeRequestVoteArgs(data)
 		if err != nil {
-			return nil
+			return nil, fmt.Errorf("group raft RPC: bad request")
 		}
 		reply := node.HandleRequestVote(args)
 		replyEnv, _ = encodeRPC(rpcTypeRequestVoteReply, reply)
 	case rpcTypeAppendEntries:
 		args, err := decodeAppendEntriesArgs(data)
 		if err != nil {
-			return nil
+			return nil, fmt.Errorf("group raft RPC: bad request")
 		}
 		reply := node.HandleAppendEntries(args)
 		replyEnv, _ = encodeRPC(rpcTypeAppendEntriesReply, reply)
 	default:
-		return nil
+		return nil, fmt.Errorf("group raft RPC: bad request")
 	}
-	return &transport.Message{Type: transport.StreamGroupRaft, Payload: replyEnv}
+	return replyEnv, nil
 }
 
 // GroupRaftSender is the per-group sender returned by GroupRaftMux.ForGroup.
@@ -178,89 +152,30 @@ func (s *GroupRaftSender) RequestVote(peer string, args *RequestVoteArgs) (*Requ
 	}
 	payload := prefixGroupID(s.groupID, env)
 
-	// Mux path: persistent stream, no per-message OpenStreamSync.
-	if s.mux.muxEnabled.Load() {
-		respBytes, err := s.muxCall(ctx, peer, payload)
-		if err == nil {
-			_, data, err := decodeRPC(respBytes)
-			if err != nil {
-				return nil, fmt.Errorf("group %s RequestVote mux reply: %w", s.groupID, err)
-			}
-			return decodeRequestVoteReply(data)
-		}
-		// Fall back to legacy path on mux dial / send failure (peer may be
-		// running an older binary or have mux disabled).
-	}
-
-	resp, err := s.mux.tr.Call(ctx, peer, &transport.Message{
-		Type:    transport.StreamGroupRaft,
-		Payload: payload,
-	})
+	reply, err := s.mux.tr.CallBuffered(ctx, peer, transport.RouteRaftGroupRPC, payload)
 	if err != nil {
 		return nil, fmt.Errorf("group %s RequestVote to %s: %w", s.groupID, peer, err)
 	}
-	_, data, err := decodeRPC(resp.Payload)
+	_, data, err := decodeRPC(reply)
 	if err != nil {
 		return nil, fmt.Errorf("group %s RequestVote reply: %w", s.groupID, err)
 	}
 	return decodeRequestVoteReply(data)
 }
 
-// muxCall sends one Request via the per-peer RaftConn, returning the response
-// payload bytes. Caller decodes via decodeRPC.
-func (s *GroupRaftSender) muxCall(ctx context.Context, peer string, payload []byte) ([]byte, error) {
-	ps, err := s.mux.muxConnFor(ctx, peer)
-	if err != nil {
-		return nil, err
-	}
-	return ps.rc.Call(ctx, payload)
-}
-
 func (s *GroupRaftSender) AppendEntries(peer string, args *AppendEntriesArgs) (*AppendEntriesReply, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), groupRaftRPCTimeout)
 	defer cancel()
-
-	// Mux path: route entries-empty heartbeats through the per-peer
-	// HeartbeatCoalescer; entries-bearing AE goes direct via RaftConn.CallBulk
-	// (bulk lane, so a large AE cannot HoL-block a control-lane heartbeat/vote).
-	// Both preserve the synchronous (*Reply, error) caller contract.
-	if s.mux.muxEnabled.Load() {
-		ps, err := s.mux.muxConnFor(ctx, peer)
-		if err == nil {
-			if len(args.Entries) == 0 {
-				reply, hcErr := ps.hc.AppendEntries(ctx, s.groupID, args)
-				if hcErr == nil {
-					return reply, nil
-				}
-				// Coalescer or batch failure: fall through to direct mux call.
-			}
-			env, encErr := encodeRPC(rpcTypeAppendEntries, args)
-			if encErr == nil {
-				respBytes, callErr := ps.rc.CallBulk(ctx, prefixGroupID(s.groupID, env))
-				if callErr == nil {
-					_, data, dErr := decodeRPC(respBytes)
-					if dErr != nil {
-						return nil, fmt.Errorf("group %s AppendEntries mux reply: %w", s.groupID, dErr)
-					}
-					return decodeAppendEntriesReply(data)
-				}
-			}
-		}
-		// Mux peer dial / send failure → fall back to legacy.
-	}
 
 	env, err := encodeRPC(rpcTypeAppendEntries, args)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := s.mux.tr.Call(ctx, peer, &transport.Message{
-		Type:    transport.StreamGroupRaft,
-		Payload: prefixGroupID(s.groupID, env),
-	})
+	reply, err := s.mux.tr.CallBuffered(ctx, peer, transport.RouteRaftGroupRPC, prefixGroupID(s.groupID, env))
 	if err != nil {
 		return nil, fmt.Errorf("group %s AppendEntries to %s: %w", s.groupID, peer, err)
 	}
-	_, data, err := decodeRPC(resp.Payload)
+	_, data, err := decodeRPC(reply)
 	if err != nil {
 		return nil, fmt.Errorf("group %s AppendEntries reply: %w", s.groupID, err)
 	}

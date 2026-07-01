@@ -3,21 +3,22 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
-	"sort"
 	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/compat"
-	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/pool"
 	"github.com/gritive/GrainFS/internal/raft"
-	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/gritive/GrainFS/internal/transport"
 	"github.com/rs/zerolog/log"
 )
+
+// errMetaForwardUnavailable is returned when the meta propose forward path has
+// no available peers or encounters a transient service error.
+var errMetaForwardUnavailable = errors.New("meta forward: service unavailable")
 
 var (
 	metaForwardRequestMagic  = []byte("GFSMFWD2")
@@ -53,7 +54,7 @@ func (s *MetaProposeForwardSender) sendPayloadWithIndex(ctx context.Context, pee
 			Str("component", "meta-forward").
 			Str("path", "empty-peers").
 			Msg("meta-forward: no peers to forward to — likely no known leader; returning 503")
-		return 0, icebergcatalog.ErrServiceUnavailable
+		return 0, errMetaForwardUnavailable
 	}
 	var lastErr error
 	for _, peer := range peers {
@@ -76,14 +77,14 @@ func (s *MetaProposeForwardSender) sendPayloadWithIndex(ctx context.Context, pee
 			Int("peers_tried", len(peers)).
 			Err(lastErr).
 			Msg("meta-forward: every peer rejected the proposal; returning 503")
-		return 0, fmt.Errorf("%w: %v", icebergcatalog.ErrServiceUnavailable, lastErr)
+		return 0, fmt.Errorf("%w: %v", errMetaForwardUnavailable, lastErr)
 	}
 	log.Warn().
 		Str("component", "meta-forward").
 		Str("path", "no-error-no-success").
 		Int("peers_tried", len(peers)).
 		Msg("meta-forward: loop exited without success or recorded error (unreachable); returning 503")
-	return 0, icebergcatalog.ErrServiceUnavailable
+	return 0, errMetaForwardUnavailable
 }
 
 // metaForwardBuilderPool reuses FlatBuffers builders across calls to avoid
@@ -100,176 +101,6 @@ func newMetaForwardBuilder() *flatbuffers.Builder {
 
 func releaseMetaForwardBuilder(b *flatbuffers.Builder) {
 	metaForwardBuilderPool.Put(b)
-}
-
-// metaCatalogReadBuilderPool reuses FlatBuffers builders across MetaCatalogRead
-// encode calls. 4096-byte initial size: LoadTable reply can carry up to ~64KB
-// of Iceberg metadata. Starting at 256 forces ~9 doublings; 4KB cuts that to
-// ~5 while still amortizing across small LoadNamespace replies.
-var metaCatalogReadBuilderPool = pool.New(func() *flatbuffers.Builder {
-	return flatbuffers.NewBuilder(4096)
-})
-
-func newMetaCatalogReadBuilder() *flatbuffers.Builder {
-	b := metaCatalogReadBuilderPool.Get()
-	b.Reset()
-	return b
-}
-
-func releaseMetaCatalogReadBuilder(b *flatbuffers.Builder) {
-	metaCatalogReadBuilderPool.Put(b)
-}
-
-func catalogOpToFB(op string) clusterpb.CatalogReadOp {
-	switch op {
-	case "load-namespace":
-		return clusterpb.CatalogReadOpLoadNamespace
-	case "list-namespaces":
-		return clusterpb.CatalogReadOpListNamespaces
-	case "load-table":
-		return clusterpb.CatalogReadOpLoadTable
-	case "list-tables":
-		return clusterpb.CatalogReadOpListTables
-	default:
-		return clusterpb.CatalogReadOpUnknown
-	}
-}
-
-func catalogOpFromFB(op clusterpb.CatalogReadOp) string {
-	switch op {
-	case clusterpb.CatalogReadOpLoadNamespace:
-		return "load-namespace"
-	case clusterpb.CatalogReadOpListNamespaces:
-		return "list-namespaces"
-	case clusterpb.CatalogReadOpLoadTable:
-		return "load-table"
-	case clusterpb.CatalogReadOpListTables:
-		return "list-tables"
-	default:
-		return ""
-	}
-}
-
-var metaCatalogReadRequestMagic = []byte("GFSMCR2")
-
-// buildStringSliceVec writes a []string vector and returns its offset (or 0
-// when empty).
-func buildStringSliceVec(b *flatbuffers.Builder, ss []string) flatbuffers.UOffsetT {
-	if len(ss) == 0 {
-		return 0
-	}
-	offs := make([]flatbuffers.UOffsetT, len(ss))
-	for i, s := range ss {
-		offs[i] = b.CreateString(s)
-	}
-	b.StartVector(4, len(offs), 4)
-	for i := len(offs) - 1; i >= 0; i-- {
-		b.PrependUOffsetT(offs[i])
-	}
-	return b.EndVector(len(offs))
-}
-
-// buildCatalogIdentifier returns 0 (absent) when id is zero-valued (Name == ""
-// AND len(Namespace) == 0). The request encoder skips this table on
-// non-LoadTable ops to avoid carrying an empty CatalogIdentifier vtable.
-func buildCatalogIdentifier(b *flatbuffers.Builder, id icebergcatalog.Identifier) flatbuffers.UOffsetT {
-	if id.Name == "" && len(id.Namespace) == 0 {
-		return 0
-	}
-	nsOff := buildStringSliceVec(b, id.Namespace)
-	nameOff := b.CreateString(id.Name)
-	clusterpb.CatalogIdentifierStart(b)
-	if nsOff != 0 {
-		clusterpb.CatalogIdentifierAddNamespace(b, nsOff)
-	}
-	clusterpb.CatalogIdentifierAddName(b, nameOff)
-	return clusterpb.CatalogIdentifierEnd(b)
-}
-
-func buildCatalogKVVec(b *flatbuffers.Builder, m map[string]string) flatbuffers.UOffsetT {
-	if len(m) == 0 {
-		return 0
-	}
-	// Sort keys for deterministic encoding (easier diffs and stable tests).
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	offs := make([]flatbuffers.UOffsetT, len(keys))
-	for i, k := range keys {
-		kOff := b.CreateString(k)
-		vOff := b.CreateString(m[k])
-		clusterpb.CatalogKVStart(b)
-		clusterpb.CatalogKVAddK(b, kOff)
-		clusterpb.CatalogKVAddV(b, vOff)
-		offs[i] = clusterpb.CatalogKVEnd(b)
-	}
-	b.StartVector(4, len(offs), 4)
-	for i := len(offs) - 1; i >= 0; i-- {
-		b.PrependUOffsetT(offs[i])
-	}
-	return b.EndVector(len(offs))
-}
-
-func buildCatalogNamespaceVec(b *flatbuffers.Builder, nss [][]string) flatbuffers.UOffsetT {
-	if len(nss) == 0 {
-		return 0
-	}
-	offs := make([]flatbuffers.UOffsetT, len(nss))
-	for i, parts := range nss {
-		partsOff := buildStringSliceVec(b, parts)
-		clusterpb.CatalogNamespaceStart(b)
-		if partsOff != 0 {
-			clusterpb.CatalogNamespaceAddParts(b, partsOff)
-		}
-		offs[i] = clusterpb.CatalogNamespaceEnd(b)
-	}
-	b.StartVector(4, len(offs), 4)
-	for i := len(offs) - 1; i >= 0; i-- {
-		b.PrependUOffsetT(offs[i])
-	}
-	return b.EndVector(len(offs))
-}
-
-func buildCatalogIdentifierVec(b *flatbuffers.Builder, ids []icebergcatalog.Identifier) flatbuffers.UOffsetT {
-	if len(ids) == 0 {
-		return 0
-	}
-	offs := make([]flatbuffers.UOffsetT, len(ids))
-	for i, id := range ids {
-		offs[i] = buildCatalogIdentifier(b, id)
-	}
-	b.StartVector(4, len(offs), 4)
-	for i := len(offs) - 1; i >= 0; i-- {
-		b.PrependUOffsetT(offs[i])
-	}
-	return b.EndVector(len(offs))
-}
-
-func buildCatalogTable(b *flatbuffers.Builder, t *icebergcatalog.Table) flatbuffers.UOffsetT {
-	if t == nil {
-		return 0
-	}
-	idOff := buildCatalogIdentifier(b, t.Identifier)
-	locOff := b.CreateString(t.MetadataLocation)
-	var metaOff flatbuffers.UOffsetT
-	if len(t.Metadata) > 0 {
-		metaOff = b.CreateByteVector([]byte(t.Metadata))
-	}
-	propsOff := buildCatalogKVVec(b, t.Properties)
-	clusterpb.CatalogTableStart(b)
-	if idOff != 0 {
-		clusterpb.CatalogTableAddIdentifier(b, idOff)
-	}
-	clusterpb.CatalogTableAddMetadataLocation(b, locOff)
-	if metaOff != 0 {
-		clusterpb.CatalogTableAddMetadata(b, metaOff)
-	}
-	if propsOff != 0 {
-		clusterpb.CatalogTableAddProperties(b, propsOff)
-	}
-	return clusterpb.CatalogTableEnd(b)
 }
 
 // scopeToFB converts a compat.Scope to its FlatBuffers enum value.
@@ -333,8 +164,6 @@ func operationToFB(o compat.Operation) clusterpb.CompatOperation {
 	switch o {
 	case compat.OperationMigrationCutover:
 		return clusterpb.CompatOperationMigrationCutover
-	case compat.OperationNfsExportCreate:
-		return clusterpb.CompatOperationNfsExportCreate
 	case compat.OperationCreateMultipartUpload:
 		return clusterpb.CompatOperationCreateMultipartUpload
 	case compat.OperationListMultipartUploads:
@@ -351,8 +180,6 @@ func operationFromFB(o clusterpb.CompatOperation) compat.Operation {
 	switch o {
 	case clusterpb.CompatOperationMigrationCutover:
 		return compat.OperationMigrationCutover
-	case clusterpb.CompatOperationNfsExportCreate:
-		return compat.OperationNfsExportCreate
 	case clusterpb.CompatOperationCreateMultipartUpload:
 		return compat.OperationCreateMultipartUpload
 	case clusterpb.CompatOperationListMultipartUploads:
@@ -495,12 +322,15 @@ func (r *MetaProposeForwardReceiver) WithGateRefresh(fn func()) *MetaProposeForw
 	return r
 }
 
-func (r *MetaProposeForwardReceiver) Handle(req *transport.Message) *transport.Message {
+// Handle serves one buffered /raft/meta/propose request. The propose outcome
+// (index + error) is in-band via encodeMetaForwardReplyWithIndex; the returned
+// error is always nil.
+func (r *MetaProposeForwardReceiver) Handle(payload []byte) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	var err error
 	var idx uint64
-	command, plan, framed, decodeErr := decodeMetaForwardRequest(req.Payload)
+	command, plan, framed, decodeErr := decodeMetaForwardRequest(payload)
 	if decodeErr != nil {
 		err = decodeErr
 	} else if framed && plan == nil {
@@ -520,12 +350,10 @@ func (r *MetaProposeForwardReceiver) Handle(req *transport.Message) *transport.M
 			Operation:  operation,
 			Unknown:    []compat.NodeID{"gate_plan"},
 		})
-	} else if isIcebergMetaCommand(command) {
-		err = r.meta.ProposeMetaCommand(ctx, command)
 	} else {
 		idx, err = r.meta.ProposeMetaCommandWithIndex(ctx, command)
 	}
-	return &transport.Message{Type: transport.StreamMetaProposeForward, Payload: encodeMetaForwardReplyWithIndex(idx, err)}
+	return encodeMetaForwardReplyWithIndex(idx, err), nil
 }
 
 func encodeMetaForwardRequest(command []byte, plan *compat.GatePlan) []byte {
@@ -552,27 +380,27 @@ func encodeMetaForwardRequest(command []byte, plan *compat.GatePlan) []byte {
 func decodeMetaForwardRequest(payload []byte) (command []byte, plan *compat.GatePlan, framed bool, err error) {
 	if bytes.HasPrefix(payload, metaForwardLegacyV1Magic) {
 		return nil, nil, true, fmt.Errorf("%w: legacy GFSMFWD1 wire format no longer supported; upgrade all nodes",
-			icebergcatalog.ErrServiceUnavailable)
+			errMetaForwardUnavailable)
 	}
 	if !bytes.HasPrefix(payload, metaForwardRequestMagic) {
 		return payload, nil, false, nil
 	}
 	body := payload[len(metaForwardRequestMagic):]
 
-	// Wrap FB panics (malformed buffer) as ErrServiceUnavailable.
+	// Wrap FB panics (malformed buffer) as errMetaForwardUnavailable.
 	var parseErr error
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
 				parseErr = fmt.Errorf("%w: malformed MetaForwardRequest: %v",
-					icebergcatalog.ErrServiceUnavailable, r)
+					errMetaForwardUnavailable, r)
 			}
 		}()
 		req := clusterpb.GetRootAsMetaForwardRequest(body, 0)
 		// Copy command bytes — do not alias the builder-pooled buffer.
 		raw := req.CommandBytes()
 		if len(raw) == 0 {
-			parseErr = fmt.Errorf("%w: empty gated forward command", icebergcatalog.ErrServiceUnavailable)
+			parseErr = fmt.Errorf("%w: empty gated forward command", errMetaForwardUnavailable)
 			return
 		}
 		command = append([]byte(nil), raw...)
@@ -584,7 +412,7 @@ func decodeMetaForwardRequest(payload []byte) (command []byte, plan *compat.Gate
 	return command, plan, true, nil
 }
 
-//nolint:unused // referenced by cluster_config_followerforward_test.go and iceberg_catalog_test.go.
+//nolint:unused // referenced by cluster_config_followerforward_test.go.
 func encodeMetaForwardReply(err error) []byte {
 	return encodeMetaForwardReplyWithIndex(0, err)
 }
@@ -618,7 +446,7 @@ func decodeMetaForwardReplyWithIndex(data []byte) (uint64, error) {
 		defer func() {
 			if r := recover(); r != nil {
 				parseErr = fmt.Errorf("%w: malformed MetaForwardReply: %v",
-					icebergcatalog.ErrServiceUnavailable, r)
+					errMetaForwardUnavailable, r)
 			}
 		}()
 		reply := clusterpb.GetRootAsMetaForwardReply(data, 0)
@@ -627,7 +455,7 @@ func decodeMetaForwardReplyWithIndex(data []byte) (uint64, error) {
 			idx = reply.Index()
 			return
 		}
-		parseErr = errorFromIcebergType(errType, string(reply.ErrorMessage()))
+		parseErr = errorFromForwardType(errType, string(reply.ErrorMessage()))
 	}()
 	if parseErr != nil {
 		return 0, parseErr
@@ -635,9 +463,9 @@ func decodeMetaForwardReplyWithIndex(data []byte) (uint64, error) {
 	return idx, nil
 }
 
-// MetaForwardApplyError preserves non-Iceberg FSM apply errors across the
+// MetaForwardApplyError preserves FSM apply errors across the
 // follower-to-leader forwarding boundary. Callers can inspect the message today;
-// future typed NFS errors can add explicit wire tags beside this generic shape.
+// future typed errors can add explicit wire tags beside this generic shape.
 type MetaForwardApplyError struct {
 	Message string
 }
@@ -649,28 +477,8 @@ func (e MetaForwardApplyError) Error() string {
 	return e.Message
 }
 
-func isIcebergMetaCommand(data []byte) bool {
-	cmd := clusterpb.GetRootAsMetaCmd(data, 0)
-	switch cmd.Type() {
-	case MetaCmdTypeIcebergCreateNamespace,
-		MetaCmdTypeIcebergDeleteNamespace,
-		MetaCmdTypeIcebergCreateTable,
-		MetaCmdTypeIcebergCommitTable,
-		MetaCmdTypeIcebergDeleteTable:
-		return true
-	default:
-		return false
-	}
-}
-
-func metaCommandGateRequirement(data []byte) (string, compat.Operation, bool) {
-	cmd := clusterpb.GetRootAsMetaCmd(data, 0)
-	switch cmd.Type() {
-	case MetaCmdTypeNfsExportCreate:
-		return compat.CapabilityNfsExportCreateV1, compat.OperationNfsExportCreate, true
-	default:
-		return "", "", false
-	}
+func metaCommandGateRequirement(_ []byte) (string, compat.Operation, bool) {
+	return "", "", false
 }
 
 func metaForwardErrorType(err error) string {
@@ -686,67 +494,11 @@ func metaForwardErrorType(err error) string {
 	if errors.Is(err, context.Canceled) {
 		return "canceled"
 	}
-	if isIcebergCatalogError(err) {
-		return icebergErrorType(err)
-	}
 	return "meta-apply-error"
 }
 
-func isIcebergCatalogError(err error) bool {
-	return errors.Is(err, icebergcatalog.ErrNamespaceNotFound) ||
-		errors.Is(err, icebergcatalog.ErrNamespaceExists) ||
-		errors.Is(err, icebergcatalog.ErrNamespaceNotEmpty) ||
-		errors.Is(err, icebergcatalog.ErrTableNotFound) ||
-		errors.Is(err, icebergcatalog.ErrTableExists) ||
-		errors.Is(err, icebergcatalog.ErrCommitFailed)
-}
-
-func icebergErrorType(err error) string {
-	switch {
-	case errors.Is(err, icebergcatalog.ErrNamespaceNotFound):
-		return "namespace-not-found"
-	case errors.Is(err, icebergcatalog.ErrNamespaceExists):
-		return "namespace-exists"
-	case errors.Is(err, icebergcatalog.ErrNamespaceNotEmpty):
-		return "namespace-not-empty"
-	case errors.Is(err, icebergcatalog.ErrTableNotFound):
-		return "table-not-found"
-	case errors.Is(err, icebergcatalog.ErrTableExists):
-		return "table-exists"
-	case errors.Is(err, icebergcatalog.ErrCommitFailed):
-		return "commit-failed"
-	case errors.Is(err, raft.ErrNotLeader):
-		return "not-leader"
-	case errors.Is(err, storage.ErrObjectNotFound),
-		errors.Is(err, storage.ErrNoSuchBucket),
-		errors.Is(err, storage.ErrBucketNotFound):
-		// Storage layer errors during catalog operations (e.g., metadata.json
-		// read fails after a successful commit) are data-integrity errors
-		// on the server, NOT "catalog unavailable". Surface them as
-		// internal-server so clients see a 500, not a 503. Without this,
-		// the default case below mis-encodes them as service-unavailable
-		// and concurrent CommitTable bursts (warp catalog-commits) produce
-		// 503 floods on the forward path even though the catalog is up.
-		return "storage-not-found"
-	default:
-		return "service-unavailable"
-	}
-}
-
-func errorFromIcebergType(errorType, message string) error {
+func errorFromForwardType(errorType, message string) error {
 	switch errorType {
-	case "namespace-not-found":
-		return icebergcatalog.ErrNamespaceNotFound
-	case "namespace-exists":
-		return icebergcatalog.ErrNamespaceExists
-	case "namespace-not-empty":
-		return icebergcatalog.ErrNamespaceNotEmpty
-	case "table-not-found":
-		return icebergcatalog.ErrTableNotFound
-	case "table-exists":
-		return icebergcatalog.ErrTableExists
-	case "commit-failed":
-		return icebergcatalog.ErrCommitFailed
 	case "not-leader":
 		return raft.ErrNotLeader
 	case "capability-rejected":
@@ -757,351 +509,97 @@ func errorFromIcebergType(errorType, message string) error {
 		return context.Canceled
 	case "meta-apply-error":
 		return MetaForwardApplyError{Message: message}
-	case "storage-not-found":
-		// Wrap so the original storage sentinel is preserved across the
-		// forward boundary. writeIcebergStorageError on the HTTP side then
-		// maps to NoSuchBucket (404) or falls through to 500 — never 503.
-		if message == "" {
-			return storage.ErrObjectNotFound
-		}
-		return fmt.Errorf("%w: %s", storage.ErrObjectNotFound, message)
 	default:
 		if message == "" {
-			return icebergcatalog.ErrServiceUnavailable
+			return errMetaForwardUnavailable
 		}
-		return fmt.Errorf("%w: %s", icebergcatalog.ErrServiceUnavailable, message)
+		return fmt.Errorf("%w: %s", errMetaForwardUnavailable, message)
 	}
 }
 
-type MetaCatalogReadSender struct {
-	dialer MetaForwardDialer
+// ── Meta read-index forward path ─────────────────────────────────────────────
+//
+// Wire format mirrors the data-group ReadIndex forward (DistributedBackend):
+//   request:  empty (nil payload)
+//   response: [8B commitIndex big-endian][4B errLen big-endian][errBytes...]
+//
+// The handler (MetaReadIndexForwardReceiver.Handle) is registered on
+// RouteForwardMetaReadIndex ("/raft/meta/read-index").
+// The sender (MetaReadIndexForwardSender) dials that route on the leader.
+
+// MetaReadIndexDialer dials the meta leader's read-index route.
+type MetaReadIndexDialer func(ctx context.Context, leaderAddr string) ([]byte, error)
+
+// MetaReadIndexForwardSender is the follower-side client for the meta
+// read-index forward route. Wire via MetaRaft.SetReadIndexForwarder.
+type MetaReadIndexForwardSender struct {
+	dialer MetaReadIndexDialer
 }
 
-func NewMetaCatalogReadSender(d MetaForwardDialer) *MetaCatalogReadSender {
-	return &MetaCatalogReadSender{dialer: d}
+// NewMetaReadIndexForwardSender creates a sender backed by dialer.
+func NewMetaReadIndexForwardSender(d MetaReadIndexDialer) *MetaReadIndexForwardSender {
+	return &MetaReadIndexForwardSender{dialer: d}
 }
 
-func (s *MetaCatalogReadSender) LoadNamespace(ctx context.Context, peers []string, warehouse string, namespace []string) (map[string]string, error) {
-	reply, err := s.send(ctx, peers, metaCatalogReadRequest{Op: "load-namespace", Warehouse: warehouse, Namespace: namespace})
+// Send dials the meta leader's RouteForwardMetaReadIndex and returns the
+// committed index. Returns raft.ErrNotLeader if the remote is not the leader.
+func (s *MetaReadIndexForwardSender) Send(ctx context.Context, leaderAddr string) (uint64, error) {
+	reply, err := s.dialer(ctx, leaderAddr)
 	if err != nil {
-		return nil, err
+		return 0, fmt.Errorf("meta read-index forward: %w", err)
 	}
-	return cloneStringMap(reply.Properties), nil
+	return decodeMetaReadIndexReply(reply)
 }
 
-func (s *MetaCatalogReadSender) ListNamespaces(ctx context.Context, peers []string, warehouse string) ([][]string, error) {
-	reply, err := s.send(ctx, peers, metaCatalogReadRequest{Op: "list-namespaces", Warehouse: warehouse})
+// MetaReadIndexForwardReceiver is the leader-side handler for
+// RouteForwardMetaReadIndex. Register Handle via transport.RegisterBufferedRoute.
+type MetaReadIndexForwardReceiver struct {
+	meta *MetaRaft
+}
+
+// NewMetaReadIndexForwardReceiver creates a receiver backed by meta.
+func NewMetaReadIndexForwardReceiver(meta *MetaRaft) *MetaReadIndexForwardReceiver {
+	return &MetaReadIndexForwardReceiver{meta: meta}
+}
+
+// Handle serves one RouteForwardMetaReadIndex request. The outcome
+// (commitIndex or error text) is in-band in the reply; the returned error is
+// always nil so the HTTP layer returns 200 (application-level error in body).
+func (r *MetaReadIndexForwardReceiver) Handle(_ []byte) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	idx, err := r.meta.node.ReadIndex(ctx)
+	return encodeMetaReadIndexReply(idx, err), nil
+}
+
+// encodeMetaReadIndexReply packs (idx, err) into the wire frame:
+//
+//	[8B idx BE][4B errLen BE][errBytes...]
+func encodeMetaReadIndexReply(idx uint64, err error) []byte {
+	var errBytes []byte
 	if err != nil {
-		return nil, err
+		errBytes = []byte(err.Error())
 	}
-	return reply.Namespaces, nil
+	buf := make([]byte, 12+len(errBytes))
+	binary.BigEndian.PutUint64(buf[0:8], idx)
+	binary.BigEndian.PutUint32(buf[8:12], uint32(len(errBytes)))
+	copy(buf[12:], errBytes)
+	return buf
 }
 
-func (s *MetaCatalogReadSender) LoadTable(ctx context.Context, peers []string, warehouse string, ident icebergcatalog.Identifier) (*icebergcatalog.Table, error) {
-	reply, err := s.send(ctx, peers, metaCatalogReadRequest{Op: "load-table", Warehouse: warehouse, Identifier: ident})
-	if err != nil {
-		return nil, err
+// decodeMetaReadIndexReply unpacks the wire frame produced by encodeMetaReadIndexReply.
+func decodeMetaReadIndexReply(reply []byte) (uint64, error) {
+	if len(reply) < 12 {
+		return 0, fmt.Errorf("meta read-index forward: short response: %d bytes", len(reply))
 	}
-	if reply.Table == nil {
-		return nil, icebergcatalog.ErrServiceUnavailable
-	}
-	return reply.Table, nil
-}
-
-func (s *MetaCatalogReadSender) ListTables(ctx context.Context, peers []string, warehouse string, namespace []string) ([]icebergcatalog.Identifier, error) {
-	reply, err := s.send(ctx, peers, metaCatalogReadRequest{Op: "list-tables", Warehouse: warehouse, Namespace: namespace})
-	if err != nil {
-		return nil, err
-	}
-	return reply.Tables, nil
-}
-
-func (s *MetaCatalogReadSender) send(ctx context.Context, peers []string, request metaCatalogReadRequest) (*metaLoadTableReply, error) {
-	req, err := encodeMetaCatalogReadRequest(request)
-	if err != nil {
-		return nil, err
-	}
-	if len(peers) == 0 {
-		return nil, icebergcatalog.ErrServiceUnavailable
-	}
-	var lastErr error
-	for _, peer := range peers {
-		if err := ctx.Err(); err != nil {
-			return nil, err
+	idx := binary.BigEndian.Uint64(reply[0:8])
+	errLen := binary.BigEndian.Uint32(reply[8:12])
+	if errLen > 0 && len(reply) >= 12+int(errLen) {
+		msg := string(reply[12 : 12+int(errLen)])
+		if msg == raft.ErrNotLeader.Error() {
+			return 0, raft.ErrNotLeader
 		}
-		reply, err := s.dialer(ctx, peer, req)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		return decodeMetaLoadTableReply(reply)
+		return 0, fmt.Errorf("meta read-index forward: leader: %s", msg)
 	}
-	if lastErr != nil {
-		return nil, fmt.Errorf("%w: %v", icebergcatalog.ErrServiceUnavailable, lastErr)
-	}
-	return nil, icebergcatalog.ErrServiceUnavailable
-}
-
-type MetaCatalogReadReceiver struct {
-	catalog *MetaCatalog
-}
-
-func NewMetaCatalogReadReceiver(catalog *MetaCatalog) *MetaCatalogReadReceiver {
-	return &MetaCatalogReadReceiver{catalog: catalog}
-}
-
-func (r *MetaCatalogReadReceiver) Handle(req *transport.Message) *transport.Message {
-	reply := &metaLoadTableReply{}
-	request, decodeErr := decodeMetaCatalogReadRequest(req.Payload)
-	if decodeErr != nil {
-		return &transport.Message{
-			Type:    transport.StreamMetaCatalogRead,
-			Payload: encodeMetaLoadTableReply(reply, decodeErr),
-		}
-	}
-	var err error
-	if !r.catalog.meta.IsLeader() {
-		err = raft.ErrNotLeader
-	} else {
-		wh := r.catalog.resolveWarehouse(request.Warehouse)
-		switch request.Op {
-		case "load-namespace":
-			reply.Properties, err = r.catalog.loadNamespaceLocal(wh, request.Namespace)
-		case "list-namespaces":
-			reply.Namespaces = r.catalog.listNamespacesLocal(wh)
-		case "load-table":
-			reply.Table, err = r.catalog.loadTableLocal(wh, request.Identifier)
-		case "list-tables":
-			reply.Tables, err = r.catalog.listTablesLocal(wh, request.Namespace)
-		default:
-			err = icebergcatalog.ErrServiceUnavailable
-		}
-	}
-	return &transport.Message{Type: transport.StreamMetaCatalogRead, Payload: encodeMetaLoadTableReply(reply, err)}
-}
-
-type metaCatalogReadRequest struct {
-	Op         string                    `json:"op"`
-	Warehouse  string                    `json:"warehouse,omitempty"`
-	Namespace  []string                  `json:"namespace,omitempty"`
-	Identifier icebergcatalog.Identifier `json:"identifier,omitempty"`
-}
-
-type metaLoadTableReply struct {
-	ErrorType    string                      `json:"error_type,omitempty"`
-	ErrorMessage string                      `json:"error_message,omitempty"`
-	Properties   map[string]string           `json:"properties,omitempty"`
-	Namespaces   [][]string                  `json:"namespaces,omitempty"`
-	Table        *icebergcatalog.Table       `json:"table,omitempty"`
-	Tables       []icebergcatalog.Identifier `json:"tables,omitempty"`
-}
-
-func encodeMetaCatalogReadRequest(req metaCatalogReadRequest) ([]byte, error) {
-	b := newMetaCatalogReadBuilder()
-	defer releaseMetaCatalogReadBuilder(b)
-
-	nsOff := buildStringSliceVec(b, req.Namespace)
-	// Only build identifier when the request actually uses it (LoadTable).
-	// For other ops the zero-value identifier returns 0 offset (absent table),
-	// keeping per-call payload size lean.
-	var idOff flatbuffers.UOffsetT
-	if req.Op == "load-table" {
-		idOff = buildCatalogIdentifier(b, req.Identifier)
-	}
-	warehouseOff := b.CreateString(req.Warehouse)
-
-	clusterpb.MetaCatalogReadRequestStart(b)
-	clusterpb.MetaCatalogReadRequestAddOp(b, catalogOpToFB(req.Op))
-	if nsOff != 0 {
-		clusterpb.MetaCatalogReadRequestAddNamespace(b, nsOff)
-	}
-	if idOff != 0 {
-		clusterpb.MetaCatalogReadRequestAddIdentifier(b, idOff)
-	}
-	clusterpb.MetaCatalogReadRequestAddWarehouse(b, warehouseOff)
-	b.Finish(clusterpb.MetaCatalogReadRequestEnd(b))
-	fb := b.FinishedBytes()
-
-	out := make([]byte, 0, len(metaCatalogReadRequestMagic)+len(fb))
-	out = append(out, metaCatalogReadRequestMagic...)
-	out = append(out, fb...)
-	return out, nil
-}
-
-func decodeMetaCatalogReadRequest(payload []byte) (req metaCatalogReadRequest, err error) {
-	if !bytes.HasPrefix(payload, metaCatalogReadRequestMagic) {
-		return metaCatalogReadRequest{}, fmt.Errorf("%w: bad meta_catalog_read magic", icebergcatalog.ErrServiceUnavailable)
-	}
-	// Per-call defer recover, mirrors PR #413 decodeMetaForwardRequest.
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("%w: malformed MetaCatalogReadRequest: %v", icebergcatalog.ErrServiceUnavailable, r)
-		}
-	}()
-
-	fb := clusterpb.GetRootAsMetaCatalogReadRequest(payload[len(metaCatalogReadRequestMagic):], 0)
-	req.Op = catalogOpFromFB(fb.Op())
-	req.Warehouse = string(fb.Warehouse())
-	nsLen := fb.NamespaceLength()
-	if nsLen > 0 {
-		req.Namespace = make([]string, nsLen)
-		for i := 0; i < nsLen; i++ {
-			req.Namespace[i] = string(fb.Namespace(i))
-		}
-	}
-	if id := fb.Identifier(nil); id != nil {
-		req.Identifier = icebergcatalog.Identifier{Name: string(id.Name())}
-		idNsLen := id.NamespaceLength()
-		if idNsLen > 0 {
-			req.Identifier.Namespace = make([]string, idNsLen)
-			for i := 0; i < idNsLen; i++ {
-				req.Identifier.Namespace[i] = string(id.Namespace(i))
-			}
-		}
-	}
-	return req, nil
-}
-
-func encodeMetaLoadTableReply(reply *metaLoadTableReply, err error) []byte {
-	if reply == nil {
-		reply = &metaLoadTableReply{}
-	}
-	if err != nil {
-		reply.ErrorType = icebergErrorType(err)
-		reply.ErrorMessage = err.Error()
-		reply.Table = nil
-	}
-
-	b := newMetaCatalogReadBuilder()
-	defer releaseMetaCatalogReadBuilder(b)
-
-	var (
-		errTypeOff flatbuffers.UOffsetT
-		errMsgOff  flatbuffers.UOffsetT
-		propsOff   flatbuffers.UOffsetT
-		nssOff     flatbuffers.UOffsetT
-		tableOff   flatbuffers.UOffsetT
-		tablesOff  flatbuffers.UOffsetT
-	)
-	if reply.ErrorType != "" {
-		errTypeOff = b.CreateString(reply.ErrorType)
-	}
-	if reply.ErrorMessage != "" {
-		errMsgOff = b.CreateString(reply.ErrorMessage)
-	}
-	propsOff = buildCatalogKVVec(b, reply.Properties)
-	nssOff = buildCatalogNamespaceVec(b, reply.Namespaces)
-	tableOff = buildCatalogTable(b, reply.Table)
-	tablesOff = buildCatalogIdentifierVec(b, reply.Tables)
-
-	clusterpb.MetaCatalogReadReplyStart(b)
-	if errTypeOff != 0 {
-		clusterpb.MetaCatalogReadReplyAddErrorType(b, errTypeOff)
-	}
-	if errMsgOff != 0 {
-		clusterpb.MetaCatalogReadReplyAddErrorMessage(b, errMsgOff)
-	}
-	if propsOff != 0 {
-		clusterpb.MetaCatalogReadReplyAddProperties(b, propsOff)
-	}
-	if nssOff != 0 {
-		clusterpb.MetaCatalogReadReplyAddNamespaces(b, nssOff)
-	}
-	if tableOff != 0 {
-		// Field is loaded_table on the wire (avoids collision with the FB
-		// built-in Table() accessor); generator emits AddLoadedTable.
-		clusterpb.MetaCatalogReadReplyAddLoadedTable(b, tableOff)
-	}
-	if tablesOff != 0 {
-		clusterpb.MetaCatalogReadReplyAddTables(b, tablesOff)
-	}
-	b.Finish(clusterpb.MetaCatalogReadReplyEnd(b))
-	return append([]byte(nil), b.FinishedBytes()...)
-}
-
-func decodeMetaLoadTableReply(data []byte) (reply *metaLoadTableReply, err error) {
-	// Per-call defer recover, mirrors PR #413 decodeMetaForwardReplyWithIndex.
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("%w: malformed MetaCatalogReadReply: %v", icebergcatalog.ErrServiceUnavailable, r)
-		}
-	}()
-	fb := clusterpb.GetRootAsMetaCatalogReadReply(data, 0)
-	errType := string(fb.ErrorType())
-	if errType != "" {
-		return nil, errorFromIcebergType(errType, string(fb.ErrorMessage()))
-	}
-
-	r := &metaLoadTableReply{}
-	if propsLen := fb.PropertiesLength(); propsLen > 0 {
-		r.Properties = make(map[string]string, propsLen)
-		var kv clusterpb.CatalogKV
-		for i := 0; i < propsLen; i++ {
-			if fb.Properties(&kv, i) {
-				r.Properties[string(kv.K())] = string(kv.V())
-			}
-		}
-	}
-	if nssLen := fb.NamespacesLength(); nssLen > 0 {
-		r.Namespaces = make([][]string, nssLen)
-		var ns clusterpb.CatalogNamespace
-		for i := 0; i < nssLen; i++ {
-			if fb.Namespaces(&ns, i) {
-				partsLen := ns.PartsLength()
-				parts := make([]string, partsLen)
-				for j := 0; j < partsLen; j++ {
-					parts[j] = string(ns.Parts(j))
-				}
-				r.Namespaces[i] = parts
-			}
-		}
-	}
-	if tbl := fb.LoadedTable(nil); tbl != nil {
-		t := &icebergcatalog.Table{
-			MetadataLocation: string(tbl.MetadataLocation()),
-		}
-		if id := tbl.Identifier(nil); id != nil {
-			t.Identifier = icebergcatalog.Identifier{Name: string(id.Name())}
-			idNsLen := id.NamespaceLength()
-			if idNsLen > 0 {
-				t.Identifier.Namespace = make([]string, idNsLen)
-				for i := 0; i < idNsLen; i++ {
-					t.Identifier.Namespace[i] = string(id.Namespace(i))
-				}
-			}
-		}
-		// MetadataBytes returns the underlying FB-owned slice; copy so the
-		// caller can hold onto Metadata after the FB buffer is released.
-		if mb := tbl.MetadataBytes(); len(mb) > 0 {
-			t.Metadata = append([]byte(nil), mb...)
-		}
-		if propsLen := tbl.PropertiesLength(); propsLen > 0 {
-			t.Properties = make(map[string]string, propsLen)
-			var kv clusterpb.CatalogKV
-			for i := 0; i < propsLen; i++ {
-				if tbl.Properties(&kv, i) {
-					t.Properties[string(kv.K())] = string(kv.V())
-				}
-			}
-		}
-		r.Table = t
-	}
-	if tablesLen := fb.TablesLength(); tablesLen > 0 {
-		r.Tables = make([]icebergcatalog.Identifier, tablesLen)
-		var id clusterpb.CatalogIdentifier
-		for i := 0; i < tablesLen; i++ {
-			if fb.Tables(&id, i) {
-				ident := icebergcatalog.Identifier{Name: string(id.Name())}
-				idNsLen := id.NamespaceLength()
-				if idNsLen > 0 {
-					ident.Namespace = make([]string, idNsLen)
-					for j := 0; j < idNsLen; j++ {
-						ident.Namespace[j] = string(id.Namespace(j))
-					}
-				}
-				r.Tables[i] = ident
-			}
-		}
-	}
-	return r, nil
+	return idx, nil
 }

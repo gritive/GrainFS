@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/compat"
@@ -15,13 +16,13 @@ import (
 	"github.com/gritive/GrainFS/internal/migration"
 )
 
-func newMigrationTestDB(t *testing.T) *badger.DB {
+func newMigrationTestStore(t *testing.T) MetadataStore {
 	t.Helper()
 	opts := badgerutil.SmallOptions(t.TempDir())
 	db, err := badger.Open(opts)
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
-	return db
+	return badgermeta.Wrap(db)
 }
 
 func makeMigrationCmd(t *testing.T, cmdType MetaCmdType, payload []byte) []byte {
@@ -57,7 +58,7 @@ func TestMetaFSM_Migration_StoreNotWired(t *testing.T) {
 
 // TestMetaFSM_MigrationJobStart verifies the happy path and decode-error path.
 func TestMetaFSM_MigrationJobStart(t *testing.T) {
-	store := migration.NewJobStore(newMigrationTestDB(t))
+	store := migration.NewJobStore(newMigrationTestStore(t))
 	f := NewMetaFSM()
 	f.SetMigration(store)
 
@@ -87,7 +88,7 @@ func TestApplyMigrationCutoverSetsUpstreamStatusAndActiveFeature(t *testing.T) {
 	enc := newIAMTestEncryptor(t)
 	iamApplier := iam.NewApplier(iamStore, enc)
 	f.SetIAM(iamStore, iamApplier)
-	f.SetMigration(migration.NewJobStore(newMigrationTestDB(t)))
+	f.SetMigration(migration.NewJobStore(newMigrationTestStore(t)))
 	iamStore.ApplyBucketUpstreamForTest(iam.BucketUpstream{
 		Bucket:    "shared",
 		Endpoint:  "http://minio:9000",
@@ -108,7 +109,7 @@ func TestApplyMigrationCutoverSetsUpstreamStatusAndActiveFeature(t *testing.T) {
 
 // TestMetaFSM_MigrationJobDone verifies status transition to Complete and job==nil path.
 func TestMetaFSM_MigrationJobDone(t *testing.T) {
-	store := migration.NewJobStore(newMigrationTestDB(t))
+	store := migration.NewJobStore(newMigrationTestStore(t))
 	f := NewMetaFSM()
 	f.SetMigration(store)
 
@@ -148,7 +149,7 @@ func TestMetaFSM_MigrationJobDone(t *testing.T) {
 
 // TestMetaFSM_MigrationJobFailed verifies status transition to Failed and job==nil path.
 func TestMetaFSM_MigrationJobFailed(t *testing.T) {
-	store := migration.NewJobStore(newMigrationTestDB(t))
+	store := migration.NewJobStore(newMigrationTestStore(t))
 	f := NewMetaFSM()
 	f.SetMigration(store)
 

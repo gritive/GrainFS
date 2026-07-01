@@ -27,21 +27,12 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 		"--public-url", "https://sentinel.example.com",
 		"--node-id", "sentinel-node",
 		"--raft-addr", "sentinel-raft:7000",
-		"--cluster-append-forward-buffer-total-bytes", "16777216",
-		"--cluster-append-forward-buffer-max-per-request", "1048576",
 		"--append-size-cap-bytes", "67108864",
-		"--nfs4-port", "12049",
-		"--nfs-write-buffer-dir", "/tmp/nfs-writebuf",
-		"--nfs-write-buffer-idle", "15s",
-		"--nbd-port", "20809",
-		"--9p-bind", "127.0.0.99",
-		"--9p-port", "1564",
 		"--pack-threshold", "31",
-		"--shard-pack-threshold", "41",
 		"--scrub-interval", "7s",
 		"--scrub-orphan-age", "11m",
-		"--reshard-interval", "13s",
-		"--datagroup-refresh-interval", "19s",
+		"--ec-redundancy-upgrade=false",
+		"--ec-redundancy-upgrade-max", "13",
 		"--lifecycle-interval", "29s",
 		"--degraded-check-interval", "23s",
 		"--raft-log-gc-interval", "31s",
@@ -70,9 +61,7 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 		"--strict-vlog-registry=true",
 		"--vlog-smoke-defer", "149ms",
 		"--badger-value-threshold", "12345",
-		"--direct-io=false",
 		"--measure-read-amp=true",
-		"--block-cache-size", "268435456",
 		"--shard-cache-size", "134217728",
 		"--heal-receipt-enabled=false",
 		"--heal-receipt-psk", "sentinel-psk",
@@ -84,10 +73,6 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 		"--pprof-port", "6060",
 		"--raft-heartbeat-interval", "37ms",
 		"--raft-election-timeout", "41ms",
-		"--mux-pool", "17",
-		"--mux-flush", "3ms",
-		"--audit-iceberg=false",
-		"--audit-commit-interval", "67s",
 	}
 	require.NoError(t, cmd.ParseFlags(args))
 
@@ -106,33 +91,18 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 	require.Equal(t, "sentinel-raft:7000", opts.RaftAddr)
 
 	// Cluster transport tuning.
-	require.Equal(t, int64(16777216), opts.AppendForwardBufferTotalBytes)
-	require.Equal(t, int64(1048576), opts.AppendForwardBufferMaxPerRequest)
 	require.Equal(t, int64(67108864), opts.AppendSizeCapBytes)
-	require.Equal(t, 17, opts.MuxPoolSize)
-	require.Equal(t, 3*1000*1000, int(opts.MuxFlushWindow.Nanoseconds()))
 
 	// Storage knobs.
 	require.Equal(t, 31, opts.PackThreshold)
-	require.Equal(t, 41, opts.ShardPackThreshold)
-	require.False(t, opts.DirectIO)
 	require.True(t, opts.MeasureReadAmp)
-	require.Equal(t, int64(268435456), opts.BlockCacheSize)
 	require.Equal(t, int64(134217728), opts.ShardCacheSize)
-
-	// Protocols.
-	require.Equal(t, 12049, opts.NFS4Port)
-	require.Equal(t, "/tmp/nfs-writebuf", opts.NFSWriteBufferDir)
-	require.Equal(t, "15s", opts.NFSWriteBufferIdle.String())
-	require.Equal(t, 20809, opts.NBDPort)
-	require.Equal(t, "127.0.0.99", opts.P9Bind)
-	require.Equal(t, 1564, opts.P9Port)
 
 	// Intervals.
 	require.Equal(t, "7s", opts.ScrubInterval.String())
 	require.Equal(t, "11m0s", opts.ScrubOrphanAge.String())
-	require.Equal(t, "13s", opts.ReshardInterval.String())
-	require.Equal(t, "19s", opts.DataGroupRefreshInterval.String())
+	require.False(t, opts.ECRedundancyUpgrade)
+	require.Equal(t, 13, opts.ECRedundancyUpgradeMax)
 	require.Equal(t, "23s", opts.DegradedInterval.String())
 	require.Equal(t, "29s", opts.LifecycleInterval.String())
 	require.Equal(t, "31s", opts.RaftLogGCInterval.String())
@@ -145,10 +115,6 @@ func TestServeOptionsFromCmdReadsAllFlags(t *testing.T) {
 	require.Equal(t, "53m0s", opts.HealReceiptRetention.String())
 	require.Equal(t, "59s", opts.HealReceiptGossipInterval.String())
 	require.Equal(t, 61, opts.HealReceiptWindow)
-
-	// Audit.
-	require.False(t, opts.AuditIceberg)
-	require.Equal(t, "1m7s", opts.AuditCommitInterval.String())
 
 	// Observability.
 	require.Equal(t, "localhost:4318", opts.OTelEndpoint)

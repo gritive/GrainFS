@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -14,10 +13,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/encrypt"
-	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
@@ -439,50 +436,6 @@ func TestMetaRaft_ProposeBucketAssignment_CallbackFired(t *testing.T) {
 	assert.Equal(t, "group-1", cbGroup)
 }
 
-func TestMetaRaft_ProposeObjectIndex_CommitToFSM(t *testing.T) {
-	m := newSingleMetaRaft(t)
-	t.Cleanup(func() { _ = m.Close() })
-	tracePath := filepath.Join(t.TempDir(), "put-trace.jsonl")
-	t.Setenv("GRAINFS_PUT_TRACE_FILE", tracePath)
-	reloadPutTraceSinkForTest()
-	t.Cleanup(reloadPutTraceSinkForTest)
-
-	require.NoError(t, m.Bootstrap())
-	require.NoError(t, m.Start(context.Background(), nil))
-	require.Eventually(t, func() bool {
-		return m.node.State() == raft.Leader
-	}, 2*time.Second, 20*time.Millisecond)
-
-	entry := ObjectIndexEntry{
-		Bucket: "b", Key: "k", VersionID: "v1",
-		PlacementGroupID: "group-2",
-		Size:             7,
-		ETag:             "etag",
-		ECData:           2,
-		ECParity:         1,
-		NodeIDs:          []string{"n1", "n2", "n3"},
-	}
-	ctx := ContextWithPutTrace(context.Background(), PutTraceRequest{
-		Bucket:      "b",
-		Key:         "k",
-		GroupID:     "group-2",
-		Ingress:     PutTraceIngressLocalLeader,
-		SizeClass:   PutTraceSizeSmall,
-		ForwardMode: PutTraceForwardNone,
-	})
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	require.NoError(t, m.ProposeObjectIndex(ctx, entry, false))
-
-	got, ok := m.FSM().ObjectIndexLatest("b", "k")
-	require.True(t, ok)
-	require.Equal(t, entry, got)
-	events := readPutTraceEvents(t, tracePath)
-	requirePutTraceStage(t, events, PutTraceStageMetaIndexEncode)
-	requirePutTraceStage(t, events, PutTraceStageMetaIndexLocalPropose)
-	requirePutTraceStage(t, events, PutTraceStageMetaIndexLocalApply)
-}
-
 func TestMetaRaft_ProposeLoadSnapshot_CommitToFSM(t *testing.T) {
 	m := newSingleMetaRaft(t)
 	t.Cleanup(func() { _ = m.Close() })
@@ -531,72 +484,6 @@ func TestMetaRaft_ProposeShardGroupForwarding_LeaderAppliesLocally(t *testing.T)
 	require.True(t, ok)
 	assert.Equal(t, "group-0", sg.ID)
 	assert.Equal(t, []string{"node-0"}, sg.PeerIDs)
-}
-
-func TestMetaRaft_ProposeRebalancePlan_CommitToFSM(t *testing.T) {
-	m := newSingleMetaRaft(t)
-	t.Cleanup(func() { _ = m.Close() })
-
-	require.NoError(t, m.Bootstrap())
-	require.NoError(t, m.Start(context.Background(), nil))
-	require.Eventually(t, func() bool {
-		return m.node.State() == raft.Leader
-	}, 2*time.Second, 20*time.Millisecond)
-
-	plan := RebalancePlan{
-		PlanID:    "plan-1",
-		GroupID:   "group-0",
-		FromNode:  "n1",
-		ToNode:    "n2",
-		CreatedAt: time.Now(),
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	require.NoError(t, m.ProposeRebalancePlan(ctx, plan))
-	assert.Equal(t, "plan-1", m.FSM().ActivePlanID())
-}
-
-func TestMetaRaft_ProposeAbortPlan_CommitToFSM(t *testing.T) {
-	m := newSingleMetaRaft(t)
-	t.Cleanup(func() { _ = m.Close() })
-
-	require.NoError(t, m.Bootstrap())
-	require.NoError(t, m.Start(context.Background(), nil))
-	require.Eventually(t, func() bool {
-		return m.node.State() == raft.Leader
-	}, 2*time.Second, 20*time.Millisecond)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	plan := RebalancePlan{PlanID: "plan-1", GroupID: "g0", FromNode: "n1", ToNode: "n2", CreatedAt: time.Now()}
-	require.NoError(t, m.ProposeRebalancePlan(ctx, plan))
-	require.Equal(t, "plan-1", m.FSM().ActivePlanID())
-
-	require.NoError(t, m.ProposeAbortPlan(ctx, "plan-1", clusterpb.AbortPlanReasonCompleted))
-	assert.Empty(t, m.FSM().ActivePlanID())
-}
-
-func TestMetaRaft_ProposeIcebergCreateNamespace_ReturnsTypedApplyResult(t *testing.T) {
-	m := newSingleMetaRaft(t)
-	t.Cleanup(func() { _ = m.Close() })
-
-	require.NoError(t, m.Bootstrap())
-	require.NoError(t, m.Start(context.Background(), nil))
-	require.Eventually(t, func() bool {
-		return m.node.State() == raft.Leader
-	}, 2*time.Second, 20*time.Millisecond)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	require.NoError(t, m.ProposeIcebergCreateNamespace(ctx, IcebergCreateNamespaceCmd{
-		RequestID: "ns-first",
-		Namespace: []string{"analytics"},
-	}))
-	require.ErrorIs(t, m.ProposeIcebergCreateNamespace(ctx, IcebergCreateNamespaceCmd{
-		RequestID: "ns-duplicate",
-		Namespace: []string{"analytics"},
-	}), icebergcatalog.ErrNamespaceExists)
 }
 
 // TestMetaRaft_ConcurrentJoin_AtLeastOneSucceeds verifies that concurrent Join
@@ -848,7 +735,7 @@ func TestMetaRaftProposeWithGateFollowerRequiresGatedForwarder(t *testing.T) {
 	gate.ReportEvidence(compat.Evidence{
 		NodeID: compat.NodeID("node-1"),
 		Capabilities: map[string]bool{
-			compat.CapabilityNfsExportCreateV1: true,
+			compat.CapabilityMigrationCutoverV1: true,
 		},
 		LastSeen: time.Now(),
 		Ready:    true,
@@ -860,10 +747,10 @@ func TestMetaRaftProposeWithGateFollowerRequiresGatedForwarder(t *testing.T) {
 	}
 	node := &fakeProposerNode{isLeader: false}
 	plan := compat.GatePlan{
-		Capability: compat.CapabilityNfsExportCreateV1,
+		Capability: compat.CapabilityMigrationCutoverV1,
 		Scope:      compat.ScopeMetaRaft,
 		Severity:   compat.SeverityHard,
-		Operation:  compat.OperationNfsExportCreate,
+		Operation:  compat.OperationMigrationCutover,
 		ConfigID:   raftConfigurationID(cfg),
 	}
 
@@ -880,7 +767,7 @@ func TestMetaRaftProposeWithGateFollowerUsesGatedForwarder(t *testing.T) {
 	gate.ReportEvidence(compat.Evidence{
 		NodeID: compat.NodeID("node-1"),
 		Capabilities: map[string]bool{
-			compat.CapabilityNfsExportCreateV1: true,
+			compat.CapabilityMigrationCutoverV1: true,
 		},
 		LastSeen: time.Now(),
 		Ready:    true,
@@ -894,10 +781,10 @@ func TestMetaRaftProposeWithGateFollowerUsesGatedForwarder(t *testing.T) {
 	}
 	node := &fakeProposerNode{isLeader: false}
 	plan := compat.GatePlan{
-		Capability: compat.CapabilityNfsExportCreateV1,
+		Capability: compat.CapabilityMigrationCutoverV1,
 		Scope:      compat.ScopeMetaRaft,
 		Severity:   compat.SeverityHard,
-		Operation:  compat.OperationNfsExportCreate,
+		Operation:  compat.OperationMigrationCutover,
 		ConfigID:   raftConfigurationID(cfg),
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
@@ -908,4 +795,131 @@ func TestMetaRaftProposeWithGateFollowerUsesGatedForwarder(t *testing.T) {
 	require.Equal(t, uint64(42), got)
 	require.Equal(t, plan, gotPlan)
 	require.Equal(t, 0, node.proposeCalls)
+}
+
+// TestMetaRaftReadIndexReturnsCommitted verifies that ReadIndex on a single-node
+// (leader) MetaRaft returns a committed index that is at least as high as the
+// index produced by a ProposeBucketAssignment, and that after WaitApplied the
+// bucket record is visible in the FSM.
+//
+// Follower-forwarding is covered by the cluster e2e (Task 13); the in-process
+// MetaTransportFake does not implement the read-index forward RPC.
+func TestMetaRaftReadIndexReturnsCommitted(t *testing.T) {
+	m := newSingleMetaRaft(t)
+	t.Cleanup(func() { _ = m.Close() })
+
+	require.NoError(t, m.Bootstrap())
+	require.NoError(t, m.Start(context.Background(), nil))
+	require.Eventually(t, func() bool {
+		return m.node.State() == raft.Leader
+	}, 2*time.Second, 20*time.Millisecond, "single node must become leader")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Propose a bucket assignment so there is at least one committed entry.
+	require.NoError(t, m.ProposeBucketAssignment(ctx, "b1", "group-0"))
+
+	// ReadIndex must succeed and return a committed index.
+	idx, err := m.ReadIndex(ctx)
+	require.NoError(t, err)
+	require.Greater(t, idx, uint64(0), "ReadIndex must return a positive committed index")
+
+	// WaitApplied must not error at that index.
+	require.NoError(t, m.WaitApplied(ctx, idx))
+
+	// The bucket record must be present in the FSM.
+	require.True(t, m.FSM().BucketRecordExists("b1"), "FSM must have the bucket record after WaitApplied")
+}
+
+// followerRaftNode is a RaftNode stub that always reports IsLeader=false and
+// records ProposeWait calls. All other RaftNode methods panic (should not be
+// called on the follower Propose path).
+type followerRaftNode struct {
+	RaftNode     // embed interface so unimplemented methods panic, not compile-error
+	mu           sync.Mutex
+	proposeCalls int
+}
+
+func (f *followerRaftNode) IsLeader() bool { return false }
+func (f *followerRaftNode) ProposeWait(_ context.Context, _ []byte) (uint64, error) {
+	f.mu.Lock()
+	f.proposeCalls++
+	f.mu.Unlock()
+	return 0, nil
+}
+
+func (f *followerRaftNode) getProposeCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.proposeCalls
+}
+
+// TestMetaRaftBucketProposeFollowerForwards verifies that all 5 bucket Propose*
+// methods on a follower MetaRaft invoke the forwardFnWithIndex seam rather than
+// erroring ErrNotLeader (P0 fix — bucket writes must forward on a follower).
+//
+// Strategy: construct a MetaRaft with a follower RaftNode stub and inject
+// forwardFnWithIndex, then assert each Propose* call invokes the forwarder
+// and does NOT call ProposeWait on the underlying node.
+func TestMetaRaftBucketProposeFollowerForwards(t *testing.T) {
+	type tc struct {
+		name string
+		do   func(ctx context.Context, m *MetaRaft) error
+	}
+	cases := []tc{
+		{
+			name: "ProposeCreateBucket",
+			do: func(ctx context.Context, m *MetaRaft) error {
+				return m.ProposeCreateBucket(ctx, "bkt", "grp-1", false)
+			},
+		},
+		{
+			name: "ProposeDeleteBucket",
+			do: func(ctx context.Context, m *MetaRaft) error {
+				return m.ProposeDeleteBucket(ctx, "bkt")
+			},
+		},
+		{
+			name: "ProposeSetBucketVersioning",
+			do: func(ctx context.Context, m *MetaRaft) error {
+				return m.ProposeSetBucketVersioning(ctx, "bkt", "Enabled")
+			},
+		},
+		{
+			name: "ProposeSetBucketPolicy",
+			do: func(ctx context.Context, m *MetaRaft) error {
+				return m.ProposeSetBucketPolicy(ctx, "bkt", []byte(`{}`))
+			},
+		},
+		{
+			name: "ProposeDeleteBucketPolicy",
+			do: func(ctx context.Context, m *MetaRaft) error {
+				return m.ProposeDeleteBucketPolicy(ctx, "bkt")
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			node := &followerRaftNode{}
+			m := &MetaRaft{
+				applyNotify: make(chan struct{}),
+				node:        node,
+			}
+
+			var forwardCalled bool
+			// forwardFnWithIndex returns idx=0 (valid: caller skips waitForwardedApplied).
+			m.forwardFnWithIndex = func(_ context.Context, _ []byte) (uint64, error) {
+				forwardCalled = true
+				return 0, nil
+			}
+
+			err := tc.do(context.Background(), m)
+			require.NoError(t, err, "%s: follower with forwarder must succeed", tc.name)
+			assert.True(t, forwardCalled, "%s: forwardFnWithIndex must be called on follower", tc.name)
+			assert.Equal(t, 0, node.getProposeCalls(),
+				"%s: ProposeWait must NOT be called on follower", tc.name)
+		})
+	}
 }

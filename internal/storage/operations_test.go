@@ -131,8 +131,8 @@ func TestOperationsRefreshesPlanAfterSwappableBackendSwap(t *testing.T) {
 
 func TestOperationsRefreshesPlanAfterNestedSwappableBackendSwap(t *testing.T) {
 	swappable := NewSwappableBackend(&basicBackend{})
-	cached := NewCachedBackend(swappable)
-	ops := NewOperations(cached)
+	outer := &putSideEffectWrapper{Backend: swappable}
+	ops := NewOperations(outer)
 
 	err := ops.SetObjectACL("b", "k", 7)
 	requireUnsupportedOp(t, err, "SetObjectACL", UnsupportedReasonNoAdapter)
@@ -218,7 +218,7 @@ func TestOperationsMultipartDelegatesToBackend(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "u1", upload.UploadID)
 
-	part, err := ops.UploadPart(context.Background(), "b", "k", "u1", 2, strings.NewReader("part"))
+	part, err := ops.UploadPart(context.Background(), "b", "k", "u1", 2, strings.NewReader("part"), "")
 	require.NoError(t, err)
 	require.Equal(t, 2, part.PartNumber)
 
@@ -314,6 +314,7 @@ func (b *recordingMultipartBackend) UploadPart(
 	bucket, key, uploadID string,
 	partNumber int,
 	r io.Reader,
+	_ string,
 ) (*Part, error) {
 	data, err := io.ReadAll(r)
 	if err != nil {
@@ -375,7 +376,7 @@ func (b *basicBackend) WalkObjects(context.Context, string, string, func(*Object
 func (b *basicBackend) CreateMultipartUpload(context.Context, string, string, string) (*MultipartUpload, error) {
 	return &MultipartUpload{}, nil
 }
-func (b *basicBackend) UploadPart(context.Context, string, string, string, int, io.Reader) (*Part, error) {
+func (b *basicBackend) UploadPart(context.Context, string, string, string, int, io.Reader, string) (*Part, error) {
 	return &Part{}, nil
 }
 func (b *basicBackend) CompleteMultipartUpload(context.Context, string, string, string, []Part) (*Object, error) {

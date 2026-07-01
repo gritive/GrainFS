@@ -9,10 +9,10 @@ import (
 // on the data plane — single source of truth.
 //
 // Routes registered:
-//   - GET  /v1/cluster/status      → clusterStatus
-//   - GET  /v1/cluster/placement   → clusterPlacement
-//   - POST /v1/cluster/remove-peer → removePeerHandler
-//   - GET  /v1/cluster/eventlog    → queryEventLog
+//   - GET  /v1/cluster/status                    → clusterStatus
+//   - GET  /v1/cluster/placement                 → clusterPlacement
+//   - POST /v1/cluster/remove-peer               → removePeerHandler
+//   - GET  /v1/cluster/eventlog                  → queryEventLog
 //
 // /v1/cluster/peers is registered separately by admin.RegisterAdmin via
 // the admin package's Deps interface.
@@ -27,6 +27,8 @@ func (s *Server) RegisterClusterAdminUDS(h *server.Hertz) {
 	g.POST(routePathAdminUDSRemovePeer, s.removePeerHandler)
 	g.GET(routePathAdminUDSEventLog, s.queryEventLog)
 	g.POST(routePathAdminUDSTransferLeader, s.transferLeaderHandler)
+	g.POST(routePathAdminUDSExpandPlacement, s.expandPlacementHandler)
+	g.POST(routePathAdminUDSRetirePlacement, s.retirePlacementGenerationHandler)
 	g.GET(routePathAdminUDSHealth, s.clusterHealth)
 	g.GET(routePathAdminUDSBalancerStatus, s.balancerStatusHandler)
 	g.GET(routePathAdminUDSCapabilities, s.capabilitiesStatus)

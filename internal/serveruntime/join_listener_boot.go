@@ -10,7 +10,6 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
-	"io"
 	"math/big"
 	"net"
 	"os"
@@ -44,21 +43,21 @@ type joinListener interface {
 // AddCleanup). The handler reads the framed JoinRequest off the stream, runs the
 // two-phase invite handler against the TLS-captured peer SPKI, and writes the
 // framed JoinReply back — all binary (no JSON), delegated to
-// MetaJoinReceiver.HandleJoinStream.
+// MetaJoinReceiver.HandleJoinRequest.
 func startJoinListener(state *bootState, receiver *cluster.MetaJoinReceiver) error {
 	cert, spki, err := LoadOrCreateJoinListenerCert(state.cfg.DataDir)
 	if err != nil {
 		return err
 	}
 	addr := resolveJoinListenAddr(state.cfg.JoinListenAddr, state.raftAddr)
-	handler := func(handlerCtx context.Context, peerSPKI [32]byte, bind []byte, stream io.ReadWriteCloser) {
+	handler := func(handlerCtx context.Context, peerSPKI [32]byte, bind []byte, req []byte) ([]byte, error) {
 		ctx, cancel := context.WithTimeout(handlerCtx, joinListenerHandlerTimeout)
 		defer cancel()
-		receiver.HandleJoinStream(ctx, peerSPKI, bind, stream)
+		return receiver.HandleJoinRequest(ctx, peerSPKI, bind, req)
 	}
-	// The join listener pairs with the cluster transport: the joiner dials the TCP
-	// join listener over crypto/tls (S6 removed the join listener).
-	ln, err := transport.NewTCPJoinListener(addr, cert, handler)
+	// The join listener pairs with the cluster transport: the joiner dials the
+	// HTTP join listener over crypto/tls (JoinALPN), Hertz owns the accept loop.
+	ln, err := transport.NewHTTPJoinListener(addr, cert, handler)
 	if err != nil {
 		return err
 	}

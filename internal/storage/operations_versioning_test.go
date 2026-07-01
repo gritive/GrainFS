@@ -18,16 +18,16 @@ func TestOperationsVersioningDelegatesToAdapters(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "Enabled", state)
 
-	rc, obj, err := ops.GetObjectVersion("b", "k", "v1")
+	rc, obj, err := ops.GetObjectVersion(context.Background(), "b", "k", "v1")
 	require.NoError(t, err)
 	require.NoError(t, rc.Close())
 	require.Equal(t, "v1", obj.VersionID)
 
-	head, err := ops.HeadObjectVersion("b", "k", "v1")
+	head, err := ops.HeadObjectVersion(context.Background(), "b", "k", "v1")
 	require.NoError(t, err)
 	require.Equal(t, "v1", head.VersionID)
 
-	versions, err := ops.ListObjectVersions("b", "k", 1000)
+	versions, err := ops.ListObjectVersions(context.Background(), "b", "k", 1000)
 	require.NoError(t, err)
 	require.Len(t, versions, 1)
 
@@ -67,13 +67,13 @@ func TestOperationsVersioningUnsupportedWithoutAdapters(t *testing.T) {
 	err = ops.SetBucketVersioning("b", "Enabled")
 	requireUnsupportedOp(t, err, "SetBucketVersioning", UnsupportedReasonNoAdapter)
 
-	_, _, err = ops.GetObjectVersion("b", "k", "v1")
+	_, _, err = ops.GetObjectVersion(context.Background(), "b", "k", "v1")
 	requireUnsupportedOp(t, err, "GetObjectVersion", UnsupportedReasonNoAdapter)
 
-	_, err = ops.HeadObjectVersion("b", "k", "v1")
+	_, err = ops.HeadObjectVersion(context.Background(), "b", "k", "v1")
 	requireUnsupportedOp(t, err, "HeadObjectVersion", UnsupportedReasonNoAdapter)
 
-	_, err = ops.ListObjectVersions("b", "", 1000)
+	_, err = ops.ListObjectVersions(context.Background(), "b", "", 1000)
 	requireUnsupportedOp(t, err, "ListObjectVersions", UnsupportedReasonNoAdapter)
 
 	err = ops.DeleteObjectVersion("b", "k", "v1")
@@ -104,17 +104,17 @@ func (b *versioningBackend) GetBucketVersioning(bucket string) (string, error) {
 	return "Enabled", nil
 }
 
-func (b *versioningBackend) GetObjectVersion(bucket, key, versionID string) (io.ReadCloser, *Object, error) {
+func (b *versioningBackend) GetObjectVersion(ctx context.Context, bucket, key, versionID string) (io.ReadCloser, *Object, error) {
 	b.calls = append(b.calls, "getversion:"+bucket+"/"+key+":"+versionID)
 	return io.NopCloser(strings.NewReader("")), &Object{Key: key, VersionID: versionID}, nil
 }
 
-func (b *versioningBackend) HeadObjectVersion(bucket, key, versionID string) (*Object, error) {
+func (b *versioningBackend) HeadObjectVersion(ctx context.Context, bucket, key, versionID string) (*Object, error) {
 	b.calls = append(b.calls, "headversion:"+bucket+"/"+key+":"+versionID)
 	return &Object{Key: key, VersionID: versionID}, nil
 }
 
-func (b *versioningBackend) ListObjectVersions(bucket, prefix string, maxKeys int) ([]*ObjectVersion, error) {
+func (b *versioningBackend) ListObjectVersions(_ context.Context, bucket, prefix string, maxKeys int) ([]*ObjectVersion, error) {
 	b.calls = append(b.calls, "listversions:"+bucket+":"+prefix+":1000")
 	return []*ObjectVersion{{Key: prefix, VersionID: "v1"}}, nil
 }

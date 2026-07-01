@@ -20,6 +20,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/onsi/ginkgo/v2"
@@ -377,16 +378,260 @@ func runObjectCases(getTgt func() s3Target) {
 		gomega.Expect(string(data)).To(gomega.Equal("form upload content"))
 	})
 
-	ginkgo.PIt("[TODO:e2e] DeleteObjects removes multiple keys in one request", func() {
-		// POST /:bucket?delete with XML body listing keys to delete.
-		// aws-sdk-go-v2: s3.DeleteObjects. Cover success path + partial-failure
-		// reporting in the Deleted/Errors response shape.
+	ginkgo.It("DeleteObjects removes multiple keys in one request (success multi-key)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		client := tgt.pickNode(0)
+		ctx := context.Background()
+		bucket := tgt.uniqueBucket(t, "obj-delobjs")
+
+		keys := []string{"del/a.txt", "del/b.txt", "del/c.txt"}
+		for _, key := range keys {
+			_, err := client.PutObject(ctx, &s3.PutObjectInput{
+				Bucket: aws.String(bucket),
+				Key:    aws.String(key),
+				Body:   stringReader("content"),
+			})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		}
+
+		objs := make([]types.ObjectIdentifier, len(keys))
+		for i, k := range keys {
+			objs[i] = types.ObjectIdentifier{Key: aws.String(k)}
+		}
+		out, err := client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+			Bucket: aws.String(bucket),
+			Delete: &types.Delete{
+				Objects: objs,
+				Quiet:   aws.Bool(false),
+			},
+		})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(out.Deleted).To(gomega.HaveLen(len(keys)))
+		gomega.Expect(out.Errors).To(gomega.BeEmpty())
+
+		for _, key := range keys {
+			_, err := client.HeadObject(ctx, &s3.HeadObjectInput{
+				Bucket: aws.String(bucket),
+				Key:    aws.String(key),
+			})
+			gomega.Expect(err).To(gomega.HaveOccurred())
+			var apiErr smithy.APIError
+			gomega.Expect(errors.As(err, &apiErr)).To(gomega.BeTrue())
+			gomega.Expect(apiErr.ErrorCode()).To(gomega.Equal("NotFound"), "head deleted object error: %v", err)
+		}
 	})
 
-	ginkgo.PIt("[TODO:e2e] ListObjects V1 paginates with Marker (no list-type=2)", func() {
-		// GET /:bucket without list-type=2 → legacy V1 listing.
-		// aws-sdk-go-v2: s3.ListObjects. Cover Marker pagination + IsTruncated
-		// + NextMarker semantics distinct from V2's ContinuationToken.
+	ginkgo.It("DeleteObjects quiet mode suppresses Deleted list (quiet mode)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		client := tgt.pickNode(0)
+		ctx := context.Background()
+		bucket := tgt.uniqueBucket(t, "obj-delobjs-quiet")
+
+		keys := []string{"quiet/a.txt", "quiet/b.txt"}
+		for _, key := range keys {
+			_, err := client.PutObject(ctx, &s3.PutObjectInput{
+				Bucket: aws.String(bucket),
+				Key:    aws.String(key),
+				Body:   stringReader("content"),
+			})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		}
+
+		objs := make([]types.ObjectIdentifier, len(keys))
+		for i, k := range keys {
+			objs[i] = types.ObjectIdentifier{Key: aws.String(k)}
+		}
+		out, err := client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+			Bucket: aws.String(bucket),
+			Delete: &types.Delete{
+				Objects: objs,
+				Quiet:   aws.Bool(true),
+			},
+		})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(out.Deleted).To(gomega.BeEmpty())
+		gomega.Expect(out.Errors).To(gomega.BeEmpty())
+
+		for _, key := range keys {
+			_, err = client.HeadObject(ctx, &s3.HeadObjectInput{
+				Bucket: aws.String(bucket),
+				Key:    aws.String(key),
+			})
+			gomega.Expect(err).To(gomega.HaveOccurred())
+			var apiErr smithy.APIError
+			gomega.Expect(errors.As(err, &apiErr)).To(gomega.BeTrue())
+			gomega.Expect(apiErr.ErrorCode()).To(gomega.Equal("NotFound"), "quiet: head deleted key %q error: %v", key, err)
+		}
+	})
+
+	ginkgo.It("DeleteObjects treats absent keys as success (mixed existing/absent)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		client := tgt.pickNode(0)
+		ctx := context.Background()
+		bucket := tgt.uniqueBucket(t, "obj-delobjs-mixed")
+
+		existingKey := "mixed/existing.txt"
+		_, err := client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(existingKey),
+			Body:   stringReader("content"),
+		})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+		requested := []string{existingKey, "mixed/nonexistent.txt"}
+		objs := make([]types.ObjectIdentifier, len(requested))
+		for i, k := range requested {
+			objs[i] = types.ObjectIdentifier{Key: aws.String(k)}
+		}
+		out, err := client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+			Bucket: aws.String(bucket),
+			Delete: &types.Delete{
+				Objects: objs,
+				Quiet:   aws.Bool(false),
+			},
+		})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(out.Deleted).To(gomega.HaveLen(len(requested)))
+		gomega.Expect(out.Errors).To(gomega.BeEmpty())
+
+		_, err = client.HeadObject(ctx, &s3.HeadObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(existingKey),
+		})
+		gomega.Expect(err).To(gomega.HaveOccurred())
+		var apiErr smithy.APIError
+		gomega.Expect(errors.As(err, &apiErr)).To(gomega.BeTrue())
+		gomega.Expect(apiErr.ErrorCode()).To(gomega.Equal("NotFound"), "mixed: head deleted key %q error: %v", existingKey, err)
+	})
+
+	ginkgo.It("DeleteObjects returns InvalidArgument for empty key (empty-key error shape)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		client := tgt.pickNode(0)
+		ctx := context.Background()
+		bucket := tgt.uniqueBucket(t, "obj-delobjs-emptykey")
+
+		validKey := "emptykey/valid.txt"
+		_, err := client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(validKey),
+			Body:   stringReader("content"),
+		})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+		out, err := client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+			Bucket: aws.String(bucket),
+			Delete: &types.Delete{
+				Objects: []types.ObjectIdentifier{
+					{Key: aws.String("")},
+					{Key: aws.String(validKey)},
+				},
+				Quiet: aws.Bool(false),
+			},
+		})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(out.Errors).To(gomega.HaveLen(1))
+		gomega.Expect(aws.ToString(out.Errors[0].Code)).To(gomega.Equal("InvalidArgument"))
+		gomega.Expect(out.Deleted).To(gomega.HaveLen(1))
+		gomega.Expect(aws.ToString(out.Deleted[0].Key)).To(gomega.Equal(validKey))
+
+		_, err = client.HeadObject(ctx, &s3.HeadObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(validKey),
+		})
+		gomega.Expect(err).To(gomega.HaveOccurred())
+		var headErr smithy.APIError
+		gomega.Expect(errors.As(err, &headErr)).To(gomega.BeTrue())
+		gomega.Expect(headErr.ErrorCode()).To(gomega.Equal("NotFound"), "emptykey: head deleted key %q error: %v", validKey, err)
+	})
+
+	ginkgo.It("paginates V1 listing with Marker (ListV1Marker)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		client := tgt.pickNode(0)
+		ctx := context.Background()
+		bucket := tgt.uniqueBucket(t, "obj-list-v1")
+
+		// Zero-padded keys sort lexicographically in PUT order.
+		keys := []string{"page/k0", "page/k1", "page/k2", "page/k3", "page/k4"}
+		for _, key := range keys {
+			_, err := client.PutObject(ctx, &s3.PutObjectInput{
+				Bucket: aws.String(bucket),
+				Key:    aws.String(key),
+				Body:   stringReader("v"),
+			})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		}
+
+		// Page through the V1 listing (no list-type=2) feeding NextMarker back
+		// as Marker. Guard against an infinite loop if truncation never clears.
+		var collected []string
+		var pageSizes []int
+		var marker *string
+		lastTruncated := true
+		for i := 0; i < len(keys)+2; i++ {
+			out, err := client.ListObjects(ctx, &s3.ListObjectsInput{
+				Bucket:  aws.String(bucket),
+				MaxKeys: aws.Int32(2),
+				Marker:  marker,
+			})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+			pageSizes = append(pageSizes, len(out.Contents))
+			for _, obj := range out.Contents {
+				collected = append(collected, aws.ToString(obj.Key))
+			}
+
+			lastTruncated = aws.ToBool(out.IsTruncated)
+			if !lastTruncated {
+				// NextMarker is omitted on the final (non-truncated) page.
+				gomega.Expect(aws.ToString(out.NextMarker)).To(gomega.BeEmpty())
+				break
+			}
+
+			// On a truncated page NextMarker is the last returned key.
+			gomega.Expect(out.Contents).NotTo(gomega.BeEmpty())
+			gomega.Expect(aws.ToString(out.NextMarker)).To(
+				gomega.Equal(aws.ToString(out.Contents[len(out.Contents)-1].Key)))
+			marker = out.NextMarker
+		}
+
+		gomega.Expect(lastTruncated).To(gomega.BeFalse(), "pagination did not terminate")
+		// MaxKeys=2 over 5 keys must split into exactly 3 pages of 2/2/1. Pinning
+		// the page sizes proves the server honored Marker pagination instead of
+		// returning everything in one untruncated page.
+		gomega.Expect(pageSizes).To(gomega.Equal([]int{2, 2, 1}))
+		// Union covers every key exactly once, in ascending lexicographic order.
+		gomega.Expect(collected).To(gomega.Equal(keys))
+	})
+
+	ginkgo.It("returns an empty V1 page for a marker past the last key (ListV1MarkerBeyond)", func() {
+		t := ginkgo.GinkgoTB()
+		tgt := getTgt()
+		client := tgt.pickNode(0)
+		ctx := context.Background()
+		bucket := tgt.uniqueBucket(t, "obj-list-v1-beyond")
+
+		for _, key := range []string{"page/k0", "page/k1", "page/k2"} {
+			_, err := client.PutObject(ctx, &s3.PutObjectInput{
+				Bucket: aws.String(bucket),
+				Key:    aws.String(key),
+				Body:   stringReader("v"),
+			})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		}
+
+		out, err := client.ListObjects(ctx, &s3.ListObjectsInput{
+			Bucket: aws.String(bucket),
+			Marker: aws.String("page/zzz"), // sorts after every stored key
+		})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(out.Contents).To(gomega.BeEmpty())
+		gomega.Expect(aws.ToBool(out.IsTruncated)).To(gomega.BeFalse())
+		gomega.Expect(aws.ToString(out.NextMarker)).To(gomega.BeEmpty())
 	})
 }
 

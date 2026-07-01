@@ -7,18 +7,15 @@ import (
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/gritive/GrainFS/internal/chunkref"
+	"github.com/stretchr/testify/require"
 )
 
 func TestPutObjectRecordAddsChunkRefs(t *testing.T) {
 	b := newTestLocalBackend(t)
 	ctx := context.Background()
-	if err := b.CreateBucket(ctx, "bkt"); err != nil {
-		t.Fatalf("create bucket: %v", err)
-	}
+	require.NoError(t, b.CreateBucket(ctx, "bkt"), "create bucket")
 	obj := &Object{Key: "k", Segments: []SegmentRef{{BlobID: "chunk-A"}, {BlobID: "chunk-B"}}}
-	if err := b.PutObjectRecord(ctx, "bkt", "k", obj); err != nil {
-		t.Fatalf("put: %v", err)
-	}
+	require.NoError(t, b.PutObjectRecord(ctx, "bkt", "k", obj), "put")
 	m := chunkref.ObjectVersionID("bkt", "k", "")
 	if err := b.db.View(func(txn *badger.Txn) error {
 		s := NewChunkRefStore(txn)
@@ -27,16 +24,13 @@ func TestPutObjectRecordAddsChunkRefs(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			if n != 1 {
-				t.Fatalf("RefCount(%s) = %d, want 1", c, n)
-			}
-			if _, gerr := txn.Get(refMembershipKey(m, c)); gerr != nil {
-				t.Fatalf("missing ref (%v, %s): %v", m, c, gerr)
-			}
+			require.Equal(t, 1, n, "RefCount(%s)", c)
+			_, err = txn.Get(refMembershipKey(m, c))
+			require.NoError(t, err, "missing ref (%v, %s)", m, c)
 		}
 		return nil
 	}); err != nil {
-		t.Fatalf("view: %v", err)
+		require.NoError(t, err, "view")
 	}
 }
 
@@ -44,23 +38,19 @@ func TestOverwriteRemovesStaleChunkRefs(t *testing.T) {
 	b := newTestLocalBackend(t)
 	ctx := context.Background()
 	_ = b.CreateBucket(ctx, "bkt")
-	if err := b.PutObjectRecord(ctx, "bkt", "k", &Object{Key: "k", Segments: []SegmentRef{{BlobID: "old-chunk"}}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := b.PutObjectRecord(ctx, "bkt", "k", &Object{Key: "k", Segments: []SegmentRef{{BlobID: "new-chunk"}}}); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, b.PutObjectRecord(ctx, "bkt", "k", &Object{Key: "k", Segments: []SegmentRef{{BlobID: "old-chunk"}}}))
+	require.NoError(t, b.PutObjectRecord(ctx, "bkt", "k", &Object{Key: "k", Segments: []SegmentRef{{BlobID: "new-chunk"}}}))
 	if err := b.db.View(func(txn *badger.Txn) error {
 		s := NewChunkRefStore(txn)
-		if n, _ := s.RefCount("old-chunk"); n != 0 {
-			t.Fatalf("old-chunk RefCount = %d, want 0 (stale ref removed)", n)
-		}
-		if n, _ := s.RefCount("new-chunk"); n != 1 {
-			t.Fatalf("new-chunk RefCount = %d, want 1", n)
-		}
+		n, err := s.RefCount("old-chunk")
+		require.NoError(t, err)
+		require.Zero(t, n, "old-chunk RefCount")
+		n, err = s.RefCount("new-chunk")
+		require.NoError(t, err)
+		require.Equal(t, 1, n, "new-chunk RefCount")
 		return nil
 	}); err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
 }
 
@@ -68,32 +58,52 @@ func TestOverwritePartialOverlapChunkRefs(t *testing.T) {
 	b := newTestLocalBackend(t)
 	ctx := context.Background()
 	_ = b.CreateBucket(ctx, "bkt")
-	if err := b.PutObjectRecord(ctx, "bkt", "k", &Object{Key: "k", Segments: []SegmentRef{{BlobID: "chunk-A"}, {BlobID: "chunk-B"}}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := b.PutObjectRecord(ctx, "bkt", "k", &Object{Key: "k", Segments: []SegmentRef{{BlobID: "chunk-A"}, {BlobID: "chunk-C"}}}); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, b.PutObjectRecord(ctx, "bkt", "k", &Object{Key: "k", Segments: []SegmentRef{{BlobID: "chunk-A"}, {BlobID: "chunk-B"}}}))
+	require.NoError(t, b.PutObjectRecord(ctx, "bkt", "k", &Object{Key: "k", Segments: []SegmentRef{{BlobID: "chunk-A"}, {BlobID: "chunk-C"}}}))
 	if err := b.db.View(func(txn *badger.Txn) error {
 		s := NewChunkRefStore(txn)
-		if n, _ := s.RefCount("chunk-A"); n != 1 {
-			t.Fatalf("chunk-A RefCount = %d, want 1 (shared, survives)", n)
-		}
-		if _, ok, _ := s.TombstoneTime("chunk-A"); ok {
-			t.Fatalf("chunk-A has a tombstone after surviving overwrite — false GC candidate")
-		}
-		if n, _ := s.RefCount("chunk-B"); n != 0 {
-			t.Fatalf("chunk-B RefCount = %d, want 0 (dropped)", n)
-		}
-		if _, ok, _ := s.TombstoneTime("chunk-B"); !ok {
-			t.Fatalf("expected tombstone for dropped chunk-B")
-		}
-		if n, _ := s.RefCount("chunk-C"); n != 1 {
-			t.Fatalf("chunk-C RefCount = %d, want 1 (new)", n)
-		}
+		n, err := s.RefCount("chunk-A")
+		require.NoError(t, err)
+		require.Equal(t, 1, n, "chunk-A RefCount")
+		_, ok, err := s.TombstoneTime("chunk-A")
+		require.NoError(t, err)
+		require.False(t, ok, "chunk-A has a tombstone after surviving overwrite")
+		n, err = s.RefCount("chunk-B")
+		require.NoError(t, err)
+		require.Zero(t, n, "chunk-B RefCount")
+		_, ok, err = s.TombstoneTime("chunk-B")
+		require.NoError(t, err)
+		require.True(t, ok, "expected tombstone for dropped chunk-B")
+		n, err = s.RefCount("chunk-C")
+		require.NoError(t, err)
+		require.Equal(t, 1, n, "chunk-C RefCount")
 		return nil
 	}); err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
+	}
+}
+
+func TestAppendObjectRecordAddsOnlyNewChunkRef(t *testing.T) {
+	b := newTestLocalBackend(t)
+	ctx := context.Background()
+	_ = b.CreateBucket(ctx, "bkt")
+	require.NoError(t, b.PutObjectRecord(ctx, "bkt", "k", &Object{Key: "k", Segments: []SegmentRef{{BlobID: "chunk-A"}}}))
+	next := &Object{Key: "k", Segments: []SegmentRef{{BlobID: "chunk-A"}, {BlobID: "chunk-B"}}}
+	require.NoError(t, b.putObjectRecordAppend(ctx, "bkt", "k", next, []string{"chunk-B"}))
+	if err := b.db.View(func(txn *badger.Txn) error {
+		s := NewChunkRefStore(txn)
+		n, err := s.RefCount("chunk-A")
+		require.NoError(t, err)
+		require.Equal(t, 1, n, "chunk-A RefCount")
+		_, ok, err := s.TombstoneTime("chunk-A")
+		require.NoError(t, err)
+		require.False(t, ok, "chunk-A has a tombstone after append-only manifest update")
+		n, err = s.RefCount("chunk-B")
+		require.NoError(t, err)
+		require.Equal(t, 1, n, "chunk-B RefCount")
+		return nil
+	}); err != nil {
+		require.NoError(t, err)
 	}
 }
 
@@ -101,24 +111,50 @@ func TestDeleteObjectRemovesChunkRefs(t *testing.T) {
 	b := newTestLocalBackend(t)
 	ctx := context.Background()
 	_ = b.CreateBucket(ctx, "bkt")
-	if err := b.PutObjectRecord(ctx, "bkt", "k", &Object{Key: "k", Segments: []SegmentRef{{BlobID: "chunk-A"}}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := b.DeleteObject(ctx, "bkt", "k"); err != nil {
-		t.Fatalf("delete: %v", err)
-	}
+	require.NoError(t, b.PutObjectRecord(ctx, "bkt", "k", &Object{Key: "k", Segments: []SegmentRef{{BlobID: "chunk-A"}}}))
+	require.NoError(t, b.DeleteObject(ctx, "bkt", "k"), "delete")
 	if err := b.db.View(func(txn *badger.Txn) error {
 		s := NewChunkRefStore(txn)
-		if n, _ := s.RefCount("chunk-A"); n != 0 {
-			t.Fatalf("RefCount = %d, want 0 after delete", n)
-		}
-		if _, ok, _ := s.TombstoneTime("chunk-A"); !ok {
-			t.Fatalf("expected tombstone after delete-to-zero")
-		}
+		n, err := s.RefCount("chunk-A")
+		require.NoError(t, err)
+		require.Zero(t, n, "RefCount after delete")
+		_, ok, err := s.TombstoneTime("chunk-A")
+		require.NoError(t, err)
+		require.True(t, ok, "expected tombstone after delete-to-zero")
 		return nil
 	}); err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
+}
+
+func TestDeleteObjectRemovesAppendSideRecordChunkRefs(t *testing.T) {
+	b, obj := seedAppendSideRecordObject(t, []string{"hello", "world"})
+	ctx := context.Background()
+	require.NoError(t, b.DeleteObject(ctx, "test", "k"))
+	err := b.db.View(func(txn *badger.Txn) error {
+		s := NewChunkRefStore(txn)
+		for i, seg := range obj.Segments {
+			c := chunkref.ChunkID(ParseLocator(seg.BlobID).String())
+			n, err := s.RefCount(c)
+			require.NoError(t, err)
+			require.Zero(t, n, "segment %d RefCount(%s)", i, c)
+			_, ok, err := s.TombstoneTime(c)
+			require.NoError(t, err)
+			require.True(t, ok, "segment %d expected tombstone for %s", i, c)
+			if _, err := txn.Get(appendSegmentKey("test", "k", obj.VersionID, i+1)); err == nil {
+				require.Failf(t, "side segment record still present", "seq=%d", i)
+			} else if err != badger.ErrKeyNotFound {
+				return err
+			}
+		}
+		if _, err := txn.Get(appendSummaryKey("test", "k", obj.VersionID)); err == nil {
+			require.Fail(t, "append summary record still present")
+		} else if err != badger.ErrKeyNotFound {
+			return err
+		}
+		return nil
+	})
+	require.NoError(t, err, "view")
 }
 
 // TestPutObjectRecordTombstoneEvictedOnRewrite verifies that re-adding a chunk
@@ -130,28 +166,22 @@ func TestPutObjectRecordTombstoneEvictedOnRewrite(t *testing.T) {
 	_ = b.CreateBucket(ctx, "bkt")
 
 	// First write: chunk-A referenced.
-	if err := b.PutObjectRecord(ctx, "bkt", "k", &Object{Key: "k", Segments: []SegmentRef{{BlobID: "chunk-A"}}}); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, b.PutObjectRecord(ctx, "bkt", "k", &Object{Key: "k", Segments: []SegmentRef{{BlobID: "chunk-A"}}}))
 	// Overwrite with chunk-B: chunk-A should get tombstoned.
-	if err := b.PutObjectRecord(ctx, "bkt", "k", &Object{Key: "k", Segments: []SegmentRef{{BlobID: "chunk-B"}}}); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, b.PutObjectRecord(ctx, "bkt", "k", &Object{Key: "k", Segments: []SegmentRef{{BlobID: "chunk-B"}}}))
 	// Overwrite again re-adding chunk-A: tombstone must be cleared.
-	if err := b.PutObjectRecord(ctx, "bkt", "k", &Object{Key: "k", Segments: []SegmentRef{{BlobID: "chunk-A"}}}); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, b.PutObjectRecord(ctx, "bkt", "k", &Object{Key: "k", Segments: []SegmentRef{{BlobID: "chunk-A"}}}))
 	if err := b.db.View(func(txn *badger.Txn) error {
 		s := NewChunkRefStore(txn)
-		if _, ok, _ := s.TombstoneTime("chunk-A"); ok {
-			t.Fatalf("chunk-A tombstone should have been cleared after re-add")
-		}
-		if n, _ := s.RefCount("chunk-A"); n != 1 {
-			t.Fatalf("chunk-A RefCount = %d, want 1", n)
-		}
+		_, ok, err := s.TombstoneTime("chunk-A")
+		require.NoError(t, err)
+		require.False(t, ok, "chunk-A tombstone should have been cleared after re-add")
+		n, err := s.RefCount("chunk-A")
+		require.NoError(t, err)
+		require.Equal(t, 1, n, "chunk-A RefCount")
 		return nil
 	}); err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
 }
 
@@ -161,12 +191,8 @@ func TestDeleteObjectTombstoneTimestamp(t *testing.T) {
 	ctx := context.Background()
 	_ = b.CreateBucket(ctx, "bkt")
 	before := time.Now()
-	if err := b.PutObjectRecord(ctx, "bkt", "k", &Object{Key: "k", Segments: []SegmentRef{{BlobID: "chunk-X"}}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := b.DeleteObject(ctx, "bkt", "k"); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, b.PutObjectRecord(ctx, "bkt", "k", &Object{Key: "k", Segments: []SegmentRef{{BlobID: "chunk-X"}}}))
+	require.NoError(t, b.DeleteObject(ctx, "bkt", "k"))
 	after := time.Now()
 	if err := b.db.View(func(txn *badger.Txn) error {
 		s := NewChunkRefStore(txn)
@@ -174,14 +200,10 @@ func TestDeleteObjectTombstoneTimestamp(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if !ok {
-			t.Fatal("expected tombstone")
-		}
-		if ts.Before(before) || ts.After(after) {
-			t.Fatalf("tombstone ts %v outside [%v, %v]", ts, before, after)
-		}
+		require.True(t, ok, "expected tombstone")
+		require.False(t, ts.Before(before) || ts.After(after), "tombstone ts %v outside [%v, %v]", ts, before, after)
 		return nil
 	}); err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
 }

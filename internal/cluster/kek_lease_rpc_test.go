@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
-	"github.com/gritive/GrainFS/internal/transport"
 )
 
 // noopSnapRefCount is a zero-returning snapshotRefCountFn for tests that do
@@ -18,15 +17,11 @@ func TestKEKLeaseRPC_RoundTrip_ZeroCount(t *testing.T) {
 	tracker := encrypt.NewKEKLeaseTracker()
 	h := NewKEKLeaseSnapshotHandler("node-A", tracker, func() uint64 { return 42 }, noopSnapRefCount)
 
-	req := &transport.Message{
-		Type:    transport.StreamKEKLeaseSnapshotProbe,
-		Payload: encodeKEKLeaseSnapshotReq(KEKLeaseSnapshotReq{Version: 5}),
+	resp, herr := h.Handle(encodeKEKLeaseSnapshotReq(KEKLeaseSnapshotReq{Version: 5}))
+	if herr != nil {
+		t.Fatalf("handler returned error: %v", herr)
 	}
-	resp := h.Handle(req)
-	if resp.Status != transport.StatusOK {
-		t.Fatalf("handler returned status=%v payload=%q", resp.Status, string(resp.Payload))
-	}
-	decoded, err := decodeKEKLeaseSnapshotResp(resp.Payload)
+	decoded, err := decodeKEKLeaseSnapshotResp(resp)
 	if err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
@@ -43,12 +38,9 @@ func TestKEKLeaseRPC_RoundTrip_ZeroCount(t *testing.T) {
 
 func TestKEKLeaseSnapshotHandler_RejectsBadMagic(t *testing.T) {
 	h := NewKEKLeaseSnapshotHandler("node-X", encrypt.NewKEKLeaseTracker(), func() uint64 { return 0 }, noopSnapRefCount)
-	resp := h.Handle(&transport.Message{
-		Type:    transport.StreamKEKLeaseSnapshotProbe,
-		Payload: []byte("not the right magic"),
-	})
-	if resp.Status != transport.StatusError {
-		t.Fatalf("expected StatusError on bad magic, got %v", resp.Status)
+	_, herr := h.Handle([]byte("not the right magic"))
+	if herr == nil {
+		t.Fatal("expected error on bad magic, got nil")
 	}
 }
 
@@ -60,12 +52,7 @@ func TestGetKEKLeaseSnapshot_RoundTrip(t *testing.T) {
 	h := NewKEKLeaseSnapshotHandler("node-B", tracker, func() uint64 { return 99 }, noopSnapRefCount)
 
 	dialer := func(_ context.Context, _ string, payload []byte) ([]byte, error) {
-		reqMsg := &transport.Message{
-			Type:    transport.StreamKEKLeaseSnapshotProbe,
-			Payload: payload,
-		}
-		respMsg := h.Handle(reqMsg)
-		return respMsg.Payload, nil
+		return h.Handle(payload)
 	}
 
 	got, err := GetKEKLeaseSnapshot(context.Background(), "node-B", 7, dialer)
@@ -91,15 +78,11 @@ func TestKEKLeaseRPC_SnapshotRefCount_RoundTrip(t *testing.T) {
 		return 3, nil // 3 retained snapshots under this KEK version
 	})
 
-	req := &transport.Message{
-		Type:    transport.StreamKEKLeaseSnapshotProbe,
-		Payload: encodeKEKLeaseSnapshotReq(KEKLeaseSnapshotReq{Version: 2}),
+	resp, herr := h.Handle(encodeKEKLeaseSnapshotReq(KEKLeaseSnapshotReq{Version: 2}))
+	if herr != nil {
+		t.Fatalf("handler returned error: %v", herr)
 	}
-	resp := h.Handle(req)
-	if resp.Status != transport.StatusOK {
-		t.Fatalf("handler returned status=%v payload=%q", resp.Status, string(resp.Payload))
-	}
-	decoded, err := decodeKEKLeaseSnapshotResp(resp.Payload)
+	decoded, err := decodeKEKLeaseSnapshotResp(resp)
 	if err != nil {
 		t.Fatalf("decode response: %v", err)
 	}

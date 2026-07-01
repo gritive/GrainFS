@@ -80,61 +80,17 @@ func fdMetricCategories() []resourcewatch.Category {
 		resourcewatch.FDCategorySocket,
 		resourcewatch.FDCategoryBadger,
 		resourcewatch.FDCategoryReceiptOrEventStore,
-		resourcewatch.FDCategoryNFSSession,
 		resourcewatch.FDCategoryRegularFile,
 		resourcewatch.FDCategoryUnknown,
 	}
 }
 
 func recordFDDecision(ctx context.Context, recorder IncidentRecorder, nodeID string, decision *resourcewatch.Decision) error {
-	if recorder == nil || decision == nil {
-		return nil
-	}
-	at := decision.Snapshot.CollectedAt
-	if at.IsZero() {
-		at = time.Now()
-	}
-	facts := []incident.Fact{{
-		CorrelationID: fdIncidentID(nodeID),
-		Type:          incident.FactObserved,
-		Cause:         incident.CauseFDExhaustionRisk,
-		Scope:         incident.Scope{Kind: incident.ScopeNode, NodeID: nodeID},
-		Message:       decision.Message,
-		At:            at,
-	}}
-	switch decision.Level {
-	case resourcewatch.LevelOK:
-		facts = append(facts, incident.Fact{
-			CorrelationID: fdIncidentID(nodeID),
-			Type:          incident.FactResolved,
-			Message:       decision.Message,
-			At:            at,
-		})
-	case resourcewatch.LevelWarn:
-		facts = append(facts, incident.Fact{
-			CorrelationID: fdIncidentID(nodeID),
-			Type:          incident.FactDiagnosed,
-			Action:        incident.ActionResourceWarning,
-			Message:       decision.Message,
-			At:            at,
-		})
-	case resourcewatch.LevelCritical:
-		facts = append(facts, incident.Fact{
-			CorrelationID: fdIncidentID(nodeID),
-			Type:          incident.FactDiagnosed,
-			Action:        incident.ActionResourceWarning,
-			Message:       decision.Message,
-			At:            at,
-		}, incident.Fact{
-			CorrelationID: fdIncidentID(nodeID),
-			Type:          incident.FactActionFailed,
-			Action:        incident.ActionResourceWarning,
-			ErrorCode:     "fd_critical",
-			Message:       decision.Message,
-			At:            at,
-		})
-	}
-	return recorder.Record(ctx, facts)
+	return recordResourceDecision(ctx, recorder, nodeID, decision, decisionIncidentSpec{
+		correlationID: fdIncidentID(nodeID),
+		cause:         incident.CauseFDExhaustionRisk,
+		criticalCode:  "fd_critical",
+	})
 }
 
 func sendFDAlert(nodeID string, sender AlertsSender, decision *resourcewatch.Decision) {

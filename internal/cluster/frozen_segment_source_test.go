@@ -9,6 +9,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type readIndexCountingNode struct {
+	RaftNode
+	calls int
+}
+
+func (n *readIndexCountingNode) ReadIndex(context.Context) (uint64, error) {
+	n.calls++
+	return 0, fmt.Errorf("read-index should not be used when GC freshness gate is wired")
+}
+
 func TestAllFrozenSegmentPaths_NilSourceFailsClosed(t *testing.T) {
 	b := &DistributedBackend{}
 	got, err := b.AllFrozenSegmentPaths()
@@ -42,6 +52,27 @@ func TestAllFrozenSegmentPaths_DelegatesToSource(t *testing.T) {
 func TestCaughtUp_NilNode(t *testing.T) {
 	b := &DistributedBackend{}
 	require.True(t, b.CaughtUp(context.Background()))
+}
+
+func TestCaughtUp_UsesInjectedGCFreshnessGate(t *testing.T) {
+	node := &readIndexCountingNode{}
+	b := &DistributedBackend{node: node}
+	b.SetGCFreshnessGate(func(context.Context) bool { return true })
+
+	require.True(t, b.CaughtUp(context.Background()))
+	require.Equal(t, 0, node.calls)
+
+	b.SetGCFreshnessGate(func(context.Context) bool { return false })
+	require.False(t, b.CaughtUp(context.Background()))
+	require.Equal(t, 0, node.calls)
+}
+
+func TestCaughtUp_LegacyReadIndexWhenGateUnset(t *testing.T) {
+	node := &readIndexCountingNode{}
+	b := &DistributedBackend{node: node}
+
+	require.False(t, b.CaughtUp(context.Background()))
+	require.Equal(t, 1, node.calls)
 }
 
 // TestCaughtUp_SingleNodeLeader exercises the ReadIndex barrier against a

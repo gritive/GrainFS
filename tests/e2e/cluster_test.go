@@ -71,8 +71,6 @@ func runNoPeersRestartPersistenceCases(t testing.TB) {
 		"--port", fmt.Sprintf("%d", port1),
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
-		"--nfs4-port", fmt.Sprintf("%d", freePort()),
-		"--nbd-port", fmt.Sprintf("%d", freePort()),
 	)
 	cmd1.Stdout = os.Stdout
 	cmd1.Stderr = os.Stderr
@@ -124,8 +122,6 @@ func runNoPeersRestartPersistenceCases(t testing.TB) {
 		"--port", fmt.Sprintf("%d", port2),
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
-		"--nfs4-port", fmt.Sprintf("%d", freePort()),
-		"--nbd-port", fmt.Sprintf("%d", freePort()),
 	)
 	cmd2.Stdout = os.Stdout
 	cmd2.Stderr = os.Stderr
@@ -192,8 +188,6 @@ func runNoPeersMultipartCases(t testing.TB) {
 		"--port", fmt.Sprintf("%d", port),
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
-		"--nfs4-port", fmt.Sprintf("%d", freePort()),
-		"--nbd-port", fmt.Sprintf("%d", freePort()),
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -287,8 +281,18 @@ func runMultipartListFanoutCases(t testing.TB, tgt s3Target) {
 	// Any node is fine — cluster forwards writes to the owning peer. We use
 	// tgt.pickNode(0) for the create/fixture and assert visibility from
 	// every node below.
+	//
+	// Gate EVERY asserting node, not just the driver: the multipart listing
+	// ops are behind the multipart_listing_v1 capability gate, whose peer
+	// evidence arrives via gossip (one balancer-gossip-interval ≈ 30s round).
+	// On a freshly formed cluster a node rejects fanout listings (503
+	// "capability ... unknown=[peer]") until its first evidence lands, so the
+	// 30s per-node assert windows below race the warm-up unless each node's
+	// gate is proven open first (the create probe exercises the same gate).
+	for i := 0; i < tgt.nodes; i++ {
+		waitForMultipartListingCreate(t, ctx, tgt.pickNode(i), bucket, multipartListingKey, 120*time.Second)
+	}
 	driver := tgt.pickNode(0)
-	waitForMultipartListingCreate(t, ctx, driver, bucket, multipartListingKey, 120*time.Second)
 	fixture := createIncompleteMultipartListingFixture(t, ctx, driver, bucket, "cluster-fanout-part")
 
 	for i := 0; i < tgt.nodes; i++ {

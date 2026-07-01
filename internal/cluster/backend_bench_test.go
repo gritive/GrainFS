@@ -18,21 +18,41 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-func newECBenchmarkBackend(b *testing.B) *DistributedBackend {
-	b.Helper()
+// newECBenchmarkBackend builds an all-local EC 4+2 DistributedBackend. It takes
+// clusterTestTB so both benchmarks (*testing.B) and round-trip tests (*testing.T)
+// can exercise the same EC write/read wiring.
+func newECBenchmarkBackend(tb clusterTestTB) *DistributedBackend {
+	tb.Helper()
 
-	bk := newTestDistributedBackend(b)
+	bk := newTestDistributedBackend(tb)
 	cfg := ECConfig{DataShards: 4, ParityShards: 2}
 	bk.SetECConfig(cfg)
 
-	keeper, clusterID := testDEKKeeper(b)
-	svc := NewShardService(bk.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(b, keeper, clusterID))
+	keeper, clusterID := testDEKKeeper(tb)
+	svc := NewShardService(bk.root, nil, WithShardDEKKeeper(keeper, clusterID))
 	allNodes := make([]string, cfg.NumShards())
 	for i := range allNodes {
 		allNodes[i] = bk.selfAddr
 	}
 	bk.SetShardService(svc, allNodes)
-	require.True(b, bk.ECActive(), "benchmark setup must exercise the EC path")
+	// Re-wire the shard group to the 4+2 stripe width (the default constructor
+	// wired a 1-peer group at EC 1+0 before this widened the config).
+	wireTestShardGroup(bk)
+	require.True(tb, bk.ECActive(), "EC setup must exercise the EC path")
+	return bk
+}
+
+func newChunkedECBenchmarkBackend(tb clusterTestTB) *DistributedBackend {
+	tb.Helper()
+	bk := newECBenchmarkBackend(tb)
+	cfg := bk.currentECConfig()
+	peers := make([]string, cfg.NumShards())
+	for i := range peers {
+		peers[i] = bk.selfAddr
+	}
+	bk.SetShardGroupSource(&fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"group-a": {ID: "group-a", PeerIDs: peers},
+	}})
 	return bk
 }
 
@@ -62,6 +82,68 @@ func BenchmarkPutObjectEC_Sequential(b *testing.B) {
 				require.NoError(b, err)
 			}
 		})
+	}
+}
+
+func BenchmarkPutObjectEC_Chunked10MiB(b *testing.B) {
+	for _, tc := range []struct {
+		name      string
+		exactHint bool
+	}{
+		{name: "spooled"},
+		{name: "exact-size-stream", exactHint: true},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			bk := newChunkedECBenchmarkBackend(b)
+			require.NoError(b, bk.CreateBucket(context.Background(), "bench"))
+
+			data := make([]byte, 10<<20)
+			size := int64(len(data))
+			b.SetBytes(size)
+			b.ResetTimer()
+			b.ReportAllocs()
+			for b.Loop() {
+				_, err := bk.PutObjectWithRequest(context.Background(), storage.PutObjectRequest{
+					Bucket:        "bench",
+					Key:           "key",
+					Body:          bytes.NewReader(data),
+					SizeHint:      &size,
+					SizeHintExact: tc.exactHint,
+					ContentType:   "application/octet-stream",
+				})
+				require.NoError(b, err)
+			}
+		})
+	}
+}
+
+// BenchmarkPutObjectEC_Spool2plus2_10MiB measures the all-local EC 2+2 / 10 MiB
+// write so it is config- and size-matched to putpipeline.BenchmarkPipelinePut10MiB
+// (also 2+2 / 10 MiB, all-local) with no network and no EC-width confound. The
+// historical spool double-staging path this name refers to has been removed: a
+// sized PutObject (bytes.Reader carries an exact length) now streams straight
+// into writeStreamShards, so this benchmark measures the streaming-EC write.
+func BenchmarkPutObjectEC_Spool2plus2_10MiB(b *testing.B) {
+	bk := newTestDistributedBackend(b)
+	cfg := ECConfig{DataShards: 2, ParityShards: 2}
+	bk.SetECConfig(cfg)
+	keeper, clusterID := testDEKKeeper(b)
+	svc := NewShardService(bk.root, nil, WithShardDEKKeeper(keeper, clusterID))
+	allNodes := make([]string, cfg.NumShards())
+	for i := range allNodes {
+		allNodes[i] = bk.selfAddr
+	}
+	bk.SetShardService(svc, allNodes)
+	require.True(b, bk.ECActive())
+	require.NoError(b, bk.CreateBucket(context.Background(), "bench"))
+
+	data := make([]byte, 10<<20)
+	b.SetBytes(int64(len(data)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_, err := bk.PutObject(context.Background(), "bench", "key", bytes.NewReader(data), "application/octet-stream")
+		require.NoError(b, err)
 	}
 }
 
@@ -109,6 +191,80 @@ func BenchmarkGetObjectEC(b *testing.B) {
 				_, _ = io.Copy(io.Discard, rc)
 				rc.Close()
 			}
+		})
+	}
+}
+
+func BenchmarkGetObjectEC_ChunkedSegment10MiB(b *testing.B) {
+	bk := newECBenchmarkBackend(b)
+	bk.chunkedPutChunkSize = 10 << 20
+	bk.SetShardGroupSource(&fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"group-a": {ID: "group-a", PeerIDs: []string{bk.selfAddr, bk.selfAddr, bk.selfAddr, bk.selfAddr, bk.selfAddr, bk.selfAddr}},
+	}})
+	require.NoError(b, bk.CreateBucket(context.Background(), "bench"))
+
+	data := make([]byte, 10<<20)
+	sp := makeSpool(b, data)
+	_, err := bk.putChunked(context.Background(),
+		"bench", "chunked-readkey", "v1", sp, "application/octet-stream",
+		nil, "", 0, 0, false, "", nil, nil, nil)
+	require.NoError(b, err)
+
+	obj, err := bk.HeadObject(context.Background(), "bench", "chunked-readkey")
+	require.NoError(b, err)
+	require.Len(b, obj.Segments, 1)
+	require.Greater(b, obj.Segments[0].Size, int64(maxECPooledReadObjectSize))
+
+	store := &clusterSegmentStore{b: bk, bucket: "bench", key: "chunked-readkey", obj: obj}
+	record, err := store.placementRecord(obj.Segments[0])
+	require.NoError(b, err)
+	shardKey := "chunked-readkey/segments/" + obj.Segments[0].BlobID
+
+	for _, tc := range []struct {
+		name string
+		read func(*testing.B)
+	}{
+		{
+			name: "open-segment-stream",
+			read: func(b *testing.B) {
+				for i := 0; i < b.N; i++ {
+					rc, err := store.OpenSegment(context.Background(), obj.Segments[0])
+					require.NoError(b, err)
+					_, err = io.Copy(io.Discard, rc)
+					require.NoError(b, rc.Close())
+					require.NoError(b, err)
+				}
+			},
+		},
+		{
+			name: "legacy-readobject-buffered",
+			read: func(b *testing.B) {
+				reader := bk.newECObjectReader()
+				for i := 0; i < b.N; i++ {
+					got, err := reader.ReadObject(context.Background(), "bench", shardKey, record)
+					require.NoError(b, err)
+					require.Len(b, got, len(data))
+				}
+			},
+		},
+		{
+			name: "getobject",
+			read: func(b *testing.B) {
+				for i := 0; i < b.N; i++ {
+					rc, _, err := bk.GetObject(context.Background(), "bench", "chunked-readkey")
+					require.NoError(b, err)
+					_, err = io.Copy(io.Discard, rc)
+					require.NoError(b, rc.Close())
+					require.NoError(b, err)
+				}
+			},
+		},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			b.SetBytes(int64(len(data)))
+			b.ReportAllocs()
+			b.ResetTimer()
+			tc.read(b)
 		})
 	}
 }
@@ -166,7 +322,7 @@ func BenchmarkDistributedBackend_ListMultipartUploads(b *testing.B) {
 
 	for _, tc := range cases {
 		b.Run(tc.name, func(b *testing.B) {
-			bk := newTestDistributedBackend(b)
+			bk, db := newTestDistributedBackendWithDB(b)
 			require.NoError(b, bk.CreateBucket(context.Background(), "bench"))
 			for i := 0; i < tc.uploads; i++ {
 				bucket := "bench"
@@ -177,7 +333,7 @@ func BenchmarkDistributedBackend_ListMultipartUploads(b *testing.B) {
 				if i%7 == 0 {
 					prefix = "else/"
 				}
-				writeMultipartMeta(b, bk, fmt.Sprintf("upload-%06d", i), clusterMultipartMeta{
+				writeMultipartMeta(b, bk, db, fmt.Sprintf("upload-%06d", i), clusterMultipartMeta{
 					Bucket:           bucket,
 					Key:              fmt.Sprintf("%sobj-%06d.bin", prefix, i),
 					CreatedAt:        int64(i),
@@ -199,13 +355,12 @@ func BenchmarkDistributedBackend_ListMultipartUploads(b *testing.B) {
 	}
 }
 
-func writeMultipartMeta(b testing.TB, bk *DistributedBackend, uploadID string, meta clusterMultipartMeta) {
+func writeMultipartMeta(b testing.TB, bk *DistributedBackend, _ *badger.DB, uploadID string, meta clusterMultipartMeta) {
 	b.Helper()
+	// M2b: manifests live on the .qmeta_mpu blob, not the FSM mpu: key.
 	raw, err := marshalClusterMultipartMeta(meta)
 	require.NoError(b, err)
-	require.NoError(b, bk.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(bk.ks().MultipartKey(uploadID), raw)
-	}))
+	require.NoError(b, bk.shardSvc.writeManifestBlobLocal(meta.Bucket, uploadID, raw))
 }
 
 func BenchmarkDistributedBackend_CompleteSinglePartMultipart64KiB(b *testing.B) {
@@ -220,7 +375,7 @@ func BenchmarkDistributedBackend_CompleteSinglePartMultipart64KiB(b *testing.B) 
 		key := fmt.Sprintf("single-part-%d", i)
 		up, err := bk.CreateMultipartUpload(context.Background(), "bench", key, "application/octet-stream")
 		require.NoError(b, err)
-		part, err := bk.UploadPart(context.Background(), "bench", key, up.UploadID, 1, bytes.NewReader(data))
+		part, err := bk.UploadPart(context.Background(), "bench", key, up.UploadID, 1, bytes.NewReader(data), "")
 		require.NoError(b, err)
 		b.StartTimer()
 

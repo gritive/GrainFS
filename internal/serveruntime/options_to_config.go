@@ -30,8 +30,11 @@ func optionsToConfig(
 		JoinListenAddr:   opts.JoinListenAddr,
 		ClusterKey:       opts.ClusterKey,
 		AuthOpts:         authOpts,
-		IAMStore:         iamStore,
-		IAMApplier:       iamApplier,
+
+		BootstrapExpectNodes:   opts.BootstrapExpectNodes,
+		BootstrapExpectTimeout: opts.BootstrapExpectTimeout,
+		IAMStore:               iamStore,
+		IAMApplier:             iamApplier,
 	}
 
 	if len(cfg.DataDirs) > 0 {
@@ -41,19 +44,12 @@ func optionsToConfig(
 	cfg.RaftLogGCInterval = opts.RaftLogGCInterval
 	cfg.RaftHeartbeatInterval = opts.RaftHeartbeatInterval
 	cfg.RaftElectionTimeout = opts.RaftElectionTimeout
-	cfg.MuxEnabled = true // mux is always on; the --mux flag was removed
-	cfg.MuxPoolSize = opts.MuxPoolSize
-	cfg.MuxFlushWindow = opts.MuxFlushWindow
 
-	cfg.AppendForwardBufferTotalBytes = opts.AppendForwardBufferTotalBytes
-	cfg.AppendForwardBufferMaxPerRequest = opts.AppendForwardBufferMaxPerRequest
 	cfg.AppendSizeCapBytes = opts.AppendSizeCapBytes
 
-	cfg.DirectIO = opts.DirectIO
 	cfg.MeasureReadAmp = opts.MeasureReadAmp
 	cfg.ShardCacheSize = opts.ShardCacheSize
 	cfg.PackThreshold = opts.PackThreshold
-	cfg.ShardPackThreshold = opts.ShardPackThreshold
 
 	cfg.HealReceiptEnabled = opts.HealReceiptEnabled
 	cfg.HealReceiptPSK = opts.HealReceiptPSK
@@ -62,7 +58,6 @@ func optionsToConfig(
 	cfg.HealReceiptWindow = opts.HealReceiptWindow
 
 	cfg.LifecycleInterval = opts.LifecycleInterval
-	cfg.BlockCacheSize = opts.BlockCacheSize
 
 	cfg.PublicURL = opts.PublicURL
 	cfg.VlogWarnRatio = opts.VlogOpts.WarnRatio
@@ -74,22 +69,13 @@ func optionsToConfig(
 	cfg.ScrubInterval = opts.ScrubInterval
 	cfg.ScrubOrphanAge = opts.ScrubOrphanAge
 	cfg.SegmentGCRetention = opts.SegmentGCRetention
-	cfg.ReshardInterval = opts.ReshardInterval
-	cfg.DataGroupRefreshInterval = opts.DataGroupRefreshInterval
+	cfg.ECRedundancyUpgrade = opts.ECRedundancyUpgrade
+	cfg.ECRedundancyUpgradeMax = opts.ECRedundancyUpgradeMax
+	cfg.ECRedundancyUpgradeMinAge = opts.ECRedundancyUpgradeMinAge
 	cfg.DegradedInterval = opts.DegradedInterval
-
-	cfg.AuditIceberg = opts.AuditIceberg
-	cfg.AuditCommitInterval = opts.AuditCommitInterval
 
 	cfg.KEKProtector = opts.KEKProtector
 	cfg.KEKRecoverySecretFile = opts.KEKRecoverySecretFile
-
-	cfg.NFS4Port = opts.NFS4Port
-	cfg.NFSWriteBufferDir = opts.NFSWriteBufferDir
-	cfg.NFSWriteBufferIdle = opts.NFSWriteBufferIdle
-	cfg.NBDPort = opts.NBDPort
-	cfg.P9Bind = opts.P9Bind
-	cfg.P9Port = opts.P9Port
 
 	cfg.FDWatchEnabled = opts.FDWatchEnabled
 	cfg.FDOpts = opts.FDOpts

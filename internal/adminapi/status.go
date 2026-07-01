@@ -1,17 +1,16 @@
 package adminapi
 
 // StatusReport is the JSON body returned by GET /v1/status. It aggregates
-// cluster topology, IAM, encryption, TLS, proxy, audit, and JWT state
+// cluster topology, IAM, encryption, TLS, audit, and JWT state
 // into a single operator-friendly snapshot.
 type StatusReport struct {
-	Cluster      ClusterStatus    `json:"cluster"`
-	IAM          IAMStatus        `json:"iam"`
-	Encryption   EncryptionStatus `json:"encryption"`
-	TLS          TLSStatus        `json:"tls"`
-	TrustedProxy []string         `json:"trusted_proxy"`
-	Audit        AuditStatus      `json:"audit"`
-	JWTKeys      JWTStatus        `json:"jwt_keys"`
-	Banner       bool             `json:"banner"`
+	Cluster    ClusterStatus    `json:"cluster"`
+	IAM        IAMStatus        `json:"iam"`
+	Encryption EncryptionStatus `json:"encryption"`
+	TLS        TLSStatus        `json:"tls"`
+	Audit      AuditStatus      `json:"audit"`
+	JWTKeys    JWTStatus        `json:"jwt_keys"`
+	Banner     bool             `json:"banner"`
 }
 
 // ClusterStatus holds cluster topology (node identity and size).

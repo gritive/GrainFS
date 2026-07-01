@@ -6,30 +6,31 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
 	"github.com/gritive/GrainFS/internal/s3auth"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // putObjectContentMD5Hex decodes the client-supplied Content-MD5 header
-// (base64-encoded per RFC 1864) to hex so the actor PUT pipeline can use
-// it as the object ETag without recomputing MD5. Returns "" if the
-// header is absent or malformed; the pipeline falls back to recompute.
-func putObjectContentMD5Hex(c *app.RequestContext) string {
+// (base64-encoded per RFC 1864) to hex so the PUT path can validate it against
+// the body. Returns ("", nil) when the header is absent. Returns
+// storage.ErrInvalidDigest when the header is present but not a valid 16-byte
+// base64 digest (S3 400 InvalidDigest), so the handler rejects before the PUT.
+func putObjectContentMD5Hex(c *app.RequestContext) (string, error) {
 	raw := string(c.GetHeader("Content-MD5"))
 	if raw == "" {
-		return ""
+		return "", nil
 	}
 	decoded, err := base64.StdEncoding.DecodeString(raw)
 	if err != nil || len(decoded) != 16 {
-		return ""
+		return "", fmt.Errorf("malformed Content-MD5 %q: %w", raw, storage.ErrInvalidDigest)
 	}
-	return hex.EncodeToString(decoded)
+	return hex.EncodeToString(decoded), nil
 }
-
-const putObjectStreamingThresholdBytes = 8 << 20
 
 func putObjectContentType(c *app.RequestContext) string {
 	if contentType := string(c.GetHeader("Content-Type")); contentType != "" {
@@ -38,11 +39,51 @@ func putObjectContentType(c *app.RequestContext) string {
 	return "application/octet-stream"
 }
 
+// putObjectDecodedContentLength parses the X-Amz-Decoded-Content-Length header
+// (the true object size that real S3 clients send alongside an aws-chunked
+// STREAMING-* payload, since Content-Length there is the encoded size including
+// per-chunk framing). Returns -1 when the header is absent or malformed.
+func putObjectDecodedContentLength(c *app.RequestContext) int64 {
+	raw := string(c.GetHeader("X-Amz-Decoded-Content-Length"))
+	if raw == "" {
+		return -1
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n < 0 {
+		return -1
+	}
+	return n
+}
+
+// putObjectStreamLength is the object's true (decoded) byte length for the
+// streaming PUT/append path. For aws-chunked the wire Content-Length is the
+// encoded size (incl. per-chunk framing), so the decoded header is the object
+// size the exact-length reader must enforce. putObjectShouldStream guarantees a
+// usable value before this is consulted on the streaming branch.
+func putObjectStreamLength(c *app.RequestContext) int64 {
+	if isAWSChunkedPayload(c) {
+		return putObjectDecodedContentLength(c)
+	}
+	return int64(c.Request.Header.ContentLength())
+}
+
+// putObjectShouldStream reports whether the request body streams straight to the
+// storage layer instead of being buffered in memory first. Hertz (WithStreamBody)
+// hands us a body stream for every size, so we stream every known-length body —
+// buffering small objects only added RSS with no benefit. Bodies with no usable
+// length fall back to buffered so the exact-length reader always has a size.
 func putObjectShouldStream(c *app.RequestContext) bool {
-	contentLength := c.Request.Header.ContentLength()
-	return c.Request.IsBodyStream() &&
-		contentLength >= putObjectStreamingThresholdBytes &&
-		!isAWSChunkedPayload(c)
+	if !c.Request.IsBodyStream() {
+		return false
+	}
+	// aws-chunked: Content-Length is the ENCODED size (chunk framing), so gate on
+	// the decoded object size. putObjectPayloadReader decodes the chunked stream
+	// incrementally (NewAWSChunkedReader). Falls back to buffered when the decoded
+	// size is absent/unusable so the exact-length reader has a trustworthy size.
+	if isAWSChunkedPayload(c) {
+		return putObjectDecodedContentLength(c) >= 0
+	}
+	return int64(c.Request.Header.ContentLength()) >= 0
 }
 
 func putObjectBody(c *app.RequestContext) ([]byte, error) {

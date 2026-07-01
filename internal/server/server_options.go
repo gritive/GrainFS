@@ -4,9 +4,9 @@ import (
 	"time"
 
 	"github.com/gritive/GrainFS/internal/iam"
-	iamjwt "github.com/gritive/GrainFS/internal/iam/jwt"
 	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/s3auth"
+	"github.com/gritive/GrainFS/internal/server/alertssvc"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -62,29 +62,13 @@ func WithPolicyAuthorizer(a PolicyAuthorizer) Option {
 	}
 }
 
-// WithJWTKeySet wires the JWT signing key set so the OAuth2 token endpoint
-// can mint bearer tokens.
-func WithJWTKeySet(ks *iamjwt.KeySet) Option {
-	return func(s *Server) {
-		s.jwtKeys = ks
-	}
-}
-
-// WithProxyTrust wires the trusted-proxy validator used by
-// (*Server).authoritativeClientIP. §5 T45.
-func WithProxyTrust(pt *ProxyTrust) Option {
-	return func(s *Server) {
-		s.proxyTrust = pt
-	}
-}
-
 func WithMutationGate(gate *MutationGate) Option {
 	return func(s *Server) {
 		s.mutationGate = gate
 	}
 }
 
-func WithAlerts(state *AlertsState) Option {
+func WithAlerts(state *alertssvc.State) Option {
 	return func(s *Server) {
 		s.alerts = state
 	}

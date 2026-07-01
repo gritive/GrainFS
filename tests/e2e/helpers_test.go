@@ -112,51 +112,6 @@ func combinedOutputWithWaitDelay(cmd *exec.Cmd) ([]byte, error) {
 	return cmd.CombinedOutput()
 }
 
-// dumpE2EProfiles fetches pprof profiles from the running server and saves them to /tmp.
-// Called only when GRAINFS_PPROF=1. CPU profile is collected separately during test run.
-// Inspect results with:
-//
-//	go tool pprof -top /tmp/grainfs-e2e-cpu.out      # CPU hotspots
-//	go tool pprof -top /tmp/grainfs-e2e-mutex.out    # lock contention
-//	go tool pprof -top /tmp/grainfs-e2e-allocs.out   # allocation hotspots
-//	go tool pprof -top /tmp/grainfs-e2e-heap.out     # live heap
-func dumpE2EProfiles(pprofPort int) {
-	base := fmt.Sprintf("http://127.0.0.1:%d/debug/pprof", pprofPort)
-	profiles := []struct {
-		url  string
-		file string
-	}{
-		{base + "/mutex", "/tmp/grainfs-e2e-mutex.out"},
-		{base + "/allocs", "/tmp/grainfs-e2e-allocs.out"},
-		{base + "/heap", "/tmp/grainfs-e2e-heap.out"},
-		{base + "/goroutine", "/tmp/grainfs-e2e-goroutine.out"},
-	}
-	for _, p := range profiles {
-		if err := fetchProfile(p.url, p.file); err != nil {
-			fmt.Fprintf(os.Stderr, "pprof dump %s: %v\n", p.file, err)
-		} else {
-			fmt.Fprintf(os.Stderr, "pprof saved: %s\n", p.file)
-		}
-	}
-	fmt.Fprintf(os.Stderr, "\nAnalyse with:\n")
-	fmt.Fprintf(os.Stderr, "  go tool pprof -top /tmp/grainfs-e2e-cpu.out    # CPU hotspots\n")
-	fmt.Fprintf(os.Stderr, "  go tool pprof -top /tmp/grainfs-e2e-mutex.out  # lock contention\n")
-	fmt.Fprintf(os.Stderr, "  go tool pprof -top /tmp/grainfs-e2e-allocs.out # alloc hotspots\n")
-}
-
-func fetchProfile(url, dest string) error {
-	resp, err := http.Get(url) //nolint:noctx
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(dest, data, 0o644)
-}
-
 func e2ePooledHTTPTransport() *http.Transport {
 	return &http.Transport{
 		MaxIdleConns:        4096,
@@ -164,23 +119,6 @@ func e2ePooledHTTPTransport() *http.Transport {
 		MaxConnsPerHost:     256,
 		IdleConnTimeout:     2 * time.Minute,
 	}
-}
-
-func e2eNoKeepAliveHTTPClient(timeout time.Duration) *http.Client {
-	return &http.Client{
-		Transport: &http.Transport{DisableKeepAlives: true},
-		Timeout:   timeout,
-	}
-}
-
-// bootstrapAdminViaUDSForTestMain is a TestMain-friendly variant of
-// bootstrapAdminViaUDS — no *testing.T because TestMain doesn't have one.
-func bootstrapAdminViaUDSForTestMain(dataDir string, timeout time.Duration) (string, string, error) {
-	out, err := bootstrapAdminResultViaUDSForTestMain(dataDir, timeout)
-	if err != nil {
-		return "", "", err
-	}
-	return out.AccessKey, out.SecretKey, nil
 }
 
 func bootstrapAdminResultViaUDSForTestMain(dataDir string, timeout time.Duration) (iamSAResult, error) {
@@ -233,15 +171,15 @@ func freePort() int {
 		defer unlock()
 	}
 	leases := readE2EPortLeases()
-	// Avoid the OS ephemeral range for listeners. The cluster e2e tests open
-	// many outbound UDP/QUIC sockets; using :0 for a future UDP listener can
-	// race with an ephemeral source port after the probe socket is closed.
+	// Avoid the OS ephemeral range for listeners. Cluster e2e tests open many
+	// outbound sockets; using :0 for a future listener can race with an
+	// ephemeral source port after the probe socket is closed.
 	for i := 0; i < 25000; i++ {
 		port := 20000 + int(atomic.AddUint32(&freePortCursor, 7919)%25000)
 		if _, reserved := leases[strconv.Itoa(port)]; reserved {
 			continue
 		}
-		if portAvailableForTCPAndUDP(port) {
+		if portAvailableForTCP(port) {
 			leases[strconv.Itoa(port)] = e2ePortLease{PID: os.Getpid()}
 			writeE2EPortLeases(leases)
 			return port
@@ -258,17 +196,12 @@ func freePort() int {
 			_ = l.Close()
 			continue
 		}
-		udp, err := net.ListenPacket("udp", fmt.Sprintf(":%d", port))
-		if err == nil {
-			_ = udp.Close()
-			_ = l.Close()
-			leases[strconv.Itoa(port)] = e2ePortLease{PID: os.Getpid()}
-			writeE2EPortLeases(leases)
-			return port
-		}
 		_ = l.Close()
+		leases[strconv.Itoa(port)] = e2ePortLease{PID: os.Getpid()}
+		writeE2EPortLeases(leases)
+		return port
 	}
-	panic("cannot allocate port available for both tcp and udp")
+	panic("cannot allocate free TCP port")
 }
 
 func lockE2EPortRegistry() (bool, func()) {
@@ -322,17 +255,12 @@ func processExists(pid int) bool {
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
-func portAvailableForTCPAndUDP(port int) bool {
+func portAvailableForTCP(port int) bool {
 	l, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		return false
 	}
 	defer l.Close()
-	udp, err := net.ListenPacket("udp", fmt.Sprintf(":%d", port))
-	if err != nil {
-		return false
-	}
-	_ = udp.Close()
 	return true
 }
 
@@ -429,14 +357,6 @@ func waitForPortsParallel(t testing.TB, ports []int, timeout time.Duration) {
 	}
 }
 
-// waitForPortsParallelErr is a non-fatal variant of waitForPortsParallel.
-// Returns the first port that did not come up within timeout, or nil on success.
-// Used by retry-aware test helpers (e.g., mrCluster) that need to recover
-// from transient bind failures rather than abort the whole test.
-func waitForPortsParallelErr(ports []int, timeout time.Duration) error {
-	return waitForPortsParallelErrWithProcesses(ports, nil, timeout)
-}
-
 func waitForPortsParallelErrWithProcesses(ports []int, procs []*exec.Cmd, timeout time.Duration) error {
 	var wg sync.WaitGroup
 	failed := make(chan error, len(ports))
@@ -530,41 +450,6 @@ func waitForS3Write(t testing.TB, client *s3.Client, bucket, key string, timeout
 		time.Sleep(250 * time.Millisecond)
 	}
 	ginkgo.Fail(fmt.Sprintf("bucket %s did not become writable within %v: %v", bucket, timeout, lastErr))
-}
-
-func startIsolatedE2EServer(t testing.TB) (string, *s3.Client) {
-	t.Helper()
-	dir, err := os.MkdirTemp("", "grainfs-e2e-isolated-*")
-	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "mkdtemp")
-	t.Cleanup(func() { _ = removeE2EDir(dir) })
-
-	port := freePort()
-	cmd := exec.Command(getBinary(), "serve",
-		"--data", dir,
-		"--port", fmt.Sprintf("%d", port),
-		"--nfs4-port", fmt.Sprintf("%d", freePort()),
-		"--nbd-port", fmt.Sprintf("%d", freePort()),
-		"--scrub-interval", "0",
-		"--lifecycle-interval", "0",
-	)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	gomega.Expect(cmd.Start()).To(gomega.Succeed(), "start isolated server")
-	t.Cleanup(func() { terminateProcess(cmd) })
-
-	url := fmt.Sprintf("http://127.0.0.1:%d", port)
-	waitForPort(t, port, 30*time.Second)
-
-	// Bootstrap an admin SA via UDS for this isolated server. Each call
-	// gets its own creds since each call has its own data dir.
-	ak, sk := bootstrapAdminViaUDS(t, dir)
-	// Disable auto-snapshot for deterministic e2e behavior. Tests that need
-	// the auto-snapshot loop PATCH it back to a non-zero interval explicitly.
-	patchSnapshotInterval(t, dir, "0s")
-	cli := s3ClientFor(url, ak, sk)
-	gomega.Expect(waitForIAMReady(cli, 30*time.Second)).To(gomega.Succeed())
-	return url, cli
 }
 
 // waitForIAMReady polls until the IAM verifier recognizes the bootstrap key.

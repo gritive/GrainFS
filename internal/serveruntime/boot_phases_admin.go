@@ -12,11 +12,9 @@ import (
 	hzserver "github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/rs/zerolog/log"
 
-	"github.com/gritive/GrainFS/internal/adminapi"
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/dashboard"
 	"github.com/gritive/GrainFS/internal/iam/pdp"
-	"github.com/gritive/GrainFS/internal/nodeconfig"
 	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/server"
@@ -85,17 +83,27 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 	srv := server.New(cfg.Addr, state.backend, state.srvOpts...)
 	state.srv = srv
 
+	// Task 10: wire the compiled-policy Invalidate callback into the meta
+	// post-commit worker registered pre-Start in bootMetaRaftWiring. The worker
+	// is already running; SetInvalidate makes it call PolicyStore.Invalidate for
+	// every committed SetBucketPolicy / DeleteBucketPolicy meta entry so the
+	// next authz Allow re-pulls the committed policy. Pull-on-miss ensures
+	// eventual consistency for the brief window between Start and this call.
+	if state.metaPolicyInvalidationWorker != nil {
+		state.metaPolicyInvalidationWorker.SetInvalidate(srv.PolicyStore().Invalidate)
+	}
+
+	// Task 12: SetOnBucketPolicyApply and the onBucketPolicyApply field on
+	// DistributedBackend are retired (group-0 bucket policy commands moved to
+	// meta-raft). Policy invalidation is driven solely by the meta post-commit
+	// hook (metaPolicyInvalidationWorker.SetInvalidate) wired above.
+
 	// --- Admin / dashboard wiring (Volume CLI Phase B) ---
 	tokenStore, err := dashboard.Open(filepath.Join(cfg.DataDir, "dashboard.token"))
 	if err != nil {
 		return fmt.Errorf("dashboard token: %w", err)
 	}
 	state.tokenStore = tokenStore
-	if state.iamAdminAPI != nil && state.cfgStore != nil {
-		state.iamAdminAPI.SetPostureChecker(
-			newIAMPostureChecker(state.cfgStore, nodeconfig.New(state.cfg.DataDir)),
-		)
-	}
 	if state.protocolCredentials == nil {
 		if state.metaRaft != nil {
 			ensureProtocolCredentialStore(state)
@@ -113,7 +121,6 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 		}
 	}
 	state.adminDeps = &admin.Deps{
-		Manager:    srv.VolumeManager(),
 		Token:      tokenStore,
 		PublicURL:  cfg.PublicURL,
 		NodeID:     state.nodeID,
@@ -124,26 +131,18 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 			WarnRatio:     cfg.VlogWarnRatio,
 			CriticalRatio: cfg.VlogCriticalRatio,
 		}),
-		VolumePlacement:      NewVolumePlacementAdapter(state.metaRaft),
 		IAM:                  state.iamAdminAPI,
-		IcebergConfig:        newIcebergConfigAdapter(state.cfg.IAMStore),
 		IAMPolicy:            iamPolicyAdminService(state),
 		IAMGroup:             iamGroupAdminService(state),
-		IAMMountSA:           iamMountSAAdminService(state),
-		BucketWithPolicyProp: state.iamProposer,
+		BucketWithPolicyProp: bucketWithPolicyProposer(state),
 		ConfigProposer:       state.metaRaft,
 		ConfigStore:          state.cfgStore,
 		Buckets:              storage.NewOperations(state.backend),
-		NfsExports:           &admin.NfsExportServiceAdapter{Svc: state.nfsExportSvc},
 		ProtocolCredentials:  state.protocolCredentials,
 		ProtocolCredAuthz:    protocolCredentialAuthorizer(state),
 		AdminAuthz:           adminAuthorizer(state, "admin"),
 		ActorAuth:            newOIDCActorAuthenticator(state.cfgStore),
-		Protocols:            storageProtocolStatusFromConfig(cfg),
 		PDPTokens:            ensurePDPTokenSource(state),
-	}
-	if state.auditSearcher != nil {
-		state.adminDeps.AuditQuery = state.auditSearcher
 	}
 	state.adminDeps.Status = NewStatusAdapter(
 		state.nodeID,
@@ -159,7 +158,7 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 	dataHertz.Use(server.DashboardTokenMiddleware(tokenStore))
 	admin.RegisterUI(dataHertz, state.adminDeps)
 
-	// Open the admin Unix socket. Operator commands (`grainfs volume *`, `grainfs
+	// Open the admin Unix socket. Operator commands (`grainfs iam *`, `grainfs
 	// dashboard`) reach this socket; permissions are governed by the file mode
 	// (0660) and optional --admin-group chown.
 	adminSocket := cfg.AdminSocket
@@ -205,20 +204,10 @@ func bootHTTPServerAndAdmin(state *bootState) error {
 				completeCutoverH := &CompleteCutoverHandler{
 					RunDrop: func(ctx context.Context) error {
 						dialer := func(ctx context.Context, peer string, payload []byte) ([]byte, error) {
-							resp, err := state.clusterTransport.Call(ctx, peer, &transport.Message{
-								Type:    transport.StreamAppliedIndexProbe,
-								Payload: payload,
-							})
-							if err != nil {
-								return nil, err
-							}
-							if resp == nil {
-								return nil, fmt.Errorf("applied-index probe: nil response from %s", peer)
-							}
-							if resp.Status != transport.StatusOK {
-								return nil, fmt.Errorf("applied-index probe from %s failed: %s", peer, string(resp.Payload))
-							}
-							return resp.Payload, nil
+							// Native /probe/applied-index buffered route (Phase 8
+							// N7-3): a handler failure (the tunnel's nil-response
+							// StatusError) surfaces as the call error.
+							return state.clusterTransport.CallBuffered(ctx, peer, transport.RouteProbeAppliedIndex, payload)
 						}
 						return state.metaRaft.CompleteCutover(ctx, dialer, 60*time.Second)
 					},
@@ -308,19 +297,6 @@ func iamGroupAdminService(state *bootState) admin.IAMGroupService {
 	return &iamGroupAdminAdapter{propose: state.metaRaft.Propose}
 }
 
-// iamMountSAAdminService returns a wired admin.IAMMountSAService if MetaRaft
-// and mountSAStore are available; otherwise returns nil (disables mount-SA
-// admin endpoints).
-func iamMountSAAdminService(state *bootState) admin.IAMMountSAService {
-	if state.metaRaft == nil || state.mountSAStore == nil {
-		return nil
-	}
-	return &iamMountSAAdminAdapter{
-		store:   state.mountSAStore,
-		propose: state.metaRaft.Propose,
-	}
-}
-
 func ensureProtocolCredentialStore(state *bootState) *protocred.Store {
 	if state == nil {
 		return nil
@@ -334,20 +310,16 @@ func ensureProtocolCredentialStore(state *bootState) *protocred.Store {
 	return state.protocolCredentialStore
 }
 
-func storageProtocolStatusFromConfig(cfg Config) adminapi.StorageProtocolStatusResp {
-	return adminapi.StorageProtocolStatusResp{
-		NFS4: adminapi.ProtocolEndpointStatus{
-			Enabled: cfg.NFS4Port > 0,
-			Port:    cfg.NFS4Port,
-		},
-		NBD: adminapi.ProtocolEndpointStatus{
-			Enabled: cfg.NBDPort > 0,
-			Port:    cfg.NBDPort,
-		},
-		P9: adminapi.ProtocolEndpointStatus{
-			Enabled: cfg.P9Port > 0,
-			Bind:    cfg.P9Bind,
-			Port:    cfg.P9Port,
-		},
+// bucketWithPolicyProposer returns the IAM create-bucket-with-policy proposer
+// for the admin bucket-create attach path, or nil when IAM is not wired.
+// Returning the concrete *iam.MetaProposer directly when it is nil would box a
+// typed-nil into the interface (non-nil interface, defeating the != nil guard
+// at handlers_bucket.go:43), so guard explicitly. Unreachable today
+// (boot_phases_backend.go fails boot when IAMStore is absent), so this is
+// defensive + for consistency with bucketUpstreamDeleteProposer.
+func bucketWithPolicyProposer(state *bootState) admin.BucketWithPolicyProposer {
+	if state.iamProposer == nil {
+		return nil
 	}
+	return state.iamProposer
 }

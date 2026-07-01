@@ -10,8 +10,6 @@ Always check the running binary for authoritative CLI flags:
 grainfs serve --help
 grainfs iam --help
 grainfs cluster --help
-grainfs nfs --help
-grainfs volume --help
 ```
 
 ## Serve
@@ -34,9 +32,6 @@ Common serve options:
 | `--public-url` | Dashboard base URL shown by `grainfs dashboard`. |
 | `--node-id` | Explicit node identity. |
 | `--raft-addr` | Raft listen address. |
-| `--nfs4-port` | NFSv4 port; use `0` to disable. |
-| `--nbd-port` | NBD port; use `0` to disable. |
-| `--9p-bind`, `--9p-port` | 9P2000.L bind address and port. |
 
 At-rest encryption is always enabled and bootstraps from the KEK/DEK metadata
 under the data directory; there is no separate static encryption-key flag.
@@ -123,19 +118,11 @@ revoke now require the target service account to be allowed for
 }
 ```
 
-S3 and Iceberg accept protocol credentials as SigV4 access keys. S3 credentials
-are scoped to one bucket (`--protocol s3 --resource bucket/<bucket>`); Iceberg
-credentials are scoped to one catalog (`--protocol iceberg --resource
-catalog/<warehouse>`). Use the returned `id` as the SigV4 access key and the
-one-time `secret` as the SigV4 secret key. Read-only credentials allow read
-operations only. S3 `CopyObject` is limited to same-bucket copies for protocol
-credentials.
-
-NBD, NFS, and 9P attach paths enforce protocol credentials when credential
-storage is wired. NBD uses `connection_hint.export_name` (`volume@secret`),
-NFS uses `connection_hint.mount_path` (`bucket/credential-id:secret`), and 9P
-uses `connection_hint.aname` (`credential-id:secret@bucket`). Read-only
-credentials mount successfully but reject mutation operations.
+S3 accepts protocol credentials as SigV4 access keys. S3 credentials are scoped
+to one bucket (`--protocol s3 --resource bucket/<bucket>`). Use the returned
+`id` as the SigV4 access key and the one-time `secret` as the SigV4 secret key.
+Read-only credentials allow read operations only. S3 `CopyObject` is limited to
+same-bucket copies for protocol credentials.
 
 List inventory can be narrowed to the same resource scope:
 
@@ -175,10 +162,9 @@ curl -X PUT "http://localhost:9000/mybucket/log.bin" \
   --data-binary @chunk-1.bin
 ```
 
-Per-request body cap defaults to 64 MiB; per-object size cap defaults to 5 TiB.
-Tune via `--cluster-append-forward-buffer-max-per-request` and
-`--append-size-cap-bytes`. Saturation of the forward buffer surfaces as HTTP
-`503 SlowDown` with `Retry-After: 1` — retry with exponential backoff.
+Per-request body cap defaults to 64 MiB; per-object size cap defaults to 5 TiB
+(tune with `--append-size-cap-bytes`). AppendObject forwards stream to the owner
+node, so there is no forward-buffer pool to size or saturate.
 
 Configure per-bucket pull-through upstreams through the admin surface:
 
@@ -193,90 +179,6 @@ grainfs bucket upstream delete legacy-data
 ```
 
 See `../reference/s3-compatibility.md` for the supported S3 surface.
-
-## NFSv4
-
-NFSv4 exports are explicit. Create an S3 bucket, register it as an export, then
-mount the pseudo-root. This example assumes the `AWS_ACCESS_KEY_ID`,
-`AWS_SECRET_ACCESS_KEY`, and `AWS_DEFAULT_REGION` variables from the S3 section
-are still set.
-
-```bash
-aws --endpoint-url http://localhost:9000 s3 mb s3://mydata
-
-grainfs nfs export add mydata
-
-sudo mkdir -p /mnt/grainfs
-sudo mount -t nfs4 -o "vers=4.0,port=2049,rw,hard,intr" localhost:/ /mnt/grainfs
-
-ls /mnt/grainfs/
-echo "hello" | sudo tee /mnt/grainfs/mydata/test.txt
-
-sudo umount /mnt/grainfs
-grainfs nfs export remove mydata
-```
-
-Manage exports:
-
-```bash
-grainfs nfs export list
-grainfs nfs export add mydata --ro
-grainfs nfs export update mydata --rw
-grainfs nfs debug mydata --json
-```
-
-See `../reference/nfs-compatibility.md`, `../operators/nfs-debug.md`, and
-`../operators/nfs-export-lifecycle.md`.
-
-## NBD
-
-NBD requires a Linux client.
-
-```bash
-grainfs volume create v1 --size 10Gi
-grainfs credential create --sa <sa_id> --protocol nbd --resource volume/v1 --mode rw
-# Save the returned connection_hint.export_name, for example: v1@pcsec_...
-
-sudo modprobe nbd
-sudo nbd-client localhost 10809 /dev/nbd0 -N 'v1@<secret>'
-
-sudo mkfs.ext4 /dev/nbd0
-sudo mkdir -p /mnt/nbd-v1
-sudo mount /dev/nbd0 /mnt/nbd-v1
-
-sudo umount /mnt/nbd-v1
-sudo nbd-client -d /dev/nbd0
-```
-
-See `../reference/nbd-compatibility.md`.
-
-## 9P
-
-Enable the 9P server with `--9p-port` and `--9p-bind`. The server is
-authenticated through Mount SAs or protocol credentials when IAM credential
-storage is wired. Keep the default loopback bind unless the network is trusted.
-
-```bash
-grainfs serve \
-  --data ./data \
-  --port 9000 \
-  --9p-bind 127.0.0.1 \
-  --9p-port 5640
-```
-
-From a Linux client:
-
-```bash
-sudo modprobe 9p 9pnet 9pnet_virtio
-sudo mkdir -p /mnt/grainfs-9p
-grainfs credential create --sa <sa_id> --protocol 9p --resource bucket/mybucket --mode ro
-# Save the returned connection_hint.aname, for example: pc_...:pcsec_...@mybucket
-sudo mount -t 9p \
-  -o trans=tcp,port=5640,version=9p2000.L,msize=262144,aname='<connection_hint.aname>' \
-  127.0.0.1 /mnt/grainfs-9p
-```
-
-See `../reference/9p-compatibility.md` for the supported 9P surface.
 
 ## Encryption Key Rotation
 

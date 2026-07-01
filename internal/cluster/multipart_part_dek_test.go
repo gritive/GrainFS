@@ -12,6 +12,7 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/raft"
@@ -51,13 +52,14 @@ func newDEKBackendAt(t *testing.T, dataDir string, keeper *encrypt.DEKKeeper, cl
 	}
 	require.True(t, node.IsLeader(), "no-peers node must become leader")
 
-	backend, err := NewDistributedBackend(dataDir, db, node, nil, false)
+	backend, err := NewDistributedBackend(dataDir, badgermeta.Wrap(db), node, nil, false)
 	require.NoError(t, err)
 	backend.SetECConfig(ECConfig{DataShards: 1, ParityShards: 0})
 
-	svc := NewShardService(backend.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(backend.root, nil, WithShardDEKKeeper(keeper, clusterID))
 	require.NotNil(t, svc.DEKKeeper(), "production shape: DEK keeper must be wired")
 	backend.SetShardService(svc, []string{backend.selfAddr})
+	backend.SetMetaBucketStore(newDirectFSMMetaBucketStore(backend.fsm))
 
 	stopApply := make(chan struct{})
 	go backend.RunApplyLoop(stopApply)
@@ -105,7 +107,7 @@ func TestMultipartPartSurvivesRestartUnderDEK(t *testing.T) {
 	uploadID := up.UploadID
 
 	partBody := bytes.Repeat([]byte("P"), 6<<20)
-	_, err = b1.UploadPart(ctx, "bkt", "obj", uploadID, 1, bytes.NewReader(partBody))
+	_, err = b1.UploadPart(ctx, "bkt", "obj", uploadID, 1, bytes.NewReader(partBody), "")
 	require.NoError(t, err)
 
 	// On-disk part file is ciphertext.

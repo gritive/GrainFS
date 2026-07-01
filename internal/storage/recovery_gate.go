@@ -13,10 +13,20 @@ type RecoveryWriteGate struct {
 	err error
 }
 
+// writeBlocker is the capability a decorator advertises to declare that it
+// refuses all mutations, exposing the error it returns for blocked writes.
+// Plan sites key off this marker rather than a concrete type so any
+// write-blocking decorator is treated identically.
+type writeBlocker interface {
+	writeBlockError() error
+}
+
 var (
-	_ Backend     = (*RecoveryWriteGate)(nil)
-	_ Truncatable = (*RecoveryWriteGate)(nil)
+	_ Backend      = (*RecoveryWriteGate)(nil)
+	_ writeBlocker = (*RecoveryWriteGate)(nil)
 )
+
+func (g *RecoveryWriteGate) writeBlockError() error { return g.err }
 
 func NewRecoveryWriteGate(inner Backend, err error) *RecoveryWriteGate {
 	if err == nil {
@@ -45,7 +55,7 @@ func (g *RecoveryWriteGate) CreateMultipartUpload(context.Context, string, strin
 func (g *RecoveryWriteGate) CreateMultipartUploadWithTags(context.Context, string, string, string, []Tag) (string, error) {
 	return "", g.err
 }
-func (g *RecoveryWriteGate) UploadPart(context.Context, string, string, string, int, io.Reader) (*Part, error) {
+func (g *RecoveryWriteGate) UploadPart(context.Context, string, string, string, int, io.Reader, string) (*Part, error) {
 	return nil, g.err
 }
 func (g *RecoveryWriteGate) CompleteMultipartUpload(context.Context, string, string, string, []Part) (*Object, error) {
@@ -67,7 +77,7 @@ func (g *RecoveryWriteGate) Truncate(context.Context, string, string, int64) err
 func (g *RecoveryWriteGate) GetBucketPolicy(bucket string) ([]byte, error) {
 	pb, ok := g.Backend.(PolicyBackend)
 	if !ok {
-		return nil, ErrSnapshotNotSupported
+		return nil, ErrOperationNotSupported
 	}
 	return pb.GetBucketPolicy(bucket)
 }
@@ -78,63 +88,41 @@ func (g *RecoveryWriteGate) DeleteBucketPolicy(string) error      { return g.err
 func (g *RecoveryWriteGate) GetBucketVersioning(bucket string) (string, error) {
 	v, ok := g.Backend.(BucketVersioner)
 	if !ok {
-		return "", ErrSnapshotNotSupported
+		return "", ErrOperationNotSupported
 	}
 	return v.GetBucketVersioning(bucket)
 }
 
 func (g *RecoveryWriteGate) SetBucketVersioning(string, string) error { return g.err }
 
-func (g *RecoveryWriteGate) GetObjectVersion(bucket, key, versionID string) (io.ReadCloser, *Object, error) {
+func (g *RecoveryWriteGate) GetObjectVersion(ctx context.Context, bucket, key, versionID string) (io.ReadCloser, *Object, error) {
 	v, ok := g.Backend.(VersionedGetter)
 	if !ok {
-		return nil, nil, ErrSnapshotNotSupported
+		return nil, nil, ErrOperationNotSupported
 	}
-	return v.GetObjectVersion(bucket, key, versionID)
+	return v.GetObjectVersion(ctx, bucket, key, versionID)
 }
 
-func (g *RecoveryWriteGate) HeadObjectVersion(bucket, key, versionID string) (*Object, error) {
+func (g *RecoveryWriteGate) HeadObjectVersion(ctx context.Context, bucket, key, versionID string) (*Object, error) {
 	v, ok := g.Backend.(VersionedHeader)
 	if !ok {
-		return nil, ErrSnapshotNotSupported
+		return nil, ErrOperationNotSupported
 	}
-	return v.HeadObjectVersion(bucket, key, versionID)
+	return v.HeadObjectVersion(ctx, bucket, key, versionID)
 }
 
-func (g *RecoveryWriteGate) ListObjectVersions(bucket, prefix string, maxKeys int) ([]*ObjectVersion, error) {
+func (g *RecoveryWriteGate) ListObjectVersions(ctx context.Context, bucket, prefix string, maxKeys int) ([]*ObjectVersion, error) {
 	v, ok := g.Backend.(ObjectVersionLister)
 	if !ok {
-		return nil, ErrSnapshotNotSupported
+		return nil, ErrOperationNotSupported
 	}
-	return v.ListObjectVersions(bucket, prefix, maxKeys)
+	return v.ListObjectVersions(ctx, bucket, prefix, maxKeys)
 }
 
 func (g *RecoveryWriteGate) DeleteObjectVersion(string, string, string) error { return g.err }
 func (g *RecoveryWriteGate) DeleteObjectReturningMarker(string, string) (string, error) {
 	return "", g.err
 }
-
-func (g *RecoveryWriteGate) ListAllObjects() ([]SnapshotObject, error) {
-	snap, ok := g.Backend.(Snapshotable)
-	if !ok {
-		return nil, ErrSnapshotNotSupported
-	}
-	return snap.ListAllObjects()
-}
-
-func (g *RecoveryWriteGate) RestoreObjects([]SnapshotObject) (int, []StaleBlob, error) {
-	return 0, nil, g.err
-}
-
-func (g *RecoveryWriteGate) ListAllBuckets() ([]SnapshotBucket, error) {
-	snap, ok := g.Backend.(BucketSnapshotable)
-	if !ok {
-		return nil, ErrSnapshotNotSupported
-	}
-	return snap.ListAllBuckets()
-}
-
-func (g *RecoveryWriteGate) RestoreBuckets([]SnapshotBucket) error { return g.err }
 
 // ScanObjectsGrouped delegates to inner via type assertion so the lifecycle
 // Scrubbable interface is satisfied through the RecoveryWriteGate chain.

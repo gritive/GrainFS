@@ -6,11 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"time"
-
-	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/klauspost/reedsolomon"
 )
 
 const (
@@ -19,47 +15,45 @@ const (
 )
 
 type spooledECShards struct {
-	paths     []string
-	sizes     []int64
-	origSize  int64
-	encrypted bool
-	seam      storage.DataEncryptor
-	domains   []string
+	paths    []string
+	sizes    []int64
+	origSize int64
 }
 
-func spoolECShards(ctx context.Context, cfg ECConfig, dir string, sp *spooledObject) (*spooledECShards, error) {
+// spoolECShardsStream is the source-agnostic EC shard spooler: it reads exactly
+// `size` bytes from `src` once (via reedsolomon Split into the data-shard temp
+// files) and then encodes parity from those temp files. It never closes `src`;
+// the caller owns the reader lifecycle. This lets maintenance paths (relocate,
+// coalesce) feed a plain reader + known size directly instead of round-tripping
+// through a disk temp-file spool.
+func spoolECShardsStream(ctx context.Context, cfg ECConfig, dir string, src io.Reader, size int64) (*spooledECShards, error) {
 	stageStart := time.Now()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create ec spool dir: %w", err)
 	}
-	enc, err := reedsolomon.NewStream(
-		cfg.DataShards,
-		cfg.ParityShards,
-		reedsolomon.WithStreamBlockSize(ecStreamBlockSize(cfg, sp.Size)),
-	)
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("set ec spool dir perms: %w", err)
+	}
+	enc, err := getStreamEncoder(cfg, ecStreamBlockSize(cfg, size))
 	if err != nil {
 		return nil, fmt.Errorf("ec stream encoder: %w", err)
 	}
 	out := &spooledECShards{
-		paths:     make([]string, cfg.NumShards()),
-		sizes:     make([]int64, cfg.NumShards()),
-		origSize:  sp.Size,
-		encrypted: sp.encrypted,
-		seam:      sp.seam,
-		domains:   make([]string, cfg.NumShards()),
+		paths:    make([]string, cfg.NumShards()),
+		sizes:    make([]int64, cfg.NumShards()),
+		origSize: size,
 	}
 	cleanup := func() {
 		out.Cleanup()
 	}
-	if sp.Size == 0 {
+	if size == 0 {
 		for i := range out.paths {
-			f, err := os.CreateTemp(dir, fmt.Sprintf(".ec-empty-%d-*", i))
+			f, err := os.CreateTemp(dir, fmt.Sprintf("ec-empty-%d-*.tmp", i))
 			if err != nil {
 				cleanup()
 				return nil, fmt.Errorf("create empty ec shard: %w", err)
 			}
 			out.paths[i] = f.Name()
-			out.domains[i] = ecSpoolShardDomain(i)
 			if err := f.Close(); err != nil {
 				cleanup()
 				return nil, fmt.Errorf("close empty ec shard: %w", err)
@@ -69,38 +63,36 @@ func spoolECShards(ctx context.Context, cfg ECConfig, dir string, sp *spooledObj
 	}
 
 	dataFiles := make([]*os.File, cfg.DataShards)
+	parityFiles := make([]*os.File, cfg.ParityShards)
+	defer func() {
+		for _, f := range dataFiles {
+			if f != nil {
+				_ = f.Close()
+			}
+		}
+		for _, f := range parityFiles {
+			if f != nil {
+				_ = f.Close()
+			}
+		}
+	}()
 	dataWriters := make([]io.Writer, cfg.DataShards)
 	for i := range dataFiles {
-		f, err := os.CreateTemp(dir, fmt.Sprintf(".ec-data-%d-*", i))
+		f, err := os.CreateTemp(dir, fmt.Sprintf("ec-data-%d-*.tmp", i))
 		if err != nil {
 			cleanup()
 			return nil, fmt.Errorf("create ec data shard: %w", err)
 		}
 		out.paths[i] = f.Name()
-		out.domains[i] = ecSpoolShardDomain(i)
 		dataFiles[i] = f
-		var writer io.Writer = f
-		if out.encrypted {
-			writer = &encryptedSpoolRecordWriter{w: f, seam: out.seam, domain: out.domains[i]}
-		}
-		dataWriters[i] = &countingWriter{w: writer, n: &out.sizes[i]}
+		dataWriters[i] = &countingWriter{w: f, n: &out.sizes[i]}
 	}
 	observePutStage("ec_spool_shards", "create_data_files", stageStart)
 
 	stageStart = time.Now()
-	src, err := sp.Open()
-	if err != nil {
-		cleanup()
-		return nil, fmt.Errorf("open spooled object: %w", err)
-	}
-	if err := enc.Split(readerWithContext{ctx: ctx, r: src}, dataWriters, sp.Size); err != nil {
-		_ = src.Close()
+	if err := enc.Split(readerWithContext{ctx: ctx, r: src}, dataWriters, size); err != nil {
 		cleanup()
 		return nil, fmt.Errorf("ec split stream: %w", err)
-	}
-	if err := src.Close(); err != nil {
-		cleanup()
-		return nil, fmt.Errorf("close spooled object: %w", err)
 	}
 	observePutStage("ec_spool_shards", "split", stageStart)
 	stageStart = time.Now()
@@ -126,27 +118,23 @@ func spoolECShards(ctx context.Context, cfg ECConfig, dir string, sp *spooledObj
 	}
 	defer func() {
 		for _, rc := range dataReadClosers {
-			_ = rc.Close()
+			if rc != nil {
+				_ = rc.Close()
+			}
 		}
 	}()
 
-	parityFiles := make([]*os.File, cfg.ParityShards)
 	parityWriters := make([]io.Writer, cfg.ParityShards)
 	for i := range parityWriters {
 		idx := cfg.DataShards + i
-		f, err := os.CreateTemp(dir, fmt.Sprintf(".ec-parity-%d-*", i))
+		f, err := os.CreateTemp(dir, fmt.Sprintf("ec-parity-%d-*.tmp", i))
 		if err != nil {
 			cleanup()
 			return nil, fmt.Errorf("create ec parity shard: %w", err)
 		}
 		out.paths[idx] = f.Name()
-		out.domains[idx] = ecSpoolShardDomain(idx)
 		parityFiles[i] = f
-		var writer io.Writer = f
-		if out.encrypted {
-			writer = &encryptedSpoolRecordWriter{w: f, seam: out.seam, domain: out.domains[idx]}
-		}
-		parityWriters[i] = &countingWriter{w: writer, n: &out.sizes[idx]}
+		parityWriters[i] = &countingWriter{w: f, n: &out.sizes[idx]}
 	}
 	observePutStage("ec_spool_shards", "open_data_create_parity", stageStart)
 	stageStart = time.Now()
@@ -212,14 +200,7 @@ func (s *spooledECShards) Cleanup() {
 }
 
 func (s *spooledECShards) openPayload(idx int) (io.ReadCloser, error) {
-	if s.encrypted {
-		return openSpoolEncryptedRecordFile(s.paths[idx], s.seam, s.domains[idx])
-	}
 	return os.Open(s.paths[idx])
-}
-
-func ecSpoolShardDomain(idx int) string {
-	return fmt.Sprintf("cluster-ec-spool:%d:%d", time.Now().UnixNano(), idx)
 }
 
 type countingWriter struct {
@@ -231,10 +212,6 @@ func (w *countingWriter) Write(p []byte) (int, error) {
 	n, err := w.w.Write(p)
 	*w.n += int64(n)
 	return n, err
-}
-
-func (b *DistributedBackend) ecSpoolDir() string {
-	return filepath.Join(b.root, "tmp", "ec-spool")
 }
 
 type multiReadCloser struct {

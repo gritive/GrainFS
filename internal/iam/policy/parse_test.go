@@ -65,8 +65,6 @@ func TestParse_AcceptsIAMGroupPolicyAdminResource(t *testing.T) {
 
 func TestParse_AcceptsRemainingAdminRouteResources(t *testing.T) {
 	for _, resource := range []string{
-		"iam/mount-sa/*",
-		"iam/mount-sa/alice-mount/policy/NFSMountOnly",
 		"iam/upstream/*",
 		"iam/upstream/logs",
 		"iam/upstream/*/cutover",

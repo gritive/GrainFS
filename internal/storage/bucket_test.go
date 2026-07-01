@@ -3,50 +3,25 @@ package storage
 import (
 	"context"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
-
-func TestIsVFSBucket(t *testing.T) {
-	tests := []struct {
-		bucket string
-		want   bool
-	}{
-		{"__grainfs_vfs_default", true},
-		{"__grainfs_vfs_volA", true},
-		{"my-app-bucket", false},
-		{"", false},
-		{"__grainfs_vfs_", true},
-	}
-	for _, tt := range tests {
-		if got := IsVFSBucket(tt.bucket); got != tt.want {
-			t.Errorf("IsVFSBucket(%q) = %v, want %v", tt.bucket, got, tt.want)
-		}
-	}
-}
-
-func TestVFSBucketPrefixConst(t *testing.T) {
-	if VFSBucketPrefix != "__grainfs_vfs_" {
-		t.Errorf("VFSBucketPrefix = %q, want %q", VFSBucketPrefix, "__grainfs_vfs_")
-	}
-}
 
 func TestIsInternalBucket(t *testing.T) {
 	tests := []struct {
 		bucket string
 		want   bool
 	}{
-		// Phase 0b (D6): __grainfs_nfs4 hard-removed from internal namespace.
-		// Now treated as a regular bucket name so admin API can manage it.
-		{"__grainfs_nfs4", false},
+		// __grainfs_nfs4 is a normal internal bucket — NFS support removed.
+		{"__grainfs_nfs4", true},
 		{"__grainfs_vfs_default", true},
-		{"__grainfs_volumes", true},
+		{"__grainfs_test_internal", true},
 		{"my-bucket", false},
 		{"", false},
 		{"__other_", false},
 	}
 	for _, tt := range tests {
-		if got := IsInternalBucket(tt.bucket); got != tt.want {
-			t.Errorf("IsInternalBucket(%q) = %v, want %v", tt.bucket, got, tt.want)
-		}
+		require.Equal(t, tt.want, IsInternalBucket(tt.bucket), "IsInternalBucket(%q)", tt.bucket)
 	}
 }
 
@@ -67,12 +42,8 @@ func (b *countingWalkBackend) WalkObjects(_ context.Context, _, _ string, fn fun
 func TestCountObjects_Empty(t *testing.T) {
 	ops := NewOperations(&countingWalkBackend{})
 	n, err := ops.CountObjects(context.Background(), "b")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n != 0 {
-		t.Errorf("got %d, want 0", n)
-	}
+	require.NoError(t, err)
+	require.Zero(t, n)
 }
 
 func TestCountObjects_Three(t *testing.T) {
@@ -81,10 +52,6 @@ func TestCountObjects_Three(t *testing.T) {
 	}
 	ops := NewOperations(backend)
 	n, err := ops.CountObjects(context.Background(), "b")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n != 3 {
-		t.Errorf("got %d, want 3", n)
-	}
+	require.NoError(t, err)
+	require.Equal(t, int64(3), n)
 }

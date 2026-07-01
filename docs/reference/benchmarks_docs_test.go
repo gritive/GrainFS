@@ -42,16 +42,6 @@ func TestReadmePerformanceMatchesBenchmarkReference(t *testing.T) {
 	}
 }
 
-func TestLatestIcebergBenchmarkTableSatisfiesDocumentedGates(t *testing.T) {
-	body, err := os.ReadFile("benchmarks.md")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := validateLatestIcebergBenchmarkGates(string(body)); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestBenchmarkReferenceDocumentsStrictHostPreflight(t *testing.T) {
 	body, err := os.ReadFile("benchmarks.md")
 	if err != nil {
@@ -151,45 +141,6 @@ func validateLatestS3BenchmarkGates(markdown string) error {
 	return nil
 }
 
-func validateLatestIcebergBenchmarkGates(markdown string) error {
-	required := map[string]bool{
-		"catalog-read":    false,
-		"catalog-commits": false,
-		"catalog-mixed":   false,
-		"sustained":       false,
-	}
-	for _, line := range strings.Split(markdown, "\n") {
-		cells := markdownTableCells(line)
-		if len(cells) != 6 {
-			continue
-		}
-		op := cells[0]
-		if _, ok := required[op]; !ok {
-			continue
-		}
-		required[op] = true
-		if cells[1] == "" {
-			return fmt.Errorf("%s Iceberg throughput must be present", op)
-		}
-		errorsValue, err := strconv.Atoi(cells[4])
-		if err != nil {
-			return fmt.Errorf("%s Iceberg errors must be numeric: %w", op, err)
-		}
-		if errorsValue != 0 {
-			return fmt.Errorf("%s Iceberg errors=%d, want 0", op, errorsValue)
-		}
-		if !strings.Contains(cells[5], "benchmarks/profiles/iceberg-single-") {
-			return fmt.Errorf("%s Iceberg artifact must point at benchmarks/profiles/iceberg-single-*", op)
-		}
-	}
-	for op, seen := range required {
-		if !seen {
-			return fmt.Errorf("latest Iceberg benchmark table missing %s", op)
-		}
-	}
-	return nil
-}
-
 func validateReadmePerformanceMatchesBenchmarks(readme, benchmarks string) error {
 	want, err := readmePerformanceFromBenchmarks(benchmarks)
 	if err != nil {
@@ -212,49 +163,28 @@ func validateReadmePerformanceMatchesBenchmarks(readme, benchmarks string) error
 }
 
 func readmePerformanceFromBenchmarks(markdown string) (map[string][4]string, error) {
-	rows := map[string][2]string{}
-	for _, line := range strings.Split(markdown, "\n") {
+	section, err := markdownSection(markdown, "### Latest GCP Single-Node Encrypted Result")
+	if err != nil {
+		return nil, err
+	}
+	rows := map[string][4]string{}
+	for _, line := range strings.Split(section, "\n") {
 		cells := markdownTableCells(line)
-		if len(cells) != 14 {
+		if len(cells) != 5 {
 			continue
 		}
-		switch cells[0] {
-		case "put":
-			rows["MinIO"] = [2]string{cells[1], ""}
-			rows["RustFS"] = [2]string{cells[5], ""}
-			rows["GrainFS"] = [2]string{cells[9], ""}
-		case "get":
-			for target, value := range map[string]string{
-				"MinIO":   cells[1],
-				"RustFS":  cells[5],
-				"GrainFS": cells[9],
-			} {
-				row := rows[target]
-				row[1] = value
-				rows[target] = row
-			}
+		target := strings.Trim(cells[0], "`")
+		if target != "GrainFS" && target != "MinIO" {
+			continue
+		}
+		rows[target] = [4]string{cells[1], cells[2], cells[3], cells[4]}
+	}
+	for _, target := range []string{"GrainFS", "MinIO"} {
+		if _, ok := rows[target]; !ok {
+			return nil, fmt.Errorf("benchmark reference missing %s GCP performance row", target)
 		}
 	}
-	minio, ok := rows["MinIO"]
-	if !ok || minio[0] == "" || minio[1] == "" {
-		return nil, fmt.Errorf("benchmark reference missing MinIO put/get rows")
-	}
-	out := make(map[string][4]string, len(rows))
-	for target, row := range rows {
-		if row[0] == "" || row[1] == "" {
-			return nil, fmt.Errorf("benchmark reference missing %s put/get values", target)
-		}
-		putRatio, err := formattedRatio(row[0], minio[0])
-		if err != nil {
-			return nil, fmt.Errorf("%s PUT ratio: %w", target, err)
-		}
-		getRatio, err := formattedRatio(row[1], minio[1])
-		if err != nil {
-			return nil, fmt.Errorf("%s GET ratio: %w", target, err)
-		}
-		out[target] = [4]string{row[0], row[1], putRatio, getRatio}
-	}
-	return out, nil
+	return rows, nil
 }
 
 func readmePerformanceRows(markdown string) (map[string][4]string, error) {
@@ -277,21 +207,6 @@ func readmePerformanceRows(markdown string) (map[string][4]string, error) {
 	return rows, nil
 }
 
-func formattedRatio(value, baseline string) (string, error) {
-	v, err := strconv.ParseFloat(value, 64)
-	if err != nil {
-		return "", err
-	}
-	base, err := strconv.ParseFloat(baseline, 64)
-	if err != nil {
-		return "", err
-	}
-	if base == 0 {
-		return "", fmt.Errorf("baseline is zero")
-	}
-	return fmt.Sprintf("%.2fx", v/base), nil
-}
-
 func validateReadmePerformanceScope(markdown string) error {
 	section, err := markdownSection(markdown, "## Performance")
 	if err != nil {
@@ -311,11 +226,6 @@ func validateReadmePerformanceScope(markdown string) error {
 		"RETENTION",
 		"MULTIPART",
 		"APPEND",
-		"Iceberg",
-		"catalog-read",
-		"catalog-commits",
-		"catalog-mixed",
-		"sustained",
 	} {
 		if strings.Contains(section, forbidden) {
 			return fmt.Errorf("README Performance section must not publish %s results; use docs/reference/benchmarks.md", forbidden)

@@ -28,8 +28,6 @@ func runOrphanSegmentSweepCases(t testing.TB) {
 		Nodes:         4,
 		ScrubInterval: "500ms",
 		ExtraArgs:     []string{"--scrub-orphan-age=1s", "--segment-gc-retention=0"},
-		DisableNFS:    true,
-		DisableNBD:    true,
 	})
 
 	// Create the bucket in cluster metadata so the scrubber's ListBuckets

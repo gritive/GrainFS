@@ -2,25 +2,27 @@ package cluster
 
 import (
 	"context"
+	"strconv"
 
-	badger "github.com/dgraph-io/badger/v4"
-	"github.com/rs/zerolog/log"
+	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
-// fsmValueRewrapMaxBatch is the default maximum number of keys per
-// CmdResealFSMValues command. Bounded to keep one apply txn small.
+// fsmValueRewrapMaxBatch is the default maximum number of keys per local
+// rewrite transaction. Bounded to keep one Badger write txn small.
 const fsmValueRewrapMaxBatch = 256
 
 // fsmValueRewrapMaxBytes is the default maximum accumulated raw value bytes per
-// CmdResealFSMValues batch. Object-meta values can be large; capping by bytes
+// local rewrite batch. Object-meta values can be large; capping by bytes
 // prevents a single batch from exceeding the badger txn budget. 4 MiB is well
 // below badger's default limit and leaves ample room for the overhead per entry.
 const fsmValueRewrapMaxBytes = 4 << 20 // 4 MiB
 
-// fsmValueRewrapAfterProposeHook, set only by tests, fires after each batch is
-// proposed inside DrainFSMValueRewrap. It lets a test advance the keeper's
+// fsmValueRewrapAfterProposeHook, set only by tests, fires after each local
+// batch inside DrainFSMValueRewrap. It lets a test advance the keeper's
 // active gen MID-DRAIN (between iterations) to reproduce the back-to-back-
-// rotation livelock. nil in production.
+// rotation livelock. The name is legacy from the retired raft-propose path.
+// nil in production.
 var fsmValueRewrapAfterProposeHook func()
 
 // CollectStaleFSMValueKeys read-only-scans this group's policy: and obj: values
@@ -28,18 +30,18 @@ var fsmValueRewrapAfterProposeHook func()
 // raw value bytes) whose DEK frame gen != activeGen.
 //
 // Multipart (mpu:) is intentionally excluded (D4 census-only). The keys are full
-// storage keys (group-prefixed) so applyResealFSMValues can txn.Get them and the
+// storage keys (group-prefixed) so the local rewrite can txn.Get them and the
 // AAD matches what sealValue/openValue use.
 //
 // The scan stops at whichever bound is hit first: len(stale) >= maxBatch OR
-// accumulated raw bytes >= maxBytes. This prevents a single CmdResealFSMValues
-// from exceeding the badger apply-txn budget (ErrTxnTooBig).
+// accumulated raw bytes >= maxBytes. This prevents a single local batch from
+// exceeding the badger write-txn budget (ErrTxnTooBig).
 func (b *DistributedBackend) CollectStaleFSMValueKeys(activeGen uint32, maxBatch int, maxBytes int) ([]string, error) {
 	var stale []string
 	var accBytes int
-	err := b.db.View(func(txn *badger.Txn) error {
+	err := b.store.View(func(txn MetadataTxn) error {
 		scan := func(prefix string) error {
-			return b.ks().scanGroupPrefix(txn, []byte(prefix), func(_ []byte, item *badger.Item) error {
+			return b.ks().scanGroupPrefix(txn, []byte(prefix), func(_ []byte, item MetaItem) error {
 				// Pre-check count cap before reading the value.
 				if len(stale) >= maxBatch {
 					return errStopScan
@@ -77,17 +79,98 @@ func (b *DistributedBackend) CollectStaleFSMValueKeys(activeGen uint32, maxBatch
 	return stale, err
 }
 
-// DrainFSMValueRewrap, run on the group LEADER, reseals every stale policy:/obj:
-// value in gb onto the KEEPER-CURRENT active gen by proposing batched
-// CmdResealFSMValues until no stale key remains. It reads keeper-current at the
-// TOP of each iteration and scans/proposes against that value — it does NOT pin
-// to a fixed gen. This is what makes it converge under back-to-back rotations:
-// a 2nd rotation landing mid-drain simply shifts the convergence target on the
+// RewrapLocalFSMValues reseals up to maxBatch stale policy:/obj: FSM values in
+// this node's local group store without proposing through data-group raft. It
+// reuses CollectStaleFSMValueKeys for bounded scanning, then re-reads each
+// collected key inside the write transaction so a live active-generation write
+// that wins after the scan is never clobbered by stale scan-time data.
+func RewrapLocalFSMValues(ctx context.Context, gb *GroupBackend, maxBatch int) (int, error) {
+	if maxBatch <= 0 {
+		maxBatch = fsmValueRewrapMaxBatch
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	current, ok := gb.fsm.activeDEKGen()
+	if !ok {
+		return 0, nil
+	}
+	keys, err := gb.CollectStaleFSMValueKeys(current, maxBatch, fsmValueRewrapMaxBytes)
+	if err != nil {
+		return 0, err
+	}
+	if len(keys) == 0 {
+		return 0, nil
+	}
+	return gb.rewrapLocalFSMValueKeys(keys)
+}
+
+func (b *DistributedBackend) rewrapLocalFSMValueKeys(keys []string) (int, error) {
+	var rewrapped int
+	err := b.store.Update(func(txn MetadataTxn) error {
+		de := b.fsm.dataEncryptor()
+		if de == nil {
+			return nil
+		}
+		current, ok := b.fsm.activeDEKGen()
+		if !ok {
+			return nil
+		}
+		for _, k := range keys {
+			changed, err := b.rewrapLocalFSMValueKey(txn, de, current, []byte(k))
+			if err != nil {
+				return err
+			}
+			if changed {
+				rewrapped++
+				RewrapFSMValuesTotal.WithLabelValues(strconv.FormatUint(uint64(current), 10)).Inc()
+			}
+		}
+		return nil
+	})
+	return rewrapped, err
+}
+
+func (b *DistributedBackend) rewrapLocalFSMValueKey(txn MetadataTxn, de storage.DataEncryptor, current uint32, key []byte) (bool, error) {
+	item, err := txn.Get(key)
+	if err == ErrMetaKeyNotFound {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	raw, err := item.ValueCopy(nil)
+	if err != nil {
+		return false, err
+	}
+	gen, ct, frameOK, derr := decodeFSMValueFrameV2(raw)
+	if derr != nil {
+		return false, derr
+	}
+	if !frameOK || gen == current {
+		return false, nil
+	}
+	plain, err := de.Open(encrypt.DomainFSMValue, []encrypt.AADField{encrypt.FieldBytes(key)}, gen, ct)
+	if err != nil {
+		return false, err
+	}
+	if err := b.fsm.setValue(txn, key, plain); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// DrainFSMValueRewrap reseals every stale policy:/obj: value in gb onto the
+// KEEPER-CURRENT active gen via node-local transactions. It reads keeper-current
+// at the top of each iteration and scans against that value — it does NOT pin to
+// a fixed gen. This is what makes it converge under back-to-back rotations: a
+// 2nd rotation landing mid-drain simply shifts the convergence target on the
 // next iteration. Live writes (already at current) are never collected, so the
 // stale set strictly shrinks toward "all-current" and the loop terminates.
 //
-// Re-scans each iteration (no cursor); propose waits for apply, so each scan
-// observes the prior batch's reseals. Idempotent.
+// Re-scans each iteration (no cursor); each scan observes the prior batch's
+// local reseals. Idempotent. The function name is retained for existing callers
+// and tests, but it no longer proposes through data-group raft.
 //
 // maxBatch, when <= 0, uses fsmValueRewrapMaxBatch. The byte budget is always
 // fsmValueRewrapMaxBytes (not exposed as a parameter; callers use the default).
@@ -96,25 +179,12 @@ func DrainFSMValueRewrap(ctx context.Context, gb *GroupBackend, maxBatch int) er
 		maxBatch = fsmValueRewrapMaxBatch
 	}
 	for {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		// Track keeper-current each iteration — never a fixed gen.
-		current, ok := gb.fsm.activeDEKGen()
-		if !ok {
-			return nil // encryption disabled — nothing to reseal
-		}
-		keys, err := gb.CollectStaleFSMValueKeys(current, maxBatch, fsmValueRewrapMaxBytes)
+		rewrapped, err := RewrapLocalFSMValues(ctx, gb, maxBatch)
 		if err != nil {
 			return err
 		}
-		if len(keys) == 0 {
+		if rewrapped == 0 {
 			return nil // drained (all values at keeper-current gen)
-		}
-		if err := gb.ProposeResealFSMValues(ctx, keys, current); err != nil {
-			log.Warn().Err(err).Uint32("active_gen", current).
-				Msg("fsm-value rewrap: propose failed; will retry on next trigger")
-			return err // surface error; the rotation post-commit will re-trigger
 		}
 		if fsmValueRewrapAfterProposeHook != nil {
 			fsmValueRewrapAfterProposeHook()

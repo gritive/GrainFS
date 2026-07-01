@@ -40,11 +40,8 @@ import (
 // the host, so colima VM clients can reach them via 192.168.5.2:<port>.
 type Cluster struct {
 	HTTPPorts []int    // S3/admin HTTP ports (bind :%d on host)
-	RaftPorts []int    // QUIC raft ports
-	JoinPorts []int    // Zero-CA QUIC join-listener ports
-	NFSPorts  []int    // NFSv4 ports (bind :%d)
-	NBDPorts  []int    // NBD ports (bind :%d)
-	P9Ports   []int    // 9P2000.L ports (bind 0.0.0.0 via --9p-bind)
+	RaftPorts []int    // cluster transport HTTP ports
+	JoinPorts []int    // Zero-CA HTTP join-listener ports
 	DataDirs  []string // per-node data directories (temp)
 
 	LeaderIdx int    // 0 — seed is always the initial leader at boot
@@ -61,16 +58,6 @@ type Cluster struct {
 type Options struct {
 	// NumNodes is the cluster size. Defaults to 3 when 0.
 	NumNodes int
-
-	// EnableNFS enables NFSv4 listeners (binds 0.0.0.0 by default).
-	EnableNFS bool
-
-	// EnableNBD enables NBD listeners (binds 0.0.0.0 by default).
-	EnableNBD bool
-
-	// EnableP9 enables 9P listeners with --9p-bind 0.0.0.0 so the colima VM
-	// can reach them. Off by default — only set true if the test mounts 9P.
-	EnableP9 bool
 
 	// Binary overrides the grainfs binary path (default: ../../bin/grainfs).
 	Binary string
@@ -103,9 +90,6 @@ func StartCluster(t testing.TB, opts Options) *Cluster {
 		HTTPPorts: make([]int, numNodes),
 		RaftPorts: make([]int, numNodes),
 		JoinPorts: make([]int, numNodes),
-		NFSPorts:  make([]int, numNodes),
-		NBDPorts:  make([]int, numNodes),
-		P9Ports:   make([]int, numNodes),
 		DataDirs:  make([]string, numNodes),
 		procs:     make([]*exec.Cmd, numNodes),
 		logs:      make([]*os.File, numNodes),
@@ -114,23 +98,14 @@ func StartCluster(t testing.TB, opts Options) *Cluster {
 		t.Cleanup(c.Stop)
 	}
 
-	// Allocate up to 5 ports/node (http, raft, nfs4, nbd, 9p). Even when a
-	// protocol is disabled we still reserve the slot so port indices are
-	// stable; serve will simply not listen on a `0` port.
+	// Allocate 6 slots/node (http, raft, reserved, reserved, reserved, join).
+	// Slots 2–4 per node are reserved for future or removed protocols so that
+	// port indices (and the join slot at index 5) remain stable across changes.
 	ports := uniqueFreePorts(t, numNodes*6)
 	for i := 0; i < numNodes; i++ {
 		c.HTTPPorts[i] = ports[i]
 		c.RaftPorts[i] = ports[numNodes+i]
 		c.JoinPorts[i] = ports[5*numNodes+i]
-		if opts.EnableNFS {
-			c.NFSPorts[i] = ports[2*numNodes+i]
-		}
-		if opts.EnableNBD {
-			c.NBDPorts[i] = ports[3*numNodes+i]
-		}
-		if opts.EnableP9 {
-			c.P9Ports[i] = ports[4*numNodes+i]
-		}
 		dir, err := os.MkdirTemp("", fmt.Sprintf("grainfs-colima-cluster-%d-*", i))
 		if err != nil {
 			c.Stop()
@@ -267,16 +242,8 @@ func (c *Cluster) spawn(t testing.TB, binary string, i int, extraEnv []string) (
 		"--node-id", raftAddr,
 		"--raft-addr", raftAddr,
 		"--join-listen-addr", joinAddr,
-		"--nfs4-port", fmt.Sprintf("%d", c.NFSPorts[i]),
-		"--nbd-port", fmt.Sprintf("%d", c.NBDPorts[i]),
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
-	}
-	if c.P9Ports[i] > 0 {
-		args = append(args,
-			"--9p-bind", "0.0.0.0",
-			"--9p-port", fmt.Sprintf("%d", c.P9Ports[i]),
-		)
 	}
 	cmd := exec.Command(binary, args...)
 	cmd.Stdout = logFile
@@ -292,13 +259,11 @@ func (c *Cluster) spawn(t testing.TB, binary string, i int, extraEnv []string) (
 	return cmd, logFile
 }
 
-// uniqueFreePorts picks n ports where both TCP and UDP are free. The fixture
-// uses TCP for HTTP/NFS/NBD/9P and UDP for QUIC raft, so checking TCP alone can
-// choose a port that later fails the raft listener with EADDRINUSE.
+// uniqueFreePorts picks n TCP ports and keeps listeners open until the full set
+// is reserved, so concurrent fixtures cannot claim the same port.
 func uniqueFreePorts(t testing.TB, n int) []int {
 	t.Helper()
 	tcpListeners := make([]net.Listener, 0, n)
-	udpListeners := make([]net.PacketConn, 0, n)
 	ports := make([]int, 0, n)
 	for len(ports) < n {
 		ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -306,26 +271,14 @@ func uniqueFreePorts(t testing.TB, n int) []int {
 			for _, prev := range tcpListeners {
 				_ = prev.Close()
 			}
-			for _, prev := range udpListeners {
-				_ = prev.Close()
-			}
 			t.Fatalf("listen :0: %v", err)
 		}
 		port := ln.Addr().(*net.TCPAddr).Port
-		pc, err := net.ListenPacket("udp", fmt.Sprintf("127.0.0.1:%d", port))
-		if err != nil {
-			_ = ln.Close()
-			continue
-		}
 		tcpListeners = append(tcpListeners, ln)
-		udpListeners = append(udpListeners, pc)
 		ports = append(ports, port)
 	}
 	for _, ln := range tcpListeners {
 		_ = ln.Close()
-	}
-	for _, pc := range udpListeners {
-		_ = pc.Close()
 	}
 	return ports
 }
@@ -410,11 +363,6 @@ func bootstrapAdminSA(sock string, timeout time.Duration) (saID, ak, sk string, 
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 	for time.Now().Before(deadline) {
-		if err := seedBootstrapTrustedProxyCIDR(client, sock); err != nil {
-			lastErr = err
-			time.Sleep(200 * time.Millisecond)
-			continue
-		}
 		body := strings.NewReader(`{"name":"admin","description":"colima cluster fixture bootstrap"}`)
 		req, rerr := http.NewRequestWithContext(context.Background(), "POST",
 			"http://unix/v1/iam/sa", body)
@@ -455,26 +403,6 @@ func bootstrapAdminSA(sock string, timeout time.Duration) (saID, ak, sk string, 
 		return out.SAID, out.AccessKey, out.SecretKey, nil
 	}
 	return "", "", "", fmt.Errorf("bootstrap admin SA: %w", lastErr)
-}
-
-func seedBootstrapTrustedProxyCIDR(client *http.Client, sock string) error {
-	body := strings.NewReader(`{"value":"127.0.0.1/32"}`)
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPut,
-		"http://unix/v1/config/trusted-proxy.cidr", body)
-	if err != nil {
-		return fmt.Errorf("build trusted-proxy.cidr seed: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("seed trusted-proxy.cidr: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		buf, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("seed trusted-proxy.cidr on %s -> %d: %s", sock, resp.StatusCode, string(buf))
-	}
-	return nil
 }
 
 // waitForMembership polls the seed's admin UDS until Status reports a leader

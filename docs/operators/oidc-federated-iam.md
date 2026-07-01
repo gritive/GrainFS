@@ -138,22 +138,8 @@ It also covers IAM policy and group mutation routes:
 - `DELETE /v1/iam/group/:name/policy/:policy` evaluates
   `grainfs:IAMGroupPolicyDetach` on `iam/group/:name/policy/:policy`.
 
-It also covers mount-SA and bucket-upstream admin routes:
+It also covers bucket-upstream admin routes:
 
-- `GET /v1/iam/mount-sa` evaluates `grainfs:IAMMountSAList` on
-  `iam/mount-sa/*`.
-- `GET /v1/iam/mount-sa/:name` evaluates `grainfs:IAMMountSARead` on
-  `iam/mount-sa/:name`.
-- `POST /v1/iam/mount-sa` evaluates `grainfs:IAMMountSAWrite` on
-  `iam/mount-sa/:name`, with `:name` read from the JSON body.
-- `DELETE /v1/iam/mount-sa/:name` evaluates `grainfs:IAMMountSADelete` on
-  `iam/mount-sa/:name`.
-- `PUT /v1/iam/mount-sa/:name/policy/:policy` evaluates
-  `grainfs:IAMMountSAPolicyAttach` on
-  `iam/mount-sa/:name/policy/:policy`.
-- `DELETE /v1/iam/mount-sa/:name/policy/:policy` evaluates
-  `grainfs:IAMMountSAPolicyDetach` on
-  `iam/mount-sa/:name/policy/:policy`.
 - `GET /v1/upstreams` evaluates `grainfs:IAMBucketUpstreamList` on
   `iam/upstream/*`.
 - `GET /v1/buckets/:bucket/upstream` evaluates
@@ -219,7 +205,6 @@ Example policy for a mapped OIDC group:
         "grainfs:IAMGroupMemberDelete",
         "grainfs:IAMGroupPolicyAttach",
         "grainfs:IAMGroupPolicyDetach",
-        "grainfs:IAMMountSA*",
         "grainfs:IAMBucketUpstream*",
         "grainfs:AdminConfig*",
         "grainfs:AdminDashboardToken*"
@@ -230,8 +215,6 @@ Example policy for a mapped OIDC group:
         "iam/policy/*/attach/sa/*",
         "iam/group/*",
         "iam/group/*/policy/*",
-        "iam/mount-sa/*",
-        "iam/mount-sa/*/policy/*",
         "iam/upstream/*",
         "iam/upstream/*/cutover",
         "admin/config/*",
@@ -409,9 +392,8 @@ decision was audited when first computed); misses and grace-serves are.
 
 The slices above gate **control-plane** operations (admin routes, protocol
 credentials). `iam.pdp.data_plane.enabled` extends the same external PDP, with
-the same deny-override semantics, to **S3 and Iceberg object/bucket
-authorization** — after GrainFS IAM allows an object/bucket operation, the PDP
-can still veto it.
+the same deny-override semantics, to **S3 object/bucket authorization** — after
+GrainFS IAM allows an object/bucket operation, the PDP can still veto it.
 
 It is **disabled by default** and is an **AND-gate**: data-plane enforcement
 runs only when **both** `iam.pdp.enabled` and `iam.pdp.data_plane.enabled` are
@@ -430,14 +412,11 @@ turning off the top-level `iam.pdp.enabled` disables every PDP plane at once
 }
 ```
 
-- **Scope: S3 + Iceberg only.** NFS, 9P, and NBD are served by separate
-  authorizer instances and are **not** covered by data-plane PDP enforcement
-  yet — that is a documented follow-up.
+- **Scope: S3 only.**
 - **Protocol/context on the wire.** A data-plane PDP request carries
-  `protocol` = the action namespace (`s3` or `iceberg`), `auth_method` =
-  `sa` or `anonymous`, and an **empty** `target_sa` (the operation acts on an
-  object, not a service account). Control-plane PDP requests are unchanged and
-  still carry `protocol="admin"`.
+  `protocol` = `s3`, `auth_method` = `sa` or `anonymous`, and an **empty**
+  `target_sa` (the operation acts on an object, not a service account).
+  Control-plane PDP requests are unchanged and still carry `protocol="admin"`.
 - **Singleflight.** Concurrent duplicate authorization misses for the same cache
   key collapse to a **single** PDP call; the rest wait for and share that one
   result, so a burst of identical object requests does not fan out into a burst
@@ -467,15 +446,14 @@ data-plane request volume, cache hit/miss/grace, and latency from the
 control-plane series.
 
 Not yet supported: mTLS client certs to the PDP, a per-CIDR SSRF allowlist,
-data-plane enforcement for NFS / 9P / NBD, and a per-scope `failure_policy`.
+and a per-scope `failure_policy`.
 
 ## Current Boundary
 
 HTTP bearer-token actors are wired for protocol credential, bucket policy, IAM,
-mount-SA, bucket-upstream, config, and dashboard-token admin routes. An optional
+bucket-upstream, config, and dashboard-token admin routes. An optional
 External PDP adapter (remote `https` with a DEK-sealed bearer token + dial-time SSRF
 egress filtering, or a local `http` loopback sidecar; disabled by default) chains
 after GrainFS IAM for admin and protocol-credential operations, and — when
-`iam.pdp.data_plane.enabled` is also set — for S3/Iceberg object/bucket
-operations. mTLS, a per-CIDR SSRF allowlist, NFS/9P/NBD data-plane enforcement,
-and a per-scope `failure_policy` remain future slices.
+`iam.pdp.data_plane.enabled` is also set — for S3 object/bucket operations. mTLS, a per-CIDR SSRF allowlist, and a per-scope `failure_policy`
+remain future slices.

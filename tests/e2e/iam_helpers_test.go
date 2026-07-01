@@ -25,51 +25,6 @@ import (
 	"github.com/gritive/GrainFS/internal/iamadmin"
 )
 
-// bootstrapAdminViaUDS performs the post-serve admin SA bootstrap via the
-// admin UDS. Returns the access_key/secret_key pair for use in subsequent
-// S3 sigv4 requests. Replaces the legacy --access-key/--secret-key flag
-// pattern. Caller must have started `grainfs serve` and waited for the
-// admin socket to exist at <dataDir>/admin.sock.
-func bootstrapAdminViaUDS(t testing.TB, dataDir string) (accessKey, secretKey string) {
-	t.Helper()
-	sock := filepath.Join(dataDir, "admin.sock")
-
-	// Wait up to 10s for socket to appear (cluster bootstrap may need time).
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		if _, err := os.Stat(sock); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("admin socket %s did not appear within 10s", sock)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-
-	// FU#3 / F#26-tls-posture: see tryBootstrapAdminViaUDSResult for rationale.
-	gomega.Expect(seedBootstrapTrustedProxyCIDR(sock)).To(gomega.Succeed(), "seed trusted-proxy.cidr")
-	client := iamUDSClient(sock)
-	body := strings.NewReader(`{"name":"admin","description":"e2e bootstrap"}`)
-	req, err := http.NewRequestWithContext(context.Background(), "POST",
-		"http://unix/v1/iam/sa", body)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	defer resp.Body.Close()
-	gomega.Expect(resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated).To(gomega.BeTrue(),
-		"bootstrap via %s: got %d", sock, resp.StatusCode)
-
-	var out struct {
-		AccessKey string `json:"access_key"`
-		SecretKey string `json:"secret_key"`
-	}
-	gomega.Expect(json.NewDecoder(resp.Body).Decode(&out)).To(gomega.Succeed())
-	gomega.Expect(out.AccessKey).NotTo(gomega.BeEmpty())
-	gomega.Expect(out.SecretKey).NotTo(gomega.BeEmpty())
-	return out.AccessKey, out.SecretKey
-}
-
 // bootstrapAdminViaUDSAny tries each candidate dataDir (one per cluster node)
 // in turn. The first call to /v1/iam/sa on a fresh cluster only succeeds on
 // the leader; followers may return propose errors. Cycles until one node
@@ -185,10 +140,6 @@ func runIAMHelpersTryBootstrapAdminViaUDSResultPreservesSAID(t testing.TB) {
 
 	srv := &http.Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/v1/config/trusted-proxy.cidr" {
-				w.WriteHeader(http.StatusNoContent)
-				return
-			}
 			gomega.Expect(r.URL.Path).To(gomega.Equal("/v1/iam/sa"))
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{
@@ -232,8 +183,6 @@ func runIAMHelpersBootstrapAdminViaUDSAnyWithBucketGrants(t testing.TB) {
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			switch {
-			case r.URL.Path == "/v1/config/trusted-proxy.cidr":
-				w.WriteHeader(http.StatusNoContent)
 			case r.URL.Path == "/v1/iam/sa":
 				gomega.Expect(r.Method).To(gomega.Equal(http.MethodPost))
 				_, _ = io.WriteString(w, `{
@@ -284,21 +233,7 @@ func runIAMHelpersBootstrapAdminViaUDSAnyWithBucketGrants(t testing.TB) {
 	}
 }
 
-func tryBootstrapAdminViaUDS(sock string) (string, string, error) {
-	out, err := tryBootstrapAdminViaUDSResult(sock)
-	if err != nil {
-		return "", "", err
-	}
-	return out.AccessKey, out.SecretKey, nil
-}
-
 func tryBootstrapAdminViaUDSResult(sock string) (iamSAResult, error) {
-	// E2E fixtures run on loopback without TLS, so seed a benign
-	// trusted-proxy.cidr before the first SA POST. Idempotent — the second path
-	// through this for cluster retries leaves the value in place.
-	if err := seedBootstrapTrustedProxyCIDR(sock); err != nil {
-		return iamSAResult{}, err
-	}
 	client := iamUDSClient(sock)
 	body := strings.NewReader(`{"name":"admin","description":"e2e bootstrap"}`)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -325,45 +260,6 @@ func tryBootstrapAdminViaUDSResult(sock string) (iamSAResult, error) {
 		return iamSAResult{}, fmt.Errorf("bootstrap %s: empty creds in response", sock)
 	}
 	return out, nil
-}
-
-// seedBootstrapTrustedProxyCIDR PUTs trusted-proxy.cidr=127.0.0.1/32 on the
-// admin UDS. Production deployments should set one of: TLS cert on disk,
-// GRAINFS_TLS_CERT/KEY env vars, or trusted-proxy.cidr — e2e picks the third.
-// Idempotent: re-running with the same value is a no-op at the FSM level.
-func seedBootstrapTrustedProxyCIDR(sock string) error {
-	return setConfigViaUDS(sock, "trusted-proxy.cidr", "127.0.0.1/32")
-}
-
-// setConfigViaUDS PUTs key=value on the admin UDS /v1/config/<key>. Used by
-// e2e fixtures that need to flip operator-path config knobs.
-func setConfigViaUDS(sock, key, value string) error {
-	client := iamUDSClient(sock)
-	payload, err := json.Marshal(struct {
-		Value string `json:"value"`
-	}{Value: value})
-	if err != nil {
-		return fmt.Errorf("encode %s value: %w", key, err)
-	}
-	body := bytes.NewReader(payload)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut,
-		"http://unix/v1/config/"+key, body)
-	if err != nil {
-		return fmt.Errorf("build %s PUT: %w", key, err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("PUT %s: %w", key, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		buf, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("PUT %s on %s -> %d: %s", key, sock, resp.StatusCode, string(buf))
-	}
-	return nil
 }
 
 // iamSAResult is the deserialized response from POST /v1/iam/sa.
@@ -547,8 +443,6 @@ func startIAMTestServer(t testing.TB) iamTestServer {
 	cmd := exec.Command(getBinary(), "serve",
 		"--data", dir,
 		"--port", fmt.Sprintf("%d", port),
-		"--nfs4-port", fmt.Sprintf("%d", freePort()),
-		"--nbd-port", fmt.Sprintf("%d", freePort()),
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	)
@@ -589,8 +483,6 @@ type iamTestServerHandle struct {
 	BootstrapAK   string
 	BootstrapSK   string
 	s3Port        int
-	nfsPort       int
-	nbdPort       int
 	cmd           *exec.Cmd
 	cli           *s3.Client
 	// firstStart tracks whether we've spawned the binary at least once.
@@ -614,8 +506,6 @@ func startIAMTestServerWithRestart(t testing.TB) *iamTestServerHandle {
 		DataDir:   dir,
 		AdminSock: filepath.Join(dir, "admin.sock"),
 		s3Port:    freePort(),
-		nfsPort:   freePort(),
-		nbdPort:   freePort(),
 	}
 	h.S3URL = fmt.Sprintf("http://127.0.0.1:%d", h.s3Port)
 	t.Cleanup(func() {
@@ -638,8 +528,6 @@ func (h *iamTestServerHandle) Start(t testing.TB) {
 	args := []string{"serve",
 		"--data", h.DataDir,
 		"--port", fmt.Sprintf("%d", h.s3Port),
-		"--nfs4-port", fmt.Sprintf("%d", h.nfsPort),
-		"--nbd-port", fmt.Sprintf("%d", h.nbdPort),
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	}

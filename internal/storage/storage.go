@@ -4,16 +4,19 @@ import (
 	"context"
 	"errors"
 	"io"
-
-	badger "github.com/dgraph-io/badger/v4"
 )
 
-// DBProvider is implemented by backends that expose their underlying BadgerDB
-// for shared use (lifecycle, events).
-type DBProvider interface{ DB() *badger.DB }
+// ErrOperationNotSupported is returned when a backend does not implement an
+// optional capability interface required by the requested operation.
+var ErrOperationNotSupported = errors.New("operation not supported by this backend")
 
-// ErrSnapshotNotSupported is returned when the backend does not implement Snapshotable.
-var ErrSnapshotNotSupported = errors.New("snapshot not supported by this backend")
+// ErrContentMD5Mismatch is returned when an object PUT's body MD5 does not match
+// the client-supplied Content-MD5 header. Maps to S3 400 BadDigest.
+var ErrContentMD5Mismatch = errors.New("storage: Content-MD5 mismatch")
+
+// ErrInvalidDigest is returned when a supplied Content-MD5 header is malformed
+// (not base64, or not a 16-byte digest). Maps to S3 400 InvalidDigest.
+var ErrInvalidDigest = errors.New("storage: invalid Content-MD5 digest")
 
 // Object represents a stored object with metadata.
 type Object struct {
@@ -30,6 +33,7 @@ type Object struct {
 	PlacementGroupID string
 	ECData           uint8
 	ECParity         uint8
+	StripeBytes      uint32
 	NodeIDs          []string
 	Segments         []SegmentRef
 	// Coalesced lists merged segment refs produced by background coalesce.
@@ -71,7 +75,9 @@ type SegmentRef struct {
 	ShardSize        int32  // EC shard size for this segment; 0 for legacy
 	ECData           uint8  // EC data shard count; 0 for legacy/local segments
 	ECParity         uint8  // EC parity shard count; 0 for legacy/local segments
+	StripeBytes      uint32 // 0 = contiguous/legacy, >0 = stripe-interleaved chunk size
 	NodeIDs          []string
+	StoredSize       int64 // 0 = uncompressed (Size==stored); >0 = compressed bytes in EC blob
 }
 
 // CoalescedRef identifies one coalesced blob produced by merging a prefix of
@@ -87,6 +93,7 @@ type CoalescedRef struct {
 	ShardKey    string // "<key>/coalesced/<coalescedID>" — used by EC reader (B3)
 	ECData      uint8
 	ECParity    uint8
+	StripeBytes uint32 // 0 = contiguous/legacy, >0 = stripe-interleaved chunk size
 	NodeIDs     []string
 }
 
@@ -116,10 +123,13 @@ type ObjectSystemMetadata struct {
 // PutObjectRequest carries optional object metadata that cannot fit in the
 // legacy PutObject signature without overloading user metadata.
 type PutObjectRequest struct {
-	Bucket         string
-	Key            string
-	Body           io.Reader
-	SizeHint       *int64
+	Bucket   string
+	Key      string
+	Body     io.Reader
+	SizeHint *int64
+	// SizeHintExact means SizeHint is a verified body length, not just an
+	// allocation hint. Backends may reject bodies shorter or longer than it.
+	SizeHintExact  bool
 	ContentType    string
 	ACL            *uint8
 	UserMetadata   map[string]string
@@ -172,14 +182,16 @@ type Copier interface {
 	CopyObject(srcBucket, srcKey, dstBucket, dstKey string) (*Object, error)
 }
 
-// SnapshotObject is a point-in-time metadata record for a stored object.
+// SnapshotObject is a single live object-version manifest record, the unit of
+// the segment-GC known-set produced by ListAllObjectsStrict. The scrubber sweep
+// and the EC orphan-shard reclaim use it to know which segments/shards belong to
+// a live object version (and must not be reclaimed).
 //
-// Segments carries the per-object chunk refs introduced in Phase 1.6: a
-// chunked object's blobs live under <key>_segments/<blob_id>, not at the
-// legacy objectPath. Snapshots must capture Segments so PITR restore can
-// verify the right blobs and rehydrate Object metadata. Older snapshots
-// without this field are still readable; they fall back to the legacy
-// single-file blob check during restore.
+// Segments carries the per-object chunk refs (Phase 1.6): a chunked object's
+// blobs live under <key>_segments/<blob_id>, not at the legacy objectPath, so
+// the GC known-set must include them. The placement/fidelity fields (NodeIDs,
+// ECData, ECParity, StripeBytes, PlacementGroupID, MetaSeq, UserMetadata, Parts)
+// are populated for the blob-authoritative branch (per-version blob authority).
 type SnapshotObject struct {
 	Bucket         string       `json:"bucket"`
 	Key            string       `json:"key"`
@@ -193,42 +205,31 @@ type SnapshotObject struct {
 	ACL            uint8        `json:"acl,omitempty"` // ACLGrant bitmask; 0 = private (backward compat)
 	SSEAlgorithm   string       `json:"sse_algorithm,omitempty"`
 	Segments       []SegmentRef `json:"segments,omitempty"`
-	// Coalesced records merged segment blobs frozen at snapshot time. Added so
-	// snapshot freeze can pin coalesced chunks; omitempty keeps old snapshot
-	// files backward compatible.
+	// Coalesced records merged segment blobs so the GC known-set can pin
+	// coalesced chunks; omitempty keeps the JSON compact.
 	Coalesced []CoalescedRef `json:"coalesced,omitempty"`
 	Tags      []Tag          `json:"tags,omitempty"`
+	// Populated only for the blob-authoritative branch (per-version blob authority).
+	// Zero/nil for the off/pending FSM-derived branch.
+	NodeIDs          []string             `json:"node_ids,omitempty"`
+	ECData           uint8                `json:"ec_data,omitempty"`
+	ECParity         uint8                `json:"ec_parity,omitempty"`
+	StripeBytes      uint32               `json:"stripe_bytes,omitempty"`
+	PlacementGroupID string               `json:"placement_group_id,omitempty"`
+	MetaSeq          uint64               `json:"meta_seq,omitempty"`
+	UserMetadata     map[string]string    `json:"user_metadata,omitempty"`
+	Parts            []MultipartPartEntry `json:"parts,omitempty"`
 }
 
-// StaleBlob reports an object whose blob data was not found during restore.
-type StaleBlob struct {
-	Bucket       string `json:"bucket"`
-	Key          string `json:"key"`
-	ExpectedETag string `json:"expected_etag"`
-}
-
-// Snapshotable is an optional interface for backends that support metadata snapshots.
-// ListAllObjects enumerates every object across all buckets.
-// RestoreObjects replaces the current metadata state with the given snapshot objects.
-type Snapshotable interface {
-	ListAllObjects() ([]SnapshotObject, error)
-	RestoreObjects(objects []SnapshotObject) (restoredCount int, staleBlobs []StaleBlob, err error)
-}
-
-// SnapshotBucket is a point-in-time record of bucket-level metadata
-// (versioning state). Captured by BucketSnapshotable backends so PITR
-// restores reproduce the full bucket configuration.
-type SnapshotBucket struct {
-	Name            string `json:"name"`
-	VersioningState string `json:"versioning_state,omitempty"` // "Unversioned" | "Enabled" | "Suspended"
-}
-
-// BucketSnapshotable is an optional interface for backends that persist
-// per-bucket metadata (versioning) and want that state preserved across
-// snapshot/restore cycles.
-type BucketSnapshotable interface {
-	ListAllBuckets() ([]SnapshotBucket, error)
-	RestoreBuckets(buckets []SnapshotBucket) error
+// SnapshotObjectRef is the minimal (bucket, key, versionID) identity of an
+// object version, used by the EC orphan-shard reclaim's frozen-object source
+// hook. With no object-metadata snapshot feature there are no frozen objects, so
+// the source is wired to an empty no-op; the type is retained for that hook's
+// signature.
+type SnapshotObjectRef struct {
+	Bucket    string
+	Key       string
+	VersionID string
 }
 
 // Backend defines the storage operations for GrainFS.
@@ -253,7 +254,7 @@ type Backend interface {
 	WalkObjects(ctx context.Context, bucket, prefix string, fn func(*Object) error) error
 
 	CreateMultipartUpload(ctx context.Context, bucket, key, contentType string) (*MultipartUpload, error)
-	UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader) (*Part, error)
+	UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader, contentMD5Hex string) (*Part, error)
 	CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []Part) (*Object, error)
 	AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string) error
 	// ListMultipartUploads returns in-progress multipart uploads in bucket whose
@@ -264,12 +265,6 @@ type Backend interface {
 	// upload, sorted by part number ascending, capped at maxParts (0 = no cap).
 	// Returns ErrUploadNotFound if uploadID does not match an active upload.
 	ListParts(ctx context.Context, bucket, key, uploadID string, maxParts int) ([]Part, error)
-}
-
-// Truncatable is an optional interface for backends that can efficiently truncate an object.
-// Backends that do not implement this interface fall back to GetObject→slice→PutObject.
-type Truncatable interface {
-	Truncate(ctx context.Context, bucket, key string, size int64) error
 }
 
 // PartialIO is an optional interface for backends that can efficiently read and
@@ -284,12 +279,6 @@ type PartialIO interface {
 // current object metadata and want to avoid a second lookup before ReadAt.
 type PreparedReadAt interface {
 	ReadAtObject(ctx context.Context, bucket, key string, obj *Object, offset int64, buf []byte) (int, error)
-}
-
-// Syncable is an optional interface for backends that can fsync a specific object.
-// Backends that do not implement this interface skip the fsync in COMMIT.
-type Syncable interface {
-	Sync(bucket, key string) error
 }
 
 // TaggingDirective controls how tags are applied on CopyObject.

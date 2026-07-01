@@ -124,81 +124,13 @@ type VlogSmokeReport struct {
 	Stale []string `json:"stale"`
 }
 
-type NfsExportInfo struct {
-	Bucket     string `json:"bucket"`
-	ReadOnly   bool   `json:"read_only"`
-	FsidMajor  uint64 `json:"fsid_major"`
-	FsidMinor  uint64 `json:"fsid_minor"`
-	Generation uint64 `json:"generation"`
-}
-
-type NfsExportUpsertReq struct {
-	Bucket   string `json:"bucket,omitempty"`
-	ReadOnly bool   `json:"read_only"`
-}
-
-type ListNfsExportsResp struct {
-	Exports []NfsExportInfo `json:"exports"`
-}
-
-type ExportDebugLookup struct {
-	Client string `json:"client,omitempty"`
-	Bucket string `json:"bucket"`
-	Result string `json:"result"`
-	AtUnix int64  `json:"at_unix"`
-}
-
-type ExportDebugPropagation struct {
-	AppliedNodes  []string `json:"applied_nodes"`
-	TotalNodes    int      `json:"total_nodes"`
-	LastApplyUnix int64    `json:"last_apply_unix,omitempty"`
-}
-
-type ExportDebugBackend struct {
-	Exists      bool  `json:"exists"`
-	ObjectCount int64 `json:"object_count"`
-}
-
-type ExportDebugResp struct {
-	Bucket             string                 `json:"bucket"`
-	Registered         bool                   `json:"registered"`
-	ReadOnly           bool                   `json:"read_only,omitempty"`
-	FsidMajor          uint64                 `json:"fsid_major,omitempty"`
-	FsidMinor          uint64                 `json:"fsid_minor,omitempty"`
-	Generation         uint64                 `json:"generation,omitempty"`
-	RecentLookups      []ExportDebugLookup    `json:"recent_lookups,omitempty"`
-	Propagation        ExportDebugPropagation `json:"propagation"`
-	BackendBucket      ExportDebugBackend     `json:"backend_bucket"`
-	ActiveMountClients []string               `json:"active_mount_clients,omitempty"`
-}
-
-type StorageBucketNFSExport struct {
-	Registered bool   `json:"registered"`
-	ReadOnly   bool   `json:"read_only"`
-	Generation uint64 `json:"generation,omitempty"`
-}
-
 type StorageBucketSummary struct {
-	Name        string                  `json:"name"`
-	HasUpstream bool                    `json:"has_upstream"`
-	NFSExport   *StorageBucketNFSExport `json:"nfs_export,omitempty"`
+	Name        string `json:"name"`
+	HasUpstream bool   `json:"has_upstream"`
 }
 
 type ListStorageBucketsResp struct {
 	Buckets []StorageBucketSummary `json:"buckets"`
-}
-
-type ProtocolEndpointStatus struct {
-	Enabled bool   `json:"enabled"`
-	Bind    string `json:"bind,omitempty"`
-	Port    int    `json:"port,omitempty"`
-	Warning string `json:"warning,omitempty"`
-}
-
-type StorageProtocolStatusResp struct {
-	NFS4 ProtocolEndpointStatus `json:"nfs4"`
-	NBD  ProtocolEndpointStatus `json:"nbd"`
-	P9   ProtocolEndpointStatus `json:"p9"`
 }
 
 type CredentialCreateReq struct {
@@ -248,42 +180,6 @@ type DashboardTokenResp struct {
 	PublicURLSet bool   `json:"public_url_set"`
 }
 
-// WriteAtVolumeReq is the JSON body for WriteAtVolume.
-type WriteAtVolumeReq struct {
-	Name   string `json:"name"`
-	Offset int64  `json:"offset"`
-	Data   []byte `json:"data"`
-}
-
-// WriteAtVolumeResp reports how many bytes were written.
-type WriteAtVolumeResp struct {
-	Bytes int64 `json:"bytes"`
-}
-
-// ReadAtVolumeReq is the JSON body for ReadAtVolume.
-type ReadAtVolumeReq struct {
-	Name   string `json:"name"`
-	Offset int64  `json:"offset"`
-	Length int64  `json:"length"`
-}
-
-// ReadAtVolumeResp carries the read bytes.
-type ReadAtVolumeResp struct {
-	Data []byte `json:"data"`
-}
-
-// ScrubVolumeReq triggers a scrub session over a single volume's blocks.
-type ScrubVolumeReq struct {
-	Name   string `json:"name"`
-	DryRun bool   `json:"dry_run,omitempty"`
-}
-
-// ScrubVolumeResp identifies the resulting session.
-type ScrubVolumeResp struct {
-	SessionID string `json:"session_id"`
-	Created   bool   `json:"created"`
-}
-
 // ScrubJobInfo is the JSON form of one scrub session.
 type ScrubJobInfo struct {
 	SessionID    string   `json:"session_id"`
@@ -307,60 +203,6 @@ type ScrubJobInfo struct {
 // ListScrubJobsResp aggregates active sessions.
 type ListScrubJobsResp struct {
 	Jobs []ScrubJobInfo `json:"jobs"`
-}
-
-// VolumeInfo is the JSON representation of a volume in admin responses.
-type VolumeInfo struct {
-	Name            string   `json:"name"`
-	Size            int64    `json:"size"`
-	BlockSize       int      `json:"block_size"`
-	AllocatedBlocks int64    `json:"allocated_blocks"`
-	AllocatedBytes  int64    `json:"allocated_bytes"`
-	Health          string   `json:"health"`
-	HealthReasons   []string `json:"health_reasons"`
-}
-
-// ListVolumesResp is returned by GET /v1/volumes.
-type ListVolumesResp struct {
-	Volumes []VolumeInfo `json:"volumes"`
-}
-
-// CreateVolumeReq is the body for POST /v1/volumes.
-type CreateVolumeReq struct {
-	Name string `json:"name"`
-	Size int64  `json:"size"`
-}
-
-// StatResp is returned by GET /v1/volumes/<name>/stat.
-type StatResp struct {
-	Volume          VolumeInfo       `json:"volume"`
-	RecentIncidents []map[string]any `json:"recent_incidents,omitempty"`
-}
-
-// DeleteResp is the response of DELETE /v1/volumes/<name>.
-type DeleteResp struct {
-	Deleted bool `json:"deleted"`
-}
-
-// ResizeReq is the body for POST /v1/volumes/<name>/resize.
-type ResizeReq struct {
-	Size int64 `json:"size"`
-}
-
-// ResizeResp is the response of resize.
-type ResizeResp struct {
-	Name    string `json:"name"`
-	OldSize int64  `json:"old_size"`
-	NewSize int64  `json:"new_size"`
-	Changed bool   `json:"changed"`
-}
-
-// RecalculateResp is the response of POST /v1/volumes/<name>/recalculate.
-type RecalculateResp struct {
-	Volume string `json:"volume"`
-	Before int64  `json:"before"`
-	After  int64  `json:"after"`
-	Fixed  bool   `json:"fixed"`
 }
 
 // --- Cluster wire types ---
@@ -627,23 +469,4 @@ type BucketVersioningResp struct {
 // BucketVersioningSetReq is the body for PUT /v1/buckets/:name/versioning.
 type BucketVersioningSetReq struct {
 	Status string `json:"status"`
-}
-
-// --- Iceberg config wire types ---
-
-// IcebergConfigRequest is the JSON body for POST /v1/iceberg/config.
-type IcebergConfigRequest struct {
-	Warehouse string `json:"warehouse"`
-	SAID      string `json:"sa"`
-	NoReveal  bool   `json:"no_reveal,omitempty"`
-}
-
-// IcebergConfigResponse is the JSON body returned by POST /v1/iceberg/config.
-// ClientSecret is empty when the server received NoReveal=true.
-type IcebergConfigResponse struct {
-	CatalogURI    string `json:"catalog_uri"`
-	OAuthTokenURI string `json:"oauth_token_uri"`
-	Warehouse     string `json:"warehouse"`
-	ClientID      string `json:"client_id"`
-	ClientSecret  string `json:"client_secret"`
 }

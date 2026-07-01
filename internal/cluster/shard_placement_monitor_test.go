@@ -11,8 +11,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/metrics"
-	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // newTestShardService returns a ShardService rooted at a fresh temp dir.
@@ -23,22 +23,37 @@ func newTestShardService(t *testing.T) (*ShardService, string) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	keeper, clusterID := testDEKKeeper(t)
-	svc := NewShardService(dir, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(dir, nil, WithShardDEKKeeper(keeper, clusterID))
 	return svc, dir
+}
+
+// seedLatestBlobOnSvc writes a latest-only quorum-meta blob directly onto the
+// given ShardService — the authority the placement monitor's
+// IterQuorumMetaECShardTargets enumerates (per-object metadata lives only in the
+// off-raft quorum-meta blob store). Bucket/Key/VersionID are overridden to match.
+func seedLatestBlobOnSvc(t *testing.T, svc *ShardService, bucket, key, versionID string, cmd PutObjectMetaCmd) {
+	t.Helper()
+	cmd.Bucket = bucket
+	cmd.Key = key
+	cmd.VersionID = versionID
+	blob, err := encodeQuorumMetaBlob(cmd)
+	require.NoError(t, err)
+	require.NoError(t, svc.writeQuorumMetaLocal(bucket, key, blob))
 }
 
 func TestShardPlacementMonitor_Scan_AllPresent(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
-	backend := &DistributedBackend{db: db, fsm: fsm}
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
+	backend := &DistributedBackend{store: badgermeta.Wrap(db), fsm: fsm}
 	svc, _ := newTestShardService(t)
 
 	const self = "node-A"
-	// Seed an EC segment object: self is shard-0 owner, two peers hold shards 1+2.
+	// Seed an EC segment object in the quorum-meta blob (the monitor's enumeration
+	// source): self is shard-0 owner, two peers hold shards 1+2.
 	segNodes := []string{self, "node-B", "node-C"}
-	seedLatestObjectMetaVersion(t, backend, "b", "obj", "v1", objectMeta{
+	seedLatestBlobOnSvc(t, svc, "b", "obj", "v1", PutObjectMetaCmd{
 		ECData: 2, ECParity: 1, NodeIDs: segNodes,
-		Segments: []storage.SegmentRef{
+		Segments: []SegmentMetaEntry{
 			{BlobID: "seg-0", ECData: 2, ECParity: 1, NodeIDs: segNodes},
 		},
 	})
@@ -52,31 +67,17 @@ func TestShardPlacementMonitor_Scan_AllPresent(t *testing.T) {
 	assert.Equal(t, 0, missing)
 }
 
-// CmdPutShardPlacement is a no-op; Scan finds no placement rows and reports 0 missing.
+// CmdPutShardPlacement is reserved/removed; Scan on empty FSM reports 0 missing.
 func TestShardPlacementMonitor_Scan_DetectsMissing(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 	svc, _ := newTestShardService(t)
 
 	const self = "node-A"
 	monitor := NewShardPlacementMonitor(fsm, nil, svc, self, time.Second)
 
-	// These applies are no-ops; no placement rows are written.
-	p1 := PutShardPlacementCmd{
-		Bucket: "b", Key: "obj1", NodeIDs: []string{self, "other", "other2"},
-	}
-	p2 := PutShardPlacementCmd{
-		Bucket: "b", Key: "obj2", NodeIDs: []string{"other", "other2", self},
-	}
-	for _, p := range []PutShardPlacementCmd{p1, p2} {
-		raw, _ := EncodeCommand(CmdPutShardPlacement, p)
-		require.NoError(t, fsm.Apply(raw))
-	}
-
 	var reported []string
 	monitor.SetOnMissing(func(target ECShardScanTarget, shardIdx int) {
-		// ShardKey is empty for object-version targets; format from
-		// ObjectKey/VersionID to match the other callbacks. (Never fires here.)
 		reported = append(reported, fmtShardRef(target.Bucket, target.ObjectKey+"/"+target.VersionID, shardIdx))
 	})
 
@@ -88,15 +89,12 @@ func TestShardPlacementMonitor_Scan_DetectsMissing(t *testing.T) {
 
 func TestShardPlacementMonitor_Scan_DetectsMetadataOnlyMissingShard(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
-	backend := &DistributedBackend{db: db, fsm: fsm}
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
+	backend := &DistributedBackend{store: badgermeta.Wrap(db), fsm: fsm}
 	svc, _ := newTestShardService(t)
 
 	const self = "node-A"
-	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
-		Bucket:      "b",
-		Key:         "obj",
-		VersionID:   "v1",
+	seedLatestBlobOnSvc(t, svc, "b", "obj", "v1", PutObjectMetaCmd{
 		Size:        10,
 		ContentType: "application/octet-stream",
 		ETag:        "etag",
@@ -105,8 +103,6 @@ func TestShardPlacementMonitor_Scan_DetectsMetadataOnlyMissingShard(t *testing.T
 		ECParity:    1,
 		NodeIDs:     []string{self, "node-B", "node-C"},
 	})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(raw))
 
 	monitor := NewShardPlacementMonitor(fsm, backend, svc, self, time.Second)
 	var reported []string
@@ -122,17 +118,17 @@ func TestShardPlacementMonitor_Scan_DetectsMetadataOnlyMissingShard(t *testing.T
 
 func TestShardPlacementMonitor_Scan_IgnoresPeerShards(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
-	backend := &DistributedBackend{db: db, fsm: fsm}
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
+	backend := &DistributedBackend{store: badgermeta.Wrap(db), fsm: fsm}
 	svc, _ := newTestShardService(t)
 
 	const self = "node-A"
-	// Seed an EC segment object where self is NOT in the node list.
-	// The monitor must skip all shards — they belong to peers.
+	// Seed an EC segment object (in the quorum-meta blob) where self is NOT in the
+	// node list. The monitor must skip all shards — they belong to peers.
 	peerNodes := []string{"node-B", "node-C", "node-D"}
-	seedLatestObjectMetaVersion(t, backend, "b", "obj", "v1", objectMeta{
+	seedLatestBlobOnSvc(t, svc, "b", "obj", "v1", PutObjectMetaCmd{
 		ECData: 2, ECParity: 1, NodeIDs: peerNodes,
-		Segments: []storage.SegmentRef{
+		Segments: []SegmentMetaEntry{
 			{BlobID: "seg-peer", ECData: 2, ECParity: 1, NodeIDs: peerNodes},
 		},
 	})
@@ -146,7 +142,7 @@ func TestShardPlacementMonitor_Scan_IgnoresPeerShards(t *testing.T) {
 
 func TestShardPlacementMonitor_Scan_NoPlacements(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 	svc, _ := newTestShardService(t)
 
 	monitor := NewShardPlacementMonitor(fsm, nil, svc, "anyone", time.Second)
@@ -157,7 +153,7 @@ func TestShardPlacementMonitor_Scan_NoPlacements(t *testing.T) {
 
 func TestShardPlacementMonitor_Stats(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 	svc, _ := newTestShardService(t)
 
 	monitor := NewShardPlacementMonitor(fsm, nil, svc, "node-A", time.Second)
@@ -173,17 +169,18 @@ func TestShardPlacementMonitor_Stats(t *testing.T) {
 
 func TestShardPlacementMonitor_Scan_ContextCancel(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
-	backend := &DistributedBackend{db: db, fsm: fsm}
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
+	backend := &DistributedBackend{store: badgermeta.Wrap(db), fsm: fsm}
 	svc, _ := newTestShardService(t)
 
 	const self = "node-A"
-	// Seed several EC segment objects so iteration has real targets to traverse.
+	// Seed several EC segment objects (in the quorum-meta blob) so iteration has
+	// real targets to traverse.
 	for i := 0; i < 10; i++ {
 		nodes := []string{self, "node-B", "node-C"}
-		seedLatestObjectMetaVersion(t, backend, "b", fmtKey(i), "v1", objectMeta{
+		seedLatestBlobOnSvc(t, svc, "b", fmtKey(i), "v1", PutObjectMetaCmd{
 			ECData: 2, ECParity: 1, NodeIDs: nodes,
-			Segments: []storage.SegmentRef{
+			Segments: []SegmentMetaEntry{
 				{BlobID: "seg-" + fmtKey(i), ECData: 2, ECParity: 1, NodeIDs: nodes},
 			},
 		})
@@ -200,7 +197,7 @@ func TestShardPlacementMonitor_Scan_ContextCancel(t *testing.T) {
 
 func TestFSM_IterShardPlacements(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	// Empty FSM: callback never invoked.
 	count := 0
@@ -211,17 +208,8 @@ func TestFSM_IterShardPlacements(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, count)
 
-	// CmdPutShardPlacement is now a no-op — no placement rows are written.
-	entries := []PutShardPlacementCmd{
-		{Bucket: "b1", Key: "k1", NodeIDs: []string{"n0", "n1"}, K: 2, M: 1},
-		{Bucket: "b2", Key: "k/with/slashes", NodeIDs: []string{"n2", "n3", "n4"}, K: 3, M: 2},
-		{Bucket: "버킷", Key: "한글", NodeIDs: []string{"n0"}, K: 1, M: 1},
-	}
-	for _, e := range entries {
-		raw, _ := EncodeCommand(CmdPutShardPlacement, e)
-		require.NoError(t, fsm.Apply(raw))
-	}
-
+	// CmdPutShardPlacement is reserved/removed; placement is ring-derived.
+	// IterShardPlacements always returns 0 rows (no BadgerDB footprint).
 	seen := make(map[string][]string)
 	err = fsm.IterShardPlacements(func(bucket, key string, rec PlacementRecord) error {
 		seen[bucket+"/"+key] = rec.Nodes
@@ -233,7 +221,7 @@ func TestFSM_IterShardPlacements(t *testing.T) {
 
 func TestShardPlacementMonitor_Scan_NilShardSvc(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 	monitor := NewShardPlacementMonitor(fsm, nil, nil, "node-A", time.Second)
 	_, err := monitor.Scan(context.Background())
 	require.Error(t, err)
@@ -253,27 +241,24 @@ func seedCorruptShardKind(t *testing.T, backend *DistributedBackend, fsm *FSM, s
 	var target ECShardScanTarget
 	switch kind {
 	case ECShardObjectVersion:
-		raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
-			Bucket: "b", Key: "obj", VersionID: "v1", Size: 10,
-			ContentType: "application/octet-stream", ETag: "etag", ModTime: 1,
+		seedLatestBlobOnSvc(t, svc, "b", "obj", "v1", PutObjectMetaCmd{
+			Size: 10, ContentType: "application/octet-stream", ETag: "etag", ModTime: 1,
 			ECData: 2, ECParity: 1, NodeIDs: nodes,
 		})
-		require.NoError(t, err)
-		require.NoError(t, fsm.Apply(raw))
 		shardKey = "obj/v1"
 		// Object-version targets carry raw object EC fields; the placement is
 		// resolved separately and is NOT echoed back on the target, so the
 		// target's Placement field stays zero-valued here.
 		target = ECShardScanTarget{Kind: ECShardObjectVersion, Bucket: "b", ObjectKey: "obj", VersionID: "v1", ECData: 2, ECParity: 1, NodeIDs: nodes}
 	case ECShardSegment:
-		seedLatestObjectMetaVersion(t, backend, "b", "chunked", "cv1", objectMeta{
+		seedLatestBlobOnSvc(t, svc, "b", "chunked", "cv1", PutObjectMetaCmd{
 			ECData: 2, ECParity: 1, NodeIDs: nodes,
-			Segments: []storage.SegmentRef{{BlobID: "seg-ok", ECData: 2, ECParity: 1, NodeIDs: nodes}},
+			Segments: []SegmentMetaEntry{{BlobID: "seg-ok", ECData: 2, ECParity: 1, NodeIDs: nodes, SegmentIdx: 0}},
 		})
 		shardKey = "chunked/segments/seg-ok"
 		target = ECShardScanTarget{Kind: ECShardSegment, Bucket: "b", ObjectKey: "chunked", VersionID: "cv1", ShardKey: shardKey, Placement: PlacementRecord{Nodes: nodes, K: 2, M: 1}}
 	case ECShardCoalesced:
-		seedLatestObjectMetaVersion(t, backend, "b", "chunked", "cv1", objectMeta{
+		seedLatestBlobOnSvc(t, svc, "b", "chunked", "cv1", PutObjectMetaCmd{
 			ECData: 2, ECParity: 1, NodeIDs: nodes,
 			Coalesced: []CoalescedShardRef{{CoalescedID: "c1", ShardKey: "chunked/coalesced/c1", ECData: 2, ECParity: 1, NodeIDs: nodes}},
 		})
@@ -309,8 +294,8 @@ func TestShardPlacementMonitor_Scan_ReportsCorruptShard(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			db := newTestDB(t)
-			fsm := NewFSM(db, newStateKeyspaceEmpty())
-			backend := &DistributedBackend{db: db, fsm: fsm}
+			fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
+			backend := &DistributedBackend{store: badgermeta.Wrap(db), fsm: fsm}
 			svc, dir := newTestShardService(t)
 			const self = "node-A"
 
@@ -358,8 +343,8 @@ func TestShardPlacementMonitor_Scan_TransientReadError(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			db := newTestDB(t)
-			fsm := NewFSM(db, newStateKeyspaceEmpty())
-			backend := &DistributedBackend{db: db, fsm: fsm}
+			fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
+			backend := &DistributedBackend{store: badgermeta.Wrap(db), fsm: fsm}
 			svc, dir := newTestShardService(t)
 			const self = "node-A"
 
@@ -400,18 +385,18 @@ func TestShardPlacementMonitor_Scan_TransientReadError(t *testing.T) {
 // with the correct ObjectKey/VersionID/ShardKey/Placement and shardIdx.
 func TestShardPlacementMonitor_Scan_DetectsMissingSegmentShard(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
-	backend := &DistributedBackend{db: db, fsm: fsm}
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
+	backend := &DistributedBackend{store: badgermeta.Wrap(db), fsm: fsm}
 	svc, _ := newTestShardService(t)
 
 	const self = "node-A"
 	segNodes := []string{self, "node-B", "node-C"}
-	seedLatestObjectMetaVersion(t, backend, "b", "chunked", "cv1", objectMeta{
+	seedLatestBlobOnSvc(t, svc, "b", "chunked", "cv1", PutObjectMetaCmd{
 		// Top-level EC fields mirror segment-0; presence of Segments means no
 		// object-version target is emitted for this object.
 		ECData: 2, ECParity: 1, NodeIDs: segNodes,
-		Segments: []storage.SegmentRef{
-			{BlobID: "seg-ok", ECData: 2, ECParity: 1, NodeIDs: segNodes},
+		Segments: []SegmentMetaEntry{
+			{BlobID: "seg-ok", ECData: 2, ECParity: 1, NodeIDs: segNodes, SegmentIdx: 0},
 		},
 	})
 
@@ -446,13 +431,13 @@ func TestShardPlacementMonitor_Scan_DetectsMissingSegmentShard(t *testing.T) {
 // not a derived one — plus the right Placement and shardIdx.
 func TestShardPlacementMonitor_Scan_DetectsMissingCoalescedShard(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
-	backend := &DistributedBackend{db: db, fsm: fsm}
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
+	backend := &DistributedBackend{store: badgermeta.Wrap(db), fsm: fsm}
 	svc, _ := newTestShardService(t)
 
 	const self = "node-A"
 	coalNodes := []string{self, "node-B", "node-C"}
-	seedLatestObjectMetaVersion(t, backend, "b", "chunked", "cv1", objectMeta{
+	seedLatestBlobOnSvc(t, svc, "b", "chunked", "cv1", PutObjectMetaCmd{
 		ECData: 2, ECParity: 1, NodeIDs: coalNodes,
 		Coalesced: []CoalescedShardRef{
 			{CoalescedID: "c1", ShardKey: "chunked/coalesced/c1", ECData: 2, ECParity: 1, NodeIDs: coalNodes},
@@ -486,7 +471,7 @@ func TestShardPlacementMonitor_Scan_DetectsMissingCoalescedShard(t *testing.T) {
 
 func TestShardPlacementMonitor_Start_StopsOnCtxCancel(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 	svc, _ := newTestShardService(t)
 
 	monitor := NewShardPlacementMonitor(fsm, nil, svc, "node-A", 10*time.Millisecond)
@@ -508,18 +493,19 @@ func TestShardPlacementMonitor_Start_StopsOnCtxCancel(t *testing.T) {
 
 func TestShardPlacementMonitor_Scan_CtxCancelMidRepair(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
-	backend := &DistributedBackend{db: db, fsm: fsm}
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
+	backend := &DistributedBackend{store: badgermeta.Wrap(db), fsm: fsm}
 	svc, _ := newTestShardService(t)
 
 	const self = "node-A"
-	// Seed 5 EC segment objects with self as shard-0 owner but NO local shards on
-	// disk — so each will fire onMissing. We only cancel after the first.
+	// Seed 5 EC segment objects (in the quorum-meta blob) with self as shard-0
+	// owner but NO local shards on disk — so each will fire onMissing. We only
+	// cancel after the first.
 	for i := 0; i < 5; i++ {
 		nodes := []string{self, "node-B", "node-C"}
-		seedLatestObjectMetaVersion(t, backend, "b", fmtKey(i), "v1", objectMeta{
+		seedLatestBlobOnSvc(t, svc, "b", fmtKey(i), "v1", PutObjectMetaCmd{
 			ECData: 2, ECParity: 1, NodeIDs: nodes,
-			Segments: []storage.SegmentRef{
+			Segments: []SegmentMetaEntry{
 				{BlobID: "seg-" + fmtKey(i), ECData: 2, ECParity: 1, NodeIDs: nodes},
 			},
 		})

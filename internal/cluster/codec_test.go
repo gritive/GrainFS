@@ -11,50 +11,7 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-func TestEncodeDecodeCommand_CreateBucket(t *testing.T) {
-	orig := CreateBucketCmd{Bucket: "my-bucket"}
-
-	encoded, err := EncodeCommand(CmdCreateBucket, orig)
-	require.NoError(t, err)
-
-	cmd, err := DecodeCommand(encoded)
-	require.NoError(t, err)
-	assert.Equal(t, CmdCreateBucket, cmd.Type)
-
-	decoded, err := decodeCreateBucketCmd(cmd.Data)
-	require.NoError(t, err)
-	assert.Equal(t, "my-bucket", decoded.Bucket)
-	assert.False(t, decoded.BypassReserved, "default bypass_reserved must be false")
-}
-
-func TestEncodeDecodeCommand_CreateBucket_BypassReserved(t *testing.T) {
-	// Roundtrip with BypassReserved=true (bootstrap bypass path).
-	orig := CreateBucketCmd{Bucket: "_grainfs", BypassReserved: true}
-
-	encoded, err := EncodeCommand(CmdCreateBucket, orig)
-	require.NoError(t, err)
-
-	cmd, err := DecodeCommand(encoded)
-	require.NoError(t, err)
-
-	decoded, err := decodeCreateBucketCmd(cmd.Data)
-	require.NoError(t, err)
-	assert.Equal(t, "_grainfs", decoded.Bucket)
-	assert.True(t, decoded.BypassReserved, "bypass_reserved must round-trip as true")
-}
-
-func TestEncodeDecodeCommand_CreateBucket_BypassHelper(t *testing.T) {
-	// encodeCreateBucketCmdBypass must produce a decodable bypass=true payload.
-	data, err := encodeCreateBucketCmdBypass("default")
-	require.NoError(t, err)
-
-	decoded, err := decodeCreateBucketCmd(data)
-	require.NoError(t, err)
-	assert.Equal(t, "default", decoded.Bucket)
-	assert.True(t, decoded.BypassReserved)
-}
-
-func TestEncodeDecodeCommand_PutObjectMeta(t *testing.T) {
+func TestQuorumMetaBlobCodec_PutObjectMetaRoundTrip(t *testing.T) {
 	orig := PutObjectMetaCmd{
 		Bucket:           "test-bucket",
 		Key:              "photos/sunset.jpg",
@@ -67,14 +24,10 @@ func TestEncodeDecodeCommand_PutObjectMeta(t *testing.T) {
 		SSEAlgorithm:     "AES256",
 	}
 
-	encoded, err := EncodeCommand(CmdPutObjectMeta, orig)
+	blob, err := encodeQuorumMetaBlob(orig)
 	require.NoError(t, err)
 
-	cmd, err := DecodeCommand(encoded)
-	require.NoError(t, err)
-	assert.Equal(t, CmdPutObjectMeta, cmd.Type)
-
-	decoded, err := decodePutObjectMetaCmd(cmd.Data)
+	decoded, err := decodeQuorumMetaBlob(blob)
 	require.NoError(t, err)
 	assert.Equal(t, "test-bucket", decoded.Bucket)
 	assert.Equal(t, "photos/sunset.jpg", decoded.Key)
@@ -128,11 +81,9 @@ func TestPutObjectMetaCmd_SegmentsRoundTrip(t *testing.T) {
 		},
 	}
 
-	encoded, err := EncodeCommand(CmdPutObjectMeta, orig)
+	blob, err := encodeQuorumMetaBlob(orig)
 	require.NoError(t, err)
-	cmd, err := DecodeCommand(encoded)
-	require.NoError(t, err)
-	decoded, err := decodePutObjectMetaCmd(cmd.Data)
+	decoded, err := decodeQuorumMetaBlob(blob)
 	require.NoError(t, err)
 
 	require.Len(t, decoded.Segments, 2)
@@ -160,108 +111,17 @@ func TestPutObjectMetaCmd_EmptySegmentsLegacyCompatible(t *testing.T) {
 		ModTime:          1700000000,
 		PlacementGroupID: "group-0",
 	}
-	encoded, err := EncodeCommand(CmdPutObjectMeta, orig)
+	blob, err := encodeQuorumMetaBlob(orig)
 	require.NoError(t, err)
-	cmd, err := DecodeCommand(encoded)
-	require.NoError(t, err)
-	decoded, err := decodePutObjectMetaCmd(cmd.Data)
+	decoded, err := decodeQuorumMetaBlob(blob)
 	require.NoError(t, err)
 	assert.Empty(t, decoded.Segments)
 	assert.Equal(t, "test-bucket", decoded.Bucket)
 	assert.Equal(t, "small.txt", decoded.Key)
 }
 
-func TestEncodeDecodeCommand_CompleteMultipart(t *testing.T) {
-	orig := CompleteMultipartCmd{
-		Bucket:           "uploads",
-		Key:              "video.mp4",
-		UploadID:         "upload-abc-123",
-		Size:             5242880,
-		ContentType:      "video/mp4",
-		ETag:             "abc123def456",
-		ModTime:          1700001000,
-		PlacementGroupID: "group-3",
-		ECData:           2,
-		ECParity:         1,
-		NodeIDs:          []string{"n1", "n2", "n3"},
-	}
-
-	encoded, err := EncodeCommand(CmdCompleteMultipart, orig)
-	require.NoError(t, err)
-
-	cmd, err := DecodeCommand(encoded)
-	require.NoError(t, err)
-	assert.Equal(t, CmdCompleteMultipart, cmd.Type)
-
-	decoded, err := decodeCompleteMultipartCmd(cmd.Data)
-	require.NoError(t, err)
-	assert.Equal(t, "uploads", decoded.Bucket)
-	assert.Equal(t, "video.mp4", decoded.Key)
-	assert.Equal(t, "upload-abc-123", decoded.UploadID)
-	assert.Equal(t, int64(5242880), decoded.Size)
-	assert.Equal(t, "video/mp4", decoded.ContentType)
-	assert.Equal(t, "abc123def456", decoded.ETag)
-	assert.Equal(t, int64(1700001000), decoded.ModTime)
-	assert.Equal(t, "group-3", decoded.PlacementGroupID)
-	assert.Equal(t, uint8(2), decoded.ECData)
-	assert.Equal(t, uint8(1), decoded.ECParity)
-	assert.Equal(t, []string{"n1", "n2", "n3"}, decoded.NodeIDs)
-}
-
-func TestCompleteMultipartCmd_PartsSegmentsRoundTrip(t *testing.T) {
-	orig := CompleteMultipartCmd{
-		Bucket:           "uploads",
-		Key:              "large-video.mp4",
-		UploadID:         "upload-with-layout",
-		Size:             40 << 20,
-		ContentType:      "video/mp4",
-		ETag:             "complete-etag",
-		ModTime:          1700001001,
-		VersionID:        "v-complete",
-		PlacementGroupID: "group-a",
-		ECData:           4,
-		ECParity:         2,
-		NodeIDs:          []string{"n1", "n2", "n3", "n4", "n5", "n6"},
-		Tags:             []storage.Tag{{Key: "env", Value: "prod"}},
-		Parts: []storage.MultipartPartEntry{
-			{PartNumber: 1, Size: 5 << 20, ETag: "part-1"},
-			{PartNumber: 2, Size: 35 << 20, ETag: "part-2"},
-		},
-		Segments: []SegmentMetaEntry{
-			{
-				BlobID:           "blob-0",
-				Size:             16 << 20,
-				Checksum:         []byte{0x01, 0x02, 0x03, 0x04},
-				PlacementGroupID: "group-a",
-				ShardSize:        4 << 20,
-				SegmentIdx:       0,
-				NodeIDs:          []string{"n1", "n2", "n3", "n4", "n5", "n6"},
-				ECData:           4,
-				ECParity:         2,
-			},
-			{
-				BlobID:           "blob-1",
-				Size:             24 << 20,
-				Checksum:         []byte{0x05, 0x06, 0x07, 0x08},
-				PlacementGroupID: "group-b",
-				ShardSize:        4 << 20,
-				SegmentIdx:       1,
-				NodeIDs:          []string{"n2", "n3", "n4", "n5", "n6", "n7"},
-				ECData:           4,
-				ECParity:         2,
-			},
-		},
-	}
-
-	raw, err := encodeCompleteMultipartCmd(orig)
-	require.NoError(t, err)
-	got, err := decodeCompleteMultipartCmd(raw)
-	require.NoError(t, err)
-
-	assert.Equal(t, orig.Parts, got.Parts)
-	assert.Equal(t, orig.Segments, got.Segments)
-	assert.Equal(t, orig.Tags, got.Tags)
-}
+// TestQuorumMetaBlobCodec_CompleteMultipart, TestCompleteMultipartCmd_PartsSegmentsRoundTrip
+// removed in M4: CmdCompleteMultipart/CompleteMultipartCmd are deleted.
 
 func TestObjectMetaCodecRoundTrip(t *testing.T) {
 	orig := objectMeta{
@@ -289,6 +149,59 @@ func TestObjectMetaCodecRoundTrip(t *testing.T) {
 	assert.Equal(t, orig.PlacementGroupID, decoded.PlacementGroupID)
 	assert.Equal(t, orig.UserMetadata, decoded.UserMetadata)
 	assert.Equal(t, orig.SSEAlgorithm, decoded.SSEAlgorithm)
+}
+
+// StoredSize (compressed-bytes length for per-segment zstd) must survive the
+// ObjectMeta SegmentRef wire codec. StoredSize==0 means uncompressed; a
+// non-zero value that differs from Size must round-trip so a future
+// byte-serving read via this path decompresses the correct number of bytes
+// instead of silently reading a compressed segment as plaintext.
+func TestObjectMetaCodec_SegmentStoredSizeRoundTrip(t *testing.T) {
+	orig := objectMeta{
+		Key:              "large/compressible.bin",
+		Size:             32 << 20,
+		ContentType:      "application/octet-stream",
+		ETag:             "etag-plaintext",
+		LastModified:     1700003000,
+		PlacementGroupID: "group-a",
+		ECData:           4,
+		ECParity:         2,
+		Segments: []storage.SegmentRef{
+			{
+				BlobID:           "blob-compressed",
+				Size:             16 << 20, // plaintext bytes
+				Checksum:         []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10},
+				PlacementGroupID: "group-a",
+				ShardSize:        1 << 20,
+				ECData:           4,
+				ECParity:         2,
+				StripeBytes:      64 << 10,
+				StoredSize:       7 << 20, // compressed bytes in the EC blob (< Size)
+			},
+			{
+				BlobID:           "blob-uncompressed",
+				Size:             16 << 20,
+				Checksum:         []byte{0x10, 0x0f, 0x0e, 0x0d, 0x0c, 0x0b, 0x0a, 0x09, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01},
+				PlacementGroupID: "group-a",
+				ShardSize:        1 << 20,
+				ECData:           4,
+				ECParity:         2,
+				StripeBytes:      64 << 10,
+				StoredSize:       0, // incompressible → stored uncompressed
+			},
+		},
+	}
+
+	data, err := marshalObjectMeta(orig)
+	require.NoError(t, err)
+	decoded, err := unmarshalObjectMeta(data)
+	require.NoError(t, err)
+
+	require.Len(t, decoded.Segments, 2)
+	assert.Equal(t, int64(7<<20), decoded.Segments[0].StoredSize, "compressed segment StoredSize must round-trip")
+	assert.Equal(t, int64(0), decoded.Segments[1].StoredSize, "uncompressed segment StoredSize stays 0")
+	// Size (plaintext) stays independent of StoredSize.
+	assert.Equal(t, int64(16<<20), decoded.Segments[0].Size)
 }
 
 func TestSnapshotStateCodecRoundTrip(t *testing.T) {
@@ -349,143 +262,19 @@ func TestClusterMultipartMetaCodecLegacyDecodeZeroValues(t *testing.T) {
 	assert.Equal(t, "group-legacy", decoded.PlacementGroupID)
 }
 
-func TestEncodeDecodeCommand_DeleteBucket(t *testing.T) {
-	orig := DeleteBucketCmd{Bucket: "remove-me"}
-
-	encoded, err := EncodeCommand(CmdDeleteBucket, orig)
-	require.NoError(t, err)
-
-	cmd, err := DecodeCommand(encoded)
-	require.NoError(t, err)
-	assert.Equal(t, CmdDeleteBucket, cmd.Type)
-
-	decoded, err := decodeDeleteBucketCmd(cmd.Data)
-	require.NoError(t, err)
-	assert.Equal(t, "remove-me", decoded.Bucket)
-}
-
-func TestEncodeDecodeCommand_DeleteObject(t *testing.T) {
-	orig := DeleteObjectCmd{Bucket: "b", Key: "file.txt"}
-
-	encoded, err := EncodeCommand(CmdDeleteObject, orig)
-	require.NoError(t, err)
-
-	cmd, err := DecodeCommand(encoded)
-	require.NoError(t, err)
-	assert.Equal(t, CmdDeleteObject, cmd.Type)
-
-	decoded, err := decodeDeleteObjectCmd(cmd.Data)
-	require.NoError(t, err)
-	assert.Equal(t, "b", decoded.Bucket)
-	assert.Equal(t, "file.txt", decoded.Key)
-}
-
-func TestEncodeDecodeCommand_CreateMultipartUpload(t *testing.T) {
-	orig := CreateMultipartUploadCmd{
-		UploadID: "mpu-123", Bucket: "b", Key: "big.bin",
-		ContentType: "application/octet-stream", CreatedAt: 1700000000,
-		PlacementGroupID: "group-4",
-	}
-
-	encoded, err := EncodeCommand(CmdCreateMultipartUpload, orig)
-	require.NoError(t, err)
-
-	cmd, err := DecodeCommand(encoded)
-	require.NoError(t, err)
-	assert.Equal(t, CmdCreateMultipartUpload, cmd.Type)
-
-	decoded, err := decodeCreateMultipartUploadCmd(cmd.Data)
-	require.NoError(t, err)
-	assert.Equal(t, "mpu-123", decoded.UploadID)
-	assert.Equal(t, "b", decoded.Bucket)
-	assert.Equal(t, "big.bin", decoded.Key)
-	assert.Equal(t, "application/octet-stream", decoded.ContentType)
-	assert.Equal(t, int64(1700000000), decoded.CreatedAt)
-	assert.Equal(t, "group-4", decoded.PlacementGroupID)
-}
-
-func TestEncodeDecodeCommand_AbortMultipart(t *testing.T) {
-	orig := AbortMultipartCmd{Bucket: "b", Key: "abort.bin", UploadID: "mpu-abort"}
-
-	encoded, err := EncodeCommand(CmdAbortMultipart, orig)
-	require.NoError(t, err)
-
-	cmd, err := DecodeCommand(encoded)
-	require.NoError(t, err)
-	assert.Equal(t, CmdAbortMultipart, cmd.Type)
-
-	decoded, err := decodeAbortMultipartCmd(cmd.Data)
-	require.NoError(t, err)
-	assert.Equal(t, "b", decoded.Bucket)
-	assert.Equal(t, "abort.bin", decoded.Key)
-	assert.Equal(t, "mpu-abort", decoded.UploadID)
-}
-
-func TestEncodeDecodeCommand_SetBucketPolicy(t *testing.T) {
-	policyJSON := []byte(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow"}]}`)
-	orig := SetBucketPolicyCmd{Bucket: "my-bucket", PolicyJSON: policyJSON}
-
-	encoded, err := EncodeCommand(CmdSetBucketPolicy, orig)
-	require.NoError(t, err)
-
-	cmd, err := DecodeCommand(encoded)
-	require.NoError(t, err)
-	assert.Equal(t, CmdSetBucketPolicy, cmd.Type)
-
-	decoded, err := decodeSetBucketPolicyCmd(cmd.Data)
-	require.NoError(t, err)
-	assert.Equal(t, "my-bucket", decoded.Bucket)
-	assert.Equal(t, policyJSON, decoded.PolicyJSON)
-}
-
-func TestEncodeDecodeCommand_DeleteBucketPolicy(t *testing.T) {
-	orig := DeleteBucketPolicyCmd{Bucket: "policy-bucket"}
-
-	encoded, err := EncodeCommand(CmdDeleteBucketPolicy, orig)
-	require.NoError(t, err)
-
-	cmd, err := DecodeCommand(encoded)
-	require.NoError(t, err)
-	assert.Equal(t, CmdDeleteBucketPolicy, cmd.Type)
-
-	decoded, err := decodeDeleteBucketPolicyCmd(cmd.Data)
-	require.NoError(t, err)
-	assert.Equal(t, "policy-bucket", decoded.Bucket)
-}
-
-func TestDecodeCommands_InvalidData(t *testing.T) {
-	// FlatBuffers panics on malformed data; test that the top-level entry
-	// points (DecodeCommand, unmarshalSnapshotState) convert panics to errors.
-	// Inner decode functions are only called with already-validated data.
-	_, err := DecodeCommand([]byte("not valid flatbuffer data"))
-	assert.Error(t, err, "DecodeCommand should fail on invalid data")
-
-	_, err = unmarshalSnapshotState([]byte("not valid flatbuffer data"))
+func TestUnmarshalSnapshotState_InvalidData(t *testing.T) {
+	// FlatBuffers panics on malformed data; the snapshot entry point converts
+	// panics to errors. Inner decode functions are only called with
+	// already-validated data.
+	_, err := unmarshalSnapshotState([]byte("not valid flatbuffer data"))
 	assert.Error(t, err, "unmarshalSnapshotState should fail on invalid data")
-
-	_, err = DecodeCommand(nil)
-	assert.Error(t, err, "DecodeCommand should fail on nil data")
 
 	_, err = unmarshalSnapshotState(nil)
 	assert.Error(t, err, "unmarshalSnapshotState should fail on nil data")
 }
 
-func TestEncodePayload_UnknownCommandType(t *testing.T) {
-	_, err := encodePayload(CommandType(99), CreateBucketCmd{Bucket: "x"})
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "unknown command type")
-}
-
 func TestClusterCodecOutputIsNotJSON(t *testing.T) {
-	// Encode a command and verify the output is not valid JSON
-	encoded, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: "test"})
-	require.NoError(t, err)
-
 	var js json.RawMessage
-	err = json.Unmarshal(encoded, &js)
-	assert.Error(t, err, "protobuf output should not parse as valid JSON")
-
-	// Also verify objectMeta encoding is not JSON
 	metaBytes, err := marshalObjectMeta(objectMeta{
 		Key: "key", Size: 10, ContentType: "text/plain", ETag: "e", LastModified: 1,
 	})
@@ -498,24 +287,6 @@ func TestClusterCodecOutputIsNotJSON(t *testing.T) {
 	require.NoError(t, err)
 	err = json.Unmarshal(snapBytes, &js)
 	assert.Error(t, err, "protobuf snapshot output should not parse as valid JSON")
-}
-
-func TestCodec_SetBucketVersioningCmd_RoundTrip(t *testing.T) {
-	cmd := SetBucketVersioningCmd{Bucket: "mybucket", State: "Enabled"}
-	raw, err := encodeSetBucketVersioningCmd(cmd)
-	require.NoError(t, err)
-	got, err := decodeSetBucketVersioningCmd(raw)
-	require.NoError(t, err)
-	assert.Equal(t, cmd, got)
-}
-
-func TestCodec_SetObjectACLCmd_RoundTrip(t *testing.T) {
-	cmd := SetObjectACLCmd{Bucket: "b", Key: "file.txt", ACL: 2}
-	raw, err := encodeSetObjectACLCmd(cmd)
-	require.NoError(t, err)
-	got, err := decodeSetObjectACLCmd(raw)
-	require.NoError(t, err)
-	assert.Equal(t, cmd, got)
 }
 
 func TestCodec_ObjectMeta_ACL_RoundTrip(t *testing.T) {
@@ -650,26 +421,6 @@ func TestCoalescedShardRefRoundTrip(t *testing.T) {
 	}
 }
 
-func TestCoalesceSegmentsCmdRoundTrip(t *testing.T) {
-	in := CoalesceSegmentsCmd{
-		Bucket: "b", Key: "a", CoalescedID: "c1",
-		ShardKey: "a/coalesced/c1", Size: 1024, ETag: "etag",
-		ConsumedSegmentIDs: []string{"s1", "s2"},
-	}
-	raw, err := encodeCoalesceSegmentsCmd(in)
-	if err != nil {
-		t.Fatalf("encode: %v", err)
-	}
-	got, err := decodeCoalesceSegmentsCmd(raw)
-	if err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if got.CoalescedID != "c1" || got.ShardKey != "a/coalesced/c1" || got.Size != 1024 ||
-		len(got.ConsumedSegmentIDs) != 2 || got.ConsumedSegmentIDs[0] != "s1" {
-		t.Fatalf("CoalesceSegmentsCmd round-trip mismatch: %+v", got)
-	}
-}
-
 // TestCoalescedShardRefECParamsRoundTrip ensures the Phase B3 EC placement
 // params (ECData / ECParity / NodeIDs) survive marshal+unmarshal.
 // These fields are required by appendableReader to reconstruct the coalesced
@@ -702,34 +453,6 @@ func TestCoalescedShardRefECParamsRoundTrip(t *testing.T) {
 	}
 	if len(c.NodeIDs) != 6 || c.NodeIDs[0] != "n1" || c.NodeIDs[5] != "n6" {
 		t.Fatalf("NodeIDs mismatch: %v", c.NodeIDs)
-	}
-}
-
-// TestCoalesceSegmentsCmdECParamsRoundTrip ensures the Raft command carries
-// the EC placement decision so the FSM apply can store it on the
-// CoalescedShardRef. Without these fields the read path cannot reconstruct
-// the coalesced blob.
-func TestCoalesceSegmentsCmdECParamsRoundTrip(t *testing.T) {
-	in := CoalesceSegmentsCmd{
-		Bucket: "b", Key: "a", CoalescedID: "c1",
-		ShardKey: "a/coalesced/c1", Size: 4096, ETag: "etag",
-		ConsumedSegmentIDs: []string{"s1", "s2"},
-		Placement:          []string{"n1", "n2", "n3", "n4", "n5", "n6"},
-		ECData:             4, ECParity: 2,
-	}
-	raw, err := encodeCoalesceSegmentsCmd(in)
-	if err != nil {
-		t.Fatalf("encode: %v", err)
-	}
-	got, err := decodeCoalesceSegmentsCmd(raw)
-	if err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if got.ECData != 4 || got.ECParity != 2 {
-		t.Fatalf("EC params mismatch: ecData=%d ecParity=%d", got.ECData, got.ECParity)
-	}
-	if len(got.Placement) != 6 || got.Placement[0] != "n1" || got.Placement[5] != "n6" {
-		t.Fatalf("Placement mismatch: %v", got.Placement)
 	}
 }
 
@@ -792,29 +515,6 @@ func TestCodec_ObjectMeta_TagsRoundTrip(t *testing.T) {
 	require.Equal(t, original.Tags, got.Tags)
 }
 
-func TestCodec_SetObjectTagsCmd_RoundTrip(t *testing.T) {
-	cmd := SetObjectTagsCmd{
-		Bucket:    "b",
-		Key:       "k",
-		VersionID: "v1",
-		Tags:      []storage.Tag{{Key: "env", Value: "prod"}, {Key: "owner", Value: "alice"}},
-	}
-	raw, err := encodeSetObjectTagsCmd(cmd)
-	require.NoError(t, err)
-	got, err := decodeSetObjectTagsCmd(raw)
-	require.NoError(t, err)
-	require.Equal(t, cmd, got)
-}
-
-func TestCodec_SetObjectTagsCmd_EmptyTags_RoundTrip(t *testing.T) {
-	cmd := SetObjectTagsCmd{Bucket: "b", Key: "k", VersionID: ""}
-	raw, err := encodeSetObjectTagsCmd(cmd)
-	require.NoError(t, err)
-	got, err := decodeSetObjectTagsCmd(raw)
-	require.NoError(t, err)
-	require.Equal(t, cmd, got)
-}
-
 func TestCodec_ClusterMultipartMeta_RoundTrip_WithTags(t *testing.T) {
 	orig := clusterMultipartMeta{
 		Bucket: "b", Key: "k", CreatedAt: 123, ContentType: "text/plain",
@@ -828,25 +528,32 @@ func TestCodec_ClusterMultipartMeta_RoundTrip_WithTags(t *testing.T) {
 	require.Equal(t, orig, got)
 }
 
-func TestCodec_CreateMultipartUploadCmd_RoundTrip_WithTags(t *testing.T) {
-	cmd := CreateMultipartUploadCmd{
-		Bucket: "b", Key: "k", UploadID: "u1", ContentType: "text/plain",
-		Tags: []storage.Tag{{Key: "env", Value: "prod"}},
+// TestCodec_CreateMultipartUploadCmd_RoundTrip_WithTags removed in M4.
+
+func TestPutObjectMetaCmd_AppendManifestRoundTrip(t *testing.T) {
+	in := PutObjectMetaCmd{
+		Bucket: "b", Key: "k", Size: 30, ModTime: 1700000000,
+		Segments:     []SegmentMetaEntry{{BlobID: "s1", Size: 10, SegmentIdx: 0}, {BlobID: "s2", Size: 20, SegmentIdx: 1}},
+		Coalesced:    []CoalescedShardRef{{CoalescedID: "c1", Size: 30, ETag: "etag", ShardKey: "k/coalesced/c1"}},
+		IsAppendable: true, MetaSeq: 7, MetaSeqCAS: true,
 	}
-	raw, err := encodeCreateMultipartUploadCmd(cmd)
+	blob, err := encodeQuorumMetaBlob(in)
 	require.NoError(t, err)
-	got, err := decodeCreateMultipartUploadCmd(raw)
+	out, err := decodeQuorumMetaBlob(blob)
 	require.NoError(t, err)
-	require.Equal(t, cmd, got)
+	require.True(t, out.IsAppendable)
+	require.True(t, out.MetaSeqCAS)
+	require.Equal(t, uint64(7), out.MetaSeq)
+	require.Len(t, out.Coalesced, 1)
+	require.Equal(t, "c1", out.Coalesced[0].CoalescedID)
+	require.Len(t, out.Segments, 2)
 }
 
-func TestFSMValueResealDoneCmd_RoundTrip(t *testing.T) {
-	data, err := EncodeCommand(CmdFSMValueResealDone, FSMValueResealDoneCmd{Gen: 3})
+func TestPutObjectMetaCmdRoundTripsAppendCallMD5s(t *testing.T) {
+	cmd := PutObjectMetaCmd{Bucket: "b", Key: "k", IsAppendable: true, AppendCallMD5s: [][]byte{[]byte("aaaaaaaaaaaaaaaa"), []byte("bbbbbbbbbbbbbbbb")}}
+	enc, err := encodePutObjectMetaCmd(cmd)
 	require.NoError(t, err)
-	cmd, err := DecodeCommand(data)
+	got, err := decodePutObjectMetaCmd(enc)
 	require.NoError(t, err)
-	require.Equal(t, CmdFSMValueResealDone, cmd.Type)
-	got, err := decodeFSMValueResealDoneCmd(cmd.Data)
-	require.NoError(t, err)
-	require.Equal(t, uint32(3), got.Gen)
+	require.Equal(t, cmd.AppendCallMD5s, got.AppendCallMD5s)
 }

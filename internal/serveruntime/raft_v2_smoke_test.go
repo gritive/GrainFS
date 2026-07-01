@@ -27,10 +27,8 @@ func TestNewRaftV2NodeForServeruntime_DurableStoresAtSubdir(t *testing.T) {
 	require.NotNil(t, node, "v2 node must be constructed")
 	require.NotNil(t, closeFn, "closeFn must be non-nil so caller can release the Badger DB")
 
-	// Smoke transport stubs — bootstrap a single-node cluster, propose,
-	// drain. The PR 26 dispatch in run.go skips QUIC RPC wiring for v2
-	// (deferred to PR 27); this test mirrors that behaviour by using
-	// noop transports.
+	// Smoke transport stubs — bootstrap a single-node cluster, propose, drain.
+	// This test mirrors the single-node path by using noop transports.
 	node.SetTransport(
 		func(string, *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
 			return nil, errNoTransport

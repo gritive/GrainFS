@@ -12,6 +12,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/server/servertest"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -32,8 +33,8 @@ func TestGetObject_IfNoneMatch(t *testing.T) {
 
 	s := New("127.0.0.1:14859", backend)
 	go func() { s.Run() }()
-	defer shutdownTestServer(t, s)
-	waitForTCP(t, "127.0.0.1:14859")
+	defer servertest.ShutdownServer(t, s)
+	servertest.WaitTCP(t, "127.0.0.1:14859")
 
 	etag := fmt.Sprintf("%q", obj.ETag)
 
@@ -91,8 +92,8 @@ func TestGetObject_IfModifiedSince(t *testing.T) {
 
 	s := New("127.0.0.1:14861", backend)
 	go func() { s.Run() }()
-	defer shutdownTestServer(t, s)
-	waitForTCP(t, "127.0.0.1:14861")
+	defer servertest.ShutdownServer(t, s)
+	servertest.WaitTCP(t, "127.0.0.1:14861")
 
 	t.Run("future date returns 304", func(t *testing.T) {
 		req, _ := http.NewRequest("GET", "http://127.0.0.1:14861/test-bucket/file.txt", nil)
@@ -138,8 +139,8 @@ func TestGetObject_IfMatch(t *testing.T) {
 
 	s := New("127.0.0.1:14862", backend)
 	go func() { s.Run() }()
-	defer shutdownTestServer(t, s)
-	waitForTCP(t, "127.0.0.1:14862")
+	defer servertest.ShutdownServer(t, s)
+	servertest.WaitTCP(t, "127.0.0.1:14862")
 
 	etag := fmt.Sprintf("%q", obj.ETag)
 
@@ -183,8 +184,8 @@ func TestHeadObject_ConditionalHeaders(t *testing.T) {
 
 	s := New("127.0.0.1:14863", backend)
 	go func() { s.Run() }()
-	defer shutdownTestServer(t, s)
-	waitForTCP(t, "127.0.0.1:14863")
+	defer servertest.ShutdownServer(t, s)
+	servertest.WaitTCP(t, "127.0.0.1:14863")
 
 	etag := fmt.Sprintf("%q", obj.ETag)
 

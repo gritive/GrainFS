@@ -15,6 +15,7 @@ type PlacementMeta struct {
 	VersionID        string
 	ECData           uint8
 	ECParity         uint8
+	StripeBytes      uint32
 	NodeIDs          []string
 	PlacementGroupID string
 }
@@ -59,7 +60,7 @@ func (b *DistributedBackend) ResolvePlacement(ctx context.Context, bucket, key s
 		return ResolvedPlacement{}, fmt.Errorf("%w: metadata placement length %d != k+m %d for %s/%s",
 			ErrPlacementCorrupt, len(meta.NodeIDs), cfg.NumShards(), bucket, key)
 	}
-	base.Record = PlacementRecord{Nodes: meta.NodeIDs, K: cfg.DataShards, M: cfg.ParityShards}
+	base.Record = PlacementRecord{Nodes: meta.NodeIDs, K: cfg.DataShards, M: cfg.ParityShards, StripeBytes: int(meta.StripeBytes)}
 	return base, nil
 }
 

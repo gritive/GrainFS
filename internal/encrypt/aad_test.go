@@ -40,7 +40,6 @@ func TestBuildAAD_AllDomainsUnique(t *testing.T) {
 		{DomainDEKFSMWrap, "dek_wrap"},
 		{DomainKEKRotate, "kek_rotate"},
 		{DomainKEKCatchup, "kek_catchup"},
-		{DomainNBD, "nbd"},
 		{DomainFSMValue, "fsm_value"},
 	} {
 		if prev, ok := seen[uint16(dom.tag)]; ok {
@@ -80,7 +79,7 @@ func TestBuildAAD_AllDomainsIncludesIAMAdmin(t *testing.T) {
 	domains := []AADDomain{
 		DomainShard, DomainWAL, DomainSnapshotBody, DomainSnapshotDEK,
 		DomainJWTKey, DomainDEKFSMWrap, DomainKEKRotate, DomainKEKCatchup,
-		DomainNBD, DomainIAMAdmin, DomainCapabilityAssertV1, DomainCASChunk,
+		DomainIAMAdmin, DomainCapabilityAssertV1, DomainCASChunk,
 		DomainIAMCredential, DomainFSMValue, DomainClusterConfigSecret,
 		DomainProtocolCredential,
 	}
@@ -92,7 +91,7 @@ func TestBuildAAD_AllDomainsIncludesIAMAdmin(t *testing.T) {
 		seen[uint16(d)] = struct{}{}
 		_ = BuildAAD(d, clusterID) // exercise BuildAAD with every domain
 	}
-	require.Len(t, seen, 16)
+	require.Len(t, seen, 15)
 }
 
 func TestAppendAADByteIdenticalToBuildAAD(t *testing.T) {

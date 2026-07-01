@@ -8,55 +8,15 @@ import (
 
 	"go.uber.org/goleak"
 
+	"github.com/dgraph-io/badger/v4"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
 
-var _ = Describe("ClusterCoordinator single-node encrypted Truncate", func() {
-	var (
-		coord *ClusterCoordinator
-		ctx   context.Context
-	)
-
-	BeforeEach(func() {
-		ctx = context.Background()
-
-		// Build a single-node GroupBackend with encrypted ShardService (default
-		// from newTestGroupBackend — do NOT call SetShardService(nil,nil)).
-		gb := newTestGroupBackend(GinkgoT(), "vol-group")
-		Expect(gb.CreateBucket(ctx, "__grainfs_volumes")).To(Succeed())
-
-		mgr := NewDataGroupManager()
-		mgr.Add(NewDataGroupWithBackend("vol-group", []string{"test-node"}, gb))
-		router := NewRouter(mgr)
-		router.AssignBucket("__grainfs_volumes", "vol-group")
-		meta := &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
-			"vol-group": {ID: "vol-group", PeerIDs: []string{"test-node"}},
-		}}
-		coord = NewClusterCoordinator(&fakeBackend{listResult: []string{"__grainfs_volumes"}}, mgr, router, meta, "test-node").
-			WithECConfig(ECConfig{DataShards: 1, ParityShards: 0})
-	})
-
-	DescribeTable("single-node encrypted internal-bucket Truncate",
-		func(initial, target int, want []byte) {
-			_, err := coord.PutObject(ctx, "__grainfs_volumes", "vol/blk",
-				bytes.NewReader(bytes.Repeat([]byte("x"), initial)), "application/octet-stream")
-			Expect(err).NotTo(HaveOccurred())
-			Expect(coord.Truncate(ctx, "__grainfs_volumes", "vol/blk", int64(target))).To(Succeed())
-			rc, _, err := coord.GetObject(ctx, "__grainfs_volumes", "vol/blk")
-			Expect(err).NotTo(HaveOccurred())
-			defer rc.Close()
-			got, _ := io.ReadAll(rc)
-			Expect(got).To(Equal(want))
-		},
-		Entry("shrink", 16, 4, bytes.Repeat([]byte("x"), 4)),
-		Entry("grow zero-fills", 4, 8, append(bytes.Repeat([]byte("x"), 4), make([]byte, 4)...)),
-	)
-})
-
 var _ = Describe("EC compatibility integration", func() {
 	var (
 		b   *DistributedBackend
+		db  *badger.DB
 		ctx context.Context
 	)
 
@@ -64,11 +24,11 @@ var _ = Describe("EC compatibility integration", func() {
 		if CurrentSpecReport().LeafNodeText == "retrieves EC objects without leaking goroutines after k-of-n succeeds" {
 			// Snapshot goroutines that already exist before this spec builds its
 			// backend. goleak.VerifyNone is process-global, so without a baseline
-			// it also catches quic-go transport goroutines (Transport.listen,
-			// sendQueue.Run, Conn.run) left behind by *other* cluster tests in the
-			// same binary — those lag past goleak's retry budget under load and
-			// made this assertion flaky in multi-package runs. Baselining here keeps
-			// the check scoped to goroutines this spec's EC read path creates.
+			// it also catches transport goroutines left behind by *other* cluster
+			// tests in the same binary — those can lag past goleak's retry budget
+			// under load and made this assertion flaky in multi-package runs.
+			// Baselining here keeps the check scoped to goroutines this spec's EC
+			// read path creates.
 			ignoreBaseline := goleak.IgnoreCurrent()
 			GinkgoT().Cleanup(func() {
 				goleak.VerifyNone(GinkgoT(),
@@ -79,7 +39,7 @@ var _ = Describe("EC compatibility integration", func() {
 				)
 			})
 		}
-		b = newTestDistributedBackend(GinkgoT())
+		b, db = newTestDistributedBackendWithDB(GinkgoT())
 		ctx = context.Background()
 	})
 
@@ -87,17 +47,18 @@ var _ = Describe("EC compatibility integration", func() {
 		GinkgoHelper()
 		b.SetECConfig(ECConfig{DataShards: dataShards, ParityShards: parityShards})
 		keeper, clusterID := testDEKKeeper(GinkgoT())
-		svc := NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID))
+		svc := NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID))
 		nodes := make([]string, dataShards+parityShards)
 		for i := range nodes {
 			nodes[i] = b.selfAddr
 		}
 		b.SetShardService(svc, nodes)
+		wireTestShardGroup(b)
 	}
 
 	It("stores the first shard service node as selfAddr", func() {
 		keeper, clusterID := testDEKKeeper(GinkgoT())
-		svc := NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID))
+		svc := NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID))
 		allNodes := []string{"addr-self:9001", "addr-peer1:9001", "addr-peer2:9001"}
 
 		b.SetShardService(svc, allNodes)
@@ -111,7 +72,7 @@ var _ = Describe("EC compatibility integration", func() {
 		// The ClusterCoordinator now always returns false from PreferWriteAt;
 		// all writes use the encrypted RMW (PutObject) path.
 		keeper, clusterID := testDEKKeeper(GinkgoT())
-		svc := NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID))
+		svc := NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID))
 		b.SetShardService(svc, []string{b.selfAddr, "peer-1", "peer-2"})
 
 		// DistributedBackend no longer exposes PreferWriteAt (removed); verify via
@@ -121,7 +82,7 @@ var _ = Describe("EC compatibility integration", func() {
 
 	It("keeps selfAddr different from the Raft node ID", func() {
 		keeper, clusterID := testDEKKeeper(GinkgoT())
-		svc := NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID))
+		svc := NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID))
 		b.SetShardService(svc, []string{"addr-self:9001", "addr-peer1:9001"})
 
 		Expect(b.RaftNodeID()).To(Equal("test-node"))
@@ -137,7 +98,7 @@ var _ = Describe("EC compatibility integration", func() {
 			shardKey  = key + "/" + versionID
 		)
 		nodes := []string{"addr-a", "addr-b", "addr-c"}
-		writePlacement(GinkgoT(), b, "bkt", shardKey, nodes)
+		writePlacement(GinkgoT(), b, db, "bkt", shardKey, nodes)
 
 		got, err := b.fsm.LookupShardPlacement("bkt", shardKey)
 		Expect(err).NotTo(HaveOccurred())
@@ -155,8 +116,8 @@ var _ = Describe("EC compatibility integration", func() {
 		v1Nodes := []string{"node-a", "node-b", "node-c"}
 		v2Nodes := []string{"node-x", "node-y", "node-z"}
 
-		writePlacement(GinkgoT(), b, "bkt", key+"/v1", v1Nodes)
-		writePlacement(GinkgoT(), b, "bkt", key+"/v2", v2Nodes)
+		writePlacement(GinkgoT(), b, db, "bkt", key+"/v1", v1Nodes)
+		writePlacement(GinkgoT(), b, db, "bkt", key+"/v2", v2Nodes)
 
 		got1, err := b.fsm.LookupShardPlacement("bkt", key+"/v1")
 		Expect(err).NotTo(HaveOccurred())
@@ -209,7 +170,9 @@ var _ = Describe("EC compatibility integration", func() {
 		obj, err := b.PutObject(ctx, "bkt", "obj", bytes.NewReader(data), "text/plain")
 		Expect(err).NotTo(HaveOccurred())
 
-		shardKey := "obj/" + obj.VersionID
+		// Chunked PUT stores shards under the per-segment key (key/segments/<blobID>).
+		Expect(obj.Segments).NotTo(BeEmpty())
+		shardKey := "obj/segments/" + obj.Segments[0].BlobID
 		Expect(os.Remove(mustShardPath(b.shardSvc, "bkt", shardKey, 0))).To(Succeed())
 
 		rc, _, err := b.GetObject(ctx, "bkt", "obj")

@@ -7,6 +7,7 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/encrypt"
 )
@@ -51,7 +52,7 @@ func TestFSMOpenValuePassesGenuinePlaintext(t *testing.T) {
 }
 
 func TestFSMOpenValueRoundTrip(t *testing.T) {
-	f := NewFSM(newTestDB(t), newStateKeyspaceEmpty())
+	f := NewFSM(badgermeta.Wrap(newTestDB(t)), newStateKeyspaceEmpty())
 	clusterID := bytes.Repeat([]byte{0x71}, 16)
 	keeper, err := encrypt.NewDEKKeeper(bytes.Repeat([]byte{0x71}, encrypt.KEKSize), clusterID)
 	require.NoError(t, err)
@@ -70,8 +71,8 @@ func TestFSMOpenValueRoundTrip(t *testing.T) {
 
 func TestDistributedBackendSetShardServicePropagatesDEKKeeperToFSM(t *testing.T) {
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
-	backend := &DistributedBackend{db: db, fsm: fsm}
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
+	backend := &DistributedBackend{store: badgermeta.Wrap(db), fsm: fsm}
 
 	kek := bytes.Repeat([]byte{0x41}, encrypt.KEKSize)
 	clusterID := bytes.Repeat([]byte{0x42}, 16)
@@ -86,7 +87,7 @@ func TestDistributedBackendSetShardServicePropagatesDEKKeeperToFSM(t *testing.T)
 }
 
 func TestFSMSealValueUsesDEKFrame(t *testing.T) {
-	fsm := NewFSM(newTestDB(t), newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(newTestDB(t)), newStateKeyspaceEmpty())
 	kek := bytes.Repeat([]byte{0x51}, encrypt.KEKSize)
 	clusterID := bytes.Repeat([]byte{0x52}, 16)
 	keeper, err := encrypt.NewDEKKeeper(kek, clusterID)
@@ -122,20 +123,21 @@ func TestDistributedBackendDEKFramedFSMValueSurvivesDBReopen(t *testing.T) {
 	clusterID := bytes.Repeat([]byte{0x62}, 16)
 	keeper, err := encrypt.NewDEKKeeper(kek, clusterID)
 	require.NoError(t, err)
-	fsm := NewFSM(db, keys)
-	backend := &DistributedBackend{db: db, fsm: fsm, keys: keys}
+	fsm := NewFSM(badgermeta.Wrap(db), keys)
+	backend := &DistributedBackend{store: badgermeta.Wrap(db), fsm: fsm, keys: keys}
 	svc := NewShardService(t.TempDir(), nil, WithShardDEKKeeper(keeper, clusterID))
 	t.Cleanup(func() { _ = svc.Close() })
 	backend.SetShardService(svc, []string{"self"})
 
-	cmd, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+	putCmd := PutObjectMetaCmd{
 		Bucket:       "b",
 		Key:          "k",
 		VersionID:    "v1",
 		UserMetadata: map[string]string{"x-secret": "metadata-secret"},
-	})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(cmd))
+	}
+	require.NoError(t, fsm.db.Update(func(txn MetadataTxn) error {
+		return fsm.persistPutObjectMetaUpdate(txn, putCmd, buildPutObjectMeta(putCmd))
+	}))
 
 	metaKey := keys.ObjectMetaKeyV("b", "k", "v1")
 	require.NoError(t, db.View(func(txn *badger.Txn) error {
@@ -153,7 +155,7 @@ func TestDistributedBackendDEKFramedFSMValueSurvivesDBReopen(t *testing.T) {
 
 	db2 := openDB(t)
 	defer db2.Close()
-	fsm2 := NewFSM(db2, keys)
+	fsm2 := NewFSM(badgermeta.Wrap(db2), keys)
 	fsm2.SetDEKKeeper(keeper, clusterID)
 	require.NoError(t, db2.View(func(txn *badger.Txn) error {
 		item, err := txn.Get(metaKey)

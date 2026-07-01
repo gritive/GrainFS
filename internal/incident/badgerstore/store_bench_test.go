@@ -12,12 +12,12 @@ import (
 )
 
 const (
-	benchVolumeBucket = "__grainfs_volumes"
+	benchVolumeBucket = "__grainfs_test_internal"
 	benchTargetVolume = "target-vol"
 )
 
 // seedBenchStore populates the store with `total` incidents:
-//   - matchN incidents under {Bucket: __grainfs_volumes, Key: __vol/target-vol/blk_<i>}
+//   - matchN incidents under {Bucket: __grainfs_test_internal, Key: __vol/target-vol/blk_<i>}
 //   - ~33% of the rest under same bucket but different volume names (close-miss distractors)
 //   - remainder in other buckets entirely
 //

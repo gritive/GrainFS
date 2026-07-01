@@ -7,6 +7,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -16,7 +17,7 @@ import (
 func TestLookupObjectECShards_NxMode(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
 	k, m, err := fsm.LookupObjectECShards("bkt", "key", "v1")
 	require.NoError(t, err)
@@ -29,18 +30,19 @@ func TestLookupObjectECShards_NxMode(t *testing.T) {
 func TestLookupObjectECShards_ECMode(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
+	fsm := NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())
 
-	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
+	putCmd := PutObjectMetaCmd{
 		Bucket:    "bkt",
 		Key:       "key",
 		VersionID: "v1",
 		Size:      1024,
 		ECData:    2,
 		ECParity:  1,
-	})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(raw))
+	}
+	require.NoError(t, fsm.db.Update(func(txn MetadataTxn) error {
+		return fsm.persistPutObjectMetaUpdate(txn, putCmd, buildPutObjectMeta(putCmd))
+	}))
 
 	k, m, err := fsm.LookupObjectECShards("bkt", "key", "v1")
 	require.NoError(t, err)
@@ -57,15 +59,18 @@ func TestECCluster_Smoke_3Node(t *testing.T) {
 	backend.SetECConfig(ECConfig{DataShards: 2, ParityShards: 1})
 
 	keeper, clusterID := testDEKKeeper(t)
-	svc := NewShardService(backend.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(backend.root, nil, WithShardDEKKeeper(keeper, clusterID))
 	backend.SetShardService(svc, []string{"self", "self", "self"})
+	wireTestShardGroup(backend)
 
 	content := bytes.Repeat([]byte("ec-smoke-3node-"), 4096)
 	obj, err := backend.PutObject(context.Background(), "ec-smoke", "obj", bytes.NewReader(content), "application/octet-stream")
 	require.NoError(t, err)
 	require.NotEmpty(t, obj.VersionID)
 
-	shardKey := "obj/" + obj.VersionID
+	// Chunked PUT stores shards under the per-segment key (key/segments/<blobID>).
+	require.NotEmpty(t, obj.Segments, "chunked PUT must record at least one segment")
+	shardKey := "obj/segments/" + obj.Segments[0].BlobID
 	require.NoError(t, os.Remove(mustShardPath(backend.shardSvc, "ec-smoke", shardKey, 0)))
 
 	rc, _, err := backend.GetObject(context.Background(), "ec-smoke", "obj")

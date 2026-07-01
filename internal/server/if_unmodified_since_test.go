@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/server/servertest"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -28,8 +29,8 @@ func TestGetObject_IfUnmodifiedSince(t *testing.T) {
 
 	s := New("127.0.0.1:14876", backend)
 	go func() { s.Run() }()
-	defer shutdownTestServer(t, s)
-	waitForTCP(t, "127.0.0.1:14876")
+	defer servertest.ShutdownServer(t, s)
+	servertest.WaitTCP(t, "127.0.0.1:14876")
 
 	t.Run("past date returns 412 (modified since then)", func(t *testing.T) {
 		req, _ := http.NewRequest("GET", "http://127.0.0.1:14876/test-bucket/file.txt", nil)

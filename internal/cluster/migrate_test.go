@@ -10,8 +10,22 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/badgerutil"
 )
+
+// migrateLegacyDir opens the legacy metadata DB under dir/meta (the caller
+// owns it now — Phase 6.5 moved badger.Open to the composition root), runs
+// MigrateLegacyMetaToCluster against it, and closes the DB so tests can
+// re-open it for verification.
+func migrateLegacyDir(t *testing.T, dir, nodeID string) error {
+	t.Helper()
+	db, err := badger.Open(badgerutil.SmallOptions(filepath.Join(dir, "meta")))
+	require.NoError(t, err)
+	migErr := MigrateLegacyMetaToCluster(badgermeta.Wrap(db), dir, nodeID)
+	require.NoError(t, db.Close())
+	return migErr
+}
 
 // setupLegacyData creates a legacy (pre-cluster) data directory with metadata in BadgerDB,
 // simulating what a Phase 1 LocalBackend would have produced.
@@ -78,13 +92,12 @@ func TestMigrateLegacyMetaToCluster_Basic(t *testing.T) {
 		"images": {"logo.png": []byte("PNG fake data")},
 	})
 
-	err := MigrateLegacyMetaToCluster(dir, "node-1")
+	err := migrateLegacyDir(t, dir, "node-1")
 	require.NoError(t, err)
 
-	// Verify Raft log was created
-	raftDir := filepath.Join(dir, "raft")
-	_, err = os.Stat(raftDir)
-	require.NoError(t, err, "raft directory should exist after migration")
+	// Task 12: bucket control-plane moved to meta-raft.
+	// MigrateLegacyMetaToCluster no longer spins up a raft node or writes a raft log;
+	// it only scans the legacy store for operator visibility. No raft/ directory expected.
 
 	// Verify metadata is still intact by re-opening BadgerDB
 	metaDir := filepath.Join(dir, "meta")
@@ -107,7 +120,10 @@ func TestMigrateLegacyMetaToCluster_Basic(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, bucketCount)
 
-	// Check objects
+	// Migration no longer re-proposes legacy object metadata (per-object FSM
+	// commands were retired in data-plane raft-free Slice 2). It must still leave
+	// the legacy source records intact (non-destructive scan), so the legacy
+	// obj: entries survive in the source BadgerDB.
 	var objCount int
 	err = db.View(func(txn *badger.Txn) error {
 		it := txn.NewIterator(badger.DefaultIteratorOptions)
@@ -119,7 +135,7 @@ func TestMigrateLegacyMetaToCluster_Basic(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
-	assert.Equal(t, 3, objCount)
+	assert.Equal(t, 3, objCount, "legacy source object records must survive migration")
 }
 
 func TestMigrateLegacyMetaToCluster_EmptyData(t *testing.T) {
@@ -127,16 +143,19 @@ func TestMigrateLegacyMetaToCluster_EmptyData(t *testing.T) {
 
 	setupLegacyData(t, dir, nil, nil)
 
-	err := MigrateLegacyMetaToCluster(dir, "node-1")
+	err := migrateLegacyDir(t, dir, "node-1")
 	require.NoError(t, err)
 }
 
-func TestMigrateLegacyMetaToCluster_NoMetaDir(t *testing.T) {
+// The "metadata directory not found" guard moved to serveruntime's
+// bootAutoMigrate (the composition root opens the legacy DB now); the cluster
+// function's contract is a nil-store error.
+func TestMigrateLegacyMetaToCluster_NilStore(t *testing.T) {
 	dir := t.TempDir()
 
-	err := MigrateLegacyMetaToCluster(dir, "node-1")
+	err := MigrateLegacyMetaToCluster(nil, dir, "node-1")
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "metadata directory not found")
+	assert.Contains(t, err.Error(), "nil legacy metadata store")
 }
 
 func TestMigrateLegacyMetaToCluster_ManyObjects(t *testing.T) {
@@ -152,6 +171,6 @@ func TestMigrateLegacyMetaToCluster_ManyObjects(t *testing.T) {
 		"bucket": objects,
 	})
 
-	err := MigrateLegacyMetaToCluster(dir, "node-1")
+	err := migrateLegacyDir(t, dir, "node-1")
 	require.NoError(t, err)
 }

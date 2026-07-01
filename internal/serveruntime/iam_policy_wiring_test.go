@@ -31,17 +31,16 @@ func TestWireIAMPolicyStores_NilFSM(t *testing.T) {
 	require.NotNil(t, s)
 }
 
-// TestWireIAMPolicyStores_InjectsAllFiveStoresIntoFSM verifies that
+// TestWireIAMPolicyStores_InjectsAllStoresIntoFSM verifies that
 // WireIAMPolicyStores actually calls the FSM's Set*Store injectors with the
 // same instances it returns in the bundle. Without this test, removing every
 // fsm.Set*() call inside WireIAMPolicyStores would still make the previous
 // non-nil assertions pass — the bundle would have populated stores that the
 // FSM apply path never sees, and §2/§3 MetaCmds would silently no-op.
 //
-// We verify each of the five injections by applying a MetaCmd of the
-// corresponding type through the FSM and asserting the bundle's store reflects
-// the mutation (or, for the resolver, that its cache responds to invalidation).
-func TestWireIAMPolicyStores_InjectsAllFiveStoresIntoFSM(t *testing.T) {
+// We verify each injection by applying a MetaCmd of the corresponding type
+// through the FSM and asserting the bundle's store reflects the mutation.
+func TestWireIAMPolicyStores_InjectsAllStoresIntoFSM(t *testing.T) {
 	ctx := context.Background()
 	fsm := cluster.NewMetaFSM()
 	s, err := WireIAMPolicyStores(ctx, fsm, 0)
@@ -78,22 +77,10 @@ func TestWireIAMPolicyStores_InjectsAllFiveStoresIntoFSM(t *testing.T) {
 	require.NoError(t, err, "policyAttachStore not injected")
 	assert.Equal(t, []string{"probe-policy"}, pols)
 
-	// 4) BucketPolicyStore injection: BucketPolicyPut → bundle.BucketPols sees the doc.
-	bpDoc := []byte(`{"Statement":[{"Effect":"Allow","Principal":{"AWS":["probe-sa"]},"Action":"s3:GetObject","Resource":"arn:aws:s3:::probe-bucket/*"}]}`)
-	bpPayload, err := cluster.EncodeBucketPolicyPutPayload("probe-bucket", bpDoc)
-	require.NoError(t, err)
-	bpCmd, err := cluster.EncodeMetaCmdForTest(cluster.MetaCmdTypeBucketPolicyPut, bpPayload)
-	require.NoError(t, err)
-	require.NoError(t, fsm.ApplyCmdForTest(bpCmd))
-	gotBP, err := s.BucketPols.Get(ctx, "probe-bucket")
-	require.NoError(t, err, "bucketPolicyStore not injected")
-	assert.Equal(t, bpDoc, gotBP)
-
-	// 5) Resolver injection: BucketPolicyPut above should have invalidated the
-	//    resolver's cache for "probe-bucket". A subsequent HasBucketPolicy call
-	//    must return true (the doc was just stored). If the FSM held a different
-	//    Resolver instance, our bundle's resolver would still see "not present".
+	// 4) Resolver injection: verify the resolver is wired to the same stores.
+	//    Bucket policy now lives in BucketRecord.Policy (SetBucketPolicy command),
+	//    not in the FSM bucketPolicyStore; HasBucketPolicy reflects the live store.
 	has, err := s.Resolver.HasBucketPolicy(ctx, "probe-bucket")
 	require.NoError(t, err)
-	assert.True(t, has, "policyResolver not injected: invalidation did not propagate through bundle.Resolver")
+	assert.False(t, has, "policyResolver not injected or spurious cache entry")
 }

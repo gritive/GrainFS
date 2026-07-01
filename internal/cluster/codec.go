@@ -24,8 +24,9 @@ type objectMeta struct {
 	ACL          uint8    // s3auth.ACLGrant bitmask; 0 = private (backward compat)
 	ECData       uint8    // EC k (data shards)
 	ECParity     uint8    // EC m (parity shards)
+	StripeBytes  uint32   // 0 = contiguous/legacy, >0 = stripe-interleaved chunk size
 	NodeIDs      []string // shard placement nodes (index i = shard i); empty for N× objects
-	// PlacementGroupID is the data Raft group that owns this object version.
+	// PlacementGroupID is the placement group that owns this object version.
 	PlacementGroupID string
 	UserMetadata     map[string]string
 	SSEAlgorithm     string
@@ -42,6 +43,10 @@ type objectMeta struct {
 	// objects; nil for legacy single-blob and appendable objects.
 	Parts []storage.MultipartPartEntry
 	Tags  []storage.Tag // Task 12a
+	// MetaSeq is the lowest-priority quorum-meta LWW tiebreak (see
+	// PutObjectMetaCmd.MetaSeq). Carried on the FSM-stored objectMeta so a
+	// re-derived quorum-meta blob cannot be tied by a stale one. Default 0.
+	MetaSeq uint64
 }
 
 // CoalescedShardRef references a single coalesced blob produced by merging a
@@ -58,6 +63,7 @@ type CoalescedShardRef struct {
 	Version     int32
 	ECData      uint8
 	ECParity    uint8
+	StripeBytes uint32
 	NodeIDs     []string
 }
 
@@ -102,52 +108,6 @@ func fbSafe[T any](data []byte, fn func([]byte) T) (t T, err error) {
 
 // --- Command encode/decode ---
 
-func encodeCreateBucketCmd(c CreateBucketCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	clusterpb.CreateBucketCmdStart(b)
-	clusterpb.CreateBucketCmdAddBucket(b, bucketOff)
-	clusterpb.CreateBucketCmdAddBypassReserved(b, c.BypassReserved)
-	return fbFinish(b, clusterpb.CreateBucketCmdEnd(b)), nil
-}
-
-// encodeCreateBucketCmdBypass encodes a CreateBucketCmd with bypass_reserved=true.
-// Use only from the bootstrap path to seed reserved buckets (e.g. "default", "_grainfs").
-// Public-API callers must use encodeCreateBucketCmd with BypassReserved=false (the default).
-//
-//nolint:unused // referenced by codec_test.go.
-func encodeCreateBucketCmdBypass(bucket string) ([]byte, error) {
-	return encodeCreateBucketCmd(CreateBucketCmd{Bucket: bucket, BypassReserved: true})
-}
-
-func decodeCreateBucketCmd(data []byte) (CreateBucketCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.CreateBucketCmd {
-		return clusterpb.GetRootAsCreateBucketCmd(d, 0)
-	})
-	if err != nil {
-		return CreateBucketCmd{}, err
-	}
-	return CreateBucketCmd{Bucket: string(t.Bucket()), BypassReserved: t.BypassReserved()}, nil
-}
-
-func encodeDeleteBucketCmd(c DeleteBucketCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	clusterpb.DeleteBucketCmdStart(b)
-	clusterpb.DeleteBucketCmdAddBucket(b, bucketOff)
-	return fbFinish(b, clusterpb.DeleteBucketCmdEnd(b)), nil
-}
-
-func decodeDeleteBucketCmd(data []byte) (DeleteBucketCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.DeleteBucketCmd {
-		return clusterpb.GetRootAsDeleteBucketCmd(d, 0)
-	})
-	if err != nil {
-		return DeleteBucketCmd{}, err
-	}
-	return DeleteBucketCmd{Bucket: string(t.Bucket())}, nil
-}
-
 func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	b := clusterBuilderPool.Get()
 	bucketOff := b.CreateString(c.Bucket)
@@ -163,6 +123,11 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	var expectedETagOff flatbuffers.UOffsetT
 	if c.ExpectedETag != "" {
 		expectedETagOff = b.CreateString(c.ExpectedETag)
+	}
+	// Slice 2: quarantine cause string — must be created before PutObjectMetaCmdStart.
+	var quarantineCauseOff flatbuffers.UOffsetT
+	if c.QuarantineCause != "" {
+		quarantineCauseOff = b.CreateString(c.QuarantineCause)
 	}
 	var nodeIDsOff flatbuffers.UOffsetT
 	if len(c.NodeIDs) > 0 {
@@ -201,6 +166,8 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 			}
 			clusterpb.SegmentMetaEntryAddEcData(b, s.ECData)
 			clusterpb.SegmentMetaEntryAddEcParity(b, s.ECParity)
+			clusterpb.SegmentMetaEntryAddStripeBytes(b, s.StripeBytes)
+			clusterpb.SegmentMetaEntryAddStoredSize(b, s.StoredSize)
 			segOffs[i] = clusterpb.SegmentMetaEntryEnd(b)
 		}
 		clusterpb.PutObjectMetaCmdStartSegmentsVector(b, len(segOffs))
@@ -210,24 +177,26 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 		segmentsOff = b.EndVector(len(segOffs))
 	}
 	// parts — build child MultipartPartEntry tables BEFORE PutObjectMetaCmdStart.
-	var partsOff flatbuffers.UOffsetT
-	if len(c.Parts) > 0 {
-		partOffs := make([]flatbuffers.UOffsetT, len(c.Parts))
-		for i, p := range c.Parts {
-			etOff := b.CreateString(p.ETag)
-			clusterpb.MultipartPartEntryStart(b)
-			clusterpb.MultipartPartEntryAddPartNumber(b, int32(p.PartNumber))
-			clusterpb.MultipartPartEntryAddSize(b, p.Size)
-			clusterpb.MultipartPartEntryAddEtag(b, etOff)
-			partOffs[i] = clusterpb.MultipartPartEntryEnd(b)
-		}
-		clusterpb.PutObjectMetaCmdStartPartsVector(b, len(partOffs))
-		for i := len(partOffs) - 1; i >= 0; i-- {
-			b.PrependUOffsetT(partOffs[i])
-		}
-		partsOff = b.EndVector(len(partOffs))
-	}
+	partsOff := buildPartsVector(b, c.Parts, clusterpb.PutObjectMetaCmdStartPartsVector)
 	tagsVec := buildTagsVector(b, c.Tags, clusterpb.PutObjectMetaCmdStartTagsVector)
+	// coalesced — build child CoalescedShardRef tables BEFORE PutObjectMetaCmdStart.
+	coalescedOff := buildCoalescedVector(b, c.Coalesced, clusterpb.PutObjectMetaCmdStartCoalescedVector)
+	// append_call_md5s — build child BytesValue tables BEFORE PutObjectMetaCmdStart.
+	var appendMD5sOff flatbuffers.UOffsetT
+	if len(c.AppendCallMD5s) > 0 {
+		md5Offs := make([]flatbuffers.UOffsetT, len(c.AppendCallMD5s))
+		for i, d := range c.AppendCallMD5s {
+			vOff := b.CreateByteVector(d)
+			clusterpb.BytesValueStart(b)
+			clusterpb.BytesValueAddVBytes(b, vOff)
+			md5Offs[i] = clusterpb.BytesValueEnd(b)
+		}
+		clusterpb.PutObjectMetaCmdStartAppendCallMd5sVector(b, len(md5Offs))
+		for i := len(md5Offs) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(md5Offs[i])
+		}
+		appendMD5sOff = b.EndVector(len(md5Offs))
+	}
 	clusterpb.PutObjectMetaCmdStart(b)
 	clusterpb.PutObjectMetaCmdAddBucket(b, bucketOff)
 	clusterpb.PutObjectMetaCmdAddKey(b, keyOff)
@@ -238,6 +207,7 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	clusterpb.PutObjectMetaCmdAddVersionId(b, vidOff)
 	clusterpb.PutObjectMetaCmdAddEcData(b, c.ECData)
 	clusterpb.PutObjectMetaCmdAddEcParity(b, c.ECParity)
+	clusterpb.PutObjectMetaCmdAddStripeBytes(b, c.StripeBytes)
 	if nodeIDsOff != 0 {
 		clusterpb.PutObjectMetaCmdAddNodeIds(b, nodeIDsOff)
 	}
@@ -266,10 +236,63 @@ func encodePutObjectMetaCmd(c PutObjectMetaCmd) ([]byte, error) {
 	if tagsVec != 0 {
 		clusterpb.PutObjectMetaCmdAddTags(b, tagsVec)
 	}
+	if c.ACL != 0 {
+		clusterpb.PutObjectMetaCmdAddAcl(b, c.ACL)
+	}
+	if c.MetaSeq != 0 {
+		clusterpb.PutObjectMetaCmdAddMetaSeq(b, c.MetaSeq)
+	}
+	if c.IsHardDeleted {
+		clusterpb.PutObjectMetaCmdAddIsHardDeleted(b, true)
+	}
+	if coalescedOff != 0 {
+		clusterpb.PutObjectMetaCmdAddCoalesced(b, coalescedOff)
+	}
+	if c.IsAppendable {
+		clusterpb.PutObjectMetaCmdAddIsAppendable(b, true)
+	}
+	if c.MetaSeqCAS {
+		clusterpb.PutObjectMetaCmdAddMetaSeqCas(b, true)
+	}
+	if c.IsQuarantined {
+		clusterpb.PutObjectMetaCmdAddIsQuarantined(b, true)
+	}
+	if quarantineCauseOff != 0 {
+		clusterpb.PutObjectMetaCmdAddQuarantineCause(b, quarantineCauseOff)
+	}
+	if appendMD5sOff != 0 {
+		clusterpb.PutObjectMetaCmdAddAppendCallMd5s(b, appendMD5sOff)
+	}
 	return fbFinish(b, clusterpb.PutObjectMetaCmdEnd(b)), nil
 }
 
-func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
+// encodeQuorumMetaBlob serializes an object's quorum-meta record for the off-raft
+// quorum-meta tree (and the per-version / multipart-manifest blobs that reuse it).
+// It is the bare PutObjectMetaCmd FlatBuffer — NOT wrapped in a clusterpb.Command
+// envelope — so the data plane no longer depends on the raft command codec/enum.
+// Every quorum-meta blob is a PutObjectMetaCmd, so no command-type discriminator is
+// needed. WIRE FORMAT: bare PutObjectMetaCmd FB (greenfield; see CHANGELOG).
+func encodeQuorumMetaBlob(c PutObjectMetaCmd) ([]byte, error) {
+	return encodePutObjectMetaCmd(c)
+}
+
+// decodeQuorumMetaBlob is the inverse of encodeQuorumMetaBlob.
+func decodeQuorumMetaBlob(data []byte) (PutObjectMetaCmd, error) {
+	return decodePutObjectMetaCmd(data)
+}
+
+func decodePutObjectMetaCmd(data []byte) (out PutObjectMetaCmd, err error) {
+	// A corrupt blob can pass GetRootAsPutObjectMetaCmd (which only reads the root
+	// vtable offset) yet panic later when a field accessor (e.g. NodeIdsLength)
+	// indexes past the buffer. fbSafe below covers only the root read, so the
+	// whole field-decode body must also be panic-safe to stay fail-closed: a
+	// malformed on-disk quorum-meta blob must surface as an error, never a panic.
+	defer func() {
+		if r := recover(); r != nil {
+			out = PutObjectMetaCmd{}
+			err = fmt.Errorf("invalid flatbuffer: %v", r)
+		}
+	}()
 	t, err := fbSafe(data, func(d []byte) *clusterpb.PutObjectMetaCmd {
 		return clusterpb.GetRootAsPutObjectMetaCmd(d, 0)
 	})
@@ -327,6 +350,49 @@ func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
 				NodeIDs:          nodeIDs,
 				ECData:           se.EcData(),
 				ECParity:         se.EcParity(),
+				StripeBytes:      se.StripeBytes(),
+				StoredSize:       se.StoredSize(),
+			}
+		}
+	}
+	var coalesced []CoalescedShardRef
+	if n := t.CoalescedLength(); n > 0 {
+		coalesced = make([]CoalescedShardRef, n)
+		var c clusterpb.CoalescedShardRef
+		for i := 0; i < n; i++ {
+			if !t.Coalesced(&c, i) {
+				return PutObjectMetaCmd{}, fmt.Errorf("decode coalesced[%d]", i)
+			}
+			var nodeIDs []string
+			if nn := c.NodeIdsLength(); nn > 0 {
+				nodeIDs = make([]string, nn)
+				for j := 0; j < nn; j++ {
+					nodeIDs[j] = string(c.NodeIds(j))
+				}
+			}
+			coalesced[i] = CoalescedShardRef{
+				CoalescedID: string(c.CoalescedId()),
+				Size:        c.Size(),
+				ETag:        string(c.Etag()),
+				ShardKey:    string(c.ShardKey()),
+				Version:     c.Version(),
+				ECData:      c.EcData(),
+				ECParity:    c.EcParity(),
+				StripeBytes: c.StripeBytes(),
+				NodeIDs:     nodeIDs,
+			}
+		}
+	}
+	var appendCallMD5s [][]byte
+	if n := t.AppendCallMd5sLength(); n > 0 {
+		appendCallMD5s = make([][]byte, n)
+		var bv clusterpb.BytesValue
+		for i := 0; i < n; i++ {
+			if !t.AppendCallMd5s(&bv, i) {
+				return PutObjectMetaCmd{}, fmt.Errorf("decode append_call_md5s[%d]", i)
+			}
+			if v := bv.VBytesBytes(); len(v) > 0 {
+				appendCallMD5s[i] = append([]byte(nil), v...)
 			}
 		}
 	}
@@ -340,6 +406,7 @@ func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
 		VersionID:        string(t.VersionId()),
 		ECData:           t.EcData(),
 		ECParity:         t.EcParity(),
+		StripeBytes:      t.StripeBytes(),
 		NodeIDs:          nodeIDs,
 		PlacementGroupID: string(t.PlacementGroupId()),
 		UserMetadata:     readKeyValueProperties(t.UserMetadataLength(), t.UserMetadata),
@@ -350,341 +417,16 @@ func decodePutObjectMetaCmd(data []byte) (PutObjectMetaCmd, error) {
 		Parts:            parts,
 		Segments:         segments,
 		Tags:             readTagsVector(t.TagsLength(), t.Tags),
+		ACL:              t.Acl(),
+		MetaSeq:          t.MetaSeq(),
+		IsHardDeleted:    t.IsHardDeleted(),
+		Coalesced:        coalesced,
+		IsAppendable:     t.IsAppendable(),
+		MetaSeqCAS:       t.MetaSeqCas(),
+		IsQuarantined:    t.IsQuarantined(),
+		QuarantineCause:  string(t.QuarantineCause()),
+		AppendCallMD5s:   appendCallMD5s,
 	}, nil
-}
-
-func encodeDeleteObjectCmd(c DeleteObjectCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	keyOff := b.CreateString(c.Key)
-	vidOff := b.CreateString(c.VersionID)
-	clusterpb.DeleteObjectCmdStart(b)
-	clusterpb.DeleteObjectCmdAddBucket(b, bucketOff)
-	clusterpb.DeleteObjectCmdAddKey(b, keyOff)
-	clusterpb.DeleteObjectCmdAddVersionId(b, vidOff)
-	return fbFinish(b, clusterpb.DeleteObjectCmdEnd(b)), nil
-}
-
-func decodeDeleteObjectCmd(data []byte) (DeleteObjectCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.DeleteObjectCmd {
-		return clusterpb.GetRootAsDeleteObjectCmd(d, 0)
-	})
-	if err != nil {
-		return DeleteObjectCmd{}, err
-	}
-	return DeleteObjectCmd{
-		Bucket:    string(t.Bucket()),
-		Key:       string(t.Key()),
-		VersionID: string(t.VersionId()),
-	}, nil
-}
-
-func encodeDeleteObjectVersionCmd(c DeleteObjectVersionCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	keyOff := b.CreateString(c.Key)
-	vidOff := b.CreateString(c.VersionID)
-	clusterpb.DeleteObjectVersionCmdStart(b)
-	clusterpb.DeleteObjectVersionCmdAddBucket(b, bucketOff)
-	clusterpb.DeleteObjectVersionCmdAddKey(b, keyOff)
-	clusterpb.DeleteObjectVersionCmdAddVersionId(b, vidOff)
-	return fbFinish(b, clusterpb.DeleteObjectVersionCmdEnd(b)), nil
-}
-
-func decodeDeleteObjectVersionCmd(data []byte) (DeleteObjectVersionCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.DeleteObjectVersionCmd {
-		return clusterpb.GetRootAsDeleteObjectVersionCmd(d, 0)
-	})
-	if err != nil {
-		return DeleteObjectVersionCmd{}, err
-	}
-	return DeleteObjectVersionCmd{
-		Bucket:    string(t.Bucket()),
-		Key:       string(t.Key()),
-		VersionID: string(t.VersionId()),
-	}, nil
-}
-
-func encodeCreateMultipartUploadCmd(c CreateMultipartUploadCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	uidOff := b.CreateString(c.UploadID)
-	bucketOff := b.CreateString(c.Bucket)
-	keyOff := b.CreateString(c.Key)
-	ctOff := b.CreateString(c.ContentType)
-	pgOff := b.CreateString(c.PlacementGroupID)
-	tagsVec := buildTagsVector(b, c.Tags, clusterpb.CreateMultipartUploadCmdStartTagsVector)
-	clusterpb.CreateMultipartUploadCmdStart(b)
-	clusterpb.CreateMultipartUploadCmdAddUploadId(b, uidOff)
-	clusterpb.CreateMultipartUploadCmdAddBucket(b, bucketOff)
-	clusterpb.CreateMultipartUploadCmdAddKey(b, keyOff)
-	clusterpb.CreateMultipartUploadCmdAddContentType(b, ctOff)
-	clusterpb.CreateMultipartUploadCmdAddCreatedAt(b, c.CreatedAt)
-	clusterpb.CreateMultipartUploadCmdAddPlacementGroupId(b, pgOff)
-	if tagsVec != 0 {
-		clusterpb.CreateMultipartUploadCmdAddTags(b, tagsVec)
-	}
-	return fbFinish(b, clusterpb.CreateMultipartUploadCmdEnd(b)), nil
-}
-
-func decodeCreateMultipartUploadCmd(data []byte) (CreateMultipartUploadCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.CreateMultipartUploadCmd {
-		return clusterpb.GetRootAsCreateMultipartUploadCmd(d, 0)
-	})
-	if err != nil {
-		return CreateMultipartUploadCmd{}, err
-	}
-	return CreateMultipartUploadCmd{
-		UploadID:         string(t.UploadId()),
-		Bucket:           string(t.Bucket()),
-		Key:              string(t.Key()),
-		ContentType:      string(t.ContentType()),
-		CreatedAt:        t.CreatedAt(),
-		PlacementGroupID: string(t.PlacementGroupId()),
-		Tags:             readTagsVector(t.TagsLength(), t.Tags),
-	}, nil
-}
-
-func encodeCompleteMultipartCmd(c CompleteMultipartCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	keyOff := b.CreateString(c.Key)
-	uidOff := b.CreateString(c.UploadID)
-	ctOff := b.CreateString(c.ContentType)
-	etagOff := b.CreateString(c.ETag)
-	vidOff := b.CreateString(c.VersionID)
-	pgOff := b.CreateString(c.PlacementGroupID)
-	var nodeIDsOff flatbuffers.UOffsetT
-	if len(c.NodeIDs) > 0 {
-		nodeIDsOff = buildStringVector(b, c.NodeIDs, clusterpb.CompleteMultipartCmdStartNodeIdsVector)
-	}
-	var partsOff flatbuffers.UOffsetT
-	if len(c.Parts) > 0 {
-		partOffs := make([]flatbuffers.UOffsetT, len(c.Parts))
-		for i, p := range c.Parts {
-			etOff := b.CreateString(p.ETag)
-			clusterpb.MultipartPartEntryStart(b)
-			clusterpb.MultipartPartEntryAddPartNumber(b, int32(p.PartNumber))
-			clusterpb.MultipartPartEntryAddSize(b, p.Size)
-			clusterpb.MultipartPartEntryAddEtag(b, etOff)
-			partOffs[i] = clusterpb.MultipartPartEntryEnd(b)
-		}
-		clusterpb.CompleteMultipartCmdStartPartsVector(b, len(partOffs))
-		for i := len(partOffs) - 1; i >= 0; i-- {
-			b.PrependUOffsetT(partOffs[i])
-		}
-		partsOff = b.EndVector(len(partOffs))
-	}
-	var segmentsOff flatbuffers.UOffsetT
-	if len(c.Segments) > 0 {
-		segOffs := make([]flatbuffers.UOffsetT, len(c.Segments))
-		for i, s := range c.Segments {
-			blobOff := b.CreateString(s.BlobID)
-			pgOff := b.CreateString(s.PlacementGroupID)
-			var checksumOff flatbuffers.UOffsetT
-			if len(s.Checksum) > 0 {
-				checksumOff = b.CreateByteVector(s.Checksum)
-			}
-			var nodeIdsOff flatbuffers.UOffsetT
-			if len(s.NodeIDs) > 0 {
-				nodeIdsOff = buildStringVector(b, s.NodeIDs, clusterpb.SegmentMetaEntryStartNodeIdsVector)
-			}
-			clusterpb.SegmentMetaEntryStart(b)
-			clusterpb.SegmentMetaEntryAddBlobId(b, blobOff)
-			clusterpb.SegmentMetaEntryAddSize(b, s.Size)
-			if checksumOff != 0 {
-				clusterpb.SegmentMetaEntryAddChecksum(b, checksumOff)
-			}
-			clusterpb.SegmentMetaEntryAddPlacementGroupId(b, pgOff)
-			clusterpb.SegmentMetaEntryAddShardSize(b, s.ShardSize)
-			clusterpb.SegmentMetaEntryAddSegmentIdx(b, s.SegmentIdx)
-			if nodeIdsOff != 0 {
-				clusterpb.SegmentMetaEntryAddNodeIds(b, nodeIdsOff)
-			}
-			clusterpb.SegmentMetaEntryAddEcData(b, s.ECData)
-			clusterpb.SegmentMetaEntryAddEcParity(b, s.ECParity)
-			segOffs[i] = clusterpb.SegmentMetaEntryEnd(b)
-		}
-		clusterpb.CompleteMultipartCmdStartSegmentsVector(b, len(segOffs))
-		for i := len(segOffs) - 1; i >= 0; i-- {
-			b.PrependUOffsetT(segOffs[i])
-		}
-		segmentsOff = b.EndVector(len(segOffs))
-	}
-	tagsOff := buildTagsVector(b, c.Tags, clusterpb.CompleteMultipartCmdStartTagsVector)
-	clusterpb.CompleteMultipartCmdStart(b)
-	clusterpb.CompleteMultipartCmdAddBucket(b, bucketOff)
-	clusterpb.CompleteMultipartCmdAddKey(b, keyOff)
-	clusterpb.CompleteMultipartCmdAddUploadId(b, uidOff)
-	clusterpb.CompleteMultipartCmdAddSize(b, c.Size)
-	clusterpb.CompleteMultipartCmdAddContentType(b, ctOff)
-	clusterpb.CompleteMultipartCmdAddEtag(b, etagOff)
-	clusterpb.CompleteMultipartCmdAddModTime(b, c.ModTime)
-	clusterpb.CompleteMultipartCmdAddVersionId(b, vidOff)
-	clusterpb.CompleteMultipartCmdAddPlacementGroupId(b, pgOff)
-	clusterpb.CompleteMultipartCmdAddEcData(b, c.ECData)
-	clusterpb.CompleteMultipartCmdAddEcParity(b, c.ECParity)
-	if nodeIDsOff != 0 {
-		clusterpb.CompleteMultipartCmdAddNodeIds(b, nodeIDsOff)
-	}
-	if partsOff != 0 {
-		clusterpb.CompleteMultipartCmdAddParts(b, partsOff)
-	}
-	if segmentsOff != 0 {
-		clusterpb.CompleteMultipartCmdAddSegments(b, segmentsOff)
-	}
-	if tagsOff != 0 {
-		clusterpb.CompleteMultipartCmdAddTags(b, tagsOff)
-	}
-	return fbFinish(b, clusterpb.CompleteMultipartCmdEnd(b)), nil
-}
-
-func decodeCompleteMultipartCmd(data []byte) (CompleteMultipartCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.CompleteMultipartCmd {
-		return clusterpb.GetRootAsCompleteMultipartCmd(d, 0)
-	})
-	if err != nil {
-		return CompleteMultipartCmd{}, err
-	}
-	var nodeIDs []string
-	if n := t.NodeIdsLength(); n > 0 {
-		nodeIDs = make([]string, n)
-		for i := range nodeIDs {
-			nodeIDs[i] = string(t.NodeIds(i))
-		}
-	}
-	var parts []storage.MultipartPartEntry
-	if n := t.PartsLength(); n > 0 {
-		parts = make([]storage.MultipartPartEntry, n)
-		var pe clusterpb.MultipartPartEntry
-		for i := 0; i < n; i++ {
-			if !t.Parts(&pe, i) {
-				return CompleteMultipartCmd{}, fmt.Errorf("decode complete multipart parts[%d]", i)
-			}
-			parts[i] = storage.MultipartPartEntry{
-				PartNumber: int(pe.PartNumber()),
-				Size:       pe.Size(),
-				ETag:       string(pe.Etag()),
-			}
-		}
-	}
-	var segments []SegmentMetaEntry
-	if n := t.SegmentsLength(); n > 0 {
-		segments = make([]SegmentMetaEntry, n)
-		var se clusterpb.SegmentMetaEntry
-		for i := 0; i < n; i++ {
-			if !t.Segments(&se, i) {
-				return CompleteMultipartCmd{}, fmt.Errorf("decode complete multipart segments[%d]", i)
-			}
-			var nodeIDs []string
-			if nn := se.NodeIdsLength(); nn > 0 {
-				nodeIDs = make([]string, nn)
-				for j := 0; j < nn; j++ {
-					nodeIDs[j] = string(se.NodeIds(j))
-				}
-			}
-			var checksum []byte
-			if cb := se.ChecksumBytes(); len(cb) > 0 {
-				checksum = append([]byte(nil), cb...)
-			}
-			segments[i] = SegmentMetaEntry{
-				BlobID:           string(se.BlobId()),
-				Size:             se.Size(),
-				Checksum:         checksum,
-				PlacementGroupID: string(se.PlacementGroupId()),
-				ShardSize:        se.ShardSize(),
-				SegmentIdx:       se.SegmentIdx(),
-				NodeIDs:          nodeIDs,
-				ECData:           se.EcData(),
-				ECParity:         se.EcParity(),
-			}
-		}
-	}
-	return CompleteMultipartCmd{
-		Bucket:           string(t.Bucket()),
-		Key:              string(t.Key()),
-		UploadID:         string(t.UploadId()),
-		Size:             t.Size(),
-		ContentType:      string(t.ContentType()),
-		ETag:             string(t.Etag()),
-		ModTime:          t.ModTime(),
-		VersionID:        string(t.VersionId()),
-		PlacementGroupID: string(t.PlacementGroupId()),
-		ECData:           t.EcData(),
-		ECParity:         t.EcParity(),
-		NodeIDs:          nodeIDs,
-		Parts:            parts,
-		Segments:         segments,
-		Tags:             readTagsVector(t.TagsLength(), t.Tags),
-	}, nil
-}
-
-func encodeAbortMultipartCmd(c AbortMultipartCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	keyOff := b.CreateString(c.Key)
-	uidOff := b.CreateString(c.UploadID)
-	clusterpb.AbortMultipartCmdStart(b)
-	clusterpb.AbortMultipartCmdAddBucket(b, bucketOff)
-	clusterpb.AbortMultipartCmdAddKey(b, keyOff)
-	clusterpb.AbortMultipartCmdAddUploadId(b, uidOff)
-	return fbFinish(b, clusterpb.AbortMultipartCmdEnd(b)), nil
-}
-
-func decodeAbortMultipartCmd(data []byte) (AbortMultipartCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.AbortMultipartCmd {
-		return clusterpb.GetRootAsAbortMultipartCmd(d, 0)
-	})
-	if err != nil {
-		return AbortMultipartCmd{}, err
-	}
-	return AbortMultipartCmd{
-		Bucket:   string(t.Bucket()),
-		Key:      string(t.Key()),
-		UploadID: string(t.UploadId()),
-	}, nil
-}
-
-func encodeSetBucketPolicyCmd(c SetBucketPolicyCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	var policyOff flatbuffers.UOffsetT
-	if len(c.PolicyJSON) > 0 {
-		policyOff = b.CreateByteVector(c.PolicyJSON)
-	}
-	clusterpb.SetBucketPolicyCmdStart(b)
-	clusterpb.SetBucketPolicyCmdAddBucket(b, bucketOff)
-	if len(c.PolicyJSON) > 0 {
-		clusterpb.SetBucketPolicyCmdAddPolicyJson(b, policyOff)
-	}
-	return fbFinish(b, clusterpb.SetBucketPolicyCmdEnd(b)), nil
-}
-
-func decodeSetBucketPolicyCmd(data []byte) (SetBucketPolicyCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.SetBucketPolicyCmd {
-		return clusterpb.GetRootAsSetBucketPolicyCmd(d, 0)
-	})
-	if err != nil {
-		return SetBucketPolicyCmd{}, err
-	}
-	return SetBucketPolicyCmd{Bucket: string(t.Bucket()), PolicyJSON: t.PolicyJsonBytes()}, nil
-}
-
-func encodeDeleteBucketPolicyCmd(c DeleteBucketPolicyCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	clusterpb.DeleteBucketPolicyCmdStart(b)
-	clusterpb.DeleteBucketPolicyCmdAddBucket(b, bucketOff)
-	return fbFinish(b, clusterpb.DeleteBucketPolicyCmdEnd(b)), nil
-}
-
-func decodeDeleteBucketPolicyCmd(data []byte) (DeleteBucketPolicyCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.DeleteBucketPolicyCmd {
-		return clusterpb.GetRootAsDeleteBucketPolicyCmd(d, 0)
-	})
-	if err != nil {
-		return DeleteBucketPolicyCmd{}, err
-	}
-	return DeleteBucketPolicyCmd{Bucket: string(t.Bucket())}, nil
 }
 
 // buildTagsVector encodes []storage.Tag as a FlatBuffers Tag vector using the
@@ -743,9 +485,84 @@ func buildStringVector(b *flatbuffers.Builder, ss []string, startVec func(*flatb
 	return b.EndVector(len(ss))
 }
 
+// buildCoalescedVector encodes []CoalescedShardRef as a CoalescedShardRef
+// FlatBuffers vector using the provided parent-table startVector func (e.g.
+// clusterpb.PutObjectMetaCmdStartCoalescedVector /
+// clusterpb.ObjectMetaStartCoalescedVector). Returns 0 when len==0 so callers
+// can guard the Add call. Each ref's node_ids vector and child strings MUST be
+// built BEFORE that ref's CoalescedShardRefStart, and the whole vector BEFORE
+// the parent table's Start (flatbuffers nested-vector rule).
+//
+// EcData/EcParity/StripeBytes are written unconditionally to preserve
+// byte-identity with the inline loops this replaced (do NOT add a 0-default
+// omit — semantically similar but not byte-identical).
+func buildCoalescedVector(b *flatbuffers.Builder, refs []CoalescedShardRef, startVec func(*flatbuffers.Builder, int) flatbuffers.UOffsetT) flatbuffers.UOffsetT {
+	if len(refs) == 0 {
+		return 0
+	}
+	cOffs := make([]flatbuffers.UOffsetT, len(refs))
+	for i, c := range refs {
+		idOff := b.CreateString(c.CoalescedID)
+		etOff := b.CreateString(c.ETag)
+		skOff := b.CreateString(c.ShardKey)
+		var nodesOff flatbuffers.UOffsetT
+		if len(c.NodeIDs) > 0 {
+			nodesOff = buildStringVector(b, c.NodeIDs, clusterpb.CoalescedShardRefStartNodeIdsVector)
+		}
+		clusterpb.CoalescedShardRefStart(b)
+		clusterpb.CoalescedShardRefAddCoalescedId(b, idOff)
+		clusterpb.CoalescedShardRefAddSize(b, c.Size)
+		clusterpb.CoalescedShardRefAddEtag(b, etOff)
+		clusterpb.CoalescedShardRefAddShardKey(b, skOff)
+		clusterpb.CoalescedShardRefAddVersion(b, c.Version)
+		clusterpb.CoalescedShardRefAddEcData(b, c.ECData)
+		clusterpb.CoalescedShardRefAddEcParity(b, c.ECParity)
+		clusterpb.CoalescedShardRefAddStripeBytes(b, c.StripeBytes)
+		if nodesOff != 0 {
+			clusterpb.CoalescedShardRefAddNodeIds(b, nodesOff)
+		}
+		cOffs[i] = clusterpb.CoalescedShardRefEnd(b)
+	}
+	startVec(b, len(cOffs))
+	for i := len(cOffs) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(cOffs[i])
+	}
+	return b.EndVector(len(cOffs))
+}
+
+// buildPartsVector encodes []storage.MultipartPartEntry as a MultipartPartEntry
+// FlatBuffers vector using the provided parent-table startVector func (e.g.
+// clusterpb.PutObjectMetaCmdStartPartsVector /
+// clusterpb.ObjectMetaStartPartsVector). Returns 0 when len==0. Each entry's
+// etag string MUST be created BEFORE its MultipartPartEntryStart, and the whole
+// vector BEFORE the parent table's Start.
+//
+// Deliberately narrow to []storage.MultipartPartEntry (NOT storage.Part /
+// forward PartRef) so the int32(PartNumber) cast and Add order stay
+// byte-identical with the inline loops this replaced.
+func buildPartsVector(b *flatbuffers.Builder, parts []storage.MultipartPartEntry, startVec func(*flatbuffers.Builder, int) flatbuffers.UOffsetT) flatbuffers.UOffsetT {
+	if len(parts) == 0 {
+		return 0
+	}
+	partOffs := make([]flatbuffers.UOffsetT, len(parts))
+	for i, p := range parts {
+		etOff := b.CreateString(p.ETag)
+		clusterpb.MultipartPartEntryStart(b)
+		clusterpb.MultipartPartEntryAddPartNumber(b, int32(p.PartNumber))
+		clusterpb.MultipartPartEntryAddSize(b, p.Size)
+		clusterpb.MultipartPartEntryAddEtag(b, etOff)
+		partOffs[i] = clusterpb.MultipartPartEntryEnd(b)
+	}
+	startVec(b, len(partOffs))
+	for i := len(partOffs) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(partOffs[i])
+	}
+	return b.EndVector(len(partOffs))
+}
+
 // --- ObjectMeta codec ---
 
-func marshalObjectMeta(m objectMeta) ([]byte, error) {
+func marshalObjectMeta(m objectMeta) ([]byte, error) { //nolint:unused // referenced by codec_test.go and multiple *_test.go helpers
 	b := clusterBuilderPool.Get()
 	keyOff := b.CreateString(m.Key)
 	ctOff := b.CreateString(m.ContentType)
@@ -799,6 +616,12 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 			if s.ECParity != 0 {
 				clusterpb.SegmentRefAddEcParity(b, s.ECParity)
 			}
+			if s.StripeBytes != 0 {
+				clusterpb.SegmentRefAddStripeBytes(b, s.StripeBytes)
+			}
+			if s.StoredSize != 0 {
+				clusterpb.SegmentRefAddStoredSize(b, s.StoredSize)
+			}
 			segOffs[i] = clusterpb.SegmentRefEnd(b)
 		}
 		clusterpb.ObjectMetaStartSegmentsVector(b, len(segOffs))
@@ -810,72 +633,11 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 	// coalesced — build child CoalescedShardRef tables BEFORE ObjectMetaStart.
 	// Note: node_ids vector for each ref MUST also be built BEFORE its
 	// owning table Start (flatbuffers nested-vector rule).
-	var coalescedOff flatbuffers.UOffsetT
-	if len(m.Coalesced) > 0 {
-		cOffs := make([]flatbuffers.UOffsetT, len(m.Coalesced))
-		for i, c := range m.Coalesced {
-			idOff := b.CreateString(c.CoalescedID)
-			etOff := b.CreateString(c.ETag)
-			skOff := b.CreateString(c.ShardKey)
-			var nodesOff flatbuffers.UOffsetT
-			if len(c.NodeIDs) > 0 {
-				nodesOff = buildStringVector(b, c.NodeIDs, clusterpb.CoalescedShardRefStartNodeIdsVector)
-			}
-			clusterpb.CoalescedShardRefStart(b)
-			clusterpb.CoalescedShardRefAddCoalescedId(b, idOff)
-			clusterpb.CoalescedShardRefAddSize(b, c.Size)
-			clusterpb.CoalescedShardRefAddEtag(b, etOff)
-			clusterpb.CoalescedShardRefAddShardKey(b, skOff)
-			clusterpb.CoalescedShardRefAddVersion(b, c.Version)
-			clusterpb.CoalescedShardRefAddEcData(b, c.ECData)
-			clusterpb.CoalescedShardRefAddEcParity(b, c.ECParity)
-			if nodesOff != 0 {
-				clusterpb.CoalescedShardRefAddNodeIds(b, nodesOff)
-			}
-			cOffs[i] = clusterpb.CoalescedShardRefEnd(b)
-		}
-		clusterpb.ObjectMetaStartCoalescedVector(b, len(cOffs))
-		for i := len(cOffs) - 1; i >= 0; i-- {
-			b.PrependUOffsetT(cOffs[i])
-		}
-		coalescedOff = b.EndVector(len(cOffs))
-	}
+	coalescedOff := buildCoalescedVector(b, m.Coalesced, clusterpb.ObjectMetaStartCoalescedVector)
 	// parts — build child MultipartPartEntry tables BEFORE ObjectMetaStart.
-	var partsOff flatbuffers.UOffsetT
-	if len(m.Parts) > 0 {
-		partOffs := make([]flatbuffers.UOffsetT, len(m.Parts))
-		for i, p := range m.Parts {
-			etOff := b.CreateString(p.ETag)
-			clusterpb.MultipartPartEntryStart(b)
-			clusterpb.MultipartPartEntryAddPartNumber(b, int32(p.PartNumber))
-			clusterpb.MultipartPartEntryAddSize(b, p.Size)
-			clusterpb.MultipartPartEntryAddEtag(b, etOff)
-			partOffs[i] = clusterpb.MultipartPartEntryEnd(b)
-		}
-		clusterpb.ObjectMetaStartPartsVector(b, len(partOffs))
-		for i := len(partOffs) - 1; i >= 0; i-- {
-			b.PrependUOffsetT(partOffs[i])
-		}
-		partsOff = b.EndVector(len(partOffs))
-	}
+	partsOff := buildPartsVector(b, m.Parts, clusterpb.ObjectMetaStartPartsVector)
 	// tags — build child Tag tables BEFORE ObjectMetaStart.
-	var tagsVec flatbuffers.UOffsetT
-	if len(m.Tags) > 0 {
-		tagOffsets := make([]flatbuffers.UOffsetT, len(m.Tags))
-		for i, t := range m.Tags {
-			kOff := b.CreateString(t.Key)
-			vOff := b.CreateString(t.Value)
-			clusterpb.TagStart(b)
-			clusterpb.TagAddKey(b, kOff)
-			clusterpb.TagAddValue(b, vOff)
-			tagOffsets[i] = clusterpb.TagEnd(b)
-		}
-		clusterpb.ObjectMetaStartTagsVector(b, len(tagOffsets))
-		for i := len(tagOffsets) - 1; i >= 0; i-- {
-			b.PrependUOffsetT(tagOffsets[i])
-		}
-		tagsVec = b.EndVector(len(tagOffsets))
-	}
+	tagsVec := buildTagsVector(b, m.Tags, clusterpb.ObjectMetaStartTagsVector)
 	clusterpb.ObjectMetaStart(b)
 	clusterpb.ObjectMetaAddKey(b, keyOff)
 	clusterpb.ObjectMetaAddSize(b, m.Size)
@@ -885,6 +647,7 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 	clusterpb.ObjectMetaAddAcl(b, m.ACL)
 	clusterpb.ObjectMetaAddEcData(b, m.ECData)
 	clusterpb.ObjectMetaAddEcParity(b, m.ECParity)
+	clusterpb.ObjectMetaAddStripeBytes(b, m.StripeBytes)
 	if nodeIDsOff != 0 {
 		clusterpb.ObjectMetaAddNodeIds(b, nodeIDsOff)
 	}
@@ -909,6 +672,9 @@ func marshalObjectMeta(m objectMeta) ([]byte, error) {
 	}
 	if tagsVec != 0 {
 		clusterpb.ObjectMetaAddTags(b, tagsVec)
+	}
+	if m.MetaSeq != 0 {
+		clusterpb.ObjectMetaAddMetaSeq(b, m.MetaSeq)
 	}
 	return fbFinish(b, clusterpb.ObjectMetaEnd(b)), nil
 }
@@ -957,6 +723,8 @@ func unmarshalObjectMeta(data []byte) (objectMeta, error) {
 				ShardSize:        seg.ShardSize(),
 				ECData:           seg.EcData(),
 				ECParity:         seg.EcParity(),
+				StripeBytes:      seg.StripeBytes(),
+				StoredSize:       seg.StoredSize(),
 				NodeIDs:          nodeIDs,
 			}
 		}
@@ -984,6 +752,7 @@ func unmarshalObjectMeta(data []byte) (objectMeta, error) {
 				Version:     c.Version(),
 				ECData:      c.EcData(),
 				ECParity:    c.EcParity(),
+				StripeBytes: c.StripeBytes(),
 				NodeIDs:     nodeIDs,
 			}
 		}
@@ -1022,6 +791,7 @@ func unmarshalObjectMeta(data []byte) (objectMeta, error) {
 		ACL:              t.Acl(),
 		ECData:           t.EcData(),
 		ECParity:         t.EcParity(),
+		StripeBytes:      t.StripeBytes(),
 		NodeIDs:          nodeIDs,
 		PlacementGroupID: string(t.PlacementGroupId()),
 		UserMetadata:     readKeyValueProperties(t.UserMetadataLength(), t.UserMetadata),
@@ -1031,6 +801,7 @@ func unmarshalObjectMeta(data []byte) (objectMeta, error) {
 		IsAppendable:     t.IsAppendable(),
 		Parts:            parts,
 		Tags:             tags,
+		MetaSeq:          t.MetaSeq(),
 	}, nil
 }
 
@@ -1133,540 +904,5 @@ func unmarshalClusterMultipartMeta(data []byte) (clusterMultipartMeta, error) {
 		ContentType:      string(t.ContentType()),
 		PlacementGroupID: string(t.PlacementGroupId()),
 		Tags:             readTagsVector(t.TagsLength(), t.Tags),
-	}, nil
-}
-
-// --- MigrateShard / MigrationDone codec ---
-
-func encodeMigrateShardCmd(c MigrateShardFSMCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	keyOff := b.CreateString(c.Key)
-	vidOff := b.CreateString(c.VersionID)
-	srcOff := b.CreateString(c.SrcNode)
-	dstOff := b.CreateString(c.DstNode)
-	clusterpb.MigrateShardCmdStart(b)
-	clusterpb.MigrateShardCmdAddBucket(b, bucketOff)
-	clusterpb.MigrateShardCmdAddKey(b, keyOff)
-	clusterpb.MigrateShardCmdAddVersionId(b, vidOff)
-	clusterpb.MigrateShardCmdAddSrcNode(b, srcOff)
-	clusterpb.MigrateShardCmdAddDstNode(b, dstOff)
-	return fbFinish(b, clusterpb.MigrateShardCmdEnd(b)), nil
-}
-
-func decodeMigrateShardCmd(data []byte) (MigrateShardFSMCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.MigrateShardCmd {
-		return clusterpb.GetRootAsMigrateShardCmd(d, 0)
-	})
-	if err != nil {
-		return MigrateShardFSMCmd{}, err
-	}
-	return MigrateShardFSMCmd{
-		Bucket:    string(t.Bucket()),
-		Key:       string(t.Key()),
-		VersionID: string(t.VersionId()),
-		SrcNode:   string(t.SrcNode()),
-		DstNode:   string(t.DstNode()),
-	}, nil
-}
-
-func decodeMigrationDoneCmd(data []byte) (MigrationDoneFSMCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.MigrationDoneCmd {
-		return clusterpb.GetRootAsMigrationDoneCmd(d, 0)
-	})
-	if err != nil {
-		return MigrationDoneFSMCmd{}, err
-	}
-	return MigrationDoneFSMCmd{
-		Bucket:    string(t.Bucket()),
-		Key:       string(t.Key()),
-		VersionID: string(t.VersionId()),
-		SrcNode:   string(t.SrcNode()),
-		DstNode:   string(t.DstNode()),
-	}, nil
-}
-
-func encodeMigrationDoneCmd(c MigrationDoneFSMCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	keyOff := b.CreateString(c.Key)
-	vidOff := b.CreateString(c.VersionID)
-	srcOff := b.CreateString(c.SrcNode)
-	dstOff := b.CreateString(c.DstNode)
-	clusterpb.MigrationDoneCmdStart(b)
-	clusterpb.MigrationDoneCmdAddBucket(b, bucketOff)
-	clusterpb.MigrationDoneCmdAddKey(b, keyOff)
-	clusterpb.MigrationDoneCmdAddVersionId(b, vidOff)
-	clusterpb.MigrationDoneCmdAddSrcNode(b, srcOff)
-	clusterpb.MigrationDoneCmdAddDstNode(b, dstOff)
-	return fbFinish(b, clusterpb.MigrationDoneCmdEnd(b)), nil
-}
-
-func encodeSetBucketVersioningCmd(c SetBucketVersioningCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	stateOff := b.CreateString(c.State)
-	clusterpb.SetBucketVersioningCmdStart(b)
-	clusterpb.SetBucketVersioningCmdAddBucket(b, bucketOff)
-	clusterpb.SetBucketVersioningCmdAddState(b, stateOff)
-	return fbFinish(b, clusterpb.SetBucketVersioningCmdEnd(b)), nil
-}
-
-func decodeSetBucketVersioningCmd(data []byte) (SetBucketVersioningCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.SetBucketVersioningCmd {
-		return clusterpb.GetRootAsSetBucketVersioningCmd(d, 0)
-	})
-	if err != nil {
-		return SetBucketVersioningCmd{}, err
-	}
-	return SetBucketVersioningCmd{
-		Bucket: string(t.Bucket()),
-		State:  string(t.State()),
-	}, nil
-}
-
-func encodeSetObjectACLCmd(c SetObjectACLCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	keyOff := b.CreateString(c.Key)
-	clusterpb.SetObjectACLCmdStart(b)
-	clusterpb.SetObjectACLCmdAddBucket(b, bucketOff)
-	clusterpb.SetObjectACLCmdAddKey(b, keyOff)
-	clusterpb.SetObjectACLCmdAddAcl(b, c.ACL)
-	return fbFinish(b, clusterpb.SetObjectACLCmdEnd(b)), nil
-}
-
-func decodeSetObjectACLCmd(data []byte) (SetObjectACLCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.SetObjectACLCmd {
-		return clusterpb.GetRootAsSetObjectACLCmd(d, 0)
-	})
-	if err != nil {
-		return SetObjectACLCmd{}, err
-	}
-	return SetObjectACLCmd{
-		Bucket: string(t.Bucket()),
-		Key:    string(t.Key()),
-		ACL:    t.Acl(),
-	}, nil
-}
-
-func encodeSetObjectTagsCmd(c SetObjectTagsCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	keyOff := b.CreateString(c.Key)
-	verOff := b.CreateString(c.VersionID)
-
-	var tagsVec flatbuffers.UOffsetT
-	if len(c.Tags) > 0 {
-		tagOffs := make([]flatbuffers.UOffsetT, len(c.Tags))
-		for i, t := range c.Tags {
-			kOff := b.CreateString(t.Key)
-			vOff := b.CreateString(t.Value)
-			clusterpb.TagStart(b)
-			clusterpb.TagAddKey(b, kOff)
-			clusterpb.TagAddValue(b, vOff)
-			tagOffs[i] = clusterpb.TagEnd(b)
-		}
-		clusterpb.SetObjectTagsCmdStartTagsVector(b, len(tagOffs))
-		for i := len(tagOffs) - 1; i >= 0; i-- {
-			b.PrependUOffsetT(tagOffs[i])
-		}
-		tagsVec = b.EndVector(len(tagOffs))
-	}
-
-	clusterpb.SetObjectTagsCmdStart(b)
-	clusterpb.SetObjectTagsCmdAddBucket(b, bucketOff)
-	clusterpb.SetObjectTagsCmdAddKey(b, keyOff)
-	clusterpb.SetObjectTagsCmdAddVersionId(b, verOff)
-	if tagsVec != 0 {
-		clusterpb.SetObjectTagsCmdAddTags(b, tagsVec)
-	}
-	return fbFinish(b, clusterpb.SetObjectTagsCmdEnd(b)), nil
-}
-
-func decodeSetObjectTagsCmd(data []byte) (SetObjectTagsCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.SetObjectTagsCmd {
-		return clusterpb.GetRootAsSetObjectTagsCmd(d, 0)
-	})
-	if err != nil {
-		return SetObjectTagsCmd{}, err
-	}
-	out := SetObjectTagsCmd{
-		Bucket:    string(t.Bucket()),
-		Key:       string(t.Key()),
-		VersionID: string(t.VersionId()),
-	}
-	if n := t.TagsLength(); n > 0 {
-		out.Tags = make([]storage.Tag, n)
-		for i := 0; i < n; i++ {
-			var tg clusterpb.Tag
-			if t.Tags(&tg, i) {
-				out.Tags[i] = storage.Tag{Key: string(tg.Key()), Value: string(tg.Value())}
-			}
-		}
-	}
-	return out, nil
-}
-
-func encodeAppendObjectCmd(c AppendObjectCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	keyOff := b.CreateString(c.Key)
-	blobIDOff := b.CreateString(c.BlobID)
-	etagOff := b.CreateString(c.SegmentETag)
-	pgOff := b.CreateString(c.PlacementGroupID)
-	vidOff := b.CreateString(c.VersionID)
-	clusterpb.AppendObjectCmdStart(b)
-	clusterpb.AppendObjectCmdAddBucket(b, bucketOff)
-	clusterpb.AppendObjectCmdAddKey(b, keyOff)
-	clusterpb.AppendObjectCmdAddExpectedOffset(b, c.ExpectedOffset)
-	clusterpb.AppendObjectCmdAddBlobId(b, blobIDOff)
-	clusterpb.AppendObjectCmdAddSegmentSize(b, c.SegmentSize)
-	clusterpb.AppendObjectCmdAddSegmentEtag(b, etagOff)
-	clusterpb.AppendObjectCmdAddPlacementGroupId(b, pgOff)
-	clusterpb.AppendObjectCmdAddVersionId(b, vidOff)
-	clusterpb.AppendObjectCmdAddModifiedUnixSec(b, c.ModifiedUnixSec)
-	return fbFinish(b, clusterpb.AppendObjectCmdEnd(b)), nil
-}
-
-func decodeAppendObjectCmd(data []byte) (AppendObjectCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.AppendObjectCmd {
-		return clusterpb.GetRootAsAppendObjectCmd(d, 0)
-	})
-	if err != nil {
-		return AppendObjectCmd{}, err
-	}
-	return AppendObjectCmd{
-		Bucket:           string(t.Bucket()),
-		Key:              string(t.Key()),
-		ExpectedOffset:   t.ExpectedOffset(),
-		BlobID:           string(t.BlobId()),
-		SegmentSize:      t.SegmentSize(),
-		SegmentETag:      string(t.SegmentEtag()),
-		PlacementGroupID: string(t.PlacementGroupId()),
-		VersionID:        string(t.VersionId()),
-		ModifiedUnixSec:  t.ModifiedUnixSec(),
-	}, nil
-}
-
-func encodeCoalesceSegmentsCmd(c CoalesceSegmentsCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	keyOff := b.CreateString(c.Key)
-	cidOff := b.CreateString(c.CoalescedID)
-	skOff := b.CreateString(c.ShardKey)
-	etOff := b.CreateString(c.ETag)
-	var consumedOff flatbuffers.UOffsetT
-	if len(c.ConsumedSegmentIDs) > 0 {
-		consumedOff = buildStringVector(b, c.ConsumedSegmentIDs, clusterpb.CoalesceSegmentsCmdStartConsumedSegmentIdsVector)
-	}
-	var placementOff flatbuffers.UOffsetT
-	if len(c.Placement) > 0 {
-		placementOff = buildStringVector(b, c.Placement, clusterpb.CoalesceSegmentsCmdStartPlacementVector)
-	}
-	clusterpb.CoalesceSegmentsCmdStart(b)
-	clusterpb.CoalesceSegmentsCmdAddBucket(b, bucketOff)
-	clusterpb.CoalesceSegmentsCmdAddKey(b, keyOff)
-	clusterpb.CoalesceSegmentsCmdAddCoalescedId(b, cidOff)
-	clusterpb.CoalesceSegmentsCmdAddShardKey(b, skOff)
-	clusterpb.CoalesceSegmentsCmdAddSize(b, c.Size)
-	clusterpb.CoalesceSegmentsCmdAddEtag(b, etOff)
-	if consumedOff != 0 {
-		clusterpb.CoalesceSegmentsCmdAddConsumedSegmentIds(b, consumedOff)
-	}
-	if placementOff != 0 {
-		clusterpb.CoalesceSegmentsCmdAddPlacement(b, placementOff)
-	}
-	clusterpb.CoalesceSegmentsCmdAddEcData(b, c.ECData)
-	clusterpb.CoalesceSegmentsCmdAddEcParity(b, c.ECParity)
-	return fbFinish(b, clusterpb.CoalesceSegmentsCmdEnd(b)), nil
-}
-
-func decodeCoalesceSegmentsCmd(data []byte) (CoalesceSegmentsCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.CoalesceSegmentsCmd {
-		return clusterpb.GetRootAsCoalesceSegmentsCmd(d, 0)
-	})
-	if err != nil {
-		return CoalesceSegmentsCmd{}, err
-	}
-	var consumed []string
-	if n := t.ConsumedSegmentIdsLength(); n > 0 {
-		consumed = make([]string, n)
-		for i := range consumed {
-			consumed[i] = string(t.ConsumedSegmentIds(i))
-		}
-	}
-	var placement []string
-	if n := t.PlacementLength(); n > 0 {
-		placement = make([]string, n)
-		for i := range placement {
-			placement[i] = string(t.Placement(i))
-		}
-	}
-	return CoalesceSegmentsCmd{
-		Bucket:             string(t.Bucket()),
-		Key:                string(t.Key()),
-		CoalescedID:        string(t.CoalescedId()),
-		ShardKey:           string(t.ShardKey()),
-		Size:               t.Size(),
-		ETag:               string(t.Etag()),
-		ConsumedSegmentIDs: consumed,
-		Placement:          placement,
-		ECData:             t.EcData(),
-		ECParity:           t.EcParity(),
-	}, nil
-}
-
-// encodeSetRingCmd serializes a SetRingCmd for Raft proposal.
-func encodeSetRingCmd(c SetRingCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	// VNodeEntry 객체들을 먼저 역순으로 빌드 (FlatBuffers vector prepend 방식)
-	vnOffsets := make([]flatbuffers.UOffsetT, len(c.VNodes))
-	for i := len(c.VNodes) - 1; i >= 0; i-- {
-		nodeIDOff := b.CreateString(c.VNodes[i].NodeID)
-		clusterpb.VNodeEntryStart(b)
-		clusterpb.VNodeEntryAddToken(b, c.VNodes[i].Token)
-		clusterpb.VNodeEntryAddNodeId(b, nodeIDOff)
-		vnOffsets[i] = clusterpb.VNodeEntryEnd(b)
-	}
-	clusterpb.SetRingCmdStartVnodesVector(b, len(vnOffsets))
-	for i := len(vnOffsets) - 1; i >= 0; i-- {
-		b.PrependUOffsetT(vnOffsets[i])
-	}
-	vnodesVec := b.EndVector(len(vnOffsets))
-	clusterpb.SetRingCmdStart(b)
-	clusterpb.SetRingCmdAddVersion(b, c.Version)
-	clusterpb.SetRingCmdAddVnodes(b, vnodesVec)
-	clusterpb.SetRingCmdAddVperNode(b, uint32(c.VPerNode))
-	return fbFinish(b, clusterpb.SetRingCmdEnd(b)), nil
-}
-
-// --- Payload encoding dispatch ---
-
-func encodePayload(cmdType CommandType, payload any) ([]byte, error) {
-	switch cmdType {
-	case CmdNoOp:
-		return nil, nil
-	case CmdCreateBucket:
-		return encodeCreateBucketCmd(payload.(CreateBucketCmd))
-	case CmdDeleteBucket:
-		return encodeDeleteBucketCmd(payload.(DeleteBucketCmd))
-	case CmdPutObjectMeta:
-		return encodePutObjectMetaCmd(payload.(PutObjectMetaCmd))
-	case CmdDeleteObject:
-		return encodeDeleteObjectCmd(payload.(DeleteObjectCmd))
-	case CmdCreateMultipartUpload:
-		return encodeCreateMultipartUploadCmd(payload.(CreateMultipartUploadCmd))
-	case CmdCompleteMultipart:
-		return encodeCompleteMultipartCmd(payload.(CompleteMultipartCmd))
-	case CmdAbortMultipart:
-		return encodeAbortMultipartCmd(payload.(AbortMultipartCmd))
-	case CmdSetBucketPolicy:
-		return encodeSetBucketPolicyCmd(payload.(SetBucketPolicyCmd))
-	case CmdDeleteBucketPolicy:
-		return encodeDeleteBucketPolicyCmd(payload.(DeleteBucketPolicyCmd))
-	case CmdMigrateShard:
-		return encodeMigrateShardCmd(payload.(MigrateShardFSMCmd))
-	case CmdMigrationDone:
-		return encodeMigrationDoneCmd(payload.(MigrationDoneFSMCmd))
-	case CmdPutShardPlacement:
-		return encodePutShardPlacementCmd(payload.(PutShardPlacementCmd))
-	case CmdDeleteShardPlacement:
-		return encodeDeleteShardPlacementCmd(payload.(DeleteShardPlacementCmd))
-	case CmdDeleteObjectVersion:
-		return encodeDeleteObjectVersionCmd(payload.(DeleteObjectVersionCmd))
-	case CmdSetBucketVersioning:
-		return encodeSetBucketVersioningCmd(payload.(SetBucketVersioningCmd))
-	case CmdSetObjectACL:
-		return encodeSetObjectACLCmd(payload.(SetObjectACLCmd))
-	case CmdSetObjectTags:
-		return encodeSetObjectTagsCmd(payload.(SetObjectTagsCmd))
-	case CmdAppendObject:
-		return encodeAppendObjectCmd(payload.(AppendObjectCmd))
-	case CmdCoalesceSegments:
-		return encodeCoalesceSegmentsCmd(payload.(CoalesceSegmentsCmd))
-	case CmdSetRing:
-		return encodeSetRingCmd(payload.(SetRingCmd))
-	case CmdPutObjectQuarantine:
-		return encodePutObjectQuarantineCmd(payload.(PutObjectQuarantineCmd))
-	case CmdResealFSMValues:
-		return encodeResealFSMValuesCmd(payload.(ResealFSMValuesCmd))
-	case CmdFSMValueResealDone:
-		return encodeFSMValueResealDoneCmd(payload.(FSMValueResealDoneCmd))
-	default:
-		return nil, fmt.Errorf("unknown command type: %d", cmdType)
-	}
-}
-
-func encodePutObjectQuarantineCmd(c PutObjectQuarantineCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	keyOff := b.CreateString(c.Key)
-	vidOff := b.CreateString(c.VersionID)
-	causeOff := b.CreateString(c.Cause)
-	reasonOff := b.CreateString(c.Reason)
-	clusterpb.PutObjectQuarantineCmdStart(b)
-	clusterpb.PutObjectQuarantineCmdAddBucket(b, bucketOff)
-	clusterpb.PutObjectQuarantineCmdAddKey(b, keyOff)
-	clusterpb.PutObjectQuarantineCmdAddVersionId(b, vidOff)
-	clusterpb.PutObjectQuarantineCmdAddCause(b, causeOff)
-	clusterpb.PutObjectQuarantineCmdAddReason(b, reasonOff)
-	return fbFinish(b, clusterpb.PutObjectQuarantineCmdEnd(b)), nil
-}
-
-func decodePutObjectQuarantineCmd(data []byte) (PutObjectQuarantineCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.PutObjectQuarantineCmd {
-		return clusterpb.GetRootAsPutObjectQuarantineCmd(d, 0)
-	})
-	if err != nil {
-		return PutObjectQuarantineCmd{}, err
-	}
-	return PutObjectQuarantineCmd{
-		Bucket:    string(t.Bucket()),
-		Key:       string(t.Key()),
-		VersionID: string(t.VersionId()),
-		Cause:     string(t.Cause()),
-		Reason:    string(t.Reason()),
-	}, nil
-}
-
-// decodePutObjectQuarantineCmdStorage is the storage-safe variant of
-// decodePutObjectQuarantineCmd. Unlike the RPC version, it wraps BOTH
-// GetRootAs AND all field access in defer-recover so a malformed FB blob
-// produces a typed error instead of panicking through callers. (Existing
-// fbSafe only wraps the GetRootAs call.)
-//
-// Used by FSM apply paths that read raft-derived badger values.
-func decodePutObjectQuarantineCmdStorage(data []byte) (cmd PutObjectQuarantineCmd, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("decode quarantine storage: malformed FB: %v", r)
-		}
-	}()
-	t := clusterpb.GetRootAsPutObjectQuarantineCmd(data, 0)
-	cmd = PutObjectQuarantineCmd{
-		Bucket:    string(t.Bucket()),
-		Key:       string(t.Key()),
-		VersionID: string(t.VersionId()),
-		Cause:     string(t.Cause()),
-		Reason:    string(t.Reason()),
-	}
-	return cmd, nil
-}
-
-func encodeResealFSMValuesCmd(c ResealFSMValuesCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	var keysOff flatbuffers.UOffsetT
-	if len(c.Keys) > 0 {
-		keysOff = buildStringVector(b, c.Keys, clusterpb.ResealFSMValuesCmdStartKeysVector)
-	}
-	clusterpb.ResealFSMValuesCmdStart(b)
-	if len(c.Keys) > 0 {
-		clusterpb.ResealFSMValuesCmdAddKeys(b, keysOff)
-	}
-	clusterpb.ResealFSMValuesCmdAddActiveGen(b, c.ActiveGen)
-	return fbFinish(b, clusterpb.ResealFSMValuesCmdEnd(b)), nil
-}
-
-func decodeResealFSMValuesCmd(data []byte) (ResealFSMValuesCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.ResealFSMValuesCmd {
-		return clusterpb.GetRootAsResealFSMValuesCmd(d, 0)
-	})
-	if err != nil {
-		return ResealFSMValuesCmd{}, err
-	}
-	n := t.KeysLength()
-	keys := make([]string, n)
-	for i := 0; i < n; i++ {
-		keys[i] = string(t.Keys(i))
-	}
-	return ResealFSMValuesCmd{Keys: keys, ActiveGen: t.ActiveGen()}, nil
-}
-
-func encodeFSMValueResealDoneCmd(c FSMValueResealDoneCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	clusterpb.FSMValueResealDoneCmdStart(b)
-	clusterpb.FSMValueResealDoneCmdAddGen(b, c.Gen)
-	return fbFinish(b, clusterpb.FSMValueResealDoneCmdEnd(b)), nil
-}
-
-//nolint:unused // referenced by codec_test.go (TestFSMValueResealDoneCmd_RoundTrip).
-func decodeFSMValueResealDoneCmd(data []byte) (FSMValueResealDoneCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.FSMValueResealDoneCmd {
-		return clusterpb.GetRootAsFSMValueResealDoneCmd(d, 0)
-	})
-	if err != nil {
-		return FSMValueResealDoneCmd{}, err
-	}
-	return FSMValueResealDoneCmd{Gen: t.Gen()}, nil
-}
-
-func encodePutShardPlacementCmd(c PutShardPlacementCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	keyOff := b.CreateString(c.Key)
-
-	nodeOffs := make([]flatbuffers.UOffsetT, len(c.NodeIDs))
-	for i, n := range c.NodeIDs {
-		nodeOffs[i] = b.CreateString(n)
-	}
-	clusterpb.PutShardPlacementCmdStartNodeIdsVector(b, len(c.NodeIDs))
-	for i := len(c.NodeIDs) - 1; i >= 0; i-- {
-		b.PrependUOffsetT(nodeOffs[i])
-	}
-	nodesVec := b.EndVector(len(c.NodeIDs))
-
-	clusterpb.PutShardPlacementCmdStart(b)
-	clusterpb.PutShardPlacementCmdAddBucket(b, bucketOff)
-	clusterpb.PutShardPlacementCmdAddKey(b, keyOff)
-	clusterpb.PutShardPlacementCmdAddNodeIds(b, nodesVec)
-	clusterpb.PutShardPlacementCmdAddK(b, int32(c.K))
-	clusterpb.PutShardPlacementCmdAddM(b, int32(c.M))
-	return fbFinish(b, clusterpb.PutShardPlacementCmdEnd(b)), nil
-}
-
-//nolint:unused // package tests pin command wire compatibility.
-func decodePutShardPlacementCmd(data []byte) (PutShardPlacementCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.PutShardPlacementCmd {
-		return clusterpb.GetRootAsPutShardPlacementCmd(d, 0)
-	})
-	if err != nil {
-		return PutShardPlacementCmd{}, err
-	}
-	n := t.NodeIdsLength()
-	nodes := make([]string, n)
-	for i := 0; i < n; i++ {
-		nodes[i] = string(t.NodeIds(i))
-	}
-	return PutShardPlacementCmd{
-		Bucket:  string(t.Bucket()),
-		Key:     string(t.Key()),
-		NodeIDs: nodes,
-		K:       int(t.K()),
-		M:       int(t.M()),
-	}, nil
-}
-
-func encodeDeleteShardPlacementCmd(c DeleteShardPlacementCmd) ([]byte, error) {
-	b := clusterBuilderPool.Get()
-	bucketOff := b.CreateString(c.Bucket)
-	keyOff := b.CreateString(c.Key)
-	clusterpb.DeleteShardPlacementCmdStart(b)
-	clusterpb.DeleteShardPlacementCmdAddBucket(b, bucketOff)
-	clusterpb.DeleteShardPlacementCmdAddKey(b, keyOff)
-	return fbFinish(b, clusterpb.DeleteShardPlacementCmdEnd(b)), nil
-}
-
-//nolint:unused // package tests pin command wire compatibility.
-func decodeDeleteShardPlacementCmd(data []byte) (DeleteShardPlacementCmd, error) {
-	t, err := fbSafe(data, func(d []byte) *clusterpb.DeleteShardPlacementCmd {
-		return clusterpb.GetRootAsDeleteShardPlacementCmd(d, 0)
-	})
-	if err != nil {
-		return DeleteShardPlacementCmd{}, err
-	}
-	return DeleteShardPlacementCmd{
-		Bucket: string(t.Bucket()),
-		Key:    string(t.Key()),
 	}, nil
 }

@@ -34,11 +34,11 @@ var (
 	ECShard64MB  = New("ec_shard_64mb", 64)
 	ECShard256MB = New("ec_shard_256mb", 256)
 
-	// Storage backend (disk-touching reads). Sees every read that
-	// CachedBackend missed — the "post-object-cache, pre-disk" boundary.
-	// Tells us what a unified buffer cache below CachedBackend would
-	// have caught, so the curve directly compares "object cache only"
-	// (today) vs "object cache + UBC". Sized in entries; key
+	// Storage backend (disk-touching reads). Sees every read that an
+	// in-front object cache missed — the "post-object-cache, pre-disk"
+	// boundary. Tells us what a unified buffer cache below any object
+	// cache would have caught, so the curve directly compares "object
+	// cache only" (today) vs "object cache + UBC". Sized in entries; key
 	// granularity is whatever the caller passes (typically bucket+key
 	// for the object backend, so each entry = one object miss).
 	//
@@ -70,9 +70,9 @@ func RecordECShard(key string) {
 
 // RecordBackendObject fans one access out to all three backend-object
 // trackers. Caller is the lowest-level disk-touching GetObject — the
-// boundary CachedBackend has already passed before the data reaches
-// the actual storage backend. Hits here are what a unified buffer
-// cache below CachedBackend would have absorbed.
+// point that any in-front object cache would have already passed before
+// the data reaches the actual storage backend. Hits here are what a
+// unified buffer cache at that boundary would have absorbed.
 //
 // Bucket and key are passed separately so the "bucket/key" composition
 // is paid only when the simulator is enabled (default: off). The hot

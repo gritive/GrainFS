@@ -270,8 +270,32 @@ func (rcv *ObjectMeta) TagsLength() int {
 	return 0
 }
 
+func (rcv *ObjectMeta) StripeBytes() uint32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(38))
+	if o != 0 {
+		return rcv._tab.GetUint32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *ObjectMeta) MutateStripeBytes(n uint32) bool {
+	return rcv._tab.MutateUint32Slot(38, n)
+}
+
+func (rcv *ObjectMeta) MetaSeq() uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(40))
+	if o != 0 {
+		return rcv._tab.GetUint64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *ObjectMeta) MutateMetaSeq(n uint64) bool {
+	return rcv._tab.MutateUint64Slot(40, n)
+}
+
 func ObjectMetaStart(builder *flatbuffers.Builder) {
-	builder.StartObject(17)
+	builder.StartObject(19)
 }
 func ObjectMetaAddKey(builder *flatbuffers.Builder, key flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(key), 0)
@@ -341,6 +365,12 @@ func ObjectMetaAddTags(builder *flatbuffers.Builder, tags flatbuffers.UOffsetT) 
 }
 func ObjectMetaStartTagsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
+}
+func ObjectMetaAddStripeBytes(builder *flatbuffers.Builder, stripeBytes uint32) {
+	builder.PrependUint32Slot(17, stripeBytes, 0)
+}
+func ObjectMetaAddMetaSeq(builder *flatbuffers.Builder, metaSeq uint64) {
+	builder.PrependUint64Slot(18, metaSeq, 0)
 }
 func ObjectMetaEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

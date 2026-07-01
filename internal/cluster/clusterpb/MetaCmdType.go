@@ -11,16 +11,11 @@ const (
 	MetaCmdTypeAddNode                      MetaCmdType = 1
 	MetaCmdTypeRemoveNode                   MetaCmdType = 2
 	MetaCmdTypePutShardGroup                MetaCmdType = 3
-	MetaCmdTypeSetActivePlan                MetaCmdType = 4
+	MetaCmdTypeReserved4                    MetaCmdType = 4
 	MetaCmdTypePutBucketAssignment          MetaCmdType = 5
 	MetaCmdTypeSetLoadSnapshot              MetaCmdType = 6
-	MetaCmdTypeProposeRebalancePlan         MetaCmdType = 7
-	MetaCmdTypeAbortPlan                    MetaCmdType = 8
-	MetaCmdTypeIcebergCreateNamespace       MetaCmdType = 9
-	MetaCmdTypeIcebergDeleteNamespace       MetaCmdType = 10
-	MetaCmdTypeIcebergCreateTable           MetaCmdType = 11
-	MetaCmdTypeIcebergCommitTable           MetaCmdType = 12
-	MetaCmdTypeIcebergDeleteTable           MetaCmdType = 13
+	MetaCmdTypeReserved7                    MetaCmdType = 7
+	MetaCmdTypeReserved8                    MetaCmdType = 8
 	MetaCmdTypeRotateKeyBegin               MetaCmdType = 14
 	MetaCmdTypeRotateKeySwitch              MetaCmdType = 15
 	MetaCmdTypeRotateKeyDrop                MetaCmdType = 16
@@ -47,12 +42,8 @@ const (
 	MetaCmdTypeMigrationJobStart            MetaCmdType = 37
 	MetaCmdTypeMigrationJobDone             MetaCmdType = 38
 	MetaCmdTypeMigrationJobFailed           MetaCmdType = 39
-	MetaCmdTypeNfsExportUpsert              MetaCmdType = 40
-	MetaCmdTypeNfsExportDelete              MetaCmdType = 41
-	MetaCmdTypeNfsExportBucketDeleteCascade MetaCmdType = 42
 	MetaCmdTypeCapabilityActivate           MetaCmdType = 43
 	MetaCmdTypeMigrationCutover             MetaCmdType = 44
-	MetaCmdTypeNfsExportCreate              MetaCmdType = 45
 	MetaCmdTypeConfigPut                    MetaCmdType = 46
 	MetaCmdTypeConfigDelete                 MetaCmdType = 47
 	MetaCmdTypeDEKRotate                    MetaCmdType = 48
@@ -72,10 +63,6 @@ const (
 	MetaCmdTypeCreateBucketWithPolicyAttach MetaCmdType = 62
 	MetaCmdTypeJWTSigningKeyRotate          MetaCmdType = 63
 	MetaCmdTypeJWTSigningKeyPrune           MetaCmdType = 64
-	MetaCmdTypeMountSACreate                MetaCmdType = 65
-	MetaCmdTypeMountSADelete                MetaCmdType = 66
-	MetaCmdTypeMountSAAttachPolicy          MetaCmdType = 67
-	MetaCmdTypeMountSADetachPolicy          MetaCmdType = 68
 	MetaCmdTypeKEKRotate                    MetaCmdType = 69
 	MetaCmdTypeKEKRetire                    MetaCmdType = 70
 	MetaCmdTypeKEKPrune                     MetaCmdType = 71
@@ -96,6 +83,14 @@ const (
 	MetaCmdTypeBeginPresentFlip             MetaCmdType = 86
 	MetaCmdTypeDropClusterKeyAccept         MetaCmdType = 87
 	MetaCmdTypeDEKRewrapProgress            MetaCmdType = 88
+	MetaCmdTypePutIndexGroup                MetaCmdType = 89
+	MetaCmdTypeAddPlacementGeneration       MetaCmdType = 90
+	MetaCmdTypeCreateBucket                 MetaCmdType = 91
+	MetaCmdTypeDeleteBucket                 MetaCmdType = 92
+	MetaCmdTypeSetBucketVersioning          MetaCmdType = 93
+	MetaCmdTypeSetBucketPolicy              MetaCmdType = 94
+	MetaCmdTypeDeleteBucketPolicy           MetaCmdType = 95
+	MetaCmdTypeRetirePlacementGeneration    MetaCmdType = 96
 )
 
 var EnumNamesMetaCmdType = map[MetaCmdType]string{
@@ -103,16 +98,11 @@ var EnumNamesMetaCmdType = map[MetaCmdType]string{
 	MetaCmdTypeAddNode:                      "AddNode",
 	MetaCmdTypeRemoveNode:                   "RemoveNode",
 	MetaCmdTypePutShardGroup:                "PutShardGroup",
-	MetaCmdTypeSetActivePlan:                "SetActivePlan",
+	MetaCmdTypeReserved4:                    "Reserved4",
 	MetaCmdTypePutBucketAssignment:          "PutBucketAssignment",
 	MetaCmdTypeSetLoadSnapshot:              "SetLoadSnapshot",
-	MetaCmdTypeProposeRebalancePlan:         "ProposeRebalancePlan",
-	MetaCmdTypeAbortPlan:                    "AbortPlan",
-	MetaCmdTypeIcebergCreateNamespace:       "IcebergCreateNamespace",
-	MetaCmdTypeIcebergDeleteNamespace:       "IcebergDeleteNamespace",
-	MetaCmdTypeIcebergCreateTable:           "IcebergCreateTable",
-	MetaCmdTypeIcebergCommitTable:           "IcebergCommitTable",
-	MetaCmdTypeIcebergDeleteTable:           "IcebergDeleteTable",
+	MetaCmdTypeReserved7:                    "Reserved7",
+	MetaCmdTypeReserved8:                    "Reserved8",
 	MetaCmdTypeRotateKeyBegin:               "RotateKeyBegin",
 	MetaCmdTypeRotateKeySwitch:              "RotateKeySwitch",
 	MetaCmdTypeRotateKeyDrop:                "RotateKeyDrop",
@@ -139,12 +129,8 @@ var EnumNamesMetaCmdType = map[MetaCmdType]string{
 	MetaCmdTypeMigrationJobStart:            "MigrationJobStart",
 	MetaCmdTypeMigrationJobDone:             "MigrationJobDone",
 	MetaCmdTypeMigrationJobFailed:           "MigrationJobFailed",
-	MetaCmdTypeNfsExportUpsert:              "NfsExportUpsert",
-	MetaCmdTypeNfsExportDelete:              "NfsExportDelete",
-	MetaCmdTypeNfsExportBucketDeleteCascade: "NfsExportBucketDeleteCascade",
 	MetaCmdTypeCapabilityActivate:           "CapabilityActivate",
 	MetaCmdTypeMigrationCutover:             "MigrationCutover",
-	MetaCmdTypeNfsExportCreate:              "NfsExportCreate",
 	MetaCmdTypeConfigPut:                    "ConfigPut",
 	MetaCmdTypeConfigDelete:                 "ConfigDelete",
 	MetaCmdTypeDEKRotate:                    "DEKRotate",
@@ -164,10 +150,6 @@ var EnumNamesMetaCmdType = map[MetaCmdType]string{
 	MetaCmdTypeCreateBucketWithPolicyAttach: "CreateBucketWithPolicyAttach",
 	MetaCmdTypeJWTSigningKeyRotate:          "JWTSigningKeyRotate",
 	MetaCmdTypeJWTSigningKeyPrune:           "JWTSigningKeyPrune",
-	MetaCmdTypeMountSACreate:                "MountSACreate",
-	MetaCmdTypeMountSADelete:                "MountSADelete",
-	MetaCmdTypeMountSAAttachPolicy:          "MountSAAttachPolicy",
-	MetaCmdTypeMountSADetachPolicy:          "MountSADetachPolicy",
 	MetaCmdTypeKEKRotate:                    "KEKRotate",
 	MetaCmdTypeKEKRetire:                    "KEKRetire",
 	MetaCmdTypeKEKPrune:                     "KEKPrune",
@@ -188,6 +170,14 @@ var EnumNamesMetaCmdType = map[MetaCmdType]string{
 	MetaCmdTypeBeginPresentFlip:             "BeginPresentFlip",
 	MetaCmdTypeDropClusterKeyAccept:         "DropClusterKeyAccept",
 	MetaCmdTypeDEKRewrapProgress:            "DEKRewrapProgress",
+	MetaCmdTypePutIndexGroup:                "PutIndexGroup",
+	MetaCmdTypeAddPlacementGeneration:       "AddPlacementGeneration",
+	MetaCmdTypeCreateBucket:                 "CreateBucket",
+	MetaCmdTypeDeleteBucket:                 "DeleteBucket",
+	MetaCmdTypeSetBucketVersioning:          "SetBucketVersioning",
+	MetaCmdTypeSetBucketPolicy:              "SetBucketPolicy",
+	MetaCmdTypeDeleteBucketPolicy:           "DeleteBucketPolicy",
+	MetaCmdTypeRetirePlacementGeneration:    "RetirePlacementGeneration",
 }
 
 var EnumValuesMetaCmdType = map[string]MetaCmdType{
@@ -195,16 +185,11 @@ var EnumValuesMetaCmdType = map[string]MetaCmdType{
 	"AddNode":                      MetaCmdTypeAddNode,
 	"RemoveNode":                   MetaCmdTypeRemoveNode,
 	"PutShardGroup":                MetaCmdTypePutShardGroup,
-	"SetActivePlan":                MetaCmdTypeSetActivePlan,
+	"Reserved4":                    MetaCmdTypeReserved4,
 	"PutBucketAssignment":          MetaCmdTypePutBucketAssignment,
 	"SetLoadSnapshot":              MetaCmdTypeSetLoadSnapshot,
-	"ProposeRebalancePlan":         MetaCmdTypeProposeRebalancePlan,
-	"AbortPlan":                    MetaCmdTypeAbortPlan,
-	"IcebergCreateNamespace":       MetaCmdTypeIcebergCreateNamespace,
-	"IcebergDeleteNamespace":       MetaCmdTypeIcebergDeleteNamespace,
-	"IcebergCreateTable":           MetaCmdTypeIcebergCreateTable,
-	"IcebergCommitTable":           MetaCmdTypeIcebergCommitTable,
-	"IcebergDeleteTable":           MetaCmdTypeIcebergDeleteTable,
+	"Reserved7":                    MetaCmdTypeReserved7,
+	"Reserved8":                    MetaCmdTypeReserved8,
 	"RotateKeyBegin":               MetaCmdTypeRotateKeyBegin,
 	"RotateKeySwitch":              MetaCmdTypeRotateKeySwitch,
 	"RotateKeyDrop":                MetaCmdTypeRotateKeyDrop,
@@ -231,12 +216,8 @@ var EnumValuesMetaCmdType = map[string]MetaCmdType{
 	"MigrationJobStart":            MetaCmdTypeMigrationJobStart,
 	"MigrationJobDone":             MetaCmdTypeMigrationJobDone,
 	"MigrationJobFailed":           MetaCmdTypeMigrationJobFailed,
-	"NfsExportUpsert":              MetaCmdTypeNfsExportUpsert,
-	"NfsExportDelete":              MetaCmdTypeNfsExportDelete,
-	"NfsExportBucketDeleteCascade": MetaCmdTypeNfsExportBucketDeleteCascade,
 	"CapabilityActivate":           MetaCmdTypeCapabilityActivate,
 	"MigrationCutover":             MetaCmdTypeMigrationCutover,
-	"NfsExportCreate":              MetaCmdTypeNfsExportCreate,
 	"ConfigPut":                    MetaCmdTypeConfigPut,
 	"ConfigDelete":                 MetaCmdTypeConfigDelete,
 	"DEKRotate":                    MetaCmdTypeDEKRotate,
@@ -256,10 +237,6 @@ var EnumValuesMetaCmdType = map[string]MetaCmdType{
 	"CreateBucketWithPolicyAttach": MetaCmdTypeCreateBucketWithPolicyAttach,
 	"JWTSigningKeyRotate":          MetaCmdTypeJWTSigningKeyRotate,
 	"JWTSigningKeyPrune":           MetaCmdTypeJWTSigningKeyPrune,
-	"MountSACreate":                MetaCmdTypeMountSACreate,
-	"MountSADelete":                MetaCmdTypeMountSADelete,
-	"MountSAAttachPolicy":          MetaCmdTypeMountSAAttachPolicy,
-	"MountSADetachPolicy":          MetaCmdTypeMountSADetachPolicy,
 	"KEKRotate":                    MetaCmdTypeKEKRotate,
 	"KEKRetire":                    MetaCmdTypeKEKRetire,
 	"KEKPrune":                     MetaCmdTypeKEKPrune,
@@ -280,6 +257,14 @@ var EnumValuesMetaCmdType = map[string]MetaCmdType{
 	"BeginPresentFlip":             MetaCmdTypeBeginPresentFlip,
 	"DropClusterKeyAccept":         MetaCmdTypeDropClusterKeyAccept,
 	"DEKRewrapProgress":            MetaCmdTypeDEKRewrapProgress,
+	"PutIndexGroup":                MetaCmdTypePutIndexGroup,
+	"AddPlacementGeneration":       MetaCmdTypeAddPlacementGeneration,
+	"CreateBucket":                 MetaCmdTypeCreateBucket,
+	"DeleteBucket":                 MetaCmdTypeDeleteBucket,
+	"SetBucketVersioning":          MetaCmdTypeSetBucketVersioning,
+	"SetBucketPolicy":              MetaCmdTypeSetBucketPolicy,
+	"DeleteBucketPolicy":           MetaCmdTypeDeleteBucketPolicy,
+	"RetirePlacementGeneration":    MetaCmdTypeRetirePlacementGeneration,
 }
 
 func (v MetaCmdType) String() string {

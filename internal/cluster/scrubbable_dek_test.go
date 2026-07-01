@@ -4,31 +4,18 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/raft"
-	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/gritive/GrainFS/internal/storage/datawal"
 	"github.com/gritive/GrainFS/internal/storage/eccodec"
 )
-
-// withTestWALDEK wires a data WAL sealed by the same DEKKeeper-backed seam the
-// ShardService uses (production shape: no static encryptor), satisfying the
-// mandatory-WAL invariant without a nil-encryptor adapter that would panic.
-func withTestWALDEK(tb clusterTestTB, keeper *encrypt.DEKKeeper, clusterID []byte) ShardServiceOption {
-	tb.Helper()
-	w, err := datawal.Open(filepath.Join(tb.TempDir(), "datawal"), storage.NewDEKKeeperAdapter(keeper, clusterID), datawal.NamespaceShard)
-	require.NoError(tb, err)
-	tb.Cleanup(func() { _ = w.Close() })
-	return WithDataWAL(w)
-}
 
 // newTestDistributedBackendDEK mirrors newTestDistributedBackend but wires the
 // ShardService with WithShardDEKKeeper — the production shape after PR #631.
@@ -65,7 +52,7 @@ func newTestDistributedBackendDEK(t *testing.T, extraSvcOpts ...ShardServiceOpti
 	}
 	require.True(t, node.IsLeader(), "no-peers node must become leader")
 
-	backend, err := NewDistributedBackend(dir, db, node, nil, false)
+	backend, err := NewDistributedBackend(dir, badgermeta.Wrap(db), node, nil, false)
 	require.NoError(t, err)
 
 	backend.SetECConfig(ECConfig{DataShards: 1, ParityShards: 0})
@@ -73,9 +60,10 @@ func newTestDistributedBackendDEK(t *testing.T, extraSvcOpts ...ShardServiceOpti
 	clusterID := bytes.Repeat([]byte{0x78}, 16)
 	keeper, err := encrypt.NewDEKKeeper(kek, clusterID)
 	require.NoError(t, err)
-	svc := NewShardService(backend.root, nil, append([]ShardServiceOption{WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID)}, extraSvcOpts...)...)
+	svc := NewShardService(backend.root, nil, append([]ShardServiceOption{WithShardDEKKeeper(keeper, clusterID)}, extraSvcOpts...)...)
 	require.NotNil(t, svc.DEKKeeper(), "production shape: DEK keeper must be wired")
 	backend.SetShardService(svc, []string{backend.selfAddr})
+	wireTestShardGroup(backend)
 
 	stopApply := make(chan struct{})
 	go backend.RunApplyLoop(stopApply)

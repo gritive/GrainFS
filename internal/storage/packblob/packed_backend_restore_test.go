@@ -41,33 +41,3 @@ func TestPackedBackend_NewPackedBackend_LoadsExistingIndex(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(5), head.Size)
 }
-
-// Regression for the snapshot restore path. Before the fix, RestoreObjects
-// wiped pb.index and delegated everything to inner. Packed-fast-path objects
-// only live in blob_*.bin (inner cluster meta-FSM never received them), so
-// the restore returned 0 and packed objects became invisible to LIST/GET.
-func TestPackedBackend_RestoreObjects_RebuildsPackedFromDisk(t *testing.T) {
-	pb := newTestPackedBackend(t)
-	ctx := context.Background()
-	require.NoError(t, pb.CreateBucket(ctx, "b"))
-
-	_, err := pb.PutObject(ctx, "b", "small.txt", strings.NewReader("hello"), "text/plain")
-	require.NoError(t, err)
-
-	snap, err := pb.ListAllObjects()
-	require.NoError(t, err)
-	require.Len(t, snap, 1)
-
-	// Drop the in-memory index; the blob and the snapshot are the only
-	// surviving evidence of the PUT.
-	pb.index.Range(func(k, _ any) bool { pb.index.Delete(k); return true })
-
-	restored, stale, err := pb.RestoreObjects(snap)
-	require.NoError(t, err)
-	require.Empty(t, stale)
-	require.Equal(t, 1, restored)
-
-	head, err := pb.HeadObject(ctx, "b", "small.txt")
-	require.NoError(t, err)
-	require.Equal(t, int64(5), head.Size)
-}

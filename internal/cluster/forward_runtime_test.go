@@ -30,7 +30,7 @@ func TestForwardRuntimeReadObjectUsesReadStream(t *testing.T) {
 		context.Background(),
 		RouteTarget{GroupID: "g1", Peers: []string{"peer-a"}},
 		raftpb.ForwardOpGetObject,
-		buildGetObjectArgs("bk", "k"),
+		buildGetObjectArgs("bk", "k", versioningStateUnknown),
 	)
 	require.NoError(t, err)
 	defer rc.Close()
@@ -44,12 +44,12 @@ func TestForwardRuntimeReadObjectUsesReadStream(t *testing.T) {
 	require.Equal(t, "g1", d.readCalls[0].gid)
 }
 
-func TestForwardRuntimeMutateFrameSendsStatusOnlyMutation(t *testing.T) {
+func TestForwardRuntimeMutateOwnerFrameSendsStatusOnlyMutation(t *testing.T) {
 	d := &recordingDialer{replyByOp: map[raftpb.ForwardOp][]byte{}}
 	d.replyByOp[raftpb.ForwardOpSetObjectACL] = buildOKReply()
 
 	rt := forwardRuntime{sender: NewForwardSender(d.dial)}
-	err := rt.mutateFrame(
+	err := rt.mutateOwnerFrame(
 		context.Background(),
 		RouteTarget{GroupID: "g1", Peers: []string{"peer-a"}},
 		raftpb.ForwardOpSetObjectACL,
@@ -96,7 +96,7 @@ func TestForwardRuntimeHeadObjectDecodesFrameReply(t *testing.T) {
 		context.Background(),
 		RouteTarget{GroupID: "g1", Peers: []string{"peer-a"}},
 		raftpb.ForwardOpHeadObject,
-		buildHeadObjectArgs("bk", "k"),
+		buildHeadObjectArgs("bk", "k", versioningStateUnknown),
 		"bk",
 		"k",
 	)
@@ -123,6 +123,13 @@ func TestForwardRuntimeCreateMultipartUploadDecodesFrameReply(t *testing.T) {
 	require.Equal(t, "upload-1", upload.UploadID)
 	require.Len(t, d.calls, 1)
 	require.Equal(t, raftpb.ForwardOpCreateMultipartUpload, d.calls[0].op)
+}
+
+// Forward bodies of every size stream now (no minForwardStreamBytes threshold):
+// even a small seekable body takes the stream path rather than a buffered frame.
+func TestShouldStreamForwardBodySmallSeekable(t *testing.T) {
+	body := bytes.NewReader(bytes.Repeat([]byte("x"), 1024))
+	require.True(t, shouldStreamForwardBody(body, DefaultMaxForwardBodyBytes))
 }
 
 func TestForwardRuntimeAppendObjectStreamsBody(t *testing.T) {

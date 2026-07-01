@@ -18,7 +18,7 @@ import (
 // in-process: two HealReceipt stores representing "this node" and "a
 // peer", connected by a RoutingCache and a PeerQuerier that routes
 // single-peer queries directly to the peer's store. The broadcast path
-// fans out the same way. No QUIC, no real gossip, but the same code
+// fans out the same way. No real cluster transport or gossip, but the same code
 // paths as a real multi-node deployment.
 //
 // This bridges the unit tests (which mock PeerQuerier) and a true

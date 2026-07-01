@@ -64,7 +64,7 @@ histogram_quantile(0.99,
 ```
 
 Use the service-level metric when the aggregate API latency SLI breaches and
-you need to isolate whether S3, Iceberg, admin, cluster, dashboard, or metrics
+you need to isolate whether S3, admin, cluster, dashboard, or metrics
 traffic is responsible. The label contract is documented in the production
 runbook.
 
@@ -148,8 +148,6 @@ avg(grainfs_node_recovery_duration_seconds)
 - Disk usage > 80% (`grainfs_disk_used_pct{node_id="..."} > 80`)
 - Raft apply lag is sustained on any node/group (`max(grainfs_raft_apply_lag) by (node_id, group) > 0`)
 - Operator state scrape errors are increasing (`sum(increase(grainfs_operator_state_scrape_errors_total[15m])) > 0`)
-- AppendObject forward buffer rejection ratio > 1% over 5 min
-  (`rate(grainfs_cluster_append_forward_buffer_rejected_total[5m]) > 0.01 * rate(grainfs_http_requests_total{handler="append_object"}[5m])`)
 - Orphan segment tombstone backlog growing for 3+ scrub cycles
   (`grainfs_scrub_orphan_segments_found_total - grainfs_scrub_orphan_segments_deleted_total`
   monotonically increasing)
@@ -161,11 +159,6 @@ avg(grainfs_node_recovery_duration_seconds)
 
 ### AppendObject SLI metrics (reference)
 
-- `grainfs_cluster_append_forward_buffer_inflight_bytes` (Gauge) — bytes in flight
-  through the QUIC forward buffer pool. Saturation near
-  `--cluster-append-forward-buffer-total-bytes` triggers SlowDown rejections.
-- `grainfs_cluster_append_forward_buffer_rejected_total` (Counter) — HTTP 503
-  SlowDown count.
 - `grainfs_append_coalesced_depth` (Histogram, buckets 1..1024) — number of
   coalesced entries per object at AppendObject time. Sustained right-shift means
   recoalesce backstop isn't keeping up.
@@ -177,35 +170,6 @@ avg(grainfs_node_recovery_duration_seconds)
   policy (TODOS.md P2 follow-up).
 - `grainfs_scrub_orphan_segments_{found,deleted,sweep_capped,walk_errors,delete_errors}_total` —
   Orphan segment sweep counters (see runbook.md for diagnosis).
-
-### Startup data WAL repair metrics (reference)
-
-On boot, data WAL replay flags metadata-only EC shards whose local file is missing
-or the wrong size, and a non-blocking background worker reconstructs them serially
-from surviving peers (see runbook.md for diagnosis). Repair is best-effort: reads
-keep working via read-time EC reconstruction while the worker drains.
-
-- `grainfs_datawal_startup_repair_discovered_total{reason}` (Counter) — metadata-only
-  shard repair candidates found during replay, counted per WAL record before dedup
-  (`reason`: `missing`, `size_mismatch`).
-- `grainfs_datawal_startup_repair_candidates_total{reason}` (Counter) — distinct
-  candidates queued for the worker after `(bucket, shardKey, shardIdx)` dedup.
-- `grainfs_datawal_startup_repair_attempts_total` (Counter) — repair attempts started.
-- `grainfs_datawal_startup_repair_successes_total` (Counter) — shards reconstructed.
-- `grainfs_datawal_startup_repair_failures_total{reason}` (Counter) — failed repairs
-  (`reason`: `repair_failed`, `insufficient_survivors`, `context_canceled`, `panic`).
-  Sustained `insufficient_survivors` means peers are down — investigate before it
-  becomes data loss.
-- `grainfs_datawal_startup_repair_skips_total{reason}` (Counter) — candidates skipped
-  before repair (`reason`: `no_group`, `no_backend`, `invalid_shard_key`,
-  `placement_corrupt`, `not_local_owner`, `stale`, `placement_scan_capped`).
-  `placement_scan_capped` means the resolver hit the 1000-version scan cap while
-  looking for the owning SegmentRef/CoalescedShardRef; those shards stay covered by
-  read-time EC reconstruction. Startup repair now resolves segment
-  (`<key>/segments/<blobID>`) and coalesced (`<key>/coalesced/<id>`) shard keys
-  directly; the `unsupported_shardkey` label is retired and no longer emitted. The
-  rare marker-collision case (an S3 object key literally containing `/segments/` or
-  `/coalesced/`) folds into the `stale` reason instead.
 
 ### Placement monitor metrics (reference)
 

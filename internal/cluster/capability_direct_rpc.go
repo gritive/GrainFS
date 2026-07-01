@@ -1,6 +1,7 @@
 // Package cluster: direct capability probe RPC (Task 1b, Option A).
 //
-// RPC mechanism: the cluster transport.Call / Handle with StreamCapabilityProbe (0x17).
+// RPC mechanism: the native /probe/capability buffered route (Phase 8 N7-3;
+// the tunnel StreamCapabilityProbe 0x17 registration stays server-side until N8).
 // Production wires with an injected capabilityProbeDialer (same pattern as
 // forwardDialer in forward_sender.go). Tests pass a fake function — no transport
 // needed in unit tests.
@@ -21,6 +22,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/gossip"
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
@@ -30,24 +32,21 @@ var capProbeRequestMagic = []byte("CAPREQ\x01")
 // capProbeReplyMagic guards against misrouted payloads.
 var capProbeReplyMagic = []byte("CAPREP\x01")
 
-// capabilityProbeDialer abstracts the transport Call for testability.
-// Production wires it to: func(ctx, peer, payload) { return clusterTransport.Call(ctx, peer, &transport.Message{Type: transport.StreamCapabilityProbe, Payload: payload}) }
+// capabilityProbeDialer abstracts the transport call for testability.
+// Production wires it to: func(ctx, peer, payload) { return clusterTransport.CallBuffered(ctx, peer, transport.RouteProbeCapability, payload) }
 type capabilityProbeDialer func(ctx context.Context, peer string, payload []byte) ([]byte, error)
 
 // NewCapabilityProbeDialer builds the production capabilityProbeDialer that
-// dispatches a StreamCapabilityProbe request over the shared cluster transport and
-// returns the raw response payload. Used by serve-runtime boot to wire the
-// CapabilityGate's direct signed-assertion path.
+// dispatches a capability probe over the native /probe/capability buffered
+// route (Phase 8 N7-3) and returns the raw response payload. Used by
+// serve-runtime boot to wire the CapabilityGate's direct signed-assertion path.
 func NewCapabilityProbeDialer(t callerTransport) capabilityProbeDialer {
 	return func(ctx context.Context, peer string, payload []byte) ([]byte, error) {
-		resp, err := t.Call(ctx, peer, &transport.Message{
-			Type:    transport.StreamCapabilityProbe,
-			Payload: payload,
-		})
+		reply, err := t.CallBuffered(ctx, peer, transport.RouteProbeCapability, payload)
 		if err != nil {
 			return nil, fmt.Errorf("capability_probe: call %s: %w", peer, err)
 		}
-		return resp.Payload, nil
+		return reply, nil
 	}
 }
 
@@ -220,13 +219,13 @@ func decodeCapProbeResponse(data []byte) (capabilityProbeResponse, error) {
 }
 
 // CapabilityProbeHandler is the server-side handler for StreamCapabilityProbe.
-// Register it with: clusterTransport.Handle(transport.StreamCapabilityProbe, handler.Handle)
+// Register it with: clusterTransport.RegisterBufferedRoute(transport.RouteProbeCapability, handler.Handle)
 type CapabilityProbeHandler struct {
 	serverID       string
 	binaryVersion  string
 	clusterID      []byte // 16 bytes, from HandshakeVerifier.ClusterID()
 	kekStore       *encrypt.KEKStore
-	evidenceSource CapabilityEvidenceSource
+	evidenceSource gossip.CapabilityEvidenceSource
 }
 
 // NewCapabilityProbeHandler constructs a server-side handler.
@@ -236,7 +235,7 @@ func NewCapabilityProbeHandler(
 	binaryVersion string,
 	clusterID []byte,
 	kekStore *encrypt.KEKStore,
-	evidenceSource CapabilityEvidenceSource,
+	evidenceSource gossip.CapabilityEvidenceSource,
 ) *CapabilityProbeHandler {
 	if len(clusterID) != 16 {
 		panic(fmt.Sprintf("NewCapabilityProbeHandler: clusterID must be 16 bytes, got %d", len(clusterID)))
@@ -250,18 +249,17 @@ func NewCapabilityProbeHandler(
 	}
 }
 
-// Handle processes a StreamCapabilityProbe request message and returns a response.
-func (h *CapabilityProbeHandler) Handle(req *transport.Message) *transport.Message {
-	probeReq, err := decodeCapProbeRequest(req.Payload)
+// Handle processes a /probe/capability request and returns a response payload.
+// Errors map to a 500 → client-side error, exactly as the tunnel's StatusError.
+func (h *CapabilityProbeHandler) Handle(payload []byte) ([]byte, error) {
+	probeReq, err := decodeCapProbeRequest(payload)
 	if err != nil {
-		return transport.NewErrorResponse(req, transport.StatusError,
-			fmt.Errorf("capability_probe: decode request: %w", err))
+		return nil, fmt.Errorf("capability_probe: decode request: %w", err)
 	}
 	// Identity guard: refuse requests targeting a different server.
 	if probeReq.ExpectedServerID != h.serverID {
-		return transport.NewErrorResponse(req, transport.StatusError,
-			fmt.Errorf("capability_probe: identity mismatch: expected %q, this server is %q",
-				probeReq.ExpectedServerID, h.serverID))
+		return nil, fmt.Errorf("capability_probe: identity mismatch: expected %q, this server is %q",
+			probeReq.ExpectedServerID, h.serverID)
 	}
 
 	// Collect local capabilities.
@@ -280,8 +278,7 @@ func (h *CapabilityProbeHandler) Handle(req *transport.Message) *transport.Messa
 	canonical := canonicalEncodeCapAssertion(h.serverID, caps, probeReq.Nonce[:])
 	signed, err := h.kekStore.SealWithActiveKEK(canonical, aad)
 	if err != nil {
-		return transport.NewErrorResponse(req, transport.StatusError,
-			fmt.Errorf("capability_probe: seal assertion: %w", err))
+		return nil, fmt.Errorf("capability_probe: seal assertion: %w", err)
 	}
 
 	resp := capabilityProbeResponse{
@@ -290,7 +287,7 @@ func (h *CapabilityProbeHandler) Handle(req *transport.Message) *transport.Messa
 		BinaryVersion:   h.binaryVersion,
 		SignedAssertion: signed,
 	}
-	return transport.NewResponse(req, encodeCapProbeResponse(resp))
+	return encodeCapProbeResponse(resp), nil
 }
 
 // GetCapabilities sends a capability probe to a peer and verifies the signed assertion.
@@ -355,7 +352,7 @@ func GetCapabilities(
 // capability gate path. Stored in CapabilityGate and populated via WithDirectProbe.
 type CapabilityGateDirectConfig struct {
 	// dialer dials a peer and returns the raw response payload.
-	// Production: func(ctx, peerAddr, payload) { resp, _ := clusterTransport.Call(ctx, peerAddr, &transport.Message{Type: transport.StreamCapabilityProbe, Payload: payload}); return resp.Payload, nil }
+	// Production: func(ctx, peerAddr, payload) { return clusterTransport.CallBuffered(ctx, peerAddr, transport.RouteProbeCapability, payload) }
 	dialer    capabilityProbeDialer
 	clusterID []byte
 	kekStore  *encrypt.KEKStore

@@ -2,7 +2,6 @@ package server
 
 import (
 	"os"
-	"path/filepath"
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -10,27 +9,9 @@ import (
 	"github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/cloudwego/hertz/pkg/network/standard"
 
-	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/nodeconfig"
-	"github.com/gritive/GrainFS/internal/snapshot"
 	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/gritive/GrainFS/internal/volume"
 )
-
-// unwrapBackend returns the innermost backend, unwrapping decorators like CachedBackend.
-type unwrapper interface {
-	Unwrap() storage.Backend
-}
-
-func unwrapBackend(b storage.Backend) storage.Backend {
-	for {
-		u, ok := b.(unwrapper)
-		if !ok {
-			return b
-		}
-		b = u.Unwrap()
-	}
-}
 
 func normalizeServerStorage(ss ServerStorage, policyStore *CompiledPolicyStore) (ServerStorage, *CompiledPolicyStore) {
 	if policyStore == nil {
@@ -40,14 +21,8 @@ func normalizeServerStorage(ss ServerStorage, policyStore *CompiledPolicyStore) 
 	if backend == nil && ss.Ops != nil {
 		backend = ss.Ops.Backend()
 	}
-	if backend == nil {
-		backend = ss.VolumeBackend
-	}
 	if ss.Ops == nil {
 		ss.Ops = storage.NewOperations(backend, storage.WithPolicyStore(policyStore))
-	}
-	if ss.VolumeBackend == nil {
-		ss.VolumeBackend = backend
 	}
 	ss.Backend = backend
 	return ss, policyStore
@@ -90,20 +65,8 @@ func (s *Server) installMiddlewares(h *server.Hertz) {
 	if s.verifier != nil {
 		h.Use(s.authMiddleware())
 	}
-	h.Use(s.auditEnvelopeMiddleware())
 	h.Use(s.s3RequestLogMiddleware())
 	h.Use(s.authzMiddleware())
-}
-
-func (s *Server) ensureRuntimeDefaults(ss ServerStorage) {
-	if s.volMgr == nil {
-		s.volMgr = volume.NewManager(ss.VolumeBackend)
-	}
-	if s.icebergCatalog == nil {
-		if dbp := ss.DBProvider; dbp != nil {
-			s.icebergCatalog = icebergcatalog.NewStore(dbp.DB(), "s3://grainfs-tables/warehouse")
-		}
-	}
 }
 
 func (s *Server) wireAlertState() {
@@ -123,28 +86,6 @@ func (s *Server) wireBroadcastLogger() {
 		multi := zerolog.MultiLevelWriter(os.Stderr, &broadcastWriter{hub: s.hub})
 		log.Logger = zerolog.New(multi).With().Timestamp().Logger()
 	})
-}
-
-func (s *Server) initSnapshotManager(ss ServerStorage) {
-	// An injected Manager (WithSnapshotManager — production shares the
-	// serveruntime auto-snapshotter's instance) is authoritative; do NOT build a
-	// second Manager over the same dir (that re-introduces the two-writer
-	// nextSeq seq-collision this wiring exists to prevent).
-	if s.snapMgr != nil {
-		return
-	}
-	if s.dataDir == "" {
-		return
-	}
-	if snap := ss.Snapshotable; snap != nil {
-		dir := filepath.Join(s.dataDir, "snapshots")
-		walDir := filepath.Join(s.dataDir, "wal")
-		if mgr, err := snapshot.NewManager(dir, snap, walDir, s.snapshotKEK, s.snapshotClusterID); err == nil {
-			s.snapMgr = mgr
-		} else {
-			log.Warn().Err(err).Msg("snapshot manager init failed, snapshot/PITR endpoints will be unavailable")
-		}
-	}
 }
 
 func (s *Server) startRuntimeWorkers() {

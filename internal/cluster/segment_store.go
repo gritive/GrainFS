@@ -8,6 +8,7 @@ import (
 	"io"
 
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/storage/zstdpool"
 )
 
 type clusterSegmentStore struct {
@@ -26,8 +27,12 @@ func (s *clusterSegmentStore) OpenSegment(ctx context.Context, ref storage.Segme
 	if !ok {
 		return nil, fmt.Errorf("segment %s not found in metadata for %s/%s", ref.BlobID, s.bucket, s.key)
 	}
-	if entry.Size <= 0 {
+	if entry.Size < 0 {
 		return nil, fmt.Errorf("segment %s has invalid size %d", entry.BlobID, entry.Size)
+	}
+	if entry.Size == 0 {
+		// Empty (0-byte) segment of an empty object: there is no shard to read.
+		return &segmentBytesReadCloser{Reader: bytes.NewReader(nil), data: nil}, nil
 	}
 
 	record, err := s.placementRecord(entry)
@@ -35,15 +40,36 @@ func (s *clusterSegmentStore) OpenSegment(ctx context.Context, ref storage.Segme
 		return nil, err
 	}
 
+	storedSize := entry.Size
+	if entry.StoredSize > 0 {
+		storedSize = entry.StoredSize
+	}
 	shardKey := s.key + "/segments/" + entry.BlobID
-	data, err := s.b.newECObjectReader().ReadObject(ctx, s.bucket, shardKey, record)
+	rc, err := s.b.newECObjectReader().OpenObject(ctx, s.bucket, shardKey, record, storedSize)
 	if err != nil {
-		return nil, fmt.Errorf("read segment %s: %w", entry.BlobID, err)
+		return nil, fmt.Errorf("open segment %s: %w", entry.BlobID, err)
 	}
-	if int64(len(data)) != entry.Size {
-		return nil, fmt.Errorf("segment %s reconstructed size %d != metadata size %d", entry.BlobID, len(data), entry.Size)
+	exact := &exactSegmentReadCloser{rc: rc, segment: entry.BlobID, expected: storedSize, remaining: storedSize}
+	if entry.StoredSize == 0 {
+		return exact, nil
 	}
-	return &segmentBytesReadCloser{Reader: bytes.NewReader(data), data: data}, nil
+	// Compressed: read the whole (≤16 MiB) compressed segment and decompress to
+	// plaintext. Segment-bounded buffering; range reads use ReadAtSegment.
+	compressed, err := io.ReadAll(exact)
+	if cerr := exact.Close(); cerr != nil && err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read compressed segment %s: %w", entry.BlobID, err)
+	}
+	plain, err := zstdpool.Decompress(compressed)
+	if err != nil {
+		return nil, fmt.Errorf("decompress segment %s: %w", entry.BlobID, err)
+	}
+	if int64(len(plain)) != entry.Size {
+		return nil, fmt.Errorf("decompress segment %s: size %d != expected %d", entry.BlobID, len(plain), entry.Size)
+	}
+	return &segmentBytesReadCloser{Reader: bytes.NewReader(plain), data: plain}, nil
 }
 
 type segmentBytesReadCloser struct {
@@ -54,6 +80,48 @@ type segmentBytesReadCloser struct {
 func (r *segmentBytesReadCloser) Close() error { return nil }
 
 func (r *segmentBytesReadCloser) SegmentBytes() []byte { return r.data }
+
+type exactSegmentReadCloser struct {
+	rc        io.ReadCloser
+	segment   string
+	expected  int64
+	remaining int64
+	probed    bool
+}
+
+func (r *exactSegmentReadCloser) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if r.remaining > 0 {
+		if int64(len(p)) > r.remaining {
+			p = p[:r.remaining]
+		}
+		n, err := r.rc.Read(p)
+		r.remaining -= int64(n)
+		if err == io.EOF && r.remaining > 0 {
+			return n, fmt.Errorf("segment %s reconstructed size short by %d bytes: %w", r.segment, r.remaining, io.ErrUnexpectedEOF)
+		}
+		return n, err
+	}
+	if r.probed {
+		return 0, io.EOF
+	}
+	r.probed = true
+	var extra [1]byte
+	n, err := r.rc.Read(extra[:])
+	if n > 0 {
+		return 0, fmt.Errorf("segment %s reconstructed size exceeds metadata size %d", r.segment, r.expected)
+	}
+	if err != nil && err != io.EOF {
+		return 0, err
+	}
+	return 0, io.EOF
+}
+
+func (r *exactSegmentReadCloser) Close() error {
+	return r.rc.Close()
+}
 
 func (s *clusterSegmentStore) ReadAtSegment(ctx context.Context, ref storage.SegmentRef, offset int64, buf []byte) (int, error) {
 	if offset < 0 {
@@ -75,6 +143,27 @@ func (s *clusterSegmentStore) ReadAtSegment(ctx context.Context, ref storage.Seg
 	}
 	if max := entry.Size - offset; int64(len(buf)) > max {
 		buf = buf[:max]
+	}
+	if entry.StoredSize > 0 {
+		// Compressed: no random access into the zstd frame. Open the
+		// decompressed (≤16 MiB) segment, discard up to offset, fill buf.
+		rc, err := s.OpenSegment(ctx, ref)
+		if err != nil {
+			return 0, err
+		}
+		defer rc.Close()
+		if _, err := io.CopyN(io.Discard, rc, offset); err != nil {
+			return 0, fmt.Errorf("segment %s: seek %d: %w", entry.BlobID, offset, err)
+		}
+		n, err := io.ReadFull(rc, buf)
+		if err == io.ErrUnexpectedEOF {
+			// buf was clamped to remaining plaintext; a short read at the tail
+			// means we hit EOF — return bytes read with nil to match the
+			// uncompressed paths (ecObjectReader.ReadAt and readAtStripedStreaming
+			// both normalize tail/short reads to (n, nil)).
+			return n, nil
+		}
+		return n, err
 	}
 	record, err := s.placementRecord(entry)
 	if err != nil {
@@ -145,9 +234,10 @@ func (s *clusterSegmentStore) segmentRef(blobID string) (storage.SegmentRef, boo
 func (s *clusterSegmentStore) placementRecord(ref storage.SegmentRef) (PlacementRecord, error) {
 	if len(ref.NodeIDs) > 0 && ref.ECData > 0 {
 		return PlacementRecord{
-			Nodes: cloneStringSlice(ref.NodeIDs),
-			K:     int(ref.ECData),
-			M:     int(ref.ECParity),
+			Nodes:       cloneStringSlice(ref.NodeIDs),
+			K:           int(ref.ECData),
+			M:           int(ref.ECParity),
+			StripeBytes: int(ref.StripeBytes),
 		}, nil
 	}
 
@@ -195,8 +285,39 @@ func segmentMetaEntriesToRefs(entries []SegmentMetaEntry) []storage.SegmentRef {
 			ShardSize:        entry.ShardSize,
 			ECData:           entry.ECData,
 			ECParity:         entry.ECParity,
+			StripeBytes:      entry.StripeBytes,
 			NodeIDs:          cloneStringSlice(entry.NodeIDs),
+			StoredSize:       entry.StoredSize,
 		}
 	}
 	return refs
+}
+
+// segmentRefsToMetaEntries is the inverse of segmentMetaEntriesToRefs: it
+// projects storage.SegmentRef entries (the on-disk/owner-local segment list of
+// an appendable object) into SegmentMetaEntry records for persistence in a
+// PutObjectMetaCmd. SegmentIdx is assigned by ordinal so the entries keep a
+// deterministic order. Used by the off-raft AppendObject RMW to rebuild the
+// manifest blob's Segments slice after appending a new segment.
+func segmentRefsToMetaEntries(refs []storage.SegmentRef) []SegmentMetaEntry {
+	if len(refs) == 0 {
+		return nil
+	}
+	entries := make([]SegmentMetaEntry, len(refs))
+	for i, ref := range refs {
+		entries[i] = SegmentMetaEntry{
+			BlobID:           ref.BlobID,
+			Size:             ref.Size,
+			Checksum:         append([]byte(nil), ref.Checksum...),
+			PlacementGroupID: ref.PlacementGroupID,
+			ShardSize:        ref.ShardSize,
+			SegmentIdx:       int32(i),
+			ECData:           ref.ECData,
+			ECParity:         ref.ECParity,
+			StripeBytes:      ref.StripeBytes,
+			NodeIDs:          cloneStringSlice(ref.NodeIDs),
+			StoredSize:       ref.StoredSize,
+		}
+	}
+	return entries
 }

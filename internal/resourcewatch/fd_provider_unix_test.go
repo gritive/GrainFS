@@ -33,7 +33,6 @@ func TestClassifyFDTarget(t *testing.T) {
 		{name: "socket", target: "socket:[12345]", want: FDCategorySocket},
 		{name: "badger", target: "/tmp/grainfs/000001.sst", want: FDCategoryBadger},
 		{name: "receipt store", target: "/tmp/grainfs/receipt-store.log", want: FDCategoryReceiptOrEventStore},
-		{name: "nfs session", target: "/tmp/grainfs/nfs-session.db", want: FDCategoryNFSSession},
 		{name: "regular file", target: "/tmp/grainfs/data.bin", want: FDCategoryRegularFile},
 		{name: "unknown", target: "pipe:[12345]", want: FDCategoryUnknown},
 	}

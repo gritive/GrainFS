@@ -121,59 +121,6 @@ func (rcv *MetaStateSnapshot) LoadSnapshotLength() int {
 	return 0
 }
 
-func (rcv *MetaStateSnapshot) ActivePlan(obj *RebalancePlan) *RebalancePlan {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
-	if o != 0 {
-		x := rcv._tab.Indirect(o + rcv._tab.Pos)
-		if obj == nil {
-			obj = new(RebalancePlan)
-		}
-		obj.Init(rcv._tab.Bytes, x)
-		return obj
-	}
-	return nil
-}
-
-func (rcv *MetaStateSnapshot) IcebergNamespaces(obj *IcebergNamespaceEntry, j int) bool {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
-	if o != 0 {
-		x := rcv._tab.Vector(o)
-		x += flatbuffers.UOffsetT(j) * 4
-		x = rcv._tab.Indirect(x)
-		obj.Init(rcv._tab.Bytes, x)
-		return true
-	}
-	return false
-}
-
-func (rcv *MetaStateSnapshot) IcebergNamespacesLength() int {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
-	if o != 0 {
-		return rcv._tab.VectorLen(o)
-	}
-	return 0
-}
-
-func (rcv *MetaStateSnapshot) IcebergTables(obj *IcebergTableEntry, j int) bool {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
-	if o != 0 {
-		x := rcv._tab.Vector(o)
-		x += flatbuffers.UOffsetT(j) * 4
-		x = rcv._tab.Indirect(x)
-		obj.Init(rcv._tab.Bytes, x)
-		return true
-	}
-	return false
-}
-
-func (rcv *MetaStateSnapshot) IcebergTablesLength() int {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
-	if o != 0 {
-		return rcv._tab.VectorLen(o)
-	}
-	return 0
-}
-
 func (rcv *MetaStateSnapshot) ObjectIndex(obj *MetaObjectIndexEntry, j int) bool {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
 	if o != 0 {
@@ -228,40 +175,8 @@ func (rcv *MetaStateSnapshot) MutateClusterConfig(j int, n byte) bool {
 	return false
 }
 
-func (rcv *MetaStateSnapshot) NfsExports(obj *NfsExportUpsertCmd, j int) bool {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
-	if o != 0 {
-		x := rcv._tab.Vector(o)
-		x += flatbuffers.UOffsetT(j) * 4
-		x = rcv._tab.Indirect(x)
-		obj.Init(rcv._tab.Bytes, x)
-		return true
-	}
-	return false
-}
-
-func (rcv *MetaStateSnapshot) NfsExportsLength() int {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
-	if o != 0 {
-		return rcv._tab.VectorLen(o)
-	}
-	return 0
-}
-
-func (rcv *MetaStateSnapshot) IcebergSchemaVersion() int32 {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(24))
-	if o != 0 {
-		return rcv._tab.GetInt32(o + rcv._tab.Pos)
-	}
-	return 0
-}
-
-func (rcv *MetaStateSnapshot) MutateIcebergSchemaVersion(n int32) bool {
-	return rcv._tab.MutateInt32Slot(24, n)
-}
-
 func (rcv *MetaStateSnapshot) LastRotationRequestEntries(obj *LastRotationRequestEntry, j int) bool {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(26))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(24))
 	if o != 0 {
 		x := rcv._tab.Vector(o)
 		x += flatbuffers.UOffsetT(j) * 4
@@ -273,7 +188,7 @@ func (rcv *MetaStateSnapshot) LastRotationRequestEntries(obj *LastRotationReques
 }
 
 func (rcv *MetaStateSnapshot) LastRotationRequestEntriesLength() int {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(26))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(24))
 	if o != 0 {
 		return rcv._tab.VectorLen(o)
 	}
@@ -281,7 +196,7 @@ func (rcv *MetaStateSnapshot) LastRotationRequestEntriesLength() int {
 }
 
 func (rcv *MetaStateSnapshot) KekStatusEntries(obj *KEKStatusEntry, j int) bool {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(28))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(26))
 	if o != 0 {
 		x := rcv._tab.Vector(o)
 		x += flatbuffers.UOffsetT(j) * 4
@@ -293,7 +208,7 @@ func (rcv *MetaStateSnapshot) KekStatusEntries(obj *KEKStatusEntry, j int) bool 
 }
 
 func (rcv *MetaStateSnapshot) KekStatusEntriesLength() int {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(28))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(26))
 	if o != 0 {
 		return rcv._tab.VectorLen(o)
 	}
@@ -301,7 +216,7 @@ func (rcv *MetaStateSnapshot) KekStatusEntriesLength() int {
 }
 
 func (rcv *MetaStateSnapshot) Peers(obj *PeerEntry, j int) bool {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(30))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(28))
 	if o != 0 {
 		x := rcv._tab.Vector(o)
 		x += flatbuffers.UOffsetT(j) * 4
@@ -313,7 +228,7 @@ func (rcv *MetaStateSnapshot) Peers(obj *PeerEntry, j int) bool {
 }
 
 func (rcv *MetaStateSnapshot) PeersLength() int {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(30))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(28))
 	if o != 0 {
 		return rcv._tab.VectorLen(o)
 	}
@@ -321,7 +236,7 @@ func (rcv *MetaStateSnapshot) PeersLength() int {
 }
 
 func (rcv *MetaStateSnapshot) RevokedPeerSpkis(obj *SPKIBytes, j int) bool {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(32))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(30))
 	if o != 0 {
 		x := rcv._tab.Vector(o)
 		x += flatbuffers.UOffsetT(j) * 4
@@ -333,7 +248,7 @@ func (rcv *MetaStateSnapshot) RevokedPeerSpkis(obj *SPKIBytes, j int) bool {
 }
 
 func (rcv *MetaStateSnapshot) RevokedPeerSpkisLength() int {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(32))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(30))
 	if o != 0 {
 		return rcv._tab.VectorLen(o)
 	}
@@ -341,7 +256,7 @@ func (rcv *MetaStateSnapshot) RevokedPeerSpkisLength() int {
 }
 
 func (rcv *MetaStateSnapshot) ClusterKeyDropped() bool {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(34))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(32))
 	if o != 0 {
 		return rcv._tab.GetBool(o + rcv._tab.Pos)
 	}
@@ -349,11 +264,11 @@ func (rcv *MetaStateSnapshot) ClusterKeyDropped() bool {
 }
 
 func (rcv *MetaStateSnapshot) MutateClusterKeyDropped(n bool) bool {
-	return rcv._tab.MutateBoolSlot(34, n)
+	return rcv._tab.MutateBoolSlot(32, n)
 }
 
 func (rcv *MetaStateSnapshot) PresentFlipBegun() bool {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(36))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(34))
 	if o != 0 {
 		return rcv._tab.GetBool(o + rcv._tab.Pos)
 	}
@@ -361,11 +276,11 @@ func (rcv *MetaStateSnapshot) PresentFlipBegun() bool {
 }
 
 func (rcv *MetaStateSnapshot) MutatePresentFlipBegun(n bool) bool {
-	return rcv._tab.MutateBoolSlot(36, n)
+	return rcv._tab.MutateBoolSlot(34, n)
 }
 
 func (rcv *MetaStateSnapshot) RevokedNodeIds(j int) []byte {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(38))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(36))
 	if o != 0 {
 		a := rcv._tab.Vector(o)
 		return rcv._tab.ByteVector(a + flatbuffers.UOffsetT(j*4))
@@ -374,6 +289,26 @@ func (rcv *MetaStateSnapshot) RevokedNodeIds(j int) []byte {
 }
 
 func (rcv *MetaStateSnapshot) RevokedNodeIdsLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(36))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func (rcv *MetaStateSnapshot) IndexGroups(obj *IndexGroupEntry, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(38))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *MetaStateSnapshot) IndexGroupsLength() int {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(38))
 	if o != 0 {
 		return rcv._tab.VectorLen(o)
@@ -381,8 +316,28 @@ func (rcv *MetaStateSnapshot) RevokedNodeIdsLength() int {
 	return 0
 }
 
+func (rcv *MetaStateSnapshot) PlacementGenerations(obj *PlacementGenerationEntry, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(40))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *MetaStateSnapshot) PlacementGenerationsLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(40))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
 func MetaStateSnapshotStart(builder *flatbuffers.Builder) {
-	builder.StartObject(18)
+	builder.StartObject(19)
 }
 func MetaStateSnapshotAddNodes(builder *flatbuffers.Builder, nodes flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(nodes), 0)
@@ -408,21 +363,6 @@ func MetaStateSnapshotAddLoadSnapshot(builder *flatbuffers.Builder, loadSnapshot
 func MetaStateSnapshotStartLoadSnapshotVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
 }
-func MetaStateSnapshotAddActivePlan(builder *flatbuffers.Builder, activePlan flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(4, flatbuffers.UOffsetT(activePlan), 0)
-}
-func MetaStateSnapshotAddIcebergNamespaces(builder *flatbuffers.Builder, icebergNamespaces flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(5, flatbuffers.UOffsetT(icebergNamespaces), 0)
-}
-func MetaStateSnapshotStartIcebergNamespacesVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
-	return builder.StartVector(4, numElems, 4)
-}
-func MetaStateSnapshotAddIcebergTables(builder *flatbuffers.Builder, icebergTables flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(6, flatbuffers.UOffsetT(icebergTables), 0)
-}
-func MetaStateSnapshotStartIcebergTablesVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
-	return builder.StartVector(4, numElems, 4)
-}
 func MetaStateSnapshotAddObjectIndex(builder *flatbuffers.Builder, objectIndex flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(7, flatbuffers.UOffsetT(objectIndex), 0)
 }
@@ -435,49 +375,52 @@ func MetaStateSnapshotAddClusterConfig(builder *flatbuffers.Builder, clusterConf
 func MetaStateSnapshotStartClusterConfigVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(1, numElems, 1)
 }
-func MetaStateSnapshotAddNfsExports(builder *flatbuffers.Builder, nfsExports flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(9, flatbuffers.UOffsetT(nfsExports), 0)
-}
-func MetaStateSnapshotStartNfsExportsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
-	return builder.StartVector(4, numElems, 4)
-}
-func MetaStateSnapshotAddIcebergSchemaVersion(builder *flatbuffers.Builder, icebergSchemaVersion int32) {
-	builder.PrependInt32Slot(10, icebergSchemaVersion, 0)
-}
 func MetaStateSnapshotAddLastRotationRequestEntries(builder *flatbuffers.Builder, lastRotationRequestEntries flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(11, flatbuffers.UOffsetT(lastRotationRequestEntries), 0)
+	builder.PrependUOffsetTSlot(10, flatbuffers.UOffsetT(lastRotationRequestEntries), 0)
 }
 func MetaStateSnapshotStartLastRotationRequestEntriesVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
 }
 func MetaStateSnapshotAddKekStatusEntries(builder *flatbuffers.Builder, kekStatusEntries flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(12, flatbuffers.UOffsetT(kekStatusEntries), 0)
+	builder.PrependUOffsetTSlot(11, flatbuffers.UOffsetT(kekStatusEntries), 0)
 }
 func MetaStateSnapshotStartKekStatusEntriesVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
 }
 func MetaStateSnapshotAddPeers(builder *flatbuffers.Builder, peers flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(13, flatbuffers.UOffsetT(peers), 0)
+	builder.PrependUOffsetTSlot(12, flatbuffers.UOffsetT(peers), 0)
 }
 func MetaStateSnapshotStartPeersVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
 }
 func MetaStateSnapshotAddRevokedPeerSpkis(builder *flatbuffers.Builder, revokedPeerSpkis flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(14, flatbuffers.UOffsetT(revokedPeerSpkis), 0)
+	builder.PrependUOffsetTSlot(13, flatbuffers.UOffsetT(revokedPeerSpkis), 0)
 }
 func MetaStateSnapshotStartRevokedPeerSpkisVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
 }
 func MetaStateSnapshotAddClusterKeyDropped(builder *flatbuffers.Builder, clusterKeyDropped bool) {
-	builder.PrependBoolSlot(15, clusterKeyDropped, false)
+	builder.PrependBoolSlot(14, clusterKeyDropped, false)
 }
 func MetaStateSnapshotAddPresentFlipBegun(builder *flatbuffers.Builder, presentFlipBegun bool) {
-	builder.PrependBoolSlot(16, presentFlipBegun, false)
+	builder.PrependBoolSlot(15, presentFlipBegun, false)
 }
 func MetaStateSnapshotAddRevokedNodeIds(builder *flatbuffers.Builder, revokedNodeIds flatbuffers.UOffsetT) {
-	builder.PrependUOffsetTSlot(17, flatbuffers.UOffsetT(revokedNodeIds), 0)
+	builder.PrependUOffsetTSlot(16, flatbuffers.UOffsetT(revokedNodeIds), 0)
 }
 func MetaStateSnapshotStartRevokedNodeIdsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
+}
+func MetaStateSnapshotAddIndexGroups(builder *flatbuffers.Builder, indexGroups flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(17, flatbuffers.UOffsetT(indexGroups), 0)
+}
+func MetaStateSnapshotStartIndexGroupsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
+}
+func MetaStateSnapshotAddPlacementGenerations(builder *flatbuffers.Builder, placementGenerations flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(18, flatbuffers.UOffsetT(placementGenerations), 0)
+}
+func MetaStateSnapshotStartPlacementGenerationsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
 }
 func MetaStateSnapshotEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {

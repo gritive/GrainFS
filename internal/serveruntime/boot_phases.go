@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/cluster"
@@ -121,8 +122,20 @@ func bootAutoMigrate(state *bootState) error {
 		return nil
 	}
 	log.Info().Str("component", "migrate").Msg("auto-migrating local metadata to cluster format")
-	if err := cluster.MigrateLegacyMetaToCluster(state.cfg.DataDir, state.nodeID); err != nil {
-		return fmt.Errorf("auto-migrate: %w", err)
+	// Phase 6.5 S3: the composition root opens the legacy meta DB and injects
+	// the wrapped store; cluster.MigrateLegacyMetaToCluster no longer touches
+	// badger. The layout checks above preserve the old metaDir-existence
+	// semantics (we only get here with a populated legacy meta dir).
+	legacyDB, err := badger.Open(badger.DefaultOptions(state.metaDir).WithLogger(nil))
+	if err != nil {
+		return fmt.Errorf("auto-migrate: open legacy meta db: %w", err)
+	}
+	migErr := cluster.MigrateLegacyMetaToCluster(badgermeta.Wrap(legacyDB), state.cfg.DataDir, state.nodeID)
+	if cerr := legacyDB.Close(); cerr != nil && migErr == nil {
+		migErr = fmt.Errorf("auto-migrate: close legacy meta db: %w", cerr)
+	}
+	if migErr != nil {
+		return fmt.Errorf("auto-migrate: %w", migErr)
 	}
 	log.Info().Str("component", "migrate").Msg("auto-migration complete")
 	return nil
@@ -179,16 +192,6 @@ func bootValidateTimings(state *bootState) error {
 	if cfg.RaftElectionTimeout > 0 && cfg.RaftHeartbeatInterval > 0 && cfg.RaftElectionTimeout < 3*cfg.RaftHeartbeatInterval {
 		return fmt.Errorf("--raft-election-timeout (%s) must be >= 3 * --raft-heartbeat-interval (%s)", cfg.RaftElectionTimeout, cfg.RaftHeartbeatInterval)
 	}
-	if cfg.MuxEnabled && cfg.MuxFlushWindow > 0 && cfg.RaftHeartbeatInterval > 0 && cfg.MuxFlushWindow >= cfg.RaftHeartbeatInterval {
-		return fmt.Errorf("--mux-flush (%s) must be << --raft-heartbeat-interval (%s)", cfg.MuxFlushWindow, cfg.RaftHeartbeatInterval)
-	}
-	// Meta-raft heartbeat is fixed (not user-configurable) and shares the
-	// same coalescer flush window. If the flush window were larger than
-	// the meta heartbeat, meta hb dispatch could be delayed past the meta
-	// election deadline. Cap conservatively at < half of the meta heartbeat.
-	if cfg.MuxEnabled && cfg.MuxFlushWindow > 0 && cfg.MuxFlushWindow*2 >= cluster.MetaRaftHeartbeatInterval {
-		return fmt.Errorf("--mux-flush (%s) must be << meta-raft heartbeat (%s); meta-raft uses a fixed 150ms heartbeat / 750ms election", cfg.MuxFlushWindow, cluster.MetaRaftHeartbeatInterval)
-	}
 	return nil
 }
 
@@ -225,6 +228,7 @@ func bootOpenSharedFSMDB(state *bootState) error {
 		return fmt.Errorf("open shared FSM-state badger at %s: %w", sharedDir, err)
 	}
 	state.sharedFSMDB = sharedDB
+	state.sharedFSMStore = badgermeta.Wrap(sharedDB)
 	state.AddCleanup(func() { sharedDB.Close() })
 	sharedVlog := resourcewatch.RegisterDB(resourcewatch.DBCategorySharedFSM, sharedDB)
 	state.AddCleanup(func() { resourcewatch.DeregisterDB(sharedVlog) })

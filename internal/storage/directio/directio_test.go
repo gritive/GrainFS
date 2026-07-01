@@ -36,9 +36,7 @@ func TestAlignedCopy_TailIsZero(t *testing.T) {
 	}
 	tail := buf[len(data):alignedLen]
 	for i, b := range tail {
-		if b != 0 {
-			t.Fatalf("tail byte %d is %d, want 0", i, b)
-		}
+		require.Zero(t, b, "tail byte %d", i)
 	}
 }
 
@@ -49,9 +47,7 @@ func TestAlignedCopy_LengthIsMultipleOfPageSize(t *testing.T) {
 		data[i] = byte(i)
 	}
 	_, alignedLen := AlignedCopy(data)
-	if alignedLen%ps != 0 {
-		t.Fatalf("alignedLen %d is not a multiple of page size %d", alignedLen, ps)
-	}
+	require.Zero(t, alignedLen%ps, "alignedLen %d is not a multiple of page size %d", alignedLen, ps)
 }
 
 // TestOpenFile_RoundTrip verifies the file we get back is fully usable and

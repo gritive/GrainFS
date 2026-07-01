@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -23,6 +24,8 @@ const (
 	PutTraceStageForwardNotLeaderRetry    PutTraceStage = "forward_not_leader_retry"
 	PutTraceStageForwardReceiverDispatch  PutTraceStage = "forward_receiver_dispatch"
 	PutTraceStageReceiverBackendPut       PutTraceStage = "receiver_backend_put"
+	PutTraceStageSegmentWritePrepare      PutTraceStage = "segment_write_prepare"
+	PutTraceStageECSplit                  PutTraceStage = "ec_split"
 	PutTraceStageShardWriteLocal          PutTraceStage = "shard_write_local"
 	PutTraceStageShardWriteRemote         PutTraceStage = "shard_write_remote"
 	PutTraceStageShardWriteRemoteOpen     PutTraceStage = "shard_write_remote_open"
@@ -34,21 +37,16 @@ const (
 	PutTraceStageShardWriteLocalMkdir     PutTraceStage = "shard_write_local_mkdir"
 	PutTraceStageShardWriteLocalEncode    PutTraceStage = "shard_write_local_encode"
 	PutTraceStageShardWriteLocalFile      PutTraceStage = "shard_write_local_file"
-	PutTraceStageShardWriteLocalDirect    PutTraceStage = "shard_write_local_direct"
-	PutTraceStageShardWriteLocalBuffered  PutTraceStage = "shard_write_local_buffered"
 	PutTraceStageShardWriteLocalEncOpen   PutTraceStage = "shard_write_local_enc_open"
 	PutTraceStageShardWriteLocalEncWrite  PutTraceStage = "shard_write_local_enc_write"
 	PutTraceStageShardWriteLocalEncSync   PutTraceStage = "shard_write_local_enc_sync"
 	PutTraceStageShardWriteLocalEncClose  PutTraceStage = "shard_write_local_enc_close"
 	PutTraceStageShardWriteLocalEncRename PutTraceStage = "shard_write_local_enc_rename"
 	PutTraceStageShardWriteLocalDirSync   PutTraceStage = "shard_write_local_dirsync"
+	PutTraceStagePromoteStagedNodeBatch   PutTraceStage = "promote_staged_node_batch"
+	PutTraceStagePromoteStagedShards      PutTraceStage = "promote_staged_shards"
 	PutTraceStageDataRaftProposeMeta      PutTraceStage = "data_raft_propose_meta"
-	PutTraceStageMetaIndexPropose         PutTraceStage = "meta_index_propose"
-	PutTraceStageMetaIndexEncode          PutTraceStage = "meta_index_encode"
-	PutTraceStageMetaIndexForward         PutTraceStage = "meta_index_forward"
-	PutTraceStageMetaIndexWaitLocal       PutTraceStage = "meta_index_wait_local"
-	PutTraceStageMetaIndexLocalPropose    PutTraceStage = "meta_index_local_propose"
-	PutTraceStageMetaIndexLocalApply      PutTraceStage = "meta_index_local_apply"
+	PutTraceStageQuorumMetaWrite          PutTraceStage = "quorum_meta_write"
 )
 
 type PutTraceIngress string
@@ -93,6 +91,7 @@ type PutTraceStageFields struct {
 	ShardIndex       int
 	ShardTarget      string
 	ShardTargetClass string
+	BatchCount       int
 	MetaProposeSite  string
 	MetaProposeCount int
 	Error            string
@@ -118,6 +117,7 @@ type PutTraceEvent struct {
 	ShardIndex       int                 `json:"shard_index,omitempty"`
 	ShardTarget      string              `json:"shard_target,omitempty"`
 	ShardTargetClass string              `json:"shard_target_class,omitempty"`
+	BatchCount       int                 `json:"batch_count,omitempty"`
 	MetaProposeSite  string              `json:"meta_propose_site,omitempty"`
 	MetaProposeCount int                 `json:"meta_propose_count,omitempty"`
 	Error            string              `json:"error,omitempty"`
@@ -132,7 +132,11 @@ type putTraceSink struct {
 	pid    int
 }
 
-var globalPutTraceSink = openPutTraceSinkFromEnv()
+var globalPutTraceSink atomic.Pointer[putTraceSink]
+
+func init() {
+	globalPutTraceSink.Store(openPutTraceSinkFromEnv())
+}
 
 func openPutTraceSinkFromEnv() *putTraceSink {
 	path := os.Getenv("GRAINFS_PUT_TRACE_FILE")
@@ -152,15 +156,16 @@ func openPutTraceSinkFromEnv() *putTraceSink {
 
 //nolint:unused // referenced by *_test.go files across the cluster package.
 func reloadPutTraceSinkForTest() {
-	if globalPutTraceSink != nil && globalPutTraceSink.file != nil {
-		_ = globalPutTraceSink.file.Close()
+	old := globalPutTraceSink.Load()
+	if old != nil && old.file != nil {
+		_ = old.file.Close()
 	}
-	globalPutTraceSink = openPutTraceSinkFromEnv()
+	globalPutTraceSink.Store(openPutTraceSinkFromEnv())
 }
 
 //nolint:unused // referenced by put_trace_test.go.
 func putTraceEnabled() bool {
-	return globalPutTraceSink != nil
+	return globalPutTraceSink.Load() != nil
 }
 
 func ContextWithPutTrace(ctx context.Context, req PutTraceRequest) context.Context {
@@ -186,7 +191,7 @@ func StartPutTraceStage(ctx context.Context, stage PutTraceStage) func(PutTraceS
 }
 
 func ObservePutTraceStage(ctx context.Context, stage PutTraceStage, start time.Time, fields PutTraceStageFields) {
-	sink := globalPutTraceSink
+	sink := globalPutTraceSink.Load()
 	if sink == nil {
 		return
 	}
@@ -214,6 +219,7 @@ func ObservePutTraceStage(ctx context.Context, stage PutTraceStage, start time.T
 		ShardIndex:       fields.ShardIndex,
 		ShardTarget:      fields.ShardTarget,
 		ShardTargetClass: fields.ShardTargetClass,
+		BatchCount:       fields.BatchCount,
 		MetaProposeSite:  fields.MetaProposeSite,
 		MetaProposeCount: fields.MetaProposeCount,
 		Error:            fields.Error,

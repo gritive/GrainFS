@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -94,16 +95,16 @@ func TestPullThrough_GetObject_NotFound(t *testing.T) {
 
 func TestPullThrough_ForwardsPartialIOCapabilities(t *testing.T) {
 	local := newLocalBackend(t)
-	require.NoError(t, local.CreateBucket(context.Background(), "__grainfs_volumes"))
+	require.NoError(t, local.CreateBucket(context.Background(), "__grainfs_test_internal"))
 
 	pt := pullthrough.NewBackend(local, &staticResolver{})
-	require.True(t, pt.PreferWriteAt("__grainfs_volumes"))
+	require.True(t, pt.PreferWriteAt("__grainfs_test_internal"))
 
-	_, err := pt.WriteAt(context.Background(), "__grainfs_volumes", "vol/blk", 0, []byte("abcd"))
+	_, err := pt.WriteAt(context.Background(), "__grainfs_test_internal", "vol/blk", 0, []byte("abcd"))
 	require.NoError(t, err)
 
 	buf := make([]byte, 2)
-	n, err := pt.ReadAt(context.Background(), "__grainfs_volumes", "vol/blk", 1, buf)
+	n, err := pt.ReadAt(context.Background(), "__grainfs_test_internal", "vol/blk", 1, buf)
 	require.NoError(t, err)
 	require.Equal(t, 2, n)
 	require.Equal(t, []byte("bc"), buf)
@@ -267,6 +268,85 @@ func TestPullthrough_UpstreamErrorMidStream(t *testing.T) {
 		"partial upstream stream must not create a local cache entry")
 }
 
+// mismatchUpstream reports a Content-Length (Size) that differs from the number
+// of bytes its reader actually yields — a truncating or over-long upstream.
+type mismatchUpstream struct {
+	body         string
+	reportedSize int64
+}
+
+func (u *mismatchUpstream) GetObject(bucket, key string) (io.ReadCloser, *storage.Object, error) {
+	return io.NopCloser(strings.NewReader(u.body)), &storage.Object{
+		Key:  key,
+		Size: u.reportedSize,
+		ETag: "mismatch",
+	}, nil
+}
+
+// exactSizeEnforcingBackend stands in for the production cluster DistributedBackend:
+// when SizeHintExact is set it enforces the exact body length (the real
+// exactObjectSizeReader contract, which is unexported in the cluster package) and
+// commits NOTHING on a mismatch — the body never reaches the embedded store. This
+// is the collaborator pullthrough's SizeHintExact threading is designed to engage.
+type exactSizeEnforcingBackend struct {
+	storage.Backend
+}
+
+func (b *exactSizeEnforcingBackend) PutObjectWithRequest(ctx context.Context, req storage.PutObjectRequest) (*storage.Object, error) {
+	if req.SizeHint != nil && req.SizeHintExact {
+		buf, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		if int64(len(buf)) != *req.SizeHint {
+			// Reject BEFORE delegating, so nothing is persisted/made visible —
+			// exactly as the cluster path's exactObjectSizeReader does.
+			return nil, fmt.Errorf("size mismatch: got %d, want %d", len(buf), *req.SizeHint)
+		}
+		req.Body = bytes.NewReader(buf)
+	}
+	return b.Backend.(storage.RequestPutter).PutObjectWithRequest(ctx, req)
+}
+
+// TestPullThrough_CacheFill_SizeMismatch_FailsAndCachesNothing proves that when an
+// upstream's actual body length disagrees with its reported Content-Length, the
+// cache-fill (which threads SizeHintExact) fails against a size-enforcing inner
+// backend, the GET surfaces the error, and NO partial object is cached or served.
+// This is the safe consequence of threading the exact size — the old behavior
+// silently cached a truncated object. Covers both truncating and over-long.
+func TestPullThrough_CacheFill_SizeMismatch_FailsAndCachesNothing(t *testing.T) {
+	cases := []struct {
+		name         string
+		body         string
+		reportedSize int64
+	}{
+		{"truncating (fewer bytes than reported)", "short", 100},
+		{"over-long (more bytes than reported)", strings.Repeat("x", 100), 5},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			local := newLocalBackend(t)
+			require.NoError(t, local.CreateBucket(context.Background(), "b"))
+			inner := &exactSizeEnforcingBackend{Backend: local}
+
+			upstream := &mismatchUpstream{body: tc.body, reportedSize: tc.reportedSize}
+			pt := pullthrough.NewBackend(inner, &staticResolver{up: upstream})
+
+			rc, _, err := pt.GetObject(context.Background(), "b", "k")
+			if err == nil {
+				defer rc.Close()
+				_, err = io.ReadAll(rc)
+			}
+			require.Error(t, err, "a size-mismatched upstream must fail the GET, not serve a truncated object")
+
+			// No partial object must remain in the cache: a follow-up GET still misses.
+			_, _, err = local.GetObject(context.Background(), "b", "k")
+			assert.ErrorIs(t, err, storage.ErrObjectNotFound,
+				"a failed size-mismatched cache fill must leave no partial object")
+		})
+	}
+}
+
 // zeroReader returns an infinite stream of zero bytes.
 type zeroReader struct{}
 
@@ -352,57 +432,41 @@ func TestPullThrough_PutObject_GoesToLocal(t *testing.T) {
 	assert.Equal(t, "new", string(body))
 }
 
-// TestPullThrough_ForwardsSnapshotable verifies the pull-through decorator
-// satisfies storage.Snapshotable and storage.BucketSnapshotable by delegating
-// to the wrapped backend. Regression for the bug where embedding storage.Backend
-// did not promote Snapshotable, so PITR snapshots (and GET /admin/snapshots)
-// silently broke whenever the boot chain wrapped the backend in pull-through.
-func TestPullThrough_ForwardsSnapshotable(t *testing.T) {
+// recordingRequestPutterBackend captures the PutObjectRequest the pullthrough
+// cache-fill threads into the inner backend, while delegating storage to a real
+// LocalBackend so the 2-pass GetObject still works.
+type recordingRequestPutterBackend struct {
+	storage.Backend
+	lastReq *storage.PutObjectRequest
+}
+
+func (b *recordingRequestPutterBackend) PutObjectWithRequest(ctx context.Context, req storage.PutObjectRequest) (*storage.Object, error) {
+	cp := req
+	b.lastReq = &cp
+	return b.Backend.(storage.RequestPutter).PutObjectWithRequest(ctx, req)
+}
+
+// TestPullThrough_CacheFill_ThreadsExactSizeHint proves the cache-fill write
+// threads the upstream's exact size as SizeHintExact so the inner backend takes
+// the no-spool streaming path instead of staging the body to a temp file. The
+// recording backend captures the request the pullthrough decorator builds.
+func TestPullThrough_CacheFill_ThreadsExactSizeHint(t *testing.T) {
 	local := newLocalBackend(t)
 	require.NoError(t, local.CreateBucket(context.Background(), "b"))
-	_, err := local.PutObject(context.Background(), "b", "k", strings.NewReader("data"), "text/plain")
+	rec := &recordingRequestPutterBackend{Backend: local}
+
+	const content = "upstream cache fill body"
+	upstream := &stubUpstream{objects: map[string]string{"b/k": content}}
+	pt := pullthrough.NewBackend(rec, &staticResolver{up: upstream})
+
+	rc, _, err := pt.GetObject(context.Background(), "b", "k")
 	require.NoError(t, err)
+	body, _ := io.ReadAll(rc)
+	require.NoError(t, rc.Close())
+	assert.Equal(t, content, string(body), "cache-miss must return upstream content")
 
-	pt := pullthrough.NewBackend(local, &staticResolver{up: &stubUpstream{}})
-
-	snap, ok := storage.Backend(pt).(storage.Snapshotable)
-	require.True(t, ok, "pullthrough.Backend must satisfy storage.Snapshotable")
-
-	objs, err := snap.ListAllObjects()
-	require.NoError(t, err)
-	require.Len(t, objs, 1, "ListAllObjects must see through the pull-through layer")
-	assert.Equal(t, "b", objs[0].Bucket)
-	assert.Equal(t, "k", objs[0].Key)
-
-	bs, ok := storage.Backend(pt).(storage.BucketSnapshotable)
-	require.True(t, ok, "pullthrough.Backend must satisfy storage.BucketSnapshotable")
-	// LocalBackend does not track per-bucket versioning, so it does not implement
-	// BucketSnapshotable; the forward returns (nil, nil) in that case. Just assert
-	// the call is wired and does not error.
-	_, err = bs.ListAllBuckets()
-	require.NoError(t, err)
-
-	// Unwrap exposes the inner backend.
-	type unwrapper interface{ Unwrap() storage.Backend }
-	uw, ok := storage.Backend(pt).(unwrapper)
-	require.True(t, ok, "pullthrough.Backend must expose Unwrap()")
-	assert.Equal(t, local, uw.Unwrap())
-}
-
-type walOffsetBackend struct {
-	storage.Backend
-	offset uint64
-}
-
-func (b *walOffsetBackend) WALOffset() uint64 { return b.offset }
-
-func TestPullThrough_ForwardsWALOffset(t *testing.T) {
-	local := newLocalBackend(t)
-	wrapped := &walOffsetBackend{Backend: local, offset: 42}
-	pt := pullthrough.NewBackend(wrapped, &staticResolver{up: &stubUpstream{}})
-
-	type walProvider interface{ WALOffset() uint64 }
-	wp, ok := storage.Backend(pt).(walProvider)
-	require.True(t, ok, "pullthrough.Backend must expose WALOffset for PITR snapshot anchors")
-	require.Equal(t, uint64(42), wp.WALOffset())
+	require.NotNil(t, rec.lastReq, "cache fill must go through PutObjectWithRequest (sized path)")
+	require.NotNil(t, rec.lastReq.SizeHint, "cache fill must thread a SizeHint")
+	assert.Equal(t, int64(len(content)), *rec.lastReq.SizeHint, "SizeHint must equal upstream Size")
+	assert.True(t, rec.lastReq.SizeHintExact, "SizeHint must be exact so the inner backend streams (no spool)")
 }

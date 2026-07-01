@@ -1,37 +1,24 @@
 package cluster
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
-	"time"
 
-	"github.com/dgraph-io/badger/v4"
 	"github.com/rs/zerolog/log"
-
-	"github.com/gritive/GrainFS/internal/raft"
 )
 
-// MigrateLegacyMetaToCluster converts a legacy data directory to cluster format.
-// It reads existing metadata from BadgerDB and re-proposes it through Raft
-// as a single-node cluster, establishing a clean Raft log baseline.
-func MigrateLegacyMetaToCluster(dataDir, nodeID string) error {
+// MigrateLegacyMetaToCluster converts a legacy data directory to cluster
+// format. It reads existing metadata from legacyStore (the caller opens the
+// legacy DB under dataDir/meta and owns its lifecycle — Phase 6.5 S3 moved
+// the badger.Open to the composition root, see serveruntime bootAutoMigrate)
+// and re-proposes it through Raft as a single-node cluster, establishing a
+// clean Raft log baseline.
+func MigrateLegacyMetaToCluster(legacyStore MetadataStore, dataDir, nodeID string) error {
+	if legacyStore == nil {
+		return fmt.Errorf("migrate: nil legacy metadata store")
+	}
 	logger := log.With().Str("component", "migrate").Logger()
-
-	metaDir := filepath.Join(dataDir, "meta")
-	if _, err := os.Stat(metaDir); os.IsNotExist(err) {
-		return fmt.Errorf("metadata directory not found: %s", metaDir)
-	}
-
-	// Open the existing metadata DB
-	dbOpts := badger.DefaultOptions(metaDir).WithLogger(nil)
-	db, err := badger.Open(dbOpts)
-	if err != nil {
-		return fmt.Errorf("open metadata db: %w", err)
-	}
-	defer db.Close()
+	store := legacyStore
 
 	// Collect all existing metadata entries
 	var buckets []string
@@ -43,8 +30,8 @@ func MigrateLegacyMetaToCluster(dataDir, nodeID string) error {
 	var objects []objEntry
 	var multiparts [][]byte
 
-	err = db.View(func(txn *badger.Txn) error {
-		it := txn.NewIterator(badger.DefaultIteratorOptions)
+	err := store.View(func(txn MetadataTxn) error {
+		it := txn.NewIterator(MetaIteratorOptions{PrefetchValues: true})
 		defer it.Close()
 		for it.Rewind(); it.Valid(); it.Next() {
 			item := it.Item()
@@ -84,111 +71,11 @@ func MigrateLegacyMetaToCluster(dataDir, nodeID string) error {
 		return fmt.Errorf("scan metadata: %w", err)
 	}
 
-	logger.Info().Int("buckets", len(buckets)).Int("objects", len(objects)).Int("multiparts", len(multiparts)).Msg("metadata scan complete")
-
-	raftDir := filepath.Join(dataDir, "raft")
-	cfg := raft.DefaultConfig(nodeID, nil) // no peers = legacy bootstrap
-	node, closeRaft, err := NewRaftV2NodeForServeruntime(cfg, raftDir)
-	if err != nil {
-		return fmt.Errorf("create raft node: %w", err)
-	}
-	defer func() {
-		if closeRaft != nil {
-			_ = closeRaft()
-		}
-	}()
-
-	// For a legacy node, set transport stubs (no peers to communicate with)
-	node.SetTransport(
-		func(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
-			return nil, fmt.Errorf("no peers during migration")
-		},
-		func(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error) {
-			return nil, fmt.Errorf("no peers during migration")
-		},
-	)
-
-	// Start the node — it will become leader since it's the only voter
-	node.Start()
-	defer node.Close()
-
-	// Wait for leadership (legacy node should become leader within a few election timeouts)
-	for range 200 {
-		if node.State() == raft.Leader {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if node.State() != raft.Leader {
-		return fmt.Errorf("node did not become leader during migration")
-	}
-
-	// Start FSM apply loop to keep metadata in sync
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
-	stopApply := make(chan struct{})
-	go func() {
-		for {
-			select {
-			case <-stopApply:
-				return
-			case entry, ok := <-node.ApplyCh():
-				if !ok {
-					// ApplyCh closed (node stopped); exit cleanly to avoid
-					// busy-looping on zero-value reads.
-					logger.Debug().Msg("migration apply loop: ApplyCh closed; exiting")
-					return
-				}
-				if err := fsm.Apply(entry.Command); err != nil {
-					logger.Error().Uint64("index", entry.Index).Err(err).Msg("fsm apply error during migration")
-				}
-			}
-		}
-	}()
-	defer close(stopApply)
-
-	// Propose bucket creations
-	for _, bucket := range buckets {
-		data, err := EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
-		if err != nil {
-			return fmt.Errorf("encode bucket cmd: %w", err)
-		}
-		if err := node.Propose(data); err != nil {
-			return fmt.Errorf("propose create bucket %s: %w", bucket, err)
-		}
-	}
-
-	// Propose object metadata
-	for _, obj := range objects {
-		var meta struct {
-			Key          string `json:"Key"`
-			Size         int64  `json:"Size"`
-			ContentType  string `json:"ContentType"`
-			ETag         string `json:"ETag"`
-			LastModified int64  `json:"LastModified"`
-		}
-		if err := json.Unmarshal(obj.meta, &meta); err != nil {
-			logger.Warn().Str("bucket", obj.bucket).Str("key", obj.key).Err(err).Msg("skip malformed object meta")
-			continue
-		}
-		// Legacy JSON objectMeta predates the Tags field; tags genuinely don't
-		// exist on these records, so the empty Tags here is not a clobber.
-		data, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
-			Bucket:      obj.bucket,
-			Key:         meta.Key,
-			Size:        meta.Size,
-			ContentType: meta.ContentType,
-			ETag:        meta.ETag,
-			ModTime:     meta.LastModified,
-		})
-		if err != nil {
-			return fmt.Errorf("encode object cmd: %w", err)
-		}
-		if err := node.Propose(data); err != nil {
-			return fmt.Errorf("propose put object %s/%s: %w", obj.bucket, obj.key, err)
-		}
-	}
-
-	logger.Info().Int("proposed_buckets", len(buckets)).Int("proposed_objects", len(objects)).Msg("migration complete")
+	// Bucket control-plane moved to meta-raft and per-object metadata moved
+	// off-raft, so there is nothing to propose. The raft node setup + proposal
+	// loop that used to live here is removed; the metadata scan above still logs
+	// counts for operator visibility. Greenfield clusters never reach bootAutoMigrate.
+	logger.Info().Int("buckets", len(buckets)).Int("objects", len(objects)).Int("multiparts", len(multiparts)).Msg("migration: legacy metadata scan complete (no proposals needed)")
 
 	return nil
 }

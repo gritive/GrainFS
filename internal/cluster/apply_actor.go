@@ -1,11 +1,8 @@
 package cluster
 
 import (
-	"errors"
 	"os"
 	"strconv"
-
-	"github.com/dgraph-io/badger/v4"
 
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/raft"
@@ -15,14 +12,9 @@ import (
 // raft propose path's maxProposeAppendBatch.
 const maxApplyBatchEntries = 64
 
-// maxApplyBatchBytes caps the summed raw-command size per batch. The ceiling is
-// badgerutil.SmallMaxBatchSize (~314 KiB); 64 KiB leaves ~5x margin because the
-// command-byte sum underestimates the real write set for append/coalesce. The
-// ErrTxnTooBig fallback is the safety net when the estimate is wrong.
+// maxApplyBatchBytes caps the summed raw-command size per batch so one apply
+// loop turn does not monopolize the goroutine on very large retired payloads.
 const maxApplyBatchBytes = 64 << 10
-
-// commitApplyTxn is the batch-commit seam. Tests override it to inject failures.
-var commitApplyTxn = func(txn *badger.Txn) error { return txn.Commit() }
 
 // applyBatchMax parses a GRAINFS_RAFT_APPLY_BATCH_MAX value into an entry cap
 // in [1, maxApplyBatchEntries]. Empty or invalid -> maxApplyBatchEntries.
@@ -48,59 +40,18 @@ func applyBatchMax(v string) int {
 // isolation set GRAINFS_RAFT_APPLY_BATCH_MAX=1 to disable batching.
 var applyBatchEntriesCap = applyBatchMax(os.Getenv("GRAINFS_RAFT_APPLY_BATCH_MAX"))
 
-// applyActor owns the FSM apply loop. It drains committed Raft entries, applies
-// each batch to a single BadgerDB transaction, and emits per-entry results.
-// Single-goroutine: batch/results buffers are reused without synchronization.
+// applyActor owns the data-group raft drain loop. Data-plane commands are
+// retired; committed command entries are opaque cursor markers. Snapshot
+// entries still restore the group metadata store for brownfield raft state.
 type applyActor struct {
-	db      *badger.DB
-	fsm     *FSM
-	batch   []raft.LogEntry // reused across iterations (batch[:0]); never re-nil'd
-	results []error         // reused across iterations
-}
-
-// applyBatch applies a batch of command entries to one transaction and returns
-// the per-entry results (results[i] for batch[i]). On mid-batch ErrTxnTooBig or
-// commit failure it discards and re-applies each entry in its own transaction.
-func (a *applyActor) applyBatch(batch []raft.LogEntry) []error {
-	results := a.results[:0]
-	txn := a.db.NewTransaction(true)
-	for _, e := range batch {
-		results = append(results, a.fsm.ApplyTxn(txn, e.Command))
-	}
-
-	// Check ErrTxnTooBig BEFORE committing. A partial commit followed by
-	// individual replay would double-apply the entries that fit and corrupt
-	// the result vector for delete-style handlers (applyCompleteMultipart
-	// re-run sees the mpu key already gone -> spurious ErrUploadNotFound).
-	needFallback := false
-	for _, r := range results {
-		if errors.Is(r, badger.ErrTxnTooBig) {
-			needFallback = true
-			break
-		}
-	}
-	if !needFallback {
-		needFallback = commitApplyTxn(txn) != nil
-	}
-
-	if needFallback {
-		txn.Discard() // uncommitted on the ErrTxnTooBig path
-		results = results[:0]
-		for _, e := range batch {
-			results = append(results, a.fsm.Apply(e.Command))
-		}
-		metrics.ApplyBatchCommitFallbackTotal.Inc()
-	}
-
-	metrics.ApplyBatchSize.Observe(float64(len(batch)))
-	a.results = results
-	return results
+	fsm   *FSM
+	batch []raft.LogEntry // reused across iterations (batch[:0]); never re-nil'd
 }
 
 // run is the apply actor's main loop. It drains committed entries from the Raft
-// node, batches command entries into one transaction, and handles snapshot
-// entries / snapshot requests as batch barriers. Returns when stop fires or
-// ApplyCh closes.
+// node, batches command entries only to advance lastApplied efficiently, and
+// handles snapshot entries / snapshot requests as batch barriers. Returns when
+// stop fires or ApplyCh closes.
 func (a *applyActor) run(b *DistributedBackend, stop <-chan struct{}) {
 	applyCh := b.node.ApplyCh()
 	for {
@@ -122,7 +73,7 @@ func (a *applyActor) run(b *DistributedBackend, stop <-chan struct{}) {
 }
 
 // collect handles one entry received from ApplyCh: for a command entry it
-// opportunistically drains more command entries (up to the caps) and commits
+// opportunistically drains more command entries (up to the caps) and records
 // the batch; for a snapshot entry it restores standalone. Returns false when
 // the loop should exit (ApplyCh closed mid-drain).
 func (a *applyActor) collect(b *DistributedBackend, first raft.LogEntry, applyCh <-chan raft.LogEntry) bool {
@@ -131,7 +82,14 @@ func (a *applyActor) collect(b *DistributedBackend, first raft.LogEntry, applyCh
 		return true
 	}
 	if first.Type != raft.LogEntryCommand {
-		return true // LogEntryNoOp / conf-change: nothing for the FSM
+		// LogEntryNoOp / conf-change: nothing for the FSM, but advance the applied
+		// cursor to the commit frontier so the linearizable read fence
+		// (WaitApplied) is satisfied even when the committed log tail is a
+		// non-command entry (e.g. a fresh group's leader-election NoOp). Entries
+		// arrive in log order, so storing first.Index keeps lastApplied contiguous.
+		b.lastApplied.Store(first.Index)
+		b.lastAppliedTerm.Store(first.Term)
+		return true
 	}
 
 	a.batch = a.batch[:0]
@@ -163,27 +121,28 @@ func (a *applyActor) collect(b *DistributedBackend, first raft.LogEntry, applyCh
 }
 
 // collectNonCommand handles a non-command entry encountered mid-drain (after
-// the pending batch was already committed).
+// the pending batch was already recorded).
 func (a *applyActor) collectNonCommand(b *DistributedBackend, e raft.LogEntry) {
 	if e.Type == raft.LogEntrySnapshot {
 		a.restore(b, e)
+		return
 	}
+	// NoOp / conf-change after a committed batch: no FSM work, but advance the
+	// applied cursor to this entry's index (commitBatch already advanced it to the
+	// batch's last command; e.Index is higher) so lastApplied reaches the commit
+	// frontier. Keeps the forward read fence (WaitApplied) unblocked.
+	b.lastApplied.Store(e.Index)
+	b.lastAppliedTerm.Store(e.Term)
 }
 
-// commitBatch applies a.batch, records results, runs notifications, and advances
-// lastApplied. A zero-length batch is a no-op.
+// commitBatch advances lastApplied over a batch of retired data-group command
+// entries. Command bytes are deliberately opaque; all live data-plane writes are
+// off-raft and brownfield command payloads replay as no-ops.
 func (a *applyActor) commitBatch(b *DistributedBackend) {
 	if len(a.batch) == 0 {
 		return
 	}
-	results := a.applyBatch(a.batch)
-	for i, entry := range a.batch {
-		b.recordApplyResult(entry.Index, results[i])
-		if results[i] != nil {
-			b.logger.Error().Uint64("index", entry.Index).Err(results[i]).Msg("fsm apply error")
-		}
-		b.notifyOnApply(entry.Command)
-	}
+	metrics.ApplyBatchSize.Observe(float64(len(a.batch)))
 	last := a.batch[len(a.batch)-1]
 	b.lastApplied.Store(last.Index)
 	b.lastAppliedTerm.Store(last.Term)
@@ -204,4 +163,7 @@ func (a *applyActor) restore(b *DistributedBackend, entry raft.LogEntry) {
 	}
 	b.lastApplied.Store(entry.Index)
 	b.lastAppliedTerm.Store(entry.Term)
+	// Policy-cache invalidation on snapshot install was driven by the retired
+	// onBucketPolicyApply hook (Task 12). Policy invalidation is now handled by
+	// the meta post-commit invalidation worker; no hook needed here.
 }

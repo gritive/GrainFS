@@ -168,8 +168,32 @@ func (rcv *SegmentMetaEntry) MutateEcParity(n byte) bool {
 	return rcv._tab.MutateByteSlot(20, n)
 }
 
+func (rcv *SegmentMetaEntry) StripeBytes() uint32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
+	if o != 0 {
+		return rcv._tab.GetUint32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *SegmentMetaEntry) MutateStripeBytes(n uint32) bool {
+	return rcv._tab.MutateUint32Slot(22, n)
+}
+
+func (rcv *SegmentMetaEntry) StoredSize() int64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(24))
+	if o != 0 {
+		return rcv._tab.GetInt64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *SegmentMetaEntry) MutateStoredSize(n int64) bool {
+	return rcv._tab.MutateInt64Slot(24, n)
+}
+
 func SegmentMetaEntryStart(builder *flatbuffers.Builder) {
-	builder.StartObject(9)
+	builder.StartObject(11)
 }
 func SegmentMetaEntryAddBlobId(builder *flatbuffers.Builder, blobId flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(blobId), 0)
@@ -203,6 +227,12 @@ func SegmentMetaEntryAddEcData(builder *flatbuffers.Builder, ecData byte) {
 }
 func SegmentMetaEntryAddEcParity(builder *flatbuffers.Builder, ecParity byte) {
 	builder.PrependByteSlot(8, ecParity, 0)
+}
+func SegmentMetaEntryAddStripeBytes(builder *flatbuffers.Builder, stripeBytes uint32) {
+	builder.PrependUint32Slot(9, stripeBytes, 0)
+}
+func SegmentMetaEntryAddStoredSize(builder *flatbuffers.Builder, storedSize int64) {
+	builder.PrependInt64Slot(10, storedSize, 0)
 }
 func SegmentMetaEntryEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

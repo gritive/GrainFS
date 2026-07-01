@@ -7,12 +7,12 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/gossip"
 )
 
 // bootBalancerAndGossip starts the balancer (cluster mode only) and ensures a
-// single GossipReceiver drains transport.Receive() whenever a feature needs
-// StreamReceipt gossip. Only one consumer is allowed because Receive() is a
-// single channel — competing readers would deliver each message to only one.
+// single GossipReceiver consumes the native gossip routes whenever a feature
+// needs receipt gossip.
 //
 // Inputs:  state.cfg (HealReceiptEnabled), state.metaRaft.FSM().ClusterConfig()
 //
@@ -32,7 +32,7 @@ func bootBalancerAndGossip(ctx context.Context, state *bootState) error {
 		return receiptPeerAddresses(state.nodeID, state.raftAddr, state.peers, state.metaRaft.FSM().Nodes())
 	}
 	if ccfg.BalancerEnabled() {
-		statsStore := cluster.NewNodeStatsStore(3 * ccfg.BalancerGossipInterval())
+		statsStore := gossip.NewNodeStatsStore(3 * ccfg.BalancerGossipInterval())
 		bp, gr, err := StartBalancer(ctx, state.nodeID, cfg.DataDir, statsStore, state.node, state.peers, state.fsm, state.clusterTransport, state.shardSvc, state.effectiveEC.NumShards(), ccfg, ccfg, state.capabilityGate, state.metaRaft.FSM(), state.metaRaft.FSM(), gossipPeerProvider)
 		if err != nil {
 			log.Warn().Err(err).Msg("balancer start failed")
@@ -53,21 +53,22 @@ func bootBalancerAndGossip(ctx context.Context, state *bootState) error {
 	// gossip, create a bare receiver; its NodeStatsStore is unused by receipt
 	// but required by the ctor.
 	if state.gossipReceiver == nil && (cfg.HealReceiptEnabled || needsCapabilityGossip) {
-		standaloneStats := cluster.NewNodeStatsStore(3 * ccfg.BalancerGossipInterval())
-		state.gossipReceiver = cluster.NewGossipReceiver(state.clusterTransport, standaloneStats).
+		standaloneStats := gossip.NewNodeStatsStore(3 * ccfg.BalancerGossipInterval())
+		state.gossipReceiver = gossip.NewGossipReceiver(state.clusterTransport, standaloneStats).
 			WithCapabilityGate(state.capabilityGate).
-			WithNodeAddressBook(state.metaRaft.FSM())
-		go state.gossipReceiver.Run(ctx)
+			WithAddressResolver(cluster.NodeAddressBookResolver(state.metaRaft.FSM()))
+		// Phase 8 N7-3: native gossip routes replace the Receive()-loop goroutine.
+		state.gossipReceiver.RegisterNativeGossipRoutes()
 		log.Info().Str("component", "gossip").Msg("gossip receiver started")
 	}
 	if state.gossipReceiver != nil {
 		state.gossipReceiver.SetCapabilityGate(state.capabilityGate)
-		state.gossipReceiver.SetNodeAddressBook(state.metaRaft.FSM())
+		state.gossipReceiver.SetAddressResolver(cluster.NodeAddressBookResolver(state.metaRaft.FSM()))
 	}
 	if needsCapabilityGossip && !ccfg.BalancerEnabled() {
-		statsStore := cluster.NewNodeStatsStore(3 * ccfg.BalancerGossipInterval())
-		statsStore.Set(cluster.NodeStats{NodeID: state.nodeID, JoinedAt: time.Now()})
-		sender := cluster.NewGossipSender(state.nodeID, state.peers, state.clusterTransport, statsStore, ccfg.BalancerGossipInterval()).
+		statsStore := gossip.NewNodeStatsStore(3 * ccfg.BalancerGossipInterval())
+		statsStore.Set(gossip.NodeStats{NodeID: state.nodeID, JoinedAt: time.Now()})
+		sender := gossip.NewGossipSender(state.nodeID, state.peers, state.clusterTransport, statsStore, ccfg.BalancerGossipInterval()).
 			WithPeerProvider(gossipPeerProvider).
 			WithCapabilityEvidenceSource(state.metaRaft.FSM()).
 			WithCapabilityGate(state.capabilityGate).

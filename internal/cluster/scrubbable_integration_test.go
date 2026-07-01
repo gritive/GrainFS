@@ -21,10 +21,13 @@ var _ scrubber.Scrubbable = (*DistributedBackend)(nil)
 var _ scrubber.ShardIntegrityReader = (*DistributedBackend)(nil)
 
 var _ = Describe("Scrubbable integration", func() {
-	var b *DistributedBackend
+	var (
+		b  *DistributedBackend
+		db *badger.DB
+	)
 
 	BeforeEach(func() {
-		b = newTestDistributedBackend(GinkgoT())
+		b, db = newTestDistributedBackendWithDB(GinkgoT())
 	})
 
 	Describe("object scanning", func() {
@@ -47,7 +50,7 @@ var _ = Describe("Scrubbable integration", func() {
 
 		It("emits a single object record with EC configuration", func() {
 			Expect(b.CreateBucket(context.Background(), "bkt")).To(Succeed())
-			writeScrubVersionedObjectMeta(b, "bkt", "hello.txt", "01HZXYZABC", "etag-hello", 11, nil)
+			writeScrubVersionedObjectMeta(b, db, "bkt", "hello.txt", "01HZXYZABC", "etag-hello", 11, nil)
 
 			ch, err := b.ScanObjects("bkt")
 			Expect(err).NotTo(HaveOccurred())
@@ -62,10 +65,30 @@ var _ = Describe("Scrubbable integration", func() {
 			Expect(recs[0].ETag).To(Equal("etag-hello"))
 		})
 
+		It("reports a 1+0 object's own non-redundant EC profile (not the cluster config)", func() {
+			// Regression guard: a genesis single-node object is written 1+0; after the
+			// cluster grows to 2+1, ScanObjects must still emit ParityShards==0 so the
+			// EC-redundancy-upgrade sweep can detect it (the scrub record reports the
+			// object's OWN EC profile from its quorum-meta blob, not the cluster config).
+			Expect(b.CreateBucket(context.Background(), "bkt")).To(Succeed())
+			writeScrubLatestBlob(b, "bkt", "single.txt", PutObjectMetaCmd{
+				VersionID: "01SINGLE", Size: 5, ContentType: "application/octet-stream",
+				ETag: "etag-single", ModTime: time.Now().Unix(), ECData: 1, ECParity: 0,
+				NodeIDs: []string{b.currentSelfAddr()},
+			})
+
+			ch, err := b.ScanObjects("bkt")
+			Expect(err).NotTo(HaveOccurred())
+			recs := scrubDrainObjectRecords(ch)
+			Expect(recs).To(HaveLen(1))
+			Expect(recs[0].DataShards).To(Equal(1))
+			Expect(recs[0].ParityShards).To(Equal(0))
+		})
+
 		It("preserves slash-containing keys while scanning", func() {
 			Expect(b.CreateBucket(context.Background(), "bkt")).To(Succeed())
-			writeScrubVersionedObjectMeta(b, "bkt", "folder/nested/file.bin", "01A", "etag-a", 100, nil)
-			writeScrubVersionedObjectMeta(b, "bkt", "top.txt", "01B", "etag-b", 7, nil)
+			writeScrubVersionedObjectMeta(b, db, "bkt", "folder/nested/file.bin", "01A", "etag-a", 100, nil)
+			writeScrubVersionedObjectMeta(b, db, "bkt", "top.txt", "01B", "etag-b", 7, nil)
 
 			ch, err := b.ScanObjects("bkt")
 			Expect(err).NotTo(HaveOccurred())
@@ -82,8 +105,8 @@ var _ = Describe("Scrubbable integration", func() {
 
 		It("skips tombstones while scanning", func() {
 			Expect(b.CreateBucket(context.Background(), "bkt")).To(Succeed())
-			writeScrubVersionedObjectMeta(b, "bkt", "alive", "01A", "etag-alive", 5, nil)
-			writeScrubVersionedObjectMeta(b, "bkt", "dead", "01D", deleteMarkerETag, 0, nil)
+			writeScrubVersionedObjectMeta(b, db, "bkt", "alive", "01A", "etag-alive", 5, nil)
+			writeScrubVersionedObjectMeta(b, db, "bkt", "dead", "01D", deleteMarkerETag, 0, nil)
 
 			ch, err := b.ScanObjects("bkt")
 			Expect(err).NotTo(HaveOccurred())
@@ -97,8 +120,14 @@ var _ = Describe("Scrubbable integration", func() {
 	Describe("object existence", func() {
 		It("reports only live objects as existing", func() {
 			Expect(b.CreateBucket(context.Background(), "bkt")).To(Succeed())
-			writeScrubVersionedObjectMeta(b, "bkt", "present", "01A", "etag", 10, nil)
-			writeScrubVersionedObjectMeta(b, "bkt", "tomb", "01B", deleteMarkerETag, 0, nil)
+			// Non-versioned: latest-only blob is the HeadObject authority.
+			writeScrubLatestBlob(b, "bkt", "present", PutObjectMetaCmd{
+				ETag: "etag", Size: 10, NodeIDs: []string{b.currentSelfAddr()},
+			})
+			// A latest-only delete-marker tombstone → HeadObject 404 → not existing.
+			writeScrubLatestBlob(b, "bkt", "tomb", PutObjectMetaCmd{
+				ETag: deleteMarkerETag, IsDeleteMarker: true, NodeIDs: []string{b.currentSelfAddr()},
+			})
 
 			ok, err := b.ObjectExists("bkt", "present")
 			Expect(err).NotTo(HaveOccurred())
@@ -130,7 +159,7 @@ var _ = Describe("Scrubbable integration", func() {
 
 		It("matches the shard service layout", func() {
 			keeper, clusterID := testDEKKeeper(GinkgoT())
-			svc := NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID))
+			svc := NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID))
 			Expect(svc.WriteLocalShard("bkt", "key/01VID", 3, []byte("payload"))).To(Succeed())
 
 			paths := b.ShardPaths("bkt", "key", "01VID", 4)
@@ -144,7 +173,7 @@ var _ = Describe("Scrubbable integration", func() {
 		It("uses the shared shard service root", func() {
 			shardRoot := GinkgoT().TempDir()
 			keeper, clusterID := testDEKKeeper(GinkgoT())
-			svc := NewShardService(shardRoot, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID))
+			svc := NewShardService(shardRoot, nil, WithShardDEKKeeper(keeper, clusterID))
 			b.SetShardService(svc, []string{"test-node"})
 			Expect(svc.WriteLocalShard("bkt", "key/01VID", 0, []byte("payload"))).To(Succeed())
 
@@ -179,7 +208,7 @@ var _ = Describe("Scrubbable integration", func() {
 
 		It("verifies encrypted shard-service shards", func() {
 			keeper, clusterID := testDEKKeeper(GinkgoT())
-			svc := NewShardService(GinkgoT().TempDir(), nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID))
+			svc := NewShardService(GinkgoT().TempDir(), nil, WithShardDEKKeeper(keeper, clusterID))
 			b.SetShardService(svc, []string{"test-node"})
 			Expect(svc.WriteLocalShard("bkt", "key/01VID", 0, []byte("payload"))).To(Succeed())
 
@@ -188,22 +217,6 @@ var _ = Describe("Scrubbable integration", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got.Status).To(Equal(scrubber.ShardIntegrityVerified))
 			Expect(string(got.Payload)).To(Equal("payload"))
-		})
-
-		It("verifies packed shards through shared shard service", func() {
-			keeper, clusterID := testDEKKeeper(GinkgoT())
-			svc := NewShardService(GinkgoT().TempDir(), nil, WithShardDEKKeeper(keeper, clusterID), WithShardPackThreshold(1024), withTestWALDEK(GinkgoT(), keeper, clusterID))
-			b.SetShardService(svc, []string{"test-node"})
-			Expect(svc.WriteLocalShard("bkt", "key/01VID", 0, []byte("packed-payload"))).To(Succeed())
-
-			path := b.ShardPaths("bkt", "key", "01VID", 1)[0]
-			_, err := os.Stat(path)
-			Expect(os.IsNotExist(err)).To(BeTrue())
-
-			got, err := b.ReadShardIntegrity("bkt", "key", "01VID", 0, path)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(got.Status).To(Equal(scrubber.ShardIntegrityVerified))
-			Expect(string(got.Payload)).To(Equal("packed-payload"))
 		})
 
 		It("rejects shards outside a data dir (non-data-dir read fail-closed)", func() {
@@ -261,9 +274,13 @@ var _ = Describe("Scrubbable integration", func() {
 
 		It("groups versions by key in key order", func() {
 			Expect(b.CreateBucket(context.Background(), "bkt")).To(Succeed())
-			writeScrubVersionedObjectMeta(b, "bkt", "a", "01AAAA0001", "etag-a-v1", 11, nil)
-			writeScrubVersionedObjectMeta(b, "bkt", "a", "01AAAA0002", "etag-a-v2", 22, nil)
-			writeScrubVersionedObjectMeta(b, "bkt", "b", "01BBBB0001", "etag-b-v1", 33, nil)
+			Expect(b.SetBucketVersioning("bkt", "Enabled")).To(Succeed())
+			self := b.currentSelfAddr()
+			// Per-version blobs (versioning-enabled authority). ModTime ascending
+			// mirrors VID order so the ModTime-primary derive is deterministic.
+			writeScrubVersionBlob(b, "bkt", "a", "01AAAA0001", PutObjectMetaCmd{ETag: "etag-a-v1", Size: 11, ModTime: 1, NodeIDs: []string{self}})
+			writeScrubVersionBlob(b, "bkt", "a", "01AAAA0002", PutObjectMetaCmd{ETag: "etag-a-v2", Size: 22, ModTime: 2, NodeIDs: []string{self}})
+			writeScrubVersionBlob(b, "bkt", "b", "01BBBB0001", PutObjectMetaCmd{ETag: "etag-b-v1", Size: 33, ModTime: 1, NodeIDs: []string{self}})
 
 			ch, err := b.ScanObjectsGrouped("bkt")
 			Expect(err).NotTo(HaveOccurred())
@@ -286,8 +303,10 @@ var _ = Describe("Scrubbable integration", func() {
 
 		It("passes delete markers through grouped scans", func() {
 			Expect(b.CreateBucket(context.Background(), "bkt")).To(Succeed())
-			writeScrubVersionedObjectMeta(b, "bkt", "k", "01AAAA0001", "etag-live", 10, nil)
-			writeScrubVersionedObjectMeta(b, "bkt", "k", "01AAAA0002", deleteMarkerETag, 0, nil)
+			Expect(b.SetBucketVersioning("bkt", "Enabled")).To(Succeed())
+			self := b.currentSelfAddr()
+			writeScrubVersionBlob(b, "bkt", "k", "01AAAA0001", PutObjectMetaCmd{ETag: "etag-live", Size: 10, ModTime: 1, NodeIDs: []string{self}})
+			writeScrubVersionBlob(b, "bkt", "k", "01AAAA0002", PutObjectMetaCmd{ETag: deleteMarkerETag, IsDeleteMarker: true, ModTime: 2, NodeIDs: []string{self}})
 
 			ch, err := b.ScanObjectsGrouped("bkt")
 			Expect(err).NotTo(HaveOccurred())
@@ -301,8 +320,11 @@ var _ = Describe("Scrubbable integration", func() {
 
 		It("preserves tags in grouped scans", func() {
 			Expect(b.CreateBucket(context.Background(), "bkt")).To(Succeed())
+			Expect(b.SetBucketVersioning("bkt", "Enabled")).To(Succeed())
 			tags := []storage.Tag{{Key: "env", Value: "prod"}, {Key: "team", Value: "data"}}
-			writeScrubVersionedObjectMeta(b, "bkt", "tagged", "01AAAA0001", "etag", 5, tags)
+			writeScrubVersionBlob(b, "bkt", "tagged", "01AAAA0001", PutObjectMetaCmd{
+				ETag: "etag", Size: 5, Tags: tags, ModTime: 1, NodeIDs: []string{b.currentSelfAddr()},
+			})
 
 			ch, err := b.ScanObjectsGrouped("bkt")
 			Expect(err).NotTo(HaveOccurred())
@@ -316,7 +338,10 @@ var _ = Describe("Scrubbable integration", func() {
 		It("includes legacy unversioned objects", func() {
 			Expect(b.CreateBucket(context.Background(), "bkt")).To(Succeed())
 			tags := []storage.Tag{{Key: "expire", Value: "yes"}}
-			writeScrubLegacyObjectMeta(b, "bkt", "folder/tagged", "etag", 42, tags)
+			// Non-versioned object: latest-only blob is the authority.
+			writeScrubLatestBlob(b, "bkt", "folder/tagged", PutObjectMetaCmd{
+				ETag: "etag", Size: 42, Tags: tags, NodeIDs: []string{b.currentSelfAddr()},
+			})
 
 			ch, err := b.ScanObjectsGrouped("bkt")
 			Expect(err).NotTo(HaveOccurred())
@@ -350,13 +375,13 @@ var _ = Describe("Scrubbable integration", func() {
 			Expect(b.CreateBucket(context.Background(), "bkt")).To(Succeed())
 			Expect(b.CreateBucket(context.Background(), "other")).To(Succeed())
 
-			writeScrubMultipartMeta(b, "upload-aaa", clusterMultipartMeta{
+			writeScrubMultipartMeta(b, db, "upload-aaa", clusterMultipartMeta{
 				Bucket: "bkt", Key: "a.bin", ContentType: "application/octet-stream", CreatedAt: 100,
 			})
-			writeScrubMultipartMeta(b, "upload-bbb", clusterMultipartMeta{
+			writeScrubMultipartMeta(b, db, "upload-bbb", clusterMultipartMeta{
 				Bucket: "bkt", Key: "b.bin", ContentType: "application/octet-stream", CreatedAt: 200,
 			})
-			writeScrubMultipartMeta(b, "upload-other", clusterMultipartMeta{
+			writeScrubMultipartMeta(b, db, "upload-other", clusterMultipartMeta{
 				Bucket: "other", Key: "x.bin", ContentType: "application/octet-stream", CreatedAt: 300,
 			})
 
@@ -380,51 +405,61 @@ var _ = Describe("Scrubbable integration", func() {
 	})
 })
 
-func writeScrubVersionedObjectMeta(b *DistributedBackend, bucket, key, versionID, etag string, size int64, tags []storage.Tag) {
+func writeScrubVersionedObjectMeta(b *DistributedBackend, _ *badger.DB, bucket, key, versionID, etag string, size int64, tags []storage.Tag) {
 	GinkgoHelper()
-	meta, err := marshalObjectMeta(objectMeta{
-		Key:          key,
-		Size:         size,
-		ContentType:  "application/octet-stream",
-		ETag:         etag,
-		LastModified: time.Now().Unix(),
-		Tags:         tags,
+	// Object metadata lives in the off-raft quorum-meta blob store. These specs use
+	// non-versioned buckets, so seed the latest-only blob (the off-path scrub
+	// source). Record a real 2+1 EC profile so the object represents an EC object
+	// (matches enableECForSpec(b, 2, 1)); a delete-marker keeps no shards, so leave
+	// its EC profile zero.
+	var ecData, ecParity uint8 = 2, 1
+	if etag == deleteMarkerETag {
+		ecData, ecParity = 0, 0
+	}
+	writeScrubLatestBlob(b, bucket, key, PutObjectMetaCmd{
+		VersionID:      versionID,
+		Size:           size,
+		ContentType:    "application/octet-stream",
+		ETag:           etag,
+		ModTime:        time.Now().Unix(),
+		Tags:           tags,
+		ECData:         ecData,
+		ECParity:       ecParity,
+		IsDeleteMarker: etag == deleteMarkerETag,
+		NodeIDs:        []string{b.currentSelfAddr()},
 	})
-	Expect(err).NotTo(HaveOccurred())
-	Expect(b.db.Update(func(txn *badger.Txn) error {
-		if err := txn.Set(objectMetaKey(bucket, key), meta); err != nil {
-			return err
-		}
-		if err := txn.Set(objectMetaKeyV(bucket, key, versionID), meta); err != nil {
-			return err
-		}
-		return txn.Set(latestKey(bucket, key), []byte(versionID))
-	})).To(Succeed())
 }
 
-func writeScrubLegacyObjectMeta(b *DistributedBackend, bucket, key, etag string, size int64, tags []storage.Tag) {
+// writeScrubVersionBlob seeds a per-version quorum-meta blob (the live
+// versioning-enabled authority). Ginkgo-native twin of seedVersionBlob.
+func writeScrubVersionBlob(b *DistributedBackend, bucket, key, versionID string, cmd PutObjectMetaCmd) {
 	GinkgoHelper()
-	meta, err := marshalObjectMeta(objectMeta{
-		Key:          key,
-		Size:         size,
-		ContentType:  "application/octet-stream",
-		ETag:         etag,
-		LastModified: time.Now().Unix(),
-		Tags:         tags,
-	})
+	cmd.Bucket = bucket
+	cmd.Key = key
+	cmd.VersionID = versionID
+	blob, err := encodeQuorumMetaBlob(cmd)
 	Expect(err).NotTo(HaveOccurred())
-	Expect(b.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(objectMetaKey(bucket, key), meta)
-	})).To(Succeed())
+	Expect(b.shardSvc.writeQuorumMetaVersionLocal(bucket, filepath.Join(key, versionID), blob)).To(Succeed())
 }
 
-func writeScrubMultipartMeta(b *DistributedBackend, uploadID string, meta clusterMultipartMeta) {
+// writeScrubLatestBlob seeds a latest-only quorum-meta blob (the non-versioned
+// object authority). Ginkgo-native twin of seedLatestBlob.
+func writeScrubLatestBlob(b *DistributedBackend, bucket, key string, cmd PutObjectMetaCmd) {
 	GinkgoHelper()
+	cmd.Bucket = bucket
+	cmd.Key = key
+	blob, err := encodeQuorumMetaBlob(cmd)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(b.shardSvc.writeQuorumMetaLocal(bucket, key, blob)).To(Succeed())
+}
+
+func writeScrubMultipartMeta(b *DistributedBackend, _ *badger.DB, uploadID string, meta clusterMultipartMeta) {
+	GinkgoHelper()
+	// M2b: ScanLocalMultipartUploads walks the local .qmeta_mpu manifest replicas,
+	// so seed the manifest blob (not the FSM mpu: key).
 	raw, err := marshalClusterMultipartMeta(meta)
 	Expect(err).NotTo(HaveOccurred())
-	Expect(b.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(b.ks().MultipartKey(uploadID), raw)
-	})).To(Succeed())
+	Expect(b.shardSvc.writeManifestBlobLocal(meta.Bucket, uploadID, raw)).To(Succeed())
 }
 
 func scrubDrainObjectRecords(ch <-chan scrubber.ObjectRecord) []scrubber.ObjectRecord {

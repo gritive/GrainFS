@@ -10,7 +10,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"sync"
 	"time"
 
@@ -196,35 +195,26 @@ func (r *MetaJoinReceiver) HandleJoin(ctx context.Context, capturedSPKI [32]byte
 	}
 }
 
-// HandleJoinStream is the JoinListener (W9) glue: it reads the framed JoinRequest
-// off the transport stream, runs HandleJoin with the TLS-captured peer SPKI, and
-// writes the framed JoinReply back. The wire is length-prefixed binary (NO
-// JSON) using transport.JoinReadFields/JoinPutField: exactly ONE field in each
-// direction, carrying the magic-prefixed FlatBuffers JoinRequest/JoinReply blob.
-// stream is typically a *quic.Stream (io.ReadWriteCloser); the caller owns
-// closing the underlying connection.
-func (r *MetaJoinReceiver) HandleJoinStream(ctx context.Context, peerSPKI [32]byte, bind []byte, stream io.ReadWriteCloser) {
-	defer func() { _ = stream.Close() }()
-	fields, err := transport.JoinReadFields(stream, 1)
+// HandleJoinRequest is the HTTPJoinListener glue: the request body is the
+// magic-prefixed FlatBuffers JoinRequest blob, the reply body the JoinReply
+// blob (HTTP framing carries the single request/reply — no manual length-prefix
+// framing).
+//
+// It preserves the gate sequence decode → not-leader → HandleJoin → encode:
+// HandleJoin assumes IsLeader() is true and every node runs a join listener, so
+// a follower that receives a dial must return the standard not-leader reply
+// (with leader hint) rather than running the invite path and failing noisily at
+// the raft layer. A decode failure or not-leader is a valid 200-level JoinReply;
+// only an encode failure surfaces as a transport error (mapped to 500).
+func (r *MetaJoinReceiver) HandleJoinRequest(ctx context.Context, peerSPKI [32]byte, bind []byte, reqBytes []byte) ([]byte, error) {
+	req, err := decodeJoinRequest(reqBytes)
 	if err != nil {
-		log.Warn().Err(err).Msg("meta_join: read join request frame failed")
-		return
+		return encodeJoinReply(JoinReply{Accepted: false, Status: JoinStatusError, Message: err.Error()})
 	}
-	req, err := decodeJoinRequest(fields[0])
-	if err != nil {
-		r.writeJoinReply(stream, JoinReply{Accepted: false, Status: JoinStatusError, Message: err.Error()})
-		return
-	}
-	// Leadership gate: HandleJoin assumes IsLeader() is true. Every node runs a
-	// join listener, so a follower that receives a dial must return the standard
-	// not-leader reply (with leader hint) rather than running the invite path
-	// and failing noisily at the raft layer. (The leader_join_addr/spki redirect
-	// extension is W7b — intentionally out of scope here.)
 	if !r.meta.IsLeader() {
-		r.writeJoinReply(stream, r.notLeaderReply())
-		return
+		return encodeJoinReply(r.notLeaderReply())
 	}
-	r.writeJoinReply(stream, r.HandleJoin(ctx, peerSPKI, bind, req))
+	return encodeJoinReply(r.HandleJoin(ctx, peerSPKI, bind, req))
 }
 
 // notLeaderReply builds the JoinStatusNotLeader reply with the best-effort
@@ -246,17 +236,6 @@ func (r *MetaJoinReceiver) notLeaderReply() JoinReply {
 		Status:     JoinStatusNotLeader,
 		LeaderID:   leaderID,
 		LeaderAddr: leaderAddr,
-	}
-}
-
-func (r *MetaJoinReceiver) writeJoinReply(w io.Writer, reply JoinReply) {
-	replyBytes, err := encodeJoinReply(reply)
-	if err != nil {
-		log.Warn().Err(err).Msg("meta_join: encode join reply failed")
-		return
-	}
-	if _, err := w.Write(transport.JoinPutField(nil, replyBytes)); err != nil {
-		log.Warn().Err(err).Msg("meta_join: write join reply frame failed")
 	}
 }
 
@@ -525,7 +504,7 @@ func joinStatusFromFB(s clusterpb.JoinStatus) JoinStatus {
 
 // EncodeJoinRequest serializes a JoinRequest to the magic-prefixed FlatBuffers
 // blob carried in one length-prefixed join-wire field. Used by the W9b joiner
-// to drive Phase-1/Phase-2 over transport.DialJoinTCP.
+// to drive Phase-1/Phase-2 over transport.DialJoinHTTP.
 func EncodeJoinRequest(req JoinRequest) ([]byte, error) {
 	return encodeJoinRequest(req)
 }

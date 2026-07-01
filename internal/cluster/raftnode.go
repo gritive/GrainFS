@@ -36,8 +36,8 @@ type RaftNode interface {
 	Peers() []string
 
 	// PeerMatchIndex returns the last known replicated index for the given
-	// peerKey (address or nodeID). Used by DataGroupPlanExecutor to wait for
-	// catch-up before leadership transfer.
+	// peerKey (address or nodeID). Implementations may return (0, false) when
+	// per-peer replication state is unavailable.
 	PeerMatchIndex(peerKey string) (uint64, bool)
 
 	// Bootstrapping.
@@ -69,10 +69,6 @@ type RaftNode interface {
 	// Must be called before Start(). Enables immediate leadership transfer
 	// on shutdown (Raft §3.10) instead of waiting for election timeout.
 	SetTimeoutNowTransport(send func(peer string, args *raft.TimeoutNowArgs) (*raft.TimeoutNowReply, error))
-
-	// SetNoOpCommand configures the FSM no-op payload proposed on leader election.
-	// The canonical actor emits no-op entries internally; the adapter is a no-op.
-	SetNoOpCommand(cmd []byte)
 
 	// Observer pattern. The adapter stubs are no-ops that log a warning once.
 	RegisterObserver(ch chan<- raft.Event)

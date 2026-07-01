@@ -1,7 +1,6 @@
 package serveruntime
 
 import (
-	"bytes"
 	"context"
 	"testing"
 	"time"
@@ -9,13 +8,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/cluster"
-	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/raft"
-	"github.com/gritive/GrainFS/internal/storage"
-
-	"go.uber.org/goleak"
 )
 
 // storagePhasePrereqs runs every prior boot phase (config, storage open,
@@ -25,7 +19,7 @@ import (
 // cluster-key is required in all modes; a fixed test key is supplied.
 // In solo mode bootShardService still runs the !JoinMode branch — meta-raft
 // has a single voter so the leader wait completes near-instantly.
-// The data-plane raft node is constructed but not Bootstrap'd — bootStreamRouter
+// The data-plane raft node is constructed but not Bootstrap'd — bootShardRoutes
 // fires node.Start() in production; tests rely on the cleanup stack to Stop it.
 func storagePhasePrereqs(t *testing.T) (context.Context, *bootState) {
 	t.Helper()
@@ -46,7 +40,6 @@ func storagePhasePrereqs(t *testing.T) (context.Context, *bootState) {
 	t.Cleanup(cancel)
 
 	require.NoError(t, bootClusterTransport(ctx, state))
-	require.NoError(t, bootPeerConnections(ctx, state))
 	require.NoError(t, bootGroupRaftMux(state))
 
 	// Mirror the run.go raft-node construction: needed by the storage phases.
@@ -68,22 +61,8 @@ func storagePhasePrereqs(t *testing.T) (context.Context, *bootState) {
 	require.NoError(t, bootMetaRaftWiring(state))
 	require.NoError(t, bootDataGroupRouter(state))
 	require.NoError(t, bootRotationAndAdminAPI(state))
-	require.NoError(t, bootMetaRaftStart(ctx, state, nil))
+	require.NoError(t, bootMetaRaftStart(ctx, state))
 	return ctx, state
-}
-
-func TestBootShardServiceDataWALPrefersDEKKeeper(t *testing.T) {
-	state := newBootState(Config{DataDir: t.TempDir()})
-	kek := bytes.Repeat([]byte{0x61}, encrypt.KEKSize)
-	clusterID := bytes.Repeat([]byte{0x62}, 16)
-	keeper, err := encrypt.NewDEKKeeper(kek, clusterID)
-	require.NoError(t, err)
-	state.dekKeeper = keeper
-	state.clusterID = clusterID
-
-	sealer, err := dataWALSealerForState(state)
-	require.NoError(t, err)
-	require.IsType(t, &storage.DEKKeeperAdapter{}, sealer)
 }
 
 func TestRuntimeTopologyNodesPrefersJoinedMetaNodes(t *testing.T) {
@@ -137,81 +116,58 @@ func TestBootShardService_DoesNotOverwriteReplayedShardGroups(t *testing.T) {
 	assert.Equal(t, []string{"n1", "n2", "n3"}, group.PeerIDs)
 }
 
+// TestBootShardService_ShardPackThresholdIsHardError proves S3: requesting
+// shard-packing via the GRAINFS_SHARD_PACK_THRESHOLD env gate is refused at boot
+// with a clear error (packing is disabled — a durable pack index was never built).
+func TestBootShardService_ShardPackThresholdIsHardError(t *testing.T) {
+	ctx, state := storagePhasePrereqs(t)
+	t.Setenv("GRAINFS_SHARD_PACK_THRESHOLD", "1024")
+
+	err := bootShardService(ctx, state)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "shard-pack")
+}
+
 // TestBootStoragePhases_OrderingInvariant — witness test. Asserts each phase
 // boundary by checking which state fields are nil before vs populated after.
 // Mirrors the PR 4 ordering test pattern: if a refactor accidentally re-orders
 // the storage phases, the test catches it. It also preserves the individual
 // phase population checks without paying for separate full boot prerequisites.
-// TestBootShardService_ClosesShardPackActorOnShutdown asserts the boot path
-// registers a cleanup that closes the shard service on shutdown. With a shard
-// pack store wired (WAL present), the shard-pack actor goroutine spawns; if no
-// cleanup closes it, it leaks past shutdown.
-func TestBootShardService_ClosesShardPackActorOnShutdown(t *testing.T) {
-	ctx, state := storagePhasePrereqs(t)
-	// Enable the shard-pack store so the WAL-wired shard-pack actor goroutine spawns.
-	state.cfg.ShardPackThreshold = 1024
-	baseline := goleak.IgnoreCurrent()
-
-	require.NoError(t, bootShardService(ctx, state))
-	require.NotNil(t, state.shardSvc)
-
-	// Production shutdown runs the cleanup stack — it must close the shard
-	// service so the shard-pack actor goroutine is stopped.
-	state.Cleanup()
-
-	goleak.VerifyNone(t, baseline)
-}
-
-func TestBootShardServiceWiresDataWALRepairCollector(t *testing.T) {
-	ctx, state := storagePhasePrereqs(t)
-
-	require.NoError(t, bootShardService(ctx, state))
-
-	require.NotNil(t, state.dataWALRepairCollector)
-	require.NotNil(t, state.shardSvc)
-	require.True(t, state.shardSvc.HasDataWALRepairSink(),
-		"shard service must be constructed with the repair-candidate sink")
-}
-
 func TestBootStoragePhases_OrderingInvariant(t *testing.T) {
 	ctx, state := storagePhasePrereqs(t)
 
 	// Before any storage phase: nothing wired.
 	assert.Nil(t, state.shardSvc)
-	assert.Nil(t, state.streamRouter)
 	assert.Nil(t, state.distBackend)
 	assert.Nil(t, state.shardCache)
-	assert.Nil(t, state.rebalancer)
-	assert.Nil(t, state.dataWAL, "data WAL not opened before shard service phase")
-	assert.Empty(t, state.dataWALDir, "dataWALDir not set before shard service phase")
 	assert.Equal(t, 0, state.effectiveEC.NumShards(), "effectiveEC zero-value before phases")
 
-	// 1. ShardService — populates shardSvc + effectiveEC + data WAL; no router yet.
+	// 1. ShardService - populates shardSvc + effectiveEC; no router yet.
 	require.NoError(t, bootShardService(ctx, state))
 	require.NotNil(t, state.shardSvc, "shardSvc after bootShardService")
-	require.NotNil(t, state.dataWAL, "data WAL after shard service phase")
-	assert.NotEmpty(t, state.dataWALDir, "dataWALDir set after shard service phase")
-	assert.True(t, state.shardSvc.HasDataWAL(), "shard service receives data WAL")
 	require.Greater(t, state.effectiveEC.NumShards(), 0, "effectiveEC after bootShardService")
 	// Single-node cluster -> 1+0 auto profile.
 	assert.Equal(t, 1, state.effectiveEC.DataShards)
 	assert.Equal(t, 0, state.effectiveEC.ParityShards)
-	assert.Nil(t, state.streamRouter, "streamRouter not yet constructed")
 	assert.Nil(t, state.distBackend, "distBackend not yet constructed")
 
-	// 2. StreamRouter — populates streamRouter; distBackend still nil.
+	// 2. ShardRoutes — registers the native shard routes; distBackend still nil.
+	// node.Start (and its Stop cleanup) moved to run.go, BEFORE invite-join
+	// Phase-2 (the §6 join-deadlock fix) — bootShardRoutes pushes no cleanup.
 	cleanupsBefore := len(state.cleanups)
-	require.NoError(t, bootStreamRouter(state))
-	require.NotNil(t, state.streamRouter, "streamRouter after bootStreamRouter")
-	assert.Equal(t, cleanupsBefore+1, len(state.cleanups), "node.Stop cleanup pushed")
+	require.NoError(t, bootShardRoutes(state))
+	assert.Equal(t, cleanupsBefore, len(state.cleanups), "bootShardRoutes pushes no cleanup (node.Start lives in run.go)")
 	assert.Nil(t, state.distBackend, "distBackend not yet constructed")
+	// Mirror run.go's early Start so the later phases see a running actor,
+	// exactly as production boot does.
+	state.node.Start()
+	state.AddCleanup(func() { state.node.Close() })
 
-	// 3. OwnedGroupsAndEC — populates distBackend + shardCache + rebalancer +
-	//    loadReporter; shutdown hook registered.
-	require.NoError(t, bootOwnedGroupsAndEC(ctx, state, func(badgerrole.Decision) {}))
+	// 3. OwnedGroupsAndEC — populates distBackend + shardCache + loadReporter;
+	//    shutdown hook registered.
+	require.NoError(t, bootOwnedGroupsAndEC(ctx, state))
 	require.NotNil(t, state.distBackend, "distBackend after bootOwnedGroupsAndEC")
 	require.NotNil(t, state.shardCache, "shardCache after bootOwnedGroupsAndEC")
-	require.NotNil(t, state.rebalancer, "rebalancer after bootOwnedGroupsAndEC")
 	require.NotNil(t, state.loadReporter, "loadReporter after bootOwnedGroupsAndEC")
 	require.NotNil(t, state.loadReporterStor, "loadReporter store after bootOwnedGroupsAndEC")
 	require.NotNil(t, state.stopApply, "stopApply channel after bootOwnedGroupsAndEC")

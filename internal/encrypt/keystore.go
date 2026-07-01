@@ -204,7 +204,7 @@ func (s *KEKStore) Delete(version uint32) error {
 // single-file kek.key alongside the new keys/ directory. The caller MUST
 // refuse boot — silently migrating would conflict with the green-field
 // cutover invariants of a later phase.
-var ErrLegacyKEKDetected = errors.New("legacy kek.key file detected; refusing to boot in Phase A. Green-field cutover required.")
+var ErrLegacyKEKDetected = errors.New("legacy kek.key file detected; refusing to boot in Phase A. Green-field cutover required")
 
 // parseKeyFilename accepts "<uint32>.key" and rejects everything else.
 // Centralised so the parser stays consistent with the writer.

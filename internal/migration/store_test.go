@@ -7,26 +7,29 @@ import (
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/badgermeta"
+	"github.com/gritive/GrainFS/internal/metastore"
 )
 
-func newTestDB(t *testing.T) *badger.DB {
+func newTestStore(t *testing.T) metastore.Store {
 	t.Helper()
 	opts := badger.DefaultOptions(t.TempDir()).WithLogger(nil)
 	db, err := badger.Open(opts)
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
-	return db
+	return badgermeta.Wrap(db)
 }
 
 func TestJobStore_GetCursor_NotFound_ReturnsEmpty(t *testing.T) {
-	s := NewJobStore(newTestDB(t))
+	s := NewJobStore(newTestStore(t))
 	cur, err := s.GetCursor("nope")
 	require.NoError(t, err)
 	assert.Empty(t, cur)
 }
 
 func TestJobStore_SaveCursor_RoundTrip(t *testing.T) {
-	s := NewJobStore(newTestDB(t))
+	s := NewJobStore(newTestStore(t))
 	require.NoError(t, s.SaveCursor("b", "token-abc"))
 	cur, err := s.GetCursor("b")
 	require.NoError(t, err)
@@ -34,14 +37,14 @@ func TestJobStore_SaveCursor_RoundTrip(t *testing.T) {
 }
 
 func TestJobStore_GetJob_NotFound_ReturnsNil(t *testing.T) {
-	s := NewJobStore(newTestDB(t))
+	s := NewJobStore(newTestStore(t))
 	job, err := s.GetJob("nope")
 	require.NoError(t, err)
 	assert.Nil(t, job)
 }
 
 func TestJobStore_SaveJob_RoundTrip(t *testing.T) {
-	s := NewJobStore(newTestDB(t))
+	s := NewJobStore(newTestStore(t))
 	state := &JobState{
 		Bucket:    "b",
 		Status:    StatusRunning,
@@ -59,7 +62,7 @@ func TestJobStore_SaveJob_RoundTrip(t *testing.T) {
 }
 
 func TestJobStore_ListJobs_ByStatus(t *testing.T) {
-	s := NewJobStore(newTestDB(t))
+	s := NewJobStore(newTestStore(t))
 	require.NoError(t, s.SaveJob(&JobState{Bucket: "a", Status: StatusRunning}))
 	require.NoError(t, s.SaveJob(&JobState{Bucket: "b", Status: StatusComplete}))
 	require.NoError(t, s.SaveJob(&JobState{Bucket: "c", Status: StatusRunning}))
@@ -72,14 +75,14 @@ func TestJobStore_ListJobs_ByStatus(t *testing.T) {
 }
 
 func TestJobStore_ListJobs_Empty(t *testing.T) {
-	s := NewJobStore(newTestDB(t))
+	s := NewJobStore(newTestStore(t))
 	got, err := s.ListJobs(StatusRunning)
 	require.NoError(t, err)
 	assert.Empty(t, got)
 }
 
 func TestJobStore_DeleteJob_ClearsJobAndCursor(t *testing.T) {
-	s := NewJobStore(newTestDB(t))
+	s := NewJobStore(newTestStore(t))
 	require.NoError(t, s.SaveJob(&JobState{Bucket: "b", Status: StatusRunning}))
 	require.NoError(t, s.SaveCursor("b", "tok"))
 	require.NoError(t, s.DeleteJob("b"))
@@ -94,6 +97,6 @@ func TestJobStore_DeleteJob_ClearsJobAndCursor(t *testing.T) {
 }
 
 func TestJobStore_DeleteJob_NonExistent_NoError(t *testing.T) {
-	s := NewJobStore(newTestDB(t))
+	s := NewJobStore(newTestStore(t))
 	assert.NoError(t, s.DeleteJob("no-such-bucket"))
 }

@@ -107,8 +107,72 @@ func (rcv *PutObjectArgs) SseAlgorithm() []byte {
 	return nil
 }
 
+func (rcv *PutObjectArgs) UserMetadata(obj *Tag, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *PutObjectArgs) UserMetadataLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func (rcv *PutObjectArgs) ContentMd5Hex() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
+func (rcv *PutObjectArgs) Acl() byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
+	if o != 0 {
+		return rcv._tab.GetByte(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *PutObjectArgs) MutateAcl(n byte) bool {
+	return rcv._tab.MutateByteSlot(18, n)
+}
+
+func (rcv *PutObjectArgs) VersioningState() byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
+	if o != 0 {
+		return rcv._tab.GetByte(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *PutObjectArgs) MutateVersioningState(n byte) bool {
+	return rcv._tab.MutateByteSlot(20, n)
+}
+
+func (rcv *PutObjectArgs) DecodedLength() int64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
+	if o != 0 {
+		return rcv._tab.GetInt64(o + rcv._tab.Pos)
+	}
+	return -1
+}
+
+func (rcv *PutObjectArgs) MutateDecodedLength(n int64) bool {
+	return rcv._tab.MutateInt64Slot(22, n)
+}
+
 func PutObjectArgsStart(builder *flatbuffers.Builder) {
-	builder.StartObject(5)
+	builder.StartObject(10)
 }
 func PutObjectArgsAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -127,6 +191,24 @@ func PutObjectArgsStartBodyVector(builder *flatbuffers.Builder, numElems int) fl
 }
 func PutObjectArgsAddSseAlgorithm(builder *flatbuffers.Builder, sseAlgorithm flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(4, flatbuffers.UOffsetT(sseAlgorithm), 0)
+}
+func PutObjectArgsAddUserMetadata(builder *flatbuffers.Builder, userMetadata flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(5, flatbuffers.UOffsetT(userMetadata), 0)
+}
+func PutObjectArgsStartUserMetadataVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
+}
+func PutObjectArgsAddContentMd5Hex(builder *flatbuffers.Builder, contentMd5Hex flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(6, flatbuffers.UOffsetT(contentMd5Hex), 0)
+}
+func PutObjectArgsAddAcl(builder *flatbuffers.Builder, acl byte) {
+	builder.PrependByteSlot(7, acl, 0)
+}
+func PutObjectArgsAddVersioningState(builder *flatbuffers.Builder, versioningState byte) {
+	builder.PrependByteSlot(8, versioningState, 0)
+}
+func PutObjectArgsAddDecodedLength(builder *flatbuffers.Builder, decodedLength int64) {
+	builder.PrependInt64Slot(9, decodedLength, -1)
 }
 func PutObjectArgsEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

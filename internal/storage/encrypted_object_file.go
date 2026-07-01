@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
 )
@@ -17,6 +18,22 @@ const (
 	encryptedObjectMagic         = "GFOBJENC2"
 	encryptedObjectFormatVersion = uint16(1)
 	encryptedChunkSize           = 128 * 1024 // Balance write overhead with bounded ReadAt decrypt work.
+	encryptedObjectWriteBufSize  = 1 << 20    // bufio buffer for encrypted object materialization.
+)
+
+// Pools for the per-write fixed buffers in writeEncryptedObjectFile. Without
+// them, every encrypted object write — including tiny objects — allocates a
+// 1 MiB bufio buffer plus a 128 KiB working buffer. Pooling keeps steady-state
+// per-write allocation proportional to the object, not the buffer ceilings.
+var (
+	encObjectWriteBufioPool = sync.Pool{New: func() any { return bufio.NewWriterSize(nil, encryptedObjectWriteBufSize) }}
+	encObjectWriteChunkPool = sync.Pool{New: func() any { b := make([]byte, encryptedChunkSize); return &b }}
+	// encObjectWriteSealedPool holds the reusable per-write sealed-record scratch.
+	// Without it each 128 KiB record's Seal output is a fresh slice, so an N-record
+	// object allocates ~object-size of transient ciphertext buffers. SealTo reuses
+	// this across records → one buffer per write, not per record. Slack covers the
+	// nonce + AEAD tag the seal prepends/appends to the plaintext chunk.
+	encObjectWriteSealedPool = sync.Pool{New: func() any { b := make([]byte, 0, encryptedChunkSize+64); return &b }}
 )
 
 // writeEncryptedObjectHeader writes the GFOBJENC2 file header: magic,
@@ -70,7 +87,12 @@ func writeEncryptedObjectFile(path string, enc DataEncryptor, baseFields []encry
 		return 0, fmt.Errorf("create encrypted object: %w", err)
 	}
 	defer f.Close()
-	bw := bufio.NewWriterSize(f, 1<<20)
+	bw := encObjectWriteBufioPool.Get().(*bufio.Writer)
+	bw.Reset(f)
+	defer func() {
+		bw.Reset(nil) // drop the file reference before returning to the pool
+		encObjectWriteBufioPool.Put(bw)
+	}()
 
 	// fields is baseFields with one extra slot for the per-chunk ordinal,
 	// rewritten each iteration to avoid per-chunk allocation.
@@ -78,7 +100,18 @@ func writeEncryptedObjectFile(path string, enc DataEncryptor, baseFields []encry
 	copy(fields, baseFields)
 	ordinalIdx := len(baseFields)
 
-	buf := make([]byte, encryptedChunkSize)
+	bufp := encObjectWriteChunkPool.Get().(*[]byte)
+	defer encObjectWriteChunkPool.Put(bufp)
+	buf := *bufp
+	// sealed is reused across records via SealTo/SealAtGenTo so the per-record
+	// ciphertext is not a fresh allocation. Its grown capacity is returned to the
+	// pool for the next write.
+	sealedp := encObjectWriteSealedPool.Get().(*[]byte)
+	sealed := *sealedp
+	defer func() {
+		*sealedp = sealed
+		encObjectWriteSealedPool.Put(sealedp)
+	}()
 	var size int64
 	var chunk uint64
 	var pinnedGen uint32
@@ -95,11 +128,10 @@ func writeEncryptedObjectFile(path string, enc DataEncryptor, baseFields []encry
 			// chunks 1+ seal AT the pinned gen so a DEK rotation racing this
 			// (possibly non-seekable) write can't split the object across
 			// generations.
-			var sealed []byte
 			var err error
 			if chunk == 0 {
 				var gen uint32
-				sealed, gen, err = enc.Seal(encrypt.DomainShard, fields, plain)
+				sealed, gen, err = enc.SealTo(sealed[:0], encrypt.DomainShard, fields, plain)
 				if err != nil {
 					return 0, fmt.Errorf("encrypt object chunk %d: %w", chunk, err)
 				}
@@ -109,7 +141,7 @@ func writeEncryptedObjectFile(path string, enc DataEncryptor, baseFields []encry
 				}
 				headerWritten = true
 			} else {
-				sealed, err = enc.SealAtGen(encrypt.DomainShard, fields, plain, pinnedGen)
+				sealed, err = enc.SealAtGenTo(sealed[:0], encrypt.DomainShard, fields, plain, pinnedGen)
 				if err != nil {
 					return 0, fmt.Errorf("encrypt object chunk %d: %w", chunk, err)
 				}
@@ -136,8 +168,8 @@ func writeEncryptedObjectFile(path string, enc DataEncryptor, baseFields []encry
 	if err := bw.Flush(); err != nil {
 		return 0, fmt.Errorf("flush encrypted object: %w", err)
 	}
-	// Durability is owned by internal/storage/datawal. The tmp+rename below
-	// provides atomic visibility of already-WAL-flushed bytes.
+	// The tmp file provides atomic visibility after rename; callers control
+	// whether the write is fsynced for crash durability.
 	return size, nil
 }
 
@@ -181,7 +213,17 @@ type encryptedObjectReader struct {
 	// grows to chunk-class size on the first chunk and stays there for the
 	// lifetime of the reader.
 	sealedBuf []byte
-	err       error
+	// fields is reusable AAD scratch: baseFields plus one trailing slot for the
+	// per-chunk ordinal, rewritten each chunk. Lazily built on the first
+	// loadNext and reused for the reader's lifetime so the GET hot path does
+	// not allocate a fresh AAD slice per 128 KiB chunk (mirrors the writer's
+	// preallocated `fields` at the top of this file).
+	fields []encrypt.AADField
+	// hdr is reusable scratch for each record's 8-byte header. Held on the
+	// reader (already heap-resident) so the per-chunk header read does not
+	// allocate (see readEncryptedObjectRecordInto).
+	hdr [8]byte
+	err error
 }
 
 func (r *encryptedObjectReader) Read(p []byte) (int, error) {
@@ -219,7 +261,7 @@ func (r *encryptedObjectReader) loadNext() error {
 	if r.remaining <= 0 {
 		return io.EOF
 	}
-	plainLen, sealed, err := readEncryptedObjectRecordInto(r.f, r.sealedBuf[:0])
+	plainLen, sealed, err := readEncryptedObjectRecordInto(r.f, r.hdr[:], r.sealedBuf[:0])
 	if err != nil {
 		if err == io.EOF {
 			if r.remaining > 0 {
@@ -245,11 +287,18 @@ func (r *encryptedObjectReader) loadNext() error {
 		clear(r.plainBuf[:cap(r.plainBuf)])
 		return fmt.Errorf("encrypted object chunk %d plaintext length exceeds chunk size", r.chunk)
 	}
-	// Readers append the per-chunk ordinal to a fresh slice each chunk
-	// (the writer reuses a preallocated slice via ordinalIdx). The alloc
-	// is acceptable for this groundwork lane; a zero-alloc reader pass is
-	// deferred to a later optimization.
-	fields := append(append([]encrypt.AADField(nil), r.baseFields...), encrypt.FieldUint32(uint32(r.chunk)))
+	// Reuse a per-reader AAD scratch slice (baseFields + a trailing ordinal
+	// slot), rewriting only the ordinal each chunk — mirrors the writer's
+	// preallocated `fields`. Removes the per-chunk allocation the prior
+	// append-to-nil incurred on the GET hot path (a 5 MiB object streams as
+	// 40 chunks = 40 throwaway AAD slices per GET). OpenTo only reads the
+	// fields to build the AAD; it never retains the slice, so reuse is safe.
+	if r.fields == nil {
+		r.fields = make([]encrypt.AADField, len(r.baseFields)+1)
+		copy(r.fields, r.baseFields)
+	}
+	r.fields[len(r.baseFields)] = encrypt.FieldUint32(uint32(r.chunk))
+	fields := r.fields
 	// Zero the prior chunk's plaintext (full cap, incl. any partial tail) before
 	// OpenTo reuses the backing for this chunk.
 	clear(r.plainBuf[:cap(r.plainBuf)])
@@ -478,10 +527,8 @@ func writeEncryptedObjectFileAtomic(path string, enc DataEncryptor, baseFields [
 		cleanup()
 		return 0, fmt.Errorf("rename encrypted object: %w", err)
 	}
-	// Directory metadata durability is owned by the data WAL: the WAL
-	// record was flushed before this materialization ran, so a crash
-	// after rename and before the next natural dir sync replays the
-	// same bytes from the WAL.
+	// Directory metadata durability follows the caller's sync policy after
+	// this atomic rename.
 	return size, nil
 }
 
@@ -512,8 +559,9 @@ func readEncryptedObjectFile(path string, enc DataEncryptor, baseFields []encryp
 		}
 	}()
 	plainBuf = make([]byte, 0, encryptedChunkSize)
+	var hdr [8]byte // reused across chunks so the per-record header read is O(1)
 	for {
-		plainLen, sealed, err := readEncryptedObjectRecordInto(f, sealedBuf[:0])
+		plainLen, sealed, err := readEncryptedObjectRecordInto(f, hdr[:], sealedBuf[:0])
 		if err == io.EOF {
 			break
 		}
@@ -574,8 +622,9 @@ func hashEncryptedObjectFile(path string, enc DataEncryptor, baseFields []encryp
 		}
 	}()
 	plainBuf = make([]byte, 0, encryptedChunkSize)
+	var hdr [8]byte // reused across chunks so the per-record header read is O(1)
 	for {
-		plainLen, sealed, err := readEncryptedObjectRecordInto(f, sealedBuf[:0])
+		plainLen, sealed, err := readEncryptedObjectRecordInto(f, hdr[:], sealedBuf[:0])
 		if err == io.EOF {
 			break
 		}
@@ -658,9 +707,13 @@ func writeEncryptedObjectRecord(w io.Writer, plainLen uint32, sealed []byte) err
 // dst only when its capacity is too small. Callers in tight chunk loops
 // reuse the same buffer across iterations so the per-chunk
 // `make([]byte, blobLen)` cost disappears after the first record.
-func readEncryptedObjectRecordInto(r io.Reader, dst []byte) (uint32, []byte, error) {
-	var hdr [8]byte
-	if _, err := io.ReadFull(r, hdr[:]); err != nil {
+// hdr is a caller-owned >=8-byte scratch for the record header. Taking it as a
+// parameter (rather than a local `var hdr [8]byte`) keeps it from escaping to
+// the heap on every call: the local-array form escapes through io.ReadFull's
+// io.Reader and allocated once per chunk on the streaming GET hot path. Callers
+// in a per-chunk loop reuse one buffer for O(1) header reads.
+func readEncryptedObjectRecordInto(r io.Reader, hdr, dst []byte) (uint32, []byte, error) {
+	if _, err := io.ReadFull(r, hdr[:8]); err != nil {
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
 			return 0, nil, err
 		}

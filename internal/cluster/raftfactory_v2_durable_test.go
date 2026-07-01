@@ -33,7 +33,7 @@ func TestNewRaftNode_V2DurableStoresAtV2Subdir(t *testing.T) {
 	})
 
 	// Verify the sub-directory was created.
-	subDir := filepath.Join(tmp, raftV2StoreSubdir)
+	subDir := filepath.Join(tmp, "raft-v2")
 	info, err := os.Stat(subDir)
 	require.NoError(t, err, "v2 store sub-directory must exist")
 	require.True(t, info.IsDir(), "v2 store path must be a directory")

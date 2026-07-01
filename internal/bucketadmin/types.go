@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// BaseOptions matches iamadmin/volumeadmin/clusteradmin/nfsadmin shape.
+// BaseOptions matches iamadmin/admincli/clusteradmin/nfsadmin shape.
 // RawBytes is unused for bucket but kept for parity.
 type BaseOptions struct {
 	Endpoint string

@@ -22,7 +22,7 @@ func TestMetaFSMProtocolCredentialSnapshotRoundTrip(t *testing.T) {
 		{
 			ID:          "pc_b",
 			SAID:        "sa_b",
-			Protocol:    protocred.ProtocolNBD,
+			Protocol:    protocred.ProtocolS3,
 			Resource:    "volume/b",
 			Mode:        protocred.ModeRW,
 			SecretHash:  sha256.Sum256([]byte("b")),
@@ -125,7 +125,7 @@ func TestMetaFSMProtocolCredentialEmptySnapshotClearsWiredStore(t *testing.T) {
 	dstStore.Restore([]protocred.Credential{{
 		ID:         "pc_stale",
 		SAID:       "sa_stale",
-		Protocol:   protocred.ProtocolNBD,
+		Protocol:   protocred.ProtocolS3,
 		Resource:   "volume/stale",
 		Mode:       protocred.ModeRW,
 		SecretHash: sha256.Sum256([]byte("stale")),

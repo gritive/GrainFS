@@ -4,12 +4,14 @@ package cluster
 // (NodeID, OwnedShards) and scrubber.ShardRepairer (RepairShardLocal).
 
 import (
+	"context"
 	"testing"
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/scrubber"
 )
 
@@ -21,9 +23,9 @@ var _ scrubber.ShardOwner = (*DistributedBackend)(nil)
 // bypassing the Raft proposal path. Matches the byte layout that
 // applyPutShardPlacement writes. Used by tests that call LookupShardPlacement
 // directly (not ResolvePlacement).
-func writePlacement(t clusterTestTB, b *DistributedBackend, bucket, key string, nodes []string) {
+func writePlacement(t clusterTestTB, b *DistributedBackend, db *badger.DB, bucket, key string, nodes []string) {
 	t.Helper()
-	if err := b.db.Update(func(txn *badger.Txn) error {
+	if err := db.Update(func(txn *badger.Txn) error {
 		rec := PlacementRecord{Nodes: nodes, K: 4, M: 2}
 		return txn.Set(shardPlacementKey(bucket, key), encodePlacementValue(rec))
 	}); err != nil {
@@ -31,46 +33,20 @@ func writePlacement(t clusterTestTB, b *DistributedBackend, bucket, key string, 
 	}
 }
 
-// seedPlacementMeta writes an object metadata record (including EC placement)
-// via FSM Apply, so that readPlacementMeta can resolve it.
-func seedPlacementMeta(t clusterTestTB, b *DistributedBackend, bucket, key, versionID string, nodes []string, ecData, ecParity uint8) {
-	t.Helper()
-	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
-		Bucket:      bucket,
-		Key:         key,
-		VersionID:   versionID,
-		Size:        1,
-		ContentType: "application/octet-stream",
-		ETag:        "etag",
-		ModTime:     1,
-		ECData:      ecData,
-		ECParity:    ecParity,
-		NodeIDs:     nodes,
-	})
-	if err != nil {
-		t.Fatalf("encode placement meta: %v", err)
-	}
-	if err := b.fsm.Apply(raw); err != nil {
-		t.Fatalf("apply placement meta: %v", err)
-	}
-}
-
 func TestRaftNodeID_NilNode(t *testing.T) {
 	// DistributedBackend with node == nil must return "" (no panic).
 	db := newTestDB(t)
-	b := &DistributedBackend{db: db, fsm: NewFSM(db, newStateKeyspaceEmpty())}
+	b := &DistributedBackend{store: badgermeta.Wrap(db), fsm: NewFSM(badgermeta.Wrap(db), newStateKeyspaceEmpty())}
 	assert.Equal(t, "", b.RaftNodeID())
 }
 
 func TestOwnedShards_MetadataOnlyPlacement(t *testing.T) {
-	db := newTestDB(t)
-	fsm := NewFSM(db, newStateKeyspaceEmpty())
-	b := &DistributedBackend{db: db, fsm: fsm}
+	b := newTestDistributedBackend(t)
+	require.NoError(t, b.CreateBucket(context.Background(), "b"))
 
-	raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
-		Bucket:      "b",
-		Key:         "obj",
-		VersionID:   "v1",
+	// Placement (NodeIDs) lives on the latest-only quorum-meta blob — the
+	// non-versioned object authority readPlacementMeta resolves.
+	seedLatestBlob(t, b, "b", "obj", PutObjectMetaCmd{
 		Size:        1,
 		ContentType: "application/octet-stream",
 		ETag:        "etag",
@@ -79,8 +55,6 @@ func TestOwnedShards_MetadataOnlyPlacement(t *testing.T) {
 		ECParity:    1,
 		NodeIDs:     []string{"test-node", "other", "test-node"},
 	})
-	require.NoError(t, err)
-	require.NoError(t, fsm.Apply(raw))
 
 	got := b.OwnedShards("b", "obj", "v1", "test-node")
 	assert.Equal(t, []int{0, 2}, got)

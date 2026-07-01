@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"testing"
 
@@ -51,4 +52,37 @@ func TestCopyObjectSegmentedEncryptedReEncodes(t *testing.T) {
 	_ = rc.Close()
 	require.NoError(t, err, "copied encrypted segments must decrypt at the dst (re-encoded, not raw-copied)")
 	require.Equal(t, data, got)
+}
+
+func TestCopyObjectEncryptedUsesSourceSizeHint(t *testing.T) {
+	if raceDetectorEnabled {
+		t.Skip("race instrumentation inflates TotalAlloc, making the byte threshold meaningless")
+	}
+	b := newDEKLocalBackend(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "bkt"))
+
+	const objSize = 4 << 10
+	payload := bytes.Repeat([]byte("Z"), objSize)
+	_, err := b.PutObjectWithRequest(ctx, PutObjectRequest{
+		Bucket:      "bkt",
+		Key:         "src",
+		Body:        bytes.NewReader(payload),
+		SizeHint:    int64Ptr(objSize),
+		ContentType: "application/octet-stream",
+	})
+	require.NoError(t, err)
+
+	var idx int
+	perOp := allocBytesPerRunForStorageTest(t, 5, func() error {
+		idx++
+		_, err := b.CopyObject("bkt", "src", "bkt", fmt.Sprintf("dst-%d", idx))
+		return err
+	})
+	require.Less(t, perOp, uint64(4<<20), "encrypted copy alloc bytes too high: %d", perOp)
+}
+
+func int64Ptr(n int) *int64 {
+	v := int64(n)
+	return &v
 }

@@ -5,6 +5,8 @@ import (
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 type contextRecorderBackend struct {
@@ -55,7 +57,7 @@ func (b *contextRecorderBackend) CreateMultipartUpload(ctx context.Context, buck
 	b.ctx = ctx
 	return &MultipartUpload{UploadID: "u", Bucket: bucket, Key: key}, nil
 }
-func (b *contextRecorderBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader) (*Part, error) {
+func (b *contextRecorderBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader, contentMD5Hex string) (*Part, error) {
 	b.ctx = ctx
 	return &Part{PartNumber: partNumber}, nil
 }
@@ -90,24 +92,9 @@ func TestSwappableBackend_ForwardsContext(t *testing.T) {
 	ctx := context.WithValue(context.Background(), testContextKey{}, "caller")
 
 	if _, err := sb.PutObject(ctx, "b", "k", strings.NewReader("x"), "text/plain"); err != nil {
-		t.Fatal(err)
+		require.NoError(t, err)
 	}
-	if rec.ctx != ctx {
-		t.Fatalf("wrapped backend got %p, want %p", rec.ctx, ctx)
-	}
-}
-
-func TestCachedBackend_TruncateForwardsContext(t *testing.T) {
-	rec := &contextRecorderBackend{}
-	cb := NewCachedBackend(rec)
-	ctx := context.WithValue(context.Background(), testContextKey{}, "caller")
-
-	if err := cb.Truncate(ctx, "b", "k", 3); err != nil {
-		t.Fatal(err)
-	}
-	if rec.ctx != ctx {
-		t.Fatalf("wrapped backend got %p, want %p", rec.ctx, ctx)
-	}
+	require.Same(t, ctx, rec.ctx, "wrapped backend context")
 }
 
 type testContextKey struct{}

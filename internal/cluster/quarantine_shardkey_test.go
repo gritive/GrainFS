@@ -7,7 +7,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/incident"
-	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // segmentTarget builds an ECShardSegment scan target whose ShardKey matches the
@@ -30,12 +29,18 @@ func TestQuarantineCorruptShardLocalAtShardKey_VersionExists(t *testing.T) {
 	b := NewSingletonBackendForTest(t)
 	require.NoError(t, b.CreateBucket(ctx, "b"))
 
-	// Seed a versioned object-meta whose Segments[] references blob "seg-1".
-	seedObjectMetaVersion(t, b, "b", "obj", "v1", objectMeta{
-		Segments: []storage.SegmentRef{
-			{BlobID: "seg-1", ECData: 4, ECParity: 2, NodeIDs: []string{"n1", "n2", "n3", "n4", "n5", "n6"}},
+	// Seed a versioned object-meta whose Segments[] references blob "seg-1" into
+	// the quorum-meta blob — the sole authority that ShardTargetStillReferenced
+	// (readShardTargetMeta) and QuarantineObject read. Use 1+0 EC so the
+	// quorum-meta write succeeds with the singleton test backend.
+	selfAddr := b.selfAddr
+	require.NoError(t, b.writeQuorumMeta(ctx, PutObjectMetaCmd{
+		Bucket: "b", Key: "obj", VersionID: "v1",
+		ECData: 1, ECParity: 0, NodeIDs: []string{selfAddr},
+		Segments: []SegmentMetaEntry{
+			{BlobID: "seg-1", ECData: 1, ECParity: 0, NodeIDs: []string{selfAddr}},
 		},
-	})
+	}))
 
 	rec := &recordingIncidentRecorder{}
 	b.SetIncidentRecorder(rec)
@@ -104,13 +109,17 @@ func TestQuarantineCorruptShardLocalAtShardKey_StaleTarget(t *testing.T) {
 	b := NewSingletonBackendForTest(t)
 	require.NoError(t, b.CreateBucket(ctx, "b"))
 
-	// Seed a versioned meta whose Segments[] does NOT contain "seg-gone"
-	// (coalesce consumed it while preserving the version).
-	seedObjectMetaVersion(t, b, "b", "obj", "v1", objectMeta{
-		Segments: []storage.SegmentRef{
-			{BlobID: "seg-other", ECData: 4, ECParity: 2, NodeIDs: []string{"n1", "n2", "n3", "n4", "n5", "n6"}},
+	// Seed a versioned meta (in the quorum-meta blob — the readShardTargetMeta
+	// authority) whose Segments[] does NOT contain "seg-gone" (coalesce consumed
+	// it while preserving the version). 1+0 EC so the singleton write succeeds.
+	selfAddr := b.selfAddr
+	require.NoError(t, b.writeQuorumMeta(ctx, PutObjectMetaCmd{
+		Bucket: "b", Key: "obj", VersionID: "v1",
+		ECData: 1, ECParity: 0, NodeIDs: []string{selfAddr},
+		Segments: []SegmentMetaEntry{
+			{BlobID: "seg-other", ECData: 1, ECParity: 0, NodeIDs: []string{selfAddr}},
 		},
-	})
+	}))
 
 	rec := &recordingIncidentRecorder{}
 	b.SetIncidentRecorder(rec)
@@ -133,15 +142,20 @@ func TestShardTargetStillReferenced(t *testing.T) {
 	b := NewSingletonBackendForTest(t)
 	require.NoError(t, b.CreateBucket(ctx, "b"))
 
-	seedObjectMetaVersion(t, b, "b", "obj", "v1", objectMeta{
-		ECData: 4, ECParity: 2, NodeIDs: []string{"n1", "n2", "n3", "n4", "n5", "n6"},
-		Segments: []storage.SegmentRef{
-			{BlobID: "seg-1", ECData: 4, ECParity: 2, NodeIDs: []string{"n1", "n2", "n3", "n4", "n5", "n6"}},
+	// Seed the version in the quorum-meta blob (the readShardTargetMeta authority).
+	// 1+0 EC at the top level so the singleton write succeeds; the segment/coalesced
+	// refs carry their own EC profile (irrelevant to the reference check).
+	selfAddr := b.selfAddr
+	require.NoError(t, b.writeQuorumMeta(ctx, PutObjectMetaCmd{
+		Bucket: "b", Key: "obj", VersionID: "v1",
+		ECData: 1, ECParity: 0, NodeIDs: []string{selfAddr},
+		Segments: []SegmentMetaEntry{
+			{BlobID: "seg-1", ECData: 1, ECParity: 0, NodeIDs: []string{selfAddr}},
 		},
 		Coalesced: []CoalescedShardRef{
-			{CoalescedID: "c1", ShardKey: "obj/coalesced/c1", ECData: 4, ECParity: 2, NodeIDs: []string{"n1", "n2", "n3", "n4", "n5", "n6"}},
+			{CoalescedID: "c1", ShardKey: "obj/coalesced/c1", ECData: 1, ECParity: 0, NodeIDs: []string{selfAddr}},
 		},
-	})
+	}))
 
 	// Segment referenced → true.
 	require.True(t, b.ShardTargetStillReferenced(ctx, segmentTarget("b", "obj", "v1", "seg-1")))

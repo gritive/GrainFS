@@ -62,32 +62,22 @@ func TestAutoECConfigForClusterSize(t *testing.T) {
 	}
 }
 
-func TestPlacement_DistinctWhenNEqualsShards(t *testing.T) {
+// TestSelectShardPlacement_DistinctWhenNEqualsShards is the HRW replacement for
+// the deleted modulo distinct-test: when the group size N == k+m, every shard
+// lands on a distinct node (the all-distinct invariant the modulo formula used
+// to guarantee). Covers a range of keys including empty + multibyte.
+func TestSelectShardPlacement_DistinctWhenNEqualsShards(t *testing.T) {
 	keys := []string{"foo", "bar", "baz/biz", "", "x", "버킷/키"}
-	numNodes := 6
-	shardCount := 6
+	cfg := ECConfig{DataShards: 4, ParityShards: 2}
+	peers := []string{"n0", "n1", "n2", "n3", "n4", "n5"}
 	for _, k := range keys {
-		seen := make(map[int]bool)
-		for i := 0; i < shardCount; i++ {
-			n := Placement(k, i, numNodes)
-			assert.Falsef(t, seen[n], "key=%q shard=%d → dup node %d", k, i, n)
+		placement := selectShardPlacement(cfg, peers, k, nil, false)
+		require.Lenf(t, placement, cfg.NumShards(), "key=%q", k)
+		seen := make(map[string]bool)
+		for i, n := range placement {
+			assert.Falsef(t, seen[n], "key=%q shard=%d → dup node %q", k, i, n)
 			seen[n] = true
 		}
-	}
-}
-
-func TestPlacementForNodes_OrderingPreserved(t *testing.T) {
-	cfg := ECConfig{DataShards: 4, ParityShards: 2}
-	nodes := []string{"n0", "n1", "n2", "n3", "n4", "n5"}
-	placement := PlacementForNodes(cfg, nodes, "mykey")
-	require.Len(t, placement, 6)
-	// Each shard placement must reference a node from the input list.
-	nodeSet := make(map[string]bool)
-	for _, n := range nodes {
-		nodeSet[n] = true
-	}
-	for i, p := range placement {
-		assert.Truef(t, nodeSet[p], "placement[%d]=%q not in nodes", i, p)
 	}
 }
 
@@ -167,7 +157,7 @@ func TestECReconstructStreamReader_SmallReadsRoundTrip(t *testing.T) {
 		readers[i] = bytes.NewReader(shards[i])
 	}
 
-	r, err := newECReconstructStreamReader(cfg, readers)
+	r, err := newECReconstructStreamReaderWithPrefetch(cfg, readers, true)
 	require.NoError(t, err)
 	var got bytes.Buffer
 	buf := make([]byte, 7)
@@ -197,7 +187,7 @@ func TestECReconstructStreamReader_MultiWindowRoundTrip(t *testing.T) {
 		readers[i] = bytes.NewReader(shards[i])
 	}
 
-	r, err := newECReconstructStreamReader(cfg, readers)
+	r, err := newECReconstructStreamReaderWithPrefetch(cfg, readers, true)
 	require.NoError(t, err)
 	got, err := io.ReadAll(r)
 	require.NoError(t, err)

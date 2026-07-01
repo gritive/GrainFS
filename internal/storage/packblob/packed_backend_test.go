@@ -28,6 +28,32 @@ func newTestPackedBackend(t *testing.T) *PackedBackend {
 	return pb
 }
 
+func TestPackedBackend_PutObject_ContentMD5Mismatch(t *testing.T) {
+	pb := newTestPackedBackend(t)
+	require.NoError(t, pb.CreateBucket(context.Background(), "bucket"))
+	_, err := pb.PutObjectWithRequest(context.Background(), storage.PutObjectRequest{
+		Bucket:        "bucket",
+		Key:           "k",
+		Body:          bytes.NewReader([]byte("hello")),
+		ContentMD5Hex: "deadbeefdeadbeefdeadbeefdeadbeef", // wrong
+	})
+	require.ErrorIs(t, err, storage.ErrContentMD5Mismatch)
+}
+
+func TestPackedBackend_PutObject_ContentMD5Match(t *testing.T) {
+	pb := newTestPackedBackend(t)
+	require.NoError(t, pb.CreateBucket(context.Background(), "bucket"))
+	// md5("hello") = 5d41402abc4b2a76b9719d911017c592
+	obj, err := pb.PutObjectWithRequest(context.Background(), storage.PutObjectRequest{
+		Bucket:        "bucket",
+		Key:           "k2",
+		Body:          bytes.NewReader([]byte("hello")),
+		ContentMD5Hex: "5d41402abc4b2a76b9719d911017c592",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "5d41402abc4b2a76b9719d911017c592", obj.ETag)
+}
+
 type countingBackend struct {
 	mockBackend
 	puts    atomic.Int64
@@ -680,4 +706,15 @@ func TestPackedBackend_WalkObjectsEarlyStop(t *testing.T) {
 	})
 	assert.ErrorIs(t, err, sentinel)
 	assert.Equal(t, 2, count)
+}
+
+func TestPackedBackend_PutObject_Large_ContentMD5Mismatch(t *testing.T) {
+	pb := newTestPackedBackend(t) // inner = LocalBackend, threshold 64KiB
+	require.NoError(t, pb.CreateBucket(context.Background(), "bucket"))
+	big := bytes.Repeat([]byte("a"), 70*1024) // > threshold → large → inner
+	_, err := pb.PutObjectWithRequest(context.Background(), storage.PutObjectRequest{
+		Bucket: "bucket", Key: "big", Body: bytes.NewReader(big),
+		ContentMD5Hex: "deadbeefdeadbeefdeadbeefdeadbeef", // wrong
+	})
+	require.ErrorIs(t, err, storage.ErrContentMD5Mismatch)
 }

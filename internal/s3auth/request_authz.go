@@ -45,11 +45,6 @@ type AuthzDetail struct {
 	ConditionContext map[string]string
 }
 
-// IAMStore is the subset of *iam.Store the authorizer depends on.
-type IAMStore interface {
-	AuthEnabled() bool
-}
-
 // IAMChecker is the Layer 1 policy gate. saID is "" for anonymous requests.
 // bucket is the target bucket name; key is the object key (empty for
 // bucket-level actions like ListBucket). Passing the key is required for
@@ -67,17 +62,11 @@ type PolicyChecker interface {
 	Allow(ctx context.Context, in PermCheckInput) bool
 }
 
-// Audit emission has two INDEPENDENT sinks:
+// Audit emission has one sink:
 //
 //  1. AuditEmitter (this interface): structured zerolog line "iam.authz";
 //     immediate, per-call. AuditEmitterDetailed extension carries
 //     matched_policy_id / matched_sid / authz_latency_us / condition_context.
-//  2. audit.s3 Iceberg table (internal/audit + internal/server/audit_envelope_event.go):
-//     built from the request context via rememberAuthzDecision; flushed via
-//     outbox at request end.
-//
-// Both are fed from the same Decision; if you change the Decision shape,
-// update BOTH paths.
 //
 // AuditEmitter records authorization decisions. *iam.AuditLogger satisfies this.
 type AuditEmitter interface {
@@ -113,7 +102,7 @@ type PrincipalResolver func(ctx context.Context) string
 // single authz decision for one S3 request. See CONTEXT.md
 // § "S3 Request Authorization Decision" for the full contract.
 type RequestAuthorizer struct {
-	iam              IAMStore
+	authEnabled      bool
 	iamCheck         IAMChecker
 	policy           PolicyChecker
 	audit            AuditEmitter
@@ -122,20 +111,20 @@ type RequestAuthorizer struct {
 
 // NewRequestAuthorizer wires the authorizer with its dependencies. Any nil
 // dependency is tolerated:
-//   - iam == nil treats auth as disabled.
+//   - authEnabled == false treats auth as disabled (anonymous_pass mode).
 //   - iamCheck == nil with auth enabled denies with "no_grant".
 //   - policy == nil treats every bucket-policy check as allow.
 //   - audit == nil silently drops audit records.
 //   - principalFromCtx == nil resolves saID to "".
 func NewRequestAuthorizer(
-	iam IAMStore,
+	authEnabled bool,
 	iamCheck IAMChecker,
 	policy PolicyChecker,
 	audit AuditEmitter,
 	principalFromCtx PrincipalResolver,
 ) *RequestAuthorizer {
 	return &RequestAuthorizer{
-		iam:              iam,
+		authEnabled:      authEnabled,
 		iamCheck:         iamCheck,
 		policy:           policy,
 		audit:            audit,
@@ -152,7 +141,7 @@ func (r *RequestAuthorizer) Decide(ctx context.Context, in PermCheckInput, phase
 	if r.principalFromCtx != nil {
 		saID = r.principalFromCtx(ctx)
 	}
-	authEnabled := r.iam != nil && r.iam.AuthEnabled()
+	authEnabled := r.authEnabled
 
 	// Latency clock starts here so the audit row's authz_latency_us reflects
 	// the full Layer 1 + Layer 2 + Layer 3 evaluation as observed by the

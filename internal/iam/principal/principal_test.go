@@ -8,7 +8,6 @@ import (
 
 func TestConstructorsProduceStableKindsAndIDs(t *testing.T) {
 	require.Equal(t, Principal{Kind: KindServiceAccount, ID: "sa-app", Source: "iam"}, ServiceAccount("sa-app"))
-	require.Equal(t, Principal{Kind: KindMountSA, ID: "alice-mount", Source: "mount-sa"}, MountSA("alice-mount"))
 	require.Equal(t, Principal{Kind: KindProtocolCredential, ID: "sa-app", Source: "protocol-credential", CredentialID: "pc_123"}, ProtocolCredential("sa-app", "pc_123"))
 }
 

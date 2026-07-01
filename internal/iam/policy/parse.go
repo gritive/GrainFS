@@ -15,7 +15,7 @@ var (
 	ErrInvalidCondition = errors.New("invalid Condition operator or key")
 )
 
-var allowedActionNamespaces = map[string]bool{"s3": true, "iceberg": true, "grainfs": true}
+var allowedActionNamespaces = map[string]bool{"s3": true, "grainfs": true}
 
 var allowedCondKeys = map[string]string{
 	"aws:SourceIp": "IpAddress|NotIpAddress",
@@ -146,7 +146,7 @@ func validProtocolCredentialResource(r string) bool {
 	parts := strings.Split(r, "/")
 	if len(parts) == 3 {
 		switch parts[1] {
-		case "s3", "iceberg", "nbd", "nfs", "9p", "*":
+		case "s3", "*":
 		default:
 			return false
 		}
@@ -157,14 +157,14 @@ func validProtocolCredentialResource(r string) bool {
 	}
 	if parts[1] == "*" {
 		switch parts[2] {
-		case "bucket", "catalog", "volume", "*":
+		case "bucket", "*":
 		default:
 			return false
 		}
 		return parts[3] != ""
 	}
 	switch parts[1] + "/" + parts[2] {
-	case "s3/bucket", "iceberg/catalog", "nbd/volume", "nfs/bucket", "9p/bucket":
+	case "s3/bucket":
 	default:
 		return false
 	}
@@ -178,7 +178,7 @@ func validIAMAdminResource(r string) bool {
 	parts := strings.Split(r, "/")
 	if len(parts) == 3 {
 		switch parts[1] {
-		case "policy", "sa", "group", "mount-sa", "upstream":
+		case "policy", "sa", "group", "upstream":
 		default:
 			return false
 		}
@@ -188,9 +188,6 @@ func validIAMAdminResource(r string) bool {
 		return parts[2] != "" && parts[5] != ""
 	}
 	if len(parts) == 5 && parts[1] == "group" && parts[3] == "policy" {
-		return parts[2] != "" && parts[4] != ""
-	}
-	if len(parts) == 5 && parts[1] == "mount-sa" && parts[3] == "policy" {
 		return parts[2] != "" && parts[4] != ""
 	}
 	if len(parts) == 4 && parts[1] == "upstream" && parts[3] == "cutover" {

@@ -19,7 +19,7 @@ type postPolicy struct {
 
 // SignPostPolicy generates the HMAC-SHA256 signature for a base64-encoded policy.
 func SignPostPolicy(policyB64, secretKey, date, region, service string) string {
-	signingKey := deriveSigningKey(secretKey, date, region, service)
+	signingKey := DeriveSigningKey(secretKey, date, region, service)
 	mac := hmac.New(sha256.New, signingKey)
 	mac.Write([]byte(policyB64))
 	return hex.EncodeToString(mac.Sum(nil))
@@ -118,13 +118,4 @@ func decodePolicy(policyB64 string) (*postPolicy, error) {
 		return nil, fmt.Errorf("invalid policy JSON: %w", err)
 	}
 	return &p, nil
-}
-
-// deriveSigningKey computes the SigV4 signing key.
-// hmacSHA256 is defined in sigv4.go and reused here.
-func deriveSigningKey(secretKey, date, region, service string) []byte {
-	kDate := hmacSHA256([]byte("AWS4"+secretKey), []byte(date))
-	kRegion := hmacSHA256(kDate, []byte(region))
-	kService := hmacSHA256(kRegion, []byte(service))
-	return hmacSHA256(kService, []byte("aws4_request"))
 }

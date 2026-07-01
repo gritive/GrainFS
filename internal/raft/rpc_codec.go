@@ -11,6 +11,22 @@ import (
 
 var raftBuilderPool = pool.New(func() *flatbuffers.Builder { return flatbuffers.NewBuilder(256) })
 
+// RPC type constants for meta-Raft transport (legacy StreamMetaRaft envelope).
+//
+// On the mux path the receiver's handleMuxRequest switches on the unified
+// rpcType* (RequestVote / AppendEntries) constants because meta-raft *Node
+// has the same Handle* methods as a per-group Node. The metaRPC* constants
+// stay reserved for the legacy StreamMetaRaft envelope so cross-version
+// peers keep talking to each other; the decoders below accept both forms.
+const (
+	metaRPCRequestVote          = "MetaRequestVote"
+	metaRPCRequestVoteReply     = "MetaRequestVoteReply"
+	metaRPCAppendEntries        = "MetaAppendEntries"
+	metaRPCAppendEntriesReply   = "MetaAppendEntriesReply"
+	metaRPCInstallSnapshot      = "MetaInstallSnapshot"
+	metaRPCInstallSnapshotReply = "MetaInstallSnapshotReply"
+)
+
 func fbFinishRPC(b *flatbuffers.Builder, root flatbuffers.UOffsetT) []byte {
 	b.Finish(root)
 	raw := b.FinishedBytes()
@@ -19,34 +35,6 @@ func fbFinishRPC(b *flatbuffers.Builder, root flatbuffers.UOffsetT) []byte {
 	b.Reset()
 	raftBuilderPool.Put(b)
 	return out
-}
-
-type borrowedRPCPayload struct {
-	data []byte
-	b    *flatbuffers.Builder
-}
-
-func (p borrowedRPCPayload) release() {
-	if p.b == nil {
-		return
-	}
-	p.b.Reset()
-	raftBuilderPool.Put(p.b)
-}
-
-func releaseBorrowedRPCPayloads(payloads []borrowedRPCPayload) {
-	for i := range payloads {
-		payloads[i].release()
-		payloads[i] = borrowedRPCPayload{}
-	}
-}
-
-func borrowAppendEntriesArgsPayload(args *AppendEntriesArgs) borrowedRPCPayload {
-	b := raftBuilderPool.Get()
-	root := buildAppendEntriesArgsFlatBuffer(b, args)
-	b.Finish(root)
-
-	return borrowedRPCPayload{data: b.FinishedBytes(), b: b}
 }
 
 func buildAppendEntriesArgsFlatBuffer(b *flatbuffers.Builder, args *AppendEntriesArgs) flatbuffers.UOffsetT {
@@ -84,12 +72,6 @@ func buildAppendEntriesArgsFlatBuffer(b *flatbuffers.Builder, args *AppendEntrie
 	pb.AppendEntriesArgsAddEntries(b, entriesVec)
 	pb.AppendEntriesArgsAddLeaderCommit(b, args.LeaderCommit)
 	return pb.AppendEntriesArgsEnd(b)
-}
-
-// encodeAppendEntriesReply serializes just the AppendEntriesReply FlatBuffer
-// (no RPCMessage envelope) for batch reply payloads.
-func encodeAppendEntriesReply(reply *AppendEntriesReply) ([]byte, error) {
-	return encodeRPCPayload(rpcTypeAppendEntriesReply, reply)
 }
 
 // encodeRPC serializes an RPC message (type + payload) using FlatBuffers.
@@ -342,55 +324,5 @@ func decodeAppendEntriesReply(data []byte) (reply *AppendEntriesReply, err error
 		Success:       r.Success(),
 		ConflictTerm:  r.ConflictTerm(),
 		ConflictIndex: r.ConflictIndex(),
-	}, nil
-}
-
-func decodeInstallSnapshotArgs(data []byte) (args *InstallSnapshotArgs, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("decode InstallSnapshotArgs: invalid flatbuffer: %v", r)
-		}
-	}()
-	a := pb.GetRootAsInstallSnapshotArgs(data, 0)
-	servers := make([]Server, 0, a.ServersLength())
-	cfg := make([]string, 0, a.ServersLength())
-	learners := make(map[string]string)
-	var se pb.ServerEntry
-	for i := 0; i < a.ServersLength(); i++ {
-		if a.Servers(&se, i) {
-			id := string(se.Id())
-			suffrage := ServerSuffrage(se.Suffrage())
-			servers = append(servers, Server{ID: id, Suffrage: suffrage})
-			if suffrage == NonVoter {
-				learners[id] = ""
-				continue
-			}
-			cfg = append(cfg, id)
-		}
-	}
-	if len(learners) == 0 {
-		learners = nil
-	}
-	return &InstallSnapshotArgs{
-		Term:              a.Term(),
-		LeaderID:          string(a.LeaderId()),
-		LastIncludedIndex: a.LastIncludedIndex(),
-		LastIncludedTerm:  a.LastIncludedTerm(),
-		Data:              a.DataBytes(),
-		Servers:           servers,
-		Configuration:     cfg,
-		Learners:          learners,
-	}, nil
-}
-
-func decodeInstallSnapshotReply(data []byte) (reply *InstallSnapshotReply, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("decode InstallSnapshotReply: invalid flatbuffer: %v", r)
-		}
-	}()
-	r := pb.GetRootAsInstallSnapshotReply(data, 0)
-	return &InstallSnapshotReply{
-		Term: r.Term(),
 	}, nil
 }

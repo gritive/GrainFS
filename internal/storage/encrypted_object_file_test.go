@@ -278,24 +278,16 @@ func TestEncryptedObjectFileWriteAtRejectsWholeRecordTruncation(t *testing.T) {
 
 func TestEncryptedObjectHeader_RoundTrip(t *testing.T) {
 	var buf bytes.Buffer
-	if err := writeEncryptedObjectHeader(&buf, 7); err != nil {
-		t.Fatalf("writeEncryptedObjectHeader: %v", err)
-	}
+	require.NoError(t, writeEncryptedObjectHeader(&buf, 7), "writeEncryptedObjectHeader")
 	gen, err := readEncryptedObjectHeader(&buf)
-	if err != nil {
-		t.Fatalf("readEncryptedObjectHeader: %v", err)
-	}
-	if gen != 7 {
-		t.Fatalf("dek_gen mismatch: want 7 got %d", gen)
-	}
+	require.NoError(t, err, "readEncryptedObjectHeader")
+	require.Equal(t, uint32(7), gen, "dek_gen mismatch")
 }
 
 func TestEncryptedObjectHeader_RejectsLegacyMagic(t *testing.T) {
 	legacy := append([]byte("GFOBJENC1"), 0x00, 0x00)
 	_, err := readEncryptedObjectHeader(bytes.NewReader(legacy))
-	if err == nil {
-		t.Fatal("expected legacy magic to be rejected")
-	}
+	require.Error(t, err, "expected legacy magic to be rejected")
 }
 
 // corruptByteAt flips one byte at the given offset in the file at path.
@@ -372,9 +364,7 @@ type fakeDataEncryptor struct {
 func newFakeDataEncryptor(t *testing.T) *fakeDataEncryptor {
 	t.Helper()
 	enc, err := encrypt.NewEncryptor(bytes.Repeat([]byte{0x07}, 32))
-	if err != nil {
-		t.Fatalf("NewEncryptor: %v", err)
-	}
+	require.NoError(t, err, "NewEncryptor")
 	return &fakeDataEncryptor{enc: enc}
 }
 
@@ -445,19 +435,11 @@ func TestWriteEncryptedObjectFile_RoundTrip(t *testing.T) {
 	f := newFakeDataEncryptor(t) // constant gen 0
 	plain := bytes.Repeat([]byte("y"), encryptedChunkSize+123)
 	n, err := writeEncryptedObjectFile(path, f, objectFileAADFields("b", "k"), bytes.NewReader(plain), io.Discard)
-	if err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if n != int64(len(plain)) {
-		t.Fatalf("size mismatch: want %d got %d", len(plain), n)
-	}
+	require.NoError(t, err, "write")
+	require.Equal(t, int64(len(plain)), n)
 	got, err := readEncryptedObjectFile(path, f, objectFileAADFields("b", "k"), n)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if !bytes.Equal(got, plain) {
-		t.Fatal("round-trip mismatch")
-	}
+	require.NoError(t, err, "read")
+	require.Equal(t, plain, got)
 }
 
 func TestWriteEncryptedObjectFile_EmptyObject_RoundTrip(t *testing.T) {
@@ -465,19 +447,11 @@ func TestWriteEncryptedObjectFile_EmptyObject_RoundTrip(t *testing.T) {
 	path := dir + "/empty"
 	f := newFakeDataEncryptor(t) // constant gen 0
 	n, err := writeEncryptedObjectFile(path, f, objectFileAADFields("b", "k"), bytes.NewReader(nil), io.Discard)
-	if err != nil {
-		t.Fatalf("write empty: %v", err)
-	}
-	if n != 0 {
-		t.Fatalf("empty object size: want 0 got %d", n)
-	}
+	require.NoError(t, err, "write empty")
+	require.Zero(t, n, "empty object size")
 	got, err := readEncryptedObjectFile(path, f, objectFileAADFields("b", "k"), 0)
-	if err != nil {
-		t.Fatalf("read empty: %v", err)
-	}
-	if len(got) != 0 {
-		t.Fatalf("empty object read: want 0 bytes got %d", len(got))
-	}
+	require.NoError(t, err, "read empty")
+	require.Empty(t, got, "empty object read")
 }
 
 func TestEncryptedObjectFile_ChunkSwap_FailsDecrypt(t *testing.T) {
@@ -487,16 +461,10 @@ func TestEncryptedObjectFile_ChunkSwap_FailsDecrypt(t *testing.T) {
 	// Two full chunks of DISTINCT plaintext so swapped bodies are detectable.
 	plain := append(bytes.Repeat([]byte("A"), encryptedChunkSize), bytes.Repeat([]byte("B"), encryptedChunkSize)...)
 	n, err := writeEncryptedObjectFile(path, f, objectFileAADFields("b", "k"), bytes.NewReader(plain), io.Discard)
-	if err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if err := swapFirstTwoEncryptedRecords(path); err != nil {
-		t.Fatalf("swap: %v", err)
-	}
+	require.NoError(t, err, "write")
+	require.NoError(t, swapFirstTwoEncryptedRecords(path), "swap")
 	_, err = readEncryptedObjectFile(path, f, objectFileAADFields("b", "k"), n)
-	if err == nil {
-		t.Fatal("expected decrypt to fail after swapping chunk record bodies (ordinal AAD binding)")
-	}
+	require.Error(t, err, "expected decrypt to fail after swapping chunk record bodies (ordinal AAD binding)")
 }
 
 // swapFirstTwoEncryptedRecords rewrites the file at path with the sealed bodies

@@ -37,11 +37,29 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 		s.putObjectRetention(ctx, c)
 		return
 	}
+	// PUT /:bucket/:key?legal-hold has no dedicated route; without this dispatch it
+	// falls through to a plain PutObject and OVERWRITES the object body with the
+	// legal-hold XML (silent data corruption). Reject with 501. Placed after the
+	// isDegraded guard above so degraded nodes still return 503, and before the
+	// PutObject fall-through so the object is never mutated.
+	if c.QueryArgs().Has("legal-hold") {
+		s.putObjectLegalHold(ctx, c)
+		return
+	}
 
-	// Check if this is an UploadPart request
+	// Check if this is an UploadPart / UploadPartCopy request. Both carry
+	// uploadId+partNumber; UploadPartCopy is distinguished by x-amz-copy-source.
+	// This copy-source check MUST stay INSIDE the uploadId+partNumber branch:
+	// the standalone CopyObject check below runs only for non-part requests, so
+	// without this fork an UploadPartCopy is silently handled as a plain
+	// UploadPart and the copy source is dropped (empty part stored).
 	uploadID := string(c.QueryArgs().Peek("uploadId"))
 	partNumberStr := string(c.QueryArgs().Peek("partNumber"))
 	if uploadID != "" && partNumberStr != "" {
+		if copySource := string(c.GetHeader("x-amz-copy-source")); copySource != "" {
+			s.uploadPartCopy(ctx, c, bucket, key, uploadID, partNumberStr, copySource)
+			return
+		}
 		s.uploadPart(ctx, c, bucket, key, uploadID, partNumberStr)
 		return
 	}
@@ -78,6 +96,25 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 		cluster.ObservePutTraceStage(ctx, cluster.PutTraceStageHTTPPutTotal, requestStart, cluster.PutTraceStageFields{})
 	}()
 
+	// PutObject carrying Object Lock headers (x-amz-object-lock-*) requests WORM
+	// semantics we do not implement; today they are silently ignored and the PUT
+	// succeeds (false success). Reject with 501 (fail-closed) on the plain
+	// PutObject path only — multipart/copy/append have already returned above.
+	if hasObjectLockHeaders(c) {
+		writeObjectLockNotImplemented(c)
+		return
+	}
+
+	// PutObject carrying an unsupported canned ACL or any x-amz-grant-* header:
+	// silently downgrading would give the caller false confidence that their
+	// access-control semantics were honored. Reject with 501 (fail-closed).
+	// Placed after multipart/copy/append have already returned above so the
+	// guard applies only to the plain PutObject path.
+	if hasUnsupportedACLHeaders(c) {
+		writeACLNotImplemented(c)
+		return
+	}
+
 	prepareStart := time.Now()
 	systemMetadata, sseErr := parseObjectSSEHeaders(c)
 	if sseErr != nil {
@@ -109,10 +146,13 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 			c.AbortWithMsg(err.Error(), consts.StatusBadRequest)
 			return
 		}
-		contentLength := int64(c.Request.Header.ContentLength())
-		sizeHint = &contentLength
-		bodyBytes = contentLength
-		body = newExactLengthReader(stream, contentLength)
+		// aws-chunked wire Content-Length includes per-chunk framing; the decoded
+		// stream yields only the object bytes, so the exact-length reader must
+		// enforce the decoded size (else it short-reads and fails the PUT).
+		streamLength := putObjectStreamLength(c)
+		sizeHint = &streamLength
+		bodyBytes = streamLength
+		body = newExactLengthReader(stream, streamLength)
 	} else {
 		rawBody, err := putObjectBody(c)
 		if err != nil {
@@ -128,7 +168,11 @@ func (s *Server) handlePut(ctx context.Context, c *app.RequestContext) {
 		Bytes: bodyBytes,
 	})
 
-	contentMD5Hex := putObjectContentMD5Hex(c)
+	contentMD5Hex, md5Err := putObjectContentMD5Hex(c)
+	if md5Err != nil {
+		mapError(c, md5Err)
+		return
+	}
 	result, putErr := s.putObjectWithUserMetadataAndMD5(ctx, bucket, key, body, sizeHint, contentType, putObjectACL(c), userMetadata, systemMetadata, contentMD5Hex)
 	if putErr != nil {
 		mapError(c, putErr)

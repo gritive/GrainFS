@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/s3auth"
+	"github.com/gritive/GrainFS/internal/server/servertest"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -132,13 +133,13 @@ func TestGetAndHeadObjectRetryTransientReadAfterWriteNotFound(t *testing.T) {
 	require.NoError(t, local.SetObjectACL("b", "obj", 1)) // ACLPublicRead
 
 	backend := &transientNotFoundBackend{Backend: local}
-	port := freePort(t)
+	port := servertest.FreePort(t)
 	s := New(fmt.Sprintf("127.0.0.1:%d", port), backend)
 	go s.Run()
 	t.Cleanup(func() {
-		shutdownTestServer(t, s)
+		servertest.ShutdownServer(t, s)
 	})
-	waitForTCP(t, fmt.Sprintf("127.0.0.1:%d", port))
+	servertest.WaitTCP(t, fmt.Sprintf("127.0.0.1:%d", port))
 
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/b/obj", port))
 	require.NoError(t, err)
@@ -202,13 +203,13 @@ func TestGetObjectRange_UsesBackendReadAtWhenAvailable(t *testing.T) {
 	require.NoError(t, local.SetObjectACL("b", "obj", 1)) // ACLPublicRead
 
 	backend := &countingReadAtBackend{Backend: local}
-	port := freePort(t)
+	port := servertest.FreePort(t)
 	s := New(fmt.Sprintf("127.0.0.1:%d", port), backend)
 	go s.Run()
 	t.Cleanup(func() {
-		shutdownTestServer(t, s)
+		servertest.ShutdownServer(t, s)
 	})
-	waitForTCP(t, fmt.Sprintf("127.0.0.1:%d", port))
+	servertest.WaitTCP(t, fmt.Sprintf("127.0.0.1:%d", port))
 
 	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/b/obj", port), nil)
 	require.NoError(t, err)
@@ -251,13 +252,13 @@ func TestGetObjectPartNumber_UsesBackendReadAtWhenAvailable(t *testing.T) {
 			},
 		},
 	}
-	port := freePort(t)
+	port := servertest.FreePort(t)
 	s := New(fmt.Sprintf("127.0.0.1:%d", port), backend)
 	go s.Run()
 	t.Cleanup(func() {
-		shutdownTestServer(t, s)
+		servertest.ShutdownServer(t, s)
 	})
-	waitForTCP(t, fmt.Sprintf("127.0.0.1:%d", port))
+	servertest.WaitTCP(t, fmt.Sprintf("127.0.0.1:%d", port))
 
 	base := fmt.Sprintf("http://127.0.0.1:%d", port)
 	resp, err := http.Get(base + "/b/obj?partNumber=2")
@@ -297,13 +298,13 @@ func TestGetObjectPartNumber_FullPartStreamsObject(t *testing.T) {
 			},
 		},
 	}
-	port := freePort(t)
+	port := servertest.FreePort(t)
 	s := New(fmt.Sprintf("127.0.0.1:%d", port), backend)
 	go s.Run()
 	t.Cleanup(func() {
-		shutdownTestServer(t, s)
+		servertest.ShutdownServer(t, s)
 	})
-	waitForTCP(t, fmt.Sprintf("127.0.0.1:%d", port))
+	servertest.WaitTCP(t, fmt.Sprintf("127.0.0.1:%d", port))
 
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/b/obj?partNumber=1", port))
 	require.NoError(t, err)
@@ -316,6 +317,108 @@ func TestGetObjectPartNumber_FullPartStreamsObject(t *testing.T) {
 	require.Zero(t, backend.readAtCalls.Load())
 	require.Zero(t, backend.preparedReadAtCalls.Load())
 	require.Equal(t, int32(1), backend.getObjCalls.Load())
+}
+
+// stripedRangeBackend models a stripe-interleaved object: HeadObject reports
+// StripeBytes>0, GetObject streams the full payload (counted), and ReadAt is
+// counted so the test can assert the striped Range path uses a single stream
+// instead of the O(N^2) chunked-ReadAt amplifier.
+type stripedRangeBackend struct {
+	storage.Backend
+	data        []byte
+	obj         storage.Object
+	readAtCalls atomic.Int32
+	getObjCalls atomic.Int32
+}
+
+func (b *stripedRangeBackend) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
+	obj := b.obj
+	return &obj, nil
+}
+
+func (b *stripedRangeBackend) GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error) {
+	b.getObjCalls.Add(1)
+	obj := b.obj
+	return io.NopCloser(bytes.NewReader(b.data)), &obj, nil
+}
+
+func (b *stripedRangeBackend) ReadAt(ctx context.Context, bucket, key string, offset int64, buf []byte) (int, error) {
+	b.readAtCalls.Add(1)
+	if offset >= int64(len(b.data)) {
+		return 0, io.EOF
+	}
+	n := copy(buf, b.data[offset:])
+	if n < len(buf) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+func TestGetObjectRange_StripedUsesSingleStreamNotReadAt(t *testing.T) {
+	tmp := t.TempDir()
+	local, err := storage.NewLocalBackend(tmp)
+	require.NoError(t, err)
+	require.NoError(t, local.CreateBucket(context.Background(), "b"))
+
+	payload := []byte("0123456789abcdefghijklmnopqrstuvwxyz")
+	backend := &stripedRangeBackend{
+		Backend: local,
+		data:    payload,
+		obj: storage.Object{
+			Key:         "obj",
+			Size:        int64(len(payload)),
+			ContentType: "application/octet-stream",
+			ETag:        "striped-etag",
+			ACL:         1, // public-read
+			ECData:      3,
+			ECParity:    2,
+			StripeBytes: 1 << 20,
+			Parts: []storage.MultipartPartEntry{
+				{PartNumber: 1, Size: 18, ETag: "part-1"},
+				{PartNumber: 2, Size: 18, ETag: "part-2"},
+			},
+		},
+	}
+	port := servertest.FreePort(t)
+	s := New(fmt.Sprintf("127.0.0.1:%d", port), backend)
+	go s.Run()
+	t.Cleanup(func() {
+		servertest.ShutdownServer(t, s)
+	})
+	servertest.WaitTCP(t, fmt.Sprintf("127.0.0.1:%d", port))
+
+	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/b/obj", port), nil)
+	require.NoError(t, err)
+	req.Header.Set("Range", "bytes=10-19")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	require.Equal(t, http.StatusPartialContent, resp.StatusCode)
+	require.Equal(t, "bytes 10-19/36", resp.Header.Get("Content-Range"))
+	require.Equal(t, payload[10:20], body)
+	// The striped Range path must serve from a SINGLE de-interleave stream (skip +
+	// limit), never the chunked ReadAt amplifier that re-discards the prefix per chunk.
+	require.Equal(t, int32(1), backend.getObjCalls.Load(), "striped range must use one GetObject stream")
+	require.Zero(t, backend.readAtCalls.Load(), "striped range must not fall through to chunked ReadAt")
+
+	// The partNumber range handler shares the same serveStripedRange branch — exercise
+	// it too so that call site is covered (it would otherwise silently use chunked ReadAt).
+	backend.getObjCalls.Store(0)
+	backend.readAtCalls.Store(0)
+	presp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/b/obj?partNumber=2", port))
+	require.NoError(t, err)
+	defer presp.Body.Close()
+	pbody, err := io.ReadAll(presp.Body)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusPartialContent, presp.StatusCode)
+	require.Equal(t, "bytes 18-35/36", presp.Header.Get("Content-Range"))
+	require.Equal(t, payload[18:36], pbody)
+	require.Equal(t, int32(1), backend.getObjCalls.Load(), "striped partNumber range must use one GetObject stream")
+	require.Zero(t, backend.readAtCalls.Load(), "striped partNumber range must not fall through to chunked ReadAt")
 }
 
 func TestGetObjectRange_ReadAtDeniesPrivateObjectBeforeMetadataHeaders(t *testing.T) {
@@ -336,16 +439,16 @@ func TestGetObjectRange_ReadAtDeniesPrivateObjectBeforeMetadataHeaders(t *testin
 	require.NoError(t, local.SetObjectACL("b", "private", uint8(s3auth.ACLPrivate)))
 
 	backend := &countingReadAtBackend{Backend: local}
-	port := freePort(t)
+	port := servertest.FreePort(t)
 	s := New(fmt.Sprintf("127.0.0.1:%d", port), backend, WithAuth([]s3auth.Credentials{{
 		AccessKey: "ak",
 		SecretKey: "sk",
 	}}))
 	go s.Run()
 	t.Cleanup(func() {
-		shutdownTestServer(t, s)
+		servertest.ShutdownServer(t, s)
 	})
-	waitForTCP(t, fmt.Sprintf("127.0.0.1:%d", port))
+	servertest.WaitTCP(t, fmt.Sprintf("127.0.0.1:%d", port))
 
 	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/b/private", port), nil)
 	require.NoError(t, err)
@@ -372,13 +475,13 @@ func TestGetObjectRange_LargeRangeDoesNotAllocateFullBody(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, backend.SetObjectACL("b", "large.bin", 1)) // ACLPublicRead
 
-	port := freePort(t)
+	port := servertest.FreePort(t)
 	s := New(fmt.Sprintf("127.0.0.1:%d", port), backend)
 	go s.Run()
 	t.Cleanup(func() {
-		shutdownTestServer(t, s)
+		servertest.ShutdownServer(t, s)
 	})
-	waitForTCP(t, fmt.Sprintf("127.0.0.1:%d", port))
+	servertest.WaitTCP(t, fmt.Sprintf("127.0.0.1:%d", port))
 
 	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/b/large.bin", port), nil)
 	require.NoError(t, err)

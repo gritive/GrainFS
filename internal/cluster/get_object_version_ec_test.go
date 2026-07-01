@@ -16,9 +16,10 @@ func TestGetObjectVersion_ReconstructsEC(t *testing.T) {
 	const selfAddr = "addr-self:9001"
 	shardDir := t.TempDir()
 	keeper, clusterID := testDEKKeeper(t)
-	svc := NewShardService(shardDir, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(shardDir, nil, WithShardDEKKeeper(keeper, clusterID))
 	backend.SetShardService(svc, []string{selfAddr})
 	backend.SetECConfig(ECConfig{DataShards: 1, ParityShards: 1}) // 1+1 so single node works
+	wireTestShardGroup(backend)
 
 	require.NoError(t, backend.CreateBucket(context.Background(), "bucket"))
 	content := []byte("ec versioned round-trip")
@@ -26,7 +27,7 @@ func TestGetObjectVersion_ReconstructsEC(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, obj.VersionID, "EC PutObject must assign a versionID")
 
-	rc, got, err := backend.GetObjectVersion("bucket", "key", obj.VersionID)
+	rc, got, err := backend.GetObjectVersion(context.Background(), "bucket", "key", obj.VersionID)
 	require.NoError(t, err, "GetObjectVersion must reconstruct the EC-stored version, not fail on a missing plain file")
 	defer rc.Close()
 	body, err := io.ReadAll(rc)

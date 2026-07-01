@@ -118,7 +118,7 @@ func TestBuildUploadPartArgs_5MiBAllocationBound(t *testing.T) {
 	var before runtime.MemStats
 	runtime.ReadMemStats(&before)
 	for i := 0; i < runs; i++ {
-		args := buildUploadPartArgs("bucket", "multipart/object.rnd", "upload-id", int32(i+1), body)
+		args := buildUploadPartArgs("bucket", "multipart/object.rnd", "upload-id", int32(i+1), body, "")
 		require.Greater(t, len(args), len(body))
 	}
 	runtime.GC()
@@ -160,7 +160,7 @@ func BenchmarkBuildUploadPartArgs_5MiB(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		args := buildUploadPartArgs("bucket", "multipart/object.rnd", "upload-id", int32(i+1), body)
+		args := buildUploadPartArgs("bucket", "multipart/object.rnd", "upload-id", int32(i+1), body, "")
 		if len(args) <= len(body) {
 			b.Fatalf("args length %d <= body length %d", len(args), len(body))
 		}
@@ -211,6 +211,26 @@ func TestForwardSender_NotLeaderRedirect_OnceOnly(t *testing.T) {
 	// Verify final reply is OK (came from peer-B, not the NotLeader from peer-A)
 	fr := raftpb.GetRootAsForwardReply(reply, 0)
 	require.Equal(t, raftpb.ForwardStatusOK, fr.Status())
+}
+
+func TestForwardSender_SendOwner_IgnoresLeaderHint(t *testing.T) {
+	var connected []string
+	dialer := func(ctx context.Context, peer string, payload []byte) ([]byte, error) {
+		connected = append(connected, peer)
+		require.Equal(t, "owner-peer", peer)
+		return notLeaderReplyBytes(t, "raft-leader"), nil
+	}
+	s := NewForwardSender(dialer)
+
+	reply, err := s.SendOwner(context.Background(),
+		[]string{"owner-peer"}, "group-1",
+		raftpb.ForwardOpCreateMultipartUpload, buildCreateMultipartUploadArgs("b", "k", "text/plain", nil))
+
+	require.NoError(t, err)
+	require.Equal(t, []string{"owner-peer"}, connected)
+	fr := raftpb.GetRootAsForwardReply(reply, 0)
+	require.Equal(t, raftpb.ForwardStatusNotLeader, fr.Status())
+	require.Empty(t, s.cachedLeader("group-1"))
 }
 
 func TestForwardSender_NotLeaderMalformedHintDoesNotPanic(t *testing.T) {
@@ -308,6 +328,35 @@ func TestForwardSender_ReadinessRetryAddsDeadlineForBackgroundCaller(t *testing.
 	require.Equal(t, []string{"a", "b", "a"}, connected)
 }
 
+// TestForwardSender_SendReadStreamReadinessRetryAddsDeadlineForBackgroundCaller
+// pins the read-side symmetry with Send: a deadline-less read (S3 GET carries no
+// ctx deadline) must wait out a data-group leader re-election via the not-leader
+// backoff loop, which readinessRetry enables. Without the promotion, the read
+// returns immediately on the first not-leader reply (connected==["a"]).
+//
+// RED-on-revert: remove the `!callerHasDeadline && s.readinessRetry > 0` promotion
+// in SendReadStream and the read returns after the first peer instead of retrying.
+func TestForwardSender_SendReadStreamReadinessRetryAddsDeadlineForBackgroundCaller(t *testing.T) {
+	var connected []string
+	readDialer := func(ctx context.Context, peer string, payload []byte) ([]byte, io.ReadCloser, error) {
+		connected = append(connected, peer)
+		if len(connected) < 3 {
+			return notLeaderReplyBytes(t, ""), nil, nil
+		}
+		return okReplyBytes(t), io.NopCloser(bytes.NewReader([]byte("body"))), nil
+	}
+	s := NewForwardSender(func(context.Context, string, []byte) ([]byte, error) {
+		return okReplyBytes(t), nil
+	}).WithReadStreamDialer(readDialer).WithReadinessRetry(500 * time.Millisecond)
+
+	reply, rc, err := s.SendReadStream(context.Background(), []string{"a", "b"}, "g",
+		raftpb.ForwardOpGetObject, buildGetObjectArgs("b", "k", versioningStateUnknown))
+	require.NoError(t, err)
+	require.NotEmpty(t, reply)
+	require.NoError(t, rc.Close())
+	require.Equal(t, []string{"a", "b", "a"}, connected)
+}
+
 // TestForwardSender_NotLeaderHintFails_FallthroughOriginalReply verifies that
 // when the hint dial also fails, we don't loop forever — we return the original
 // NotLeader reply and let the caller retry from a fresh node.
@@ -329,6 +378,32 @@ func TestForwardSender_NotLeaderHintFails_FallthroughOriginalReply(t *testing.T)
 	fr := raftpb.GetRootAsForwardReply(reply, 0)
 	// Caller sees NotLeader status — they will retry from a fresh node.
 	require.Equal(t, raftpb.ForwardStatusNotLeader, fr.Status())
+}
+
+func TestForwardSender_SendStreamOwner_IgnoresLeaderHint(t *testing.T) {
+	var connected []string
+	streamDialer := func(ctx context.Context, peer string, payload []byte, body io.Reader) ([]byte, error) {
+		connected = append(connected, peer)
+		require.Equal(t, "owner-peer", peer)
+		got, err := io.ReadAll(body)
+		require.NoError(t, err)
+		require.Equal(t, []byte("payload"), got)
+		return notLeaderReplyBytes(t, "raft-leader"), nil
+	}
+	s := NewForwardSender(func(context.Context, string, []byte) ([]byte, error) {
+		t.Fatal("single-message dialer must not be used for streamed body")
+		return nil, nil
+	}).WithStreamDialer(streamDialer)
+
+	reply, err := s.SendStreamOwner(context.Background(),
+		[]string{"owner-peer"}, "group-1",
+		raftpb.ForwardOpAppendObject, buildAppendObjectForwardArgs("b", "k", 0), bytes.NewReader([]byte("payload")))
+
+	require.NoError(t, err)
+	require.Equal(t, []string{"owner-peer"}, connected)
+	fr := raftpb.GetRootAsForwardReply(reply, 0)
+	require.Equal(t, raftpb.ForwardStatusNotLeader, fr.Status())
+	require.Empty(t, s.cachedLeader("group-1"))
 }
 
 // TestForwardSender_ContextCanceled_StopsImmediately verifies caller context
@@ -587,14 +662,19 @@ func TestForwardSender_SendStreamDefaultLimitHandlesWarpMultipartConcurrency(t *
 		t.Fatal("single-message dialer must not be used for streamed body")
 		return nil, nil
 	}).WithStreamDialer(streamDialer)
-	defer close(release)
+
+	// Use sync.Once so close(release) is safe to call from both the success
+	// path and t.Cleanup (which fires on t.Fatal / timeout).
+	var once sync.Once
+	closeRelease := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(closeRelease)
 
 	done := make(chan error, concurrency)
 	for i := 0; i < concurrency; i++ {
 		i := i
 		go func() {
 			_, err := s.SendStream(context.Background(), []string{"peer-a"}, "g",
-				raftpb.ForwardOpUploadPart, buildUploadPartArgs("b", "k", "upload-id", int32(i+1), nil), bytes.NewReader([]byte("part")))
+				raftpb.ForwardOpUploadPart, buildUploadPartArgs("b", "k", "upload-id", int32(i+1), nil, ""), bytes.NewReader([]byte("part")))
 			done <- err
 		}()
 	}
@@ -607,6 +687,12 @@ func TestForwardSender_SendStreamDefaultLimitHandlesWarpMultipartConcurrency(t *
 		case <-time.After(time.Second):
 			t.Fatal("timed out waiting for concurrent streams to start")
 		}
+	}
+
+	// Unblock all goroutines and drain to ensure none outlive this test.
+	closeRelease()
+	for i := 0; i < concurrency; i++ {
+		require.NoError(t, <-done)
 	}
 }
 
@@ -658,8 +744,10 @@ func TestForwardSender_SendReadStreamUsesSeparateSlotPool(t *testing.T) {
 		return okReplyBytes(t), nil
 	}).WithStreamDialer(streamDialer).
 		WithReadStreamDialer(readDialer).
-		WithMaxForwardStreams(1).
-		WithMaxForwardReadStreams(1)
+		WithMaxForwardStreams(1)
+	// Separate read-slot pool of size 1 (was WithMaxForwardReadStreams(1), removed
+	// as a test-only builder; production uses the NewForwardSender default of 64).
+	s.readSlots = make(chan struct{}, 1)
 
 	done := make(chan error, 1)
 	go func() {
@@ -670,7 +758,7 @@ func TestForwardSender_SendReadStreamUsesSeparateSlotPool(t *testing.T) {
 	<-started
 
 	reply, rc, err := s.SendReadStream(context.Background(), []string{"peer-a"}, "g",
-		raftpb.ForwardOpGetObject, buildGetObjectArgs("b", "k"))
+		raftpb.ForwardOpGetObject, buildGetObjectArgs("b", "k", versioningStateUnknown))
 	require.NoError(t, err)
 	require.NotNil(t, reply)
 	require.NoError(t, rc.Close())
@@ -699,7 +787,7 @@ func TestForwardSender_SendReadStreamStaleLeaderHintTriesRemainingPeer(t *testin
 	}).WithReadStreamDialer(readDialer)
 
 	reply, rc, err := s.SendReadStream(context.Background(), []string{"peer-a", "peer-b"}, "g",
-		raftpb.ForwardOpGetObject, buildGetObjectArgs("b", "k"))
+		raftpb.ForwardOpGetObject, buildGetObjectArgs("b", "k", versioningStateUnknown))
 
 	require.NoError(t, err)
 	require.NotNil(t, reply)
@@ -723,7 +811,7 @@ func TestForwardSender_SendReadStreamRetriesNotLeaderWithinCallerDeadline(t *tes
 	defer cancel()
 
 	reply, rc, err := s.SendReadStream(ctx, []string{"peer-a", "peer-b"}, "g",
-		raftpb.ForwardOpGetObject, buildGetObjectArgs("b", "k"))
+		raftpb.ForwardOpGetObject, buildGetObjectArgs("b", "k", versioningStateUnknown))
 
 	require.NoError(t, err)
 	require.NotNil(t, reply)

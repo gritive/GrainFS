@@ -1,14 +1,12 @@
-// raft_rpc.go — Raft RPC bridge for raft v2 (renamed from
-// raftv2_quic_rpc.go in M5 PR 29 now that v2 is the only path).
+// raft_rpc.go — Raft RPC bridge for the cluster data raft.
 //
-// Mirrors internal/raft.RPCTransport: it registers a transport.StreamControl
-// handler that decodes inbound Raft RPCs via the v2 wire codec
-// (raftv2_codec.go) and dispatches them through cluster.RaftNode.Handle*
-// (the v2 adapter forwards to raftv2.Node). Outbound RPCs go through the
-// v1-style callback pair the cluster layer already wires into the v2 adapter.
+// It registers a transport.StreamControl handler that decodes inbound Raft RPCs
+// via the wire codec (raft_codec.go) and dispatches them through
+// cluster.RaftNode.Handle* (the adapter forwards to the raft Node). Outbound
+// RPCs go through the callback pair the cluster layer wires into the adapter.
 //
-// Wire format is byte-identical to v1's raft_rpc.go (frozen until PR 30
-// deletes the v1 package).
+// The wire format is the FlatBuffers RPC envelope in raft_codec.go; it is the
+// sole raft RPC codec (the QUIC-era v1 it once mirrored is deleted).
 
 package cluster
 
@@ -23,11 +21,13 @@ import (
 )
 
 const (
-	// v2RaftRPCTimeout mirrors v1's raftRPCTimeout (internal/raft/quic_rpc.go).
-	// Must stay shorter than the minimum election timeout so heartbeats can
-	// reconnect before a follower starts a spurious election.
-	v2RaftRPCTimeout      = 80 * time.Millisecond
-	v2RaftSnapshotTimeout = 60 * time.Second
+	// raftRPCTimeout bounds one raft RPC (RequestVote/AppendEntries/TimeoutNow)
+	// over the HTTP cluster transport: a warm pooled POST plus the one stale-conn
+	// retry (httpRetryIf). It MUST stay shorter than the minimum election timeout
+	// (raft.DefaultElectionTimeout) so an in-flight heartbeat completes before a
+	// follower starts a spurious election — guarded by
+	// TestRaftRPCTimeout_BelowElectionTimeout.
+	raftRPCTimeout = 80 * time.Millisecond
 )
 
 // RaftRPCTransport bridges Raft RPCs over the cluster transport for raft v2. It registers
@@ -46,7 +46,10 @@ type RaftRPCTransport struct {
 // RaftNode.SetTransport.
 func NewRaftRPCTransport(tr clusterRPCTransport, node RaftNode) *RaftRPCTransport {
 	rpc := &RaftRPCTransport{transport: tr, node: node}
-	tr.Handle(transport.StreamControl, rpc.handleRPC)
+	// Native /raft/data/rpc buffered route. The wire payload is the v2 FB RPC
+	// envelope; a decode failure / unknown RPC maps to a 500 exactly as the
+	// tunnel's nil-response StatusError did.
+	tr.RegisterBufferedRoute(transport.RouteRaftDataRPC, rpc.handleRPC)
 	return rpc
 }
 
@@ -67,75 +70,72 @@ func (r *RaftRPCTransport) GetNode() RaftNode {
 }
 
 // SetTransport wires the outbound callbacks into the RaftNode (matches the
-// v1-style API used by *raft.MetaRaftTransport).
+// callback API the deleted v1 meta transport used).
 func (r *RaftRPCTransport) SetTransport() {
 	r.GetNode().SetTransport(r.sendRequestVote, r.sendAppendEntries)
 }
 
 func (r *RaftRPCTransport) sendRequestVote(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), v2RaftRPCTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), raftRPCTimeout)
 	defer cancel()
 
-	envelope, err := v2EncodeRPC(v2RPCTypeRequestVote, args)
+	envelope, err := encodeRPC(rpcTypeRequestVote, args)
 	if err != nil {
 		return nil, err
 	}
-	msg := &transport.Message{Type: transport.StreamControl, Payload: envelope}
-	resp, err := r.transport.Call(ctx, peer, msg)
+	reply, err := r.transport.CallBuffered(ctx, peer, transport.RouteRaftDataRPC, envelope)
 	if err != nil {
 		return nil, fmt.Errorf("RequestVote to %s: %w", peer, err)
 	}
-	rpcType, data, err := v2DecodeRPC(resp.Payload)
+	rpcType, data, err := decodeRPC(reply)
 	if err != nil {
 		return nil, err
 	}
-	if rpcType != v2RPCTypeRequestVoteReply {
+	if rpcType != rpcTypeRequestVoteReply {
 		return nil, fmt.Errorf("unexpected reply type: %s", rpcType)
 	}
-	return v2DecodeRequestVoteReply(data)
+	return decodeRequestVoteReply(data)
 }
 
 func (r *RaftRPCTransport) sendAppendEntries(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), v2RaftRPCTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), raftRPCTimeout)
 	defer cancel()
 
-	envelope, err := v2EncodeRPC(v2RPCTypeAppendEntries, args)
+	envelope, err := encodeRPC(rpcTypeAppendEntries, args)
 	if err != nil {
 		return nil, err
 	}
-	msg := &transport.Message{Type: transport.StreamControl, Payload: envelope}
-	resp, err := r.transport.Call(ctx, peer, msg)
+	reply, err := r.transport.CallBuffered(ctx, peer, transport.RouteRaftDataRPC, envelope)
 	if err != nil {
 		return nil, fmt.Errorf("AppendEntries to %s: %w", peer, err)
 	}
-	rpcType, data, err := v2DecodeRPC(resp.Payload)
+	rpcType, data, err := decodeRPC(reply)
 	if err != nil {
 		return nil, err
 	}
-	if rpcType != v2RPCTypeAppendEntriesReply {
+	if rpcType != rpcTypeAppendEntriesReply {
 		return nil, fmt.Errorf("unexpected reply type: %s", rpcType)
 	}
-	return v2DecodeAppendEntriesReply(data)
+	return decodeAppendEntriesReply(data)
 }
 
 func (r *RaftRPCTransport) sendTimeoutNow(peer string, args *raft.TimeoutNowArgs) (*raft.TimeoutNowReply, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), v2RaftRPCTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), raftRPCTimeout)
 	defer cancel()
 
-	envelope, err := v2EncodeRPC(v2RPCTypeTimeoutNow, args)
+	envelope, err := encodeRPC(rpcTypeTimeoutNow, args)
 	if err != nil {
 		return nil, err
 	}
-	msg := &transport.Message{Type: transport.StreamControl, Payload: envelope}
-	resp, err := r.transport.Call(ctx, peer, msg)
+	reply, err := r.transport.CallBuffered(ctx, peer, transport.RouteRaftDataRPC, envelope)
 	if err != nil {
 		return nil, fmt.Errorf("TimeoutNow to %s: %w", peer, err)
 	}
-	rpcType, _, err := v2DecodeRPC(resp.Payload)
+	rpcType, _, err := decodeRPC(reply)
 	if err != nil {
 		return nil, err
 	}
-	if rpcType != v2RPCTypeTimeoutNowReply {
+	if rpcType != rpcTypeTimeoutNowReply {
 		return nil, fmt.Errorf("unexpected reply type: %s", rpcType)
 	}
 	return &raft.TimeoutNowReply{}, nil
@@ -149,47 +149,47 @@ func (r *RaftRPCTransport) SetTimeoutNowTransport() {
 // handleRPC dispatches inbound Raft RPCs to the v2 node via the RaftNode
 // interface. The interface methods accept v1 wire types (raft.*); the v2
 // adapter translates to v2 native types and back (see raftv2adapter.go).
-func (r *RaftRPCTransport) handleRPC(req *transport.Message) *transport.Message {
-	rpcType, data, err := v2DecodeRPC(req.Payload)
+func (r *RaftRPCTransport) handleRPC(payload []byte) ([]byte, error) {
+	rpcType, data, err := decodeRPC(payload)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("raft data RPC: bad request")
 	}
 
 	var replyEnvelope []byte
 
 	node := r.GetNode()
 	switch rpcType {
-	case v2RPCTypeRequestVote:
-		args, err := v2DecodeRequestVoteArgs(data)
+	case rpcTypeRequestVote:
+		args, err := decodeRequestVoteArgs(data)
 		if err != nil {
-			return nil
+			return nil, fmt.Errorf("raft data RPC: bad request")
 		}
 		reply := node.HandleRequestVote(args)
-		replyEnvelope, _ = v2EncodeRPC(v2RPCTypeRequestVoteReply, reply)
+		replyEnvelope, _ = encodeRPC(rpcTypeRequestVoteReply, reply)
 
-	case v2RPCTypeAppendEntries:
-		args, err := v2DecodeAppendEntriesArgs(data)
+	case rpcTypeAppendEntries:
+		args, err := decodeAppendEntriesArgs(data)
 		if err != nil {
-			return nil
+			return nil, fmt.Errorf("raft data RPC: bad request")
 		}
 		reply := node.HandleAppendEntries(args)
-		replyEnvelope, _ = v2EncodeRPC(v2RPCTypeAppendEntriesReply, reply)
+		replyEnvelope, _ = encodeRPC(rpcTypeAppendEntriesReply, reply)
 
-	case v2RPCTypeInstallSnapshot:
-		args, err := v2DecodeInstallSnapshotArgs(data)
+	case rpcTypeInstallSnapshot:
+		args, err := decodeInstallSnapshotArgs(data)
 		if err != nil {
-			return nil
+			return nil, fmt.Errorf("raft data RPC: bad request")
 		}
 		reply := node.HandleInstallSnapshot(args)
-		replyEnvelope, _ = v2EncodeRPC(v2RPCTypeInstallSnapshotReply, reply)
+		replyEnvelope, _ = encodeRPC(rpcTypeInstallSnapshotReply, reply)
 
-	case v2RPCTypeTimeoutNow:
+	case rpcTypeTimeoutNow:
 		node.HandleTimeoutNow()
-		replyEnvelope, _ = v2EncodeRPC(v2RPCTypeTimeoutNowReply, nil)
+		replyEnvelope, _ = encodeRPC(rpcTypeTimeoutNowReply, nil)
 
 	default:
-		return nil
+		return nil, fmt.Errorf("raft data RPC: bad request")
 	}
 
-	return &transport.Message{Type: transport.StreamControl, Payload: replyEnvelope}
+	return replyEnvelope, nil
 }

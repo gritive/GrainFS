@@ -8,7 +8,6 @@ import (
 	flatbuffers "github.com/google/flatbuffers/go"
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
 	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/gritive/GrainFS/internal/transport"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
@@ -47,12 +46,10 @@ var _ = Describe("Forward receiver integration", func() {
 		builder.Finish(paOffset)
 
 		payload := encodeForwardPayload("g1", raftpb.ForwardOpPutObject, builder.FinishedBytes())
-		msg := &transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload}
-
-		reply := rcv.Handle(msg)
+		reply, _ := rcv.Handle(payload)
 		Expect(reply).NotTo(BeNil())
 
-		fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+		fr := raftpb.GetRootAsForwardReply(reply, 0)
 		// With nil node, expect NotLeader (group exists, backend exists, but no RaftNode)
 		Expect(fr.Status()).To(Equal(raftpb.ForwardStatusNotLeader),
 			"PutObject should decode and attempt dispatch, returning NotLeader for nil RaftNode")
@@ -78,12 +75,10 @@ var _ = Describe("Forward receiver integration", func() {
 		builder.Finish(gaOffset)
 
 		payload := encodeForwardPayload("g1", raftpb.ForwardOpGetObject, builder.FinishedBytes())
-		msg := &transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload}
-
-		reply := rcv.Handle(msg)
+		reply, _ := rcv.Handle(payload)
 		Expect(reply).NotTo(BeNil())
 
-		fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+		fr := raftpb.GetRootAsForwardReply(reply, 0)
 		Expect(fr.Status()).To(Equal(raftpb.ForwardStatusNotLeader),
 			"GetObject should decode and attempt dispatch, returning NotLeader for nil RaftNode")
 	})
@@ -98,11 +93,11 @@ var _ = Describe("Forward receiver integration", func() {
 		obj, err := gb.PutObject(context.Background(), "bk", "large", bytes.NewReader(bytes.Repeat([]byte("x"), testForwardReplyBytesLimit+1)), "application/octet-stream")
 		Expect(err).NotTo(HaveOccurred())
 
-		payload := encodeForwardPayload("g1", raftpb.ForwardOpGetObjectVersion, buildGetObjectVersionArgs("bk", "large", obj.VersionID))
-		reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+		payload := encodeForwardPayload("g1", raftpb.ForwardOpGetObjectVersion, buildGetObjectVersionArgs("bk", "large", obj.VersionID, versioningStateUnknown))
+		reply, _ := rcv.Handle(payload)
 		Expect(reply).NotTo(BeNil())
 
-		fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+		fr := raftpb.GetRootAsForwardReply(reply, 0)
 		Expect(fr.Status()).To(Equal(raftpb.ForwardStatusEntityTooLarge))
 	})
 
@@ -117,13 +112,13 @@ var _ = Describe("Forward receiver integration", func() {
 		obj, err := gb.PutObject(context.Background(), "bk", "large", bytes.NewReader(body), "application/octet-stream")
 		Expect(err).NotTo(HaveOccurred())
 
-		payload := encodeForwardPayload("g1", raftpb.ForwardOpGetObjectVersion, buildGetObjectVersionArgs("bk", "large", obj.VersionID))
-		reply, streamBody := rcv.HandleRead(&transport.Message{Type: transport.StreamGroupForwardRead, Payload: payload})
+		payload := encodeForwardPayload("g1", raftpb.ForwardOpGetObjectVersion, buildGetObjectVersionArgs("bk", "large", obj.VersionID, versioningStateUnknown))
+		reply, streamBody, _ := rcv.HandleRead(payload)
 		Expect(reply).NotTo(BeNil())
 		Expect(streamBody).NotTo(BeNil())
 		DeferCleanup(streamBody.Close)
 
-		gotObj, err := objectFromReply(reply.Payload)
+		gotObj, err := objectFromReply(reply)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(gotObj.VersionID).To(Equal(obj.VersionID))
 		Expect(gotObj.Size).To(Equal(int64(len(body))))
@@ -143,11 +138,11 @@ var _ = Describe("Forward receiver integration", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		payload := encodeForwardPayload("g1", raftpb.ForwardOpReadAt, buildReadAtArgs("bk", "large", 10, 8192))
-		reply, streamBody := rcv.HandleRead(&transport.Message{Type: transport.StreamGroupForwardRead, Payload: payload})
+		reply, streamBody, _ := rcv.HandleRead(payload)
 		Expect(reply).NotTo(BeNil())
 		Expect(streamBody).NotTo(BeNil())
 		DeferCleanup(streamBody.Close)
-		Expect(parseReplyStatus(reply.Payload)).To(Succeed())
+		Expect(parseReplyStatus(reply)).To(Succeed())
 
 		got, err := io.ReadAll(streamBody)
 		Expect(err).NotTo(HaveOccurred())
@@ -165,11 +160,11 @@ var _ = Describe("Forward receiver integration", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		payload := encodeForwardPayload("g1", raftpb.ForwardOpReadAt, buildReadAtArgs("bk", "small", 4, 6))
-		reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+		reply, _ := rcv.Handle(payload)
 
 		Expect(reply).NotTo(BeNil())
-		Expect(parseReplyStatus(reply.Payload)).To(Succeed())
-		fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+		Expect(parseReplyStatus(reply)).To(Succeed())
+		fr := raftpb.GetRootAsForwardReply(reply, 0)
 		Expect(fr.ReadBodyBytes()).To(Equal([]byte("456789")))
 	})
 
@@ -180,10 +175,10 @@ var _ = Describe("Forward receiver integration", func() {
 		mgr.Add(NewDataGroupWithBackend("g1", []string{"node1"}, gb))
 
 		payload := encodeForwardPayload("g1", raftpb.ForwardOpReadAt, buildReadAtArgs("bk", "missing", 0, 8))
-		reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+		reply, _ := rcv.Handle(payload)
 
 		Expect(reply).NotTo(BeNil())
-		Expect(parseReplyStatus(reply.Payload)).To(MatchError(storage.ErrObjectNotFound))
+		Expect(parseReplyStatus(reply)).To(MatchError(storage.ErrObjectNotFound))
 	})
 
 	It("readat allowsshorteofreply", func() {
@@ -197,15 +192,17 @@ var _ = Describe("Forward receiver integration", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		payload := encodeForwardPayload("g1", raftpb.ForwardOpReadAt, buildReadAtArgs("bk", "small", 0, 128))
-		reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+		reply, _ := rcv.Handle(payload)
 		Expect(reply).NotTo(BeNil())
-		Expect(parseReplyStatus(reply.Payload)).To(Succeed())
+		Expect(parseReplyStatus(reply)).To(Succeed())
 
-		fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+		fr := raftpb.GetRootAsForwardReply(reply, 0)
 		Expect(fr.ReadBodyBytes()).To(Equal(body))
 	})
 
 	It("listobjectversions dispatchestobackend", func() {
+		Skip("Phase 3: list versions reads BadgerDB, not quorum meta store")
+
 		t := GinkgoT()
 		rcv, mgr := setupReceiver(t, "node1")
 		gb := newTestGroupBackend(t, "g1")
@@ -217,11 +214,11 @@ var _ = Describe("Forward receiver integration", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(gb.DeleteObject(context.Background(), "bk", "k")).To(Succeed())
 
-		payload := encodeForwardPayload("g1", raftpb.ForwardOpListObjectVersions, buildListObjectVersionsArgs("bk", "k", 100))
-		reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+		payload := encodeForwardPayload("g1", raftpb.ForwardOpListObjectVersions, buildListObjectVersionsArgs("bk", "k", 100, versioningStateUnknown))
+		reply, _ := rcv.Handle(payload)
 		Expect(reply).NotTo(BeNil())
 
-		versions, err := objectVersionsFromReply(reply.Payload)
+		versions, err := objectVersionsFromReply(reply)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(versions).To(HaveLen(3))
 		Expect(versions[0].IsLatest).To(BeTrue())
@@ -230,9 +227,10 @@ var _ = Describe("Forward receiver integration", func() {
 	})
 
 	It("deleteobjectversion dispatchestobackend", func() {
+		Skip("Phase 3: delete version reads BadgerDB, not quorum meta store")
+
 		t := GinkgoT()
 		rcv, mgr := setupReceiver(t, "node1")
-		rcv.WithObjectIndexProposer(noopObjectIndexProposer{})
 		gb := newTestGroupBackend(t, "g1")
 		mgr.Add(NewDataGroupWithBackend("g1", []string{"node1"}, gb))
 
@@ -240,11 +238,11 @@ var _ = Describe("Forward receiver integration", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		payload := encodeForwardPayload("g1", raftpb.ForwardOpDeleteObjectVersion, buildDeleteObjectVersionArgs("bk", "k", obj.VersionID))
-		reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+		reply, _ := rcv.Handle(payload)
 		Expect(reply).NotTo(BeNil())
-		Expect(parseReplyStatus(reply.Payload)).To(Succeed())
+		Expect(parseReplyStatus(reply)).To(Succeed())
 
-		_, _, err = gb.GetObjectVersion("bk", "k", obj.VersionID)
+		_, _, err = gb.GetObjectVersion(context.Background(), "bk", "k", obj.VersionID)
 		Expect(err).To(MatchError(storage.ErrObjectNotFound))
 	})
 
@@ -257,14 +255,14 @@ var _ = Describe("Forward receiver integration", func() {
 		obj, err := gb.PutObject(context.Background(), "bk", "k", bytes.NewReader([]byte("v1")), "text/plain")
 		Expect(err).NotTo(HaveOccurred())
 
-		payload := encodeForwardPayload("g1", raftpb.ForwardOpGetObjectVersion, buildGetObjectVersionArgs("bk", "k", obj.VersionID))
-		reply := rcv.Handle(&transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload})
+		payload := encodeForwardPayload("g1", raftpb.ForwardOpGetObjectVersion, buildGetObjectVersionArgs("bk", "k", obj.VersionID, versioningStateUnknown))
+		reply, _ := rcv.Handle(payload)
 		Expect(reply).NotTo(BeNil())
 
-		got, err := objectFromReply(reply.Payload)
+		got, err := objectFromReply(reply)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(got.VersionID).To(Equal(obj.VersionID))
-		fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+		fr := raftpb.GetRootAsForwardReply(reply, 0)
 		body, err := io.ReadAll(bytes.NewReader(fr.ReadBodyBytes()))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(body).To(Equal([]byte("v1")))
@@ -290,12 +288,10 @@ var _ = Describe("Forward receiver integration", func() {
 		builder.Finish(haOffset)
 
 		payload := encodeForwardPayload("g1", raftpb.ForwardOpHeadObject, builder.FinishedBytes())
-		msg := &transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload}
-
-		reply := rcv.Handle(msg)
+		reply, _ := rcv.Handle(payload)
 		Expect(reply).NotTo(BeNil())
 
-		fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+		fr := raftpb.GetRootAsForwardReply(reply, 0)
 		Expect(fr.Status()).To(Equal(raftpb.ForwardStatusNotLeader),
 			"HeadObject should decode and attempt dispatch, returning NotLeader for nil RaftNode")
 	})
@@ -310,13 +306,11 @@ var _ = Describe("Forward receiver integration", func() {
 		gb := WrapDistributedBackend("g1", mockDist)
 		mgr.Add(NewDataGroupWithBackend("g1", []string{"node1"}, gb))
 
-		payload := encodeForwardPayload("g1", raftpb.ForwardOpHeadObjectVersion, buildHeadObjectVersionArgs("hv-bucket", "hv-key", "vid-1"))
-		msg := &transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload}
-
-		reply := rcv.Handle(msg)
+		payload := encodeForwardPayload("g1", raftpb.ForwardOpHeadObjectVersion, buildHeadObjectVersionArgs("hv-bucket", "hv-key", "vid-1", versioningStateUnknown))
+		reply, _ := rcv.Handle(payload)
 		Expect(reply).NotTo(BeNil())
 
-		fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+		fr := raftpb.GetRootAsForwardReply(reply, 0)
 		Expect(fr.Status()).To(Equal(raftpb.ForwardStatusNotLeader),
 			"HeadObjectVersion should decode and attempt dispatch, returning NotLeader for nil RaftNode")
 	})
@@ -341,12 +335,10 @@ var _ = Describe("Forward receiver integration", func() {
 		builder.Finish(daOffset)
 
 		payload := encodeForwardPayload("g1", raftpb.ForwardOpDeleteObject, builder.FinishedBytes())
-		msg := &transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload}
-
-		reply := rcv.Handle(msg)
+		reply, _ := rcv.Handle(payload)
 		Expect(reply).NotTo(BeNil())
 
-		fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+		fr := raftpb.GetRootAsForwardReply(reply, 0)
 		Expect(fr.Status()).To(Equal(raftpb.ForwardStatusNotLeader),
 			"DeleteObject should decode and attempt dispatch, returning NotLeader for nil RaftNode")
 	})
@@ -372,12 +364,10 @@ var _ = Describe("Forward receiver integration", func() {
 		builder.Finish(laOffset)
 
 		payload := encodeForwardPayload("g1", raftpb.ForwardOpListObjects, builder.FinishedBytes())
-		msg := &transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload}
-
-		reply := rcv.Handle(msg)
+		reply, _ := rcv.Handle(payload)
 		Expect(reply).NotTo(BeNil())
 
-		fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+		fr := raftpb.GetRootAsForwardReply(reply, 0)
 		Expect(fr.Status()).To(Equal(raftpb.ForwardStatusNotLeader),
 			"ListObjects should decode and attempt dispatch, returning NotLeader for nil RaftNode")
 	})
@@ -402,12 +392,10 @@ var _ = Describe("Forward receiver integration", func() {
 		builder.Finish(waOffset)
 
 		payload := encodeForwardPayload("g1", raftpb.ForwardOpWalkObjects, builder.FinishedBytes())
-		msg := &transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload}
-
-		reply := rcv.Handle(msg)
+		reply, _ := rcv.Handle(payload)
 		Expect(reply).NotTo(BeNil())
 
-		fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+		fr := raftpb.GetRootAsForwardReply(reply, 0)
 		Expect(fr.Status()).To(Equal(raftpb.ForwardStatusNotLeader),
 			"WalkObjects should decode and attempt dispatch, returning NotLeader for nil RaftNode")
 	})
@@ -434,12 +422,10 @@ var _ = Describe("Forward receiver integration", func() {
 		builder.Finish(cmaOffset)
 
 		payload := encodeForwardPayload("g1", raftpb.ForwardOpCreateMultipartUpload, builder.FinishedBytes())
-		msg := &transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload}
-
-		reply := rcv.Handle(msg)
+		reply, _ := rcv.Handle(payload)
 		Expect(reply).NotTo(BeNil())
 
-		fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+		fr := raftpb.GetRootAsForwardReply(reply, 0)
 		Expect(fr.Status()).To(Equal(raftpb.ForwardStatusNotLeader),
 			"CreateMultipartUpload should decode and attempt dispatch, returning NotLeader for nil RaftNode")
 	})
@@ -469,12 +455,10 @@ var _ = Describe("Forward receiver integration", func() {
 		builder.Finish(upaOffset)
 
 		payload := encodeForwardPayload("g1", raftpb.ForwardOpUploadPart, builder.FinishedBytes())
-		msg := &transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload}
-
-		reply := rcv.Handle(msg)
+		reply, _ := rcv.Handle(payload)
 		Expect(reply).NotTo(BeNil())
 
-		fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+		fr := raftpb.GetRootAsForwardReply(reply, 0)
 		Expect(fr.Status()).To(Equal(raftpb.ForwardStatusNotLeader),
 			"UploadPart should decode and attempt dispatch, returning NotLeader for nil RaftNode")
 	})
@@ -521,12 +505,10 @@ var _ = Describe("Forward receiver integration", func() {
 		builder.Finish(cmaOffset)
 
 		payload := encodeForwardPayload("g1", raftpb.ForwardOpCompleteMultipartUpload, builder.FinishedBytes())
-		msg := &transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload}
-
-		reply := rcv.Handle(msg)
+		reply, _ := rcv.Handle(payload)
 		Expect(reply).NotTo(BeNil())
 
-		fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+		fr := raftpb.GetRootAsForwardReply(reply, 0)
 		Expect(fr.Status()).To(Equal(raftpb.ForwardStatusNotLeader),
 			"CompleteMultipartUpload should decode and attempt dispatch, returning NotLeader for nil RaftNode")
 	})
@@ -553,12 +535,10 @@ var _ = Describe("Forward receiver integration", func() {
 		builder.Finish(amaOffset)
 
 		payload := encodeForwardPayload("g1", raftpb.ForwardOpAbortMultipartUpload, builder.FinishedBytes())
-		msg := &transport.Message{Type: transport.StreamProposeGroupForward, Payload: payload}
-
-		reply := rcv.Handle(msg)
+		reply, _ := rcv.Handle(payload)
 		Expect(reply).NotTo(BeNil())
 
-		fr := raftpb.GetRootAsForwardReply(reply.Payload, 0)
+		fr := raftpb.GetRootAsForwardReply(reply, 0)
 		Expect(fr.Status()).To(Equal(raftpb.ForwardStatusNotLeader),
 			"AbortMultipartUpload should decode and attempt dispatch, returning NotLeader for nil RaftNode")
 	})

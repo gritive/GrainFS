@@ -106,19 +106,6 @@ var (
 		Help: "Total number of events dropped because the in-flight event queue was full.",
 	})
 
-	// CacheInvalidationTotal counts cache invalidation operations.
-	CacheInvalidationTotal = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "grainfs_cache_invalidation_total",
-		Help: "Total number of cache invalidation operations.",
-	}, []string{"bucket", "protocol"}) // protocol: vfs, nfs, cached_backend
-
-	// CacheInvalidationDuration measures cache invalidation operation duration.
-	CacheInvalidationDuration = promauto.NewHistogram(prometheus.HistogramOpts{
-		Name:    "grainfs_cache_invalidation_duration_seconds",
-		Help:    "Cache invalidation operation duration in seconds.",
-		Buckets: prometheus.DefBuckets,
-	})
-
 	// CacheStatHits counts cache hits in stat cache.
 	CacheStatHits = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "grainfs_cache_stat_hits_total",
@@ -135,12 +122,6 @@ var (
 	DeletedMarkersTotal = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "grainfs_deleted_markers_total",
 		Help: "Current number of deleted file markers in memory.",
-	})
-
-	// RegistrySize tracks current number of registered cache invalidators.
-	RegistrySize = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "grainfs_cache_registry_size",
-		Help: "Current number of registered cache invalidators.",
 	})
 
 	// NFSv4BufferPoolGets tracks total buffer pool get operations by buffer size.
@@ -166,14 +147,6 @@ var (
 		Name: "grainfs_split_brain_suspected",
 		Help: "1 if split brain is suspected (multiple leaders or large term divergence), 0 otherwise.",
 	})
-
-	// DataWALStartupRepairDiscovered counts metadata-only data WAL shard repair
-	// candidates discovered and queued during startup replay, per record before
-	// deduplication. Only counted when a repair sink is configured.
-	DataWALStartupRepairDiscovered = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "grainfs_datawal_startup_repair_discovered_total",
-		Help: "Metadata-only data WAL shard repair candidates discovered and queued during startup replay (only counted when a repair sink is configured); counted per WAL record before deduplication.",
-	}, []string{"reason"})
 
 	// ScrubShardErrorsTotal counts shard errors (missing + corrupt) detected during scrubbing.
 	ScrubShardErrorsTotal = promauto.NewCounter(prometheus.CounterOpts{
@@ -223,6 +196,20 @@ var (
 		Help: "Total plain objects skipped because max_migrations_per_cycle was reached.",
 	})
 
+	// ECRedundancyUpgradeRelocatedTotal counts non-redundant (1+0) EC objects
+	// relocated into a redundant placement group by the background sweep.
+	ECRedundancyUpgradeRelocatedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_ec_redundancy_upgrade_relocated_total",
+		Help: "Total non-redundant EC objects relocated into a redundant group by the background sweep.",
+	})
+
+	// ECRedundancyUpgradeFailedTotal counts relocate attempts that failed with a
+	// non-benign error (benign ErrRelocateSkipped is not counted).
+	ECRedundancyUpgradeFailedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_ec_redundancy_upgrade_failed_total",
+		Help: "Total EC redundancy-upgrade relocations that failed with a non-benign error.",
+	})
+
 	// ECScrubUnverifiedShardsTotal counts EC shards that were readable but
 	// could not be integrity-verified because they lack a CRC oracle.
 	ECScrubUnverifiedShardsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
@@ -252,6 +239,13 @@ var (
 	DiskUsedPct = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "grainfs_disk_used_pct",
 		Help: "Local disk usage percentage (0–100) as seen by each node.",
+	}, []string{"node_id"})
+
+	// NodeRequestsPerSec tracks the locally-measured request rate per node, the
+	// load signal gossiped to BoundedLoads and the balancer.
+	NodeRequestsPerSec = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "grainfs_node_requests_per_sec",
+		Help: "Locally-measured request rate (RPS) as seen by each node.",
 	}, []string{"node_id"})
 
 	// FDOpen tracks current open file descriptors per node.
@@ -356,6 +350,19 @@ var (
 		Help: "Current consecutive RunValueLogGC failures per category; resets on ErrNoRewrite.",
 	}, []string{"node_id", "category"})
 
+	// Transport metrics.
+
+	// TransportClientDialsTotal counts cold (pool-miss) dials made by the
+	// node-to-node Hertz client. With keep-alive pooling a single conn serves
+	// many RPCs to a peer, so this stays flat under steady load; a sustained rise
+	// (relative to RPC volume) means the pool is not reusing connections —
+	// connection churn that the explicit MaxConnsPerHost/MaxIdleConnDuration/
+	// KeepAlive pool contract is meant to avoid.
+	TransportClientDialsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_transport_client_dials_total",
+		Help: "Total cold (pool-miss) connection dials made by the cluster HTTP client.",
+	})
+
 	// Balancer metrics.
 
 	BalancerGossipTotal = promauto.NewCounter(prometheus.CounterOpts{
@@ -370,17 +377,17 @@ var (
 
 	BalancerMigrationsProposedTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "grainfs_balancer_migrations_proposed_total",
-		Help: "Total CmdMigrateShard proposals submitted to Raft.",
+		Help: "Legacy counter for retired balancer shard migration proposals. Should remain 0.",
 	})
 
 	BalancerMigrationsDoneTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "grainfs_balancer_migrations_done_total",
-		Help: "Total migrations completed successfully.",
+		Help: "Legacy counter for retired balancer shard migrations. Should remain 0.",
 	})
 
 	BalancerMigrationsFailedTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "grainfs_balancer_migrations_failed_total",
-		Help: "Total migrations that failed.",
+		Help: "Legacy counter for retired balancer shard migration failures. Should remain 0.",
 	})
 
 	BalancerImbalancePct = promauto.NewGauge(prometheus.GaugeOpts{
@@ -390,7 +397,7 @@ var (
 
 	BalancerPendingTasks = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "grainfs_balancer_pending_tasks",
-		Help: "Number of pending-migration entries persisted in BadgerDB.",
+		Help: "Legacy pending-migration entries persisted in BadgerDB. Retired migration replay no longer creates them.",
 	})
 
 	BalancerLeaderTransfersTotal = promauto.NewCounter(prometheus.CounterOpts{
@@ -400,12 +407,12 @@ var (
 
 	BalancerShardWriteErrorsTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "grainfs_balancer_shard_write_errors_total",
-		Help: "Total shard write errors during migration copy phase.",
+		Help: "Legacy counter for retired balancer shard copy write errors. Should remain 0.",
 	})
 
 	BalancerShardCopyDuration = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name:    "grainfs_balancer_shard_copy_duration_seconds",
-		Help:    "Duration of shard copy operations during migration.",
+		Help:    "Legacy histogram for retired balancer shard copy operations.",
 		Buckets: prometheus.DefBuckets,
 	})
 
@@ -426,12 +433,12 @@ var (
 
 	BalancerShardWriteRetriesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "grainfs_balancer_shard_write_retries_total",
-		Help: "Total shard write retries per node and shard index.",
+		Help: "Legacy counter for retired balancer shard copy retries. Should remain 0.",
 	}, []string{"node_id", "shard_idx"})
 
 	BalancerMigrationPendingTTLExpiredTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "grainfs_balancer_migration_pending_ttl_expired_total",
-		Help: "Total pending migrations cancelled due to TTL expiry.",
+		Help: "Legacy counter for retired pending-migration TTL expiry. Should remain 0.",
 	})
 
 	// Orphan shard sweep metrics.
@@ -449,6 +456,17 @@ var (
 	OrphanSweepCappedTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "grainfs_scrub_orphan_sweep_capped_total",
 		Help: "Total orphan shards deferred because maxOrphansPerCycle was reached.",
+	})
+
+	// SegStagingReclaimed counts abandoned segment-staging shard-leaf dirs
+	// (.segstaging) aged out by the orphan-shard walker. Counted per physical
+	// shard-leaf COPY reclaimed (the walk processes each dataDir independently and
+	// removes that dataDir's instance directly), so a leaf striped across N dataDirs
+	// increments this N times — unlike OrphanShardsDeletedTotal, which dedups per
+	// canonical logical dir. Informational only.
+	SegStagingReclaimed = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_scrub_segstaging_reclaimed_total",
+		Help: "Total abandoned segment-staging shard-leaf copies reclaimed (age-out) by the orphan-shard walker.",
 	})
 
 	OrphanSegmentsFoundTotal = promauto.NewCounter(prometheus.CounterOpts{
@@ -474,6 +492,43 @@ var (
 	OrphanSegmentDeleteErrorsTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "grainfs_scrub_orphan_segment_delete_errors_total",
 		Help: "Total delete failures during orphan segment sweep (excludes ENOENT).",
+	})
+
+	OrphanQuorumMetaVersionsFoundTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_scrub_orphan_quorum_meta_versions_found_total",
+		Help: "Total dangling per-version quorum-meta blobs newly tombstoned during scrubbing.",
+	})
+
+	OrphanQuorumMetaVersionsDeletedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_scrub_orphan_quorum_meta_versions_deleted_total",
+		Help: "Total dangling per-version quorum-meta blobs deleted by the scrubber.",
+	})
+
+	OrphanQuorumMetaVersionSweepCappedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_scrub_orphan_quorum_meta_version_sweep_capped_total",
+		Help: "Total per-version blobs deferred because the per-cycle cap was reached.",
+	})
+
+	// Foundation S3 — per-version blob backfill sweep metrics.
+
+	QuorumMetaVersionBackfillFoundTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_scrub_quorum_meta_versions_backfill_found_total",
+		Help: "Total per-version quorum-meta blob candidates found needing backfill.",
+	})
+
+	QuorumMetaVersionBackfillMigratedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_scrub_quorum_meta_versions_backfill_migrated_total",
+		Help: "Total per-version quorum-meta blobs successfully backfilled.",
+	})
+
+	QuorumMetaVersionBackfillCappedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_scrub_quorum_meta_versions_backfill_capped_total",
+		Help: "Total per-version backfill candidates deferred because the per-cycle cap was reached.",
+	})
+
+	QuorumMetaVersionBackfillErrorTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_scrub_quorum_meta_versions_backfill_error_total",
+		Help: "Total per-version backfill failures (per-object; sweep continues).",
 	})
 
 	// Phase 16 — Self-healing metrics.
@@ -582,43 +637,11 @@ var (
 		Buckets: []float64{0, 1, 2, 3, 5, 10},
 	})
 
-	// Data WAL startup repair candidates, attempts, successes, failures, and skips.
-
-	DataWALStartupRepairCandidates = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "grainfs_datawal_startup_repair_candidates_total",
-		Help: "Distinct data WAL shard repair candidates queued for the startup worker after (bucket, shardKey, shardIdx) deduplication.",
-	}, []string{"reason"})
-
-	DataWALStartupRepairAttempts = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "grainfs_datawal_startup_repair_attempts_total",
-		Help: "Startup data WAL EC shard repair attempts.",
+	// InternalBucketOrphanObjectsTotal counts internal-bucket objects found at
+	// startup detect scan. Non-zero means pre-existing data unreachable after
+	// the capability removal — operator manual cleanup required.
+	InternalBucketOrphanObjectsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "grainfs_internal_bucket_orphan_objects_total",
+		Help: "Internal-bucket objects found at startup; unreachable after capability removal.",
 	})
-
-	DataWALStartupRepairSuccesses = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "grainfs_datawal_startup_repair_successes_total",
-		Help: "Successful startup data WAL EC shard repairs.",
-	})
-
-	// DataWALStartupRepairFailures reason label values:
-	//   context_canceled       — repair context was canceled
-	//   insufficient_survivors — too few EC shards readable for reconstruction
-	//   repair_failed          — other repair error
-	//   panic                  — worker goroutine panicked
-	DataWALStartupRepairFailures = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "grainfs_datawal_startup_repair_failures_total",
-		Help: "Failed startup data WAL EC shard repairs.",
-	}, []string{"reason"})
-
-	// DataWALStartupRepairSkips reason label values:
-	//   no_group              — bucket has no data group assignment
-	//   no_backend            — data group has no distributed backend
-	//   invalid_shard_key     — shard key is empty or shard index is negative
-	//   placement_corrupt     — placement resolution errored or returned an inconsistent node count
-	//   placement_scan_capped — segment/coalesced placement scan hit its cap before resolving
-	//   not_local_owner       — this node does not own the shard
-	//   stale                 — placement record has no nodes (object version deleted / shard ref missing)
-	DataWALStartupRepairSkips = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "grainfs_datawal_startup_repair_skips_total",
-		Help: "Startup data WAL EC shard repair candidates skipped before repair.",
-	}, []string{"reason"})
 )

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gritive/GrainFS/internal/server/servertest"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/stretchr/testify/require"
 )
@@ -75,7 +76,7 @@ func TestDeleteObjectsDeletesBatchConcurrently(t *testing.T) {
 		LocalBackend: local,
 		delay:        50 * time.Millisecond,
 	}
-	addr := fmt.Sprintf("127.0.0.1:%d", freePort(t))
+	addr := fmt.Sprintf("127.0.0.1:%d", servertest.FreePort(t))
 	startTestServer(t, addr, backend)
 	base := "http://" + addr
 

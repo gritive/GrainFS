@@ -185,8 +185,8 @@ func wireDEKKeeper(state *bootState, fsm *cluster.MetaFSM) error {
 	state.dekKeeper = keeper
 	state.handshakeVerifier = encrypt.NewHandshakeVerifier(store, clusterID)
 	// Single source for the data-plane AAD clusterID (slice C). bootShardService
-	// and bootOwnedGroupsAndEC read this so the EC-shard WRITE (putpipeline) and
-	// READ (ShardService) bind the SAME clusterID — divergence fails every GET.
+	// and bootOwnedGroupsAndEC read this so the EC-shard WRITE and READ
+	// (ShardService) bind the SAME clusterID — divergence fails every GET.
 	state.clusterID = clusterID
 	// kekLeaseTracker counts in-flight KEK consumers per version. Phase B has no
 	// runtime acquire sites — Phase D wires them (raft snapshot reader holding
@@ -222,12 +222,7 @@ func wireDEKKeeper(state *bootState, fsm *cluster.MetaFSM) error {
 	if state.metaRaft != nil {
 		reportFn = state.metaRaft.ProposeDEKRewrapProgress
 	}
-	// S7-1a: FSM-value rewrap trigger — leader-only per group, epoch-neutral.
-	// The trigger is created once here; it captures state (by pointer) so that
-	// it reads state.dgMgr at invocation time — after bootOwnedGroupsAndEC has
-	// registered the group backends. The sync.Map single-flight guard inside the
-	// returned closure persists across rotations (allocated once at wire time).
-	WireDEKPostCommit(fsm, state.metaRaft, isLeaderFn, newRewrapScrubberKick(rewrapCtrl, state.nodeID, reportFn), newFSMValueRewrapTriggerLazy(state))
+	WireDEKPostCommit(fsm, state.metaRaft, isLeaderFn, newRewrapScrubberKick(rewrapCtrl, state.nodeID, reportFn))
 	return nil
 }
 
@@ -266,20 +261,11 @@ func wireRewrapLanes(state *bootState) {
 		state.rewrapController.RegisterLane(packblob.NewPackblobRewrapLane(state.packedBackend))
 	}
 
-	// FSMValueCheckLane + marker re-Kick wiring (S7-1a-2).
+	// FSMValueCheckLane wiring (S7-1a-2).
 	//
 	// The check-lane gates Kick's completion report until this node's policy:/obj:
 	// values are all at keeper-current gen. Registering it here (BEFORE MarkReady)
 	// ensures every Kick includes the predicate.
-	//
-	// NOTE on liveness coupling: registering FSMValueCheckLane on the shared
-	// RewrapController means a stale check-lane suppresses the ENTIRE report —
-	// including EC+packblob. The rotation-time scrubberKick (fired before the
-	// leader's async drain can reseal anything) will now error on the stale
-	// check-lane and suppress EC/packblob reporting. The marker re-Kick becomes
-	// the only report path. This is safe under S7-0 (blanket prune block), and
-	// epoch 1 = all-lanes-done is exactly the prune precondition. Recovery from a
-	// stranded report = next rotation + existing [P2] S6d-reconcile.
 	if state.dgMgr != nil {
 		checkLane := cluster.NewFSMValueCheckLane(func() []*cluster.GroupBackend {
 			var out []*cluster.GroupBackend
@@ -292,40 +278,6 @@ func wireRewrapLanes(state *bootState) {
 		})
 		state.rewrapController.RegisterLane(checkLane)
 
-		// Rebuild scrubberKick from state (fix #3): the closure built in
-		// wireDEKKeeper is passed into WireDEKPostCommit with no retained handle,
-		// so we reconstruct it here from the same state fields.
-		var reportFn func(ctx context.Context, nodeID string, gen, epoch uint32) error
-		if state.metaRaft != nil {
-			reportFn = state.metaRaft.ProposeDEKRewrapProgress
-		}
-		scrubberKick := newRewrapScrubberKick(state.rewrapController, state.nodeID, reportFn)
-
-		// Debounced coalescer (fix #2): many data groups may apply the marker at
-		// nearly the same time, each triggering its callback. We coalesce all of
-		// them into ONE in-flight re-Kick. The buffered-1 channel gives re-arm
-		// semantics for free: if a marker lands while a sweep is running, the next
-		// poke sets the buffer and the worker drains it on the next iteration.
-		kickCh := make(chan struct{}, 1)
-		go func() {
-			for range kickCh {
-				scrubberKick(context.Background(), 0)
-			}
-		}()
-		poke := func() {
-			select {
-			case kickCh <- struct{}{}:
-			default: // kick already pending; drop (re-arm is already buffered)
-			}
-		}
-
-		for _, dg := range state.dgMgr.All() {
-			if gb := dg.Backend(); gb != nil {
-				// The callback fires in the apply-actor goroutine; poke is non-blocking
-				// so no inner goroutine is needed here.
-				gb.SetOnFSMValueResealDone(poke)
-			}
-		}
 	}
 
 	// Signal that all lanes have been registered. Kick refuses (errLanesNotReady)

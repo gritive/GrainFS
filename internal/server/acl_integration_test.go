@@ -12,6 +12,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/gritive/GrainFS/internal/s3auth"
+	"github.com/gritive/GrainFS/internal/server/servertest"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -21,8 +22,8 @@ import (
 // serialization correctness is covered by cluster/apply_test.go; here we
 // test the HTTP layer.
 func setupECAuthServer(t interface {
-	serverTestTB
-	serverCleanupTB
+	servertest.TB
+	servertest.CleanupTB
 	TempDir() string
 	Cleanup(func())
 }) (baseURL string, sign func(*http.Request), backend *storage.LocalBackend) {
@@ -38,10 +39,10 @@ func setupECAuthServer(t interface {
 		secretKey = "testsecret"
 	)
 	creds := []s3auth.Credentials{{AccessKey: accessKey, SecretKey: secretKey}}
-	port := freePort(t)
+	port := servertest.FreePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	srv := New(addr, backend, WithAuth(creds))
-	t.Cleanup(func() { shutdownTestServer(t, srv) })
+	t.Cleanup(func() { servertest.ShutdownServer(t, srv) })
 	go srv.Run() //nolint:errcheck
 	for i := 0; i < 50; i++ {
 		conn, err := net.Dial("tcp", addr)

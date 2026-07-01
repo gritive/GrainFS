@@ -8,7 +8,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/scrubber"
-	"github.com/gritive/GrainFS/internal/server/execution"
 )
 
 type mockDirector struct {
@@ -34,37 +33,6 @@ func (m *mockDirector) CancelSession(id string) error {
 	return nil
 }
 func (m *mockDirector) ApplyFromFSM(_ scrubber.ScrubTriggerEntry) {}
-
-// covers the default scrub-trigger path that used to assert ScopeFull
-func TestScrubVolume_Triggers(t *testing.T) {
-	d := &mockDirector{sessionID: "sess-1", created: true}
-	deps := &Deps{Director: d}
-	resp, err := ScrubVolume(context.Background(), deps, ScrubVolumeReq{Name: "myvol"})
-	require.NoError(t, err)
-	require.Equal(t, "sess-1", resp.SessionID)
-	require.True(t, resp.Created)
-	require.Equal(t, "__grainfs_volumes", d.triggered.Bucket)
-	require.Equal(t, "__vol/myvol/blk_", d.triggered.KeyPrefix)
-}
-
-func TestScrubVolume_DryRun(t *testing.T) {
-	d := &mockDirector{sessionID: "sess-2", created: true}
-	deps := &Deps{Director: d}
-	_, err := ScrubVolume(context.Background(), deps, ScrubVolumeReq{Name: "myvol", DryRun: true})
-	require.NoError(t, err)
-	require.True(t, d.triggered.DryRun)
-}
-
-func TestScrubVolume_NoName(t *testing.T) {
-	d := &mockDirector{}
-	_, err := ScrubVolume(context.Background(), &Deps{Director: d}, ScrubVolumeReq{})
-	require.Error(t, err)
-}
-
-func TestScrubVolume_NoDirector(t *testing.T) {
-	_, err := ScrubVolume(context.Background(), &Deps{}, ScrubVolumeReq{Name: "v"})
-	require.Error(t, err)
-}
 
 func TestListScrubJobs_EmptyOK(t *testing.T) {
 	resp, err := ListScrubJobs(context.Background(), &Deps{Director: &mockDirector{}})
@@ -138,49 +106,6 @@ func TestTriggerScrub_ProposerError(t *testing.T) {
 type errAggTest string
 
 func (e errAggTest) Error() string { return string(e) }
-
-type mockExecutionExecutor struct {
-	gotPlan execution.Plan
-	result  execution.Result
-	err     error
-}
-
-func (m *mockExecutionExecutor) Execute(_ context.Context, plan execution.Plan) (execution.Result, error) {
-	m.gotPlan = plan
-	return m.result, m.err
-}
-
-func TestTriggerScrub_UsesExecutionExecutorWhenConfigured(t *testing.T) {
-	exec := &mockExecutionExecutor{result: execution.Result{Scrub: execution.ScrubResult{SessionID: "sid-exec", Created: true}}}
-
-	resp, err := TriggerScrub(context.Background(), &Deps{Execution: exec}, ScrubReq{Bucket: "ec1", DryRun: true})
-
-	require.NoError(t, err)
-	require.Equal(t, "sid-exec", resp.SessionID)
-	require.True(t, resp.Created)
-	require.Equal(t, execution.StrategyCluster, exec.gotPlan.Strategy)
-	require.Equal(t, "ec1", exec.gotPlan.Operation.Scrub.Bucket)
-	require.True(t, exec.gotPlan.Operation.Scrub.DryRun)
-}
-
-func TestTriggerScrub_ExecutionErrorUsesBoundedAdminCode(t *testing.T) {
-	exec := &mockExecutionExecutor{err: execution.NewError(execution.CodeRetry, execution.ErrAdmissionRejected)}
-
-	_, err := TriggerScrub(context.Background(), &Deps{Execution: exec}, ScrubReq{Bucket: "ec1"})
-
-	var ae *Error
-	require.ErrorAs(t, err, &ae)
-	require.Equal(t, "retry", ae.Code)
-}
-
-func TestTriggerScrub_ExecutionPreservesSessionIDCreatedContract(t *testing.T) {
-	exec := &mockExecutionExecutor{result: execution.Result{Scrub: execution.ScrubResult{SessionID: "sid-contract", Created: false}}}
-
-	resp, err := TriggerScrub(context.Background(), &Deps{Execution: exec}, ScrubReq{Bucket: "ec1"})
-
-	require.NoError(t, err)
-	require.Equal(t, ScrubResp{SessionID: "sid-contract", Created: false}, resp)
-}
 
 type mockScrubAggregator struct {
 	infos    []ScrubJobInfo

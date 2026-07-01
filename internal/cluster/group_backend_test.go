@@ -12,6 +12,7 @@ import (
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/raft"
 )
@@ -19,6 +20,15 @@ import (
 // newTestGroupBackend wires a single-voter GroupBackend backed by fresh
 // BadgerDB + RaftNode. Mirrors newTestDistributedBackend (single-node leader).
 func newTestGroupBackend(t clusterTestTB, groupID string) *GroupBackend {
+	t.Helper()
+	gb, _ := newTestGroupBackendWithDB(t, groupID)
+	return gb
+}
+
+// newTestGroupBackendWithDB is newTestGroupBackend plus the raw BadgerDB the
+// test opened, for raw verification / injection (GroupBackend no longer
+// exposes its store as *badger.DB).
+func newTestGroupBackendWithDB(t clusterTestTB, groupID string) (*GroupBackend, *badger.DB) {
 	t.Helper()
 	dir := t.TempDir()
 
@@ -50,11 +60,11 @@ func newTestGroupBackend(t clusterTestTB, groupID string) *GroupBackend {
 	require.True(t, node.IsLeader(), "no-peers node must become leader")
 
 	keeper, clusterID := testDEKKeeper(t)
-	svc := NewShardService(dir+"/shards", nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(dir+"/shards", nil, WithShardDEKKeeper(keeper, clusterID))
 	gb, err := NewGroupBackend(GroupBackendConfig{
 		ID:       groupID,
 		Root:     dir,
-		DB:       db,
+		Store:    badgermeta.Wrap(db),
 		Node:     node,
 		PeerIDs:  []string{"test-node"},
 		ShardSvc: svc,
@@ -65,6 +75,13 @@ func newTestGroupBackend(t clusterTestTB, groupID string) *GroupBackend {
 	stopApply := make(chan struct{})
 	go gb.RunApplyLoop(stopApply)
 
+	// Wire the direct-FSM MetaBucketStore so CreateBucket works in tests
+	// without a real meta-Raft cluster.
+	gb.SetMetaBucketStore(newDirectFSMMetaBucketStore(gb.fsm))
+	// The streaming chunked PUT path needs a non-nil ShardGroupSource (production
+	// wires one via the boot path); wire a single-node group over the group's peers.
+	wireTestShardGroup(gb.DistributedBackend)
+
 	t.Cleanup(func() {
 		close(stopApply)
 		_ = gb.Close()
@@ -73,7 +90,7 @@ func newTestGroupBackend(t clusterTestTB, groupID string) *GroupBackend {
 		}
 	})
 
-	return gb
+	return gb, db
 }
 
 func TestGroupBackend_ID(t *testing.T) {
@@ -97,23 +114,6 @@ func TestGroupBackend_PutGetRoundTrip(t *testing.T) {
 	got, err := io.ReadAll(r)
 	require.NoError(t, err)
 	require.True(t, bytes.Equal(body, got), "round-trip body mismatch: got %q want %q", got, body)
-}
-
-func TestGroupBackend_InternalPutObjectReadableViaReadAt(t *testing.T) {
-	gb := newTestGroupBackend(t, "group-internal-readat")
-
-	const bucket = "__grainfs_volumes"
-	require.NoError(t, gb.CreateBucket(context.Background(), bucket))
-
-	body := []byte("nbd-block-payload")
-	_, err := gb.PutObject(context.Background(), bucket, "__vol/default/blk_000000000000", bytes.NewReader(body), "application/octet-stream")
-	require.NoError(t, err)
-
-	buf := make([]byte, len(body))
-	n, err := gb.ReadAt(context.Background(), bucket, "__vol/default/blk_000000000000", 0, buf)
-	require.NoError(t, err)
-	require.Equal(t, len(body), n)
-	require.Equal(t, body, buf)
 }
 
 func TestGroupBackend_ListBuckets(t *testing.T) {
@@ -151,10 +151,10 @@ func TestGroupBackend_CloseIdempotent(t *testing.T) {
 	})
 
 	gb, err := NewGroupBackend(GroupBackendConfig{
-		ID:   "group-close",
-		Root: dir,
-		DB:   db,
-		Node: node,
+		ID:    "group-close",
+		Root:  dir,
+		Store: badgermeta.Wrap(db),
+		Node:  node,
 	})
 	require.NoError(t, err)
 

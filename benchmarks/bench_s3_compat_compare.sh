@@ -23,7 +23,14 @@ BENCH_DIR_PROVIDED=0
 if [[ -n "${BENCH_DIR:-}" ]]; then
   BENCH_DIR_PROVIDED=1
 else
-  BENCH_DIR="$(mktemp -d "${TMPDIR:-/tmp}/grainfs-s3-compat-compare.XXXXXX")"
+  # macOS caps unix-socket sun_path at 104 bytes; the default TMPDIR under
+  # /var/folders/... overflows it once the nested data dir + admin.sock are
+  # appended, so admin.sock bind fails with EINVAL. Use a short base on Darwin.
+  bench_tmp_base="${TMPDIR:-/tmp}"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    bench_tmp_base="/tmp"
+  fi
+  BENCH_DIR="$(mktemp -d "${bench_tmp_base%/}/grainfs-s3-compat-compare.XXXXXX")"
 fi
 BUCKET="${BUCKET:-bench}"
 WARP_BIN="${WARP_BIN:-$(command -v warp 2>/dev/null || true)}"
@@ -63,17 +70,6 @@ RUSTFS_ACCESS_KEY="${RUSTFS_ACCESS_KEY:-rustfsadmin}"
 RUSTFS_SECRET_KEY="${RUSTFS_SECRET_KEY:-rustfsadmin}"
 RUSTFS_RPC_SECRET="${RUSTFS_RPC_SECRET:-grainfs-bench-rustfs-rpc-secret}"
 
-if [[ -z "$WARP_BIN" ]]; then
-  echo "[error] warp is required for S3-compatible comparison benchmarks. Install minio/warp or set WARP_BIN." >&2
-  exit 1
-fi
-
-mkdir -p "$PROFILE_ROOT"
-if [[ "$BENCH_DIR_PROVIDED" == "1" ]]; then
-  rm -rf "$BENCH_DIR"
-fi
-mkdir -p "$BENCH_DIR"
-
 PIDS=()
 TARGET_DATA_DIRS=()
 START_BASE_URL=""
@@ -82,6 +78,7 @@ START_SECRET_KEY=""
 START_MODE=""
 STOP_GRACE_SECONDS="${STOP_GRACE_SECONDS:-5}"
 BACKENDS_STARTED=0
+CLEANED_UP=0
 
 set_start_info() {
   START_BASE_URL="$1"
@@ -177,18 +174,39 @@ PY
 }
 
 cleanup() {
+  if [[ "$CLEANED_UP" == "1" ]]; then
+    return 0
+  fi
+  CLEANED_UP=1
   if [[ "$BACKENDS_STARTED" == "1" ]]; then
     echo "[bench] stopping comparison backends..."
   fi
-  stop_pids "${PIDS[@]:-}"
-  stop_child_backends
+  if declare -F stop_pids >/dev/null; then
+    stop_pids "${PIDS[@]:-}"
+  fi
+  if declare -F stop_child_backends >/dev/null; then
+    stop_child_backends
+  fi
   if [[ "${KEEP_BENCH_DIR:-0}" != "1" ]]; then
     rm -rf "$BENCH_DIR" 2>/dev/null || true
   else
     echo "[bench] bench data dir saved to $BENCH_DIR"
   fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+
+if [[ -z "$WARP_BIN" ]]; then
+  echo "[error] warp is required for S3-compatible comparison benchmarks. Install minio/warp or set WARP_BIN." >&2
+  exit 1
+fi
+
+mkdir -p "$PROFILE_ROOT"
+if [[ "$BENCH_DIR_PROVIDED" == "1" ]]; then
+  rm -rf "$BENCH_DIR"
+fi
+mkdir -p "$BENCH_DIR"
 
 stop_pids() {
   local pids=("$@")
@@ -328,8 +346,6 @@ start_grainfs_single() {
     --data "$data_arg" \
     --port "$port" \
     $(bench_encryption_args) \
-    --nfs4-port 0 \
-    --nbd-port 0 \
     --scrub-interval 0 \
     --lifecycle-interval 0 \
     --log-level warn \
@@ -365,6 +381,7 @@ start_grainfs_cluster() {
   local cluster_dir="$BENCH_DIR/gfc"
   local http_ports=()
   local raft_ports=()
+  local join_ports=()
   local pprof_ports=()
   local urls=()
   local idx
@@ -374,6 +391,10 @@ start_grainfs_cluster() {
     register_target_data_dir "$cluster_dir/n${idx}"
     http_ports+=("$(bench_free_port)")
     raft_ports+=("$(bench_free_port)")
+    # Stable Zero-CA join-listener port per node. The genesis node serves the
+    # invite handler here; joiners bind their own (the invite bundle carries the
+    # seed's join-listener address, so joiners dial the seed's port).
+    join_ports+=("$(bench_free_port)")
     if [[ "$BENCH_PPROF" == "1" ]]; then
       pprof_ports+=("$((PPROF_BASE_PORT + idx - 1))")
     fi
@@ -381,8 +402,19 @@ start_grainfs_cluster() {
   if [[ "$BENCH_PPROF" == "1" ]]; then
     GRAINFS_PPROF_PORTS=("${pprof_ports[@]}")
   fi
+  # start_grainfs_cluster_node <node_idx> [invite_bundle]
+  #
+  # node 1 (no bundle) is the genesis seed: it pre-stages the cluster transport
+  # PSK and bootstraps the meta-raft group + initial shard groups. Nodes 2..N
+  # (with a bundle) join via the Zero-CA invite flow — GRAINFS_INVITE_BUNDLE
+  # carries the sealed PSK/KEK + cluster.id + the seed's join-listener address,
+  # so joiners need NO pre-staged keys. The legacy `.join-pending` file the bench
+  # used to write is dead code (never read at boot since the invite-join model
+  # landed) — without a real join, nodes 2..N booted as isolated solo clusters,
+  # which is why every shard group ended up single-voter (RF=1) on the seed.
   start_grainfs_cluster_node() {
     local node_idx="$1"
+    local invite_bundle="${2:-}"
     local zero_idx=$((node_idx - 1))
     local extra=()
     if [[ "$BENCH_PPROF" == "1" ]]; then
@@ -391,18 +423,27 @@ start_grainfs_cluster() {
     if [[ -n "${GRAINFS_SHARD_CACHE_SIZE:-}" ]]; then
       extra+=(--shard-cache-size "$GRAINFS_SHARD_CACHE_SIZE")
     fi
-    # Pre-stage the cluster transport PSK on disk (replaces the removed
-    # cluster-key flag). Idempotent; must precede serve.
-    mkdir -p "$cluster_dir/n${node_idx}/keys.d"
-    printf '%s\n' "bench-s3-compat-cluster-key" >"$cluster_dir/n${node_idx}/keys.d/current.key"
-    "$BINARY" serve \
+    if [[ -n "${GRAINFS_BOOTSTRAP_EXPECT_NODES:-}" ]]; then
+      # Option B: defer genesis seed until N nodes join → uniform RF (no RF=1 batch).
+      extra+=(--bootstrap-expect-nodes "$GRAINFS_BOOTSTRAP_EXPECT_NODES")
+    fi
+    local -a env_prefix=()
+    if [[ -z "$invite_bundle" ]]; then
+      # Genesis seed: pre-stage the cluster transport PSK on disk (replaces the
+      # removed cluster-key flag). Idempotent; must precede serve.
+      mkdir -p "$cluster_dir/n${node_idx}/keys.d"
+      printf '%s\n' "bench-s3-compat-cluster-key" >"$cluster_dir/n${node_idx}/keys.d/current.key"
+    else
+      # Joiner: the invite bundle delivers all cluster crypto + identity.
+      env_prefix=(env "GRAINFS_INVITE_BUNDLE=$invite_bundle")
+    fi
+    "${env_prefix[@]}" "$BINARY" serve \
       --data "$cluster_dir/n${node_idx}" \
       --port "${http_ports[$zero_idx]}" \
       --node-id "bench-node-${node_idx}" \
       --raft-addr "127.0.0.1:${raft_ports[$zero_idx]}" \
+      --join-listen-addr "127.0.0.1:${join_ports[$zero_idx]}" \
       $(bench_encryption_args) \
-      --nfs4-port 0 \
-      --nbd-port 0 \
       --scrub-interval 0 \
       --lifecycle-interval 0 \
       --log-level warn \
@@ -416,20 +457,22 @@ start_grainfs_cluster() {
   }
 
   start_grainfs_cluster_node 1
-  local kek_file="$cluster_dir/n1/keys/0.key"
-  local cluster_id_file="$cluster_dir/n1/cluster.id"
-  bench_wait_file "$kek_file" "grainfs-cluster node1 KEK" 100 0.2 >&2
-  bench_wait_file "$cluster_id_file" "grainfs-cluster node1 cluster.id" 100 0.2 >&2
+  bench_wait_file "$cluster_dir/n1/keys/0.key" "grainfs-cluster node1 KEK" 100 0.2 >&2
+  bench_wait_file "$cluster_dir/n1/cluster.id" "grainfs-cluster node1 cluster.id" 100 0.2 >&2
   bench_bootstrap_iam_credentials "$BINARY" "$cluster_dir/n1" "bench-s3-compat-cluster" >&2
+  # Nodes 2..N join the seed via single-use Zero-CA invite bundles minted on the
+  # seed's admin socket. Serial: each mint needs the live seed leader, and the
+  # leader's post-join hook (expandShardGroupsForJoinedNode) grows the shard-group
+  # set to the joined node count with RF=3 multi-node voters.
   for idx in $(seq 2 "$GRAINFS_CLUSTER_NODES"); do
-    mkdir -p "$cluster_dir/n${idx}/keys"
-    cp "$kek_file" "$cluster_dir/n${idx}/keys/0.key"
-    chmod 600 "$cluster_dir/n${idx}/keys/0.key"
-    cp "$cluster_id_file" "$cluster_dir/n${idx}/cluster.id"
-    chmod 600 "$cluster_dir/n${idx}/cluster.id"
-    printf '%s' "127.0.0.1:${raft_ports[0]}" >"$cluster_dir/n${idx}/.join-pending"
-    chmod 600 "$cluster_dir/n${idx}/.join-pending"
-    start_grainfs_cluster_node "$idx"
+    local bundle
+    bundle=$("$BINARY" cluster invite create --endpoint "$cluster_dir/n1/admin.sock" 2>/dev/null \
+      | awk 'f{print;exit} /GRAINFS_INVITE_BUNDLE:/{f=1}')
+    if [[ -z "$bundle" ]]; then
+      echo "[error] grainfs-cluster: failed to mint invite bundle for node${idx} via $cluster_dir/n1/admin.sock" >&2
+      return 1
+    fi
+    start_grainfs_cluster_node "$idx" "$bundle"
   done
 
   for idx in $(seq 1 "$GRAINFS_CLUSTER_NODES"); do
@@ -769,6 +812,7 @@ write_summary_header() {
     echo "- delete batch: ${WARP_DELETE_BATCH}"
     echo "- duration: ${WARP_DURATION}"
     echo "- concurrency: ${WARP_CONCURRENT}"
+    echo "- grainfs fsync mode: ${GRAINFS_FSYNC_MODE:-full} ($([ "${GRAINFS_FSYNC_MODE:-full}" = "fast" ] && echo "plain fsync(2) — matches MinIO's macOS durability" || echo "SyncFull = F_FULLFSYNC on macOS, full power-loss barrier"))"
     echo "- noclear: ${WARP_NOCLEAR}"
     echo "- host select: ${WARP_HOST_SELECT}"
     echo "- raw artifacts: ${PROFILE_ROOT}"
@@ -777,6 +821,8 @@ write_summary_header() {
     echo "> Method: all targets use signed S3 requests through warp, identical object size, concurrency, duration, and bucket lookup mode. PUT, GET, and DELETE are reported separately. By default (WARP_NOCLEAR=0) each op clears the objects it created, bounding peak disk to a single op's working set; set WARP_NOCLEAR=1 to retain objects across ops (GET then measures a warm-read pass over the preceding PUT, at the cost of unbounded accumulation). DELETE uses warp's batch delete workload."
     echo
     echo "> Caveat: GrainFS runs with at-rest encryption. Local MinIO/RustFS single-node targets use their default single-node durability; local \`*-cluster\` targets boot 4-node distributed clusters unless overridden."
+    echo
+    echo "> Durability caveat (PUT): GrainFS defaults to \`SyncFull\` = \`F_FULLFSYNC\` on macOS — a full drive-cache→platter barrier (~10-40ms per group-commit) for power-loss durability. MinIO's observed PUT median (~3.7ms) is far below one F_FULLFSYNC, so it does not pay that barrier per object on macOS. For a durability-MATCHED PUT comparison, run GrainFS with \`GRAINFS_FSYNC_MODE=fast\` (plain fsync(2)); at matched durability GrainFS beats MinIO on macOS (measured PUT ~1.48x, GET ~2.58x, same-run). On Linux \`SyncFull\` == plain fsync(2) (no F_FULLFSYNC), so the GrainFS default already runs at the \`fast\` throughput level there — the gap is a macOS-only durability artifact, not a throughput deficiency."
     bench_print_host_preflight_warnings
     echo
     echo "| target | mode | op | MiB/s | obj/s | errors | ratio vs MinIO | ratio vs RustFS | artifacts |"

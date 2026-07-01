@@ -10,11 +10,7 @@ import (
 type Protocol string
 
 const (
-	ProtocolS3      Protocol = "s3"
-	ProtocolIceberg Protocol = "iceberg"
-	ProtocolNFS     Protocol = "nfs"
-	Protocol9P      Protocol = "9p"
-	ProtocolNBD     Protocol = "nbd"
+	ProtocolS3 Protocol = "s3"
 )
 
 type Mode string
@@ -95,7 +91,7 @@ func ValidateCreateRequest(req CreateRequest) error {
 
 func validProtocol(p Protocol) bool {
 	switch p {
-	case ProtocolS3, ProtocolIceberg, ProtocolNFS, Protocol9P, ProtocolNBD:
+	case ProtocolS3:
 		return true
 	default:
 		return false
@@ -107,20 +103,12 @@ func validMode(m Mode) bool {
 }
 
 func validResource(resource string) bool {
-	for _, prefix := range []string{"bucket/", "volume/", "catalog/"} {
+	for _, prefix := range []string{"bucket/"} {
 		if strings.HasPrefix(resource, prefix) && len(resource) > len(prefix) {
 			return true
 		}
 	}
 	return false
-}
-
-func resourceName(resource string) string {
-	_, name, ok := strings.Cut(resource, "/")
-	if !ok {
-		return resource
-	}
-	return name
 }
 
 func cloneTime(t *time.Time) *time.Time {

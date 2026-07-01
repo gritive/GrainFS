@@ -166,38 +166,26 @@ The command removes the peer from meta-Raft membership, burns pending invites
 for the same node ID, deny-lists the node transport SPKI, and closes cached cluster
 transport connections to that peer.
 
-### Data-group voter eviction
+### Data-group roster eviction
 
-Revoking a node also evicts it from the per-data-group Raft voter sets it
-belonged to. Each surviving data-group leader runs an eviction controller that,
-on the next tick (within ~30s) or on the revoke wake, removes the revoked node
-from the groups it leads (adding a healthy replacement when one is available,
-otherwise shrinking the group). This is eventually-consistent: the node leaves
-every group whose quorum allows the change.
+Revoking a node also evicts it from the shard-group placement rosters it
+belonged to. Each node runs a roster reconciler that, on the next tick (within
+~30s) or on the revoke wake, proposes updated `ShardGroupEntry` metadata
+(adding a healthy replacement when one is available, otherwise shrinking the
+group). This is eventually-consistent: the node leaves the replicated roster
+after the meta-Raft proposal applies.
 
-Confirm the eviction completed by reading the real Raft voter set per group:
+Confirm the eviction completed by reading the placement roster per group:
 
 ```bash
 grainfs cluster --endpoint "$LEADER_DATA/admin.sock" --format json health \
-  | jq '.data_groups.groups[] | {group_id, raft_voters, peer_ids}'
+  | jq '.data_groups.groups[] | {group_id, peer_ids}'
 ```
 
-`raft_voters` is the live committed voter set (resolved to node IDs); a revoked
-node should disappear from `raft_voters` across all groups, and from the
-`peer_ids` placement mirror shortly after. Aggregate across every node's admin
-socket — a group led by a node other than the one you query reports its real
-voters only on that leader.
-
-**Limitation — a 2-voter group whose other voter is revoked cannot self-heal.**
-If a data group has exactly `[revoked-node, one-survivor]`, the survivor cannot
-commit the removal: Raft joint consensus needs a quorum of the old 2-voter
-config, which includes the now-unreachable revoked node. The controller logs
-`evacuator: eviction failed; retry next tick` for that group and the revoked node
-stays in `raft_voters`. Detection: the revoked node persists in `raft_voters` for
-a group plus that repeating log line. Remedy: an operator must intervene, or run
-`complete-cutover` to drop the cluster key (the hard-security path that excludes
-the revoked SPKI from the accept-set regardless of voter membership). Groups with
-replication factor 3 or higher evict automatically.
+`peer_ids` is the source-of-truth placement roster. A revoked node should
+disappear from `peer_ids` across all groups once the reconciler proposal applies.
+If a proposal fails, the reconciler logs `evacuator: eviction failed; retry next
+tick` and retries on the next wake/tick.
 
 ## Troubleshooting
 

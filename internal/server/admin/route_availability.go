@@ -4,7 +4,6 @@ type routeFeature uint8
 
 const (
 	routeFeatureBuckets routeFeature = iota
-	routeFeatureNfsExports
 	routeFeatureIAM
 )
 
@@ -22,7 +21,6 @@ type routeAvailabilityEntry struct {
 
 var routeAvailabilityManifest = []routeAvailabilityEntry{
 	{feature: routeFeatureBuckets, name: "buckets", unavailableMode: routeHiddenWhenUnavailable},
-	{feature: routeFeatureNfsExports, name: "nfs_exports", unavailableMode: routeHiddenWhenUnavailable},
 	{feature: routeFeatureIAM, name: "iam", unavailableMode: routeHiddenWhenUnavailable},
 }
 
@@ -42,8 +40,6 @@ func routeFeatureAvailable(d *Deps, feature routeFeature) bool {
 	switch feature {
 	case routeFeatureBuckets:
 		return d.Buckets != nil
-	case routeFeatureNfsExports:
-		return d.NfsExports != nil
 	case routeFeatureIAM:
 		return d.IAM != nil
 	default:

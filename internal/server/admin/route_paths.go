@@ -7,21 +7,7 @@ const (
 	routePathClusterPeers          = "/cluster/peers"
 	routePathResourceVlogBreakdown = "/resource/vlog/breakdown"
 
-	routePathStorageProtocols  = "/storage/protocols"
-	routePathStorageBuckets    = "/storage/buckets"
-	routePathStorageNfsExports = "/storage/nfs/exports"
-	routePathStorageNfsExport  = "/storage/nfs/exports/:name"
-	routePathStorageNfsDebug   = "/storage/nfs/exports/:name/debug"
-
-	routePathVolumes           = "/volumes"
-	routePathVolume            = "/volumes/:name"
-	routePathVolumeStat        = "/volumes/:name/stat"
-	routePathVolumeResize      = "/volumes/:name/resize"
-	routePathVolumeRecalculate = "/volumes/:name/recalculate"
-	routePathVolumeWriteAt     = "/volumes/:name/write-at"
-	routePathVolumeReadAt      = "/volumes/:name/read-at"
-
-	routePathVolumeScrub = "/volumes/:name/scrub"
+	routePathStorageBuckets = "/storage/buckets"
 
 	routePathScrub           = "/scrub"
 	routePathScrubJobs       = "/scrub/jobs"
@@ -37,10 +23,6 @@ const (
 	routePathBucket           = "/buckets/:name"
 	routePathBucketPolicy     = "/buckets/:name/policy"
 	routePathBucketVersioning = "/buckets/:name/versioning"
-
-	routePathNfsExports = "/nfs/exports"
-	routePathNfsDebug   = "/nfs/exports/:name/debug"
-	routePathNfsExport  = "/nfs/exports/:name"
 
 	routePathConfig      = "/config"
 	routePathConfigByKey = "/config/:key"
@@ -61,22 +43,9 @@ const (
 	routePathIAMGroupMember       = "/iam/group/:name/member/:said"
 	routePathIAMGroupPolicyAttach = "/iam/group/:name/policy/:policy"
 
-	// MountSA routes: policy sub-path listed before bare :name to ensure
-	// more-specific routes are registered first (avoids Hertz param capture).
-	routePathIAMMountSA             = "/iam/mount-sa"
-	routePathIAMMountSAByName       = "/iam/mount-sa/:name"
-	routePathIAMMountSAPolicyAttach = "/iam/mount-sa/:name/policy/:policy"
-
 	// PDP bearer-token: set (POST, token in body) / clear (DELETE) / show (GET).
 	routePathIAMPDPToken  = "/iam/pdp/token"
 	routePathIAMPDPStatus = "/iam/pdp/status"
-
-	routePathAuditQuery        = "/audit/query"
-	routePathAuditRecentDenies = "/audit/recent-denies"
-	routePathAuditBySA         = "/audit/by-sa/:said"
-	routePathAuditByRequestID  = "/audit/by-request-id/:rid"
-
-	routePathIcebergConfig = "/iceberg/config"
 
 	routePathStatus = "/status"
 

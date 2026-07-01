@@ -27,10 +27,8 @@ type Backend struct {
 }
 
 var (
-	_ storage.Backend            = (*Backend)(nil)
-	_ storage.Snapshotable       = (*Backend)(nil)
-	_ storage.BucketSnapshotable = (*Backend)(nil)
-	_ storage.PartialIO          = (*Backend)(nil)
+	_ storage.Backend   = (*Backend)(nil)
+	_ storage.PartialIO = (*Backend)(nil)
 )
 
 // NewBackend creates a pull-through caching backend. The Resolver returns
@@ -156,49 +154,6 @@ func (b *Backend) PreferWriteAt(bucket string) bool {
 	return ok && pref.PreferWriteAt(bucket)
 }
 
-// WALOffset forwards PITR snapshot anchors through the pull-through decorator.
-func (b *Backend) WALOffset() uint64 {
-	type walProvider interface{ WALOffset() uint64 }
-	if wp, ok := b.Backend.(walProvider); ok {
-		return wp.WALOffset()
-	}
-	return 0
-}
-
-// ListAllObjects implements storage.Snapshotable by delegating to the wrapped
-// backend. Embedding storage.Backend does not promote Snapshotable, so this
-// forwarding is required for PITR snapshots to see through the pull-through layer.
-func (b *Backend) ListAllObjects() ([]storage.SnapshotObject, error) {
-	if snap, ok := b.Backend.(storage.Snapshotable); ok {
-		return snap.ListAllObjects()
-	}
-	return nil, storage.ErrSnapshotNotSupported
-}
-
-// RestoreObjects implements storage.Snapshotable by delegating to the wrapped backend.
-func (b *Backend) RestoreObjects(objects []storage.SnapshotObject) (int, []storage.StaleBlob, error) {
-	if snap, ok := b.Backend.(storage.Snapshotable); ok {
-		return snap.RestoreObjects(objects)
-	}
-	return 0, nil, storage.ErrSnapshotNotSupported
-}
-
-// ListAllBuckets implements storage.BucketSnapshotable by delegating to the wrapped backend.
-func (b *Backend) ListAllBuckets() ([]storage.SnapshotBucket, error) {
-	if bs, ok := b.Backend.(storage.BucketSnapshotable); ok {
-		return bs.ListAllBuckets()
-	}
-	return nil, nil
-}
-
-// RestoreBuckets implements storage.BucketSnapshotable by delegating to the wrapped backend.
-func (b *Backend) RestoreBuckets(buckets []storage.SnapshotBucket) error {
-	if bs, ok := b.Backend.(storage.BucketSnapshotable); ok {
-		return bs.RestoreBuckets(buckets)
-	}
-	return nil
-}
-
 // HeadObject returns metadata from the local cache. On miss it pulls via GetObject
 // (since S3Upstream has no HeadObject), caches the body, and returns the metadata.
 func (b *Backend) HeadObject(ctx context.Context, bucket, key string) (*storage.Object, error) {
@@ -258,14 +213,40 @@ func (b *Backend) GetObject(ctx context.Context, bucket, key string) (io.ReadClo
 		ct = upObj.ContentType
 	}
 
-	// Stream upstream → local cache. If upstream fails mid-stream, PutObject
-	// returns the upstream error and the local backend removes any partial file.
-	if _, err := b.Backend.PutObject(ctx, bucket, key, upRC, ct); err != nil {
+	// Stream upstream → local cache. The upstream reports the object's exact byte
+	// length (Content-Length), so thread it as an exact SizeHint when the inner
+	// backend can persist a full request — this takes the no-spool streaming write
+	// path instead of staging the whole body to a temp file first. If upstream
+	// fails mid-stream the write returns the upstream error and the local backend
+	// removes any partial file. Backends without RequestPutter (or an unknown
+	// upstream size) keep the bare-PutObject fallback.
+	if err := b.cacheUpstreamObject(ctx, bucket, key, ct, upRC, upObj); err != nil {
 		return nil, nil, fmt.Errorf("cache upstream object: %w", err)
 	}
 
 	// 2-pass: return a fresh reader from the local cache.
 	return b.Backend.GetObject(ctx, bucket, key)
+}
+
+// cacheUpstreamObject persists the upstream body into the inner backend. When the
+// upstream reports an exact size and the inner backend supports full requests, it
+// threads an exact SizeHint so the write streams without spooling; otherwise it
+// falls back to the bare PutObject.
+func (b *Backend) cacheUpstreamObject(ctx context.Context, bucket, key, ct string, body io.Reader, upObj *storage.Object) error {
+	if putter, ok := b.Backend.(storage.RequestPutter); ok && upObj != nil && upObj.Size >= 0 {
+		size := upObj.Size
+		_, err := putter.PutObjectWithRequest(ctx, storage.PutObjectRequest{
+			Bucket:        bucket,
+			Key:           key,
+			Body:          body,
+			ContentType:   ct,
+			SizeHint:      &size,
+			SizeHintExact: true,
+		})
+		return err
+	}
+	_, err := b.Backend.PutObject(ctx, bucket, key, body, ct)
+	return err
 }
 
 func isNotFound(err error) bool {

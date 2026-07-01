@@ -130,8 +130,6 @@ func classifyFDTarget(target string) Category {
 		return FDCategoryBadger
 	case strings.Contains(lower, "receipt") || strings.Contains(lower, "event"):
 		return FDCategoryReceiptOrEventStore
-	case strings.Contains(lower, "/nfs") || strings.Contains(lower, "nfs-") || strings.Contains(lower, "nfs_") || strings.Contains(lower, "session"):
-		return FDCategoryNFSSession
 	case strings.Contains(lower, "/") || strings.Contains(lower, ".log") || strings.Contains(lower, ".db"):
 		return FDCategoryRegularFile
 	default:

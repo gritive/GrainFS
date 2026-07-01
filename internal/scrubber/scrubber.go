@@ -12,6 +12,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/time/rate"
 
 	"github.com/gritive/GrainFS/internal/chunkref"
@@ -89,21 +90,6 @@ type PlainRecord struct {
 	ContentType string
 }
 
-// AppendableRecord carries metadata for an appendable object so the scrubber
-// can build the known-segment set for orphan sweep.
-type AppendableRecord struct {
-	Bucket         string
-	Key            string
-	SegmentBlobIDs []string // raw segment blob IDs (bounded by coalesce threshold)
-}
-
-// AppendableScannable is an optional Scrubbable extension that streams
-// appendable objects for a bucket. Cluster backends implement this so the
-// scrubber can build the known-segment set for orphan sweep.
-type AppendableScannable interface {
-	ScanAppendableObjects(bucket string) (<-chan AppendableRecord, error)
-}
-
 // segmentManifestSource exposes the authoritative chunk-reference sources the
 // orphan-segment sweep must treat as "known": live object versions (all
 // versions, not just appendable) and snapshot-frozen chunks. Packed small
@@ -123,13 +109,16 @@ type segmentManifestSource interface {
 	AllFrozenSegmentPaths() (map[string][]string, error)
 }
 
-// caughtUpReporter lets a backend signal that its local metadata view is
-// up-to-date enough to safely compute the known-set. A lagging node's
-// ListAllObjects is stale and could mark a committed segment as orphaned, so
-// the sweep is skipped for the whole cycle when CaughtUp() is false. The ctx
-// bounds the underlying ReadIndex barrier so the gate never stalls the cycle.
-type caughtUpReporter interface {
-	CaughtUp(ctx context.Context) bool
+// segmentBucketLister supplies the multi-group bucket list the orphan-segment
+// sweep iterates: the union of every locally-hosted group's buckets. Segments
+// live per-group under each group's b.root, so without this the sweep would only
+// reach group-0's buckets (s.backend.ListBuckets is group-0-scoped). Per-bucket
+// caught-up is enforced inside the backend's WalkOrphanSegments dispatch (only the
+// caught-up leader of a group GCs its segments). Fail-closed: an error skips the
+// segment sweep this cycle. Backends that don't implement it fall back to
+// s.backend.ListBuckets() (single-group behavior).
+type segmentBucketLister interface {
+	SegmentSweepBuckets(ctx context.Context) ([]string, error)
 }
 
 // segmentOrphanLog persists when a raw segment blob first became unreferenced
@@ -204,6 +193,14 @@ func (s *BackgroundScrubber) hoistSegmentSources() (segByBucket map[string]map[s
 	return segByBucket, frozenByBucket, true
 }
 
+// RedundancyUpgrader is an optional interface a backend implements to relocate
+// non-redundant (1+0) EC objects — written while the cluster was single-node —
+// into a redundant placement group. The sweep runs at the end of each scrub
+// cycle when enabled, returning the count relocated.
+type RedundancyUpgrader interface {
+	RunRedundancyUpgradeSweep(ctx context.Context, maxPerCycle int, minAge time.Duration) (int, error)
+}
+
 // Migrator is an optional interface ECBackend can implement to enable plain→EC migration.
 // If the backend implements this, the scrubber will re-encode plain objects each cycle.
 type Migrator interface {
@@ -266,6 +263,9 @@ type BackgroundScrubber struct {
 	stats           ScrubStats
 	statsSnap       atomic.Value // published at end of each cycle; stores ScrubStats
 	orphanTombstone map[string]struct{}
+	// orphanVersionTombstone tracks dangling per-version quorum-meta blobs seen in
+	// the previous cycle (parallel to orphanTombstone for EC shards).
+	orphanVersionTombstone map[string]struct{}
 	// segmentTombstone tracks raw segment orphan candidates across cycles
 	// (parallel to orphanTombstone for EC shards).
 	segmentTombstone map[string]struct{}
@@ -282,9 +282,17 @@ type BackgroundScrubber struct {
 	mu           sync.RWMutex
 	lastStatuses map[string]ShardStatus // "bucket/key" → last observed status
 
+	// redundancyUpgradeEnabled gates the end-of-cycle EC redundancy-upgrade sweep
+	// (relocate 1+0 objects into a redundant group). Disabled by default; config
+	// wires it. redundancyUpgradeMaxPerCycle bounds relocations per cycle;
+	// redundancyUpgradeMinAge is the minimum object age before relocation.
+	redundancyUpgradeEnabled     bool
+	redundancyUpgradeMaxPerCycle int
+	redundancyUpgradeMinAge      time.Duration
+
 	// Replication-source registry. EC scrub keeps using the legacy runOnce
-	// path above; replication sources (volume blocks today, future internal
-	// buckets tomorrow) ride the same interval ticker via SourceRunOnce.
+	// path above; replication sources (internal full-object-replicated
+	// buckets) ride the same interval ticker via SourceRunOnce.
 	sources   map[string]BlockSource
 	verifiers map[string]BlockVerifier
 }
@@ -336,16 +344,17 @@ func WithSegmentOrphanLog(log segmentOrphanLog, window time.Duration) ScrubberOp
 // New creates a BackgroundScrubber with a rate limit of 100 scans/sec.
 func New(backend Scrubbable, interval time.Duration, opts ...ScrubberOption) *BackgroundScrubber {
 	s := &BackgroundScrubber{
-		backend:          backend,
-		verifier:         NewShardVerifier(backend),
-		repairer:         NewRepairEngine(backend),
-		emitter:          NoopEmitter{},
-		interval:         interval,
-		resetCh:          make(chan time.Duration, 1),
-		limiter:          rate.NewLimiter(100, 10),
-		lastStatuses:     make(map[string]ShardStatus),
-		orphanTombstone:  make(map[string]struct{}),
-		segmentTombstone: make(map[string]struct{}),
+		backend:                backend,
+		verifier:               NewShardVerifier(backend),
+		repairer:               NewRepairEngine(backend),
+		emitter:                NoopEmitter{},
+		interval:               interval,
+		resetCh:                make(chan time.Duration, 1),
+		limiter:                rate.NewLimiter(100, 10),
+		lastStatuses:           make(map[string]ShardStatus),
+		orphanTombstone:        make(map[string]struct{}),
+		orphanVersionTombstone: make(map[string]struct{}),
+		segmentTombstone:       make(map[string]struct{}),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -398,6 +407,17 @@ func (s *BackgroundScrubber) SetInterval(d time.Duration) {
 		}
 		s.resetCh <- d
 	}
+}
+
+// EnableRedundancyUpgrade turns on the end-of-cycle EC redundancy-upgrade sweep
+// and bounds relocations per cycle to maxPerCycle. minAge is the minimum object
+// age before the sweep relocates an object (avoids racing in-flight writes).
+// Must be called before Start. The sweep only runs when the backend implements
+// RedundancyUpgrader.
+func (s *BackgroundScrubber) EnableRedundancyUpgrade(maxPerCycle int, minAge time.Duration) {
+	s.redundancyUpgradeEnabled = true
+	s.redundancyUpgradeMaxPerCycle = maxPerCycle
+	s.redundancyUpgradeMinAge = minAge
 }
 
 // RegisterSource attaches a BlockSource/BlockVerifier pair for replication
@@ -489,6 +509,15 @@ func (s *BackgroundScrubber) RunOnce(ctx context.Context) {
 	s.runOnce(ctx)
 }
 
+// runOnce is the thin per-cycle sequencer. Each phase is delegated to a private
+// helper; runOnce owns only the cycle otel span, the ListBuckets precondition,
+// and the final stats finalization.
+//
+// Cancellation contract: a mid-scan ctx cancellation aborts the WHOLE cycle —
+// scanAndRepair reports cancelled=true and runOnce returns BEFORE any downstream
+// sweep or stats finalization. Folding cancellation into a plain return (so the
+// cycle flows into downstream sweeps with a cancelled ctx) is an observable
+// behavior change; see TestRunOnce_CancelMidScan_SkipsDownstreamAndStats.
 func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 	tr := otel.GetTracerProvider().Tracer(otelTracerName)
 	ctx, cycleSpan := tr.Start(ctx, "scrub.cycle")
@@ -502,21 +531,7 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 		return
 	}
 
-	// If signing is unavailable, skip repairs this cycle to avoid producing
-	// unaudited sessions with no receipt. Verification (detect phase) still
-	// runs so the dashboard shows degraded state while signing is down.
-	signingOK := true
-	if checker, ok := s.emitter.(SigningHealthChecker); ok {
-		if !checker.SigningHealthy() {
-			signingOK = false
-			log.Warn().Msg("scrub: signing unavailable, skipping repairs this cycle")
-		}
-	}
-	// sessionFinalizer is non-nil only when signing is available.
-	var sessionFinalizer SessionFinalizer
-	if signingOK {
-		sessionFinalizer, _ = s.emitter.(SessionFinalizer)
-	}
+	signingOK, sessionFinalizer := s.resolveSigningState()
 
 	// Cluster-mode opt-in: when the backend implements ShardOwner, we only
 	// verify the shards this node actually holds; peer-owned shards are each
@@ -527,127 +542,11 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 	owner, _ := s.backend.(ShardOwner)
 	repairer, _ := s.backend.(ShardRepairer)
 
-	knownDirs := make(map[string]bool)
-	repairCount := 0
-	for _, bucket := range buckets {
-		objCh, err := s.backend.ScanObjects(bucket)
-		if err != nil {
-			log.Warn().Str("bucket", bucket).Err(err).Msg("scrub: scan objects failed")
-			continue
-		}
-		for rec := range objCh {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-
-			// Throttle scan to protect foreground I/O (Eng Review #8)
-			if err := s.limiter.Wait(ctx); err != nil {
-				return
-			}
-
-			// Race check: object may have been deleted since scan (Eng Review #9)
-			exists, err := s.backend.ObjectExists(rec.Bucket, rec.Key)
-			if err != nil || !exists {
-				continue
-			}
-
-			// Resolve the indices to verify. In ShardOwner mode an empty
-			// result means "nothing on this node" — skip the object wholesale
-			// so the orphan sweep doesn't mistake an unverified object for
-			// a healthy one.
-			var indices []int
-			if owner != nil {
-				indices = owner.OwnedShards(rec.Bucket, rec.Key, rec.VersionID, owner.NodeID())
-				if len(indices) == 0 {
-					continue
-				}
-			}
-
-			// Track shard dir as known (for orphan sweep).
-			total := rec.DataShards + rec.ParityShards
-			if total > 0 {
-				paths := s.backend.ShardPaths(rec.Bucket, rec.Key, rec.VersionID, total)
-				if len(paths) > 0 {
-					knownDirs[shardDirFromPath(paths[0])] = true
-				}
-			}
-
-			metrics.ScrubObjectsCheckedTotal.Inc()
-			s.stats.ObjectsChecked++
-
-			status := s.verifier.VerifyIndices(rec, indices)
-
-			s.mu.Lock()
-			s.lastStatuses[rec.Bucket+"/"+rec.Key] = status
-			s.mu.Unlock()
-
-			if status.IsHealthy() {
-				continue
-			}
-
-			// Group every event for this object's repair under one correlation ID.
-			correlationID := newCorrelationID()
-			s.emitDetect(rec, status, correlationID)
-
-			if len(status.Unverified) > 0 {
-				metrics.ECScrubUnverifiedShardsTotal.WithLabelValues("legacy_no_crc").Add(float64(len(status.Unverified)))
-			}
-			if len(status.Missing) == 0 && len(status.Corrupt) == 0 && len(status.Unverified) > 0 {
-				continue
-			}
-
-			errCount := int64(len(status.Missing) + len(status.Corrupt))
-			metrics.ScrubShardErrorsTotal.Add(float64(errCount))
-			s.stats.ShardErrors += errCount
-			if len(status.Unverified) > 0 {
-				ev := newRepairEvent(PhaseReconstruct, OutcomeSkipped, rec, correlationID)
-				ev.ErrCode = "legacy_no_crc"
-				s.emitter.Emit(ev)
-				continue
-			}
-
-			// Per-cycle repair cap (Eng Review #5)
-			if repairCount >= maxRepairsPerCycle {
-				metrics.ScrubSkippedOverCapTotal.Inc()
-				ev := newRepairEvent(PhaseReconstruct, OutcomeSkipped, rec, correlationID)
-				ev.ErrCode = "cycle_cap"
-				s.emitter.Emit(ev)
-				continue
-			}
-
-			// Signing unavailable this cycle: skip repair to preserve the
-			// "no unsigned receipts" audit invariant.
-			if !signingOK {
-				continue
-			}
-
-			repaired, rerr := s.repairOne(ctx, rec, status, correlationID, repairer)
-			if rerr != nil {
-				metrics.ECDegradedTotal.Inc()
-				s.stats.Unrepairable++
-				log.Error().Str("bucket", rec.Bucket).Str("key", rec.Key).Err(rerr).Msg("scrub: unrepairable")
-				continue
-			}
-			metrics.ScrubRepairedTotal.Inc()
-			metrics.HealShardsRepairedTotal.Add(float64(repaired))
-			s.stats.Repaired++
-			repairCount++
-
-			// Notify the emitter that this repair session is complete so it
-			// can aggregate the session's HealEvents into a signed HealReceipt.
-			// Re-check signing health: the key store may have rotated out after
-			// the cycle-start check; calling FinalizeSession when signing is
-			// gone would silently drop the receipt.
-			if sessionFinalizer != nil {
-				if checker, ok := s.emitter.(SigningHealthChecker); ok && !checker.SigningHealthy() {
-					log.Warn().Str("correlation_id", correlationID).Msg("scrub: signing unavailable mid-cycle, receipt dropped")
-				} else {
-					sessionFinalizer.FinalizeSession(correlationID)
-				}
-			}
-		}
+	knownDirs, cancelled := s.scanAndRepair(ctx, buckets, owner, repairer, signingOK, sessionFinalizer)
+	if cancelled {
+		// Abort-everything: a mid-scan cancellation skips every downstream phase
+		// AND the stats finalization below, preserving the pre-refactor behavior.
+		return
 	}
 
 	// Optional: migrate plain objects to EC if backend supports it.
@@ -656,63 +555,285 @@ func (s *BackgroundScrubber) runOnce(ctx context.Context) {
 	}
 
 	// Optional: sweep orphan raw segment files left by interrupted appends.
-	segmentScanner, hasSegScanner := s.backend.(AppendableScannable)
-	segmentWalker, hasSegWalker := s.backend.(OrphanSegmentWalkable)
-	if hasSegScanner && hasSegWalker {
-		// (E) caught-up gate: a lagging node's ListAllObjects is stale and could
-		// mark a committed segment orphan. Skip the whole segment sweep this cycle.
-		if cu, ok := s.backend.(caughtUpReporter); ok && !cu.CaughtUp(ctx) {
-			log.Warn().Msg("scrub: node not caught up, skipping orphan-segment sweep this cycle")
-		} else if segByBucket, frozenByBucket, sourcesOK := s.hoistSegmentSources(); sourcesOK {
-			// (G) reconcile: a segment in the known-set is referenced -> must not
-			// carry a t_zero. Clear stale entries (covers re-reference across
-			// restart) before observing/sweeping.
-			if s.orphanLog != nil {
-				known := make(map[chunkref.ChunkID]struct{})
-				for _, paths := range frozenByBucket {
-					for _, p := range paths {
-						known[chunkref.ChunkID(blobIDOf(p))] = struct{}{}
-					}
-				}
-				for _, m := range segByBucket {
-					for p := range m {
-						known[chunkref.ChunkID(blobIDOf(p))] = struct{}{}
-					}
-				}
-				if err := s.orphanLog.Reconcile(known); err != nil {
-					log.Warn().Err(err).Msg("scrub: orphan-log reconcile failed")
-				}
-			}
-			segCapRemaining := maxSegmentsPerCycle
-			for _, bucket := range buckets {
-				knownSegmentsB := make(map[string]bool)
-				if appCh, appErr := segmentScanner.ScanAppendableObjects(bucket); appErr != nil {
-					log.Warn().Str("bucket", bucket).Err(appErr).Msg("scrub: scan appendable failed")
-				} else {
-					for rec := range appCh {
-						for _, blobID := range rec.SegmentBlobIDs {
-							knownSegmentsB[storage.SegmentKnownPath(rec.Bucket, rec.Key, blobID)] = true
-						}
-					}
-				}
-				for k, v := range buildKnownSegments(bucket, segByBucket, frozenByBucket) {
-					knownSegmentsB[k] = v
-				}
-				segCapRemaining = s.segmentSweepBucket(segmentWalker, bucket, knownSegmentsB, segCapRemaining)
-			}
-		}
-		// hoistSegmentSources returned ok=false: it already logged and the whole
-		// segment sweep is skipped this cycle (fail-closed against a partial
-		// known-set).
-	}
+	s.sweepOrphanSegments(ctx, buckets)
 
 	// Optional: sweep orphan shard dirs left by migration crashes.
 	if walker, ok := s.backend.(OrphanWalkable); ok {
 		s.orphanSweep(walker, knownDirs)
 	}
 
+	// Optional: reclaim dangling per-version quorum-meta blobs whose FSM record
+	// is gone (residual of a partially-failed S2a hard-delete dual-delete).
+	if vw, ok := s.backend.(OrphanQuorumMetaVersionWalkable); ok {
+		s.orphanVersionSweep(vw)
+	}
+
+	// Optional: relocate non-redundant (1+0) EC objects into a redundant group.
+	if s.redundancyUpgradeEnabled {
+		s.upgradeRedundancy(ctx, cycleSpan)
+	}
+
 	s.stats.LastRun = time.Now()
 	s.statsSnap.Store(s.stats)
+}
+
+// resolveSigningState determines whether repairs may run this cycle. If signing
+// is unavailable we skip repairs to avoid producing unaudited sessions with no
+// receipt; verification (detect phase) still runs so the dashboard shows
+// degraded state while signing is down. sessionFinalizer is non-nil only when
+// signing is available.
+func (s *BackgroundScrubber) resolveSigningState() (signingOK bool, finalizer SessionFinalizer) {
+	signingOK = true
+	if checker, ok := s.emitter.(SigningHealthChecker); ok {
+		if !checker.SigningHealthy() {
+			signingOK = false
+			log.Warn().Msg("scrub: signing unavailable, skipping repairs this cycle")
+		}
+	}
+	if signingOK {
+		finalizer, _ = s.emitter.(SessionFinalizer)
+	}
+	return signingOK, finalizer
+}
+
+// scanAndRepair runs the scan+repair pass across every bucket. It owns the
+// cycle-global repairCount cap (shared across buckets — splitting the bucket
+// loop would reset the cap) and accumulates knownDirs across ALL buckets for
+// the downstream orphan-shard sweep (a knownDirs that emptied before the scan
+// finished risks false-orphan deletion). It returns cancelled=true when the
+// scan observed ctx cancellation, signalling runOnce to abort the whole cycle.
+func (s *BackgroundScrubber) scanAndRepair(
+	ctx context.Context,
+	buckets []string,
+	owner ShardOwner,
+	repairer ShardRepairer,
+	signingOK bool,
+	sessionFinalizer SessionFinalizer,
+) (knownDirs map[string]bool, cancelled bool) {
+	knownDirs = make(map[string]bool)
+	repairCount := 0
+	for _, bucket := range buckets {
+		objCh, err := s.backend.ScanObjects(bucket)
+		if err != nil {
+			log.Warn().Str("bucket", bucket).Err(err).Msg("scrub: scan objects failed")
+			continue
+		}
+		for rec := range objCh {
+			if s.scrubOneObject(ctx, rec, owner, repairer, signingOK, sessionFinalizer, knownDirs, &repairCount) {
+				return knownDirs, true
+			}
+		}
+	}
+	return knownDirs, false
+}
+
+// scrubOneObject processes a single scanned object. It returns cancelled=true
+// ONLY for the abort-everything cases (ctx.Done / limiter error) so the caller
+// stops the whole cycle; every skip-this-object case returns false to advance
+// to the next object (the pre-refactor `continue` semantics).
+func (s *BackgroundScrubber) scrubOneObject(
+	ctx context.Context,
+	rec ObjectRecord,
+	owner ShardOwner,
+	repairer ShardRepairer,
+	signingOK bool,
+	sessionFinalizer SessionFinalizer,
+	knownDirs map[string]bool,
+	repairCount *int,
+) (cancelled bool) {
+	select {
+	case <-ctx.Done():
+		return true
+	default:
+	}
+
+	// Throttle scan to protect foreground I/O (Eng Review #8)
+	if err := s.limiter.Wait(ctx); err != nil {
+		return true
+	}
+
+	// Race check: object may have been deleted since scan (Eng Review #9)
+	exists, err := s.backend.ObjectExists(rec.Bucket, rec.Key)
+	if err != nil || !exists {
+		return false
+	}
+
+	// Resolve the indices to verify. In ShardOwner mode an empty
+	// result means "nothing on this node" — skip the object wholesale
+	// so the orphan sweep doesn't mistake an unverified object for
+	// a healthy one.
+	var indices []int
+	if owner != nil {
+		indices = owner.OwnedShards(rec.Bucket, rec.Key, rec.VersionID, owner.NodeID())
+		if len(indices) == 0 {
+			return false
+		}
+	}
+
+	// Track shard dir as known (for orphan sweep).
+	total := rec.DataShards + rec.ParityShards
+	if total > 0 {
+		paths := s.backend.ShardPaths(rec.Bucket, rec.Key, rec.VersionID, total)
+		if len(paths) > 0 {
+			knownDirs[shardDirFromPath(paths[0])] = true
+		}
+	}
+
+	metrics.ScrubObjectsCheckedTotal.Inc()
+	s.stats.ObjectsChecked++
+
+	status := s.verifier.VerifyIndices(rec, indices)
+
+	s.mu.Lock()
+	s.lastStatuses[rec.Bucket+"/"+rec.Key] = status
+	s.mu.Unlock()
+
+	if status.IsHealthy() {
+		return false
+	}
+
+	// Group every event for this object's repair under one correlation ID.
+	correlationID := newCorrelationID()
+	s.emitDetect(rec, status, correlationID)
+
+	if len(status.Unverified) > 0 {
+		metrics.ECScrubUnverifiedShardsTotal.WithLabelValues("legacy_no_crc").Add(float64(len(status.Unverified)))
+	}
+	if len(status.Missing) == 0 && len(status.Corrupt) == 0 && len(status.Unverified) > 0 {
+		return false
+	}
+
+	errCount := int64(len(status.Missing) + len(status.Corrupt))
+	metrics.ScrubShardErrorsTotal.Add(float64(errCount))
+	s.stats.ShardErrors += errCount
+	if len(status.Unverified) > 0 {
+		ev := newRepairEvent(PhaseReconstruct, OutcomeSkipped, rec, correlationID)
+		ev.ErrCode = "legacy_no_crc"
+		s.emitter.Emit(ev)
+		return false
+	}
+
+	// Per-cycle repair cap (Eng Review #5)
+	if *repairCount >= maxRepairsPerCycle {
+		metrics.ScrubSkippedOverCapTotal.Inc()
+		ev := newRepairEvent(PhaseReconstruct, OutcomeSkipped, rec, correlationID)
+		ev.ErrCode = "cycle_cap"
+		s.emitter.Emit(ev)
+		return false
+	}
+
+	// Signing unavailable this cycle: skip repair to preserve the
+	// "no unsigned receipts" audit invariant.
+	if !signingOK {
+		return false
+	}
+
+	repaired, rerr := s.repairOne(ctx, rec, status, correlationID, repairer)
+	if rerr != nil {
+		metrics.ECDegradedTotal.Inc()
+		s.stats.Unrepairable++
+		log.Error().Str("bucket", rec.Bucket).Str("key", rec.Key).Err(rerr).Msg("scrub: unrepairable")
+		return false
+	}
+	metrics.ScrubRepairedTotal.Inc()
+	metrics.HealShardsRepairedTotal.Add(float64(repaired))
+	s.stats.Repaired++
+	*repairCount++
+
+	// Notify the emitter that this repair session is complete so it
+	// can aggregate the session's HealEvents into a signed HealReceipt.
+	// Re-check signing health: the key store may have rotated out after
+	// the cycle-start check; calling FinalizeSession when signing is
+	// gone would silently drop the receipt.
+	if sessionFinalizer != nil {
+		if checker, ok := s.emitter.(SigningHealthChecker); ok && !checker.SigningHealthy() {
+			log.Warn().Str("correlation_id", correlationID).Msg("scrub: signing unavailable mid-cycle, receipt dropped")
+		} else {
+			sessionFinalizer.FinalizeSession(correlationID)
+		}
+	}
+	return false
+}
+
+// sweepOrphanSegments sweeps orphan raw segment files left by interrupted
+// appends. It is a no-op unless the backend implements OrphanSegmentWalkable.
+func (s *BackgroundScrubber) sweepOrphanSegments(ctx context.Context, buckets []string) {
+	segmentWalker, hasSegWalker := s.backend.(OrphanSegmentWalkable)
+	if !hasSegWalker {
+		return
+	}
+
+	// Bucket source: the union of every locally-hosted group's buckets (segments
+	// live per-group under each group's b.root). Per-bucket caught-up is enforced
+	// inside WalkOrphanSegments (only the caught-up LEADER of a group GCs its
+	// segments — a lagging/follower FSM could mark a committed segment orphan), so
+	// there is no single node-level top gate: a node that leads group-N while
+	// following group-0 must still GC group-N's segments. Fail-closed: a bucket-list
+	// error skips the segment sweep this cycle.
+	segBuckets := buckets
+	if l, ok := s.backend.(segmentBucketLister); ok {
+		sb, err := l.SegmentSweepBuckets(ctx)
+		if err != nil {
+			log.Warn().Err(err).Msg("scrub: segment sweep bucket list failed, skipping orphan-segment sweep this cycle")
+			return
+		}
+		segBuckets = sb
+	}
+
+	segByBucket, frozenByBucket, sourcesOK := s.hoistSegmentSources()
+	if !sourcesOK {
+		// hoistSegmentSources returned ok=false: it already logged and the whole
+		// segment sweep is skipped this cycle (fail-closed against a partial
+		// known-set).
+		return
+	}
+
+	// (G) reconcile: a segment in the known-set is referenced -> must not
+	// carry a t_zero. Clear stale entries (covers re-reference across
+	// restart) before observing/sweeping.
+	if s.orphanLog != nil {
+		known := make(map[chunkref.ChunkID]struct{})
+		for _, paths := range frozenByBucket {
+			for _, p := range paths {
+				known[chunkref.ChunkID(blobIDOf(p))] = struct{}{}
+			}
+		}
+		for _, m := range segByBucket {
+			for p := range m {
+				known[chunkref.ChunkID(blobIDOf(p))] = struct{}{}
+			}
+		}
+		if err := s.orphanLog.Reconcile(known); err != nil {
+			log.Warn().Err(err).Msg("scrub: orphan-log reconcile failed")
+		}
+	}
+	segCapRemaining := maxSegmentsPerCycle
+	for _, bucket := range segBuckets {
+		// The known-segment set is derived from the live object manifest
+		// (segByBucket, via ListAllObjectsStrict) unioned with snapshot-frozen
+		// segments. Appendable/coalesced objects appear in the manifest with their
+		// Segments, so the sweep never orphans a live segment.
+		knownSegmentsB := buildKnownSegments(bucket, segByBucket, frozenByBucket)
+		segCapRemaining = s.segmentSweepBucket(segmentWalker, bucket, knownSegmentsB, segCapRemaining)
+	}
+}
+
+// upgradeRedundancy relocates non-redundant (1+0) EC objects into a redundant
+// group. The caller gates on s.redundancyUpgradeEnabled; this runs only when the
+// backend also implements RedundancyUpgrader. Fail-soft: a sweep error is
+// recorded on the cycle span but does not abort the cycle.
+func (s *BackgroundScrubber) upgradeRedundancy(ctx context.Context, cycleSpan trace.Span) {
+	upgrader, ok := s.backend.(RedundancyUpgrader)
+	if !ok {
+		return
+	}
+	n, err := upgrader.RunRedundancyUpgradeSweep(ctx, s.redundancyUpgradeMaxPerCycle, s.redundancyUpgradeMinAge)
+	if err != nil {
+		log.Warn().Err(err).Msg("scrub: redundancy-upgrade sweep failed")
+		cycleSpan.RecordError(err)
+	} else if n > 0 {
+		log.Info().Int("relocated", n).Msg("scrub: redundancy-upgrade sweep relocated objects")
+	}
 }
 
 // repairOne drives repair for a single object. When the backend implements

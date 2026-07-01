@@ -46,15 +46,15 @@ func bootClusterTransport(ctx context.Context, state *bootState) error {
 		state.transportPSK = ephemeral
 	}
 
-	// TCP is the sole cluster transport (S6 removed the legacy QUIC stack). All
-	// post-construction setup below is transport-agnostic (ClusterTransport interface
-	// methods); state.clusterTransport is the interface-typed field (legacy name).
-	var clusterTransport transport.ClusterTransport
-	tcpTransport, terr := transport.NewTCPTransport(state.transportPSK)
-	if terr != nil {
-		return fmt.Errorf("init cluster transport: %w", terr)
+	// The cluster transport is the Phase 8 Hertz HTTP transport (the TCP transport
+	// and the --transport selector were removed in Phase 8). All post-construction
+	// setup below is transport-agnostic (ClusterTransport interface methods);
+	// state.clusterTransport is the interface-typed field.
+	httpTransport, herr := transport.NewHTTPTransport(state.transportPSK)
+	if herr != nil {
+		return fmt.Errorf("init HTTP cluster transport: %w", herr)
 	}
-	clusterTransport = tcpTransport
+	var clusterTransport transport.ClusterTransport = httpTransport
 	// Forwarded S3 PUTs can fan out into EC shard body streams on the bucket
 	// owner. Keep enough bulk capacity for that nested data path while meta
 	// and raft traffic remain independently classed.
@@ -126,32 +126,10 @@ func loadInviteNodeKeyKEKFromDisk(dataDir string, gen uint32) ([]byte, error) {
 	return kek, nil
 }
 
-// bootPeerConnections opens a cluster-transport connection to each peer.
-// Connection failures are logged but non-fatal — the transport retries lazily on
-// the first send. Empty peer list (solo mode) is a clean no-op.
-func bootPeerConnections(ctx context.Context, state *bootState) error {
-	for _, peer := range state.peers {
-		if err := state.clusterTransport.Connect(ctx, peer); err != nil {
-			log.Warn().Str("peer", peer).Err(err).Msg("failed to connect to peer (will retry lazily)")
-		}
-	}
-	return nil
-}
-
-// bootGroupRaftMux constructs the GroupRaftMux that multiplexes per-group
-// raft RPCs over StreamGroupRaft. Must run BEFORE NewMetaTransportMux so
-// the meta-raft transport can auto-register its node on the mux at
-// construction time. If the mux were created later, a startup race would let
-// inbound meta calls hit "mux: unknown group __meta__" and stall meta
-// election (codex P1 #3).
+// bootGroupRaftMux constructs the GroupRaftMux that dispatches per-group raft
+// RPCs over StreamGroupRaft (one transport.Call per RPC). Must run before the
+// meta-raft transport so the group-raft inbound handler is registered.
 func bootGroupRaftMux(state *bootState) error {
 	state.groupRaftMux = raft.NewGroupRaftMux(state.clusterTransport)
-	if state.cfg.MuxEnabled {
-		state.groupRaftMux.EnableMux(state.cfg.MuxPoolSize, state.cfg.MuxFlushWindow)
-		log.Info().
-			Int("pool", state.cfg.MuxPoolSize).
-			Dur("flush", state.cfg.MuxFlushWindow).
-			Msg("group raft mux mode enabled (R+H Phase 2 prototype)")
-	}
 	return nil
 }

@@ -17,6 +17,7 @@ import (
 
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/eventstore"
+	"github.com/gritive/GrainFS/internal/server/servertest"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -26,6 +27,30 @@ func withEventQueueSize(size int) Option {
 	return func(s *Server) {
 		s.eventQueueSize = size
 	}
+}
+
+// TestEventWorker_StopDrainsBeforeDBClose locks the contract the teardown ordering
+// relies on: eventWorker.stop() must FLUSH all buffered events (append them while the
+// underlying Badger DB is still open) before it returns. An owner that calls stop()
+// before db.Close() therefore never races a worker Append against a closed DB — the
+// "send on closed channel" teardown panic. If stop() ever stopped draining, the
+// buffered event would not be persisted here.
+func TestEventWorker_StopDrainsBeforeDBClose(t *testing.T) {
+	opts := badgerutil.SmallOptions(t.TempDir())
+	db, err := badger.Open(opts)
+	require.NoError(t, err)
+	evStore := eventstore.New(db)
+
+	w := newEventWorker(evStore, 16)
+	w.start()
+	require.True(t, w.emit(eventstore.Event{Timestamp: time.Now().UnixNano(), Type: "test", Action: "ping"}))
+	w.stop() // must drain (append) the buffered event on the still-open DB before returning
+
+	events, err := evStore.Query(time.Unix(0, 0), time.Now().Add(time.Hour), 10, nil)
+	require.NoError(t, err)
+	require.Len(t, events, 1, "stop() must drain buffered events before returning, so db.Close after stop is race-free")
+
+	require.NoError(t, db.Close()) // safe: worker fully drained, no Append can race this
 }
 
 func setupTestServerWithEvents(t *testing.T) (string, *eventstore.Store) {
@@ -47,9 +72,14 @@ func setupTestServerWithEventsAndBackend(t *testing.T) (string, *storage.LocalBa
 	t.Cleanup(func() { db.Close() })
 	evStore := eventstore.New(db)
 
-	port := freePort(t)
+	port := servertest.FreePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	srv := New(addr, backend, WithEventStore(evStore), withEventQueueSize(testEventQueueSize))
+	// Drain the event worker (Shutdown → stopEventWorker) BEFORE the db.Close cleanup
+	// above runs. t.Cleanup is LIFO, so registering this after db.Close guarantees the
+	// worker is fully drained before the Badger DB closes — otherwise a buffered Append
+	// races the close and panics ("send on closed channel").
+	t.Cleanup(func() { servertest.ShutdownServer(t, srv) })
 	go srv.Run() //nolint:errcheck
 	for i := 0; i < 50; i++ {
 		conn, err := net.Dial("tcp", addr)

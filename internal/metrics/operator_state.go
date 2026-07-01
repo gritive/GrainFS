@@ -17,7 +17,6 @@ type OperatorStateSources struct {
 	Cluster OperatorClusterStateSource
 	Raft    OperatorRaftStateSource
 	Buckets OperatorBucketStateSource
-	Volumes OperatorVolumeStateSource
 }
 
 type OperatorServerStateSource interface {
@@ -34,10 +33,6 @@ type OperatorRaftStateSource interface {
 
 type OperatorBucketStateSource interface {
 	BucketStateSnapshot(context.Context) (OperatorBucketState, error)
-}
-
-type OperatorVolumeStateSource interface {
-	VolumeStateSnapshot(context.Context) (OperatorVolumeState, error)
 }
 
 type OperatorServerState struct {
@@ -62,12 +57,6 @@ type OperatorRaftState struct {
 
 type OperatorBucketState struct {
 	Active int
-}
-
-type OperatorVolumeState struct {
-	HealthCounts        map[string]int
-	CapacityBytesTotal  int64
-	AllocatedBytesTotal int64
 }
 
 var (
@@ -121,21 +110,6 @@ var (
 		"User bucket counts by bounded state.",
 		[]string{"state"}, nil,
 	)
-	operatorVolumesByHealthDesc = prometheus.NewDesc(
-		"grainfs_volumes_by_health",
-		"Volume counts by bounded health state.",
-		[]string{"health"}, nil,
-	)
-	operatorVolumeCapacityBytesTotalDesc = prometheus.NewDesc(
-		"grainfs_volume_capacity_bytes_total",
-		"Aggregate logical capacity bytes across visible volumes.",
-		nil, nil,
-	)
-	operatorVolumeAllocatedBytesTotalDesc = prometheus.NewDesc(
-		"grainfs_volume_allocated_bytes_total",
-		"Aggregate allocated bytes across visible volumes.",
-		nil, nil,
-	)
 	operatorStateScrapeErrorsTotalDesc = prometheus.NewDesc(
 		"grainfs_operator_state_scrape_errors_total",
 		"Cumulative scrape-time failures while reading optional operator state sources.",
@@ -157,8 +131,7 @@ var (
 	raftRoles            = []string{"leader", "follower", "candidate", "unknown"}
 	raftRolesSet         = map[string]struct{}{"leader": {}, "follower": {}, "candidate": {}, "unknown": {}}
 	bucketStates         = []string{"active", "list_error"} //nolint:unused // operator-state scaffolding (v0.0.388-389); kept until the feature wires it.
-	volumeHealthStates   = []string{"healthy", "degraded", "unknown", "missing_replica", "incident"}
-	operatorErrorSources = []string{"status", "buckets", "volumes", "raft"}
+	operatorErrorSources = []string{"status", "buckets", "raft"}
 )
 
 type OperatorStateCollector struct {
@@ -214,9 +187,6 @@ func (c *OperatorStateCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- operatorRaftAppliedIndexDesc
 	ch <- operatorRaftApplyLagDesc
 	ch <- operatorBucketsByStateDesc
-	ch <- operatorVolumesByHealthDesc
-	ch <- operatorVolumeCapacityBytesTotalDesc
-	ch <- operatorVolumeAllocatedBytesTotalDesc
 	ch <- operatorStateScrapeErrorsTotalDesc
 }
 
@@ -265,21 +235,6 @@ func (c *OperatorStateCollector) Collect(ch chan<- prometheus.Metric) {
 		} else {
 			ch <- prometheus.MustNewConstMetric(operatorBucketsByStateDesc, prometheus.GaugeValue, float64(state.Active), "active")
 			ch <- prometheus.MustNewConstMetric(operatorBucketsByStateDesc, prometheus.GaugeValue, 0, "list_error")
-		}
-	}
-
-	if sources.Volumes != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), operatorStateScrapeTimeout)
-		state, err := sources.Volumes.VolumeStateSnapshot(ctx)
-		cancel()
-		if err != nil {
-			c.incScrapeFailure("volumes")
-		} else {
-			for _, label := range volumeHealthStates {
-				ch <- prometheus.MustNewConstMetric(operatorVolumesByHealthDesc, prometheus.GaugeValue, float64(state.HealthCounts[label]), label)
-			}
-			ch <- prometheus.MustNewConstMetric(operatorVolumeCapacityBytesTotalDesc, prometheus.GaugeValue, nonNegativeFloat(state.CapacityBytesTotal))
-			ch <- prometheus.MustNewConstMetric(operatorVolumeAllocatedBytesTotalDesc, prometheus.GaugeValue, nonNegativeFloat(state.AllocatedBytesTotal))
 		}
 	}
 
@@ -372,11 +327,4 @@ func saturatingSub(a, b uint64) uint64 {
 		return 0
 	}
 	return a - b
-}
-
-func nonNegativeFloat(v int64) float64 {
-	if v < 0 {
-		return 0
-	}
-	return float64(v)
 }

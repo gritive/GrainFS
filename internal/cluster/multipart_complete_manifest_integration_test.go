@@ -33,7 +33,7 @@ var _ = Describe("Multipart complete manifest integration", func() {
 	}
 
 	uploadPart := func(uploadID string, partNumber int, body []byte) storage.Part {
-		part, err := b.UploadPart(context.Background(), "bucket", "mp.bin", uploadID, partNumber, bytes.NewReader(body))
+		part, err := b.UploadPart(context.Background(), "bucket", "mp.bin", uploadID, partNumber, bytes.NewReader(body), "")
 		Expect(err).NotTo(HaveOccurred())
 		return *part
 	}
@@ -165,7 +165,7 @@ var _ = Describe("Multipart complete manifest integration", func() {
 
 	It("returns plaintext from encrypted part storage", func() {
 		keeper, clusterID := testDEKKeeper(GinkgoT())
-		b.SetShardService(NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID)), []string{b.selfAddr})
+		b.SetShardService(NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID)), []string{b.selfAddr})
 		up := createUpload()
 		p1Body := testMultipartMinPartBody
 		p2Body := []byte("tail")

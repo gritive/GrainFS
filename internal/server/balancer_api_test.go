@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/server/servertest"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -42,7 +43,7 @@ func TestBalancerStatus_WithBalancer_ReturnsStatus(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { backend.Close() })
 
-	port := freePort(t)
+	port := servertest.FreePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 
 	stub := &stubBalancer{

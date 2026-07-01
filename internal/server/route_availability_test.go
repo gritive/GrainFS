@@ -3,9 +3,9 @@ package server
 import (
 	"testing"
 
-	"github.com/gritive/GrainFS/internal/audit"
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/receipt"
+	"github.com/gritive/GrainFS/internal/server/alertssvc"
 )
 
 func TestRouteAvailabilityManifestDocumentsHiddenOptionalFeatures(t *testing.T) {
@@ -36,14 +36,10 @@ func TestRouteAvailabilityManifestDocumentsRegisteredOptionalFeatures(t *testing
 		feature routeFeature
 		name    string
 	}{
-		{feature: routeFeatureAuditHealth, name: "audit_health"},
-		{feature: routeFeatureAuditSearchS3, name: "audit_search_s3"},
 		{feature: routeFeatureEventLog, name: "eventlog"},
 		{feature: routeFeatureBalancer, name: "balancer"},
 		{feature: routeFeatureScrubber, name: "scrubber"},
 		{feature: routeFeatureRaftSnapshot, name: "raft_snapshot"},
-		{feature: routeFeatureSnapshot, name: "snapshot"},
-		{feature: routeFeatureIceberg, name: "iceberg"},
 		{feature: routeFeatureLifecycle, name: "lifecycle"},
 		{feature: routeFeatureCluster, name: "cluster"},
 		{feature: routeFeatureClusterJoin, name: "cluster_join"},
@@ -74,12 +70,6 @@ func TestRouteFeatureRoutesVisibleRequiresDependencyForHiddenFeatures(t *testing
 	if s.routeFeatureRoutesVisible(routeFeatureReceipt) {
 		t.Fatal("receipt routes should be hidden without receipt API")
 	}
-	if !s.routeFeatureRoutesVisible(routeFeatureAuditHealth) {
-		t.Fatal("audit health route should remain visible without audit outbox")
-	}
-	if !s.routeFeatureRoutesVisible(routeFeatureAuditSearchS3) {
-		t.Fatal("audit search route should remain visible without searcher")
-	}
 	if !s.routeFeatureRoutesVisible(routeFeatureEventLog) {
 		t.Fatal("eventlog route should remain visible without event store")
 	}
@@ -91,12 +81,6 @@ func TestRouteFeatureRoutesVisibleRequiresDependencyForHiddenFeatures(t *testing
 	}
 	if !s.routeFeatureRoutesVisible(routeFeatureRaftSnapshot) {
 		t.Fatal("raft snapshot route should remain visible without snapshotter")
-	}
-	if !s.routeFeatureRoutesVisible(routeFeatureSnapshot) {
-		t.Fatal("snapshot routes should remain visible without snapshot manager")
-	}
-	if !s.routeFeatureRoutesVisible(routeFeatureIceberg) {
-		t.Fatal("iceberg routes should remain visible without catalog")
 	}
 	if !s.routeFeatureRoutesVisible(routeFeatureLifecycle) {
 		t.Fatal("lifecycle routes should remain visible without lifecycle service")
@@ -114,11 +98,9 @@ func TestRouteFeatureRoutesVisibleRequiresDependencyForHiddenFeatures(t *testing
 
 func TestRouteFeatureRoutesVisibleWhenDependencyExists(t *testing.T) {
 	s := &Server{
-		alerts:        &AlertsState{},
+		alerts:        &alertssvc.State{},
 		incidentStore: &incidentStoreStub{},
 		receiptAPI:    receipt.NewAPI(nil, nil, nil, 0),
-		auditOutbox:   &audit.Outbox{},
-		auditSearcher: &fakeAuditSearcher{},
 		evStore:       &eventstore.Store{},
 	}
 
@@ -130,12 +112,6 @@ func TestRouteFeatureRoutesVisibleWhenDependencyExists(t *testing.T) {
 	}
 	if !s.routeFeatureRoutesVisible(routeFeatureReceipt) {
 		t.Fatal("receipt routes should be visible with receipt API")
-	}
-	if !s.routeFeatureAvailable(routeFeatureAuditHealth) {
-		t.Fatal("audit health should be available with audit outbox")
-	}
-	if !s.routeFeatureAvailable(routeFeatureAuditSearchS3) {
-		t.Fatal("audit search should be available with searcher")
 	}
 	if !s.routeFeatureAvailable(routeFeatureEventLog) {
 		t.Fatal("eventlog should be available with event store")

@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"time"
 
-	badger "github.com/dgraph-io/badger/v4"
-
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
@@ -20,56 +18,14 @@ var errShutdownTimeout = errors.New("group lifecycle: shutdown timed out")
 
 // GroupLifecycleConfig collects the wiring needed to instantiate a local group.
 type GroupLifecycleConfig struct {
-	NodeID    string
-	DataDir   string
-	ShardSvc  *ShardService // may be nil for in-process / single-node tests
-	EC        ECConfig
-	FSMStore  *badger.DB // required — the per-node shared FSM-state DB; each group gets a prefixed view (C2 P3)
-	Transport groupTransport
-	AddrBook  NodeAddressBook
+	NodeID   string
+	DataDir  string
+	ShardSvc *ShardService // may be nil for in-process / single-node tests
+	EC       ECConfig
+	FSMStore MetadataStore // required — the per-node shared FSM-state store; each group gets a prefixed view (C2 P3)
 	// Raft tuning. Zero values use raft.DefaultConfig defaults.
 	ElectionTimeout  time.Duration
 	HeartbeatTimeout time.Duration
-}
-
-// groupTransport is the optional wiring for raft RPCs. Tests with no peers can
-// pass nil; production wires a transport that dispatches per-group RPCs over
-// transport streams labeled with the group ID.
-type groupTransport interface {
-	RequestVote(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error)
-	AppendEntries(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error)
-}
-
-type resolvingGroupTransport struct {
-	inner    groupTransport
-	addrBook NodeAddressBook
-}
-
-func (t resolvingGroupTransport) RequestVote(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
-	addr, err := t.resolve(peer)
-	if err != nil {
-		return nil, err
-	}
-	return t.inner.RequestVote(addr, args)
-}
-
-func (t resolvingGroupTransport) AppendEntries(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error) {
-	addr, err := t.resolve(peer)
-	if err != nil {
-		return nil, err
-	}
-	return t.inner.AppendEntries(addr, args)
-}
-
-func (t resolvingGroupTransport) resolve(peer string) (string, error) {
-	if t.addrBook == nil {
-		return peer, nil
-	}
-	addr, ok := ResolveNodeAddress(t.addrBook, peer)
-	if !ok {
-		return "", fmt.Errorf("group raft transport: resolve peer %q: node not found in address book", peer)
-	}
-	return addr, nil
 }
 
 // instantiateLocalGroup boots BadgerDB + raft.Node + GroupBackend for a group.
@@ -104,15 +60,7 @@ func instantiateLocalGroup(cfg GroupLifecycleConfig, entry ShardGroupEntry) (*Gr
 		return nil, fmt.Errorf("group %s: keyspace: %w", entry.ID, err)
 	}
 
-	// peers = all PeerIDs except self
-	peers := make([]string, 0, len(entry.PeerIDs))
-	for _, p := range entry.PeerIDs {
-		if p != cfg.NodeID {
-			peers = append(peers, p)
-		}
-	}
-
-	rcfg := raft.DefaultConfig(cfg.NodeID, peers)
+	rcfg := raft.DefaultConfig(cfg.NodeID, nil)
 	if cfg.ElectionTimeout > 0 {
 		rcfg.ElectionTimeout = cfg.ElectionTimeout
 	}
@@ -125,23 +73,14 @@ func instantiateLocalGroup(cfg GroupLifecycleConfig, entry ShardGroupEntry) (*Gr
 	if err != nil {
 		return nil, fmt.Errorf("group %s: newRaftNode: %w", entry.ID, err)
 	}
-	if cfg.Transport != nil {
-		tr := cfg.Transport
-		if cfg.AddrBook != nil {
-			tr = resolvingGroupTransport{inner: tr, addrBook: cfg.AddrBook}
-		}
-		node.SetTransport(tr.RequestVote, tr.AppendEntries)
-	} else {
-		// Single-node / in-process — RPCs always fail (no peers anyway).
-		node.SetTransport(
-			func(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
-				return nil, fmt.Errorf("no transport")
-			},
-			func(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error) {
-				return nil, fmt.Errorf("no transport")
-			},
-		)
-	}
+	node.SetTransport(
+		func(peer string, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
+			return nil, fmt.Errorf("no transport")
+		},
+		func(peer string, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error) {
+			return nil, fmt.Errorf("no transport")
+		},
+	)
 	node.Start()
 
 	// SetShardService requires self first in allNodes for correct self-skip in
@@ -157,7 +96,7 @@ func instantiateLocalGroup(cfg GroupLifecycleConfig, entry ShardGroupEntry) (*Gr
 	gb, err := NewGroupBackend(GroupBackendConfig{
 		ID:           entry.ID,
 		Root:         groupDir,
-		DB:           cfg.FSMStore,
+		Store:        cfg.FSMStore,
 		Node:         node,
 		ShardSvc:     cfg.ShardSvc,
 		PeerIDs:      peerIDsSelfFirst,

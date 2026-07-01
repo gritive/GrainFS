@@ -4,20 +4,22 @@ Usage:
   grainfs cluster [command]
 
 Available Commands:
-  balancer         Cluster balancer commands
-  complete-cutover Complete Zero-CA TLS cutover by dropping the cluster key
-  config           Inspect or change cluster-wide policy
-  drain            Remove a voter via graceful transfer-leader + remove-peer composite
-  events           Show recent cluster audit events
-  health           Show aggregated cluster health (quorum, peers, issues)
-  invite           Zero-CA invite tooling (mint one-time join invites)
-  peers            List cluster voters with leader and liveness state
-  placement        Show object placement summary and detail
-  remove-peer      Remove a voter from the meta-Raft cluster (joint consensus)
-  revoke-node      Revoke a Zero-CA node identity and remove it from the cluster
-  rotate-key       Rolling cluster-key rotation (zero-downtime)
-  status           Show cluster status (leader, term, peers)
-  transfer-leader  Trigger immediate leadership transfer to another voter
+  balancer                    Cluster balancer commands
+  complete-cutover            Complete Zero-CA TLS cutover by dropping the cluster key
+  config                      Inspect or change cluster-wide policy
+  drain                       Remove a voter via graceful transfer-leader + remove-peer composite
+  events                      Show recent cluster audit events
+  expand-placement            Activate newly-formed shard groups for object placement (grow the cluster)
+  health                      Show aggregated cluster health (quorum, peers, issues)
+  invite                      Zero-CA invite tooling (mint one-time join invites)
+  peers                       List cluster voters with leader and liveness state
+  placement                   Show object placement summary and detail
+  remove-peer                 Remove a voter from the meta-Raft cluster (joint consensus)
+  retire-placement-generation Stop probing a drained placement generation
+  revoke-node                 Revoke a Zero-CA node identity and remove it from the cluster
+  rotate-key                  Rolling cluster-key rotation (zero-downtime)
+  status                      Show cluster status (leader, term, peers)
+  transfer-leader             Trigger immediate leadership transfer to another voter
 
 Flags:
       --endpoint string   admin Unix socket path (required, e.g. ./tmp/admin.sock)

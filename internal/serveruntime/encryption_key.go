@@ -22,13 +22,13 @@ const bulkCipherFormatFile = "encryption.format"
 // under DomainIAMCredential AAD (R2). Pre-"5" IAM ciphertext used the static
 // *encrypt.Encryptor with raw saID AAD; "5" binary uses the DataEncryptor seam
 // with BuildAAD(DomainIAMCredential, clusterID, FieldString(saID), FieldString(accessKey))
-// and cannot read pre-"5" IAM bytes. "6" = data-group FSM values and data WAL
-// records moved to the gen-aware DEK seam with persisted DEK generation frames.
+// and cannot read pre-"5" IAM bytes. "6" = data-group FSM values and retired
+// data-plane WAL records moved to the gen-aware DEK seam with persisted DEK generation frames.
 // "7" = Zero-CA bootstrap/node identity no longer uses the legacy static
 // encryption.key as boot glue; node.key.enc must be recoverable through KEK
 // generation evidence. "8" = raft v2 Badger log stores are encrypted at rest
-// by a node-local raft-store key sealed under the cluster KEK. "9" = encrypted
-// data WAL node/shard AEAD namespace separation. Greenfield only.
+// by a node-local raft-store key sealed under the cluster KEK. "9" = retired
+// data-plane WAL namespace separation. Greenfield only.
 const bulkCipherFormatVersion = "9"
 
 // EnsureBulkCipherFormat enforces the XAES greenfield boundary at boot. Call it
@@ -41,7 +41,7 @@ func EnsureBulkCipherFormat(dataDir string, bulkDataPresent bool) error {
 	switch {
 	case err == nil:
 		if got := strings.TrimSpace(string(b)); got != bulkCipherFormatVersion {
-			return fmt.Errorf("bulk-cipher format %q in %s is not supported by this binary (expected %q); data WAL namespace separation was enabled and in-place upgrade is unsupported — create a new cluster", got, bulkCipherFormatFile, bulkCipherFormatVersion)
+			return fmt.Errorf("bulk-cipher format %q in %s is not supported by this binary (expected %q); in-place upgrade is unsupported for this storage format - create a new cluster", got, bulkCipherFormatFile, bulkCipherFormatVersion)
 		}
 		return nil
 	case os.IsNotExist(err):
@@ -89,14 +89,10 @@ func dataDirHasEntries(path string) bool {
 //   - <root>/shards/  — EC shards, cluster mode (shard_service.go:167)
 //   - <root>/data/    — single-node object files + _segments (local.go:128,167)
 //   - under the primary dataDir:
-//   - datawal/        — encrypted WAL records (boot_phases_storage_runtime.go:40)
 //   - blobs/          — packblob, active by default at pack-threshold=65537
 //     (boot_phases_backend.go:48)
 //   - shared-fsm/     — cluster FSM-state BadgerDB with encrypted values
 //     (boot_phases.go:235 bootOpenSharedFSMDB)
-//   - wal/            — logical WAL opened via wal.OpenEncrypted
-//     (boot_phases_logical_wal.go bootLogicalWALOpen; forwarder wiring lives
-//     in boot_phases_forwarders.go bootWALAndForwardersPart1)
 //   - raft/raft-v2/   — data-plane raft v2 Badger log/stable/snapshot store
 //   - meta_raft/raft-v2/ — meta-raft v2 Badger log/stable/snapshot store
 //   - metaDir (= --meta-dir or <dataDir>/meta):
@@ -117,9 +113,6 @@ func BulkDataPresent(dataDir string, dataDirs []string, metaDir string) bool {
 		if dataDirHasEntries(filepath.Join(d, "data")) {
 			return true
 		}
-	}
-	if dataDirHasEntries(filepath.Join(dataDir, "datawal")) {
-		return true
 	}
 	if dataDirHasEntries(filepath.Join(dataDir, "blobs")) {
 		return true

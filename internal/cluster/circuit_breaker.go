@@ -1,6 +1,10 @@
 package cluster
 
-import "sync"
+import (
+	"sync"
+
+	"github.com/gritive/GrainFS/internal/gossip"
+)
 
 // circuitBreaker is a 2-state (open/closed) gate per destination node.
 // open = disk is full, reject writes; closed = allow writes.
@@ -18,7 +22,7 @@ func newCircuitBreaker() *circuitBreaker { return &circuitBreaker{} }
 
 // update recalculates open/closed from the latest gossip stats against the
 // caller-supplied threshold (percent, e.g. 85.0 for 85%).
-func (cb *circuitBreaker) update(ns NodeStats, thresholdPct float64) {
+func (cb *circuitBreaker) update(ns gossip.NodeStats, thresholdPct float64) {
 	cb.mu.Lock()
 	cb.open = ns.DiskUsedPct >= thresholdPct
 	cb.mu.Unlock()

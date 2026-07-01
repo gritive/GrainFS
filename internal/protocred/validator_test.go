@@ -16,8 +16,8 @@ func TestAttachValidatorAllowsMatchingCredential(t *testing.T) {
 	validator := NewAttachValidator(store, WithValidatorNow(func() time.Time { return now }))
 
 	decision, err := validator.ValidateAttach(context.Background(), AttachRequest{
-		Protocol:        ProtocolNBD,
-		Resource:        "volume/devdisk",
+		Protocol:        ProtocolS3,
+		Resource:        "bucket/devdisk",
 		CredentialID:    secret.ID,
 		PresentedSecret: secret.Secret,
 		RequestedMode:   ModeRW,
@@ -215,8 +215,8 @@ func validatorStoreWithCredential(t *testing.T, now time.Time, expiresAt *time.T
 	store := NewStore()
 	row, secret, err := MaterializeCreate(CreateRequest{
 		SAID:      "node-a",
-		Protocol:  ProtocolNBD,
-		Resource:  "volume/devdisk",
+		Protocol:  ProtocolS3,
+		Resource:  "bucket/devdisk",
 		Mode:      ModeRW,
 		ExpiresAt: expiresAt,
 	}, now)
@@ -230,8 +230,8 @@ func validatorStoreWithCredential(t *testing.T, now time.Time, expiresAt *time.T
 
 func attachReq(secret Secret, presentedSecret string) AttachRequest {
 	return AttachRequest{
-		Protocol:        ProtocolNBD,
-		Resource:        "volume/devdisk",
+		Protocol:        ProtocolS3,
+		Resource:        "bucket/devdisk",
 		CredentialID:    secret.ID,
 		PresentedSecret: presentedSecret,
 		RequestedMode:   ModeRW,

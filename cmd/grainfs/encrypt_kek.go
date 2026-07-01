@@ -164,8 +164,7 @@ func kekClusterNodeID(ctx context.Context, client *clusteradmin.Client) (string,
 }
 
 func init() {
-	encryptKEKCmd.PersistentFlags().String("endpoint", "",
-		"admin Unix socket path (overrides GRAINFS_ADMIN_SOCKET env var)")
+	registerAdminEndpointFlag(encryptKEKCmd, "admin Unix socket path (overrides GRAINFS_ADMIN_SOCKET env var)")
 
 	encryptKEKRotateCmd.Flags().BoolVar(&rotateIKnow, "i-know", false,
 		"confirm that rotation is irreversible")

@@ -22,7 +22,7 @@ func TestSelectECPlacement_WeightedFromDiskAvail(t *testing.T) {
 	count := make(map[string]int)
 	for i := 0; i < 1000; i++ {
 		key := fmt.Sprintf("obj-%d", i)
-		nodes := selectECPlacementFromNodeStates(cfg, liveNodes, key, nodeStates, true, true)
+		nodes := selectECPlacementFromNodeStates(cfg, liveNodes, key, nodeStates, true)
 		for _, n := range nodes {
 			count[n]++
 		}
@@ -36,14 +36,17 @@ func TestSelectECPlacement_WeightedFromDiskAvail(t *testing.T) {
 	}
 }
 
-func TestSelectObjectPlacementGroup_ExcludesGroup0(t *testing.T) {
+func TestCandidateGroupsFor_IncludesGroup0AsPlainDataGroup(t *testing.T) {
 	groups := []ShardGroupEntry{
 		{ID: "group-0", PeerIDs: []string{"n1", "n2", "n3"}},
 		{ID: "group-1", PeerIDs: []string{"n1", "n2", "n3"}},
 	}
-	got, err := SelectObjectPlacementGroup("b", "k", groups, ECConfig{DataShards: 2, ParityShards: 1})
+	got, err := candidateGroupsFor(groups, ECConfig{DataShards: 2, ParityShards: 1})
 	require.NoError(t, err)
-	require.Equal(t, "group-1", got.ID)
+	require.Equal(t, []ShardGroupEntry{
+		{ID: "group-0", PeerIDs: []string{"n1", "n2", "n3"}},
+		{ID: "group-1", PeerIDs: []string{"n1", "n2", "n3"}},
+	}, got)
 }
 
 func TestSelectObjectPlacementGroup_FiltersECIncapableGroups(t *testing.T) {
@@ -72,7 +75,7 @@ func TestSelectObjectPlacementGroup_UsesOnlyWidestTopologyGroups(t *testing.T) {
 	}
 }
 
-func TestSelectObjectPlacementGroup_FallsBackToGroup0WhenNoDataGroupsExist(t *testing.T) {
+func TestSelectObjectPlacementGroup_UsesGroup0WhenItIsTheOnlyCandidate(t *testing.T) {
 	got, err := SelectObjectPlacementGroup("b", "k", []ShardGroupEntry{
 		{ID: "group-0", PeerIDs: []string{"n1", "n2", "n3"}},
 	}, ECConfig{DataShards: 2, ParityShards: 1})
@@ -147,19 +150,26 @@ func TestSelectSegmentPlacementGroup_DifferentBlobIDsDifferentPGs(t *testing.T) 
 	require.True(t, found, "blobID should influence placement: never observed different PGs across 64 blobID pairs")
 }
 
-func TestSelectSegmentPlacementGroup_FiltersGroup0(t *testing.T) {
+func TestSelectSegmentPlacementGroup_CanUseGroup0AsPlainDataGroup(t *testing.T) {
 	groups := []ShardGroupEntry{
 		{ID: "group-0", PeerIDs: []string{"n1", "n2", "n3"}},
 		{ID: "group-1", PeerIDs: []string{"n1", "n2", "n3"}},
 	}
 	cfg := ECConfig{DataShards: 2, ParityShards: 1}
-	blobID := uuid.Must(uuid.NewV7()).String()
-	got, err := SelectSegmentPlacementGroup("b", "k", 0, blobID, groups, cfg)
-	require.NoError(t, err)
-	require.Equal(t, "group-1", got.ID)
+
+	found := false
+	for i := 0; i < 64 && !found; i++ {
+		blobID := uuid.Must(uuid.NewV7()).String()
+		got, err := SelectSegmentPlacementGroup("b", "k", i, blobID, groups, cfg)
+		require.NoError(t, err)
+		if got.ID == "group-0" {
+			found = true
+		}
+	}
+	require.True(t, found, "group-0 must participate in normal segment placement")
 }
 
-func TestSelectSegmentPlacementGroup_FallsBackToGroup0(t *testing.T) {
+func TestSelectSegmentPlacementGroup_UsesGroup0WhenItIsTheOnlyCandidate(t *testing.T) {
 	groups := []ShardGroupEntry{
 		{ID: "group-0", PeerIDs: []string{"n1", "n2", "n3"}},
 	}
@@ -207,6 +217,44 @@ func TestPlacementContextCarriesShardGroup(t *testing.T) {
 func TestSelectECPlacement_AllStaleFallback(t *testing.T) {
 	// nodeStates is empty — every node is stale.
 	cfg := ECConfig{DataShards: 2, ParityShards: 1}
-	nodes := selectECPlacementFromNodeStates(cfg, []string{"n1", "n2", "n3", "n4"}, "key", nil, true, false)
+	nodes := selectECPlacementFromNodeStates(cfg, []string{"n1", "n2", "n3", "n4"}, "key", nil, true)
 	assert.Len(t, nodes, 3, "should fall back to unweighted placement, not empty")
+}
+
+func TestCandidateGroupsFor_SortStability(t *testing.T) {
+	cfg := ECConfig{DataShards: 2, ParityShards: 1}
+	ordered := []ShardGroupEntry{
+		{ID: "group-1", PeerIDs: []string{"n1", "n2", "n3"}},
+		{ID: "group-2", PeerIDs: []string{"n1", "n2", "n3"}},
+		{ID: "group-3", PeerIDs: []string{"n1", "n2", "n3"}},
+	}
+	shuffled := []ShardGroupEntry{
+		{ID: "group-3", PeerIDs: []string{"n1", "n2", "n3"}},
+		{ID: "group-1", PeerIDs: []string{"n1", "n2", "n3"}},
+		{ID: "group-2", PeerIDs: []string{"n1", "n2", "n3"}},
+	}
+	c1, err := candidateGroupsFor(ordered, cfg)
+	require.NoError(t, err)
+	c2, err := candidateGroupsFor(shuffled, cfg)
+	require.NoError(t, err)
+	require.Equal(t, len(c1), len(c2))
+	for i := range c1 {
+		require.Equal(t, c1[i].ID, c2[i].ID, "sort output must be identical regardless of input order")
+	}
+}
+
+func TestObjectPlacement_Deterministic(t *testing.T) {
+	sortedIDs := []string{"group-1", "group-2", "group-3"}
+	id1 := groupIDForObject("bucket", "same-key", sortedIDs)
+	id2 := groupIDForObject("bucket", "same-key", sortedIDs)
+	require.Equal(t, id1, id2)
+	require.Contains(t, sortedIDs, id1)
+
+	// Different keys should not all map to the same group (distribution check).
+	seen := make(map[string]struct{})
+	for i := 0; i < 300; i++ {
+		key := fmt.Sprintf("obj/%d", i)
+		seen[groupIDForObject("b", key, sortedIDs)] = struct{}{}
+	}
+	require.GreaterOrEqual(t, len(seen), 2, "keys should spread across at least 2 groups")
 }

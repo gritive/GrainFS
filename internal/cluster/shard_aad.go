@@ -6,8 +6,8 @@ import "github.com/gritive/GrainFS/internal/encrypt"
 // (bucket, key, shardIdx). eccodec appends the intra-shard chunk ordinal. Domain
 // DomainShard + clusterID are added by the DataEncryptor seam. This is the AAD
 // shape CAS 4c's TransitionReseal reconstructs as oldAAD — do not change it
-// without re-writing every shard. Exported so internal/cluster/putpipeline's
-// cpupool shares the one definition (DRY: the shard AAD shape is load-bearing).
+// without re-writing every shard. Shared by the EC shard write/read paths in
+// shard_service.go (DRY: the shard AAD shape is load-bearing).
 func ShardAADFields(bucket, key string, shardIdx int) []encrypt.AADField {
 	return []encrypt.AADField{
 		encrypt.FieldString(bucket),

@@ -77,10 +77,10 @@ func parsePackedKey(s string) (packedKey, bool) {
 // consistent — acceptable for listing-style operations.
 // Audit follow-up: docs/architecture/lock-free-audit.md → "PackedBackend.mu
 // protects the packed-object index. If packed small object reads become a
-// hot-path bottleneck, convert this to the same immutable snapshot pattern
-// used by CachedBackend." PR #392 mixed-workload mutex profile attributed
-// 91.7% of remaining delay (44.81s / 48.86s) to PackedBackend.PutObject's
-// RWMutex.Unlock — the trigger condition was hit.
+// hot-path bottleneck, convert this to an immutable snapshot pattern
+// (atomic.Pointer + CompareAndSwap)." PR #392 mixed-workload mutex profile
+// attributed 91.7% of remaining delay (44.81s / 48.86s) to
+// PackedBackend.PutObject's RWMutex.Unlock — the trigger condition was hit.
 type PackedBackend struct {
 	inner     storage.Backend
 	blobStore *BlobStore
@@ -94,8 +94,6 @@ type PackedBackend struct {
 }
 
 var _ storage.Backend = (*PackedBackend)(nil)
-var _ storage.Snapshotable = (*PackedBackend)(nil)
-var _ storage.BucketSnapshotable = (*PackedBackend)(nil)
 var _ storage.PartialIO = (*PackedBackend)(nil)
 var _ interface {
 	CopyObjectWithRequest(context.Context, storage.CopyObjectAccelerationRequest) (*storage.Object, error)
@@ -509,6 +507,17 @@ func (pb *PackedBackend) PutObjectWithRequest(ctx context.Context, req storage.P
 		return obj, nil
 	}
 
+	// Content-MD5 validation: the full small-object body is in `data`. Reject a
+	// wrong client digest before any inner delegation or pack append (S3
+	// BadDigest). No-op when no Content-MD5. Large objects (above) validate in
+	// the inner backend.
+	if req.ContentMD5Hex != "" {
+		sum := md5.Sum(data)
+		if hex.EncodeToString(sum[:]) != req.ContentMD5Hex {
+			return nil, fmt.Errorf("%w: client %s", storage.ErrContentMD5Mismatch, req.ContentMD5Hex)
+		}
+	}
+
 	// Versioning-enabled buckets must round-trip through the inner backend so
 	// the version index is updated and the response carries x-amz-version-id.
 	// Packblob's keyspace is (bucket,key) only; without this bypass small
@@ -648,7 +657,7 @@ func putInnerWithUserMetadata(ctx context.Context, inner storage.Backend, bucket
 }
 
 func putInnerWithRequest(ctx context.Context, inner storage.Backend, req storage.PutObjectRequest) (*storage.Object, error) {
-	if req.ACL == nil && req.SystemMetadata.SSEAlgorithm == "" && req.SizeHint == nil {
+	if req.ACL == nil && req.SystemMetadata.SSEAlgorithm == "" && req.SizeHint == nil && req.ContentMD5Hex == "" {
 		return putInnerWithUserMetadata(ctx, inner, req.Bucket, req.Key, req.Body, req.ContentType, req.UserMetadata)
 	}
 	putter, ok := inner.(storage.RequestPutter)
@@ -819,8 +828,7 @@ func (pb *PackedBackend) ReadAtObject(ctx context.Context, bucket, key string, o
 
 // WriteAt is a pass-through to inner. Packed (small S3 object) entries are
 // immutable blob slices and never receive pwrite traffic — internal buckets
-// (NFS4 / VFS Volume Device) live entirely on the inner path, so this is a
-// plain delegate.
+// live entirely on the inner path, so this is a plain delegate.
 func (pb *PackedBackend) WriteAt(ctx context.Context, bucket, key string, offset uint64, data []byte) (*storage.Object, error) {
 	wa, ok := pb.inner.(storage.PartialIO)
 	if !ok {
@@ -916,7 +924,7 @@ func (pb *PackedBackend) DeleteObject(ctx context.Context, bucket, key string) e
 }
 
 // DeleteObjectReturningMarker forwards to the inner backend only when bucket
-// versioning is enabled so the wal.Backend soft-delete path can obtain the
+// versioning is enabled so an outer decorator.s soft-delete path can obtain the
 // freshly minted delete-marker versionId. Non-versioned packed objects live in
 // this wrapper's index, so they must take the local DeleteObject path to clear
 // the packed entry instead of bypassing it through the inner backend.
@@ -962,9 +970,9 @@ func (pb *PackedBackend) evictPackedKeyIfSame(pk packedKey, entry *indexEntry) {
 }
 
 // DeleteObjectVersion forwards version-specific hard deletes to the inner
-// backend. Required so wal.Backend.DeleteObjectVersion's type assertion
-// (b.Backend.(versionDeleter)) succeeds when packblob sits between WAL and
-// the version-aware backend (DistributedBackend / ClusterCoordinator).
+// backend. Required so an outer decorator.s DeleteObjectVersion type assertion
+// (b.Backend.(versionDeleter)) succeeds when packblob sits between that decorator
+// and the version-aware backend (DistributedBackend / ClusterCoordinator).
 func (pb *PackedBackend) DeleteObjectVersion(bucket, key, versionID string) error {
 	vd, ok := pb.inner.(storage.ObjectVersionDeleter)
 	if !ok {
@@ -1369,7 +1377,7 @@ func (pb *PackedBackend) CreateMultipartUpload(ctx context.Context, bucket, key,
 
 // CreateMultipartUploadWithTags forwards to the inner backend when it supports
 // the tagsCreator extension. PackedBackend uses a non-embedded inner field, so
-// no method is promoted — without this explicit pass-through the wal.Backend
+// no method is promoted — without this explicit pass-through an outer decorator
 // wrapping us in the single-node packed hot path would fail its type assertion
 // (tagsCreator) and silently drop x-amz-tagging on multipart-initiate.
 func (pb *PackedBackend) CreateMultipartUploadWithTags(ctx context.Context, bucket, key, contentType string, tags []storage.Tag) (string, error) {
@@ -1449,8 +1457,8 @@ func (pb *PackedBackend) GetObjectTags(bucket, key, versionID string) ([]storage
 	return getter.GetObjectTags(bucket, key, versionID)
 }
 
-func (pb *PackedBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader) (*storage.Part, error) {
-	return pb.inner.UploadPart(ctx, bucket, key, uploadID, partNumber, r)
+func (pb *PackedBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader, contentMD5Hex string) (*storage.Part, error) {
+	return pb.inner.UploadPart(ctx, bucket, key, uploadID, partNumber, r, contentMD5Hex)
 }
 
 func (pb *PackedBackend) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []storage.Part) (*storage.Object, error) {
@@ -1476,144 +1484,4 @@ func (pb *PackedBackend) MultipartUploadPartCount(bucket, key, uploadID string) 
 		return c.MultipartUploadPartCount(bucket, key, uploadID)
 	}
 	return 0, nil
-}
-
-func (pb *PackedBackend) ListAllObjects() ([]storage.SnapshotObject, error) {
-	snap, ok := pb.inner.(storage.Snapshotable)
-	if !ok {
-		return nil, storage.ErrSnapshotNotSupported
-	}
-	objects, err := snap.ListAllObjects()
-	if err != nil {
-		return nil, err
-	}
-	seen := make(map[packedKey]struct{}, len(objects))
-	for _, obj := range objects {
-		seen[packedKey{bucket: obj.Bucket, key: obj.Key}] = struct{}{}
-	}
-	pb.index.Range(func(rk, rv any) bool {
-		pk := rk.(packedKey)
-		entry := rv.(*indexEntry)
-		if entry.Refcount.Load() <= 0 {
-			return true
-		}
-		if _, ok := seen[pk]; ok {
-			return true
-		}
-		objects = append(objects, storage.SnapshotObject{
-			Bucket:      pk.bucket,
-			Key:         pk.key,
-			ETag:        entry.ETag,
-			Size:        entry.OriginalSize,
-			ContentType: entry.ContentType,
-			Modified:    entry.LastModified,
-		})
-		return true
-	})
-	return objects, nil
-}
-
-// RestoreObjects restores the packed in-memory index from surviving on-disk
-// blob files for any snapshot entries whose (bucket,key) tuple is present in
-// the blob store, and delegates remaining entries to the inner backend.
-//
-// Why the split: small objects PUT via the packblob fast path live ONLY in
-// blob_*.bin (the cluster meta/EC path is bypassed at PutObject time). The
-// previous behavior — wipe in-memory index, delegate everything to inner —
-// orphaned packed data: LIST returned 0 because PackedBackend.ListObjectsPage
-// supplements from the cleared index, while CC.ListObjectsPage reads the
-// meta-FSM ObjectIndex which never received those PUTs either. The fix
-// rebuilds the packed index from disk for entries the snapshot kept, so both
-// LIST (via index supplementation) and GET (via blobStore.Read) recover.
-//
-// Stale on-disk entries (PUT after the snapshot point — present in
-// blob_*.bin but not in the snapshot list) are not re-indexed. They become
-// inaccessible to LIST/GET, with on-disk space recovered by background blob
-// orphan sweep on a best-effort cadence (see compaction).
-func (pb *PackedBackend) RestoreObjects(objects []storage.SnapshotObject) (int, []storage.StaleBlob, error) {
-	snap, ok := pb.inner.(storage.Snapshotable)
-	if !ok {
-		return 0, nil, storage.ErrSnapshotNotSupported
-	}
-
-	diskLocs, err := pb.blobStore.ScanAll()
-	if err != nil {
-		return 0, nil, fmt.Errorf("packblob restore: scan blob store: %w", err)
-	}
-	diskByPK := make(map[packedKey]BlobLocation, len(diskLocs))
-	for k, loc := range diskLocs {
-		if pk, ok := parsePackedKey(k); ok {
-			diskByPK[pk] = loc
-		}
-	}
-
-	// Partition snapshot entries into packed-origin (surviving on disk) vs
-	// cluster-origin (delegate to inner). The packed branch wins on collision
-	// because that's where the data physically resides.
-	type packedRestore struct {
-		key packedKey
-		loc BlobLocation
-		obj storage.SnapshotObject
-	}
-	var clusterObjs []storage.SnapshotObject
-	var packedRestores []packedRestore
-	for _, obj := range objects {
-		pk := packedKey{bucket: obj.Bucket, key: obj.Key}
-		if loc, ok := diskByPK[pk]; ok {
-			packedRestores = append(packedRestores, packedRestore{key: pk, loc: loc, obj: obj})
-			continue
-		}
-		clusterObjs = append(clusterObjs, obj)
-	}
-
-	// Delegate non-packed entries first. Inner restore also reconciles its
-	// own orphans (cluster objects no longer in the snapshot) before we
-	// touch the packed index, so a mid-flight failure leaves the cluster
-	// side consistent.
-	restored, stale, err := snap.RestoreObjects(clusterObjs)
-	if err != nil {
-		return restored, stale, err
-	}
-
-	// Rebuild packed index. Existing in-memory entries are dropped first;
-	// then snapshot-surviving packed entries are restored using metadata
-	// from the snapshot (ETag/ContentType/Modified) rather than recomputing
-	// from disk (cheaper, and preserves the snapshot's view of those fields).
-	pb.index.Range(func(k, _ any) bool {
-		pb.index.Delete(k)
-		return true
-	})
-	pb.listIndex.clear()
-	for _, pr := range packedRestores {
-		e := &indexEntry{
-			Location:     pr.loc,
-			OriginalSize: pr.obj.Size,
-			ContentType:  pr.obj.ContentType,
-			ETag:         pr.obj.ETag,
-			LastModified: pr.obj.Modified,
-			SSEAlgorithm: pr.obj.SSEAlgorithm,
-		}
-		e.Refcount.Store(1)
-		pb.index.Store(pr.key, e)
-		pb.listIndex.add(pr.key)
-		restored++
-	}
-
-	return restored, stale, nil
-}
-
-func (pb *PackedBackend) ListAllBuckets() ([]storage.SnapshotBucket, error) {
-	snap, ok := pb.inner.(storage.BucketSnapshotable)
-	if !ok {
-		return nil, nil
-	}
-	return snap.ListAllBuckets()
-}
-
-func (pb *PackedBackend) RestoreBuckets(buckets []storage.SnapshotBucket) error {
-	snap, ok := pb.inner.(storage.BucketSnapshotable)
-	if !ok {
-		return nil
-	}
-	return snap.RestoreBuckets(buckets)
 }

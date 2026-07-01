@@ -39,8 +39,6 @@ type s3Target struct {
 	secretKey string
 	saID      string
 	dataDir   string
-	nfsPort   int
-	nbdPort   int
 	createBkt func(t testing.TB, bucket string)
 	// uniqueBucket creates a bucket with a name derived from t.Name() + case,
 	// sanitized to S3 spec (lowercase/hyphen, 3-63 chars). Auto-registers
@@ -81,8 +79,6 @@ func initSharedS3Targets(t testing.TB) {
 		Mode:       ClusterModeDynamicJoin,
 		ClusterKey: "E2E-S3-OP-KEY",
 		LogPrefix:  "grainfs-s3op-shared",
-		DisableNFS: true,
-		DisableNBD: true,
 	})
 	for i := range c.procs {
 		iamWaitKeyReady(t, c.httpURLs[i], c.accessKey, c.secretKey, 30*time.Second)
@@ -202,8 +198,6 @@ func newClusterS3TargetWithExtraArgs(t testing.TB, nodes int, extraArgs []string
 		Mode:       ClusterModeDynamicJoin,
 		ClusterKey: "E2E-S3-OP-KEY",
 		LogPrefix:  "grainfs-s3op",
-		DisableNFS: true,
-		DisableNBD: true,
 		ExtraArgs:  extraArgs,
 	})
 
@@ -263,13 +257,9 @@ func newDedicatedSingleNodeS3Target(t testing.TB, extraArgs []string) s3Target {
 	})
 
 	port := freePort()
-	nfsPort := freePort()
-	nbdPort := freePort()
 	args := []string{
 		"serve", "--data", dir,
 		"--port", fmt.Sprintf("%d", port),
-		"--nfs4-port", fmt.Sprintf("%d", nfsPort),
-		"--nbd-port", fmt.Sprintf("%d", nbdPort),
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
 	}
@@ -313,8 +303,6 @@ func newDedicatedSingleNodeS3Target(t testing.TB, extraArgs []string) s3Target {
 		secretKey: sk,
 		saID:      admin.SAID,
 		dataDir:   dir,
-		nfsPort:   nfsPort,
-		nbdPort:   nbdPort,
 		createBkt: func(t testing.TB, bucket string) {
 			createBucketWithAdminPolicyAttachViaUDSAny(t, []string{dir}, admin.SAID, bucket, client)
 		},
@@ -331,23 +319,6 @@ func newDedicatedSingleNodeS3Target(t testing.TB, extraArgs []string) s3Target {
 		},
 		isCluster: false,
 	}
-}
-
-// newDedicatedCluster4NodeS3Target boots a per-test 4-node cluster. All
-// runtime flags are caller-controlled via extraArgs (lifecycle-interval,
-// etc.) — mirrors newDedicatedSingleNodeS3Target for single/cluster parity.
-// Boot cost is the trade-off for being able to exercise versioning-dependent
-// lifecycle behavior (DM reclaim) in a real cluster topology. Vanilla cluster
-// lifecycle tests should keep using the package-global shared cluster
-// fixture where boot cost dominates.
-//
-// The fixture's tgt.name is "cluster-4-dedicated" — sub-tests use this
-// to discriminate cluster-only flows (e.g., DM sub-test).
-func newDedicatedCluster4NodeS3Target(t testing.TB, extraArgs []string) s3Target {
-	t.Helper()
-	tgt := newClusterS3TargetWithExtraArgs(t, 4, extraArgs)
-	tgt.name = "cluster-4-dedicated"
-	return tgt
 }
 
 // Bucket name helper verifies the bucketNameFor helper that derives an

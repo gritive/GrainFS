@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/gossip"
 )
 
 // TestSyncCB_ThresholdHotReload covers the bug Slice 1 left in place: before
@@ -22,11 +24,11 @@ func TestSyncCB_ThresholdHotReload(t *testing.T) {
 	cfg := testBalancerConfig()
 	cfg.cbThreshold.Store(0.85) // 85%
 
-	store := NewNodeStatsStore(1 * time.Minute)
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
 	node := &mockRaftNode{state: 2, nodeID: "self", peerIDs: []string{"n2"}}
 	p := NewBalancerProposer("self", store, node, cfg)
 
-	peers := []NodeStats{
+	peers := []gossip.NodeStats{
 		{NodeID: "self"},
 		{NodeID: "n2", DiskUsedPct: 88.0},
 	}

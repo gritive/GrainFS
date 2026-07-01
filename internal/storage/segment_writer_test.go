@@ -11,6 +11,7 @@ import (
 	"testing"
 	"testing/iotest"
 	"time"
+	"unsafe"
 
 	"github.com/stretchr/testify/require"
 )
@@ -36,24 +37,32 @@ func TestSegmentWriter_Boundaries(t *testing.T) {
 			b := newTestLocalBackend(t)
 			data := makePattern(tc.size)
 			obj, err := writeViaSegmentWriter(b, "test", "k-"+tc.name, bytes.NewReader(data))
-			if err != nil {
-				t.Fatalf("write: %v", err)
-			}
-			if len(obj.Segments) != tc.wantSegs {
-				t.Fatalf("segments: want %d, got %d", tc.wantSegs, len(obj.Segments))
-			}
-			if obj.Size != int64(tc.size) {
-				t.Fatalf("size: want %d, got %d", tc.size, obj.Size)
-			}
+			require.NoError(t, err, "write")
+			require.Len(t, obj.Segments, tc.wantSegs)
+			require.Equal(t, int64(tc.size), obj.Size)
 			// Simple-PUT ETag = MD5 of full plaintext.
 			h := md5.New()
 			h.Write(data)
 			wantEtag := hex.EncodeToString(h.Sum(nil))
-			if obj.ETag != wantEtag {
-				t.Fatalf("etag: want %s, got %s", wantEtag, obj.ETag)
-			}
+			require.Equal(t, wantEtag, obj.ETag)
 		})
 	}
+}
+
+func TestSegmentWriter_S3FastETagSkipsMD5WhenOptedIn(t *testing.T) {
+	t.Setenv(s3ETagMD5Env, "0")
+	b := newTestLocalBackend(t)
+	data := makePattern(4096 + 7)
+
+	obj, err := writeViaSegmentWriter(b, "test", "fast-etag", bytes.NewReader(data))
+	require.NoError(t, err, "write")
+
+	h := md5.New()
+	h.Write(data)
+	wantMD5 := hex.EncodeToString(h.Sum(nil))
+	require.NotEqual(t, wantMD5, obj.ETag)
+	require.Equal(t, InternalETag(data), obj.ETag)
+	require.Len(t, obj.ETag, 16)
 }
 
 func TestSegmentWriter_UnknownContentLength(t *testing.T) {
@@ -63,15 +72,9 @@ func TestSegmentWriter_UnknownContentLength(t *testing.T) {
 	r := iotest.OneByteReader(bytes.NewReader(data))
 	w := NewSegmentWriterWithChunkSize(localBackendAdapter{b}, 1024)
 	obj, err := w.Write(context.Background(), "test", "drip", "application/octet-stream", r)
-	if err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if len(obj.Segments) != 5 {
-		t.Fatalf("segments: want 5, got %d", len(obj.Segments))
-	}
-	if obj.Segments[4].Size != 7 {
-		t.Fatalf("trailing segment size: want 7, got %d", obj.Segments[4].Size)
-	}
+	require.NoError(t, err, "write")
+	require.Len(t, obj.Segments, 5)
+	require.Equal(t, int64(7), obj.Segments[4].Size)
 }
 
 func TestSegmentWriter_CustomChunkSize(t *testing.T) {
@@ -81,15 +84,9 @@ func TestSegmentWriter_CustomChunkSize(t *testing.T) {
 
 	w := NewSegmentWriterWithChunkSize(localBackendAdapter{b}, 1024)
 	obj, err := w.Write(context.Background(), "test", "small-chunks", "application/octet-stream", bytes.NewReader(data))
-	if err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if len(obj.Segments) != 5 {
-		t.Fatalf("segments: want 5, got %d", len(obj.Segments))
-	}
-	if obj.Segments[4].Size != 7 {
-		t.Fatalf("trailing segment size: want 7, got %d", obj.Segments[4].Size)
-	}
+	require.NoError(t, err, "write")
+	require.Len(t, obj.Segments, 5)
+	require.Equal(t, int64(7), obj.Segments[4].Size)
 }
 
 func TestSegmentWriter_UsesByteWriterFastPath(t *testing.T) {
@@ -99,18 +96,10 @@ func TestSegmentWriter_UsesByteWriterFastPath(t *testing.T) {
 
 	w := NewSegmentWriterWithChunkSize(b, 1024)
 	obj, err := w.Write(context.Background(), "test", "fast-path", "application/octet-stream", bytes.NewReader(data))
-	if err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if b.readerCalls != 0 {
-		t.Fatalf("reader path calls: want 0, got %d", b.readerCalls)
-	}
-	if b.byteCalls != 2 {
-		t.Fatalf("byte path calls: want 2, got %d", b.byteCalls)
-	}
-	if len(obj.Segments) != 2 {
-		t.Fatalf("segments: want 2, got %d", len(obj.Segments))
-	}
+	require.NoError(t, err, "write")
+	require.Zero(t, b.readerCalls, "reader path calls")
+	require.Equal(t, 2, b.byteCalls, "byte path calls")
+	require.Len(t, obj.Segments, 2)
 }
 
 func TestSegmentWriter_CustomWorkersBoundsConcurrentWrites(t *testing.T) {
@@ -119,15 +108,9 @@ func TestSegmentWriter_CustomWorkersBoundsConcurrentWrites(t *testing.T) {
 
 	w := NewSegmentWriterWithChunkSizeAndWorkers(b, 1024, 1)
 	obj, err := w.Write(context.Background(), "test", "serial", "application/octet-stream", bytes.NewReader(data))
-	if err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if obj.Size != int64(len(data)) {
-		t.Fatalf("size: want %d, got %d", len(data), obj.Size)
-	}
-	if got := b.maxActive.Load(); got != 1 {
-		t.Fatalf("max concurrent writes: want 1, got %d", got)
-	}
+	require.NoError(t, err, "write")
+	require.Equal(t, int64(len(data)), obj.Size)
+	require.Equal(t, int32(1), b.maxActive.Load(), "max concurrent writes")
 }
 
 func TestSegmentWriter_StreamErrorMidChunk(t *testing.T) {
@@ -136,12 +119,9 @@ func TestSegmentWriter_StreamErrorMidChunk(t *testing.T) {
 	r := &errAfterNReader{n: 1024 + 100, err: io.ErrUnexpectedEOF}
 	w := NewSegmentWriterWithChunkSize(localBackendAdapter{b}, 1024)
 	_, err := w.Write(context.Background(), "test", "boom", "application/octet-stream", r)
-	if !errors.Is(err, io.ErrUnexpectedEOF) {
-		t.Fatalf("want ErrUnexpectedEOF, got %v", err)
-	}
-	if _, getErr := b.HeadObject(context.Background(), "test", "boom"); !errors.Is(getErr, ErrObjectNotFound) {
-		t.Fatalf("partial PUT must not appear in meta: %v", getErr)
-	}
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	_, getErr := b.HeadObject(context.Background(), "test", "boom")
+	require.ErrorIs(t, getErr, ErrObjectNotFound, "partial PUT must not appear in meta")
 }
 
 type bytesOnlySegmentBackend struct {
@@ -193,19 +173,16 @@ func TestSegmentWriter_UsesByteFastPathWhenAvailable(t *testing.T) {
 	data := makePattern((16 << 20) + 7)
 
 	obj, err := NewSegmentWriter(b).Write(context.Background(), "test", "fast", "application/octet-stream", bytes.NewReader(data))
-	if err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if b.calls != 2 {
-		t.Fatalf("byte fast path calls: want 2, got %d", b.calls)
-	}
-	if obj.Size != int64(len(data)) {
-		t.Fatalf("size: want %d, got %d", len(data), obj.Size)
-	}
+	require.NoError(t, err, "write")
+	require.Equal(t, 2, b.calls, "byte fast path calls")
+	require.Equal(t, int64(len(data)), obj.Size)
 }
 
 func TestSegmentWriter_ByteFastPathAllocBytesBounded(t *testing.T) {
-	payload := makePattern(5 << 20)
+	if raceDetectorEnabled {
+		t.Skip("race instrumentation inflates TotalAlloc, making the byte threshold meaningless")
+	}
+	payload := makePattern(DefaultChunkSize)
 
 	run := func(t testing.TB) error {
 		t.Helper()
@@ -214,18 +191,64 @@ func TestSegmentWriter_ByteFastPathAllocBytesBounded(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if obj.Size != int64(len(payload)) {
-			t.Fatalf("size: want %d, got %d", len(payload), obj.Size)
-		}
+		require.Equal(t, int64(len(payload)), obj.Size)
 		return nil
 	}
 
-	require.NoError(t, run(t))
-	allocedBytes := int64(allocBytesPerRunForStorageTest(t, 3, func() error {
+	require.NoError(t, run(t)) // warm chunk pool
+	allocedBytes := int64(allocBytesPerRunForStorageTest(t, 10, func() error {
 		return run(t)
 	}))
 	t.Logf("SegmentWriter byte fast path alloc bytes: %d", allocedBytes)
-	if allocedBytes > 18*1024*1024 {
-		t.Fatalf("alloc bytes: got %d, want <= %d", allocedBytes, 18*1024*1024)
+	// 12 MiB threshold: pool reuse keeps hot-path alloc well below DefaultChunkSize
+	// (16 MiB). Extra headroom over the observed ~7 MiB absorbs background-goroutine
+	// TotalAlloc noise when running inside the full test suite.
+	require.LessOrEqual(t, allocedBytes, int64(12*1024*1024))
+}
+
+type blockingBytesBackend struct {
+	entered chan struct{}
+	release chan struct{}
+	ptrs    chan uintptr
+}
+
+func (b *blockingBytesBackend) WriteSegment(context.Context, string, string, int, io.Reader) (SegmentRef, error) {
+	return SegmentRef{}, errors.New("reader path should not be used")
+}
+
+func (b *blockingBytesBackend) WriteSegmentBytes(_ context.Context, _ string, _ string, idx int, data []byte) (SegmentRef, error) {
+	if len(data) > 0 {
+		b.ptrs <- uintptr(unsafe.Pointer(&data[0]))
 	}
+	if idx == 0 {
+		close(b.entered)
+		<-b.release
+	}
+	return SegmentRef{
+		BlobID:   string(rune('a' + idx)),
+		Size:     int64(len(data)),
+		Checksum: ChecksumOf(data),
+	}, nil
+}
+
+func TestSegmentWriter_PooledChunkReleasedAfterBackendReturns(t *testing.T) {
+	backend := &blockingBytesBackend{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+		ptrs:    make(chan uintptr, 2),
+	}
+	payload := makePattern((DefaultChunkSize * 2) + 1)
+	done := make(chan error, 1)
+	go func() {
+		_, err := NewSegmentWriterWithChunkSizeAndWorkers(backend, DefaultChunkSize, 2).
+			Write(context.Background(), "test", "pooled", "application/octet-stream", bytes.NewReader(payload))
+		done <- err
+	}()
+
+	<-backend.entered
+	firstPtr := <-backend.ptrs
+	secondPtr := <-backend.ptrs
+	require.NotEqual(t, firstPtr, secondPtr, "second chunk reused the first chunk buffer before backend returned")
+	close(backend.release)
+	require.NoError(t, <-done)
 }

@@ -37,6 +37,14 @@ type Config struct {
 	// invite bundle (W10).
 	JoinListenAddr string
 
+	// BootstrapExpectNodes (Option B) is the declared target node count for a
+	// fresh cluster. >1 defers genesis shard-group seeding until this many nodes
+	// have joined, then seeds all initial groups at the target size's uniform EC
+	// width (eliminating the RF=1 solo-genesis batch). 0/unset = seed-immediately
+	// (today's behavior). BootstrapExpectTimeout bounds the wait.
+	BootstrapExpectNodes   int
+	BootstrapExpectTimeout time.Duration
+
 	// Pre-built per Q9 of the cmd-thin grill
 	AuthOpts []server.Option
 
@@ -56,16 +64,11 @@ type Config struct {
 	RaftLogGCInterval     time.Duration
 	RaftHeartbeatInterval time.Duration
 	RaftElectionTimeout   time.Duration
-	MuxEnabled            bool
-	MuxPoolSize           int
-	MuxFlushWindow        time.Duration
 
 	// Storage / EC
-	DirectIO           bool
-	MeasureReadAmp     bool
-	ShardCacheSize     int64
-	PackThreshold      int
-	ShardPackThreshold int
+	MeasureReadAmp bool
+	ShardCacheSize int64
+	PackThreshold  int
 
 	// Heal receipts
 	HealReceiptEnabled        bool
@@ -74,17 +77,12 @@ type Config struct {
 	HealReceiptGossipInterval time.Duration
 	HealReceiptWindow         int
 
-	// AppendObject forward buffer pool
-	AppendForwardBufferTotalBytes    int64
-	AppendForwardBufferMaxPerRequest int64
-
 	// AppendObject size cap
 	AppendSizeCapBytes int64
 
 	// Lifecycle / cache
 	LifecycleInterval time.Duration
 	MigrationInterval time.Duration
-	BlockCacheSize    int64
 
 	// Dashboard / vlog
 	PublicURL         string
@@ -95,31 +93,26 @@ type Config struct {
 	AdminSocket string
 	AdminGroup  string
 
-	// Scrub / reshard / degraded
-	ScrubInterval            time.Duration
-	ReshardInterval          time.Duration
-	DataGroupRefreshInterval time.Duration
-	DegradedInterval         time.Duration
+	// Scrub / degraded
+	ScrubInterval    time.Duration
+	DegradedInterval time.Duration
 	// ScrubOrphanAge is the minimum filesystem mtime age before an orphan raw
 	// segment is eligible for sweep. Default 5m.
 	ScrubOrphanAge time.Duration
 	// SegmentGCRetention is the grace period after a raw segment blob becomes
 	// unreferenced before the scrubber may physically delete it. Protects
-	// in-flight reads and recent-PITR margin. 0 disables retention gating
+	// in-flight reads and recent-write margin. 0 disables retention gating
 	// (age-gate only). Default 24h (matches snapshot retention 1h x 24).
 	SegmentGCRetention time.Duration
 
-	// Audit Iceberg log lake
-	AuditIceberg        bool
-	AuditCommitInterval time.Duration
-
-	// Node services
-	NFS4Port           int
-	NFSWriteBufferDir  string
-	NFSWriteBufferIdle time.Duration
-	NBDPort            int
-	P9Bind             string
-	P9Port             int
+	// EC-redundancy-upgrade sweep: relocate non-redundant (1+0) objects into a
+	// redundant EC group after the cluster grows. Default on; ECRedundancyUpgradeMax
+	// bounds relocations per scrub cycle (<=0 → default 8). ECRedundancyUpgradeMinAge
+	// is the minimum object age before relocation (avoids racing in-flight writes;
+	// 0 → relocate immediately, <0 → conservative default).
+	ECRedundancyUpgrade       bool
+	ECRedundancyUpgradeMax    int
+	ECRedundancyUpgradeMinAge time.Duration
 
 	// Resource guards (pre-resolved from cobra; Run body reads only these)
 	FDWatchEnabled        bool

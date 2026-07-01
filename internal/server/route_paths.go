@@ -9,16 +9,9 @@ const (
 	routePathUI      = "/ui"
 	routePathUIRoot  = "/ui/"
 
-	routePrefixAPI           = "/api/"
-	routePrefixAdmin         = "/admin/"
-	routePrefixIceberg       = "/iceberg/"
-	routePrefixIcebergAIStor = "/_iceberg/"
-
-	// routePathOAuthTokenSuffix is the iceberg OAuth2 token endpoint suffix,
-	// appended to each iceberg route prefix. The iceberg package holds its own
-	// copy for route registration; core uses this for the route-surface manifest.
-	routePathOAuthTokenSuffix = "v1/oauth/tokens"
-	routePrefixUI             = "/ui/"
+	routePrefixAPI   = "/api/"
+	routePrefixAdmin = "/admin/"
+	routePrefixUI    = "/ui/"
 
 	routePathEvents            = "/api/events"
 	routePathHealEventsStream  = "/api/events/heal/stream"
@@ -37,8 +30,6 @@ const (
 	// SigV4-authenticated like the rest of /api/. Documented in TODOS.
 	routePathLifecycleTestRunCycle = "/api/cluster/lifecycle/test/run-cycle"
 	routePathLifecycleTestSetNow   = "/api/cluster/lifecycle/test/set-now"
-	routePathAuditHealth           = "/api/audit/health"
-	routePathAuditS3               = "/api/audit/s3"
 	routePathCacheStatus           = "/api/cache/status"
 	routePathConfig                = "/api/admin/config"
 	routePathAlertsStatus          = "/api/admin/alerts/status"
@@ -50,21 +41,16 @@ const (
 	routePathAdminHealthRaft   = "/admin/health/raft"
 	routePathAdminHealthScrub  = "/admin/health/scrub"
 	routePathAdminRaftSnapshot = "/admin/raft/snapshot"
-	routePathAdminSnapshots    = "/admin/snapshots"
-	routePathAdminPITR         = "/admin/pitr"
-	routePathAdminDebug        = "/admin/debug"
-	routePathAdminDebugVFSStat = "/vfs/stat"
 
-	routePathSnapshotSeq        = "/:seq"
-	routePathSnapshotSeqRestore = "/:seq/restore"
-
-	routePrefixAdminUDSCluster      = "/v1/cluster"
-	routePathAdminUDSClusterStatus  = "/status"
-	routePathAdminUDSPlacement      = "/placement"
-	routePathAdminUDSRemovePeer     = "/remove-peer"
-	routePathAdminUDSEventLog       = "/eventlog"
-	routePathAdminUDSTransferLeader = "/transfer-leader"
-	routePathAdminUDSHealth         = "/health"
-	routePathAdminUDSBalancerStatus = "/balancer/status"
-	routePathAdminUDSCapabilities   = "/capabilities"
+	routePrefixAdminUDSCluster       = "/v1/cluster"
+	routePathAdminUDSClusterStatus   = "/status"
+	routePathAdminUDSPlacement       = "/placement"
+	routePathAdminUDSRemovePeer      = "/remove-peer"
+	routePathAdminUDSEventLog        = "/eventlog"
+	routePathAdminUDSTransferLeader  = "/transfer-leader"
+	routePathAdminUDSHealth          = "/health"
+	routePathAdminUDSBalancerStatus  = "/balancer/status"
+	routePathAdminUDSCapabilities    = "/capabilities"
+	routePathAdminUDSExpandPlacement = "/expand-placement"
+	routePathAdminUDSRetirePlacement = "/retire-placement-generation"
 )

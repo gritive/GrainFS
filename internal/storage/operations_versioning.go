@@ -21,28 +21,45 @@ func (o *Operations) GetBucketVersioning(bucket string) (string, error) {
 	return plan.bucketVersioner.GetBucketVersioning(bucket)
 }
 
-func (o *Operations) GetObjectVersion(bucket, key, versionID string) (io.ReadCloser, *Object, error) {
+// GetBucketVersioningLinearized is the linearizable, fail-closed read for the
+// MUTATING S3 edge (a follower must not read a stale local replica and
+// mis-version the write). Delegates to the backend's linearized read when it
+// supports one (cluster), else the plain local read.
+func (o *Operations) GetBucketVersioningLinearized(ctx context.Context, bucket string) (string, error) {
+	plan := o.planForCall()
+	if plan.bucketVersioner == nil {
+		return "", UnsupportedOperationError{Op: "GetBucketVersioningLinearized", Reason: UnsupportedReasonNoAdapter}
+	}
+	if lin, ok := plan.bucketVersioner.(interface {
+		GetBucketVersioningLinearized(context.Context, string) (string, error)
+	}); ok {
+		return lin.GetBucketVersioningLinearized(ctx, bucket)
+	}
+	return plan.bucketVersioner.GetBucketVersioning(bucket)
+}
+
+func (o *Operations) GetObjectVersion(ctx context.Context, bucket, key, versionID string) (io.ReadCloser, *Object, error) {
 	plan := o.planForCall()
 	if plan.versionedGetter == nil {
 		return nil, nil, UnsupportedOperationError{Op: "GetObjectVersion", Reason: UnsupportedReasonNoAdapter}
 	}
-	return plan.versionedGetter.GetObjectVersion(bucket, key, versionID)
+	return plan.versionedGetter.GetObjectVersion(ctx, bucket, key, versionID)
 }
 
-func (o *Operations) HeadObjectVersion(bucket, key, versionID string) (*Object, error) {
+func (o *Operations) HeadObjectVersion(ctx context.Context, bucket, key, versionID string) (*Object, error) {
 	plan := o.planForCall()
 	if plan.versionedHeader == nil {
 		return nil, UnsupportedOperationError{Op: "HeadObjectVersion", Reason: UnsupportedReasonNoAdapter}
 	}
-	return plan.versionedHeader.HeadObjectVersion(bucket, key, versionID)
+	return plan.versionedHeader.HeadObjectVersion(ctx, bucket, key, versionID)
 }
 
-func (o *Operations) ListObjectVersions(bucket, prefix string, maxKeys int) ([]*ObjectVersion, error) {
+func (o *Operations) ListObjectVersions(ctx context.Context, bucket, prefix string, maxKeys int) ([]*ObjectVersion, error) {
 	plan := o.planForCall()
 	if plan.objectVersionLister == nil {
 		return nil, UnsupportedOperationError{Op: "ListObjectVersions", Reason: UnsupportedReasonNoAdapter}
 	}
-	return plan.objectVersionLister.ListObjectVersions(bucket, prefix, maxKeys)
+	return plan.objectVersionLister.ListObjectVersions(ctx, bucket, prefix, maxKeys)
 }
 
 func (o *Operations) DeleteObjectVersion(bucket, key, versionID string) error {

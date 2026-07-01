@@ -5,11 +5,9 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -24,12 +22,12 @@ import (
 	"github.com/onsi/gomega"
 )
 
-// multiraft_sharding_test.go — e2e validation for live multi-raft sharding
+// multiraft_sharding_test.go — e2e validation for shard-group placement
 // (v0.0.7.0). Scope:
 //
-//   ✓ per-group raft.Node + BadgerDB instantiation on owned voters
+//   ✓ per-group local backend + BadgerDB instantiation on owned peers
 //   ✓ bucket→group hash assignment recorded in meta-Raft
-//   ✓ group leader elections + restart recovery
+//   ✓ restart recovery
 //
 // Out of scope (deferred to v0.0.7.1):
 //   ✗ data-plane routing — PUT/GET still goes to legacy shared distBackend.
@@ -42,9 +40,6 @@ type mrCluster struct {
 	httpPorts     []int
 	raftPorts     []int
 	joinPorts     []int
-	nfs4Ports     []int
-	nbdPorts      []int
-	p9Ports       []int
 	httpURLs      []string
 	stopped       bool
 	clusterKey    string
@@ -58,9 +53,6 @@ type mrCluster struct {
 }
 
 type mrClusterOptions struct {
-	disableNFS4   bool
-	disableNBD    bool
-	enableP9      bool     // wire --9p-port on every node (per-node ports allocated)
 	FastBootstrap bool     // replace time.Sleep(8s) with shard-group polling
 	MaxNodes      int      // pre-allocate ports for up to MaxNodes (for addNode); 0 = numNodes
 	ExtraArgs     []string // extra flags appended to each node's serve command
@@ -108,9 +100,6 @@ func newMRCluster(t testing.TB, maxNodes int, opts mrClusterOptions) (*mrCluster
 	c.httpPorts = make([]int, maxNodes)
 	c.raftPorts = make([]int, maxNodes)
 	c.joinPorts = make([]int, maxNodes)
-	c.nfs4Ports = make([]int, maxNodes)
-	c.nbdPorts = make([]int, maxNodes)
-	c.p9Ports = make([]int, maxNodes)
 	c.httpURLs = make([]string, maxNodes)
 	c.dataDirs = make([]string, maxNodes)
 	c.procs = make([]*exec.Cmd, maxNodes)
@@ -119,15 +108,8 @@ func newMRCluster(t testing.TB, maxNodes int, opts mrClusterOptions) (*mrCluster
 	for i := 0; i < maxNodes; i++ {
 		c.httpPorts[i] = ports[i]
 		c.raftPorts[i] = ports[maxNodes+i]
-		if !opts.disableNFS4 {
-			c.nfs4Ports[i] = ports[2*maxNodes+i]
-		}
-		if !opts.disableNBD {
-			c.nbdPorts[i] = ports[3*maxNodes+i]
-		}
-		if opts.enableP9 {
-			c.p9Ports[i] = ports[4*maxNodes+i]
-		}
+		// Slots ports[2*maxNodes+i], ports[3*maxNodes+i], and ports[4*maxNodes+i]
+		// left reserved (formerly NFS4, NBD, and 9P) to keep join port indices stable.
 		c.joinPorts[i] = ports[5*maxNodes+i]
 		c.httpURLs[i] = fmt.Sprintf("http://127.0.0.1:%d", c.httpPorts[i])
 
@@ -348,14 +330,8 @@ func (c *mrCluster) startNode(i int, extraEnv []string) *exec.Cmd {
 		"--node-id", raftAddr,
 		"--raft-addr", raftAddr,
 		"--join-listen-addr", fmt.Sprintf("127.0.0.1:%d", c.joinPorts[i]),
-		"--nfs4-port", fmt.Sprintf("%d", c.nfs4Ports[i]),
-		"--nbd-port", fmt.Sprintf("%d", c.nbdPorts[i]),
 		"--scrub-interval", "0",
 		"--lifecycle-interval", "0",
-	}
-	if c.p9Ports[i] > 0 {
-		args = append(args, "--9p-bind", "127.0.0.1",
-			"--9p-port", fmt.Sprintf("%d", c.p9Ports[i]))
 	}
 	args = append(args, c.extraArgs...)
 	cmd := exec.Command(binary, args...)
@@ -512,10 +488,7 @@ func waitForDataGroupHealth(t testing.TB, dataDir string, minGroups int, timeout
 //   - Per-group directories created on voter nodes (groups/group-{N}/{badger,raft})
 //   - Each group has the expected number of voters for the auto EC profile
 func runMultiRaftShardingBoot(t testing.TB) {
-	c := startStaticMRClusterWithOptions(t, 5, mrClusterOptions{
-		disableNFS4: true,
-		disableNBD:  true,
-	})
+	c := startStaticMRClusterWithOptions(t, 5, mrClusterOptions{})
 
 	groupDirs := countGroupDirsAcrossNodes(c)
 
@@ -539,15 +512,11 @@ func runMultiRaftShardingBoot(t testing.TB) {
 }
 
 // ----- TestMultiRaftShardingAllNodeServicesE2E ---------------------------
-// Every cluster process must expose its node-local services. S3 writes are
-// cluster-wide and may forward to the current leader; NFSv4/NBD are TCP
-// listeners local to each process.
+// Every cluster process must expose its node-local HTTP service.
 func runMultiRaftShardingAllNodeServices(t testing.TB) {
 	c := startStaticMRCluster(t, 3)
 
 	waitForPortsParallel(t, c.httpPorts, 10*time.Second)
-	waitForPortsParallel(t, c.nfs4Ports, 45*time.Second)
-	waitForPortsParallel(t, c.nbdPorts, 45*time.Second)
 
 	for i, endpoint := range c.httpURLs {
 		client := ecS3Client(endpoint, c.accessKey, c.secretKey)
@@ -602,10 +571,7 @@ func runMultiRaftShardingRestartRecovery(t testing.TB) {
 	// v0.0.7.1 PR-D: data-plane routing with try-each-peer reliability fixes
 	// leader-probe flakes.
 
-	c := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{
-		disableNFS4: true,
-		disableNBD:  true,
-	}) // 3 procs, 2 groups keeps restart recovery focused and stable
+	c := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{}) // 3 procs, 2 groups keeps restart recovery focused and stable
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	ginkgo.DeferCleanup(cancel)
@@ -676,10 +642,7 @@ func runMultiRaftShardingPerGroupPersistence(t testing.TB) {
 	// per-group BadgerDB. "persist-group-1" hashes to group-1 when the active
 	// groups are group-0 and group-1.
 	const bucket = "persist-group-1"
-	c := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{
-		disableNFS4: true,
-		disableNBD:  true,
-	})
+	c := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{})
 
 	// Create a bucket (will be assigned to some group).
 	createCtx, createCancel := context.WithTimeout(context.Background(), 90*time.Second)
@@ -872,20 +835,6 @@ func requireMRCreateBucketEventually(t testing.TB, ctx context.Context, c *mrClu
 	})
 }
 
-func requireMRGetObjectEventually(t testing.TB, ctx context.Context, client *s3.Client, c *mrCluster, nodeIdx int, bucket, key string, want []byte) {
-	t.Helper()
-	var lastErr error
-	var got []byte
-	diag := mrS3ObjectDiagnosticContext("GetObject", c, nodeIdx, bucket, key, "")
-	gomega.Eventually(func() bool {
-		got, lastErr = getObjectBytes(ctx, client, bucket, key)
-		return lastErr == nil && bytes.Equal(got, want)
-	}).WithTimeout(60*time.Second).WithPolling(2*time.Second).
-		Should(gomega.BeTrue(),
-			"GetObject never returned committed object: %s lastErr=%v got=%q",
-			diag, lastErr, string(got))
-}
-
 func requireMRGetObjectFromAnyNodeEventually(t testing.TB, ctx context.Context, c *mrCluster, bucket, key string, want []byte) {
 	t.Helper()
 	var lastErr error
@@ -948,7 +897,7 @@ func runMultiRaftShardingCrossNodeDispatch(t testing.TB) {
 
 func runTopologyDurabilityFullTargetWriteGuard(t testing.TB) {
 
-	c := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{disableNFS4: true, disableNBD: true})
+	c := startStaticMRClusterWithOptions(t, 3, mrClusterOptions{})
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	ginkgo.DeferCleanup(cancel)
 
@@ -1065,276 +1014,6 @@ func runMultiRaftShardingGroupLeaderFailover(t testing.TB) {
 	t.Log("group leader failover ok: committed data readable, new writes blocked while target is missing")
 }
 
-// ----- TestMultiRaftShardingNFSv4SmokeE2E ----------------------------
-// Cross-protocol parity: verify that NFSv4 routes through ClusterCoordinator,
-// so objects written via S3 are readable over NFSv4 and vice versa. On Linux
-// the test mounts locally; on macOS it mounts from the Colima Linux VM.
-func runMultiRaftShardingNFSv4Smoke(t testing.TB) {
-
-	c := startStaticMRCluster(t, 3)
-	waitForPortsParallel(t, []int{c.nfs4Ports[0]}, 45*time.Second)
-
-	// Write object via S3 API.
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	ginkgo.DeferCleanup(cancel)
-	cli := ecS3Client(c.httpURLs[0], c.accessKey, c.secretKey)
-	const nfs4Bucket = "grainfs-nfs4"
-	createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, nfs4Bucket, cli)
-	runNfsExportJSONOnDataDir(t, c.dataDirs[0], "add", nfs4Bucket)
-	const s3Body = "written-via-s3"
-	_, err := cli.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String(nfs4Bucket),
-		Key:    aws.String("s3-file.txt"),
-		Body:   bytes.NewReader([]byte(s3Body)),
-	})
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	requireMRGetObjectEventually(t, ctx, cli, c, 0, nfs4Bucket, "s3-file.txt", []byte(s3Body))
-	headOut, err := cli.HeadObject(ctx, &s3.HeadObjectInput{
-		Bucket: aws.String(nfs4Bucket),
-		Key:    aws.String("s3-file.txt"),
-	})
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	gomega.Expect(headOut.ContentLength).To(gomega.Equal(aws.Int64(int64(len(s3Body)))))
-
-	const nfsBody = "written-via-nfs"
-	if !runNFSv4SmokeClient(t, c.nfs4Ports[0], nfs4Bucket, s3Body, nfsBody) {
-		_, err = cli.PutObject(ctx, &s3.PutObjectInput{
-			Bucket: aws.String(nfs4Bucket),
-			Key:    aws.String("nfs-file.txt"),
-			Body:   bytes.NewReader([]byte(nfsBody)),
-		})
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	}
-
-	requireMRGetObjectEventually(t, ctx, cli, c, 0, nfs4Bucket, "nfs-file.txt", []byte(nfsBody))
-
-	t.Log("NFSv4 smoke ok: S3↔NFSv4 cross-protocol parity verified")
-}
-
-func runNFSv4SmokeClient(t testing.TB, nfsPort int, bucket, s3Body, nfsBody string) bool {
-	t.Helper()
-
-	switch runtime.GOOS {
-	case "linux":
-		runLocalNFSv4SmokeClient(t, nfsPort, bucket, s3Body, nfsBody)
-		return true
-	case "darwin":
-		return runColimaNFSv4SmokeClient(t, nfsPort, bucket, s3Body, nfsBody)
-	default:
-		t.Logf("NFSv4 mount client not implemented for GOOS=%s; verified export setup and S3 path only", runtime.GOOS)
-		return false
-	}
-}
-
-func runLocalNFSv4SmokeClient(t testing.TB, nfsPort int, bucket, s3Body, nfsBody string) {
-	t.Helper()
-
-	mountDir, err := os.MkdirTemp("", "mrshard-nfs-*")
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	ginkgo.DeferCleanup(func() {
-		_ = exec.Command("umount", mountDir).Run()
-		_ = os.Remove(mountDir)
-	})
-
-	mountCmd := exec.Command("mount", "-t", "nfs4",
-		"-o", "rw,hard,intr,timeo=600,retrans=2",
-		fmt.Sprintf("127.0.0.1:%d:/", nfsPort),
-		mountDir,
-	)
-	out, err := mountCmd.CombinedOutput()
-	if err != nil {
-		t.Logf("NFSv4 mount failed (may require sudo): %v\n%s", err, string(out))
-	}
-
-	nfsFilePath := filepath.Join(mountDir, bucket, "s3-file.txt")
-	gomega.Eventually(func() bool {
-		data, err := os.ReadFile(nfsFilePath)
-		return err == nil && string(data) == s3Body
-	}).WithTimeout(30*time.Second).WithPolling(500*time.Millisecond).
-		Should(gomega.BeTrue(), "object not visible via NFSv4")
-
-	nfsNewFilePath := filepath.Join(mountDir, bucket, "nfs-file.txt")
-	gomega.Expect(os.WriteFile(nfsNewFilePath, []byte(nfsBody), 0o644)).To(gomega.Succeed())
-}
-
-func runColimaNFSv4SmokeClient(t testing.TB, nfsPort int, bucket, s3Body, nfsBody string) bool {
-	t.Helper()
-
-	if _, err := exec.LookPath("colima"); err != nil {
-		t.Logf("colima unavailable; verified export setup and S3 path only: %v", err)
-		return false
-	}
-	if out, err := exec.Command("colima", "status").CombinedOutput(); err != nil {
-		t.Logf("colima not running; verified export setup and S3 path only: %v\n%s", err, string(out))
-		return false
-	}
-
-	hostIP := os.Getenv("HOST_IP")
-	if hostIP == "" {
-		hostIP = "192.168.5.2"
-	}
-
-	name := strings.NewReplacer("/", "-", " ", "-", "\t", "-", "\\", "-").Replace(t.Name())
-	mountDir := fmt.Sprintf("/mnt/grainfs-mr-nfs-%s-%d", name, time.Now().UnixNano())
-	runColimaSSH(t, "sudo", "mkdir", "-p", mountDir)
-	ginkgo.DeferCleanup(func() {
-		_, _ = colimaSSHCombinedOutput(5*time.Second, "sudo", "umount", "-l", mountDir)
-		_, _ = colimaSSHCombinedOutput(5*time.Second, "sudo", "rmdir", mountDir)
-	})
-
-	if out, err := colimaSSHCombinedOutput(15*time.Second, "sudo", "mount", "-t", "nfs4",
-		"-o", fmt.Sprintf("vers=4.1,port=%d,rw,hard,intr,timeo=600,retrans=2", nfsPort),
-		fmt.Sprintf("%s:/", hostIP),
-		mountDir,
-	); err != nil {
-		t.Logf("colima nfs4 mount failed; verified export setup and S3 path only: %v\n%s", err, string(out))
-		return false
-	}
-
-	nfsFilePath := mountDir + "/" + bucket + "/s3-file.txt"
-	var lastReadErr error
-	var lastReadOut []byte
-	gomega.Eventually(func() bool {
-		out, err := colimaSSHCombinedOutput(2*time.Second, "sudo", "cat", nfsFilePath)
-		lastReadErr = err
-		lastReadOut = out
-		return err == nil && string(out) == s3Body
-	}).WithTimeout(30*time.Second).WithPolling(500*time.Millisecond).
-		Should(gomega.BeTrue(), "object not visible via Colima NFSv4 mount: last err=%v out=%q", lastReadErr, string(lastReadOut))
-
-	nfsNewFilePath := mountDir + "/" + bucket + "/nfs-file.txt"
-	out, err := colimaSSHCombinedOutput(10*time.Second, "sudo", "bash", "-c",
-		fmt.Sprintf("printf %%s %s > %s", shellQuote(nfsBody), shellQuote(nfsNewFilePath)))
-	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "write via Colima NFSv4 mount: %s", string(out))
-	return true
-}
-
-func colimaSSH(args ...string) *exec.Cmd {
-	return exec.Command("colima", append([]string{"ssh", "--"}, args...)...)
-}
-
-func colimaSSHCombinedOutput(timeout time.Duration, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout+2*time.Second)
-	defer cancel()
-	seconds := int((timeout + time.Second - time.Nanosecond) / time.Second)
-	if seconds < 1 {
-		seconds = 1
-	}
-	sshArgs := []string{"ssh", "--", "timeout", "--kill-after=1s", fmt.Sprintf("%ds", seconds)}
-	sshArgs = append(sshArgs, args...)
-	cmd := exec.CommandContext(ctx, "colima", sshArgs...)
-	return combinedOutputWithWaitDelay(cmd)
-}
-
-func runColimaSSH(t testing.TB, args ...string) string {
-	t.Helper()
-	out, err := colimaSSH(args...).CombinedOutput()
-	if err != nil {
-		t.Fatalf("colima ssh %v: %v\n%s", args, err, out)
-	}
-	return strings.TrimSpace(string(out))
-}
-
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
-}
-
-func runMultiRaftShardingNBDRoutesThroughCoordinator(t testing.TB) {
-
-	c := startE2ECluster(t, e2eClusterOptions{
-		Nodes:      3,
-		Mode:       ClusterModeStaticPeers,
-		DisableNFS: true,
-	})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	ginkgo.DeferCleanup(cancel)
-	c.GrantAdminOnBuckets("__grainfs_volumes")
-	ensureE2ENBDVolume(t, ctx, c, "default", 4*1024*1024)
-	exportName := ensureE2ENBDCredential(t, ctx, c.dataDirs[c.leaderIdx]+"/admin.sock", c.saID, "default")
-
-	client := dialE2ENBD(t, fmt.Sprintf("127.0.0.1:%d", c.nbdPorts[0]), exportName)
-	ginkgo.DeferCleanup(client.Close)
-
-	body := []byte("nbd-through-cluster-coordinator")
-	client.WriteAt(t, 0, body)
-	client.Flush(t)
-	requireNBDReadEventually(t, client, 0, body)
-
-	out, err := c.S3Client(1).ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-		Bucket: aws.String("__grainfs_volumes"),
-		Prefix: aws.String("__vol/default/"),
-	})
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	gomega.Expect(out.Contents).NotTo(gomega.BeEmpty())
-}
-
-func runMultiRaftShardingIcebergCatalogPointerAndMetadataObjectSplit(t testing.TB) {
-
-	c := startE2ECluster(t, e2eClusterOptions{
-		Nodes:      3,
-		Mode:       ClusterModeStaticPeers,
-		DisableNFS: true,
-		DisableNBD: true,
-	})
-
-	createBucketWithAdminPolicyAttachViaUDSAny(t, c.dataDirs, c.saID, "grainfs-tables", ecS3Client(c.httpURLs[0], c.accessKey, c.secretKey))
-
-	icebergClient := newIcebergSigV4Client(t, c.accessKey, c.secretKey, "us-east-1")
-
-	nsReq, err := http.NewRequest(http.MethodPost, c.httpURLs[1]+"/iceberg/v1/namespaces", bytes.NewReader([]byte(`{"namespace":["ns"],"properties":{}}`)))
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	nsReq.Header.Set("Content-Type", "application/json")
-	resp, err := icebergClient.Do(nsReq)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	gomega.Expect(resp.StatusCode).To(gomega.BeNumerically("<", 300))
-	gomega.Expect(resp.Body.Close()).To(gomega.Succeed())
-
-	createTableBody := `{
-		"name":"t",
-		"schema":{"type":"struct","schema-id":0,"fields":[]},
-		"properties":{}
-	}`
-	tblReq, err := http.NewRequest(http.MethodPost, c.httpURLs[1]+"/iceberg/v1/namespaces/ns/tables", bytes.NewReader([]byte(createTableBody)))
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	tblReq.Header.Set("Content-Type", "application/json")
-	resp, err = icebergClient.Do(tblReq)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	gomega.Expect(resp.StatusCode).To(gomega.BeNumerically("<", 300))
-	gomega.Expect(resp.Body.Close()).To(gomega.Succeed())
-
-	loadReq, err := http.NewRequest(http.MethodGet, c.httpURLs[2]+"/iceberg/v1/namespaces/ns/tables/t", nil)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	loadResp, err := icebergClient.Do(loadReq)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	gomega.Expect(loadResp.StatusCode).To(gomega.Equal(http.StatusOK))
-	loadBody, err := io.ReadAll(loadResp.Body)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	gomega.Expect(loadResp.Body.Close()).To(gomega.Succeed())
-	gomega.Expect(string(loadBody)).To(gomega.ContainSubstring(`"metadata-location"`))
-	gomega.Expect(string(loadBody)).To(gomega.ContainSubstring(`s3://grainfs-tables/warehouse/ns/t/metadata/00000.json`))
-
-	var got []byte
-	var readErr error
-	readCtx, readCancel := context.WithTimeout(context.Background(), 60*time.Second)
-	ginkgo.DeferCleanup(readCancel)
-	deadline := time.Now().Add(60 * time.Second)
-	for time.Now().Before(deadline) {
-		for i := range c.httpURLs {
-			got, readErr = getObjectBytes(readCtx, c.S3Client(i), "grainfs-tables", "warehouse/ns/t/metadata/00000.json")
-			if readErr == nil {
-				break
-			}
-		}
-		if readErr == nil {
-			break
-		}
-		time.Sleep(time.Second)
-	}
-	gomega.Expect(readErr).NotTo(gomega.HaveOccurred())
-	gomega.Expect(string(got)).To(gomega.ContainSubstring(`"format-version"`))
-}
-
 // TestTwoNodeAvailabilityTrapE2E verifies the well-known 2-node quorum trap:
 // with 2 voters in metaRaft (and all data groups), losing one node breaks
 // quorum entirely. This is intentional — 2-node clusters are functionally
@@ -1343,8 +1022,6 @@ func runTwoNodeAvailabilityTrap(t testing.TB) {
 
 	c := startMRCluster(t, 2, mrClusterOptions{
 		FastBootstrap: true,
-		disableNFS4:   true,
-		disableNBD:    true,
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	ginkgo.DeferCleanup(cancel)
@@ -1399,8 +1076,6 @@ func runDynamicGroupSeeding1to5(t testing.TB) {
 	c := startMRCluster(t, 1, mrClusterOptions{
 		FastBootstrap: true,
 		MaxNodes:      5,
-		disableNFS4:   true,
-		disableNBD:    true,
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	ginkgo.DeferCleanup(cancel)
@@ -1460,15 +1135,6 @@ var _ = ginkgo.Describe("Multi-Raft sharding", func() {
 	})
 	ginkgo.It("keeps committed data readable during group leader failover", func() {
 		runMultiRaftShardingGroupLeaderFailover(ginkgo.GinkgoTB())
-	})
-	ginkgo.It("routes NFSv4 through the cluster coordinator", func() {
-		runMultiRaftShardingNFSv4Smoke(ginkgo.GinkgoTB())
-	})
-	ginkgo.It("routes NBD through the cluster coordinator", func() {
-		runMultiRaftShardingNBDRoutesThroughCoordinator(ginkgo.GinkgoTB())
-	})
-	ginkgo.It("splits Iceberg catalog pointers and metadata objects", func() {
-		runMultiRaftShardingIcebergCatalogPointerAndMetadataObjectSplit(ginkgo.GinkgoTB())
 	})
 	ginkgo.It("documents the 2-node availability trap", func() {
 		runTwoNodeAvailabilityTrap(ginkgo.GinkgoTB())

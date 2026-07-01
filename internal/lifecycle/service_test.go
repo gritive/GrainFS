@@ -29,7 +29,7 @@ func (f *fakeProposer) ProposeLifecyclePut(ctx context.Context, bucket string, r
 	}{bucket, append([]byte(nil), raw...)})
 	return f.err
 }
-func (f *fakeProposer) ProposeLifecycleDelete(ctx context.Context, bucket string) error {
+func (f *fakeProposer) ProposeLifecycleDelete(ctx context.Context, bucket string, observedGen uint64) error {
 	f.deleteCalls = append(f.deleteCalls, bucket)
 	return f.err
 }
@@ -46,7 +46,7 @@ func (f *fakeLeadership) Subscribe() (<-chan struct{}, func()) {
 
 func newServiceForTest(t *testing.T) *Service {
 	t.Helper()
-	return NewService(NewStore(newTestDB(t)), &fakeProposer{}, &fakeLeadership{}, nil, nil, 0)
+	return NewService(NewStore(newWrappedStore(t)), &fakeProposer{}, &fakeLeadership{}, nil, nil, 0)
 }
 
 func TestService_Enabled_True(t *testing.T) {
@@ -70,7 +70,7 @@ func TestService_GetRaw_NotFound_ReturnsNil(t *testing.T) {
 
 func TestService_Apply_ValidXML_CallsProposer(t *testing.T) {
 	prop := &fakeProposer{}
-	svc := NewService(NewStore(newTestDB(t)), prop, &fakeLeadership{}, nil, nil, 0)
+	svc := NewService(NewStore(newWrappedStore(t)), prop, &fakeLeadership{}, nil, nil, 0)
 	raw := []byte(`<LifecycleConfiguration><Rule><ID>r1</ID><Status>Enabled</Status><Expiration><Days>1</Days></Expiration></Rule></LifecycleConfiguration>`)
 	require.NoError(t, svc.Apply(context.Background(), "b", raw))
 	require.Len(t, prop.putCalls, 1)
@@ -80,7 +80,7 @@ func TestService_Apply_ValidXML_CallsProposer(t *testing.T) {
 
 func TestService_Apply_InvalidXML_ReturnsError(t *testing.T) {
 	prop := &fakeProposer{}
-	svc := NewService(NewStore(newTestDB(t)), prop, &fakeLeadership{}, nil, nil, 0)
+	svc := NewService(NewStore(newWrappedStore(t)), prop, &fakeLeadership{}, nil, nil, 0)
 	err := svc.Apply(context.Background(), "b", []byte("not xml at all"))
 	require.Error(t, err)
 	assert.Empty(t, prop.putCalls, "proposer must not be called on invalid XML")
@@ -88,7 +88,7 @@ func TestService_Apply_InvalidXML_ReturnsError(t *testing.T) {
 
 func TestService_Apply_FailsValidation(t *testing.T) {
 	prop := &fakeProposer{}
-	svc := NewService(NewStore(newTestDB(t)), prop, &fakeLeadership{}, nil, nil, 0)
+	svc := NewService(NewStore(newWrappedStore(t)), prop, &fakeLeadership{}, nil, nil, 0)
 	raw := []byte(`<LifecycleConfiguration></LifecycleConfiguration>`)
 	err := svc.Apply(context.Background(), "b", raw)
 	require.Error(t, err)
@@ -97,7 +97,7 @@ func TestService_Apply_FailsValidation(t *testing.T) {
 
 func TestService_Delete_CallsProposer(t *testing.T) {
 	prop := &fakeProposer{}
-	svc := NewService(NewStore(newTestDB(t)), prop, &fakeLeadership{}, nil, nil, 0)
+	svc := NewService(NewStore(newWrappedStore(t)), prop, &fakeLeadership{}, nil, nil, 0)
 	require.NoError(t, svc.Delete(context.Background(), "b"))
 	require.Equal(t, []string{"b"}, prop.deleteCalls)
 }
@@ -140,7 +140,7 @@ func TestService_Status_NotRunning(t *testing.T) {
 	be := &mockBackend{buckets: []string{}}
 	del := &mockDeleter{}
 	lead := &signalLeadership{leader: false}
-	s := NewService(NewStore(newTestDB(t)), &fakeProposer{}, lead, be, del, 20*time.Millisecond)
+	s := NewService(NewStore(newWrappedStore(t)), &fakeProposer{}, lead, be, del, 20*time.Millisecond)
 	st := s.Status()
 	assert.False(t, st.Running)
 	assert.True(t, st.LastRun.IsZero())
@@ -162,7 +162,7 @@ func TestService_Status_RunningReflectsWorker(t *testing.T) {
 	be := &mockBackend{buckets: []string{}}
 	del := &mockDeleter{}
 	lead := &signalLeadership{leader: false}
-	s := NewService(NewStore(newTestDB(t)), &fakeProposer{}, lead, be, del, 20*time.Millisecond)
+	s := NewService(NewStore(newWrappedStore(t)), &fakeProposer{}, lead, be, del, 20*time.Millisecond)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go s.Run(ctx)
@@ -185,15 +185,14 @@ type fakeProposerWithStore struct {
 func (f *fakeProposerWithStore) ProposeLifecyclePut(_ context.Context, bucket string, raw []byte) error {
 	return f.store.PutRaw(bucket, raw)
 }
-func (f *fakeProposerWithStore) ProposeLifecycleDelete(_ context.Context, bucket string) error {
+func (f *fakeProposerWithStore) ProposeLifecycleDelete(_ context.Context, bucket string, observedGen uint64) error {
 	return f.store.Delete(bucket)
 }
 
 // TestService_Apply_ThenWorkerProcesses verifies the full module invariant:
 // a lifecycle config written via Apply() is eventually processed by the Worker.
 func TestService_Apply_ThenWorkerProcesses(t *testing.T) {
-	db := newTestDB(t)
-	store := NewStore(db)
+	store := NewStore(newWrappedStore(t))
 	prop := &fakeProposerWithStore{store: store}
 
 	oldTime := time.Now().Add(-2 * 24 * time.Hour).Unix()
@@ -238,7 +237,7 @@ func TestService_Run_StartsWorkerOnLeader_StopsOnFollower(t *testing.T) {
 	lead := &signalLeadership{leader: false}
 	be := &mockBackend{buckets: []string{}} // existing in worker_test.go
 	del := &mockDeleter{}                   // existing in worker_test.go
-	svc := NewService(NewStore(newTestDB(t)), &fakeProposer{}, lead, be, del, 20*time.Millisecond)
+	svc := NewService(NewStore(newWrappedStore(t)), &fakeProposer{}, lead, be, del, 20*time.Millisecond)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -266,7 +265,7 @@ func TestService_MPUWorkerStartsOnFollower(t *testing.T) {
 	be := &mockBackend{buckets: []string{}}
 	del := &mockDeleter{}
 	lead := &signalLeadership{leader: false}
-	svc := NewService(NewStore(newTestDB(t)), &fakeProposer{}, lead, be, del, 20*time.Millisecond)
+	svc := NewService(NewStore(newWrappedStore(t)), &fakeProposer{}, lead, be, del, 20*time.Millisecond)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -288,7 +287,7 @@ func TestService_BothWorkersStartOnLeader(t *testing.T) {
 	be := &mockBackend{buckets: []string{}}
 	del := &mockDeleter{}
 	lead := &signalLeadership{leader: true}
-	svc := NewService(NewStore(newTestDB(t)), &fakeProposer{}, lead, be, del, 20*time.Millisecond)
+	svc := NewService(NewStore(newWrappedStore(t)), &fakeProposer{}, lead, be, del, 20*time.Millisecond)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

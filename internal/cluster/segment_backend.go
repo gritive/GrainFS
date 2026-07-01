@@ -6,10 +6,11 @@ import (
 	"io"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/storage/zstdpool"
+	"github.com/gritive/GrainFS/internal/uuidutil"
+	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -36,18 +37,41 @@ type clusterSegmentBackend struct {
 	contentType  string
 	userMetadata map[string]string
 	sseAlgorithm string
+	acl          uint8              // s3auth.ACLGrant bitmask; 0 = private (default)
 	placements   []segmentPlacement // indexed by segmentIdx; pre-allocated; mutex-free
 
 	// Test seams. Production constructor leaves these nil; defaults route
 	// through b.shardGroup / newECObjectWriter / b.shardSvc.DeleteShards /
-	// b.propose. Tests inject all four to exercise putObjectChunked without
+	// b.writeQuorumMeta. Tests inject these to exercise putObjectChunked without
 	// a full RaftNode + ShardService.
-	writeSegmentFn  func(ctx context.Context, idx int, in writeSegmentInput) (PlacementRecord, string, string, error)
-	groupSelectorFn func(bucket, key string, idx int, blobID string) (ShardGroupEntry, error)
-	deleteShardsFn  func(ctx context.Context, peer, bucket, shardKey string) error
-	proposeFn       func(ctx context.Context, cmdType CommandType, payload any) error
-	ecConfigFn      func() ECConfig
-	chunkSize       int
+	writeSegmentFn       func(ctx context.Context, idx int, in writeSegmentInput) (PlacementRecord, string, string, error)
+	groupSelectorFn      func(bucket, key string, idx int, blobID string) (ShardGroupEntry, error)
+	deleteShardsFn       func(ctx context.Context, peer, bucket, shardKey string) error
+	promoteStagedFn      func(ctx context.Context, node, bucket, stagingKey, finalKey string) error
+	promoteStagedBatchFn func(ctx context.Context, node, bucket string, pairs []stagedPromotePair) error
+	writeQuorumMetaFn    func(ctx context.Context, cmd PutObjectMetaCmd) error
+	ecConfigFn           func() ECConfig
+	// peerWeightsFn returns the per-peer disk-capacity weight snapshot aligned
+	// 1:1 with peers and whether weighting is enabled. Production constructor
+	// leaves it nil; the default routes through b.nodeStatsStore + b.clusterCfg.
+	peerWeightsFn func(peers []string) (weights []float64, enabled bool)
+	chunkSize     int
+
+	// stagingTxnID, when non-empty, activates PR1 segment staging: each segment's
+	// EC shards are written to a per-node staging dir (.segstaging/<stagingTxnID>/
+	// <blobID>) with the FINAL logical key as AAD, then promoted (renamed) to their
+	// final path right before the manifest commit (data-before-meta). Empty = legacy
+	// direct-to-final write. Set once per PUT (uploadID for multipart, a fresh
+	// UUIDv7 for simple chunked PUT).
+	stagingTxnID string
+
+	// sizeHint is the known object size (production callers all have it: spool
+	// size / multipart total / relocated object size). It is threaded to
+	// SegmentWriter.WriteSized so a small object does not allocate a full
+	// DefaultChunkSize chunk buffer when the streamed body cannot be size-sniffed.
+	// Advisory: a body that outruns it is still written in full. Zero is a valid
+	// hint (empty object); test seams that leave it unset degrade to no benefit.
+	sizeHint int64
 }
 
 // segmentPlacement captures the post-write placement metadata for one
@@ -61,6 +85,20 @@ type segmentPlacement struct {
 	NodeIDs          []string
 	Config           ECConfig
 	ShardSize        int32
+	// LogicalShardSize is the PRE-compression per-data-shard size (ShardSize is
+	// post-compression). Threaded into the commit-time promote so the dir-fsync
+	// class mirrors the write side: a logically-large redundant shard skips the
+	// commit-tail fsync even when it compressed small (#986). 0 ⇒ empty segment.
+	LogicalShardSize int32
+}
+
+type stagedPromotePair struct {
+	stagingKey string
+	finalKey   string
+	// logicalShardSize is the segment's PRE-compression per-shard size for the
+	// promote fsync class (see segmentPlacement.LogicalShardSize). -1 ⇒ unknown
+	// (e.g. decoded from a remote batch-promote, which carries no logical size).
+	logicalShardSize int64
 }
 
 // WriteSegment buffers the chunk, picks a PG for this (bucket,key,idx,blobID),
@@ -78,27 +116,71 @@ func (c *clusterSegmentBackend) WriteSegment(ctx context.Context, bucket, key st
 // WriteSegmentBytes receives an owned chunk from SegmentWriter's chunker. This
 // avoids re-reading the bytes.Reader with io.ReadAll on the cluster hot path.
 func (c *clusterSegmentBackend) WriteSegmentBytes(ctx context.Context, bucket, key string, idx int, data []byte) (storage.SegmentRef, error) {
+	prepareStart := time.Now()
 	if idx < 0 || idx >= len(c.blobIDs) {
+		ObservePutTraceStage(ctx, PutTraceStageSegmentWritePrepare, prepareStart, PutTraceStageFields{
+			Bytes:      int64(len(data)),
+			ShardIndex: idx,
+			Error:      fmt.Sprintf("segment %d out of range", idx),
+		})
 		return storage.SegmentRef{}, fmt.Errorf("segment %d: out of range (allocated %d)", idx, len(c.blobIDs))
 	}
 
 	// 1. Pick PG for this segment.
 	group, err := c.selectGroup(bucket, key, idx, c.blobIDs[idx])
 	if err != nil {
+		ObservePutTraceStage(ctx, PutTraceStageSegmentWritePrepare, prepareStart, PutTraceStageFields{
+			Bytes:      int64(len(data)),
+			ShardIndex: idx,
+			Error:      err.Error(),
+		})
 		return storage.SegmentRef{}, fmt.Errorf("segment %d: pick PG: %w", idx, err)
 	}
 
 	// 2. Delegate to writeOneSegment.
 	cfg := c.currentECConfig()
+	// Compute the per-peer weight snapshot for THIS group's peers once, on the
+	// coordinating writer. writeOneSegment passes it to weighted HRW; the chosen
+	// NodeIDs are recorded and replayed on read, so readers never recompute.
+	weights, weightedEnabled := c.peerWeights(group.PeerIDs)
+
+	// Plaintext identity stays the contract for object size, range-offset
+	// mapping, and AppendObject composite ETag — compute BEFORE compression.
+	originalLen := int64(len(data))
+	sum := storage.ChecksumOf(data)
+
+	// Per-segment zstd: store the smaller of {compressed, raw}. StoredSize==0
+	// means raw (read path skips decompression).
+	storedSize := int64(0)
+	if len(data) > 0 {
+		compressed, cerr := zstdpool.Compress(data)
+		if cerr != nil {
+			return storage.SegmentRef{}, fmt.Errorf("segment %d: compress: %w", idx, cerr)
+		}
+		if len(compressed) < len(data) {
+			data = compressed
+			storedSize = int64(len(compressed))
+		}
+	}
+
+	ObservePutTraceStage(ctx, PutTraceStageSegmentWritePrepare, prepareStart, PutTraceStageFields{
+		Bytes:       int64(len(data)),
+		ShardIndex:  idx,
+		ShardTarget: group.ID,
+	})
 	in := writeSegmentInput{
-		Bucket:        bucket,
-		Key:           key,
-		VersionID:     c.versionID,
-		SegmentBlobID: c.blobIDs[idx],
-		SegmentIdx:    idx,
-		Group:         group,
-		Cfg:           cfg,
-		Data:          data,
+		Bucket:          bucket,
+		Key:             key,
+		VersionID:       c.versionID,
+		SegmentBlobID:   c.blobIDs[idx],
+		SegmentIdx:      idx,
+		Group:           group,
+		Cfg:             cfg,
+		Data:            data,
+		LogicalSize:     originalLen, // pre-compression, for the shard fsync class
+		Weights:         weights,
+		WeightedEnabled: weightedEnabled,
+		StagingTxnID:    c.stagingTxnID,
 	}
 	rec, _, blobID, werr := c.writeOne(ctx, idx, in)
 	if werr != nil {
@@ -108,8 +190,11 @@ func (c *clusterSegmentBackend) WriteSegmentBytes(ctx context.Context, bucket, k
 	// 3. Record placement. Workers receive unique idx, so the slot write
 	// is race-free without a mutex.
 	shardSize := int32(0)
+	logicalShardSize := int32(0)
 	if cfg.DataShards > 0 {
 		shardSize = int32((int64(len(data)) + int64(cfg.DataShards) - 1) / int64(cfg.DataShards))
+		// Pre-compression per-shard size for the commit-time promote fsync class.
+		logicalShardSize = int32((originalLen + int64(cfg.DataShards) - 1) / int64(cfg.DataShards))
 	}
 	c.placements[idx] = segmentPlacement{
 		BlobID:           blobID,
@@ -118,17 +203,56 @@ func (c *clusterSegmentBackend) WriteSegmentBytes(ctx context.Context, bucket, k
 		NodeIDs:          rec.Nodes,
 		Config:           cfg,
 		ShardSize:        shardSize,
+		LogicalShardSize: logicalShardSize,
 	}
 
-	// 4. xxhash3-128 over plaintext.
-	sum := storage.ChecksumOf(data)
 	return storage.SegmentRef{
 		BlobID:           blobID,
-		Size:             int64(len(data)),
-		Checksum:         sum,
+		Size:             originalLen, // plaintext byte count
+		Checksum:         sum,         // xxhash3-128 over plaintext (computed before compression)
 		PlacementGroupID: group.ID,
 		ShardSize:        shardSize,
+		StoredSize:       storedSize,
 	}, nil
+}
+
+// vidDeterministicBlobNodeIDs computes the per-version blob's recorded NodeIDs
+// from (bucket, key, vid) alone — independent of any segment's RANDOM blobID — so
+// two independent completers of the same upload (which derive the SAME det-vid
+// via deriveMultipartVID) record the SAME placement. That recorded set is the
+// per-version blob WRITE target AND the hard-delete / tombstone-GC target
+// (fanOutPerVersionBlob / deleteQuorumMetaQuorum / tombstoneConverged all
+// fan over cmd.NodeIDs), so a divergent placement would land a loser's blob on
+// nodes a later hard-delete never visits → orphan/resurrection. Keying on vid
+// closes that. The group is selected via the same seam as segment writes
+// (selectGroup), passing vid in the blobID slot so it hashes by vid; the
+// placement permutation is then keyed on a vid-derived shard key. Segments keep
+// their own random-blobID placement; reads are placement-blind (all-peer
+// fan-out), so regular PUTs are unaffected.
+//
+// Placement uses the SAME weighted HRW as segment writes (selectShardPlacement
+// with the group's peer weights), consistent with the cluster-wide weighted-HRW
+// placement model (FNV modulo was retired in #843). The vid-derived key — not
+// the segment's random blobID — makes two completers converge whenever they
+// share a peer-weight snapshot (the common case). A rare divergent weight
+// snapshot (gossip lag) can place the same vid's blob on different nodes; that
+// residual is resolved without a strict placement guarantee: the per-version
+// read-merge LWW (quorumMetaCmdWins, F1.1) makes reads deterministic
+// (higher-ModTime winner), a hard-delete's tombstone is read-gathered and
+// shadows the loser, and the orphan walker reclaims the stale loser blob after
+// delete. The divergence is thus a rare transient extra-replica, not a
+// correctness or resurrection hazard.
+func (c *clusterSegmentBackend) vidDeterministicBlobNodeIDs(bucket, key, vid string, cfg ECConfig) ([]string, error) {
+	group, err := c.selectGroup(bucket, key, 0, vid)
+	if err != nil {
+		return nil, fmt.Errorf("vid-deterministic blob placement: %w", err)
+	}
+	if len(group.PeerIDs) == 0 {
+		return nil, fmt.Errorf("vid-deterministic blob placement: group %q has no peers", group.ID)
+	}
+	placementKey := key + "/versions/" + vid
+	weights, weightedEnabled := c.peerWeights(group.PeerIDs)
+	return selectShardPlacement(cfg, group.PeerIDs, placementKey, weights, weightedEnabled), nil
 }
 
 func (c *clusterSegmentBackend) selectGroup(bucket, key string, idx int, blobID string) (ShardGroupEntry, error) {
@@ -146,6 +270,20 @@ func (c *clusterSegmentBackend) currentECConfig() ECConfig {
 		return c.ecConfigFn()
 	}
 	return c.b.currentECConfig()
+}
+
+// peerWeights returns the per-peer disk-capacity weight snapshot for this
+// group's peers (aligned 1:1 with peers) and whether weighting is enabled.
+// Tests inject peerWeightsFn; production reads b.nodeStatsStore + b.clusterCfg.
+// A nil backend (test seam wiring) means unweighted placement.
+func (c *clusterSegmentBackend) peerWeights(peers []string) ([]float64, bool) {
+	if c.peerWeightsFn != nil {
+		return c.peerWeightsFn(peers)
+	}
+	if c.b == nil {
+		return nil, false
+	}
+	return c.b.peerPlacementWeights(peers)
 }
 
 func (c *clusterSegmentBackend) writeOne(ctx context.Context, idx int, in writeSegmentInput) (PlacementRecord, string, string, error) {
@@ -166,23 +304,64 @@ func (c *clusterSegmentBackend) deleteShards(ctx context.Context, peer, bucket, 
 	return c.b.shardSvc.DeleteShards(ctx, peer, bucket, shardKey)
 }
 
-// chunkedPathThresholdMet reports whether a spooled object with the given
-// size is large enough to justify the chunked-PUT pipeline. Objects at or
-// below the threshold stay on the legacy single-segment EC path; strictly
-// larger objects route through putObjectChunked. Extracted from the call
-// site so the outer routing decision in putObjectECSpooledWithOptionalModTime
-// is unit-testable without standing up a full DistributedBackend fixture.
-//
-//nolint:unused // exercised by segment_backend_test.go; lint config sets tests:false so test usage is invisible to the linter
-func chunkedPathThresholdMet(spSize int64) bool {
-	return spSize > int64(storage.DefaultChunkSize)
+func (c *clusterSegmentBackend) promoteStagedShardsBatch(ctx context.Context, node, bucket string, pairs []stagedPromotePair) (err error) {
+	if len(pairs) == 0 {
+		return nil
+	}
+	stageStart := time.Now()
+	targetClass := "remote"
+	if c.promoteStagedBatchFn != nil || c.promoteStagedFn != nil {
+		targetClass = "injected"
+	} else if c.b != nil && node == c.b.currentSelfAddr() {
+		targetClass = "local"
+	}
+	defer func() {
+		fields := PutTraceStageFields{
+			ShardTarget:      node,
+			ShardTargetClass: targetClass,
+			BatchCount:       len(pairs),
+		}
+		if err != nil {
+			fields.Error = err.Error()
+		}
+		ObservePutTraceStage(ctx, PutTraceStagePromoteStagedNodeBatch, stageStart, fields)
+	}()
+	if c.promoteStagedBatchFn != nil {
+		return c.promoteStagedBatchFn(ctx, node, bucket, pairs)
+	}
+	if c.promoteStagedFn != nil {
+		for _, pair := range pairs {
+			if err := c.promoteStagedFn(ctx, node, bucket, pair.stagingKey, pair.finalKey); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if c.b.shardSvc == nil {
+		return fmt.Errorf("shard service not wired")
+	}
+	if node == c.b.currentSelfAddr() {
+		for _, pair := range pairs {
+			if err := c.b.shardSvc.PromoteLocalStagedShards(bucket, pair.stagingKey, pair.finalKey, pair.logicalShardSize); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return c.b.shardSvc.PromoteStagedShardsBatch(ctx, node, bucket, pairs)
 }
 
-func (b *DistributedBackend) chunkedPathThresholdMet(size int64) bool {
-	return size > int64(b.effectiveChunkedPutChunkSize())
+// segmentStagingShardKey is the per-node STAGING physical shard key for a segment
+// blob: .segstaging/<txnID>/<blobID> (no "/segments/" — kept out of the final
+// namespace so the orphan-shard walker's wholesale skip and the PR2 age-out sweep
+// classify it cleanly). The shard lands on the SAME dataDir its final shard will
+// occupy (getShardDir keys the dataDir on shardIdx alone), so the promote rename
+// is intra-device and atomic.
+func segmentStagingShardKey(txnID, blobID string) string {
+	return SegStagingPrefix + "/" + txnID + "/" + blobID
 }
 
-func chunkedMultipartCompleteChunkSize(defaultSize int) int {
+func chunkedMultipartCompleteChunkSize(defaultSize int64) int64 {
 	if defaultSize <= 0 || defaultSize > defaultChunkedMultipartCompleteSize {
 		return defaultChunkedMultipartCompleteSize
 	}
@@ -198,18 +377,15 @@ func acquireChunkedMultipartCompleteSlot(ctx context.Context) (func(), error) {
 	}
 }
 
-// putObjectChunked is the chunked-PUT cluster pipeline: split the spooled
-// body into N segments via storage.SegmentWriter, fan out per-segment EC
-// writes across placement groups (best-effort, defer cleanup on any error),
-// then commit a single PutObjectMetaCmd carrying all per-segment placements.
-// The single raft commit is the atomic point.
-func (b *DistributedBackend) putObjectChunked(
+func (b *DistributedBackend) putObjectChunkedReader(
 	ctx context.Context,
 	bucket, key, versionID string,
-	sp *spooledObject,
+	body io.Reader,
+	size int64,
 	contentType string,
 	userMetadata map[string]string,
 	sseAlgorithm string,
+	acl uint8,
 	modTime int64,
 	preserveModTime bool,
 	expectedETag string,
@@ -217,15 +393,28 @@ func (b *DistributedBackend) putObjectChunked(
 	parts []storage.MultipartPartEntry,
 	tags []storage.Tag,
 ) (*storage.Object, error) {
-	// Pre-allocate blobIDs + placements sized to exact segment count.
-	chunkSize := int64(b.effectiveChunkedPutChunkSize())
-	numSegments := int((sp.Size + chunkSize - 1) / chunkSize)
+	if size < 0 {
+		return nil, fmt.Errorf("putObjectChunked: negative size %d", size)
+	}
+	// Guard against pre-body heap exhaustion: the SizeHintExact fast path feeds
+	// a client-declared Content-Length directly here before reading any body bytes.
+	// Cap at 5 TiB (S3 single-PUT limit) to bound the blobIDs/placements alloc.
+	const maxObjectSize = int64(5) << 40 // 5 TiB
+	if size > maxObjectSize {
+		return nil, fmt.Errorf("putObjectChunked: object too large: %d bytes (max %d)", size, maxObjectSize)
+	}
+	// Pre-allocate blobIDs + placements sized to exact segment count. A 0-byte
+	// object still gets one (empty) segment so every simple PUT — including
+	// empty objects — takes this single chunked path (mirrors the multipart
+	// variant + SegmentWriter, which always emits one segment for empty input).
+	chunkSize := b.effectiveChunkedPutChunkSize(size)
+	numSegments := int((size + chunkSize - 1) / chunkSize)
 	if numSegments < 1 {
-		return nil, fmt.Errorf("putObjectChunked: sp.Size=%d below chunk threshold; caller should not have routed here", sp.Size)
+		numSegments = 1
 	}
 	blobIDs := make([]string, numSegments)
 	for i := range blobIDs {
-		blobIDs[i] = uuid.Must(uuid.NewV7()).String()
+		blobIDs[i] = uuidutil.MustNewV7()
 	}
 	csb := &clusterSegmentBackend{
 		b:            b,
@@ -236,14 +425,14 @@ func (b *DistributedBackend) putObjectChunked(
 		contentType:  contentType,
 		userMetadata: userMetadata,
 		sseAlgorithm: sseAlgorithm,
+		acl:          acl,
 		placements:   make([]segmentPlacement, numSegments),
 		chunkSize:    int(chunkSize),
+		// PR1 segment staging: a fresh per-PUT txn id isolates this write's in-flight
+		// segment shards under .segstaging until the commit-time promote.
+		stagingTxnID: uuidutil.MustNewV7(),
+		sizeHint:     size,
 	}
-	body, err := sp.Open()
-	if err != nil {
-		return nil, fmt.Errorf("open spool: %w", err)
-	}
-	defer body.Close()
 	return runChunkedPut(ctx, csb, body, bucket, key, versionID, contentType, userMetadata, sseAlgorithm, modTime, preserveModTime, expectedETag, beforeCommit, parts, tags)
 }
 
@@ -260,14 +449,14 @@ func (b *DistributedBackend) putMultipartObjectChunked(
 	beforeCommit func() error,
 	tags []storage.Tag,
 ) (*storage.Object, error) {
-	chunkSize := int64(chunkedMultipartCompleteChunkSize(b.effectiveChunkedPutChunkSize()))
+	chunkSize := chunkedMultipartCompleteChunkSize(b.effectiveChunkedPutChunkSize(0))
 	numSegments := int((manifest.TotalSize + chunkSize - 1) / chunkSize)
 	if numSegments < 1 {
 		numSegments = 1
 	}
 	blobIDs := make([]string, numSegments)
 	for i := range blobIDs {
-		blobIDs[i] = uuid.Must(uuid.NewV7()).String()
+		blobIDs[i] = uuidutil.MustNewV7()
 	}
 	csb := &clusterSegmentBackend{
 		b:            b,
@@ -280,6 +469,10 @@ func (b *DistributedBackend) putMultipartObjectChunked(
 		sseAlgorithm: sseAlgorithm,
 		placements:   make([]segmentPlacement, numSegments),
 		chunkSize:    int(chunkSize),
+		// PR1 segment staging: the uploadID is the natural per-upload txn id, so
+		// concurrent/idempotent completers of the same upload share a staging dir.
+		stagingTxnID: uploadID,
+		sizeHint:     manifest.TotalSize,
 	}
 	body, err := manifest.Open()
 	if err != nil {
@@ -290,11 +483,41 @@ func (b *DistributedBackend) putMultipartObjectChunked(
 		userMetadata, sseAlgorithm, modTime, preserveModTime, expectedETag, beforeCommit, manifest.Parts, tags, uploadID)
 }
 
-func (b *DistributedBackend) effectiveChunkedPutChunkSize() int {
+func (b *DistributedBackend) effectiveChunkedPutChunkSize(objectSize int64) int64 {
 	if b != nil && b.chunkedPutChunkSize > 0 {
 		return b.chunkedPutChunkSize
 	}
-	return storage.DefaultChunkSize
+	return adaptiveChunkSize(objectSize)
+}
+
+// adaptiveChunkSizeFloor: a segment smaller than this is not worth its own EC +
+// shard-write + staging-promote overhead — below it, splitting LOSES throughput
+// (the GCP sweep: a 1MiB PUT fell 288→157 MB/s when forced to 2 segments).
+const adaptiveChunkSizeFloor = 5 << 20 // 5 MiB
+
+// adaptiveChunkSize picks a chunk so a PUT splits into ~2 segments when that
+// helps and stays single-segment when it doesn't, per the size×chunk sweep:
+//   - small objects (chunk would fall below the floor): single segment — the
+//     8-worker SegmentWriter has nothing to parallelize and per-segment overhead
+//     dominates.
+//   - mid objects: split into 2 (objectSize/2) — the sweet spot (read‖EC‖write
+//     pipeline fills without over-splitting; 5-segment was worse than 2).
+//   - large objects: cap at DefaultChunkSize so they split naturally into a
+//     bounded number of segments instead of objectSize/2 ballooning the chunk.
+//
+// objectSize <= 0 (unknown length) keeps the single DefaultChunkSize chunk.
+func adaptiveChunkSize(objectSize int64) int64 {
+	if objectSize <= 0 {
+		return storage.DefaultChunkSize
+	}
+	chunk := objectSize / 2
+	if chunk < adaptiveChunkSizeFloor {
+		return storage.DefaultChunkSize // single segment
+	}
+	if chunk > storage.DefaultChunkSize {
+		return storage.DefaultChunkSize // cap → natural multi-segment
+	}
+	return chunk
 }
 
 // runChunkedPut is the test-injectable core of putObjectChunked. The caller
@@ -335,9 +558,13 @@ func runChunkedPutWithParts(
 	completeUploadID string,
 ) (*storage.Object, error) {
 
-	// Best-effort blob cleanup on any error path before raft commit.
+	// Best-effort blob cleanup on any error path before the commit.
 	// SegmentWriter.Write joins all workers before returning, so by the time
-	// defer runs csb.placements is settled — no race.
+	// defer runs csb.placements is settled — no race. M3: the multipart-complete
+	// commit (per-version blob or latest-only quorum-meta) is synchronous and
+	// FAIL-CLOSED, so a commit error means nothing is durable — the segment shards
+	// are eager-cleaned here, same as the non-multipart chunked PUT. There is no
+	// raft propose and therefore no phantom-commit window to preserve shards for.
 	var committed bool
 	defer func() {
 		if committed {
@@ -350,6 +577,17 @@ func runChunkedPutWithParts(
 			shardKey := key + "/segments/" + p.BlobID
 			for _, node := range p.NodeIDs {
 				_ = csb.deleteShards(context.Background(), node, bucket, shardKey)
+			}
+			// PR1 staging: shards may still be at the staging path (write done,
+			// promote not reached or failed). Delete both — the promote fanout below
+			// is data-before-meta, so a not-committed object can have shards at
+			// staging (un-promoted) OR final (promoted then commit failed). Both
+			// deletes are idempotent no-ops when the path is absent.
+			if csb.stagingTxnID != "" {
+				stagingKey := segmentStagingShardKey(csb.stagingTxnID, p.BlobID)
+				for _, node := range p.NodeIDs {
+					_ = csb.deleteShards(context.Background(), node, bucket, stagingKey)
+				}
 			}
 		}
 	}()
@@ -367,7 +605,7 @@ func runChunkedPutWithParts(
 		defer release()
 		sw = storage.NewSegmentWriterWithChunkSizeAndWorkers(csb, csb.chunkSize, 1)
 	}
-	obj, err := sw.Write(ctx, bucket, key, contentType, body)
+	obj, err := sw.WriteSized(ctx, bucket, key, contentType, body, csb.sizeHint)
 	if err != nil {
 		return nil, fmt.Errorf("segment write: %w", err)
 	}
@@ -384,6 +622,53 @@ func runChunkedPutWithParts(
 		}
 	}
 
+	// 4b. PR1 segment staging promote (data-before-meta): the shards were written
+	// to per-node staging dirs; rename them to their final paths BEFORE the
+	// manifest commit so the committed meta only ever references shards already at
+	// their final location. All-or-fail: the first promote error aborts the commit,
+	// leaving committed=false so the cleanup defer reclaims both staging and final
+	// shards. The residual orphan window (promote succeeds, commit fails, OR a crash
+	// between promote and commit) leaves final-path shards no manifest references —
+	// a disk leak, not data loss; PR1 narrows the leak, it does not close the class.
+	if csb.stagingTxnID != "" {
+		promoteStart := time.Now()
+		promotes := make(map[string][]stagedPromotePair)
+		var nodeOrder []string
+		for _, p := range csb.placements {
+			if p.BlobID == "" {
+				continue
+			}
+			stagingKey := segmentStagingShardKey(csb.stagingTxnID, p.BlobID)
+			finalKey := key + "/segments/" + p.BlobID
+			for _, node := range p.NodeIDs {
+				if _, ok := promotes[node]; !ok {
+					nodeOrder = append(nodeOrder, node)
+				}
+				promotes[node] = append(promotes[node], stagedPromotePair{
+					stagingKey:       stagingKey,
+					finalKey:         finalKey,
+					logicalShardSize: int64(p.LogicalShardSize),
+				})
+			}
+		}
+		g, promoteCtx := errgroup.WithContext(ctx)
+		for _, node := range nodeOrder {
+			node := node
+			pairs := promotes[node]
+			g.Go(func() error {
+				if perr := csb.promoteStagedShardsBatch(promoteCtx, node, bucket, pairs); perr != nil {
+					return fmt.Errorf("promote staged segment shard batch (node %s, count %d): %w", node, len(pairs), perr)
+				}
+				return nil
+			})
+		}
+		if err := g.Wait(); err != nil {
+			ObservePutTraceStage(ctx, PutTraceStagePromoteStagedShards, promoteStart, PutTraceStageFields{Error: err.Error()})
+			return nil, err
+		}
+		ObservePutTraceStage(ctx, PutTraceStagePromoteStagedShards, promoteStart, PutTraceStageFields{})
+	}
+
 	// 5. Build PutObjectMetaCmd. csb.placements is already SegmentIdx-indexed.
 	if len(csb.placements) == 0 || csb.placements[0].BlobID == "" {
 		return nil, fmt.Errorf("putObjectChunked: placement[0] not recorded")
@@ -393,28 +678,28 @@ func runChunkedPutWithParts(
 	obj.VersionID = versionID
 	segments := buildSegmentMetaEntries(csb.placements, obj.Segments)
 
-	// 6. Single atomic raft commit.
-	var commitErr error
+	// 6. Commit. M3: the multipart complete is raft-free — there is no
+	// CmdCompleteMultipart propose. The completed object's quorum-meta blob IS the
+	// durable commit, FAIL-CLOSED: a write failure leaves nothing committed, so the
+	// segment shards are eager-cleaned by the defer (committed stays false). Same-vid
+	// convergence across concurrent completers / idempotent retry is provided by the
+	// deterministic VersionID + the det-vid existence short-circuit in
+	// CompleteMultipartUpload — NOT a done-marker.
+	var (
+		commitErr        error
+		commitTraceStart time.Time
+	)
 	if completeUploadID != "" {
-		commitErr = csb.propose(ctx, CmdCompleteMultipart, CompleteMultipartCmd{
-			Bucket:           bucket,
-			Key:              key,
-			UploadID:         completeUploadID,
-			Size:             obj.Size,
-			ETag:             obj.ETag,
-			VersionID:        versionID,
-			ContentType:      contentType,
-			ModTime:          commitModTime,
-			Parts:            partsMeta,
-			NodeIDs:          csb.placements[0].NodeIDs,
-			ECData:           uint8(csb.placements[0].Config.DataShards),
-			ECParity:         uint8(csb.placements[0].Config.ParityShards),
-			PlacementGroupID: csb.placements[0].PlacementGroupID,
-			Segments:         segments,
-			Tags:             tags,
-		})
-	} else {
-		commitErr = csb.propose(ctx, CmdPutObjectMeta, PutObjectMetaCmd{
+		// Vid-deterministic recorded blob placement (same-vid convergence): the
+		// recorded NodeIDs must be a function of (bucket,key,det-vid), NOT segment-0's
+		// random blobID, so concurrent completers of the same upload record the same
+		// per-version blob WRITE target and hard-delete / tombstone-GC target. Segment
+		// data shards keep their own random-blobID placement (csb.placements).
+		blobNodeIDs, bnerr := csb.vidDeterministicBlobNodeIDs(bucket, key, versionID, csb.currentECConfig())
+		if bnerr != nil {
+			return nil, bnerr
+		}
+		metaCmd := PutObjectMetaCmd{
 			Bucket:           bucket,
 			Key:              key,
 			Size:             obj.Size,
@@ -424,6 +709,53 @@ func runChunkedPutWithParts(
 			ModTime:          commitModTime,
 			UserMetadata:     userMetadata,
 			SSEAlgorithm:     sseAlgorithm,
+			ACL:              csb.acl,
+			Parts:            partsMeta,
+			NodeIDs:          blobNodeIDs,
+			ECData:           uint8(csb.placements[0].Config.DataShards),
+			ECParity:         uint8(csb.placements[0].Config.ParityShards),
+			PlacementGroupID: csb.placements[0].PlacementGroupID,
+			Segments:         segments,
+			Tags:             tags,
+		}
+		// Versioning-enabled buckets get an encoded per-version blob; non-versioned /
+		// Suspended get nil and commit via the latest-only quorum-meta write below.
+		metaBlob, mberr := csb.buildMultipartMetaBlob(ctx, metaCmd)
+		if mberr != nil {
+			return nil, mberr
+		}
+		if len(metaBlob) > 0 {
+			// VERSIONED: the per-version quorum-meta blob is the blob authority,
+			// written FAIL-CLOSED. On failure nothing is committed; the segment shards
+			// are cleaned by the defer and the client retries CompleteMultipartUpload.
+			winCmd, werr := csb.writeCompletedMultipartBlob(ctx, metaBlob)
+			if werr != nil {
+				return nil, werr
+			}
+			committed = true
+			metrics.ChunkFanoutBreadth.Observe(float64(countDistinctPlacementGroups(csb.placements)))
+			winObj, _ := objectAndPlacementFromCmd(winCmd)
+			return winObj, nil
+		}
+		// NON-VERSIONED / Suspended: the latest-only quorum-meta blob is the sole
+		// authority, written FAIL-CLOSED (M3 F7) — mirrors the regular non-versioned
+		// PUT. On failure nothing is committed; the cleanup defer reclaims the shards.
+		commitTraceStart = time.Now()
+		commitErr = csb.writeQuorumMeta(ctx, metaCmd)
+	} else {
+		// Phase 3: commit via per-node quorum meta write (bypasses data_raft).
+		commitTraceStart = time.Now()
+		commitErr = csb.writeQuorumMeta(ctx, PutObjectMetaCmd{
+			Bucket:           bucket,
+			Key:              key,
+			Size:             obj.Size,
+			ETag:             obj.ETag,
+			VersionID:        versionID,
+			ContentType:      contentType,
+			ModTime:          commitModTime,
+			UserMetadata:     userMetadata,
+			SSEAlgorithm:     sseAlgorithm,
+			ACL:              csb.acl,
 			ExpectedETag:     expectedETag,
 			IsDeleteMarker:   false,
 			Parts:            partsMeta,
@@ -434,6 +766,13 @@ func runChunkedPutWithParts(
 			Segments:         segments,
 			Tags:             tags,
 		})
+	}
+	if !commitTraceStart.IsZero() {
+		fields := PutTraceStageFields{}
+		if commitErr != nil {
+			fields.Error = commitErr.Error()
+		}
+		ObservePutTraceStage(ctx, PutTraceStageQuorumMetaWrite, commitTraceStart, fields)
 	}
 	if commitErr != nil {
 		return nil, fmt.Errorf("commit meta: %w", commitErr)
@@ -448,11 +787,30 @@ func runChunkedPutWithParts(
 	return obj, nil
 }
 
-func (c *clusterSegmentBackend) propose(ctx context.Context, cmdType CommandType, payload any) error {
-	if c.proposeFn != nil {
-		return c.proposeFn(ctx, cmdType, payload)
+func (c *clusterSegmentBackend) writeQuorumMeta(ctx context.Context, cmd PutObjectMetaCmd) error {
+	if c.writeQuorumMetaFn != nil {
+		return c.writeQuorumMetaFn(ctx, cmd)
 	}
-	return c.b.propose(ctx, cmdType, payload)
+	return c.b.writeQuorumMeta(ctx, cmd)
+}
+
+// buildMultipartMetaBlob delegates to the DistributedBackend. A nil backend
+// (test seam wiring without a real DistributedBackend) means the legacy
+// non-versioned path → no meta_blob.
+func (c *clusterSegmentBackend) buildMultipartMetaBlob(ctx context.Context, cmd PutObjectMetaCmd) ([]byte, error) {
+	if c.b == nil {
+		return nil, nil
+	}
+	return c.b.buildMultipartMetaBlob(ctx, cmd)
+}
+
+// writeCompletedMultipartBlob delegates to the DistributedBackend. Only reached on
+// the blob-authoritative path (meta_blob present), which a nil backend never takes.
+func (c *clusterSegmentBackend) writeCompletedMultipartBlob(ctx context.Context, metaBlob []byte) (PutObjectMetaCmd, error) {
+	if c.b == nil {
+		return PutObjectMetaCmd{}, fmt.Errorf("multipart complete: no backend for per-version blob write")
+	}
+	return c.b.writeCompletedMultipartBlob(ctx, metaBlob)
 }
 
 // chunkedChooseModTime returns ModTime according to the preserveModTime
@@ -492,12 +850,14 @@ func buildSegmentMetaEntries(placements []segmentPlacement, refs []storage.Segme
 	out := make([]SegmentMetaEntry, len(placements))
 	for i, p := range placements {
 		var (
-			size     int64
-			checksum []byte
+			size       int64
+			checksum   []byte
+			storedSize int64
 		)
 		if i < len(refs) {
 			size = refs[i].Size
 			checksum = refs[i].Checksum
+			storedSize = refs[i].StoredSize
 		}
 		out[i] = SegmentMetaEntry{
 			BlobID:           p.BlobID,
@@ -509,6 +869,7 @@ func buildSegmentMetaEntries(placements []segmentPlacement, refs []storage.Segme
 			NodeIDs:          p.NodeIDs,
 			ECData:           uint8(p.Config.DataShards),
 			ECParity:         uint8(p.Config.ParityShards),
+			StoredSize:       storedSize,
 		}
 	}
 	return out

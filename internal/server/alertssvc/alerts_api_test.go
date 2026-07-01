@@ -1,0 +1,266 @@
+package alertssvc
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/cloudwego/hertz/pkg/app"
+	hertz "github.com/cloudwego/hertz/pkg/app/server"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/alerts"
+	"github.com/gritive/GrainFS/internal/server/servertest"
+)
+
+type fakeReceiver struct {
+	srv      *httptest.Server
+	attempts atomic.Int32
+	failNext atomic.Int32
+}
+
+func newFailingReceiver(t *testing.T, fails int) *fakeReceiver {
+	t.Helper()
+	r := &fakeReceiver{}
+	r.failNext.Store(int32(fails))
+	r.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		r.attempts.Add(1)
+		if r.failNext.Load() > 0 {
+			r.failNext.Add(-1)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(r.srv.Close)
+	return r
+}
+
+// startTestAlertsServer spins up a real Hertz server on a free localhost port
+// with only the alerts endpoints registered. Returns its base URL and a
+// shutdown helper.
+//
+// Also starts the dispatcher actor and registers a Cleanup that stops it
+// before st.Close — tests that exercise Send must start it here.
+func startTestAlertsServer(t *testing.T, st *State) string {
+	t.Helper()
+	port := servertest.FreePort(t)
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+
+	h := hertz.Default(
+		hertz.WithHostPorts(addr),
+		hertz.WithExitWaitTime(servertest.ShutdownTimeout),
+	)
+	NewHandler(Deps{
+		State:            st,
+		LocalhostOnly:    func() app.HandlerFunc { return func(c context.Context, rc *app.RequestContext) { rc.Next(c) } },
+		MutationDisabled: func(*app.RequestContext, string) bool { return false },
+		FeatureVisible:   func() bool { return true },
+		StatusPath:       "/api/admin/alerts/status",
+		ResendPath:       "/api/admin/alerts/resend",
+	}).Register(h)
+
+	go h.Spin()
+
+	if st.dispatcher != nil {
+		st.dispatcher.Start(context.Background())
+		t.Cleanup(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_ = st.dispatcher.Stop(ctx)
+		})
+	}
+
+	t.Cleanup(func() {
+		servertest.ShutdownServer(t, h)
+	})
+	t.Cleanup(st.Close)
+
+	base := "http://" + addr
+	servertest.WaitTCP(t, addr)
+	return base
+}
+
+func getJSON(t *testing.T, url string, into any) {
+	t.Helper()
+	resp, err := http.Get(url)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode, "GET %s", url)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(body, into))
+}
+
+func postJSON(t *testing.T, url string, into any) int {
+	t.Helper()
+	resp, err := http.Post(url, "application/json", strings.NewReader(""))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	if into != nil {
+		require.NoError(t, json.Unmarshal(body, into))
+	}
+	return resp.StatusCode
+}
+
+func TestAlertsStatus_HealthyResponseHasNoFailures(t *testing.T) {
+	r := newFailingReceiver(t, 0)
+	st := NewState(r.srv.URL, alerts.Options{
+		MaxRetries:  0,
+		BackoffBase: time.Millisecond,
+	}, alerts.DegradedConfig{})
+	base := startTestAlertsServer(t, st)
+
+	st.Send(alerts.Alert{Type: "ok", Severity: alerts.SeverityWarning, Message: "ok"})
+	st.dispatcher.DrainForTest()
+
+	var got StatusResponse
+	getJSON(t, base+"/api/admin/alerts/status", &got)
+
+	assert.False(t, got.Degraded)
+	assert.EqualValues(t, 1, got.DeliveredOK)
+	assert.EqualValues(t, 0, got.DeliveryFailed)
+	assert.Empty(t, got.LastFailedType, "no failed alert means no banner")
+}
+
+func TestAlertsStatus_FailureSurfacesForBanner(t *testing.T) {
+	r := newFailingReceiver(t, 999)
+	st := NewState(r.srv.URL, alerts.Options{
+		MaxRetries:  1,
+		BackoffBase: time.Millisecond,
+		BackoffCap:  2 * time.Millisecond,
+	}, alerts.DegradedConfig{})
+	base := startTestAlertsServer(t, st)
+
+	st.Send(alerts.Alert{
+		Type:     "raft_quorum_lost",
+		Severity: alerts.SeverityCritical,
+		Resource: "cluster-1",
+		Message:  "lost",
+	})
+	st.dispatcher.DrainForTest()
+
+	var got StatusResponse
+	getJSON(t, base+"/api/admin/alerts/status", &got)
+	assert.EqualValues(t, 0, got.DeliveredOK)
+	assert.EqualValues(t, 1, got.DeliveryFailed)
+	assert.Equal(t, "raft_quorum_lost", got.LastFailedType, "banner needs the type to render")
+	assert.NotEmpty(t, got.LastFailedErr)
+}
+
+func TestAlertsResend_ClearsBannerOnSuccess(t *testing.T) {
+	// 1 try + 1 retry both fail (2 failures), then resend tries lands on
+	// the third (now-healthy) attempt.
+	r := newFailingReceiver(t, 2)
+	st := NewState(r.srv.URL, alerts.Options{
+		MaxRetries:  1,
+		BackoffBase: time.Millisecond,
+		BackoffCap:  2 * time.Millisecond,
+		// DedupWindow=0 disables dedup so resend isn't suppressed.
+		DedupWindow: -1,
+	}, alerts.DegradedConfig{})
+	base := startTestAlertsServer(t, st)
+
+	st.Send(alerts.Alert{Type: "x", Severity: alerts.SeverityWarning, Message: "m"})
+	st.dispatcher.DrainForTest()
+
+	var resend struct {
+		Resent bool   `json:"resent"`
+		Error  string `json:"error"`
+	}
+	require.Equal(t, http.StatusOK, postJSON(t, base+"/api/admin/alerts/resend", &resend))
+	require.True(t, resend.Resent, "resend must succeed once receiver heals: %s", resend.Error)
+	st.dispatcher.DrainForTest()
+
+	var got StatusResponse
+	getJSON(t, base+"/api/admin/alerts/status", &got)
+	assert.Empty(t, got.LastFailedType, "successful resend must clear the banner")
+}
+
+func TestAlertsResend_NoFailedAlertReturnsFalse(t *testing.T) {
+	st := NewState("", alerts.Options{}, alerts.DegradedConfig{})
+	base := startTestAlertsServer(t, st)
+
+	var out map[string]any
+	require.Equal(t, http.StatusOK, postJSON(t, base+"/api/admin/alerts/resend", &out))
+	assert.Equal(t, false, out["resent"])
+	assert.Contains(t, out["reason"], "no failed alert")
+}
+
+// TestAlertsState_ConcurrentReportsHaveNoRace exercises the gauge-mirror path
+// under parallel Report traffic. With gauge updates driven by
+// DegradedConfig.OnStateChange (which fires inside the tracker lock), the race
+// detector should never flag a data race on grainfs_degraded. Previously,
+// gaugeTracker did `inner.Report()` then `inner.Degraded()` on a separate
+// read — concurrent writers could interleave between those two steps, and the
+// race detector caught the split.
+func TestAlertsState_ConcurrentReportsHaveNoRace(t *testing.T) {
+	st := NewState("", alerts.Options{}, alerts.DegradedConfig{
+		// Non-default FlapWindow bypasses the zero-config production-defaults
+		// fallback so ExitStableWindow stays at 0 (immediate exit per report).
+		FlapWindow:    1 * time.Second,
+		FlapThreshold: 999,
+	})
+	defer st.Close()
+	tr := st.Tracker()
+
+	const goroutines = 4
+	const perGoroutine = 50
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for g := 0; g < goroutines; g++ {
+		go func() {
+			defer wg.Done()
+			for i := 0; i < perGoroutine; i++ {
+				tr.Report(i%2 == 0, "shard_unrepairable", "b/k")
+			}
+		}()
+	}
+	wg.Wait()
+
+	// Settle: one final healthy report triggers a clean exit; tracker and gauge
+	// must end in the same value (race detector also validates no data race).
+	tr.Report(false, "", "")
+	require.False(t, tr.Degraded(), "final healthy report should exit degraded")
+}
+
+func TestGaugeTracker_MirrorsDegradedState(t *testing.T) {
+	// Pass ExitStableWindow=-1 to suppress the "all-zero = production
+	// defaults" fallback so we get exit-on-tick semantics.
+	st := NewState("", alerts.Options{}, alerts.DegradedConfig{
+		ExitStableWindow: -1,
+	})
+	defer st.Close()
+	g := st.Tracker()
+
+	g.Report(true, "shard_unrepairable", "b/k")
+	assert.True(t, g.Degraded())
+
+	g.Report(false, "", "")
+	assert.True(t, g.Degraded(), "negative window falls back to default 30s, must remain degraded")
+
+	// Use a fresh state with explicitly-zero (immediate exit) window via
+	// a non-empty FlapWindow to bypass the zero-config fallback.
+	st2 := NewState("", alerts.Options{}, alerts.DegradedConfig{
+		ExitStableWindow: 0,
+		FlapWindow:       1 * time.Second,
+		FlapThreshold:    99,
+	})
+	defer st2.Close()
+	g2 := st2.Tracker()
+	g2.Report(true, "x", "y")
+	assert.True(t, g2.Degraded())
+	g2.Report(false, "", "")
+	assert.False(t, g2.Degraded(), "zero ExitStableWindow + non-default config = exit on next healthy report")
+}

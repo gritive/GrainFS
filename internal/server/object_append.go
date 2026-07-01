@@ -15,12 +15,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 
-	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -47,30 +47,64 @@ func (s *Server) appendObject(ctx context.Context, c *app.RequestContext, bucket
 	}
 
 	// AppendObject is not defined on versioning-enabled buckets — S3 Express
-	// rejects with 501. GetBucketVersioning may return ErrUnsupportedOperation
-	// on backends that don't track versioning (LocalBackend); that's treated
-	// as Unversioned.
-	if state, vErr := s.ops.GetBucketVersioning(bucket); vErr == nil && state == "Enabled" {
+	// rejects with 501. This is a MUTATING edge (the append writes data), so it
+	// resolves versioning via the LINEARIZED read (#839): a just-joined group-0
+	// follower whose local replica lags (~90s) must not read "Unversioned" for an
+	// Enabled bucket and let the append bypass the 501 gate — the same mutating-edge
+	// contract PUT/Copy/CompleteMultipart already follow. GetBucketVersioningLinearized
+	// degrades to a local read during a group-0 leaderless window (no control-plane
+	// coupling) and returns ErrUnsupportedOperation on backends that don't track
+	// versioning (LocalBackend); that's treated as Unversioned.
+	// Fail CLOSED on a genuine versioning-read fault: this is a MUTATING edge, so
+	// it must not proceed when it cannot confirm the bucket is not versioning-
+	// enabled (it would otherwise bypass the 501 gate). A backend that does not
+	// track versioning (LocalBackend -> UnsupportedOperationError) is not a fault —
+	// treat it as Unversioned and continue, exactly like ctxWithBucketVersioningStrict.
+	state, vErr := s.ops.GetBucketVersioningLinearized(ctx, bucket)
+	if vErr != nil {
+		var unsupported storage.UnsupportedOperationError
+		if !errors.As(vErr, &unsupported) {
+			mapError(c, vErr)
+			return true
+		}
+	} else if state == "Enabled" {
 		writeXMLError(c, consts.StatusNotImplemented, "NotImplemented", "AppendObject is not supported on versioning-enabled buckets")
 		return true
 	}
 
-	body, err := putObjectBody(c)
-	if err != nil {
-		writeXMLError(c, consts.StatusBadRequest, "InvalidArgument", err.Error())
-		return true
+	// Large aws-chunked/streaming appends are streamed rather than buffered whole
+	// in Hertz's bytebufferpool (the retained pool is the PUT-path RSS driver).
+	// The coordinator's appendObjectLocalWithRetry re-buffers a non-seekable
+	// reader once under the same cap for stale-placement retry, so streaming the
+	// HTTP body here stays retry-safe. Small/unknown-length bodies keep the
+	// buffered path (cheap, and the cap is enforced after the read).
+	var bodyReader io.Reader
+	if putObjectShouldStream(c) {
+		streamLength := putObjectStreamLength(c)
+		if streamLength > appendBodyMaxBytes {
+			writeXMLError(c, consts.StatusBadRequest, "EntityTooLarge", fmt.Sprintf("AppendObject body exceeds %d byte limit", appendBodyMaxBytes))
+			return true
+		}
+		stream, err := putObjectPayloadReader(c)
+		if err != nil {
+			writeXMLError(c, consts.StatusBadRequest, "InvalidArgument", err.Error())
+			return true
+		}
+		bodyReader = newExactLengthReader(stream, streamLength)
+	} else {
+		body, err := putObjectBody(c)
+		if err != nil {
+			writeXMLError(c, consts.StatusBadRequest, "InvalidArgument", err.Error())
+			return true
+		}
+		if len(body) > appendBodyMaxBytes {
+			writeXMLError(c, consts.StatusBadRequest, "EntityTooLarge", fmt.Sprintf("AppendObject body exceeds %d byte limit", appendBodyMaxBytes))
+			return true
+		}
+		bodyReader = bytes.NewReader(body)
 	}
-	if len(body) > appendBodyMaxBytes {
-		writeXMLError(c, consts.StatusBadRequest, "EntityTooLarge", fmt.Sprintf("AppendObject body exceeds %d byte limit", appendBodyMaxBytes))
-		return true
-	}
-
-	ap, ok := s.backend.(storage.AppendObjecter)
-	if !ok {
-		writeXMLError(c, consts.StatusNotImplemented, "NotImplemented", "backend does not support AppendObject")
-		return true
-	}
-	obj, err := ap.AppendObject(ctx, bucket, key, off, bytes.NewReader(body))
+	obj, err := s.ops.AppendObject(ctx, bucket, key, off, bodyReader)
+	var unsupportedAppend storage.UnsupportedOperationError
 	switch {
 	case errors.Is(err, storage.ErrAppendOffsetMismatch):
 		writeXMLError(c, consts.StatusBadRequest, "InvalidWriteOffset", "the write offset does not match the object size")
@@ -81,9 +115,8 @@ func (s *Server) appendObject(ctx context.Context, c *app.RequestContext, bucket
 		writeXMLError(c, consts.StatusServiceUnavailable, "SlowDown", "append segment cap reached")
 	case errors.Is(err, storage.ErrAppendObjectTooLarge):
 		writeXMLError(c, consts.StatusBadRequest, "EntityTooLarge", "object total size cap exceeded")
-	case errors.Is(err, cluster.ErrForwardBufferFull):
-		c.Response.Header.Set("Retry-After", "1")
-		writeXMLError(c, consts.StatusServiceUnavailable, "SlowDown", "append forward buffer saturated")
+	case errors.As(err, &unsupportedAppend):
+		writeXMLError(c, consts.StatusNotImplemented, "NotImplemented", "backend does not support AppendObject")
 	case err != nil:
 		mapError(c, err)
 	default:

@@ -42,36 +42,26 @@ func serveOptionsFromCmd(cmd *cobra.Command) (serveruntime.ServeOptions, error) 
 	opts.NodeID, _ = cmd.Flags().GetString("node-id")
 	opts.RaftAddr, _ = cmd.Flags().GetString("raft-addr")
 	opts.JoinListenAddr, _ = cmd.Flags().GetString("join-listen-addr")
+	opts.BootstrapExpectNodes, _ = cmd.Flags().GetInt("bootstrap-expect-nodes")
+	opts.BootstrapExpectTimeout, _ = cmd.Flags().GetDuration("bootstrap-expect-timeout")
 
 	// Cluster transport tuning.
-	opts.AppendForwardBufferTotalBytes, _ = cmd.Flags().GetInt64("cluster-append-forward-buffer-total-bytes")
-	opts.AppendForwardBufferMaxPerRequest, _ = cmd.Flags().GetInt64("cluster-append-forward-buffer-max-per-request")
 	opts.AppendSizeCapBytes, _ = cmd.Flags().GetInt64("append-size-cap-bytes")
-	opts.MuxPoolSize, _ = cmd.Flags().GetInt("mux-pool")
-	opts.MuxFlushWindow, _ = cmd.Flags().GetDuration("mux-flush")
 
 	// Storage knobs.
 	opts.PackThreshold, _ = cmd.Flags().GetInt("pack-threshold")
-	opts.ShardPackThreshold, _ = cmd.Flags().GetInt("shard-pack-threshold")
-	opts.DirectIO, _ = cmd.Flags().GetBool("direct-io")
 	opts.MeasureReadAmp, _ = cmd.Flags().GetBool("measure-read-amp")
-	opts.BlockCacheSize, _ = cmd.Flags().GetInt64("block-cache-size")
 	opts.ShardCacheSize, _ = cmd.Flags().GetInt64("shard-cache-size")
-
-	// Protocols.
-	opts.NFS4Port, _ = cmd.Flags().GetInt("nfs4-port")
-	opts.NFSWriteBufferDir, _ = cmd.Flags().GetString("nfs-write-buffer-dir")
-	opts.NFSWriteBufferIdle, _ = cmd.Flags().GetDuration("nfs-write-buffer-idle")
-	opts.NBDPort, _ = cmd.Flags().GetInt("nbd-port")
-	opts.P9Bind, _ = cmd.Flags().GetString("9p-bind")
-	opts.P9Port, _ = cmd.Flags().GetInt("9p-port")
 
 	// Intervals.
 	opts.ScrubInterval, _ = cmd.Flags().GetDuration("scrub-interval")
 	opts.ScrubOrphanAge, _ = cmd.Flags().GetDuration("scrub-orphan-age")
 	opts.SegmentGCRetention, _ = cmd.Flags().GetDuration("segment-gc-retention")
-	opts.ReshardInterval, _ = cmd.Flags().GetDuration("reshard-interval")
-	opts.DataGroupRefreshInterval, _ = cmd.Flags().GetDuration("datagroup-refresh-interval")
+	// Bool defaults true: read the flag value directly (GetBool returns the
+	// resolved value), unlike the duration helper's 0→default reset semantics.
+	opts.ECRedundancyUpgrade, _ = cmd.Flags().GetBool("ec-redundancy-upgrade")
+	opts.ECRedundancyUpgradeMax, _ = cmd.Flags().GetInt("ec-redundancy-upgrade-max")
+	opts.ECRedundancyUpgradeMinAge, _ = cmd.Flags().GetDuration("ec-redundancy-upgrade-min-age")
 	opts.DegradedInterval, _ = cmd.Flags().GetDuration("degraded-check-interval")
 	opts.LifecycleInterval, _ = cmd.Flags().GetDuration("lifecycle-interval")
 	opts.RaftLogGCInterval, _ = cmd.Flags().GetDuration("raft-log-gc-interval")
@@ -87,10 +77,6 @@ func serveOptionsFromCmd(cmd *cobra.Command) (serveruntime.ServeOptions, error) 
 
 	opts.KEKProtector, _ = cmd.Flags().GetString("kek-protector")
 	opts.KEKRecoverySecretFile, _ = cmd.Flags().GetString("kek-recovery-secret-file")
-
-	// Audit.
-	opts.AuditIceberg, _ = cmd.Flags().GetBool("audit-iceberg")
-	opts.AuditCommitInterval, _ = cmd.Flags().GetDuration("audit-commit-interval")
 
 	// Observability.
 	opts.OTelEndpoint, _ = cmd.Flags().GetString("otel-endpoint")

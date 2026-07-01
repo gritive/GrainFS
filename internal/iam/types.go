@@ -16,7 +16,7 @@ type Proposer interface {
 	ProposeKeyCreateScoped(ctx context.Context, k AccessKey) error
 	ProposeKeyRevoke(ctx context.Context, accessKey string) error
 	ProposeBucketUpstreamPut(ctx context.Context, u BucketUpstream) error
-	ProposeBucketUpstreamDelete(ctx context.Context, bucket string) error
+	ProposeBucketUpstreamDelete(ctx context.Context, bucket string, observedGen uint64) error
 	ProposeBucketUpstreamCutover(ctx context.Context, bucket string) error
 	ProposePolicyAttachToSAPut(ctx context.Context, saID, policy string) error
 	ProposePolicyAttachToSADelete(ctx context.Context, saID, policy string) error
@@ -26,6 +26,10 @@ type Proposer interface {
 	// Both sa and policy empty = create-only path (no-op IAM half).
 	ProposeCreateBucketWithPolicyAttach(ctx context.Context, bucket, sa, policy string) error
 }
+
+// UnconditionalDeleteGen, as the observed generation on a bucket-upstream
+// delete, deletes regardless of stored generation (explicit operator delete).
+const UnconditionalDeleteGen = ^uint64(0)
 
 // KeyStatus represents whether an AccessKey is usable for SigV4 verification.
 type KeyStatus uint8
@@ -84,4 +88,5 @@ type BucketUpstream struct {
 	CreatedAt       time.Time
 	CreatedBy       string // sa_id of admin that issued the put
 	Status          BucketUpstreamStatus
+	Generation      uint64 // CAS generation: bumped on each Put, checked on cascade Delete
 }

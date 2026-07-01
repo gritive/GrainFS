@@ -14,15 +14,6 @@ import (
 
 const operatorMetricsVersionUnknown = "unknown"
 
-//nolint:unused // operator-state scaffolding landed v0.0.388-389 without a lint gate; production uses metrics.OperatorStateSources. Kept until that feature wires or removes it.
-type operatorStateSource struct {
-	nodeID   string
-	metaRaft metaRaftOperatorSource
-	dataNode dataRaftOperatorSource
-	peers    admin.PeerHealthAPI
-	deps     *admin.Deps
-}
-
 type metaRaftOperatorSource interface {
 	Node() cluster.RaftNode
 	LastApplied() uint64
@@ -46,7 +37,6 @@ func operatorStateSources(state *bootState) metrics.OperatorStateSources {
 		Cluster: operatorClusterStateSource{nodeID: state.nodeID, metaRaft: state.metaRaft, peers: NewPeerHealthAdapter(state.distBackend)},
 		Raft:    operatorRaftStateSource{nodeID: state.nodeID, metaRaft: state.metaRaft, dataNode: state.node},
 		Buckets: operatorBucketStateSource{deps: state.adminDeps},
-		Volumes: operatorVolumeStateSource{deps: state.adminDeps},
 	}
 }
 
@@ -256,62 +246,4 @@ func (s operatorBucketStateSource) BucketStateSnapshot(ctx context.Context) (met
 		return metrics.OperatorBucketState{}, err
 	}
 	return metrics.OperatorBucketState{Active: len(resp.Buckets)}, nil
-}
-
-type operatorVolumeStateSource struct {
-	deps *admin.Deps
-}
-
-func (s operatorVolumeStateSource) VolumeStateSnapshot(ctx context.Context) (metrics.OperatorVolumeState, error) {
-	counts := map[string]int{}
-	if s.deps == nil || s.deps.Manager == nil {
-		return metrics.OperatorVolumeState{HealthCounts: counts}, nil
-	}
-	volumes, err := s.deps.Manager.ListContext(ctx)
-	if err != nil {
-		return metrics.OperatorVolumeState{}, err
-	}
-	infos := make([]admin.VolumeInfo, len(volumes))
-	for i, vol := range volumes {
-		infos[i] = admin.VolumeInfo{
-			Name:            vol.Name,
-			Size:            vol.Size,
-			BlockSize:       vol.BlockSize,
-			AllocatedBlocks: vol.AllocatedBlocks,
-			AllocatedBytes:  vol.AllocatedBytes(),
-			Health:          "ok",
-			HealthReasons:   []string{},
-		}
-	}
-	admin.AnnotateVolumeHealthForMetrics(ctx, s.deps, infos)
-	var capacity, allocated int64
-	for _, vol := range infos {
-		counts[normalizeOperatorVolumeHealth(vol.Health, vol.HealthReasons)]++
-		capacity += vol.Size
-		allocated += vol.AllocatedBytes
-	}
-	return metrics.OperatorVolumeState{
-		HealthCounts:        counts,
-		CapacityBytesTotal:  capacity,
-		AllocatedBytesTotal: allocated,
-	}, nil
-}
-
-func normalizeOperatorVolumeHealth(health string, reasons []string) string {
-	for _, reason := range reasons {
-		switch reason {
-		case "replica_missing":
-			return "missing_replica"
-		case "recent_incident":
-			return "incident"
-		}
-	}
-	switch health {
-	case "ok":
-		return "healthy"
-	case "warning", "degraded", "critical":
-		return "degraded"
-	default:
-		return "unknown"
-	}
 }

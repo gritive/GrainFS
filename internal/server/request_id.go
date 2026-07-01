@@ -27,7 +27,7 @@ type reqIDKey struct{}
 
 // requestIDHertzKey is the c.Set/c.Get key under which WithRequestID stashes
 // the rid for synchronous read by writers that only hold *app.RequestContext
-// (e.g. S3 / Iceberg error envelopes). This dual-write is atomic with the
+// (e.g. S3 XML error envelopes). This dual-write is atomic with the
 // context.WithValue write inside WithRequestID, so there is only one writer
 // and no drift risk.
 const requestIDHertzKey = "grainfs.request_id"
@@ -61,9 +61,9 @@ func RequestIDFromContext(ctx context.Context) string {
 }
 
 // requestIDFromHertz reads the rid from the Hertz request context's K/V store.
-// Returns empty if WithRequestID did not run. Used by error envelope writers
-// (S3 XML, Iceberg JSON) that only hold *app.RequestContext and would
-// otherwise need ctx plumbed through hundreds of call sites.
+// Returns empty if WithRequestID did not run. Used by S3 XML error envelope
+// writers that only hold *app.RequestContext and would otherwise need ctx
+// plumbed through hundreds of call sites.
 func requestIDFromHertz(c *app.RequestContext) string {
 	v, ok := c.Get(requestIDHertzKey)
 	if !ok {

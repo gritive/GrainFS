@@ -15,8 +15,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/lifecycle"
+	"github.com/gritive/GrainFS/internal/server/servertest"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -27,7 +29,7 @@ type directProposer struct{ store *lifecycle.Store }
 func (p *directProposer) ProposeLifecyclePut(_ context.Context, bucket string, raw []byte) error {
 	return p.store.PutRaw(bucket, raw)
 }
-func (p *directProposer) ProposeLifecycleDelete(_ context.Context, bucket string) error {
+func (p *directProposer) ProposeLifecycleDelete(_ context.Context, bucket string, observedGen uint64) error {
 	return p.store.Delete(bucket)
 }
 
@@ -55,10 +57,10 @@ func setupLifecycleServer(t *testing.T) (base string, svc *lifecycle.Service, ba
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
 
-	store := lifecycle.NewStore(db)
+	store := lifecycle.NewStore(badgermeta.Wrap(db))
 	svc = lifecycle.NewService(store, &directProposer{store: store}, noopLeadership{}, nil, nil, 0)
 
-	port := freePort(t)
+	port := servertest.FreePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	srv := New(addr, backend, WithLifecycleService(svc))
 	go srv.Run() //nolint:errcheck

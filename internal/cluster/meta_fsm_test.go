@@ -8,17 +8,15 @@ import (
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
-	flatbuffers "github.com/google/flatbuffers/go"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/badgerutil"
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
-	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/metrics"
-	"github.com/gritive/GrainFS/internal/nfsexport"
 	"github.com/gritive/GrainFS/internal/raft"
 )
 
@@ -279,134 +277,6 @@ func TestMetaFSM_Apply_PutBucketAssignment_Overwrite(t *testing.T) {
 	assert.Equal(t, "group-1", assignments["photos"])
 }
 
-func makePutObjectIndexCmd(t *testing.T, entry ObjectIndexEntry, preserveLatest bool) []byte {
-	t.Helper()
-	data, err := encodeMetaPutObjectIndexCmd(entry, preserveLatest)
-	require.NoError(t, err)
-	cmd, err := encodeMetaCmd(MetaCmdTypePutObjectIndex, data)
-	require.NoError(t, err)
-	return cmd
-}
-
-func makeDeleteObjectIndexCmd(t *testing.T, bucket, key, versionID string) []byte {
-	t.Helper()
-	data, err := encodeMetaDeleteObjectIndexCmd(bucket, key, versionID)
-	require.NoError(t, err)
-	cmd, err := encodeMetaCmd(MetaCmdTypeDeleteObjectIndex, data)
-	require.NoError(t, err)
-	return cmd
-}
-
-func TestMetaFSM_ObjectIndexPutLatestAndVersion(t *testing.T) {
-	f := NewMetaFSM()
-	entry := ObjectIndexEntry{
-		Bucket: "b", Key: "k", VersionID: "v1",
-		PlacementGroupID: "group-2",
-		Size:             5,
-		ETag:             "etag",
-		ECData:           1,
-		ECParity:         0,
-		NodeIDs:          []string{"n1"},
-	}
-	require.NoError(t, f.applyCmd(makePutObjectIndexCmd(t, entry, false)))
-
-	latest, ok := f.ObjectIndexLatest("b", "k")
-	require.True(t, ok)
-	require.Equal(t, "group-2", latest.PlacementGroupID)
-	require.Equal(t, []string{"n1"}, latest.NodeIDs)
-
-	ver, ok := f.ObjectIndexVersion("b", "k", "v1")
-	require.True(t, ok)
-	require.Equal(t, latest, ver)
-}
-
-func TestMetaFSM_ObjectIndexRejectsEmptyPlacementGroupID(t *testing.T) {
-	f := NewMetaFSM()
-	entry := ObjectIndexEntry{Bucket: "b", Key: "k", VersionID: "v1"}
-	err := f.applyCmd(makePutObjectIndexCmd(t, entry, false))
-	require.ErrorContains(t, err, "empty placement_group_id")
-}
-
-func TestMetaFSM_ObjectIndexDeleteMarkerLatest(t *testing.T) {
-	f := NewMetaFSM()
-	entry := ObjectIndexEntry{
-		Bucket: "b", Key: "k", VersionID: "del1",
-		PlacementGroupID: "group-2",
-		IsDeleteMarker:   true,
-	}
-	require.NoError(t, f.applyCmd(makePutObjectIndexCmd(t, entry, false)))
-	latest, ok := f.ObjectIndexLatest("b", "k")
-	require.True(t, ok)
-	require.True(t, latest.IsDeleteMarker)
-}
-
-func TestMetaFSM_ObjectIndexPreserveLatest(t *testing.T) {
-	f := NewMetaFSM()
-	require.NoError(t, f.applyCmd(makePutObjectIndexCmd(t, ObjectIndexEntry{
-		Bucket: "b", Key: "k", VersionID: "v1", PlacementGroupID: "group-1",
-	}, false)))
-	require.NoError(t, f.applyCmd(makePutObjectIndexCmd(t, ObjectIndexEntry{
-		Bucket: "b", Key: "k", VersionID: "v0", PlacementGroupID: "group-2",
-	}, true)))
-
-	latest, ok := f.ObjectIndexLatest("b", "k")
-	require.True(t, ok)
-	require.Equal(t, "v1", latest.VersionID)
-
-	older, ok := f.ObjectIndexVersion("b", "k", "v0")
-	require.True(t, ok)
-	require.Equal(t, "group-2", older.PlacementGroupID)
-}
-
-func TestMetaFSM_ObjectIndexDeleteVersionRecomputesLatest(t *testing.T) {
-	f := NewMetaFSM()
-	require.NoError(t, f.applyCmd(makePutObjectIndexCmd(t, ObjectIndexEntry{
-		Bucket: "b", Key: "k", VersionID: "v1", PlacementGroupID: "group-1", ModTime: 10,
-	}, false)))
-	require.NoError(t, f.applyCmd(makePutObjectIndexCmd(t, ObjectIndexEntry{
-		Bucket: "b", Key: "k", VersionID: "v2", PlacementGroupID: "group-2", ModTime: 20,
-	}, false)))
-
-	require.NoError(t, f.applyCmd(makeDeleteObjectIndexCmd(t, "b", "k", "v2")))
-
-	_, ok := f.ObjectIndexVersion("b", "k", "v2")
-	require.False(t, ok)
-	latest, ok := f.ObjectIndexLatest("b", "k")
-	require.True(t, ok)
-	require.Equal(t, "v1", latest.VersionID)
-
-	require.NoError(t, f.applyCmd(makeDeleteObjectIndexCmd(t, "b", "k", "v1")))
-	_, ok = f.ObjectIndexLatest("b", "k")
-	require.False(t, ok)
-}
-
-func TestMetaFSM_ObjectIndexSnapshotRestore(t *testing.T) {
-	f := NewMetaFSM()
-	wireTestKEK(t, f)
-	entry := ObjectIndexEntry{
-		Bucket: "b", Key: "k", VersionID: "v1",
-		PlacementGroupID: "group-2",
-		Size:             5,
-		ContentType:      "text/plain",
-		ETag:             "etag",
-		ModTime:          123,
-		ECData:           2,
-		ECParity:         1,
-		NodeIDs:          []string{"n1", "n2", "n3"},
-	}
-	require.NoError(t, f.applyCmd(makePutObjectIndexCmd(t, entry, false)))
-
-	snap, err := f.Snapshot()
-	require.NoError(t, err)
-	f2 := NewMetaFSM()
-	wireTestKEK(t, f2)
-	require.NoError(t, f2.Restore(raft.SnapshotMeta{}, snap))
-
-	latest, ok := f2.ObjectIndexLatest("b", "k")
-	require.True(t, ok)
-	require.Equal(t, entry, latest)
-}
-
 func TestMetaFSM_BucketAssignments_Snapshot_Restore(t *testing.T) {
 	f := NewMetaFSM()
 	wireTestKEK(t, f)
@@ -425,158 +295,6 @@ func TestMetaFSM_BucketAssignments_Snapshot_Restore(t *testing.T) {
 	require.Len(t, assignments, 2)
 	assert.Equal(t, "group-0", assignments["photos"])
 	assert.Equal(t, "group-1", assignments["videos"])
-}
-
-func makeIcebergCreateNamespaceCmd(t *testing.T, requestID string, namespace []string, properties map[string]string) []byte {
-	t.Helper()
-	data, err := encodeMetaIcebergCreateNamespaceCmd(IcebergCreateNamespaceCmd{
-		RequestID:  requestID,
-		Namespace:  namespace,
-		Properties: properties,
-	})
-	require.NoError(t, err)
-	cmd, err := encodeMetaCmd(MetaCmdTypeIcebergCreateNamespace, data)
-	require.NoError(t, err)
-	return cmd
-}
-
-func makeIcebergCreateTableCmd(t *testing.T, requestID string, ident icebergcatalog.Identifier, metadataLocation string, properties map[string]string) []byte {
-	t.Helper()
-	data, err := encodeMetaIcebergCreateTableCmd(IcebergCreateTableCmd{
-		RequestID:        requestID,
-		Identifier:       ident,
-		MetadataLocation: metadataLocation,
-		Properties:       properties,
-	})
-	require.NoError(t, err)
-	cmd, err := encodeMetaCmd(MetaCmdTypeIcebergCreateTable, data)
-	require.NoError(t, err)
-	return cmd
-}
-
-func makeIcebergDeleteNamespaceCmd(t *testing.T, requestID string, namespace []string) []byte {
-	t.Helper()
-	data, err := encodeMetaIcebergDeleteNamespaceCmd(IcebergDeleteNamespaceCmd{
-		RequestID: requestID,
-		Namespace: namespace,
-	})
-	require.NoError(t, err)
-	cmd, err := encodeMetaCmd(MetaCmdTypeIcebergDeleteNamespace, data)
-	require.NoError(t, err)
-	return cmd
-}
-
-func makeIcebergCommitTableCmd(t *testing.T, requestID string, ident icebergcatalog.Identifier, expected, next string) []byte {
-	t.Helper()
-	data, err := encodeMetaIcebergCommitTableCmd(IcebergCommitTableCmd{
-		RequestID:                requestID,
-		Identifier:               ident,
-		ExpectedMetadataLocation: expected,
-		NewMetadataLocation:      next,
-	})
-	require.NoError(t, err)
-	cmd, err := encodeMetaCmd(MetaCmdTypeIcebergCommitTable, data)
-	require.NoError(t, err)
-	return cmd
-}
-
-func makeIcebergDeleteTableCmd(t *testing.T, requestID string, ident icebergcatalog.Identifier) []byte {
-	t.Helper()
-	data, err := encodeMetaIcebergDeleteTableCmd(IcebergDeleteTableCmd{
-		RequestID:  requestID,
-		Identifier: ident,
-	})
-	require.NoError(t, err)
-	cmd, err := encodeMetaCmd(MetaCmdTypeIcebergDeleteTable, data)
-	require.NoError(t, err)
-	return cmd
-}
-
-func TestMetaFSM_IcebergCatalog_SnapshotRestoreStoresPointerOnly(t *testing.T) {
-	f := NewMetaFSM()
-	wireTestKEK(t, f)
-	require.NoError(t, f.applyCmd(makeIcebergCreateNamespaceCmd(t, "ns-1", []string{"analytics"}, map[string]string{"owner": "eng"})))
-	require.NoError(t, f.applyCmd(makeIcebergCreateTableCmd(t, "tbl-1", icebergcatalog.Identifier{
-		Namespace: []string{"analytics"},
-		Name:      "events",
-	}, "s3://grainfs-tables/warehouse/analytics/events/metadata/00000.json", map[string]string{"format-version": "2"})))
-
-	ns, ok := f.IcebergNamespace("", []string{"analytics"})
-	require.True(t, ok)
-	require.Equal(t, []string{"analytics"}, ns.Namespace)
-	require.Equal(t, "eng", ns.Properties["owner"])
-
-	tbl, ok := f.IcebergTable("", icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"})
-	require.True(t, ok)
-	require.Equal(t, "s3://grainfs-tables/warehouse/analytics/events/metadata/00000.json", tbl.MetadataLocation)
-	require.Equal(t, "2", tbl.Properties["format-version"])
-
-	snap, err := f.Snapshot()
-	require.NoError(t, err)
-	require.NotContains(t, string(snap), "current-snapshot-id", "metadata JSON bodies must not be snapshotted into meta-Raft")
-
-	f2 := NewMetaFSM()
-	wireTestKEK(t, f2)
-	require.NoError(t, f2.Restore(raft.SnapshotMeta{}, snap))
-	restored, ok := f2.IcebergTable("", icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"})
-	require.True(t, ok)
-	require.Equal(t, tbl.MetadataLocation, restored.MetadataLocation)
-	require.Equal(t, tbl.Identifier, restored.Identifier)
-}
-
-func TestMetaFSM_IcebergApplyPublishesTypedResultWithoutReturningApplyError(t *testing.T) {
-	f := NewMetaFSM()
-	results := make(map[string]error)
-	f.SetOnIcebergApplyResult(func(requestID string, err error) {
-		results[requestID] = err
-	})
-
-	require.NoError(t, f.applyCmd(makeIcebergCreateNamespaceCmd(t, "first", []string{"analytics"}, nil)))
-	require.NoError(t, f.applyCmd(makeIcebergCreateNamespaceCmd(t, "duplicate", []string{"analytics"}, nil)))
-
-	require.NoError(t, results["first"])
-	require.ErrorIs(t, results["duplicate"], icebergcatalog.ErrNamespaceExists)
-}
-
-func TestMetaFSM_IcebergCatalog_CommitDeleteAndTypedErrors(t *testing.T) {
-	f := NewMetaFSM()
-	results := make(map[string]error)
-	f.SetOnIcebergApplyResult(func(requestID string, err error) {
-		results[requestID] = err
-	})
-	ident := icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"}
-
-	require.NoError(t, f.applyCmd(makeIcebergCreateTableCmd(t, "missing-ns-table", ident, "s3://bucket/warehouse/a/b/metadata/00000.json", nil)))
-	require.ErrorIs(t, results["missing-ns-table"], icebergcatalog.ErrNamespaceNotFound)
-
-	require.NoError(t, f.applyCmd(makeIcebergCreateNamespaceCmd(t, "create-ns", []string{"analytics"}, nil)))
-	require.NoError(t, f.applyCmd(makeIcebergCreateTableCmd(t, "create-table", ident, "s3://bucket/warehouse/a/b/metadata/00000.json", nil)))
-	require.NoError(t, f.applyCmd(makeIcebergCommitTableCmd(t, "commit-ok", ident, "s3://bucket/warehouse/a/b/metadata/00000.json", "s3://bucket/warehouse/a/b/metadata/00001.json")))
-	require.NoError(t, results["commit-ok"])
-	table, ok := f.IcebergTable("", ident)
-	require.True(t, ok)
-	require.Equal(t, "s3://bucket/warehouse/a/b/metadata/00001.json", table.MetadataLocation)
-
-	require.NoError(t, f.applyCmd(makeIcebergCommitTableCmd(t, "commit-stale", ident, "s3://bucket/warehouse/a/b/metadata/00000.json", "s3://bucket/warehouse/a/b/metadata/00002.json")))
-	require.ErrorIs(t, results["commit-stale"], icebergcatalog.ErrCommitFailed)
-	table, ok = f.IcebergTable("", ident)
-	require.True(t, ok)
-	require.Equal(t, "s3://bucket/warehouse/a/b/metadata/00001.json", table.MetadataLocation)
-
-	require.NoError(t, f.applyCmd(makeIcebergDeleteNamespaceCmd(t, "delete-ns-not-empty", []string{"analytics"})))
-	require.ErrorIs(t, results["delete-ns-not-empty"], icebergcatalog.ErrNamespaceNotEmpty)
-
-	require.NoError(t, f.applyCmd(makeIcebergDeleteTableCmd(t, "delete-table", ident)))
-	require.NoError(t, results["delete-table"])
-	_, ok = f.IcebergTable("", ident)
-	require.False(t, ok)
-
-	require.NoError(t, f.applyCmd(makeIcebergDeleteTableCmd(t, "delete-missing-table", ident)))
-	require.ErrorIs(t, results["delete-missing-table"], icebergcatalog.ErrTableNotFound)
-	require.NoError(t, f.applyCmd(makeIcebergDeleteNamespaceCmd(t, "delete-ns", []string{"analytics"})))
-	require.NoError(t, results["delete-ns"])
-	require.NoError(t, f.applyCmd(makeIcebergDeleteNamespaceCmd(t, "delete-missing-ns", []string{"analytics"})))
-	require.ErrorIs(t, results["delete-missing-ns"], icebergcatalog.ErrNamespaceNotFound)
 }
 
 func TestMetaFSM_OnBucketAssigned_CallbackFired(t *testing.T) {
@@ -611,36 +329,13 @@ func TestMetaFSM_Restore_FiresOnBucketAssignedCallback(t *testing.T) {
 	assert.Equal(t, map[string]string{"photos": "group-0", "videos": "group-1"}, got)
 }
 
-// --- PR-D: LoadSnapshot + RebalancePlan tests ---
+// --- PR-D: LoadSnapshot tests ---
 
 func makeSetLoadSnapshotCmd(t *testing.T, entries []LoadStatEntry) []byte {
 	t.Helper()
 	data, err := encodeMetaSetLoadSnapshotCmd(entries)
 	require.NoError(t, err)
 	cmd, err := encodeMetaCmd(MetaCmdTypeSetLoadSnapshot, data)
-	require.NoError(t, err)
-	return cmd
-}
-
-func makeProposeRebalancePlanCmd(t *testing.T, plan RebalancePlan) []byte {
-	t.Helper()
-	data, err := encodeMetaProposeRebalancePlanCmd(plan)
-	require.NoError(t, err)
-	cmd, err := encodeMetaCmd(MetaCmdTypeProposeRebalancePlan, data)
-	require.NoError(t, err)
-	return cmd
-}
-
-func makeAbortPlanCmd(t *testing.T, planID string) []byte {
-	t.Helper()
-	return makeAbortPlanCmdWithReason(t, planID, clusterpb.AbortPlanReasonUnknown)
-}
-
-func makeAbortPlanCmdWithReason(t *testing.T, planID string, reason clusterpb.AbortPlanReason) []byte {
-	t.Helper()
-	data, err := encodeMetaAbortPlanCmd(planID, reason)
-	require.NoError(t, err)
-	cmd, err := encodeMetaCmd(MetaCmdTypeAbortPlan, data)
 	require.NoError(t, err)
 	return cmd
 }
@@ -658,76 +353,6 @@ func TestMetaFSM_Apply_SetLoadSnapshot(t *testing.T) {
 	assert.InDelta(t, 80.0, snap["n1"].DiskUsedPct, 0.01)
 }
 
-func TestMetaFSM_Apply_ProposeRebalancePlan(t *testing.T) {
-	f := NewMetaFSM()
-	plan := RebalancePlan{
-		PlanID:    "plan-1",
-		GroupID:   "group-0",
-		FromNode:  "n1",
-		ToNode:    "n2",
-		CreatedAt: time.Now(),
-	}
-	require.NoError(t, f.applyCmd(makeProposeRebalancePlanCmd(t, plan)))
-	assert.Equal(t, "plan-1", f.ActivePlanID())
-}
-
-func TestMetaFSM_Apply_ProposeRebalancePlan_RejectsIfActive(t *testing.T) {
-	f := NewMetaFSM()
-	plan1 := RebalancePlan{PlanID: "plan-1", GroupID: "g0", FromNode: "n1", ToNode: "n2", CreatedAt: time.Now()}
-	plan2 := RebalancePlan{PlanID: "plan-2", GroupID: "g0", FromNode: "n1", ToNode: "n3", CreatedAt: time.Now()}
-	require.NoError(t, f.applyCmd(makeProposeRebalancePlanCmd(t, plan1)))
-	require.ErrorContains(t, f.applyCmd(makeProposeRebalancePlanCmd(t, plan2)), "active plan")
-}
-
-func TestMetaFSM_Apply_AbortPlan(t *testing.T) {
-	f := NewMetaFSM()
-	plan := RebalancePlan{PlanID: "plan-1", GroupID: "g0", FromNode: "n1", ToNode: "n2", CreatedAt: time.Now()}
-	require.NoError(t, f.applyCmd(makeProposeRebalancePlanCmd(t, plan)))
-	require.NoError(t, f.applyCmd(makeAbortPlanCmd(t, "plan-1")))
-	assert.Empty(t, f.ActivePlanID())
-}
-
-func TestMetaFSM_Apply_AbortPlan_Idempotent(t *testing.T) {
-	f := NewMetaFSM()
-	// Aborting when no plan is active must be a no-op (not an error).
-	require.NoError(t, f.applyCmd(makeAbortPlanCmd(t, "nonexistent")))
-	assert.Empty(t, f.ActivePlanID())
-}
-
-// TestEncodeMetaAbortPlanCmd_ReasonRoundTrip verifies that every AbortPlanReason
-// value survives a FlatBuffers encode → decode cycle intact.
-func TestEncodeMetaAbortPlanCmd_ReasonRoundTrip(t *testing.T) {
-	cases := []struct {
-		reason clusterpb.AbortPlanReason
-		name   string
-	}{
-		{clusterpb.AbortPlanReasonUnknown, "Unknown"},
-		{clusterpb.AbortPlanReasonTimeout, "Timeout"},
-		{clusterpb.AbortPlanReasonExecutionFailed, "ExecutionFailed"},
-		{clusterpb.AbortPlanReasonCompleted, "Completed"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			data, err := encodeMetaAbortPlanCmd("plan-rt", tc.reason)
-			require.NoError(t, err)
-			cmd := clusterpb.GetRootAsMetaAbortPlanCmd(data, 0)
-			assert.Equal(t, tc.reason, cmd.Reason())
-			assert.Equal(t, tc.name, cmd.Reason().String())
-		})
-	}
-}
-
-func TestMetaFSM_OnRebalancePlan_CallbackFired(t *testing.T) {
-	f := NewMetaFSM()
-	var got *RebalancePlan
-	f.SetOnRebalancePlan(func(p *RebalancePlan) { got = p })
-
-	plan := RebalancePlan{PlanID: "plan-1", GroupID: "g0", FromNode: "n1", ToNode: "n2", CreatedAt: time.Now()}
-	require.NoError(t, f.applyCmd(makeProposeRebalancePlanCmd(t, plan)))
-	require.NotNil(t, got)
-	assert.Equal(t, "plan-1", got.PlanID)
-}
-
 func TestMetaFSM_LoadSnapshot_Snapshot_Restore(t *testing.T) {
 	f := NewMetaFSM()
 	wireTestKEK(t, f)
@@ -742,21 +367,6 @@ func TestMetaFSM_LoadSnapshot_Snapshot_Restore(t *testing.T) {
 	require.NoError(t, f2.Restore(raft.SnapshotMeta{}, snap))
 	ls := f2.LoadSnapshot()
 	assert.InDelta(t, 75.0, ls["n1"].DiskUsedPct, 0.01)
-}
-
-func TestMetaFSM_ActivePlan_Snapshot_Restore(t *testing.T) {
-	f := NewMetaFSM()
-	wireTestKEK(t, f)
-	plan := RebalancePlan{PlanID: "plan-99", GroupID: "g0", FromNode: "n1", ToNode: "n2", CreatedAt: time.Now()}
-	require.NoError(t, f.applyCmd(makeProposeRebalancePlanCmd(t, plan)))
-
-	snap, err := f.Snapshot()
-	require.NoError(t, err)
-
-	f2 := NewMetaFSM()
-	wireTestKEK(t, f2)
-	require.NoError(t, f2.Restore(raft.SnapshotMeta{}, snap))
-	assert.Equal(t, "plan-99", f2.ActivePlanID())
 }
 
 // TestMetaFSM_Dispatch_KeyCreateScoped verifies that MetaCmdTypeIAMKeyCreateScoped (type 30)
@@ -817,25 +427,18 @@ func TestMetaFSM_Dispatch_UnknownCmd_GracefulNoOp(t *testing.T) {
 	assert.Equal(t, before+1, after, "unknown cmd must increment the rolling-upgrade telemetry counter")
 }
 
-func newTestLifecycleDB(t *testing.T) *badger.DB {
+func newTestLifecycleStore(t *testing.T) MetadataStore {
 	t.Helper()
 	opts := badgerutil.SmallOptions(t.TempDir())
 	db, err := badger.Open(opts)
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
-	return db
-}
-
-func openTestBadgerAt(t *testing.T, dir string) *badger.DB {
-	t.Helper()
-	db, err := badger.Open(badgerutil.SmallOptions(dir))
-	require.NoError(t, err)
-	return db
+	return badgermeta.Wrap(db)
 }
 
 func TestApplyBucketLifecyclePut_WritesStore(t *testing.T) {
 	f := NewMetaFSM()
-	store := lifecycle.NewStore(newTestLifecycleDB(t))
+	store := lifecycle.NewStore(newTestLifecycleStore(t))
 	f.SetLifecycle(store)
 
 	raw := []byte(`<LifecycleConfiguration><Rule><ID>r1</ID><Status>Enabled</Status></Rule></LifecycleConfiguration>`)
@@ -851,11 +454,11 @@ func TestApplyBucketLifecyclePut_WritesStore(t *testing.T) {
 
 func TestApplyBucketLifecycleDelete_RemovesStore(t *testing.T) {
 	f := NewMetaFSM()
-	store := lifecycle.NewStore(newTestLifecycleDB(t))
+	store := lifecycle.NewStore(newTestLifecycleStore(t))
 	f.SetLifecycle(store)
 	require.NoError(t, store.PutRaw("b1", []byte(`<LifecycleConfiguration><Rule><ID>r1</ID></Rule></LifecycleConfiguration>`)))
 
-	payload := lifecycle.EncodeDeletePayload("b1")
+	payload := lifecycle.EncodeDeletePayload("b1", lifecycle.UnconditionalDeleteGen)
 	data, err := encodeMetaCmd(clusterpb.MetaCmdTypeBucketLifecycleDelete, payload)
 	require.NoError(t, err)
 	require.NoError(t, f.applyCmd(data))
@@ -863,349 +466,6 @@ func TestApplyBucketLifecycleDelete_RemovesStore(t *testing.T) {
 	got, err := store.Get("b1")
 	require.NoError(t, err)
 	require.Nil(t, got)
-}
-
-func TestApplyNfsExportUpsert_WritesStore(t *testing.T) {
-	f := NewMetaFSM()
-	store, err := nfsexport.OpenStore(newTestLifecycleDB(t))
-	require.NoError(t, err)
-	f.SetExportStore(store)
-
-	cfg := nfsexport.Config{ReadOnly: true}
-	payload, err := nfsexport.EncodeUpsertPayload("b1", cfg)
-	require.NoError(t, err)
-	data, err := encodeMetaCmd(clusterpb.MetaCmdTypeNfsExportUpsert, payload)
-	require.NoError(t, err)
-	require.NoError(t, f.applyCmd(data))
-
-	got, ok := store.Get("b1")
-	require.True(t, ok)
-	require.Equal(t, nfsexport.Config{ReadOnly: true, FsidMajor: 1, FsidMinor: 1, Generation: 1}, got)
-}
-
-func TestApplyNfsExportCreateRejectsExisting(t *testing.T) {
-	f := NewMetaFSM()
-	store, err := nfsexport.OpenStore(newTestLifecycleDB(t))
-	require.NoError(t, err)
-	f.SetExportStore(store)
-
-	payload, err := nfsexport.EncodeUpsertPayload("b1", nfsexport.Config{ReadOnly: false})
-	require.NoError(t, err)
-	data, err := encodeMetaCmd(clusterpb.MetaCmdTypeNfsExportCreate, payload)
-	require.NoError(t, err)
-	require.NoError(t, f.applyCmd(data))
-
-	payload, err = nfsexport.EncodeUpsertPayload("b1", nfsexport.Config{ReadOnly: true})
-	require.NoError(t, err)
-	data, err = encodeMetaCmd(clusterpb.MetaCmdTypeNfsExportCreate, payload)
-	require.NoError(t, err)
-	require.ErrorIs(t, f.applyCmd(data), nfsexport.ErrExportExists)
-
-	got, ok := store.Get("b1")
-	require.True(t, ok)
-	require.False(t, got.ReadOnly)
-	require.Equal(t, uint64(1), got.Generation)
-}
-
-func TestApplyNfsExport_ChangeCallback(t *testing.T) {
-	f := NewMetaFSM()
-	store, err := nfsexport.OpenStore(newTestLifecycleDB(t))
-	require.NoError(t, err)
-	f.SetExportStore(store)
-
-	var calls int
-	f.SetOnNfsExportChange(func() { calls++ })
-
-	cfg := nfsexport.Config{FsidMajor: 1, FsidMinor: 2, Generation: 3}
-	upsertPayload, err := nfsexport.EncodeUpsertPayload("b1", cfg)
-	require.NoError(t, err)
-	upsertData, err := encodeMetaCmd(clusterpb.MetaCmdTypeNfsExportUpsert, upsertPayload)
-	require.NoError(t, err)
-	require.NoError(t, f.applyCmd(upsertData))
-
-	deletePayload, err := nfsexport.EncodeDeletePayload("b1")
-	require.NoError(t, err)
-	deleteData, err := encodeMetaCmd(clusterpb.MetaCmdTypeNfsExportDelete, deletePayload)
-	require.NoError(t, err)
-	require.NoError(t, f.applyCmd(deleteData))
-
-	require.Equal(t, 2, calls)
-}
-
-func TestApplyNfsExportUpsert_AllocatorMonotonic(t *testing.T) {
-	f := NewMetaFSM()
-	store, err := nfsexport.OpenStore(newTestLifecycleDB(t))
-	require.NoError(t, err)
-	f.SetExportStore(store)
-
-	for i := 1; i <= 100; i++ {
-		payload, err := nfsexport.EncodeUpsertPayload(fmt.Sprintf("b-%03d", i), nfsexport.Config{})
-		require.NoError(t, err)
-		data, err := encodeMetaCmd(clusterpb.MetaCmdTypeNfsExportUpsert, payload)
-		require.NoError(t, err)
-		require.NoError(t, f.applyCmd(data))
-		cfg, ok := store.Get(fmt.Sprintf("b-%03d", i))
-		require.True(t, ok)
-		require.Equal(t, uint64(i), cfg.FsidMinor)
-		require.Equal(t, uint64(1), cfg.Generation)
-	}
-}
-
-func TestApplyNfsExportUpsert_DeleteThenReuse(t *testing.T) {
-	dir := t.TempDir()
-	db := openTestBadgerAt(t, dir)
-	store, err := nfsexport.OpenStore(db)
-	require.NoError(t, err)
-	f := NewMetaFSM()
-	f.SetExportStore(store)
-	for _, bucket := range []string{"a", "b", "c"} {
-		payload, err := nfsexport.EncodeUpsertPayload(bucket, nfsexport.Config{})
-		require.NoError(t, err)
-		data, err := encodeMetaCmd(clusterpb.MetaCmdTypeNfsExportUpsert, payload)
-		require.NoError(t, err)
-		require.NoError(t, f.applyCmd(data))
-	}
-	deletePayload, err := nfsexport.EncodeDeletePayload("c")
-	require.NoError(t, err)
-	deleteData, err := encodeMetaCmd(clusterpb.MetaCmdTypeNfsExportDelete, deletePayload)
-	require.NoError(t, err)
-	require.NoError(t, f.applyCmd(deleteData))
-	require.NoError(t, db.Close())
-
-	db = openTestBadgerAt(t, dir)
-	defer db.Close()
-	store, err = nfsexport.OpenStore(db)
-	require.NoError(t, err)
-	f = NewMetaFSM()
-	f.SetExportStore(store)
-	payload, err := nfsexport.EncodeUpsertPayload("d", nfsexport.Config{})
-	require.NoError(t, err)
-	data, err := encodeMetaCmd(clusterpb.MetaCmdTypeNfsExportUpsert, payload)
-	require.NoError(t, err)
-	require.NoError(t, f.applyCmd(data))
-	cfg, ok := store.Get("d")
-	require.True(t, ok)
-	require.Equal(t, uint64(4), cfg.FsidMinor)
-}
-
-func TestApplyNfsExportDelete_Idempotent(t *testing.T) {
-	f := NewMetaFSM()
-	store, err := nfsexport.OpenStore(newTestLifecycleDB(t))
-	require.NoError(t, err)
-	f.SetExportStore(store)
-	require.NoError(t, store.Put("b1", nfsexport.Config{FsidMinor: 1}))
-
-	payload, err := nfsexport.EncodeDeletePayload("b1")
-	require.NoError(t, err)
-	data, err := encodeMetaCmd(clusterpb.MetaCmdTypeNfsExportDelete, payload)
-	require.NoError(t, err)
-	require.NoError(t, f.applyCmd(data))
-	require.NoError(t, f.applyCmd(data))
-
-	_, ok := store.Get("b1")
-	require.False(t, ok)
-}
-
-func TestApplyNfsExportBucketDeleteCascadeDeletesExportAfterBucket(t *testing.T) {
-	f := NewMetaFSM()
-	store, err := nfsexport.OpenStore(newTestLifecycleDB(t))
-	require.NoError(t, err)
-	f.SetExportStore(store)
-	_, err = store.ApplyUpsert("b1", false, 1)
-	require.NoError(t, err)
-
-	payload, err := nfsexport.EncodeBucketDeleteCascadePayload("b1", true)
-	require.NoError(t, err)
-	cmd, err := encodeMetaCmd(clusterpb.MetaCmdTypeNfsExportBucketDeleteCascade, payload)
-	require.NoError(t, err)
-
-	require.NoError(t, f.applyCmd(cmd))
-	_, ok := store.Get("b1")
-	require.False(t, ok)
-}
-
-func TestMetaFSM_NfsExportsSnapshotRestore(t *testing.T) {
-	f := NewMetaFSM()
-	wireTestKEK(t, f)
-	store, err := nfsexport.OpenStore(newTestLifecycleDB(t))
-	require.NoError(t, err)
-	f.SetExportStore(store)
-	_, err = store.ApplyUpsert("b1", true, 7)
-	require.NoError(t, err)
-	before, ok := store.Get("b1")
-	require.True(t, ok)
-
-	snap, err := f.Snapshot()
-	require.NoError(t, err)
-
-	restoredStore, err := nfsexport.OpenStore(newTestLifecycleDB(t))
-	require.NoError(t, err)
-	f2 := NewMetaFSM()
-	wireTestKEK(t, f2)
-	f2.SetExportStore(restoredStore)
-	calls := 0
-	f2.SetOnNfsExportChange(func() { calls++ })
-	require.NoError(t, f2.Restore(raft.SnapshotMeta{}, snap))
-	require.Equal(t, 1, calls)
-
-	after, ok := restoredStore.Get("b1")
-	require.True(t, ok)
-	require.Equal(t, before, after)
-}
-
-func TestMetaFSM_RestoreLegacySnapshotKeepsNfsExports(t *testing.T) {
-	f := NewMetaFSM()
-	wireTestKEK(t, f)
-	store, err := nfsexport.OpenStore(newTestLifecycleDB(t))
-	require.NoError(t, err)
-	f.SetExportStore(store)
-	before, err := store.ApplyUpsert("b1", true, 7)
-	require.NoError(t, err)
-
-	b := flatbuffers.NewBuilder(64)
-	clusterpb.MetaStateSnapshotStart(b)
-	root := clusterpb.MetaStateSnapshotEnd(b)
-	b.Finish(root)
-
-	// Phase D-snap: Restore decrypts the envelope first; seal the raw FB so the
-	// trailer-less ("legacy") body reaches the inner restore path.
-	sealed, err := f.sealSnapshotEnvelope(append([]byte(nil), b.FinishedBytes()...))
-	require.NoError(t, err)
-	require.NoError(t, f.Restore(raft.SnapshotMeta{}, sealed))
-	after, ok := store.Get("b1")
-	require.True(t, ok)
-	require.Equal(t, before, after)
-}
-
-func TestApplyNfsExportMissingStore_ReturnsError(t *testing.T) {
-	f := NewMetaFSM()
-	payload, err := nfsexport.EncodeDeletePayload("b1")
-	require.NoError(t, err)
-	data, err := encodeMetaCmd(clusterpb.MetaCmdTypeNfsExportDelete, payload)
-	require.NoError(t, err)
-
-	applyErr := f.applyCmd(data)
-	require.Error(t, applyErr)
-	require.Contains(t, applyErr.Error(), "NFS export store not wired")
-}
-
-// TestMetaCatalog_SnapshotRoundtrip_TwoWarehouses verifies that Snapshot writes
-// iceberg_schema_version=2 with warehouse in each entry, and that Restore
-// correctly re-keys into the per-warehouse nested maps.
-func TestMetaCatalog_SnapshotRoundtrip_TwoWarehouses(t *testing.T) {
-	f := NewMetaFSM()
-	wireTestKEK(t, f)
-
-	// Create entries in two warehouses.
-	require.NoError(t, f.applyCmd(makeIcebergCreateNamespaceCmdWH(t, "ns-a-1", "wh-a", []string{"analytics"}, nil)))
-	require.NoError(t, f.applyCmd(makeIcebergCreateTableCmdWH(t, "tbl-a-1", "wh-a", icebergcatalog.Identifier{
-		Namespace: []string{"analytics"}, Name: "events",
-	}, "s3://bucket/wh-a/analytics/events/metadata/00000.json", nil)))
-	require.NoError(t, f.applyCmd(makeIcebergCreateNamespaceCmdWH(t, "ns-b-1", "wh-b", []string{"metrics"}, nil)))
-
-	snap, err := f.Snapshot()
-	require.NoError(t, err)
-
-	f2 := NewMetaFSM()
-	wireTestKEK(t, f2)
-	require.NoError(t, f2.Restore(raft.SnapshotMeta{}, snap))
-
-	// wh-a: namespace and table present.
-	_, ok := f2.IcebergNamespace("wh-a", []string{"analytics"})
-	require.True(t, ok, "wh-a namespace should survive roundtrip")
-	tbl, ok := f2.IcebergTable("wh-a", icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"})
-	require.True(t, ok, "wh-a table should survive roundtrip")
-	require.Equal(t, "s3://bucket/wh-a/analytics/events/metadata/00000.json", tbl.MetadataLocation)
-
-	// wh-b: namespace present, wh-a namespace absent.
-	_, ok = f2.IcebergNamespace("wh-b", []string{"metrics"})
-	require.True(t, ok, "wh-b namespace should survive roundtrip")
-	_, ok = f2.IcebergNamespace("wh-b", []string{"analytics"})
-	require.False(t, ok, "wh-b should not see wh-a namespaces")
-
-	// wh-a table not visible in wh-b.
-	_, ok = f2.IcebergTable("wh-b", icebergcatalog.Identifier{Namespace: []string{"analytics"}, Name: "events"})
-	require.False(t, ok, "wh-b should not see wh-a tables")
-}
-
-// TestMetaCatalog_Restore_FailsLoudly_OnOldFormat verifies that a snapshot
-// written by a pre-T38 node (iceberg_schema_version=0 with iceberg entries)
-// causes a hard error on Restore rather than silently misrouting data.
-func TestMetaCatalog_Restore_FailsLoudly_OnOldFormat(t *testing.T) {
-	rawFB := buildLegacyIcebergSnapshot(t)
-	f := NewMetaFSM()
-	wireTestKEK(t, f)
-	// Phase D-snap: Restore decrypts the envelope first; seal the raw legacy FB
-	// so the restore reaches the inner iceberg_schema_version check.
-	snap, err := f.sealSnapshotEnvelope(rawFB)
-	require.NoError(t, err)
-	err = f.Restore(raft.SnapshotMeta{}, snap)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "iceberg_schema_version=0")
-}
-
-// makeIcebergCreateNamespaceCmdWH builds a CreateNamespace command with an
-// explicit warehouse, for testing warehouse-aware FSM paths.
-func makeIcebergCreateNamespaceCmdWH(t *testing.T, requestID string, warehouse string, namespace []string, properties map[string]string) []byte {
-	t.Helper()
-	data, err := encodeMetaIcebergCreateNamespaceCmd(IcebergCreateNamespaceCmd{
-		RequestID:  requestID,
-		Warehouse:  warehouse,
-		Namespace:  namespace,
-		Properties: properties,
-	})
-	require.NoError(t, err)
-	cmd, err := encodeMetaCmd(MetaCmdTypeIcebergCreateNamespace, data)
-	require.NoError(t, err)
-	return cmd
-}
-
-// makeIcebergCreateTableCmdWH builds a CreateTable command with an explicit warehouse.
-func makeIcebergCreateTableCmdWH(t *testing.T, requestID string, warehouse string, ident icebergcatalog.Identifier, metadataLocation string, properties map[string]string) []byte {
-	t.Helper()
-	data, err := encodeMetaIcebergCreateTableCmd(IcebergCreateTableCmd{
-		RequestID:        requestID,
-		Warehouse:        warehouse,
-		Identifier:       ident,
-		MetadataLocation: metadataLocation,
-		Properties:       properties,
-	})
-	require.NoError(t, err)
-	cmd, err := encodeMetaCmd(MetaCmdTypeIcebergCreateTable, data)
-	require.NoError(t, err)
-	return cmd
-}
-
-// buildLegacyIcebergSnapshot crafts a raw snapshot byte slice that looks like a
-// pre-T38 (iceberg_schema_version=0) snapshot with non-empty iceberg data.
-// It writes iceberg entries directly without setting the schema version field
-// (defaults to 0).
-func buildLegacyIcebergSnapshot(t *testing.T) []byte {
-	t.Helper()
-	// Build a v0 snapshot: namespace entry present, no warehouse, version=0.
-	b := flatbuffers.NewBuilder(512)
-
-	nsVec := buildStringVector(b, []string{"analytics"}, clusterpb.IcebergNamespaceEntryStartNamespaceVector)
-	clusterpb.IcebergNamespaceEntryStart(b)
-	clusterpb.IcebergNamespaceEntryAddNamespace(b, nsVec)
-	// deliberately omit Warehouse field (leaves empty/legacy)
-	nsOff := clusterpb.IcebergNamespaceEntryEnd(b)
-
-	clusterpb.MetaStateSnapshotStartIcebergNamespacesVector(b, 1)
-	b.PrependUOffsetT(nsOff)
-	nsVecOff := b.EndVector(1)
-
-	clusterpb.MetaStateSnapshotStart(b)
-	clusterpb.MetaStateSnapshotAddIcebergNamespaces(b, nsVecOff)
-	// iceberg_schema_version left at 0 (FlatBuffers default)
-	root := clusterpb.MetaStateSnapshotEnd(b)
-	b.Finish(root)
-	fb := b.FinishedBytes()
-
-	// Snapshot format: [FB bytes] — no IAM/JWT trailer needed for this test.
-	out := make([]byte, len(fb))
-	copy(out, fb)
-	return out
 }
 
 func TestFSM_LastRotationRequestStatus_FIFOEvictAt1024(t *testing.T) {

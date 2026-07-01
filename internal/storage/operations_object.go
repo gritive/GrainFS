@@ -104,18 +104,26 @@ func (o *Operations) PutObjectWithRequestResult(ctx context.Context, req PutObje
 func (o *Operations) putObjectWithRequest(ctx context.Context, req PutObjectRequest) (*Object, error) {
 	// SizeHint must reach RequestPutter-aware backends (e.g. the actor
 	// pipeline gate in cluster.DistributedBackend) — falling through to
-	// PutObjectWithUserMetadata silently strips it. Only the no-ACL/
-	// no-SSE branch gets the new behavior; the PutObjectWithACL path
-	// stays unchanged because ACL plumbing through PutObjectWithRequest
-	// has different semantics than the dedicated ACL setter.
-	if req.SizeHint == nil && req.ACL == nil && req.SystemMetadata.empty() {
+	// PutObjectWithUserMetadata silently strips it. The no-ACL/no-SSE
+	// fast path is a pure-body convenience over PutObjectWithUserMetadata.
+	if req.SizeHint == nil && req.ACL == nil && req.SystemMetadata.empty() && req.ContentMD5Hex == "" {
 		return o.PutObjectWithUserMetadata(ctx, req.Bucket, req.Key, req.Body, req.ContentType, req.UserMetadata)
 	}
-	if req.ACL != nil && req.SystemMetadata.empty() && len(req.UserMetadata) == 0 {
-		return o.PutObjectWithACL(ctx, req.Bucket, req.Key, req.Body, req.ContentType, *req.ACL)
-	}
+	// RequestPutter-capable backends stamp the canned ACL into the SAME object
+	// write (LocalBackend.PutObjectWithRequest / DistributedBackend.PutObjectWithRequest
+	// both honor req.ACL atomically), so ACL-bearing requests MUST take this path.
+	// Previously an ACL request was diverted to the PutObjectWithACL two-step
+	// (PutObject then SetObjectACL) BEFORE this check, which broke on the cluster
+	// path: the follow-up SetObjectACL read did not see the just-written object and
+	// failed the PUT with a spurious 501 — silently sinking the entire canned-ACL
+	// write/copy feature on the real binary.
 	if putter, ok := o.backend.(RequestPutter); ok {
 		return putter.PutObjectWithRequest(ctx, req)
+	}
+	// Non-RequestPutter backends cannot stamp ACL atomically: fall back to the
+	// PutObjectWithACL two-step (PutObject then SetObjectACL via the ACL adapter).
+	if req.ACL != nil && req.SystemMetadata.empty() && len(req.UserMetadata) == 0 {
+		return o.PutObjectWithACL(ctx, req.Bucket, req.Key, req.Body, req.ContentType, *req.ACL)
 	}
 	if !req.SystemMetadata.empty() {
 		return nil, UnsupportedOperationError{Op: "PutObjectWithRequest", Reason: UnsupportedReasonNoAdapter}

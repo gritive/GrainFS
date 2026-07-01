@@ -27,43 +27,28 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 		AdminGroup:  "sentinel-admin-grp",
 		PublicURL:   "https://sentinel.example.com",
 
-		AppendForwardBufferTotalBytes:    int64(1 << 24),
-		AppendForwardBufferMaxPerRequest: int64(1 << 20),
-		AppendSizeCapBytes:               int64(1 << 26),
-		MuxPoolSize:                      17,
-		MuxFlushWindow:                   3 * time.Millisecond,
+		AppendSizeCapBytes: int64(1 << 26),
 
-		PackThreshold:      31,
-		ShardPackThreshold: 41,
-		DirectIO:           true,
-		MeasureReadAmp:     true,
-		BlockCacheSize:     int64(1 << 28),
-		ShardCacheSize:     int64(1 << 27),
+		PackThreshold:  31,
+		MeasureReadAmp: true,
+		ShardCacheSize: int64(1 << 27),
 
-		NFS4Port: 12049,
-		NBDPort:  10809,
-		P9Bind:   "127.0.0.99",
-		P9Port:   1564,
-
-		ScrubInterval:            7 * time.Second,
-		ScrubOrphanAge:           11 * time.Minute,
-		SegmentGCRetention:       17 * time.Minute,
-		ReshardInterval:          13 * time.Second,
-		DataGroupRefreshInterval: 19 * time.Second,
-		DegradedInterval:         23 * time.Second,
-		LifecycleInterval:        29 * time.Second,
-		RaftLogGCInterval:        31 * time.Second,
-		RaftHeartbeatInterval:    37 * time.Millisecond,
-		RaftElectionTimeout:      41 * time.Millisecond,
+		ScrubInterval:          7 * time.Second,
+		ScrubOrphanAge:         11 * time.Minute,
+		SegmentGCRetention:     17 * time.Minute,
+		ECRedundancyUpgrade:    true,
+		ECRedundancyUpgradeMax: 13,
+		DegradedInterval:       23 * time.Second,
+		LifecycleInterval:      29 * time.Second,
+		RaftLogGCInterval:      31 * time.Second,
+		RaftHeartbeatInterval:  37 * time.Millisecond,
+		RaftElectionTimeout:    41 * time.Millisecond,
 
 		HealReceiptEnabled:        true,
 		HealReceiptPSK:            "sentinel-psk",
 		HealReceiptRetention:      53 * time.Minute,
 		HealReceiptGossipInterval: 59 * time.Second,
 		HealReceiptWindow:         61,
-
-		AuditIceberg:        true,
-		AuditCommitInterval: 67 * time.Second,
 
 		FDWatchEnabled: true,
 		FDOpts: resourceguard.FDOptions{
@@ -115,25 +100,18 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 	require.Nil(t, cfg.IAMStore)
 	require.Nil(t, cfg.IAMApplier)
 
-	// Raft / QUIC.
+	// Raft / cluster transport.
 	require.Equal(t, opts.RaftLogGCInterval, cfg.RaftLogGCInterval)
 	require.Equal(t, opts.RaftHeartbeatInterval, cfg.RaftHeartbeatInterval)
 	require.Equal(t, opts.RaftElectionTimeout, cfg.RaftElectionTimeout)
-	require.True(t, cfg.MuxEnabled, "MuxEnabled is always true")
-	require.Equal(t, opts.MuxPoolSize, cfg.MuxPoolSize)
-	require.Equal(t, opts.MuxFlushWindow, cfg.MuxFlushWindow)
 
-	// Append forward buffer + size cap.
-	require.Equal(t, opts.AppendForwardBufferTotalBytes, cfg.AppendForwardBufferTotalBytes)
-	require.Equal(t, opts.AppendForwardBufferMaxPerRequest, cfg.AppendForwardBufferMaxPerRequest)
+	// Append size cap.
 	require.Equal(t, opts.AppendSizeCapBytes, cfg.AppendSizeCapBytes)
 
 	// Storage.
-	require.Equal(t, opts.DirectIO, cfg.DirectIO)
 	require.Equal(t, opts.MeasureReadAmp, cfg.MeasureReadAmp)
 	require.Equal(t, opts.ShardCacheSize, cfg.ShardCacheSize)
 	require.Equal(t, opts.PackThreshold, cfg.PackThreshold)
-	require.Equal(t, opts.ShardPackThreshold, cfg.ShardPackThreshold)
 
 	// Heal receipts.
 	require.Equal(t, opts.HealReceiptEnabled, cfg.HealReceiptEnabled)
@@ -144,7 +122,6 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 
 	// Lifecycle / cache.
 	require.Equal(t, opts.LifecycleInterval, cfg.LifecycleInterval)
-	require.Equal(t, opts.BlockCacheSize, cfg.BlockCacheSize)
 
 	// Dashboard + vlog ratios (sourced from VlogOpts — single flag origin).
 	require.Equal(t, opts.PublicURL, cfg.PublicURL)
@@ -157,21 +134,11 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 
 	// Scrub / reshard / degraded.
 	require.Equal(t, opts.ScrubInterval, cfg.ScrubInterval)
+	require.Equal(t, opts.ECRedundancyUpgrade, cfg.ECRedundancyUpgrade)
+	require.Equal(t, opts.ECRedundancyUpgradeMax, cfg.ECRedundancyUpgradeMax)
 	require.Equal(t, opts.ScrubOrphanAge, cfg.ScrubOrphanAge)
 	require.Equal(t, opts.SegmentGCRetention, cfg.SegmentGCRetention)
-	require.Equal(t, opts.ReshardInterval, cfg.ReshardInterval)
-	require.Equal(t, opts.DataGroupRefreshInterval, cfg.DataGroupRefreshInterval)
 	require.Equal(t, opts.DegradedInterval, cfg.DegradedInterval)
-
-	// Audit.
-	require.Equal(t, opts.AuditIceberg, cfg.AuditIceberg)
-	require.Equal(t, opts.AuditCommitInterval, cfg.AuditCommitInterval)
-
-	// Node services.
-	require.Equal(t, opts.NFS4Port, cfg.NFS4Port)
-	require.Equal(t, opts.NBDPort, cfg.NBDPort)
-	require.Equal(t, opts.P9Bind, cfg.P9Bind)
-	require.Equal(t, opts.P9Port, cfg.P9Port)
 
 	// Resource guards.
 	require.Equal(t, opts.FDWatchEnabled, cfg.FDWatchEnabled)

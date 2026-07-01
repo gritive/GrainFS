@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/server/servertest"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -48,8 +49,8 @@ func TestGetObject_BackendError(t *testing.T) {
 
 	s := New("127.0.0.1:14870", &errorBackend{Backend: real, getErr: errors.New("disk failure")})
 	go func() { s.Run() }()
-	defer shutdownTestServer(t, s)
-	waitForTCP(t, "127.0.0.1:14870")
+	defer servertest.ShutdownServer(t, s)
+	servertest.WaitTCP(t, "127.0.0.1:14870")
 
 	resp, err := http.Get("http://127.0.0.1:14870/test-bucket/file.bin")
 	require.NoError(t, err)
@@ -70,8 +71,8 @@ func TestHeadObject_BackendError(t *testing.T) {
 
 	s := New("127.0.0.1:14871", &errorBackend{Backend: real, headErr: errors.New("disk failure")})
 	go func() { s.Run() }()
-	defer shutdownTestServer(t, s)
-	waitForTCP(t, "127.0.0.1:14871")
+	defer servertest.ShutdownServer(t, s)
+	servertest.WaitTCP(t, "127.0.0.1:14871")
 
 	req, _ := http.NewRequest("HEAD", "http://127.0.0.1:14871/test-bucket/file.bin", nil)
 	resp, err := http.DefaultClient.Do(req)
@@ -81,15 +82,16 @@ func TestHeadObject_BackendError(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
 }
 
-// TestGetObject_SmallFilePartialReadReturns500 tests that a mid-stream error on a small file
-// (which uses io.ReadAll before sending) returns 500, not a partial 200.
-func TestGetObject_SmallFilePartialReadReturns500(t *testing.T) {
+// TestGetObject_SmallFilePartialReadTruncates tests that a mid-stream error on a
+// small file truncates the response like a large one. Every object now streams
+// (no buffered-then-ReadFull path), so headers (200 OK) are committed before the
+// body is read — a short read can no longer be upgraded to a 500.
+func TestGetObject_SmallFilePartialReadTruncates(t *testing.T) {
 	tmpDir := t.TempDir()
 	real, err := storage.NewLocalBackend(tmpDir)
 	require.NoError(t, err)
 	require.NoError(t, real.CreateBucket(context.Background(), "test-bucket"))
 
-	// 8KB: below the 16KB zero-copy threshold → uses io.ReadAll path
 	data := bytes.Repeat([]byte("S"), 8*1024)
 	_, err = real.PutObject(context.Background(), "test-bucket", "small.bin", bytes.NewReader(data), "application/octet-stream")
 	require.NoError(t, err)
@@ -97,16 +99,17 @@ func TestGetObject_SmallFilePartialReadReturns500(t *testing.T) {
 
 	s := New("127.0.0.1:14872", &partialErrorBackend{Backend: real, failAfter: 512})
 	go func() { s.Run() }()
-	defer shutdownTestServer(t, s)
-	waitForTCP(t, "127.0.0.1:14872")
+	defer servertest.ShutdownServer(t, s)
+	servertest.WaitTCP(t, "127.0.0.1:14872")
 
 	resp, err := http.Get("http://127.0.0.1:14872/test-bucket/small.bin")
 	require.NoError(t, err)
 	defer resp.Body.Close()
 
-	// Small file: io.ReadAll is called first, error happens before headers sent → must return 500
-	require.Equal(t, http.StatusInternalServerError, resp.StatusCode,
-		"partial read on small file should return 500 (not partial 200)")
+	// Streamed: headers (200 OK) sent before body streaming — status stays 200.
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	body, _ := io.ReadAll(resp.Body)
+	require.Less(t, len(body), len(data), "partial read should truncate the body")
 }
 
 // TestGetObject_LargeFilePartialReadTruncates tests that a mid-stream error on a large file
@@ -126,8 +129,8 @@ func TestGetObject_LargeFilePartialReadTruncates(t *testing.T) {
 
 	s := New("127.0.0.1:14873", &partialErrorBackend{Backend: real, failAfter: 1024})
 	go func() { s.Run() }()
-	defer shutdownTestServer(t, s)
-	waitForTCP(t, "127.0.0.1:14873")
+	defer servertest.ShutdownServer(t, s)
+	servertest.WaitTCP(t, "127.0.0.1:14873")
 
 	resp, err := http.Get("http://127.0.0.1:14873/test-bucket/large.bin")
 	require.NoError(t, err)
@@ -154,8 +157,8 @@ func TestGetObject_LargeFileIgnoresTerminalErrorAfterFullBody(t *testing.T) {
 
 	s := New("127.0.0.1:14875", &terminalErrorAfterFullBodyBackend{Backend: real, body: data})
 	go func() { s.Run() }()
-	defer shutdownTestServer(t, s)
-	waitForTCP(t, "127.0.0.1:14875")
+	defer servertest.ShutdownServer(t, s)
+	servertest.WaitTCP(t, "127.0.0.1:14875")
 
 	resp, err := http.Get("http://127.0.0.1:14875/test-bucket/full.bin")
 	require.NoError(t, err)
@@ -176,8 +179,8 @@ func TestColdDataIntegrity(t *testing.T) {
 
 	s := New("127.0.0.1:14874", backend)
 	go func() { s.Run() }()
-	defer shutdownTestServer(t, s)
-	waitForTCP(t, "127.0.0.1:14874")
+	defer servertest.ShutdownServer(t, s)
+	servertest.WaitTCP(t, "127.0.0.1:14874")
 
 	sizes := []int{
 		512,         // small: standard path

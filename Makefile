@@ -7,7 +7,7 @@ GO_SRC := $(shell find cmd internal -name '*.go' -not -name '*_test.go')
 FBS_SRC := $(shell find internal -name '*.fbs')
 FBS_STAMPS := $(FBS_SRC:.fbs=.fbs.stamp)
 
-.PHONY: test test-unit test-colima test-race test-e2e test-e2e-iceberg test-e2e-colima test-directio-linux test-jepsen test-smoke test-network-fault clean run lint lint-keyspace lint-storage-fixture bench bench-cluster bench-s3-compat-compare bench-iceberg-table bench-iceberg-table-cluster build-pgo test-nbd-interop update-deps fbs test-nfs4-colima test-pynfs-colima test-nbd-colima bench-nbd bench-nbd-cluster bench-nfs bench-nfs-multi bench-nfs-cluster bench-9p bench-9p-cluster test-fuse-s3-colima test-s3-client-smoke-colima bench-fuse-s3-colima test-raft-v2-chaos test-compat test-9p-colima test-cluster-mount-colima
+.PHONY: test test-unit test-colima test-race test-e2e test-e2e-colima test-directio-linux test-jepsen test-smoke test-network-fault clean run lint lint-keyspace lint-storage-fixture bench bench-cluster bench-s3-compat-compare bench-go-api-micro build-pgo update-deps fbs test-fuse-s3-colima test-s3-client-smoke-colima test-raft-v2-chaos test-compat
 
 PGO_PROFILE ?= /tmp/grainfs-bench-cpu.out
 E2E_TEST_TIMEOUT ?= 3600s
@@ -48,35 +48,13 @@ test: test-unit test-colima
 test-unit:
 	go test $(UNIT_PKGS) -count=1 -cover
 
-test-colima: test-directio-linux test-nbd-colima test-fuse-s3-colima test-s3-client-smoke-colima test-nfs4-colima test-cluster-mount-colima
-
-test-cluster-mount-colima: build
-	go test -v -tags colima -count=1 -timeout 300s -run Test9P_ClusterMount ./tests/9p_colima/
-	go test -v -tags colima -count=1 -timeout 300s -run TestNBD_ClusterMount ./tests/nbd_colima/
-	go test -v -tags colima -count=1 -timeout 300s -run TestNFS4_ClusterMount ./tests/nfs4_colima/
+test-colima: test-directio-linux test-fuse-s3-colima test-s3-client-smoke-colima
 
 test-race:
 	go test $(UNIT_PKGS) -count=1 -race -cover
 
 test-e2e: bin/$(BINARY)
 	GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) $(GINKGO) --procs=$(E2E_GINKGO_PROCS) --timeout=$(E2E_TEST_TIMEOUT) $(E2E_GINKGO_REPORT_ARGS) $(E2E_GINKGO_ARGS) ./tests/e2e
-
-test-e2e-iceberg: bin/$(BINARY)
-	GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) go test ./tests/e2e/ -run TestIceberg -v -count=1 -timeout 5m
-
-test-nfs4-colima: build
-	go test -v -tags colima -timeout 120s ./tests/nfs4_colima/ -run TestNFS4
-
-test-pynfs-colima:
-	@echo "Running pynfs conformance in Colima VM (advisory)"
-	tests/conformance/run_pynfs.sh --colima --suite basic
-	@echo "Summary: tests/conformance/results/summary.json"
-
-test-nbd-colima: build
-	go test -v -tags colima -timeout 120s ./tests/nbd_colima/
-
-test-nbd-interop: build
-	GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) go test -v -timeout 180s ./tests/nbd_interop/
 
 # test-raft-v2-chaos: sustained chaos run with -race for raft/v2.
 # Per-PR CI default: RAFT_CHAOS_DURATION=30s (runs in ~35s wall clock with -race).
@@ -85,44 +63,11 @@ test-nbd-interop: build
 test-raft-v2-chaos:
 	RAFT_CHAOS_DURATION=$${RAFT_CHAOS_DURATION:-30s} go test -race -count=1 -run TestChaos_Sustained -timeout 35m ./internal/raft/v2
 
-bench-nbd: build
-	./benchmarks/bench_nbd_profile.sh
-
-bench-nbd-cluster: build
-	./benchmarks/bench_nbd_cluster_profile.sh
-
-bench-nfs: build
-	./benchmarks/bench_nfs_profile.sh
-
-bench-nfs-multi: build
-	./benchmarks/bench_nfs_multi_profile.sh
-
-bench-nfs-cluster: build
-	./benchmarks/bench_nfs_cluster_profile.sh
-
-bench-9p: build
-	./benchmarks/bench_9p_profile.sh
-
-bench-9p-cluster: build
-	./benchmarks/bench_9p_cluster_profile.sh
-
-# FUSE-over-S3 e2e: macOS host runs grainfs serve, Colima Linux VM mounts via
-# rclone mount and exercises common filesystem operations. Verifies that
-# GrainFS's S3 API works with standard FUSE-over-S3 client tooling.
-# Prereqs in the VM: rclone, fuse3 (e.g., colima ssh -- sudo apt install -y rclone fuse3)
-test-9p-colima: build
-	go test -v -count=1 -timeout 120s -tags=colima ./tests/9p_colima/
-
 test-fuse-s3-colima: build
 	go test -v -tags colima -timeout 180s ./tests/fuse_s3_colima/ -run TestFUSE_S3
 
 test-s3-client-smoke-colima:
 	go test -v -tags colima -timeout 180s ./tests/fuse_s3_colima/ -run 'TestFUSE_S3_(S3FS|Goofys)' -count=1
-
-# FUSE-over-S3 throughput benchmark: compares direct S3 GET/PUT vs rclone mount
-# read/write to quantify the FUSE overhead. Run after test-fuse-s3-colima.
-bench-fuse-s3-colima: build
-	go test -v -tags colima -timeout 300s -run '^$$' -bench BenchmarkFUSE_S3_Throughput -benchtime 1x ./benchmarks/fuse_s3_colima/
 
 test-jepsen: bin/$(BINARY)
 	GRAINFS_BINARY=$(CURDIR)/bin/$(BINARY) go test ./tests/e2e/ -run TestJepsen -v -timeout 5m
@@ -178,13 +123,8 @@ bench-cluster: bin/$(BINARY)
 bench-s3-compat-compare: bin/$(BINARY)
 	NO_BUILD=1 ./benchmarks/bench_s3_compat_compare.sh
 
-bench-iceberg-table: build
-	./benchmarks/bench_iceberg_table.sh
-
-bench-iceberg-table-cluster: build
-	./benchmarks/bench_iceberg_table_cluster.sh
-
-NBD_PPROF_DIR ?= $(HOME)/tmp/grainfs-nbd-pprof
+bench-go-api-micro:
+	./benchmarks/bench_go_api_micro.sh
 
 # Run Linux-only tests directly inside Colima. The host cross-compiles Linux
 # binaries and test binaries, copies them into the VM, then executes there.

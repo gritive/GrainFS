@@ -15,10 +15,11 @@ import (
 	"github.com/gritive/GrainFS/internal/receipt"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/server/receiptsvc"
+	"github.com/gritive/GrainFS/internal/server/servertest"
 )
 
 func TestRegisterReceiptAPIDoesNotInstallRouteLevelAuth(t *testing.T) {
-	port := freeLocalPort(t)
+	port := servertest.FreePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 
 	h := hertz.Default(

@@ -8,15 +8,14 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 	hzserver "github.com/cloudwego/hertz/pkg/app/server"
-
-	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/gossip"
 )
 
 // registerTestEndpoints wires PUT /test/node_stats onto the admin UDS server.
 // Only compiled when the test_admin_endpoints build tag is active — never in
 // production binaries. The E2E harness (Task 13) uses this to inject per-node
 // disk/RPS stats so placement decisions are observable without real gossip.
-func registerTestEndpoints(h *hzserver.Hertz, store *cluster.NodeStatsStore) {
+func registerTestEndpoints(h *hzserver.Hertz, store *gossip.NodeStatsStore) {
 	if store == nil {
 		// Balancer disabled: register a stub that returns 503 so callers get a
 		// clear signal rather than a silent no-op or a nil-panic.
@@ -33,7 +32,7 @@ func registerTestEndpoints(h *hzserver.Hertz, store *cluster.NodeStatsStore) {
 		}
 		disk, _ := strconv.ParseUint(string(ctx.QueryArgs().Peek("disk")), 10, 64)
 		rps, _ := strconv.ParseFloat(string(ctx.QueryArgs().Peek("rps")), 64)
-		store.Set(cluster.NodeStats{
+		store.Set(gossip.NodeStats{
 			NodeID:         nodeID,
 			DiskAvailBytes: disk,
 			RequestsPerSec: rps,

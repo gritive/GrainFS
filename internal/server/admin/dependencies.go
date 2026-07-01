@@ -2,7 +2,6 @@ package admin
 
 import (
 	"context"
-	"time"
 
 	"github.com/gritive/GrainFS/internal/adminapi"
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
@@ -11,7 +10,6 @@ import (
 	iampdp "github.com/gritive/GrainFS/internal/iam/pdp"
 	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/iam/principal"
-	"github.com/gritive/GrainFS/internal/nfs4server"
 	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -62,16 +60,6 @@ type VlogBreakdownAPI interface {
 	Breakdown() (VlogBreakdownResp, error)
 }
 
-// VolumePlacementSource is the slim interface admin handlers need to obtain
-// per-volume replica/EC actual layout signals (ADR 0007) for volume health
-// composition. Implemented by an adapter over the cluster meta-Raft FSM;
-// defined here so handler tests can substitute a fake. nil VolumePlacement
-// (or a non-cluster runtime) disables the replica contribution to volume
-// health, leaving incident-only signals.
-type VolumePlacementSource interface {
-	VolumeReplicaSummaries(ctx context.Context, names []string) (map[string]ReplicaLayoutFact, error)
-}
-
 // BucketOps is the slim interface bucket admin handlers need from storage.
 // Satisfied by *storage.Operations.
 type BucketOps interface {
@@ -87,27 +75,6 @@ type BucketOps interface {
 	DeleteBucketPolicy(bucket string) error
 	GetBucketVersioning(bucket string) (string, error)
 	SetBucketVersioning(bucket, state string) error
-}
-
-type NfsExportService interface {
-	Create(ctx context.Context, bucket string, params NfsExportUpsertParams) error
-	Upsert(ctx context.Context, bucket string, params NfsExportUpsertParams) error
-	Delete(ctx context.Context, bucket string) error
-	DeleteForBucketDelete(ctx context.Context, bucket string, force bool) error
-	RestoreForBucketDelete(ctx context.Context, info NfsExportInfo) error
-	MarkBucketDeleteCleanup(bucket string) error
-	ClearBucketDeleteCleanup(bucket string) error
-	Get(bucket string) (NfsExportInfo, bool)
-	List() []NfsExportInfo
-}
-
-type NfsExportUpsertParams struct {
-	ReadOnly bool
-}
-
-type NFSDiag interface {
-	RecentLookups(bucket string, window time.Duration) []nfs4server.LookupRecord
-	ActiveMountClients(bucket string) []string
 }
 
 type ProtocolCredentialService interface {
@@ -138,26 +105,6 @@ type BucketWithPolicyProposer interface {
 // group admin endpoints.
 type IAMGroupService interface {
 	Propose(ctx context.Context, cmdType clusterpb.MetaCmdType, payload []byte) error
-}
-
-// MountSAItem is the JSON wire shape for a single MountSA entry.
-type MountSAItem struct {
-	Name       string `json:"name"`
-	NumericUID uint32 `json:"uid"`
-	CreatedAt  int64  `json:"created_at"`
-	CreatedBy  string `json:"created_by,omitempty"`
-}
-
-// IAMMountSAService is the slim interface Mount SA admin handlers need.
-// Kept separate from IAMGroupService / IAMPolicyService because MountSA
-// operations use distinct Raft MetaCmdTypes (65-68) and a distinct Badger
-// store. nil disables mount-SA admin endpoints.
-type IAMMountSAService interface {
-	Propose(ctx context.Context, cmdType clusterpb.MetaCmdType, payload []byte) error
-	// List returns all MountSAs. Never returns nil slice.
-	List() []MountSAItem
-	// Get returns one MountSA by name, ok=false if not found.
-	Get(name string) (MountSAItem, bool)
 }
 
 // ConfigProposer is the slim interface config admin handlers need to write
@@ -191,16 +138,6 @@ type StatusService interface {
 	Report() adminapi.StatusReport
 }
 
-// IcebergConfigService is the slim interface the iceberg config handler needs.
-// Satisfied by an adapter in serveruntime that pulls from iam.Store.
-// nil disables the iceberg config endpoint.
-type IcebergConfigService interface {
-	// RevealSAKeyPair returns the first active AccessKey + plaintext SecretKey
-	// for the given ServiceAccount. Returns an error when the SA or any
-	// active key is not found.
-	RevealSAKeyPair(ctx context.Context, saID string) (accessKey, secretKey string, err error)
-}
-
 // IAMService is the slim interface the IAM admin handlers need.
 // Satisfied by *iam.AdminAPI.
 type IAMService interface {
@@ -226,12 +163,5 @@ type ScrubResp = adminapi.ScrubResp
 type VlogBreakdownResp = adminapi.VlogBreakdownResp
 type VlogCategoryBytes = adminapi.VlogCategoryBytes
 type VlogSmokeReport = adminapi.VlogSmokeReport
-type NfsExportInfo = adminapi.NfsExportInfo
-type NfsExportUpsertReq = adminapi.NfsExportUpsertReq
-type ListNfsExportsResp = adminapi.ListNfsExportsResp
-type ExportDebugResp = adminapi.ExportDebugResp
-type ExportDebugLookup = adminapi.ExportDebugLookup
 type ListStorageBucketsResp = adminapi.ListStorageBucketsResp
 type StorageBucketSummary = adminapi.StorageBucketSummary
-type StorageBucketNFSExport = adminapi.StorageBucketNFSExport
-type StorageProtocolStatusResp = adminapi.StorageProtocolStatusResp

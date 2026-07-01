@@ -21,6 +21,7 @@ import (
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/raft"
+	"github.com/gritive/GrainFS/internal/server/servertest"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -192,7 +193,6 @@ func (f *fakeMembership) called() []string {
 type removePeerHarness struct {
 	baseURL string
 	ci      ClusterInfo
-	mem     *fakeMembership
 	gate    *MutationGate
 	events  *eventstore.Store
 }
@@ -212,7 +212,7 @@ func setupRemovePeerServer(t *testing.T, ci ClusterInfo, mem ClusterMembership) 
 
 	gate := NewMutationGate(nil)
 
-	port := freePort(t)
+	port := servertest.FreePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 
 	opts := []Option{WithMutationGate(gate), WithEventStore(evStore), withEventQueueSize(testEventQueueSize)}
@@ -224,6 +224,9 @@ func setupRemovePeerServer(t *testing.T, ci ClusterInfo, mem ClusterMembership) 
 	}
 
 	srv := New(addr, backend, opts...)
+	// Drain the event worker (Shutdown → stopEventWorker) BEFORE the db.Close cleanup
+	// above runs (t.Cleanup is LIFO) so a buffered Append never races the Badger close.
+	t.Cleanup(func() { servertest.ShutdownServer(t, srv) })
 	go srv.Run() //nolint:errcheck
 	for i := 0; i < 100; i++ {
 		conn, dialErr := net.Dial("tcp", addr)

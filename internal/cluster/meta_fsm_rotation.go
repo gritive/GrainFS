@@ -79,6 +79,8 @@ func (f *MetaFSM) dekRefCount(gen uint32) uint64 {
 
 // incDEKRef increments the ref count for the given DEK generation.
 // Must be called with f.mu held.
+//
+//nolint:unused // object-index callers removed in Phase 4 S4-4b; kept wired for the S7 prune-safety predicate (see DEKVersionPrune below).
 func (f *MetaFSM) incDEKRef(gen uint32) {
 	f.dekRefCounts[gen]++
 }
@@ -86,6 +88,8 @@ func (f *MetaFSM) incDEKRef(gen uint32) {
 // decDEKRef decrements the ref count for the given DEK generation.
 // Clamps at zero to guard against double-decrement on buggy replay.
 // Must be called with f.mu held.
+//
+//nolint:unused // object-index callers removed in Phase 4 S4-4b; kept wired for the S7 prune-safety predicate (see DEKVersionPrune below).
 func (f *MetaFSM) decDEKRef(gen uint32) {
 	if f.dekRefCounts[gen] > 0 {
 		f.dekRefCounts[gen]--
@@ -200,7 +204,7 @@ func (f *MetaFSM) CheckGreenfieldDEKBoundary() error {
 	}
 	return fmt.Errorf("refusing startup: replicated log contains legacy pre-Phase-D DEKRotate (type-48) entries. " +
 		"Phase D replicated-DEK is a greenfield boundary — pre-existing clusters with divergent DEKs cannot be upgraded in place. " +
-		"Provision a fresh cluster (the scope decision for Phase D is greenfield).")
+		"Provision a fresh cluster (the scope decision for Phase D is greenfield)")
 }
 
 // applyDEKReplicatedRotate installs a leader-generated, KEK-wrapped DEK

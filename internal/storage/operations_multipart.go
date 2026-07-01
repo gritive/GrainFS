@@ -30,12 +30,12 @@ func (o *Operations) CreateMultipartUploadWithTags(ctx context.Context, bucket, 
 // and runs the sweep against entries whose mtime is at or before the cutoff.
 // Returns a zero-value result when no sweeper is reachable (no-op for backends
 // that don't own a multipart staging area). Returns the gate error verbatim
-// when a RecoveryWriteGate sits between the facade and the sweeper, mirroring
+// when a write-blocking decorator sits between the facade and the sweeper, mirroring
 // the policy that gated runtimes refuse mutation even on cleanup paths.
 func (o *Operations) SweepOrphanMultiparts(ctx context.Context, before time.Time) (OrphanMultipartSweepResult, error) {
 	for b := o.backend; b != nil; b = unwrapOperationBackend(b) {
-		if g, blocksWrites := b.(*RecoveryWriteGate); blocksWrites {
-			return OrphanMultipartSweepResult{}, g.err
+		if wb, blocksWrites := b.(writeBlocker); blocksWrites {
+			return OrphanMultipartSweepResult{}, wb.writeBlockError()
 		}
 		if sw, ok := b.(OrphanMultipartSweeper); ok {
 			return sw.SweepOrphanMultiparts(ctx, before)
@@ -49,8 +49,9 @@ func (o *Operations) UploadPart(
 	bucket, key, uploadID string,
 	partNumber int,
 	r io.Reader,
+	contentMD5Hex string,
 ) (*Part, error) {
-	return o.backend.UploadPart(ctx, bucket, key, uploadID, partNumber, r)
+	return o.backend.UploadPart(ctx, bucket, key, uploadID, partNumber, r, contentMD5Hex)
 }
 
 func (o *Operations) CompleteMultipartUpload(

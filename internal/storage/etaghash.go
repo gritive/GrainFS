@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"hash"
 	"io"
+	"os"
 
 	"github.com/gritive/GrainFS/internal/pool"
 	"github.com/zeebo/xxh3"
@@ -13,6 +14,8 @@ import (
 
 var xxh3Pool = pool.New(func() *xxh3.Hasher { return xxh3.New() })
 var md5Pool = pool.New(func() hash.Hash { return md5.New() })
+
+const s3ETagMD5Env = "GRAINFS_S3_ETAG_MD5"
 
 // InternalETag returns the xxhash3-based ETag for in-memory data.
 // Result is a 16-char hex string (8-byte hash). Use for internal buckets only.
@@ -38,7 +41,6 @@ func PutXXH3Hasher(h *xxh3.Hasher) {
 // VerifyETag recomputes the ETag of rc and compares against expected.
 // Algorithm is selected by expected's hex length: 32=MD5, 16=xxhash3.
 // Internal buckets (__grainfs_*) use 16-char xxhash3; S3-exposed use 32-char MD5.
-// __grainfs_nfs4 is excluded from IsInternalBucket and always produces MD5 ETags.
 // Multipart ETags (hex-N, 34+ chars) fall to default — internal buckets never use multipart.
 func VerifyETag(rc io.Reader, expected string) (bool, error) {
 	switch len(expected) {
@@ -66,15 +68,20 @@ func VerifyETag(rc io.Reader, expected string) (bool, error) {
 
 // hashForBucket returns (hash, release) for the given bucket.
 // release() MUST be called when done — it returns the hasher to its pool.
-// Internal buckets use xxhash3; S3-exposed buckets use MD5.
+// Internal buckets use xxhash3; S3-exposed buckets use MD5 unless
+// GRAINFS_S3_ETAG_MD5=0 opts into a non-compatible benchmark spike.
 func hashForBucket(bucket string) (hash.Hash, func()) {
-	if IsInternalBucket(bucket) {
+	if IsInternalBucket(bucket) || !s3ETagMD5Enabled() {
 		h := GetXXH3Hasher()
 		return h, func() { PutXXH3Hasher(h) }
 	}
 	h := md5Pool.Get()
 	h.Reset()
 	return h, func() { md5Pool.Put(h) }
+}
+
+func s3ETagMD5Enabled() bool {
+	return os.Getenv(s3ETagMD5Env) != "0"
 }
 
 // etagFromHash encodes the hash result to hex.

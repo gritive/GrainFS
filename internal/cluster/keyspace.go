@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 
-	badger "github.com/dgraph-io/badger/v4"
-
 	"github.com/gritive/GrainFS/internal/metrics"
 )
 
@@ -58,7 +56,7 @@ func (ks *stateKeyspace) Key(raw []byte) []byte {
 }
 
 // Prefix returns prefix||rawPrefix. Use for it.Seek / it.ValidForPrefix /
-// badger.IteratorOptions.Prefix. Pass nil rawPrefix to get the bare group prefix
+// MetaIteratorOptions.Prefix. Pass nil rawPrefix to get the bare group prefix
 // (e.g. a whole-group scan in Snapshot).
 func (ks *stateKeyspace) Prefix(rawPrefix []byte) []byte {
 	if len(ks.prefix) == 0 {
@@ -112,12 +110,10 @@ func (ks *stateKeyspace) TryStrip(fullKey []byte) ([]byte, bool) {
 // group-RELATIVE key (group prefix already stripped via MustStrip) and the item.
 // fn returning errStopScan stops the scan cleanly (returns nil); any other error
 // is propagated. The caller supplies the transaction.
-func (ks *stateKeyspace) scanGroupPrefix(txn *badger.Txn, rawPrefix []byte,
-	fn func(rawKey []byte, item *badger.Item) error) error {
+func (ks *stateKeyspace) scanGroupPrefix(txn MetadataTxn, rawPrefix []byte,
+	fn func(rawKey []byte, item MetaItem) error) error {
 	full := ks.Prefix(rawPrefix)
-	opts := badger.DefaultIteratorOptions
-	opts.Prefix = full
-	it := txn.NewIterator(opts)
+	it := txn.NewIterator(MetaIteratorOptions{Prefix: full, PrefetchValues: true})
 	defer it.Close()
 	for it.Seek(full); it.ValidForPrefix(full); it.Next() {
 		item := it.Item()
@@ -133,9 +129,6 @@ func (ks *stateKeyspace) scanGroupPrefix(txn *badger.Txn, rawPrefix []byte,
 
 // ---- semantic key-builders (the apply.go free functions become these) ----
 
-func (ks *stateKeyspace) BucketKey(bucket string) []byte  { return ks.Key([]byte("bucket:" + bucket)) }
-func (ks *stateKeyspace) BucketPolicyKey(b string) []byte { return ks.Key([]byte("policy:" + b)) }
-func (ks *stateKeyspace) BucketVerKey(b string) []byte    { return ks.Key([]byte("bucketver:" + b)) }
 func (ks *stateKeyspace) ObjectMetaKey(b, k string) []byte {
 	return ks.Key([]byte("obj:" + b + "/" + k))
 }
@@ -151,7 +144,4 @@ func (ks *stateKeyspace) ShardPlacementKey(b, k string) []byte {
 }
 func (ks *stateKeyspace) PendingMigrationKey(b, k, ver string) []byte {
 	return ks.Key([]byte("pending-migration:" + b + "/" + k + "/" + ver))
-}
-func (ks *stateKeyspace) QuarantineKey(bucket, key, versionID string) []byte {
-	return ks.Key([]byte("quarantine:" + bucket + "\x00" + key + "\x00" + versionID))
 }

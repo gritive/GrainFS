@@ -4,37 +4,32 @@ import (
 	"context"
 	"crypto/tls"
 	"io"
+	"sync"
 	"sync/atomic"
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/rs/zerolog/log"
 
-	"github.com/gritive/GrainFS/internal/audit"
 	"github.com/gritive/GrainFS/internal/badgerrole"
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
 	"github.com/gritive/GrainFS/internal/cluster"
-	"github.com/gritive/GrainFS/internal/cluster/putpipeline"
 	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/dashboard"
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/gossip"
 	"github.com/gritive/GrainFS/internal/iam"
-	"github.com/gritive/GrainFS/internal/iam/mountsastore"
 	"github.com/gritive/GrainFS/internal/incident"
 	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/migration"
-	"github.com/gritive/GrainFS/internal/nfsexport"
 	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/server/admin"
-	"github.com/gritive/GrainFS/internal/snapshot"
+	"github.com/gritive/GrainFS/internal/server/alertssvc"
 	"github.com/gritive/GrainFS/internal/storage"
-	"github.com/gritive/GrainFS/internal/storage/datawal"
 	"github.com/gritive/GrainFS/internal/storage/packblob"
-	"github.com/gritive/GrainFS/internal/storage/wal"
 	"github.com/gritive/GrainFS/internal/transport"
-	"github.com/gritive/GrainFS/internal/volume"
 )
 
 // bootState carries the rolling state of Run's boot sequence. Phase functions
@@ -52,6 +47,12 @@ type bootState struct {
 	cfg      Config
 	cleanups []func()
 	cancel   context.CancelFunc // set by Run; triggers graceful shutdown
+	// startRotationSocket is the rotation-socket starter consumed by
+	// bootMetaRaftStart. Run() sets it to StartRotationSocket; tests that
+	// exercise the phase without a real admin UDS leave it nil (a no-op). It is
+	// a field rather than a phase parameter so bootMetaRaftStart fits the
+	// uniform bootSequence() signature while keeping the test-override seam.
+	startRotationSocket func(context.Context, string, Config, *cluster.MetaRaft) error
 
 	// Resolved config (populated by bootValidateConfig).
 	nodeID      string
@@ -91,9 +92,13 @@ type bootState struct {
 	// registers the matching teardown via AddCleanup.
 	db          *badger.DB // bootOpenMetaDB
 	sharedFSMDB *badger.DB // bootOpenSharedFSMDB — <dataDir>/shared-fsm/, per-node shared FSM-state DB (C2 P3)
+	// sharedFSMStore wraps sharedFSMDB once as the cluster MetadataStore
+	// (Phase 6.5 S3: composition root injects; backends are shared-mode and
+	// never close it — serveruntime owns the raw DB lifecycle).
+	sharedFSMStore cluster.MetadataStore
 
 	// Transport (populated by transport phases — bootClusterTransport,
-	// bootPeerConnections, bootGroupRaftMux). transportPSK records the
+	// bootGroupRaftMux). transportPSK records the
 	// resolved cluster key (disk > flag > ephemeral). raftAddr is updated
 	// in-place by bootClusterTransport once Listen resolves a kernel-picked
 	// port (operator passed 127.0.0.1:0).
@@ -109,7 +114,7 @@ type bootState struct {
 	// against state.metaRaft.FSM(); bootMetaRaftStart then calls Start.
 	metaRaft         *cluster.MetaRaft
 	capabilityGate   *cluster.CapabilityGate
-	metaTransport    *cluster.MetaTransportMux
+	metaTransport    *cluster.MetaRaftTransport
 	dgMgr            *cluster.DataGroupManager
 	clusterRouter    *cluster.Router
 	rotationKeystore *transport.Keystore
@@ -117,20 +122,18 @@ type bootState struct {
 	iamAdminAPI      *iam.AdminAPI
 	iamProposer      *iam.MetaProposer
 	iamPolicyStores  *IAMStores
-	mountSAStore     *mountsastore.Store
 	cfgStore         *config.Store
 	// pdpTokenSource is the single PDP TokenSource / admin.PDPTokenManager
 	// instance, created once via ensurePDPTokenSource (adminAuthorizer is
 	// called twice + the Deps literal references it). Its live encryptor is
 	// refreshed by wireIAMEncryptor on fresh boot and snapshot-restore swaps.
 	pdpTokenSource   *pdpTokenSource
-	nfsExportSvc     *nfsexport.ExportService
 	dekKeeper        *encrypt.DEKKeeper
 	rewrapController *encrypt.RewrapController // created in wireDEKKeeper (early); lanes registered post-backend in wireRewrapLanes
 	// clusterID is the 16-byte cluster identity loaded in wireDEKKeeper and (on
 	// restore) rebuildDEKKeeperFromRestore, threaded as the single source into
-	// the data-plane DEKKeeperAdapters so the WRITE (putpipeline) and READ
-	// (ShardService) clusterID are identical. Empty until wireDEKKeeper runs.
+	// the data-plane DEKKeeperAdapters so the WRITE and READ (ShardService)
+	// clusterID are identical. Empty until wireDEKKeeper runs.
 	clusterID []byte
 	// raftStoreKey is the node-local Badger encryption key for raft v2 log
 	// stores. It is sealed at rest in keys.d/raft-store.key.enc under kekStore
@@ -176,15 +179,6 @@ type bootState struct {
 	// "kek admin disabled" instead of a 5xx. Set via MetaRaft.SetKEKRotationLeader
 	// so the leadership watcher cancels in-flight propose calls on step-down.
 	kekRotationLeader *cluster.KEKRotationLeader
-	// refreshProxyCIDR re-seeds the trusted-proxy.cidr atomic snapshot used by
-	// the TLS posture reload hook. Called by bootTLSPostureGate after raft
-	// start (so any snapshot Restore has already populated cfgStore).
-	refreshProxyCIDR func(string)
-	// proxyTrust validates Forwarded / X-Forwarded-* headers when the request
-	// arrives from a trusted upstream (trusted-proxy.cidr). Built at raft-phase
-	// wire time so its SetCIDRs is also driven by OnTrustedProxyCIDR. Passed
-	// into server.New via WithProxyTrust. §5 T45.
-	proxyTrust *server.ProxyTrust
 
 	// bannerWriter is the destination for the §5 T46 default bucket anonymous
 	// access banner. Set to os.Stdout in production via newBootState; tests
@@ -192,8 +186,8 @@ type bootState struct {
 	bannerWriter io.Writer
 
 	// Storage runtime (populated by storage phases — bootShardService,
-	// bootStreamRouter, bootOwnedGroupsAndEC). The data plane: shard
-	// service, stream multiplexing on the cluster transport, distributed backend, per-group
+	// bootShardRoutes, bootOwnedGroupsAndEC). The data plane: shard
+	// service, native shard routes on the cluster transport, distributed backend, per-group
 	// raft instantiation, and EC config. effectiveEC is captured here so
 	// downstream phases (PR 6: balancer, healreceipt) can re-read the
 	// resolved EC profile without re-deriving from cluster size.
@@ -202,58 +196,42 @@ type bootState struct {
 	node cluster.RaftNode
 	//nolint:unused // assigned by boot_phases_storage_runtime_test.go to seed the RPC transport for tests.
 	rpcTransport     *cluster.RaftRPCTransport
-	streamRouter     *transport.StreamRouter
 	shardSvc         *cluster.ShardService
 	distBackend      *cluster.DistributedBackend
 	packedBackend    *packblob.PackedBackend // single-node packed-blob fast path; nil in cluster / when packing off (DEK rewrap lane source)
-	putPipeline      *putpipeline.Pipeline
 	shardCache       *shardcache.Cache
 	effectiveEC      cluster.ECConfig
 	stopApply        chan struct{}
-	rebalancer       *cluster.Rebalancer
 	evacuator        *cluster.DataGroupEvacuator
 	loadReporter     *cluster.LoadReporter
-	loadReporterStor *cluster.NodeStatsStore
+	loadReporterStor *gossip.NodeStatsStore
 
 	// Services + shutdown (populated by services phases — PR 6 onwards).
 	// bootSnapshotAndApplyLoop owns: fsm (the distBackend's FSM —
-	// distBackend.FSMRef() — group-0 keyspace over the shared FSM-state DB),
-	// cachedBackend (the post-pack LRU read cache; the wrapping chain
-	// inner→outer is distBackend → packblob (optional) → cachedBackend →
-	// WAL → pullthrough, and the final two wrappers are added downstream
-	// until later phases claim them).
+	// distBackend.FSMRef() — group-0 keyspace over the shared FSM-state DB).
 	//
 	// As of M5 PR 29 the v1 raft.SnapshotManager is no longer wired —
 	// raftv2 owns snapshot lifecycle internally.
-	fsm           *cluster.FSM
-	cachedBackend *storage.CachedBackend
+	fsm *cluster.FSM
 
 	// PR-final services-extra phases. Each field's owning phase is annotated.
 
 	// bootBalancerAndGossip
 	balancerProposer    *cluster.BalancerProposer
-	gossipReceiver      *cluster.GossipReceiver
-	placementStatsStore *cluster.NodeStatsStore // nil when balancer disabled
-
-	// bootShardService (data WAL — opened before the cluster shard service so
-	// shard writes can be logged and replayed before any transport stream handler
-	// is registered downstream by bootStreamRouter).
-	dataWAL    *datawal.WAL
-	dataWALDir string
-	// dataWALRepairCollector receives metadata-only WAL replay candidates during
-	// bootShardService; the background repair worker drains them after data
-	// groups, incident recording, and receipts are available.
-	dataWALRepairCollector *cluster.DataWALRepairCollector
+	gossipReceiver      *gossip.GossipReceiver
+	placementStatsStore *gossip.NodeStatsStore // nil when balancer disabled
 
 	// bootWALAndForwardersPart1
-	wal               *wal.WAL
-	walDir            string
 	forwardSender     *cluster.ForwardSender
 	forwardReceiver   *cluster.ForwardReceiver
 	metaForwardSender *cluster.MetaProposeForwardSender
-	metaReadSender    *cluster.MetaCatalogReadSender
 	clusterCoord      *cluster.ClusterCoordinator
 	seedGroups        int
+	// seedMu (Option B) serializes the leader-side deferred seed-on-quorum across
+	// overlapping post-join hooks within one process. The "should I seed" decision
+	// itself is derived (handleDeferredSeed), not stored, so it survives a leader
+	// change; seedMu only guards the one-shot critical section on a single leader.
+	seedMu sync.Mutex
 	// joinListener is the Zero-CA join listener (leader side, W9) serving
 	// the two-phase invite handler on cfg.JoinListenAddr with a persisted stable
 	// cert. Nil in single-node mode. Closed via AddCleanup on shutdown; its
@@ -271,35 +249,22 @@ type bootState struct {
 	lifecycleBackend storage.Backend
 	recoveryReadOnly bool
 	diskCollector    *cluster.DiskCollector
-	// objSnapMgr is the object-level PITR snapshot Manager, created
-	// synchronously by StartAutoSnapshotterWhenReady during the backend phase.
-	// Consumed by bootRecoveryAndScrubber to wire orphan-segment GC (frozen-path
-	// source). Nil when the backend does not implement storage.Snapshotable.
-	objSnapMgr *snapshot.Manager
 
 	// bootSrvOptsAndReceipt
-	srvOpts           []server.Option
-	clusterAlerts     *server.AlertsState
-	receiptWiring     *HealReceiptWiring
-	incidentRecorder  *incident.Recorder
-	lifecycleSvc      *lifecycle.Service
-	migrationSvc      *migration.Service
-	mutationGate      *server.MutationGate
-	volMgr            *volume.Manager
-	auditSearchWarmup func(context.Context) error
-	// auditSearcher is the DuckDB-backed audit searcher. Created in
-	// boot_phases_srvopts when cfg.AuditIceberg is enabled; nil otherwise.
-	// Passed to admin.Deps so `grainfs audit` commands can query it via the
-	// admin Unix socket (§8 T64).
-	auditSearcher *audit.DuckDBSearcher
-	// auditOutbox is the per-node durable audit outbox. Created in
-	// boot_phases_srvopts when cfg.AuditIceberg is enabled; nil otherwise.
-	// Kept on bootState so the OnAuditDenyOnly reload-hook closure registered
-	// earlier (in bootMetaRaftWiring) can dereference it nil-safely at fire
-	// time — RegisterClusterKeys runs before the outbox exists, so the
-	// closure must read through state rather than capturing the pointer
-	// directly.
-	auditOutbox *audit.Outbox
+	srvOpts          []server.Option
+	clusterAlerts    *alertssvc.State
+	receiptWiring    *HealReceiptWiring
+	incidentRecorder *incident.Recorder
+	lifecycleSvc     *lifecycle.Service
+	lifecycleStore   *lifecycle.Store
+	migrationSvc     *migration.Service
+	mutationGate     *server.MutationGate
+
+	// bootMetaRaftWiring: meta policy-invalidation worker.
+	// Registered as a post-commit hook on MetaFSM before MetaRaft.Start().
+	// SetInvalidate is called in bootHTTPServerAndAdmin once the server is up.
+	// Stop is registered via AddCleanup in bootMetaRaftWiring.
+	metaPolicyInvalidationWorker *cluster.MetaPolicyInvalidationWorker
 
 	// bootHTTPServerAndAdmin
 	srv                     *server.Server

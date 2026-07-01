@@ -15,6 +15,7 @@ const (
 )
 
 func (s *Server) getObjectWithReadAfterWriteRetry(ctx context.Context, bucket, key string) (io.ReadCloser, *storage.Object, error) {
+	ctx = s.ctxWithBucketVersioning(ctx, bucket)
 	result, err := retryReadAfterWrite(ctx, s.readAfterWriteRetryTimeout, s.readAfterWriteRetryInterval, func() (objectReadResult, error) {
 		rc, obj, err := s.ops.GetObject(ctx, bucket, key)
 		return objectReadResult{body: rc, object: obj}, err
@@ -24,12 +25,19 @@ func (s *Server) getObjectWithReadAfterWriteRetry(ctx context.Context, bucket, k
 
 func (s *Server) loadObjectForGet(ctx context.Context, bucket, key, versionID string) (io.ReadCloser, *storage.Object, error) {
 	if versionID != "" {
-		return s.ops.GetObjectVersion(bucket, key, versionID)
+		// Stamp the authoritative bucket-versioning decision at the S3 edge
+		// (mirror PUT). The coordinator/commit backend then reads the ctx flag
+		// instead of the control-plane bucketver state, so the per-version read
+		// path activates in multi-group / forwarded clusters without crossing
+		// the boundary. (Latest reads stamp inside the read-after-write retry.)
+		ctx = s.ctxWithBucketVersioning(ctx, bucket)
+		return s.ops.GetObjectVersion(ctx, bucket, key, versionID)
 	}
 	return s.getObjectWithReadAfterWriteRetry(ctx, bucket, key)
 }
 
 func (s *Server) headObjectWithReadAfterWriteRetry(ctx context.Context, bucket, key string) (*storage.Object, error) {
+	ctx = s.ctxWithBucketVersioning(ctx, bucket)
 	return retryReadAfterWrite(ctx, s.readAfterWriteRetryTimeout, s.readAfterWriteRetryInterval, func() (*storage.Object, error) {
 		return s.ops.HeadObject(ctx, bucket, key)
 	})
@@ -66,13 +74,20 @@ func retryReadAfterWrite[T any](ctx context.Context, timeout, interval time.Dura
 
 func (s *Server) loadObjectForHead(ctx context.Context, bucket, key, versionID string) (*storage.Object, error) {
 	if versionID != "" {
-		return s.ops.HeadObjectVersion(bucket, key, versionID)
+		// Stamp at the S3 edge (mirror PUT / loadObjectForGet). Latest reads
+		// stamp inside the read-after-write retry helper.
+		ctx = s.ctxWithBucketVersioning(ctx, bucket)
+		return s.ops.HeadObjectVersion(ctx, bucket, key, versionID)
 	}
 	return s.headObjectWithReadAfterWriteRetry(ctx, bucket, key)
 }
 
 func (s *Server) loadCopySourceObject(ctx context.Context, src storage.ObjectRef) (*storage.Object, error) {
-	return s.ops.HeadObject(ctx, src.Bucket, src.Key)
+	if src.VersionID != "" {
+		ctx = s.ctxWithBucketVersioning(ctx, src.Bucket)
+		return s.ops.HeadObjectVersion(ctx, src.Bucket, src.Key, src.VersionID)
+	}
+	return s.headObjectWithReadAfterWriteRetry(ctx, src.Bucket, src.Key)
 }
 
 func sleepReadAfterWriteRetry(ctx context.Context, interval time.Duration) bool {

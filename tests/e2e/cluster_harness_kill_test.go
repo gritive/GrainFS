@@ -34,7 +34,6 @@ var _ = ginkgo.Describe("E2E cluster kill and restart", func() {
 				Mode:       ClusterModeDynamicJoin,
 				ClusterKey: "E2E-HARNESS-KILL",
 				LogPrefix:  "harness-kill",
-				DisableNFS: true, DisableNBD: true,
 			})
 		})
 

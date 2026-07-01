@@ -16,6 +16,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -23,8 +24,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/badgerutil"
-	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // mustNewKS is a test helper that fatals if newStateKeyspace returns an error.
@@ -55,54 +56,18 @@ func setupTwoFSMs(t *testing.T) (
 	ksA = mustNewKS(t, "iso-A")
 	ksB = mustNewKS(t, "iso-B")
 
-	fA = NewFSM(db, ksA)
-	fB = NewFSM(db, ksB)
+	fA = NewFSM(badgermeta.Wrap(db), ksA)
+	fB = NewFSM(badgermeta.Wrap(db), ksB)
 	return db, ksA, ksB, fA, fB
 }
 
-func setupTwoGroups(t *testing.T) (
-	db *badger.DB,
-	ksA, ksB *stateKeyspace,
-	fA, fB *FSM,
-	backendA, backendB *DistributedBackend,
-) {
-	t.Helper()
-
-	db, ksA, ksB, fA, fB = setupTwoFSMs(t)
-
-	nodeA, _ := newTestNodeForSharedDB(t, "isoA-node")
-	var err error
-	backendA, err = NewDistributedBackend(t.TempDir(), db, nodeA, ksA, true)
-	require.NoError(t, err)
-	stopA := make(chan struct{})
-	go backendA.RunApplyLoop(stopA)
-	t.Cleanup(func() { close(stopA) })
-
-	nodeB, _ := newTestNodeForSharedDB(t, "isoB-node")
-	backendB, err = NewDistributedBackend(t.TempDir(), db, nodeB, ksB, true)
-	require.NoError(t, err)
-	stopB := make(chan struct{})
-	go backendB.RunApplyLoop(stopB)
-	t.Cleanup(func() { close(stopB) })
-
-	return db, ksA, ksB, fA, fB, backendA, backendB
-}
-
-// applyCmd is a convenience wrapper around EncodeCommand + FSM.Apply.
-func applyCmd(t *testing.T, f *FSM, cmdType CommandType, payload any) {
-	t.Helper()
-	raw, err := EncodeCommand(cmdType, payload)
-	require.NoError(t, err)
-	require.NoError(t, f.Apply(raw))
-}
-
 // dbHasKey reports whether fullKey (already encoded — no extra prefix added) exists.
-func dbHasKey(t *testing.T, db *badger.DB, fullKey []byte) bool {
+func dbHasKey(t *testing.T, db MetadataStore, fullKey []byte) bool {
 	t.Helper()
 	found := false
-	require.NoError(t, db.View(func(txn *badger.Txn) error {
+	require.NoError(t, db.View(func(txn MetadataTxn) error {
 		_, err := txn.Get(fullKey)
-		if err == badger.ErrKeyNotFound {
+		if errors.Is(err, ErrMetaKeyNotFound) {
 			return nil
 		}
 		if err != nil {
@@ -128,294 +93,169 @@ func TestSharedFSM_PrefixIsolation_AllPaths(t *testing.T) {
 	}{
 		{
 			// CreateBucket / DeleteBucket: two groups with the same bucket name
-			// produce two distinct keys; deleting one does not affect the other.
+			// produce distinct MetaFSM entries; deleting one does not affect the other.
+			// (Task 12: bucket control-plane moved to meta-raft; assertions now via
+			// MetaBucketStore / MetaFSM rather than group-0 BadgerDB keys.)
 			name: "CreateBucket_DeleteBucket",
 			exercise: func(t *testing.T) {
-				_, ksA, ksB, fA, fB := setupTwoFSMs(t)
+				ctx := context.Background()
+				// Each group gets its own MetaBucketStore (separate MetaFSM).
+				mbsA := newTestMetaBucketStore(t)
+				mbsB := newTestMetaBucketStore(t)
 
-				applyCmd(t, fA, CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
-				applyCmd(t, fB, CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
+				require.NoError(t, mbsA.CreateBucket(ctx, bucket, "gA", false))
+				require.NoError(t, mbsB.CreateBucket(ctx, bucket, "gB", false))
 
-				assert.True(t, dbHasKey(t, fA.db, ksA.BucketKey(bucket)), "A's bucket key must exist")
-				assert.True(t, dbHasKey(t, fB.db, ksB.BucketKey(bucket)), "B's bucket key must exist")
-				// The two keys must be distinct encoded byte sequences.
-				assert.NotEqual(t, ksA.BucketKey(bucket), ksB.BucketKey(bucket))
+				_, okA := mbsA.Record(bucket)
+				_, okB := mbsB.Record(bucket)
+				assert.True(t, okA, "A's bucket must exist in MetaFSM")
+				assert.True(t, okB, "B's bucket must exist in MetaFSM")
 
 				// Delete A's bucket.
-				applyCmd(t, fA, CmdDeleteBucket, DeleteBucketCmd{Bucket: bucket})
+				require.NoError(t, mbsA.DeleteBucket(ctx, bucket))
 
-				assert.False(t, dbHasKey(t, fA.db, ksA.BucketKey(bucket)), "A's bucket key must be gone")
-				assert.True(t, dbHasKey(t, fB.db, ksB.BucketKey(bucket)), "B's bucket key must survive A's delete")
+				_, okA = mbsA.Record(bucket)
+				_, okB = mbsB.Record(bucket)
+				assert.False(t, okA, "A's bucket must be gone from MetaFSM")
+				assert.True(t, okB, "B's bucket must survive A's delete")
 			},
 		},
 		{
-			// PutObjectMeta: same bucket + same key in both groups; each group sees
-			// only its own value. A-only object not visible from B.
-			name: "PutObjectMeta_Isolation",
+			// PutObjectMeta keyspace isolation: same bucket + key in both groups
+			// produce DISTINCT encoded object-meta keys. (Object metadata no longer
+			// lives in or is read from the shared FSM DB under blob-primary — it is
+			// blob-resident — so the former HeadObject point-read isolation probe is
+			// retired; this row keeps the keyspace-distinctness invariant, which is
+			// what guards against cross-group collision.)
+			name: "PutObjectMeta_KeyspaceIsolation",
 			exercise: func(t *testing.T) {
-				_, ksA, ksB, fA, fB, backendA, backendB := setupTwoGroups(t)
-
-				putObjViaApply(t, fA, bucket, "obj1", "A-etag")
-				putObjViaApply(t, fB, bucket, "obj1", "B-etag")
-				putObjViaApply(t, fA, bucket, "a-only", "A2-etag")
-
+				ksA := mustNewKS(t, "iso-A")
+				ksB := mustNewKS(t, "iso-B")
+				assert.NotEqual(t, ksA.ObjectMetaKey(bucket, "obj1"), ksB.ObjectMetaKey(bucket, "obj1"),
+					"two groups must produce distinct encoded object-meta keys")
+			},
+		},
+		{
+			// DeleteBucket: A deletes a bucket; B's same-name bucket survives.
+			// (Task 12: bucket control-plane moved to meta-raft; assertions via
+			// MetaBucketStore rather than group-0 BadgerDB keys.)
+			name: "DeleteBucket_DoesNotAffectPeer",
+			exercise: func(t *testing.T) {
 				ctx := context.Background()
+				mbsA := newTestMetaBucketStore(t)
+				mbsB := newTestMetaBucketStore(t)
 
-				objsA, err := backendA.ListObjects(ctx, bucket, "", 100)
-				require.NoError(t, err)
-				keysA := make([]string, 0, len(objsA))
-				for _, o := range objsA {
-					keysA = append(keysA, o.Key)
-				}
-				assert.ElementsMatch(t, []string{"obj1", "a-only"}, keysA, "A must see obj1+a-only")
+				require.NoError(t, mbsA.CreateBucket(ctx, "bktX", "gA", false))
+				require.NoError(t, mbsB.CreateBucket(ctx, "bktX", "gB", false))
 
-				objsB, err := backendB.ListObjects(ctx, bucket, "", 100)
-				require.NoError(t, err)
-				keysB := make([]string, 0, len(objsB))
-				for _, o := range objsB {
-					keysB = append(keysB, o.Key)
-				}
-				assert.ElementsMatch(t, []string{"obj1"}, keysB, "B must see only obj1")
+				// A deletes the bucket; B's copy must survive.
+				require.NoError(t, mbsA.DeleteBucket(ctx, "bktX"))
 
-				// Point read: distinct values.
-				objA, _, err := backendA.headObjectMeta(ctx, bucket, "obj1")
-				require.NoError(t, err)
-				assert.Equal(t, "A-etag", objA.ETag)
-
-				objB, _, err := backendB.headObjectMeta(ctx, bucket, "obj1")
-				require.NoError(t, err)
-				assert.Equal(t, "B-etag", objB.ETag)
-
-				// A-only not visible from B.
-				_, _, err = backendB.headObjectMeta(ctx, bucket, "a-only")
-				assert.Error(t, err, "a-only must not be visible from group B")
-
-				// Encoded object meta keys must be distinct.
-				assert.NotEqual(t, ksA.ObjectMetaKey(bucket, "obj1"), ksB.ObjectMetaKey(bucket, "obj1"))
+				_, okA := mbsA.Record("bktX")
+				_, okB := mbsB.Record("bktX")
+				assert.False(t, okA, "A's bucket must be gone after delete")
+				assert.True(t, okB, "B's bucket must survive A's delete")
 			},
 		},
 		{
-			// DeleteObject: A deletes obj1; B's obj1 survives.
-			name: "DeleteObject_DoesNotAffectPeer",
-			exercise: func(t *testing.T) {
-				_, _, _, fA, fB, backendA, backendB := setupTwoGroups(t)
-
-				putObjViaApply(t, fA, bucket, "obj1", "A-etag")
-				putObjViaApply(t, fB, bucket, "obj1", "B-etag")
-
-				// Legacy hard-delete (no VersionID).
-				applyCmd(t, fA, CmdDeleteObject, DeleteObjectCmd{Bucket: bucket, Key: "obj1"})
-
-				ctx := context.Background()
-				_, _, err := backendA.headObjectMeta(ctx, bucket, "obj1")
-				assert.Error(t, err, "A's obj1 must be gone after delete")
-
-				objB, _, err := backendB.headObjectMeta(ctx, bucket, "obj1")
-				require.NoError(t, err, "B's obj1 must survive A's delete")
-				assert.Equal(t, "B-etag", objB.ETag)
-			},
-		},
-		{
-			// Multipart: same uploadID in both groups → two separate mpu: keys.
-			// Aborting one leaves the other intact.
-			name: "Multipart_SameUploadID_TwoKeys",
-			exercise: func(t *testing.T) {
-				_, ksA, ksB, fA, fB := setupTwoFSMs(t)
-
-				const uploadID = "upload-42"
-
-				applyCmd(t, fA, CmdCreateMultipartUpload, CreateMultipartUploadCmd{
-					UploadID: uploadID, Bucket: bucket, Key: "k1", ContentType: "application/octet-stream",
-				})
-				applyCmd(t, fB, CmdCreateMultipartUpload, CreateMultipartUploadCmd{
-					UploadID: uploadID, Bucket: bucket, Key: "k1", ContentType: "application/octet-stream",
-				})
-
-				// Two encoded keys must both exist and be distinct.
-				keyA := ksA.MultipartKey(uploadID)
-				keyB := ksB.MultipartKey(uploadID)
-				assert.NotEqual(t, keyA, keyB, "mpu keys must be distinct")
-				assert.True(t, dbHasKey(t, fA.db, keyA), "A's mpu key must exist")
-				assert.True(t, dbHasKey(t, fB.db, keyB), "B's mpu key must exist")
-
-				// Abort A's upload.
-				applyCmd(t, fA, CmdAbortMultipart, AbortMultipartCmd{
-					Bucket: bucket, Key: "k1", UploadID: uploadID,
-				})
-
-				assert.False(t, dbHasKey(t, fA.db, keyA), "A's mpu key must be gone after abort")
-				assert.True(t, dbHasKey(t, fB.db, keyB), "B's mpu key must survive A's abort")
-			},
-		},
-		{
-			// SetBucketPolicy / DeleteBucketPolicy: distinct policy keys per group.
+			// SetBucketPolicy / DeleteBucketPolicy: distinct MetaFSM entries per group.
+			// (Task 12: bucket control-plane moved to meta-raft.)
 			name: "BucketPolicy_Isolation",
 			exercise: func(t *testing.T) {
-				_, ksA, ksB, fA, fB := setupTwoFSMs(t)
+				ctx := context.Background()
+				mbsA := newTestMetaBucketStore(t)
+				mbsB := newTestMetaBucketStore(t)
 
-				applyCmd(t, fA, CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
-				applyCmd(t, fB, CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
+				require.NoError(t, mbsA.CreateBucket(ctx, bucket, "gA", false))
+				require.NoError(t, mbsB.CreateBucket(ctx, bucket, "gB", false))
 
-				applyCmd(t, fA, CmdSetBucketPolicy, SetBucketPolicyCmd{
-					Bucket: bucket, PolicyJSON: []byte(`{"Effect":"Allow"}`),
-				})
-				applyCmd(t, fB, CmdSetBucketPolicy, SetBucketPolicyCmd{
-					Bucket: bucket, PolicyJSON: []byte(`{"Effect":"Deny"}`),
-				})
+				require.NoError(t, mbsA.SetPolicy(ctx, bucket, []byte(`{"Effect":"Allow"}`)))
+				require.NoError(t, mbsB.SetPolicy(ctx, bucket, []byte(`{"Effect":"Deny"}`)))
 
-				pA := ksA.BucketPolicyKey(bucket)
-				pB := ksB.BucketPolicyKey(bucket)
-				assert.NotEqual(t, pA, pB, "policy keys must be distinct")
-				assert.True(t, dbHasKey(t, fA.db, pA), "A's policy key must exist")
-				assert.True(t, dbHasKey(t, fB.db, pB), "B's policy key must exist")
+				recA, _ := mbsA.Record(bucket)
+				recB, _ := mbsB.Record(bucket)
+				assert.Equal(t, `{"Effect":"Allow"}`, string(recA.Policy), "A's policy must be Allow")
+				assert.Equal(t, `{"Effect":"Deny"}`, string(recB.Policy), "B's policy must be Deny")
+				assert.NotEqual(t, recA.Policy, recB.Policy, "policies must be distinct per group")
 
 				// Delete A's policy.
-				applyCmd(t, fA, CmdDeleteBucketPolicy, DeleteBucketPolicyCmd{Bucket: bucket})
+				require.NoError(t, mbsA.DeletePolicy(ctx, bucket))
 
-				assert.False(t, dbHasKey(t, fA.db, pA), "A's policy must be gone")
-				assert.True(t, dbHasKey(t, fB.db, pB), "B's policy must survive A's delete")
+				recA, _ = mbsA.Record(bucket)
+				recB, _ = mbsB.Record(bucket)
+				assert.Empty(t, recA.Policy, "A's policy must be gone")
+				assert.NotEmpty(t, recB.Policy, "B's policy must survive A's delete")
 			},
 		},
 		{
-			// SetBucketVersioning: A enables versioning, B does not. Keys distinct.
+			// SetBucketVersioning: A enables versioning, B does not. Distinct MetaFSM state.
+			// (Task 12: bucket control-plane moved to meta-raft.)
 			name: "BucketVersioning_Isolation",
 			exercise: func(t *testing.T) {
-				_, ksA, ksB, fA, fB := setupTwoFSMs(t)
+				ctx := context.Background()
+				mbsA := newTestMetaBucketStore(t)
+				mbsB := newTestMetaBucketStore(t)
 
-				applyCmd(t, fA, CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
-				applyCmd(t, fB, CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
+				require.NoError(t, mbsA.CreateBucket(ctx, bucket, "gA", false))
+				require.NoError(t, mbsB.CreateBucket(ctx, bucket, "gB", false))
 
-				applyCmd(t, fA, CmdSetBucketVersioning, SetBucketVersioningCmd{
-					Bucket: bucket, State: "Enabled",
-				})
+				require.NoError(t, mbsA.SetVersioning(ctx, bucket, "Enabled"))
 				// B does not set versioning.
 
-				vA := ksA.BucketVerKey(bucket)
-				vB := ksB.BucketVerKey(bucket)
-				assert.NotEqual(t, vA, vB, "versioning keys must be distinct")
-				assert.True(t, dbHasKey(t, fA.db, vA), "A's versioning key must exist")
-				assert.False(t, dbHasKey(t, fB.db, vB), "B must not have a versioning key")
+				recA, _ := mbsA.Record(bucket)
+				recB, _ := mbsB.Record(bucket)
+				assert.Equal(t, "Enabled", recA.Versioning, "A's versioning must be Enabled")
+				assert.Equal(t, "", recB.Versioning, "B must not have versioning set")
 			},
 		},
 		{
-			// SetObjectACL: A sets ACL on obj1; B has the same obj1 but different ACL
-			// (or none). Quarantine: A quarantines obj1; B's obj1 unaffected.
-			name: "ObjectACL_Quarantine_Isolation",
+			// Quarantine_Isolation: CmdPutObjectQuarantine is reserved/removed in
+			// data-plane raft-free Slice 2 (quarantine now lives in the quorum-meta blob
+			// via IsQuarantined/QuarantineCause). Verify the FSM never writes quarantine
+			// keys — the FSM keyspace is clean.
+			name: "Quarantine_Isolation",
 			exercise: func(t *testing.T) {
 				_, ksA, ksB, fA, fB := setupTwoFSMs(t)
 
 				putObjViaApply(t, fA, bucket, "obj1", "A-etag")
 				putObjViaApply(t, fB, bucket, "obj1", "B-etag")
 
-				// Set ACL on A's obj1.
-				applyCmd(t, fA, CmdSetObjectACL, SetObjectACLCmd{
-					Bucket: bucket, Key: "obj1", ACL: 2,
-				})
-
-				// Quarantine A's obj1.
-				applyCmd(t, fA, CmdPutObjectQuarantine, PutObjectQuarantineCmd{
-					Bucket: "b", Key: "obj1", Cause: "test", Reason: "isolation test",
-				})
-
-				qA := ksA.QuarantineKey(bucket, "obj1", "")
-				qB := ksB.QuarantineKey(bucket, "obj1", "")
+				// CmdPutObjectQuarantine is reserved/removed: quarantine now lives in
+				// the quorum-meta blob, never in the FSM. The retired QuarantineKey
+				// helper is gone (no production reader), so the legacy FSM key is
+				// inlined here purely for this negative assertion.
+				legacyQKey := func(ks *stateKeyspace) []byte {
+					return ks.Key([]byte("quarantine:" + bucket + "\x00obj1\x00"))
+				}
+				qA := legacyQKey(ksA)
+				qB := legacyQKey(ksB)
 				assert.NotEqual(t, qA, qB, "quarantine keys must be distinct")
-				assert.True(t, dbHasKey(t, fA.db, qA), "A's quarantine key must exist")
+				assert.False(t, dbHasKey(t, fA.db, qA), "A's quarantine key must NOT be written (removed Slice 2)")
 				assert.False(t, dbHasKey(t, fB.db, qB), "B must not have a quarantine key")
 			},
 		},
-		{
-			// WalkObjects: A's WalkObjects sees only A's objects.
-			name: "WalkObjects_ScopedToGroup",
-			exercise: func(t *testing.T) {
-				_, _, _, fA, fB, backendA, _ := setupTwoGroups(t)
-
-				putObjViaApply(t, fA, bucket, "walk-a1", "A1")
-				putObjViaApply(t, fA, bucket, "walk-a2", "A2")
-				putObjViaApply(t, fB, bucket, "walk-b1", "B1")
-
-				ctx := context.Background()
-				var walkedA []string
-				err := backendA.WalkObjects(ctx, bucket, "", func(o *storage.Object) error {
-					walkedA = append(walkedA, o.Key)
-					return nil
-				})
-				require.NoError(t, err)
-				assert.ElementsMatch(t, []string{"walk-a1", "walk-a2"}, walkedA,
-					"WalkObjects from A must not see B's keys")
-				for _, k := range walkedA {
-					assert.NotEqual(t, "walk-b1", k, "B's key must not appear in A's walk")
-				}
-			},
-		},
-		{
-			// ListAllObjects (snapshotable): A's view excludes B's objects.
-			name: "ListAllObjects_ScopedToGroup",
-			exercise: func(t *testing.T) {
-				_, _, _, fA, fB, backendA, _ := setupTwoGroups(t)
-
-				// ListAllObjects iterates obj: versioned keys; need a VersionID.
-				raw, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
-					Bucket: bucket, Key: "snap-a", Size: 1, ContentType: "text/plain",
-					ETag: "A-snap", ModTime: 1, VersionID: "v1",
-				})
-				require.NoError(t, err)
-				require.NoError(t, fA.Apply(raw))
-
-				raw, err = EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{
-					Bucket: bucket, Key: "snap-b", Size: 1, ContentType: "text/plain",
-					ETag: "B-snap", ModTime: 1, VersionID: "v1",
-				})
-				require.NoError(t, err)
-				require.NoError(t, fB.Apply(raw))
-
-				// Also create the bucket in A (needed for ListAllObjects → ListBuckets).
-				raw, err = EncodeCommand(CmdCreateBucket, CreateBucketCmd{Bucket: bucket})
-				require.NoError(t, err)
-				_ = fA.Apply(raw)
-
-				objs, err := backendA.ListAllObjects()
-				require.NoError(t, err)
-				var keys []string
-				for _, o := range objs {
-					keys = append(keys, o.Key)
-				}
-				for _, k := range keys {
-					assert.NotEqual(t, "snap-b", k, "B's object must not appear in A's ListAllObjects")
-				}
-				// A's object must be present (if versioned format is written).
-				// (snap-a is present only if at least one versioned key was written.)
-				found := false
-				for _, k := range keys {
-					if k == "snap-a" {
-						found = true
-					}
-				}
-				assert.True(t, found, "A's snap-a must appear in ListAllObjects")
-			},
-		},
-		// Shard placement (CmdPutShardPlacement / CmdDeleteShardPlacement) is
-		// intentionally skipped: apply.go:94-100 treats both commands as no-ops
-		// ("placement is now derived deterministically from the ring"). Driving
-		// the placement path via apply is impossible, and there is no key written
-		// to BadgerDB to assert on. The keyspace correctness for ShardPlacementKey
-		// is covered by TestStateKeyspace_PrefixRoundTrip at the unit level.
+		// Object-read isolation rows (PutObjectMeta HeadObject probe,
+		// WalkObjects_ScopedToGroup, ListAllObjectsStrict_ScopedToGroup) were
+		// removed: object metadata is no longer written to or read from the shared
+		// FSM BadgerDB (it is blob-resident under blob-primary), so the shared-DB
+		// object-collision risk these probed is structurally gone. FSM-keyspace
+		// isolation is still covered by the keyspace-distinctness rows above and by
+		// the snapshot/restore prefix-isolation tests in shared_fsm_test.go.
 		//
-		// CmdMigrateShard is likewise omitted: applyMigrateShard writes a
-		// PendingMigrationKey to BadgerDB only on the channel-overflow path, and
-		// when no migration hooks are wired (the unit-test default) onMigrateShard
-		// is nil and applyMigrateShard returns early without writing anything. It
-		// is therefore not exercisable at the unit-test level without
-		// SetMigrationHooks; the pending-migration: keyspace is covered by the
-		// keyspace-level round-trip test (TestStateKeyspace_PrefixRoundTrip).
+		// Shard placement is intentionally skipped: the data-group placement apply
+		// path is gone ("placement is now derived deterministically from the ring").
+		// Driving the placement path via apply is impossible, and there is no key
+		// written to BadgerDB to assert on. The keyspace correctness for
+		// ShardPlacementKey is covered by TestStateKeyspace_PrefixRoundTrip at the
+		// unit level.
+		//
+		// Balancer shard migration is likewise omitted: it is retired, and stale
+		// log replay is a no-op. The legacy pending-migration: keyspace is covered
+		// by the keyspace-level round-trip test (TestStateKeyspace_PrefixRoundTrip).
 	}
 
-	// Rows run sequentially (no t.Parallel). NewDistributedBackend calls
-	// SetNoOpCommand after the per-row raft goroutine has started, which races
-	// on raft.Node.noOpCmd — a pre-existing bug in internal/raft, out of scope
-	// here. Running rows one at a time keeps the test green under -race without
-	// touching raft. The fresh-DB-per-row setup means there is no correctness
-	// reason the rows need to be parallel.
+	// Rows run sequentially (no t.Parallel). Each row owns a fresh DB and raft
+	// node; there is no correctness reason the rows need to be parallel.
 	for _, row := range rows {
 		row := row
 		t.Run(row.name, func(t *testing.T) {
@@ -426,8 +266,10 @@ func TestSharedFSM_PrefixIsolation_AllPaths(t *testing.T) {
 
 // TestSharedFSM_PathologicalGroupIDs_NoCollision is the end-to-end version of
 // TestStateKeyspace_NoCrossGroupCollision_PathologicalIDs: three groups whose
-// IDs look prefix-y are written through the FSM and then read back through
-// DistributedBackend.ListObjects to prove no cross-group leakage.
+// IDs look prefix-y are written through the FSM and proven to occupy distinct,
+// non-colliding encoded keyspaces (the length header prevents byte-prefix
+// collisions). The former backend HeadObject probe is retired — object metadata
+// is blob-resident under blob-primary and no longer read from the shared FSM DB.
 func TestSharedFSM_PathologicalGroupIDs_NoCollision(t *testing.T) {
 	db, err := badger.Open(badgerutil.SmallOptions("").WithInMemory(true))
 	require.NoError(t, err)
@@ -437,73 +279,26 @@ func TestSharedFSM_PathologicalGroupIDs_NoCollision(t *testing.T) {
 	ksGx := mustNewKS(t, "g\x00x") // looks like a byte-prefix of "g" without the len-header
 	ksLong := mustNewKS(t, strings.Repeat("z", 300))
 
-	fG := NewFSM(db, ksG)
-	fGx := NewFSM(db, ksGx)
-	fLong := NewFSM(db, ksLong)
+	fG := NewFSM(badgermeta.Wrap(db), ksG)
+	fGx := NewFSM(badgermeta.Wrap(db), ksGx)
+	fLong := NewFSM(badgermeta.Wrap(db), ksLong)
 
 	putObjViaApply(t, fG, "b", "k", "G-payload")
 	putObjViaApply(t, fGx, "b", "k", "Gx-payload")
 	putObjViaApply(t, fLong, "b", "k", "Long-payload")
 
-	// All three encoded object-meta keys must be pairwise distinct.
+	// All three encoded object-meta keys must be pairwise distinct and present.
 	eG := ksG.ObjectMetaKey("b", "k")
 	eGx := ksGx.ObjectMetaKey("b", "k")
 	eLong := ksLong.ObjectMetaKey("b", "k")
 
-	assert.True(t, dbHasKey(t, db, eG), "ksG's key must exist in DB")
-	assert.True(t, dbHasKey(t, db, eGx), "ksGx's key must exist in DB")
-	assert.True(t, dbHasKey(t, db, eLong), "ksLong's key must exist in DB")
+	assert.True(t, dbHasKey(t, badgermeta.Wrap(db), eG), "ksG's key must exist in DB")
+	assert.True(t, dbHasKey(t, badgermeta.Wrap(db), eGx), "ksGx's key must exist in DB")
+	assert.True(t, dbHasKey(t, badgermeta.Wrap(db), eLong), "ksLong's key must exist in DB")
 
 	assert.NotEqual(t, eG, eGx, "g and g\\x00x must produce distinct encoded keys")
 	assert.NotEqual(t, eG, eLong, "g and long-z must produce distinct encoded keys")
 	assert.NotEqual(t, eGx, eLong, "g\\x00x and long-z must produce distinct encoded keys")
-
-	// Backend-level: each group's ListObjects returns exactly its own object.
-	nodeG, _ := newTestNodeForSharedDB(t, "path-g")
-	backendG, err := NewDistributedBackend(t.TempDir(), db, nodeG, ksG, true)
-	require.NoError(t, err)
-	stopG := make(chan struct{})
-	go backendG.RunApplyLoop(stopG)
-	t.Cleanup(func() { close(stopG) })
-
-	nodeGx, _ := newTestNodeForSharedDB(t, "path-gx")
-	backendGx, err := NewDistributedBackend(t.TempDir(), db, nodeGx, ksGx, true)
-	require.NoError(t, err)
-	stopGx := make(chan struct{})
-	go backendGx.RunApplyLoop(stopGx)
-	t.Cleanup(func() { close(stopGx) })
-
-	nodeLong, _ := newTestNodeForSharedDB(t, "path-long")
-	backendLong, err := NewDistributedBackend(t.TempDir(), db, nodeLong, ksLong, true)
-	require.NoError(t, err)
-	stopLong := make(chan struct{})
-	go backendLong.RunApplyLoop(stopLong)
-	t.Cleanup(func() { close(stopLong) })
-
-	ctx := context.Background()
-
-	for _, tc := range []struct {
-		name     string
-		backend  *DistributedBackend
-		wantETag string
-	}{
-		{"group-g", backendG, "G-payload"},
-		{"group-gx", backendGx, "Gx-payload"},
-		{"group-long", backendLong, "Long-payload"},
-	} {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			objs, err := tc.backend.ListObjects(ctx, "b", "", 100)
-			require.NoError(t, err)
-			require.Len(t, objs, 1, "each group must see exactly 1 object")
-			assert.Equal(t, "k", objs[0].Key)
-			assert.Equal(t, tc.wantETag, objs[0].ETag)
-
-			obj, _, err := tc.backend.headObjectMeta(ctx, "b", "k")
-			require.NoError(t, err)
-			assert.Equal(t, tc.wantETag, obj.ETag)
-		})
-	}
 }
 
 // TestSharedFSM_GroupCloseDoesNotCloseSharedDB verifies that a DistributedBackend
@@ -528,27 +323,29 @@ func TestSharedFSM_GroupCloseDoesNotCloseSharedDB(t *testing.T) {
 	ksB := mustNewKS(t, "close-B")
 
 	nodeA, _ := newTestNodeForSharedDB(t, "close-nodeA")
-	backendA, err := NewDistributedBackend(t.TempDir(), db, nodeA, ksA, true)
+	backendA, err := NewDistributedBackend(t.TempDir(), badgermeta.Wrap(db), nodeA, ksA, true)
 	require.NoError(t, err)
 	stopA := make(chan struct{})
 	go backendA.RunApplyLoop(stopA)
 
 	nodeB, _ := newTestNodeForSharedDB(t, "close-nodeB")
-	backendB, err := NewDistributedBackend(t.TempDir(), db, nodeB, ksB, true)
+	backendB, err := NewDistributedBackend(t.TempDir(), badgermeta.Wrap(db), nodeB, ksB, true)
 	require.NoError(t, err)
 	stopB := make(chan struct{})
 	go backendB.RunApplyLoop(stopB)
 
-	// Write data to both groups.
-	fA := backendA.fsm
-	fB := backendB.fsm
-	applyCmd(t, fA, CmdCreateBucket, CreateBucketCmd{Bucket: "alive"})
-	applyCmd(t, fB, CmdCreateBucket, CreateBucketCmd{Bucket: "alive"})
-
-	// Write a distinguishable key directly so the assertion is unambiguous.
+	// Write a distinguishable raw key into the shared DB. This is a DB-liveness
+	// probe (read back via db.View after A.Close), independent of bucket semantics
+	// — it proves the shared DB survives A.Close. Bucket existence for B's
+	// ListBuckets is supplied separately via B's MetaBucketStore below (the sole
+	// authority since Task 12).
 	require.NoError(t, db.Update(func(txn *badger.Txn) error {
-		return txn.Set(ksB.BucketKey("alive"), []byte("B-bucket-data"))
+		return txn.Set(ksB.Key([]byte("liveness-probe")), []byte("B-bucket-data"))
 	}))
+
+	// HeadBucket / ListBuckets read MetaBucketStore (sole authority since Task 12);
+	// register "alive" in B's MBS so backendB.ListBuckets sees it below.
+	seedBucketsInMBS(t, backendB, "alive")
 
 	// Close backend A — must NOT close the shared DB.
 	close(stopA)
@@ -556,7 +353,7 @@ func TestSharedFSM_GroupCloseDoesNotCloseSharedDB(t *testing.T) {
 
 	// Assert DB is still usable: B's data must be readable.
 	err = db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(ksB.BucketKey("alive"))
+		item, err := txn.Get(ksB.Key([]byte("liveness-probe")))
 		if err != nil {
 			return err
 		}

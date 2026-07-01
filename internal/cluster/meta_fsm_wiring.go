@@ -3,9 +3,7 @@ package cluster
 import (
 	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/iam"
-	"github.com/gritive/GrainFS/internal/iam/bucketpolicy"
 	"github.com/gritive/GrainFS/internal/iam/group"
-	"github.com/gritive/GrainFS/internal/iam/mountsastore"
 	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/iam/policyattach"
 	"github.com/gritive/GrainFS/internal/iam/policystore"
@@ -75,24 +73,6 @@ func (f *MetaFSM) SetPolicyAttachStore(s *policyattach.InMemoryStore) {
 	f.policyAttachStore = s
 }
 
-// SetBucketPolicyStore wires the per-bucket policy document store into the
-// MetaFSM. Must be called before the raft log starts replaying. nil means
-// BucketPolicy* commands are safe no-ops.
-func (f *MetaFSM) SetBucketPolicyStore(s *bucketpolicy.InMemoryStore) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.bucketPolicyStore = s
-}
-
-// SetMountSAStore wires the NFS/9P mount service account store into the
-// MetaFSM. Must be called before the raft log starts replaying. nil means
-// MountSA* commands return an error.
-func (f *MetaFSM) SetMountSAStore(s *mountsastore.Store) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.mountSAStore = s
-}
-
 // SetProtocolCredentialStore wires the protocol credential store into MetaFSM
 // apply and snapshot paths.
 func (f *MetaFSM) SetProtocolCredentialStore(s *protocred.Store) {
@@ -107,19 +87,4 @@ func (f *MetaFSM) SetMigration(store *migration.JobStore) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.migrationStore = store
-}
-
-func (f *MetaFSM) SetOnIcebergApplyResult(fn func(requestID string, err error)) {
-	f.mu.Lock()
-	f.onIcebergResult = fn
-	f.mu.Unlock()
-}
-
-func (f *MetaFSM) publishIcebergResult(requestID string, err error) {
-	f.mu.RLock()
-	cb := f.onIcebergResult
-	f.mu.RUnlock()
-	if cb != nil && requestID != "" {
-		cb(requestID, err)
-	}
 }

@@ -14,9 +14,6 @@ import (
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/server"
 	"github.com/gritive/GrainFS/internal/server/admin"
-	"github.com/gritive/GrainFS/internal/server/execution"
-	"github.com/gritive/GrainFS/internal/serveruntime/executioncluster"
-	"github.com/gritive/GrainFS/internal/volume"
 )
 
 // PeerHealthAdapter implements admin.PeerHealthAPI on top of
@@ -58,49 +55,6 @@ func (a PeerHealthAdapter) Snapshot() []admin.ClusterPeerInfo {
 	return out
 }
 
-// ReplicaRepairerFunc adapts a function to scrubber.ReplicaRepairer.
-type ReplicaRepairerFunc func(ctx context.Context, bucket, key string) error
-
-func (f ReplicaRepairerFunc) RepairReplica(ctx context.Context, bucket, key string) error {
-	return f(ctx, bucket, key)
-}
-
-// VolumePlacementAdapter implements admin.VolumePlacementSource over the
-// cluster meta-Raft FSM. One full pass over the volume bucket builds a
-// per-volume admin.ReplicaLayoutFact via aggregateVolumeReplicaLayout. nil
-// metaRaft (or nil FSM) returns nil with no error so standalone runtimes
-// fall back to incident-only volume health composition.
-type VolumePlacementAdapter struct {
-	metaRaft *cluster.MetaRaft
-}
-
-// NewVolumePlacementAdapter returns a value adapter (no pointer; the struct
-// is trivially copyable). Caller passes the freshly-constructed *MetaRaft at
-// admin-deps build time, or nil when running outside cluster mode.
-func NewVolumePlacementAdapter(metaRaft *cluster.MetaRaft) VolumePlacementAdapter {
-	return VolumePlacementAdapter{metaRaft: metaRaft}
-}
-
-func (a VolumePlacementAdapter) VolumeReplicaSummaries(ctx context.Context, names []string) (map[string]admin.ReplicaLayoutFact, error) {
-	if a.metaRaft == nil {
-		return nil, nil
-	}
-	fsm := a.metaRaft.FSM()
-	if fsm == nil {
-		return nil, nil
-	}
-	entries := fsm.ObjectIndexLatestEntries(volume.VolumeBucketName, "", 0)
-	if len(entries) == 0 {
-		return nil, nil
-	}
-	groupList := fsm.ShardGroups()
-	groups := make(map[string]cluster.ShardGroupEntry, len(groupList))
-	for _, g := range groupList {
-		groups[g.ID] = g
-	}
-	return aggregateVolumeReplicaLayout(entries, groups, names), nil
-}
-
 // ScrubProposerAdapter implements admin.ScrubProposer over MetaRaft. The
 // adapter does a leader-side dedup pre-check so duplicate triggers don't
 // consume a fresh raft entry per call.
@@ -127,36 +81,6 @@ func (a *ScrubProposerAdapter) Propose(ctx context.Context, req scrubber.Trigger
 		OriginatorNodeID: a.nodeID,
 	}
 	return entry, true, a.metaRaft.ProposeScrubTrigger(ctx, entry)
-}
-
-// ScrubExecutionBackend adapts the existing meta-Raft scrub proposer to the
-// execution cluster backend contract.
-type ScrubExecutionBackend struct {
-	proposer *ScrubProposerAdapter
-}
-
-var _ executioncluster.ScrubBackend = (*ScrubExecutionBackend)(nil)
-
-func NewScrubExecutionBackend(proposer *ScrubProposerAdapter) *ScrubExecutionBackend {
-	return &ScrubExecutionBackend{proposer: proposer}
-}
-
-func (a *ScrubExecutionBackend) TriggerScrub(ctx context.Context, op execution.Operation) (execution.ScrubResult, error) {
-	if op.Kind != execution.OperationScrub || a == nil || a.proposer == nil {
-		return execution.ScrubResult{}, execution.NewError(execution.CodeUnsupported, execution.ErrExecutionUnsupported)
-	}
-	if err := op.Scrub.Validate(); err != nil {
-		return execution.ScrubResult{}, err
-	}
-	entry, created, err := a.proposer.Propose(ctx, scrubber.TriggerReq{
-		Bucket:    op.Scrub.Bucket,
-		KeyPrefix: op.Scrub.KeyPrefix,
-		DryRun:    op.Scrub.DryRun,
-	})
-	if err != nil {
-		return execution.ScrubResult{}, err
-	}
-	return execution.ScrubResult{SessionID: entry.SessionID, Created: created}, nil
 }
 
 // ScrubAggregatorAdapter implements admin.ScrubAggregator over

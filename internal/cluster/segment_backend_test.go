@@ -6,19 +6,105 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
+	"math/rand"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/hrw"
 	"github.com/gritive/GrainFS/internal/storage"
 )
+
+// newTestClusterSegmentBackend builds a minimal clusterSegmentBackend suitable
+// for WriteSegmentBytes unit tests: one pre-allocated blob ID, fake seams for
+// group selection and shard writes, no real DistributedBackend required.
+func newTestClusterSegmentBackend(t *testing.T) *clusterSegmentBackend {
+	t.Helper()
+	deps := newFakeBackendWithGroups(fourPGFixture())
+	blobIDs := []string{uuid.Must(uuid.NewV7()).String()}
+	csb := newCSBWithDeps(deps, blobIDs)
+	csb.bucket = "bkt"
+	csb.key = "key"
+	return csb
+}
+
+func TestWriteSegmentBytes_CompressibleSetsStoredSize(t *testing.T) {
+	c := newTestClusterSegmentBackend(t)
+	plaintext := bytes.Repeat([]byte("grainfs zstd segment payload "), 8192) // ~232 KiB, compressible
+	ref, err := c.WriteSegmentBytes(context.Background(), "bkt", "key", 0, append([]byte(nil), plaintext...))
+	if err != nil {
+		t.Fatalf("WriteSegmentBytes: %v", err)
+	}
+	if ref.Size != int64(len(plaintext)) {
+		t.Fatalf("Size must stay plaintext: got %d want %d", ref.Size, int64(len(plaintext)))
+	}
+	if ref.StoredSize <= 0 || ref.StoredSize >= ref.Size {
+		t.Fatalf("StoredSize should be compressed (>0, <Size): got %d", ref.StoredSize)
+	}
+	if want := storage.ChecksumOf(plaintext); !bytes.Equal(ref.Checksum, want) {
+		t.Fatalf("Checksum must be over plaintext")
+	}
+}
+
+func TestWriteSegmentBytes_IncompressibleStoresRaw(t *testing.T) {
+	c := newTestClusterSegmentBackend(t)
+	rnd := make([]byte, 256<<10)
+	// Fixed-seed pseudo-random bytes approximate maximum entropy: the Go PRNG
+	// output has no repeating byte patterns, so zstd finds no back-references
+	// and cannot compress it below the input size (i.e. compressing would
+	// expand). WriteSegmentBytes must detect this and store raw (StoredSize==0).
+	r := rand.New(rand.NewSource(0xdeadbeef)) //nolint:gosec // fixed-seed PRNG, deterministic test data
+	_, _ = r.Read(rnd)
+	ref, err := c.WriteSegmentBytes(context.Background(), "bkt", "key", 0, append([]byte(nil), rnd...))
+	if err != nil {
+		t.Fatalf("WriteSegmentBytes: %v", err)
+	}
+	if ref.StoredSize != 0 {
+		t.Fatalf("incompressible segment must store raw (StoredSize==0): got %d", ref.StoredSize)
+	}
+	if ref.Size != int64(len(rnd)) {
+		t.Fatalf("Size mismatch")
+	}
+}
+
+// TestAdaptiveChunkSize locks the size-aware chunk policy derived from the GCP
+// size×chunk sweep: small objects stay single-segment (split overhead dominates,
+// e.g. 1MiB PUT dropped 288→157 MB/s when split), mid-size objects split into ~2
+// (10MiB: +13.7% at 2 segments), and large objects cap at DefaultChunkSize so
+// they split naturally without per-segment overhead blowup.
+func TestAdaptiveChunkSize(t *testing.T) {
+	cases := []struct {
+		name         string
+		size         int64
+		wantSegments int
+	}{
+		{"1MiB stays single (split overhead dominates)", 1 << 20, 1},
+		{"9MiB single (below split floor)", 9 << 20, 1},
+		{"10MiB splits to 2 (sweet spot)", 10 << 20, 2},
+		{"20MiB two segments", 20 << 20, 2},
+		{"64MiB four segments at 16MiB cap", 64 << 20, 4},
+		{"unknown size: single chunk", 0, 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			chunk := adaptiveChunkSize(c.size)
+			require.Greater(t, chunk, int64(0))
+			require.LessOrEqual(t, chunk, int64(storage.DefaultChunkSize))
+			segs := 1
+			if c.size > 0 {
+				segs = int((c.size + chunk - 1) / chunk)
+			}
+			require.Equal(t, c.wantSegments, segs)
+		})
+	}
+}
 
 // fakeSegmentBackendDeps wires the four test seams on clusterSegmentBackend.
 // Each closure records calls so individual tests can assert call counts,
@@ -38,18 +124,13 @@ type fakeSegmentBackendDeps struct {
 
 	deleteCalls []deleteCall
 
-	proposeCalls   []proposeCall
-	proposeErr     error
-	deleteShardErr error
+	deleteShardErr       error
+	writeQuorumMetaCalls []PutObjectMetaCmd
+	writeQuorumMetaErr   error
 }
 
 type deleteCall struct {
 	peer, bucket, shardKey string
-}
-
-type proposeCall struct {
-	cmdType CommandType
-	cmd     any
 }
 
 func (f *fakeSegmentBackendDeps) groupSelector(bucket, key string, idx int, blobID string) (ShardGroupEntry, error) {
@@ -72,7 +153,15 @@ func (f *fakeSegmentBackendDeps) writeSegment(ctx context.Context, idx int, in w
 	if f.writePeer != nil {
 		peers = f.writePeer(idx)
 	} else {
-		peers = append([]string(nil), in.Group.PeerIDs...)
+		// Mirror the production writeOneSegment placement: weighted HRW over the
+		// chosen group's peers, keyed by the segment-scoped shardKey. This keeps
+		// the recorded NodeIDs HRW-derived so commit-path tests can assert it.
+		placementKey := ecObjectSegmentShardKey(ecObjectWritePlan{
+			Key:           in.Key,
+			VersionID:     in.VersionID,
+			SegmentBlobID: in.SegmentBlobID,
+		})
+		peers = selectShardPlacement(in.Cfg, in.Group.PeerIDs, placementKey, in.Weights, in.WeightedEnabled)
 	}
 	rec := PlacementRecord{Nodes: peers, K: in.Cfg.DataShards, M: in.Cfg.ParityShards}
 	return rec, "etag-seg-" + fmt.Sprint(idx), in.SegmentBlobID, nil
@@ -85,11 +174,11 @@ func (f *fakeSegmentBackendDeps) deleteShards(ctx context.Context, peer, bucket,
 	return f.deleteShardErr
 }
 
-func (f *fakeSegmentBackendDeps) propose(ctx context.Context, cmdType CommandType, payload any) error {
+func (f *fakeSegmentBackendDeps) writeQuorumMeta(ctx context.Context, cmd PutObjectMetaCmd) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.proposeCalls = append(f.proposeCalls, proposeCall{cmdType: cmdType, cmd: payload})
-	return f.proposeErr
+	f.writeQuorumMetaCalls = append(f.writeQuorumMetaCalls, cmd)
+	return f.writeQuorumMetaErr
 }
 
 func newFakeBackendWithGroups(groups []ShardGroupEntry) *fakeSegmentBackendDeps {
@@ -98,16 +187,17 @@ func newFakeBackendWithGroups(groups []ShardGroupEntry) *fakeSegmentBackendDeps 
 
 func newCSBWithDeps(deps *fakeSegmentBackendDeps, blobIDs []string) *clusterSegmentBackend {
 	return &clusterSegmentBackend{
-		bucket:          "test-bucket",
-		key:             "large.bin",
-		versionID:       "v1",
-		blobIDs:         blobIDs,
-		placements:      make([]segmentPlacement, len(blobIDs)),
-		writeSegmentFn:  deps.writeSegment,
-		groupSelectorFn: deps.groupSelector,
-		deleteShardsFn:  deps.deleteShards,
-		proposeFn:       deps.propose,
-		ecConfigFn:      func() ECConfig { return ECConfig{DataShards: 4, ParityShards: 2} },
+		bucket:            "test-bucket",
+		key:               "large.bin",
+		versionID:         "v1",
+		blobIDs:           blobIDs,
+		placements:        make([]segmentPlacement, len(blobIDs)),
+		writeSegmentFn:    deps.writeSegment,
+		groupSelectorFn:   deps.groupSelector,
+		deleteShardsFn:    deps.deleteShards,
+		writeQuorumMetaFn: deps.writeQuorumMeta,
+		ecConfigFn:        func() ECConfig { return ECConfig{DataShards: 4, ParityShards: 2} },
+		sizeHint:          -1, // no hint by default; tests that exercise hinting set it explicitly
 	}
 }
 
@@ -179,13 +269,48 @@ func TestClusterSegmentBackend_WriteSegment_RecordsPlacement(t *testing.T) {
 
 const testChunkedPutChunkSize = 64 << 10
 
-// makeSpool writes payload to a temp file and returns a *spooledObject.
-func makeSpool(t *testing.T, payload []byte) *spooledObject {
+// testSpool is an in-memory stand-in for the removed *spooledObject: it carries
+// a payload + size and Opens to a fresh one-pass reader, so chunked-PUT tests can
+// feed a body + known size without staging a temp file.
+type testSpool struct {
+	payload []byte
+	Size    int64
+}
+
+// makeSpool returns an in-memory testSpool over payload.
+func makeSpool(t clusterTestTB, payload []byte) *testSpool {
 	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "spool")
-	require.NoError(t, os.WriteFile(path, payload, 0o600))
-	return &spooledObject{Path: path, Size: int64(len(payload))}
+	return &testSpool{payload: payload, Size: int64(len(payload))}
+}
+
+func (s *testSpool) Open() (io.ReadCloser, error) {
+	return io.NopCloser(bytes.NewReader(s.payload)), nil
+}
+
+// putChunked is the test entry point that replaced the removed putObjectChunked
+// method: it opens the testSpool body and streams it through the chunked PUT
+// pipeline with a known size.
+func (b *DistributedBackend) putChunked(
+	ctx context.Context,
+	bucket, key, versionID string,
+	sp *testSpool,
+	contentType string,
+	userMetadata map[string]string,
+	sseAlgorithm string,
+	acl uint8,
+	modTime int64,
+	preserveModTime bool,
+	expectedETag string,
+	beforeCommit func() error,
+	parts []storage.MultipartPartEntry,
+	tags []storage.Tag,
+) (*storage.Object, error) {
+	body, err := sp.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer body.Close()
+	return b.putObjectChunkedReader(ctx, bucket, key, versionID, body, sp.Size, contentType, userMetadata, sseAlgorithm, acl, modTime, preserveModTime, expectedETag, beforeCommit, parts, tags)
 }
 
 func chunkFanoutMetricCount(t *testing.T) uint64 {
@@ -230,9 +355,8 @@ func TestPutObjectChunked_SingleAtomicMetaCommit(t *testing.T) {
 	assert.False(t, obj.IsAppendable)
 	assert.Len(t, obj.Segments, 4)
 
-	require.Len(t, deps.proposeCalls, 1, "exactly one PutObjectMetaCmd proposed")
-	assert.Equal(t, CmdPutObjectMeta, deps.proposeCalls[0].cmdType)
-	cmd := deps.proposeCalls[0].cmd.(PutObjectMetaCmd)
+	require.Len(t, deps.writeQuorumMetaCalls, 1, "exactly one quorum meta write")
+	cmd := deps.writeQuorumMetaCalls[0]
 	require.Len(t, cmd.Segments, 4)
 	for i, seg := range cmd.Segments {
 		assert.Equal(t, int32(i), seg.SegmentIdx, "Segments[%d].SegmentIdx deterministic", i)
@@ -248,6 +372,81 @@ func TestPutObjectChunked_SingleAtomicMetaCommit(t *testing.T) {
 
 	// No cleanup calls on success path.
 	assert.Empty(t, deps.deleteCalls)
+}
+
+// TestWriteSegment_RecordsHRWPlacement guards the WriteSegmentBytes → record →
+// segmentPlacement plumbing: the recorded NodeIDs must be the HRW-derived order
+// the writer chose. The fake writeSegment mirrors the production weighted-HRW
+// selection (selectShardPlacement) so this pins the recorded-placement wiring;
+// the production writeOneSegment HRW swap itself is pinned by
+// TestWriteOneSegment_HRWPlacement.
+func TestWriteSegment_RecordsHRWPlacement(t *testing.T) {
+	groups := fourPGFixture()
+	deps := newFakeBackendWithGroups(groups)
+	blobIDs := make([]string, 4)
+	for i := range blobIDs {
+		blobIDs[i] = uuid.Must(uuid.NewV7()).String()
+	}
+	csb := newCSBWithDeps(deps, blobIDs)
+	cfg := csb.currentECConfig()
+
+	for i := 0; i < 4; i++ {
+		_, err := csb.WriteSegment(context.Background(), csb.bucket, csb.key, i, bytes.NewReader([]byte("payload")))
+		require.NoError(t, err)
+	}
+
+	for i, p := range csb.placements {
+		group := groups[i%len(groups)] // matches round-robin groupSelector
+		placementKey := ecObjectSegmentShardKey(ecObjectWritePlan{
+			Key:           csb.key,
+			VersionID:     csb.versionID,
+			SegmentBlobID: blobIDs[i],
+		})
+		want := hrw.PlaceShards(placementKey, group.PeerIDs, nil, cfg.NumShards())
+		assert.Equalf(t, want, p.NodeIDs, "placement[%d].NodeIDs must be HRW-derived", i)
+	}
+}
+
+// TestWriteSegment_WeightedHRWPlacement guards that the per-peer weight snapshot
+// (from peerWeightsFn → b.nodeStatsStore in production) is threaded into the
+// segment placement so the dominant data path is under disk-capacity weighting.
+func TestWriteSegment_WeightedHRWPlacement(t *testing.T) {
+	groups := fourPGFixture()
+	deps := newFakeBackendWithGroups(groups)
+	blobIDs := []string{uuid.Must(uuid.NewV7()).String()}
+	csb := newCSBWithDeps(deps, blobIDs)
+	cfg := csb.currentECConfig()
+
+	// Skew weights so the weighted order differs from the unweighted one.
+	weightByPeer := map[string]float64{}
+	for _, g := range groups {
+		for j, peer := range g.PeerIDs {
+			weightByPeer[peer] = float64((j + 1) * 1000)
+		}
+	}
+	csb.peerWeightsFn = func(peers []string) ([]float64, bool) {
+		w := make([]float64, len(peers))
+		for i, p := range peers {
+			w[i] = weightByPeer[p]
+		}
+		return w, true
+	}
+
+	_, err := csb.WriteSegment(context.Background(), csb.bucket, csb.key, 0, bytes.NewReader([]byte("payload")))
+	require.NoError(t, err)
+
+	group := groups[0]
+	weights := make([]float64, len(group.PeerIDs))
+	for i, p := range group.PeerIDs {
+		weights[i] = weightByPeer[p]
+	}
+	placementKey := ecObjectSegmentShardKey(ecObjectWritePlan{
+		Key:           csb.key,
+		VersionID:     csb.versionID,
+		SegmentBlobID: blobIDs[0],
+	})
+	want := hrw.PlaceShards(placementKey, group.PeerIDs, weights, cfg.NumShards())
+	assert.Equal(t, want, csb.placements[0].NodeIDs, "weighted HRW must thread through WriteSegment")
 }
 
 func TestRunChunkedPutWithParts_CommitsPartsAndSegments(t *testing.T) {
@@ -273,16 +472,53 @@ func TestRunChunkedPutWithParts_CommitsPartsAndSegments(t *testing.T) {
 	require.NotNil(t, obj)
 	require.Equal(t, parts, obj.Parts)
 
-	require.Len(t, deps.proposeCalls, 1)
-	require.Equal(t, CmdCompleteMultipart, deps.proposeCalls[0].cmdType)
-	cmd := deps.proposeCalls[0].cmd.(CompleteMultipartCmd)
-	require.Equal(t, "upload-1", cmd.UploadID)
+	// M3: the multipart complete is raft-free. The non-versioned (c.b == nil → no
+	// meta_blob) commit is a single FAIL-CLOSED latest-only quorum-meta write — no
+	// CmdCompleteMultipart propose (proven at the integration level via
+	// recordingMultipartRaftNode in multipart_complete_offraft_test.go).
+	require.Len(t, deps.writeQuorumMetaCalls, 1, "non-versioned multipart commits via one quorum-meta write")
+	cmd := deps.writeQuorumMetaCalls[0]
 	require.Len(t, cmd.Segments, 2)
 	require.Equal(t, parts, cmd.Parts)
 
 	parts[0].ETag = "mutated"
 	require.Equal(t, wantParts, obj.Parts)
 	require.Equal(t, wantParts, cmd.Parts)
+}
+
+// TestRunChunkedPutWithParts_CommitError_ShardCleanup guards the M3 fail-closed
+// commit: the non-versioned (c.b == nil → no meta_blob) multipart complete commits
+// via a single synchronous latest-only quorum-meta write. On any commit error
+// nothing is durable, so the segment shards are ALWAYS eager-deleted (there is no
+// raft propose and therefore no phantom-commit window) and the error surfaces.
+//
+// Contrast: TestPutObjectChunked_PartialFailRollsBackBlobs_* prove PRE-commit
+// failures (segment write, beforeCommit) clean up eagerly too — nothing committed.
+//
+// Neuter test: drop the `committed = true` after a successful commit (or skip the
+// eager-delete defer) and this is RED.
+func TestRunChunkedPutWithParts_CommitError_ShardCleanup(t *testing.T) {
+	chunk := storage.DefaultChunkSize
+	payload := bytes.Repeat([]byte("Q"), chunk+1)
+	sp := makeSpool(t, payload)
+	deps := newFakeBackendWithGroups(fourPGFixture())
+	deps.writeQuorumMetaErr = errors.New("quorum-meta write failed")
+	blobIDs := []string{uuid.Must(uuid.NewV7()).String(), uuid.Must(uuid.NewV7()).String()}
+	csb := newCSBWithDeps(deps, blobIDs)
+	parts := []storage.MultipartPartEntry{
+		{PartNumber: 1, Size: int64(chunk), ETag: "etag-1"},
+		{PartNumber: 2, Size: 1, ETag: "etag-2"},
+	}
+
+	body, err := sp.Open()
+	require.NoError(t, err)
+	defer body.Close()
+	_, err = runChunkedPutWithParts(context.Background(), csb, body,
+		"bucket", "large-mp.bin", "v1", "application/octet-stream",
+		nil, "", 0, false, "", nil, parts, nil, "upload-1")
+	require.Error(t, err, "commit error must surface to the caller")
+	require.NotEmpty(t, deps.deleteCalls,
+		"a fail-closed commit error must eager-delete the un-committed segment shards")
 }
 
 func TestPutObjectChunked_ObservesChunkFanoutBreadth(t *testing.T) {
@@ -332,8 +568,8 @@ func TestPutObjectChunked_PartialFailRollsBackBlobs_WorkerError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "segment write")
 
-	// No raft commit.
-	assert.Empty(t, deps.proposeCalls)
+	// No commit (pre-commit failure).
+	assert.Empty(t, deps.writeQuorumMetaCalls)
 
 	// Cleanup called for the two segments that DID complete (0 and 1).
 	// Each segment has 6 placement peers in the 4+2 fixture, so 2 × 6 = 12
@@ -376,7 +612,7 @@ func TestPutObjectChunked_PartialFailRollsBackBlobs_BeforeCommitError(t *testing
 	require.Error(t, err)
 	assert.ErrorIs(t, err, hookErr)
 
-	assert.Empty(t, deps.proposeCalls, "beforeCommit failure must not commit")
+	assert.Empty(t, deps.writeQuorumMetaCalls, "beforeCommit failure must not commit")
 	cleanedBlobs := map[string]struct{}{}
 	for _, dc := range deps.deleteCalls {
 		cleanedBlobs[dc.shardKey] = struct{}{}
@@ -391,7 +627,7 @@ func TestPutObjectChunked_PartialFailRollsBackBlobs_ProposeError(t *testing.T) {
 	payload := bytes.Repeat([]byte("D"), 2*chunk)
 	sp := makeSpool(t, payload)
 	deps := newFakeBackendWithGroups(fourPGFixture())
-	deps.proposeErr = errors.New("raft propose failed")
+	deps.writeQuorumMetaErr = errors.New("quorum meta write failed")
 
 	blobIDs := make([]string, 2)
 	for i := range blobIDs {
@@ -408,8 +644,8 @@ func TestPutObjectChunked_PartialFailRollsBackBlobs_ProposeError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "commit meta")
 
-	// propose was attempted exactly once (and failed).
-	require.Len(t, deps.proposeCalls, 1)
+	// writeQuorumMeta was attempted exactly once (and failed).
+	require.Len(t, deps.writeQuorumMetaCalls, 1)
 
 	// Both segments' blobs cleaned up after propose failure (committed=false).
 	cleanedBlobs := map[string]struct{}{}
@@ -443,7 +679,7 @@ func TestPutObjectChunked_PartialFailRollsBackBlobs_DeleteShardsBestEffort(t *te
 		nil, "", 0, false, "", nil, nil, nil)
 	require.Error(t, err)
 	// PUT errors cleanly even though cleanup also failed (no panic).
-	assert.Empty(t, deps.proposeCalls)
+	assert.Empty(t, deps.writeQuorumMetaCalls)
 }
 
 func TestPutObjectChunked_CommitsMultipartParts(t *testing.T) {
@@ -468,9 +704,145 @@ func TestPutObjectChunked_CommitsMultipartParts(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, parts, obj.Parts)
 
-	require.Len(t, deps.proposeCalls, 1)
-	cmd := deps.proposeCalls[0].cmd.(PutObjectMetaCmd)
+	require.Len(t, deps.writeQuorumMetaCalls, 1)
+	cmd := deps.writeQuorumMetaCalls[0]
 	require.Equal(t, parts, cmd.Parts)
+}
+
+func TestPutObjectChunked_BatchesStagedPromotesByNode(t *testing.T) {
+	chunk := testChunkedPutChunkSize
+	payload := bytes.Repeat([]byte("S"), 2*chunk)
+	sp := makeSpool(t, payload)
+	deps := newFakeBackendWithGroups(fourPGFixture())
+	deps.writePeer = func(int) []string { return []string{"node-a", "node-b"} }
+
+	blobIDs := []string{
+		uuid.Must(uuid.NewV7()).String(),
+		uuid.Must(uuid.NewV7()).String(),
+	}
+	csb := newCSBWithTestChunks(deps, blobIDs)
+	csb.stagingTxnID = "txn-promote"
+
+	type batchCall struct {
+		node  string
+		pairs []stagedPromotePair
+	}
+	var calls []batchCall
+	csb.promoteStagedBatchFn = func(_ context.Context, node, _ string, pairs []stagedPromotePair) error {
+		calls = append(calls, batchCall{node: node, pairs: append([]stagedPromotePair(nil), pairs...)})
+		return nil
+	}
+
+	body, err := sp.Open()
+	require.NoError(t, err)
+	defer body.Close()
+	_, err = runChunkedPut(context.Background(), csb, body,
+		"bucket", "large.bin", "v1", "application/octet-stream",
+		nil, "", 0, false, "", nil, nil, nil)
+	require.NoError(t, err)
+
+	require.Len(t, calls, 2, "two placement nodes should produce two promote batches, not segment*node calls")
+	callsByNode := make(map[string][]stagedPromotePair, len(calls))
+	for _, call := range calls {
+		callsByNode[call.node] = call.pairs
+	}
+	require.ElementsMatch(t, []string{"node-a", "node-b"}, []string{calls[0].node, calls[1].node})
+	for _, node := range []string{"node-a", "node-b"} {
+		pairs := callsByNode[node]
+		require.Len(t, pairs, 2, "each node batch should promote both segment blobs")
+		for i, pair := range pairs {
+			require.Equal(t, segmentStagingShardKey("txn-promote", blobIDs[i]), pair.stagingKey)
+			require.Equal(t, "large.bin/segments/"+blobIDs[i], pair.finalKey)
+		}
+	}
+}
+
+func TestPutObjectChunked_EmitsPromoteAndQuorumMetaTrace(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "put-trace.jsonl")
+	t.Setenv("GRAINFS_PUT_TRACE_FILE", path)
+	t.Setenv("GRAINFS_NODE_ID", "node-trace")
+	reloadPutTraceSinkForTest()
+	t.Cleanup(reloadPutTraceSinkForTest)
+
+	chunk := testChunkedPutChunkSize
+	payload := bytes.Repeat([]byte("T"), chunk)
+	sp := makeSpool(t, payload)
+	deps := newFakeBackendWithGroups(fourPGFixture())
+	deps.writePeer = func(int) []string { return []string{"node-a", "node-b"} }
+
+	blobIDs := []string{uuid.Must(uuid.NewV7()).String()}
+	csb := newCSBWithTestChunks(deps, blobIDs)
+	csb.stagingTxnID = "txn-trace"
+	csb.promoteStagedBatchFn = func(_ context.Context, _ string, _ string, _ []stagedPromotePair) error {
+		return nil
+	}
+
+	body, err := sp.Open()
+	require.NoError(t, err)
+	defer body.Close()
+	ctx := ContextWithPutTrace(context.Background(), PutTraceRequest{
+		Bucket:      "bucket",
+		Key:         "large.bin",
+		Ingress:     PutTraceIngressLocalLeader,
+		SizeClass:   PutTraceSizeSmall,
+		ForwardMode: PutTraceForwardNone,
+	})
+	_, err = runChunkedPut(ctx, csb, body,
+		"bucket", "large.bin", "v1", "application/octet-stream",
+		nil, "", 0, false, "", nil, nil, nil)
+	require.NoError(t, err)
+
+	events := readPutTraceEvents(t, path)
+	requirePutTraceStage(t, events, PutTraceStageSegmentWritePrepare)
+	requirePutTraceStage(t, events, PutTraceStagePromoteStagedNodeBatch)
+	requirePutTraceStage(t, events, PutTraceStagePromoteStagedShards)
+	requirePutTraceStage(t, events, PutTraceStageQuorumMetaWrite)
+}
+
+func TestPutObjectChunked_PromotesStagedNodeBatchesConcurrently(t *testing.T) {
+	chunk := testChunkedPutChunkSize
+	payload := bytes.Repeat([]byte("P"), 2*chunk)
+	sp := makeSpool(t, payload)
+	deps := newFakeBackendWithGroups(fourPGFixture())
+	deps.writePeer = func(int) []string { return []string{"node-a", "node-b"} }
+
+	blobIDs := []string{
+		uuid.Must(uuid.NewV7()).String(),
+		uuid.Must(uuid.NewV7()).String(),
+	}
+	csb := newCSBWithTestChunks(deps, blobIDs)
+	csb.stagingTxnID = "txn-promote-concurrent"
+
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	csb.promoteStagedBatchFn = func(_ context.Context, node, _ string, _ []stagedPromotePair) error {
+		started <- node
+		<-release
+		return nil
+	}
+
+	body, err := sp.Open()
+	require.NoError(t, err)
+	defer body.Close()
+	done := make(chan error, 1)
+	go func() {
+		_, runErr := runChunkedPut(context.Background(), csb, body,
+			"bucket", "large.bin", "v1", "application/octet-stream",
+			nil, "", 0, false, "", nil, nil, nil)
+		done <- runErr
+	}()
+
+	first := <-started
+	var second string
+	select {
+	case second = <-started:
+	case <-time.After(250 * time.Millisecond):
+		close(release)
+		require.Failf(t, "promote batches did not run concurrently", "only %s started before release", first)
+	}
+	require.ElementsMatch(t, []string{"node-a", "node-b"}, []string{first, second})
+	close(release)
+	require.NoError(t, <-done)
 }
 
 func TestPutObjectChunked_RejectsBelowChunkThreshold(t *testing.T) {
@@ -478,9 +850,9 @@ func TestPutObjectChunked_RejectsBelowChunkThreshold(t *testing.T) {
 	// > DefaultChunkSize. Direct call with smaller size returns an error.
 	sp := makeSpool(t, []byte("small"))
 	b := &DistributedBackend{}
-	_, err := b.putObjectChunked(context.Background(),
+	_, err := b.putChunked(context.Background(),
 		"bucket", "k", "v", sp, "ct", nil, "",
-		0, false, "", nil, nil, nil)
+		0, 0, false, "", nil, nil, nil)
 	require.Error(t, err)
 }
 
@@ -514,9 +886,8 @@ func TestChunkedPut_PreservesTags(t *testing.T) {
 		nil, "", 0, false, "", nil, nil, wantTags)
 	require.NoError(t, err)
 
-	require.Len(t, deps.proposeCalls, 1, "exactly one PutObjectMetaCmd proposed")
-	assert.Equal(t, CmdPutObjectMeta, deps.proposeCalls[0].cmdType)
-	cmd := deps.proposeCalls[0].cmd.(PutObjectMetaCmd)
+	require.Len(t, deps.writeQuorumMetaCalls, 1, "exactly one quorum meta write")
+	cmd := deps.writeQuorumMetaCalls[0]
 	require.Equal(t, wantTags, cmd.Tags,
 		"chunked-PUT must thread tags into PutObjectMetaCmd; clobbering this drops tags on every large object")
 }
@@ -524,33 +895,6 @@ func TestChunkedPut_PreservesTags(t *testing.T) {
 func TestChunkedChooseModTime(t *testing.T) {
 	assert.Equal(t, int64(123), chunkedChooseModTime(123, true, 999), "preserve=true returns caller modTime")
 	assert.Equal(t, int64(999), chunkedChooseModTime(123, false, 999), "preserve=false stamps now")
-}
-
-// TestPutObjectChunked_SizeGuard_EndToEnd locks down the outer routing
-// decision in putObjectECSpooledWithOptionalModTime (backend.go): objects at
-// or below DefaultChunkSize must NOT take the chunked path; strictly larger
-// objects must. The routing predicate is extracted as chunkedPathThresholdMet
-// so the threshold can be asserted without a full DistributedBackend fixture
-// while still being the exact predicate consulted at the call site.
-func TestPutObjectChunked_SizeGuard_EndToEnd(t *testing.T) {
-	chunk := int64(storage.DefaultChunkSize)
-	cases := []struct {
-		name      string
-		size      int64
-		wantChunk bool
-	}{
-		{name: "below_threshold_8MiB", size: 8 << 20, wantChunk: false},
-		{name: "at_threshold_16MiB", size: chunk, wantChunk: false},
-		{name: "just_above_threshold", size: chunk + 1, wantChunk: true},
-		{name: "above_threshold_17MiB", size: 17 << 20, wantChunk: true},
-		{name: "well_above_threshold_64MiB", size: 64 << 20, wantChunk: true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.wantChunk, chunkedPathThresholdMet(tc.size),
-				"size=%d (chunk=%d) routing decision", tc.size, chunk)
-		})
-	}
 }
 
 func TestAcquireChunkedMultipartCompleteSlotHonorsContext(t *testing.T) {
@@ -569,9 +913,9 @@ func TestAcquireChunkedMultipartCompleteSlotHonorsContext(t *testing.T) {
 }
 
 func TestChunkedMultipartCompleteChunkSizeCapsDefault(t *testing.T) {
-	require.Equal(t, 8<<20, chunkedMultipartCompleteChunkSize(storage.DefaultChunkSize))
-	require.Equal(t, 4<<20, chunkedMultipartCompleteChunkSize(4<<20))
-	require.Equal(t, 8<<20, chunkedMultipartCompleteChunkSize(0))
+	require.Equal(t, int64(8<<20), chunkedMultipartCompleteChunkSize(storage.DefaultChunkSize))
+	require.Equal(t, int64(4<<20), chunkedMultipartCompleteChunkSize(4<<20))
+	require.Equal(t, int64(8<<20), chunkedMultipartCompleteChunkSize(0))
 }
 
 // errReaderAfter wraps an underlying io.Reader; once the cumulative bytes
@@ -639,8 +983,8 @@ func TestPutObjectChunked_PartialFailRollsBackBlobs_ChunkerError(t *testing.T) {
 	assert.ErrorIs(t, err, io.ErrUnexpectedEOF,
 		"io.ErrUnexpectedEOF from the body must propagate through runChunkedPut")
 
-	// No raft commit on chunker failure.
-	assert.Empty(t, deps.proposeCalls, "chunker error must not propose meta")
+	// No commit on chunker failure.
+	assert.Empty(t, deps.writeQuorumMetaCalls, "chunker error must not commit meta")
 
 	// Every blob that the placement layer recorded MUST appear in the
 	// cleanup recorder. We don't pin the exact count (segment 0 always

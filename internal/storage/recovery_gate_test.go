@@ -22,7 +22,7 @@ func TestRecoveryWriteGateBlocksMutators(t *testing.T) {
 	require.ErrorIs(t, gate.DeleteObject(context.Background(), "b", "k"), ErrRecoveryWriteDisabled)
 	_, err = gate.CreateMultipartUpload(context.Background(), "b", "k", "text/plain")
 	require.ErrorIs(t, err, ErrRecoveryWriteDisabled)
-	_, err = gate.UploadPart(context.Background(), "b", "k", "u", 1, strings.NewReader("data"))
+	_, err = gate.UploadPart(context.Background(), "b", "k", "u", 1, strings.NewReader("data"), "")
 	require.ErrorIs(t, err, ErrRecoveryWriteDisabled)
 	_, err = gate.CompleteMultipartUpload(context.Background(), "b", "k", "u", nil)
 	require.ErrorIs(t, err, ErrRecoveryWriteDisabled)
@@ -39,9 +39,6 @@ func TestRecoveryWriteGateBlocksMutators(t *testing.T) {
 	require.ErrorIs(t, gate.DeleteObjectVersion("b", "k", "v1"), ErrRecoveryWriteDisabled)
 	_, err = gate.DeleteObjectReturningMarker("b", "k")
 	require.ErrorIs(t, err, ErrRecoveryWriteDisabled)
-	_, _, err = gate.RestoreObjects(nil)
-	require.ErrorIs(t, err, ErrRecoveryWriteDisabled)
-	require.ErrorIs(t, gate.RestoreBuckets(nil), ErrRecoveryWriteDisabled)
 }
 
 func TestRecoveryWriteGateAllowsReads(t *testing.T) {

@@ -1,0 +1,457 @@
+package cluster
+
+import (
+	"bytes"
+	"context"
+	"io"
+	"path/filepath"
+	"testing"
+
+	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/transport"
+	"github.com/stretchr/testify/require"
+)
+
+// putVersioned PUTs a body on a versioning-enabled bucket and returns the vid.
+func putVersioned(t *testing.T, b *DistributedBackend, ctx context.Context, bkt, key, body string) string {
+	t.Helper()
+	sz := int64(len(body))
+	obj, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{
+		Bucket: bkt, Key: key, Body: bytes.NewReader([]byte(body)),
+		ContentType: "text/plain", SizeHint: &sz,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, obj.VersionID)
+	return obj.VersionID
+}
+
+// TestReadQuorumMetaVersionsLocal_ListsKeyVersions proves the local lister
+// enumerates every per-version blob under .quorum_meta_versions/{bucket}/{key}/.
+func TestReadQuorumMetaVersionsLocal_ListsKeyVersions(t *testing.T) {
+	b := newTestDistributedBackend(t)
+	// Two version blobs for one key, written via the S1 local primitive.
+	for _, vid := range []string{"v1", "v2"} {
+		blob, err := encodeQuorumMetaBlob(PutObjectMetaCmd{Bucket: "bkt", Key: "a/b/c.txt", VersionID: vid, ETag: "e-" + vid})
+		require.NoError(t, err)
+		require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal("bkt", filepath.Join("a/b/c.txt", vid), blob))
+	}
+	cmds, err := b.shardSvc.readQuorumMetaVersionsLocal("bkt", "a/b/c.txt")
+	require.NoError(t, err)
+	got := map[string]string{}
+	for _, c := range cmds {
+		got[c.VersionID] = c.ETag
+	}
+	require.Equal(t, map[string]string{"v1": "e-v1", "v2": "e-v2"}, got)
+}
+
+// TestReadQuorumMetaVersions_RPC proves the per-version list RPC enumerates a
+// remote placement node's per-version blobs for a key.
+func TestReadQuorumMetaVersions_RPC(t *testing.T) {
+	ctx := context.Background()
+	keeper, clusterID := testDEKKeeper(t)
+
+	trA := transport.MustNewHTTPTransport("test-cluster-psk")
+	trB := transport.MustNewHTTPTransport("test-cluster-psk")
+	require.NoError(t, trA.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, trB.Listen(ctx, "127.0.0.1:0"))
+	defer trA.Close()
+	defer trB.Close()
+
+	svcA := NewShardService(t.TempDir(), trA, WithShardDEKKeeper(keeper, clusterID))
+	svcB := NewShardService(t.TempDir(), trB, WithShardDEKKeeper(keeper, clusterID))
+	trB.RegisterBufferedRoute(transport.RouteShardRPC, svcB.NativeRPCHandler())
+
+	for _, vid := range []string{"v1", "v2"} {
+		blob, err := encodeQuorumMetaBlob(PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: vid, ETag: "e-" + vid})
+		require.NoError(t, err)
+		require.NoError(t, svcB.writeQuorumMetaVersionLocal("bkt", filepath.Join("k", vid), blob))
+	}
+
+	cmds, err := svcA.ReadQuorumMetaVersions(ctx, trB.LocalAddr(), "bkt", "k")
+	require.NoError(t, err)
+	got := map[string]string{}
+	for _, c := range cmds {
+		got[c.VersionID] = c.ETag
+	}
+	require.Equal(t, map[string]string{"v1": "e-v1", "v2": "e-v2"}, got)
+}
+
+// TestReadQuorumMetaVersions_UnionsAcrossGroups proves the backend fan-out
+// unions a key's per-version blobs across ALL placement groups (spanning
+// generations), not just the bucket-routed group: v1 on group g1's node A, v2 on
+// group g2's node B → both returned; deriveLatestVersion picks v2 (max VID).
+func TestReadQuorumMetaVersions_UnionsAcrossGroups(t *testing.T) {
+	ctx := context.Background()
+	keeper, clusterID := testDEKKeeper(t)
+
+	trA := transport.MustNewHTTPTransport("test-cluster-psk")
+	trB := transport.MustNewHTTPTransport("test-cluster-psk")
+	require.NoError(t, trA.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, trB.Listen(ctx, "127.0.0.1:0"))
+	defer trA.Close()
+	defer trB.Close()
+
+	svcA := NewShardService(t.TempDir(), trA, WithShardDEKKeeper(keeper, clusterID))
+	svcB := NewShardService(t.TempDir(), trB, WithShardDEKKeeper(keeper, clusterID))
+	trA.RegisterBufferedRoute(transport.RouteShardRPC, svcA.NativeRPCHandler())
+	trB.RegisterBufferedRoute(transport.RouteShardRPC, svcB.NativeRPCHandler())
+
+	write := func(svc *ShardService, vid string) {
+		t.Helper()
+		blob, err := encodeQuorumMetaBlob(PutObjectMetaCmd{Bucket: "bkt", Key: "k", VersionID: vid, ETag: "e-" + vid})
+		require.NoError(t, err)
+		require.NoError(t, svc.writeQuorumMetaVersionLocal("bkt", filepath.Join("k", vid), blob))
+	}
+	// v1 on node A (group g1), v2 on node B (group g2 — a second generation).
+	write(svcA, "v1")
+	write(svcB, "v2")
+
+	backendA := &DistributedBackend{
+		selfAddr: trA.LocalAddr(),
+		shardSvc: svcA,
+		shardGroup: &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+			"g1": {ID: "g1", PeerIDs: []string{trA.LocalAddr()}},
+			"g2": {ID: "g2", PeerIDs: []string{trB.LocalAddr()}},
+		}},
+	}
+
+	cmds, err := backendA.readQuorumMetaVersions("bkt", "k")
+	require.NoError(t, err)
+	got := map[string]string{}
+	for _, c := range cmds {
+		got[c.VersionID] = c.ETag
+	}
+	require.Equal(t, map[string]string{"v1": "e-v1", "v2": "e-v2"}, got, "union must span all groups/generations")
+
+	latest, live := deriveLatestVersion(cmds)
+	require.True(t, live)
+	require.Equal(t, "v2", latest.VersionID, "derive-latest = max VersionID")
+}
+
+// TestDeriveLatestVersion_MarkerAsLatestIsDeleted proves a delete-marker with
+// the max VersionID makes the object's latest state "deleted" (not live).
+func TestDeriveLatestVersion_MarkerAsLatestIsDeleted(t *testing.T) {
+	cmds := []PutObjectMetaCmd{
+		{VersionID: "v1", ETag: "e1"},
+		{VersionID: "v2", IsDeleteMarker: true}, // marker is the newest
+	}
+	_, live := deriveLatestVersion(cmds)
+	require.False(t, live, "delete marker as latest → object is deleted")
+
+	// Empty set → not live either.
+	_, liveEmpty := deriveLatestVersion(nil)
+	require.False(t, liveEmpty)
+}
+
+// TestHeadObjectMeta_PerVersionHookOverridesLegacyLatest proves the read hook is
+// authoritative: when the per-version store holds a NEWER version (v2) than the
+// legacy latest-only blob (v1) — the situation after a cross-generation write or
+// a per-version-store-ahead state — HeadObject derives v2, not the stale legacy
+// v1. RED before the hook: headObjectMeta returns the legacy latest-only v1.
+func TestHeadObjectMeta_PerVersionHookOverridesLegacyLatest(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	const bkt, key = "vbkt", "obj"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+
+	// Legacy latest-only blob says v1 (older); per-version store has v1 AND a
+	// newer v2 that the latest-only blob never saw.
+	v1Blob, err := encodeQuorumMetaBlob(PutObjectMetaCmd{Bucket: bkt, Key: key, VersionID: "019ed400-0000-7000-8000-000000000001", ETag: "etag-v1", NodeIDs: []string{"self"}, ECData: 1})
+	require.NoError(t, err)
+	require.NoError(t, b.shardSvc.writeQuorumMetaLocal(bkt, key, v1Blob)) // legacy latest-only = v1
+	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal(bkt, filepath.Join(key, "019ed400-0000-7000-8000-000000000001"), v1Blob))
+	v2Blob, err := encodeQuorumMetaBlob(PutObjectMetaCmd{Bucket: bkt, Key: key, VersionID: "019ed400-0000-7000-8000-000000000002", ETag: "etag-v2", NodeIDs: []string{"self"}, ECData: 1})
+	require.NoError(t, err)
+	require.NoError(t, b.shardSvc.writeQuorumMetaVersionLocal(bkt, filepath.Join(key, "019ed400-0000-7000-8000-000000000002"), v2Blob))
+
+	head, err := b.HeadObject(ctx, bkt, key)
+	require.NoError(t, err)
+	require.Equal(t, "etag-v2", head.ETag, "per-version derive must win over stale legacy latest-only blob")
+}
+
+// TestHeadObject_PerVersionDerivesLatest proves HeadObject derives latest by
+// scan over per-version blobs: PUT v1, v2 → HeadObject returns v2.
+func TestHeadObject_PerVersionDerivesLatest(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	const bkt, key = "vbkt", "obj"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+
+	_ = putVersioned(t, b, ctx, bkt, key, "content-v1")
+	vid2 := putVersioned(t, b, ctx, bkt, key, "content-v2")
+
+	head, err := b.HeadObject(ctx, bkt, key)
+	require.NoError(t, err)
+	require.Equal(t, vid2, head.VersionID, "HEAD must derive latest = v2 from per-version blobs")
+}
+
+// TestGetObjectVersion_PerVersionDirectRead proves GetObjectVersion(v1) resolves
+// the older version from its own per-version blob.
+func TestGetObjectVersion_PerVersionDirectRead(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	const bkt, key = "vbkt", "obj"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+
+	vid1 := putVersioned(t, b, ctx, bkt, key, "content-v1")
+	_ = putVersioned(t, b, ctx, bkt, key, "content-v2")
+
+	hv, err := b.HeadObjectVersion(context.Background(), bkt, key, vid1)
+	require.NoError(t, err)
+	require.Equal(t, vid1, hv.VersionID)
+
+	rc, _, err := b.GetObjectVersion(context.Background(), bkt, key, vid1)
+	require.NoError(t, err)
+	got, _ := io.ReadAll(rc)
+	rc.Close()
+	require.Equal(t, []byte("content-v1"), got)
+}
+
+// TestHeadObject_DeleteMarkerAsLatest404 proves a soft-delete (delete marker is
+// the newest per-version blob) makes HeadObject return 404.
+func TestHeadObject_DeleteMarkerAsLatest404(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	const bkt, key = "vbkt", "obj"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+
+	vid1 := putVersioned(t, b, ctx, bkt, key, "content-v1")
+	require.NoError(t, b.DeleteObject(ctx, bkt, key)) // soft-delete → marker as latest
+
+	_, err := b.HeadObject(ctx, bkt, key)
+	require.ErrorIs(t, err, storage.ErrObjectNotFound, "delete marker as latest → HEAD 404")
+
+	// The live older version is still readable by id.
+	rc, _, err := b.GetObjectVersion(context.Background(), bkt, key, vid1)
+	require.NoError(t, err)
+	got, _ := io.ReadAll(rc)
+	rc.Close()
+	require.Equal(t, []byte("content-v1"), got)
+}
+
+// TestHeadObject_LegacyFallbackNoPerVersionBlob proves an object with zero
+// per-version blobs (legacy/non-versioned) still resolves via the legacy
+// quorum-meta path — behavior-safety for pre-S1 objects.
+func TestHeadObject_LegacyFallbackNoPerVersionBlob(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	const bkt, key = "legacybkt", "obj"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	// Non-versioned bucket: PUT writes only the latest-only blob, no per-version blobs.
+	body := "legacy-body"
+	sz := int64(len(body))
+	put, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{
+		Bucket: bkt, Key: key, Body: bytes.NewReader([]byte(body)),
+		ContentType: "text/plain", SizeHint: &sz,
+	})
+	require.NoError(t, err)
+
+	head, err := b.HeadObject(ctx, bkt, key)
+	require.NoError(t, err, "legacy object (no per-version blob) must resolve via fallback")
+	require.Equal(t, put.ETag, head.ETag)
+
+	rc, _, err := b.GetObject(ctx, bkt, key)
+	require.NoError(t, err)
+	got, _ := io.ReadAll(rc)
+	rc.Close()
+	require.Equal(t, []byte(body), got)
+}
+
+// TestDeleteObjectVersion_DualDeletesPerVersionBlob proves DeleteObjectVersion
+// also removes the per-version blob: after deleting v2, HeadObject re-derives v1,
+// the v2 per-version blob is gone, and GetObjectVersion(v2) → 404.
+func TestDeleteObjectVersion_DualDeletesPerVersionBlob(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	const bkt, key = "vbkt", "obj"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+
+	vid1 := putVersioned(t, b, ctx, bkt, key, "content-v1")
+	vid2 := putVersioned(t, b, ctx, bkt, key, "content-v2")
+
+	require.NoError(t, b.DeleteObjectVersion(bkt, key, vid2))
+
+	// HeadObject re-derives latest = v1 (v2's per-version blob is now a tombstone).
+	head, err := b.HeadObject(ctx, bkt, key)
+	require.NoError(t, err)
+	require.Equal(t, vid1, head.VersionID, "after hard-deleting v2, HEAD must re-derive v1")
+
+	// Blob-primary: the v2 per-version blob is REPLACED by a hard-delete tombstone
+	// (not physically purged). The low-level reader still surfaces it (so the orphan
+	// walker can reconcile it), but it carries IsHardDeleted.
+	cmds, err := b.readQuorumMetaVersions(bkt, key)
+	require.NoError(t, err)
+	var v2 *PutObjectMetaCmd
+	for i := range cmds {
+		if cmds[i].VersionID == vid2 {
+			v2 = &cmds[i]
+		}
+	}
+	require.NotNil(t, v2, "v2 per-version blob remains as a tombstone")
+	require.True(t, v2.IsHardDeleted, "v2 blob must be a hard-delete tombstone")
+
+	// GetObjectVersion(v2) → 404.
+	_, _, gerr := b.GetObjectVersion(context.Background(), bkt, key, vid2)
+	require.ErrorIs(t, gerr, storage.ErrObjectNotFound)
+}
+
+// TestDeleteObjectVersion_WritesTombstoneNotPurge proves the blob-primary
+// hard-delete writes a durable tombstone (IsHardDeleted) in place of the data blob
+// rather than purging it, with no raft propose, while reads exclude the version.
+func TestDeleteObjectVersion_WritesTombstoneNotPurge(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	const bkt, key = "vbkt", "obj"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+
+	vid1 := putVersioned(t, b, ctx, bkt, key, "content-v1")
+	vid2 := putVersioned(t, b, ctx, bkt, key, "content-v2")
+
+	require.NoError(t, b.DeleteObjectVersion(bkt, key, vid2))
+
+	// The v2 blob is present locally as a tombstone (not purged).
+	local, err := b.shardSvc.readQuorumMetaVersionsLocal(bkt, key)
+	require.NoError(t, err)
+	var v2 *PutObjectMetaCmd
+	for i := range local {
+		if local[i].VersionID == vid2 {
+			v2 = &local[i]
+		}
+	}
+	require.NotNil(t, v2, "v2 per-version blob must remain (as a tombstone)")
+	require.True(t, v2.IsHardDeleted, "v2 blob must be a hard-delete tombstone")
+	require.Greater(t, v2.MetaSeq, uint64(0), "tombstone MetaSeq is bumped above the data blob")
+
+	// Reads exclude the hard-deleted version; latest falls to v1.
+	_, _, gerr := b.GetObjectVersion(ctx, bkt, key, vid2)
+	require.ErrorIs(t, gerr, storage.ErrObjectNotFound)
+	head, herr := b.HeadObject(ctx, bkt, key)
+	require.NoError(t, herr)
+	require.Equal(t, vid1, head.VersionID)
+}
+
+// TestGetObjectVersion_BlobAbsentFSMOnlyIs404 proves the blob-primary contract: on
+// a versioning-enabled key, a specific version that exists ONLY as a BadgerDB
+// ObjectMetaKeyV FSM record with NO per-version blob is NOT served — the per-version
+// blob is the blob authority, so a stale FSM record must not resurrect it (404). The
+// key ALSO has a normal version WITH a per-version blob, which still resolves.
+func TestGetObjectVersion_BlobAbsentFSMOnlyIs404(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	const bkt, key = "vbkt", "obj"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+
+	// An FSM-only version (an ObjectMetaKeyV record with NO per-version blob) can no
+	// longer be seeded: the per-object FSM commands were retired (data-plane raft-free
+	// Slice 2) and CmdPutObjectMeta apply is now a no-op, so no record is created. The
+	// version below therefore simply never exists — neither a blob nor an FSM record —
+	// so the blob-primary 404 contract still holds for the same reason (no blob).
+	const blobAbsentVid = "019ed400-0000-7000-8000-000000000001"
+
+	// A normal versioned PUT → writes a per-version blob (the latest, blob-backed).
+	_ = putVersioned(t, b, ctx, bkt, key, "content-latest")
+
+	// Blob-primary: a blob-absent plain versioned version is 404 (no FSM resurrection).
+	_, err := b.HeadObjectVersion(context.Background(), bkt, key, blobAbsentVid)
+	require.ErrorIs(t, err, storage.ErrObjectNotFound)
+
+	// The blob-backed latest still resolves.
+	latest, lerr := b.HeadObject(context.Background(), bkt, key)
+	require.NoError(t, lerr)
+	require.NotEqual(t, blobAbsentVid, latest.VersionID)
+}
+
+// TestS2a_EpicA_ReadDeleteEndToEnd is the Epic A core: versioned PUT v1+v2,
+// HEAD=v2; DELETE v2 → HEAD=v1, GET ?versionId=v2 → 404, GET(latest)=v1 body;
+// then DELETE v1 → HEAD=404.
+func TestS2a_EpicA_ReadDeleteEndToEnd(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	const bkt, key = "vbkt", "obj"
+	require.NoError(t, b.CreateBucket(ctx, bkt))
+	require.NoError(t, b.SetBucketVersioning(bkt, "Enabled"))
+
+	vid1 := putVersioned(t, b, ctx, bkt, key, "content-v1")
+	vid2 := putVersioned(t, b, ctx, bkt, key, "content-v2")
+
+	head, err := b.HeadObject(ctx, bkt, key)
+	require.NoError(t, err)
+	require.Equal(t, vid2, head.VersionID)
+
+	require.NoError(t, b.DeleteObjectVersion(bkt, key, vid2))
+
+	head, err = b.HeadObject(ctx, bkt, key)
+	require.NoError(t, err)
+	require.Equal(t, vid1, head.VersionID, "HEAD re-derives v1 after deleting v2")
+
+	_, _, gverr := b.GetObjectVersion(context.Background(), bkt, key, vid2)
+	require.ErrorIs(t, gverr, storage.ErrObjectNotFound)
+
+	rc, _, err := b.GetObject(ctx, bkt, key)
+	require.NoError(t, err)
+	got, _ := io.ReadAll(rc)
+	rc.Close()
+	require.Equal(t, []byte("content-v1"), got, "GET latest returns v1 body")
+
+	// NOTE (spec Risks/notes — documented S2a limitation, NOT asserted here):
+	// deleting the LAST remaining version drops the key's per-version blobs to
+	// zero, so reads fall back to the legacy latest-only quorum-meta blob, which
+	// S2a does NOT maintain on hard-delete-of-latest (only PUT/soft-delete
+	// dual-write it; S2b switches LIST/latest off it entirely). So after deleting
+	// every version, HEAD/GET-by-id can still resolve the stale latest-only blob.
+	// That is out of S2a scope (and not a regression — pre-S2a it was wrong too).
+}
+
+// TestS2a_GenerationUnion_DeriveAndDelete proves derive-latest unions across
+// generations (v1 on group g1/node A, v2 on group g2/node B) — NOT a probeRead
+// short-circuit — and that hard-deleting v2 re-derives v1.
+func TestS2a_GenerationUnion_DeriveAndDelete(t *testing.T) {
+	ctx := context.Background()
+	keeper, clusterID := testDEKKeeper(t)
+
+	trA := transport.MustNewHTTPTransport("test-cluster-psk")
+	trB := transport.MustNewHTTPTransport("test-cluster-psk")
+	require.NoError(t, trA.Listen(ctx, "127.0.0.1:0"))
+	require.NoError(t, trB.Listen(ctx, "127.0.0.1:0"))
+	defer trA.Close()
+	defer trB.Close()
+
+	svcA := NewShardService(t.TempDir(), trA, WithShardDEKKeeper(keeper, clusterID))
+	svcB := NewShardService(t.TempDir(), trB, WithShardDEKKeeper(keeper, clusterID))
+	trA.RegisterBufferedRoute(transport.RouteShardRPC, svcA.NativeRPCHandler())
+	trB.RegisterBufferedRoute(transport.RouteShardRPC, svcB.NativeRPCHandler())
+
+	const bkt, key = "bkt", "k"
+	const vid1 = "019ed400-0000-7000-8000-000000000001"
+	const vid2 = "019ed400-0000-7000-8000-000000000002"
+	write := func(svc *ShardService, vid, node string) {
+		t.Helper()
+		blob, err := encodeQuorumMetaBlob(PutObjectMetaCmd{Bucket: bkt, Key: key, VersionID: vid, ETag: "e-" + vid, NodeIDs: []string{node}, ECData: 1})
+		require.NoError(t, err)
+		require.NoError(t, svc.writeQuorumMetaVersionLocal(bkt, filepath.Join(key, vid), blob))
+	}
+	write(svcA, vid1, trA.LocalAddr())
+	write(svcB, vid2, trB.LocalAddr())
+
+	backendA := &DistributedBackend{
+		selfAddr: trA.LocalAddr(),
+		shardSvc: svcA,
+		shardGroup: &fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+			"g1": {ID: "g1", PeerIDs: []string{trA.LocalAddr()}},
+			"g2": {ID: "g2", PeerIDs: []string{trB.LocalAddr()}},
+		}},
+	}
+
+	cmds, err := backendA.readQuorumMetaVersions(bkt, key)
+	require.NoError(t, err)
+	latest, live := deriveLatestVersion(cmds)
+	require.True(t, live)
+	require.Equal(t, vid2, latest.VersionID, "union across generations derives v2 (not probeRead short-circuit)")
+}

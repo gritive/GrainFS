@@ -3,11 +3,8 @@ package serveruntime
 import (
 	"context"
 	"errors"
-	"fmt"
-	"io"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/time/rate"
 
@@ -15,10 +12,98 @@ import (
 	"github.com/gritive/GrainFS/internal/receipt"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/server/receiptsvc"
-	"github.com/gritive/GrainFS/internal/serveruntime/executioncluster"
 	"github.com/gritive/GrainFS/internal/startuprecovery"
-	"github.com/gritive/GrainFS/internal/volume"
+	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/uuidutil"
 )
+
+// redundancyUpgradeMax decides whether the EC-redundancy-upgrade sweep should
+// be enabled on the scrubber and, if so, the per-cycle relocation cap. A
+// non-positive configured max falls back to the default of 8.
+func redundancyUpgradeMax(cfg Config) (enabled bool, max int) {
+	if !cfg.ECRedundancyUpgrade {
+		return false, 0
+	}
+	max = cfg.ECRedundancyUpgradeMax
+	if max <= 0 {
+		max = 8
+	}
+	return true, max
+}
+
+const gcFreshnessPingTimeout = 2 * time.Second
+
+type gcPeerPinger interface {
+	Ping(ctx context.Context, peer string) error
+}
+
+func gcFreshnessReachable(
+	ctx context.Context,
+	dgMgr *cluster.DataGroupManager,
+	meta cluster.ShardGroupSource,
+	pinger gcPeerPinger,
+	nodeID string,
+	raftAddr string,
+) bool {
+	if dgMgr == nil || meta == nil {
+		return false
+	}
+	seen := make(map[string]struct{})
+	for _, dg := range dgMgr.All() {
+		if dg == nil || dg.Backend() == nil {
+			continue
+		}
+		entry, ok := meta.ShardGroup(dg.ID())
+		if !ok || len(entry.PeerIDs) == 0 {
+			return false
+		}
+		peers := cluster.NewShardGroupPeerSet(entry)
+		localPeer, hasLocal := peers.MatchLocal(nodeID, raftAddr)
+		for _, peer := range entry.PeerIDs {
+			if hasLocal && peer == localPeer {
+				continue
+			}
+			if peer == "" {
+				return false
+			}
+			if _, dup := seen[peer]; dup {
+				continue
+			}
+			seen[peer] = struct{}{}
+			if pinger == nil {
+				return false
+			}
+			pingCtx, cancel := context.WithTimeout(ctx, gcFreshnessPingTimeout)
+			err := pinger.Ping(pingCtx, peer)
+			cancel()
+			if err != nil {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func gcSingletonOwnerForBucket(
+	dgMgr *cluster.DataGroupManager,
+	router *cluster.Router,
+	meta cluster.ShardGroupSource,
+	nodeID string,
+	raftAddr string,
+	bucket string,
+) bool {
+	dg, ok := dgMgr.GroupForBucket(bucket, router)
+	if !ok || dg == nil || meta == nil {
+		return false
+	}
+	entry, ok := meta.ShardGroup(dg.ID())
+	if !ok || len(entry.PeerIDs) == 0 {
+		return false
+	}
+	first := cluster.ShardGroupEntry{ID: entry.ID, PeerIDs: []string{entry.PeerIDs[0]}}
+	_, local := cluster.NewShardGroupPeerSet(first).MatchLocal(nodeID, raftAddr)
+	return local
+}
 
 // targetLogKey returns the log-friendly key for an EC shard scan target:
 // ObjectKey for object-version targets, ShardKey for segment/coalesced targets.
@@ -30,7 +115,7 @@ func targetLogKey(t cluster.ECShardScanTarget) string {
 }
 
 // bootRecoveryAndScrubber wires the per-node startup recovery, the scrubber
-// Director (with replication + EC sources), placement monitors, and the
+// Director (with the EC scrub source), placement monitors, and the
 // scrubber-aware healing emitter.
 //
 // Phase ordering invariant (mirrors PR 4 raft phases): MUST register
@@ -74,44 +159,15 @@ func bootRecoveryAndScrubber(ctx context.Context, state *bootState) error {
 	}
 
 	clusterIncidentRecorder, scrubberIncidentRecorder := IncidentRecorderInterfaces(state.incidentRecorder)
-	startDataWALStartupRepairWorker(ctx, state)
 
-	// All three plumbings (walk, opener, repair) route through the local
-	// data-group that owns the bucket — single-node serve still sits inside
-	// a multi-raft group structure, so the volume bucket's files live under
-	// {dataDir}/groups/<gid>/ rather than the bare distBackend root.
 	dgMgr := state.dgMgr
 	clusterRouter := state.clusterRouter
-	groupBackendForBucket := func(bucket string) *cluster.DistributedBackend {
-		dg, ok := dgMgr.GroupForBucket(bucket, clusterRouter)
-		if !ok || dg == nil || dg.Backend() == nil {
-			return nil
-		}
-		return dg.Backend().DistributedBackend
-	}
-	opener := scrubber.LocalOpener(func(bucket, key string) (io.ReadCloser, error) {
-		gb := groupBackendForBucket(bucket)
-		if gb == nil {
-			return nil, fmt.Errorf("scrub opener: no local group for %s", bucket)
-		}
-		return gb.OpenLocalReplica(bucket, key)
-	})
-	repairer := scrubber.ReplicaRepairer(ReplicaRepairerFunc(func(rctx context.Context, bucket, key string) error {
-		gb := groupBackendForBucket(bucket)
-		if gb == nil {
-			return fmt.Errorf("scrub repair: no local group for %s", bucket)
-		}
-		return gb.RepairReplica(rctx, bucket, key)
-	}))
-	replSource := scrubber.NewReplicationObjectSource("replication", volume.VolumeBucketName, volume.MetaPrefix, state.backend)
-	replVerifier := scrubber.NewReplicationVerifier(opener, repairer)
 
 	director := scrubber.NewDirector(scrubber.DirectorOpts{
 		Incident:  scrubberIncidentRecorder,
 		QueueSize: 64,
 		NodeID:    state.nodeID,
 	})
-	director.Register("replication", replSource, replVerifier)
 
 	// PR4: EC scrub source via per-bucket group resolver.
 	ecResolver := func(bucket string) (scrubber.Scrubbable, bool) {
@@ -148,30 +204,93 @@ func bootRecoveryAndScrubber(ctx context.Context, state *bootState) error {
 	if state.metaRaft != nil {
 		scrubProposer := NewScrubProposerAdapter(state.metaRaft, director, state.nodeID)
 		state.adminDeps.ScrubProposer = scrubProposer
-		exec := executioncluster.NewExecutor(
-			NewScrubExecutionBackend(scrubProposer),
-			executioncluster.WithMaxAttempts(3),
-			executioncluster.WithRetryBackoff(50*time.Millisecond),
-			executioncluster.WithMetrics(executioncluster.NewPrometheusMetrics()),
-		)
-		state.adminDeps.Execution = exec
-		state.AddCleanup(func() { _ = exec.Close(context.Background()) })
 	}
 
 	if cfg.ScrubInterval > 0 {
-		// Plan 3.5: activate orphan-segment GC. Frozen-path source + orphan-log MUST
-		// wire together (the scrubber's activation constraint). The caught-up gate is
-		// auto-applied: distBackend implements scrubber's caughtUpReporter.
-		// Scope: group-0 distBackend only (single-node complete). Per-group fan-out
-		// for multi-group clusters is a follow-up (see TODOS.md: per-group segment GC).
+		// Plan 3.5: activate orphan-SEGMENT GC. Frozen-path source + orphan-log MUST
+		// wire together (the scrubber's activation constraint). Multi-group: segments
+		// live per-group under each group's b.root, so the sweep iterates the union of
+		// every hosted group's buckets (SetOwningGroupBackendSource + the shared
+		// SetHostedGroupBackendsSource below) and dispatches each per-bucket op to its
+		// owning group's backend, gated by the raft-free GC freshness seam. Redundancy
+		// relocation additionally uses a deterministic per-group singleton owner
+		// because it rewrites global quorum-meta.
 		var segGCOpts []scrubber.ScrubberOption
-		if state.objSnapMgr != nil {
-			state.distBackend.SetFrozenSegmentPathSource(state.objSnapMgr.AllFrozenSegmentPaths)
-			segGCOpts = append(segGCOpts, scrubber.WithSegmentOrphanLog(state.distBackend.NewSegmentOrphanLog(), cfg.SegmentGCRetention))
+		if state.metaRaft != nil {
+			gcShardGroups := state.metaRaft.FSM()
+			state.dgMgr.SetGCFreshnessGate(func(gateCtx context.Context) bool {
+				return gcFreshnessReachable(gateCtx, dgMgr, gcShardGroups, state.shardSvc, state.nodeID, state.raftAddr)
+			})
+			state.distBackend.SetGCSingletonOwnerChecker(func(bucket string) bool {
+				return gcSingletonOwnerForBucket(dgMgr, clusterRouter, gcShardGroups, state.nodeID, state.raftAddr, bucket)
+			})
 		}
+		// The object-metadata snapshot feature was removed, so there are no
+		// snapshot-frozen segments/objects to pin. Wire EMPTY no-op frozen sources
+		// (NOT nil — a nil source fails closed and disables the whole sweep) so the
+		// segment GC and the EC orphan-shard reclaim keep running, judging every
+		// candidate against the live-version known-set (ListAllObjectsStrict) alone,
+		// which is the sole authority post-removal.
+		state.distBackend.SetFrozenSegmentPathSource(func() (map[string][]string, error) { return nil, nil })
+		segGCOpts = append(segGCOpts, scrubber.WithSegmentOrphanLog(state.distBackend.NewSegmentOrphanLog(), cfg.SegmentGCRetention))
+		state.distBackend.SetFrozenObjectVersionSource(func() ([]storage.SnapshotObjectRef, error) { return nil, nil })
+		// EC full-object orphan-shard sweep wiring. The shared ShardService
+		// dataDirs commingle every local group's shards (plus shards the balancer
+		// floated in from groups this node does not host — balancer.go is
+		// group-blind by design, placement metadata tracks location). The sweep
+		// judges each candidate against authoritative metadata: the union of every
+		// locally-hosted group's versioned live-set + the group-agnostic
+		// quorum-meta, and KEEPS any shard whose owning group is not locally hosted
+		// (unjudgeable locally). All sources re-evaluate each sweep (membership
+		// changes at runtime).
+		state.distBackend.SetHostedGroupBackendsSource(func() []*cluster.DistributedBackend {
+			groups := dgMgr.All()
+			out := make([]*cluster.DistributedBackend, 0, len(groups))
+			for _, g := range groups {
+				gb := g.Backend()
+				if gb == nil || gb.DistributedBackend == nil {
+					continue
+				}
+				out = append(out, gb.DistributedBackend)
+			}
+			return out
+		})
+		state.distBackend.SetOwningGroupHostedChecker(func(bucket string) bool {
+			dg, ok := dgMgr.GroupForBucket(bucket, clusterRouter)
+			if !ok || dg == nil {
+				// Unknown owner → cannot judge → keep. With requireExplicit routing
+				// an unassigned bucket lands here too, so its shards are never swept
+				// (more conservative than #774; every CreateBucket assigns a group,
+				// so steady-state reclaim is unaffected).
+				return false
+			}
+			gb := dg.Backend()
+			return gb != nil && gb.DistributedBackend != nil
+		})
+		// Also gates the per-version orphan-blob sweep
+		// (orphan_quorum_meta_version_walker.go): WalkOrphanQuorumMetaVersions calls
+		// orphanShardSweepAllowed() and reuses the same hosted-group/owning-group
+		// sources wired above — no separate wiring needed.
+		state.distBackend.SetOrphanShardSweepGate(func() bool { return true })
+		// Orphan-SEGMENT sweep: resolve each bucket to its owning group's backend so
+		// the per-bucket walk/scan/delete runs on that group's b.root subtree. nil
+		// when the owner is not locally hosted (its segments aren't on this node).
+		state.distBackend.SetOwningGroupBackendSource(func(bucket string) *cluster.DistributedBackend {
+			dg, ok := dgMgr.GroupForBucket(bucket, clusterRouter)
+			if !ok || dg == nil {
+				return nil
+			}
+			gb := dg.Backend()
+			if gb == nil {
+				return nil
+			}
+			return gb.DistributedBackend
+		})
 		sc := scrubber.New(state.distBackend, cfg.ScrubInterval, segGCOpts...)
 		sc.SetEmitter(activeEmitter)
-		sc.RegisterSource("replication", replSource, replVerifier)
+		if enabled, max := redundancyUpgradeMax(cfg); enabled {
+			sc.EnableRedundancyUpgrade(max, cfg.ECRedundancyUpgradeMinAge)
+		}
 		sc.Start(ctx)
 
 		placementMonitors := NewPlacementMonitorRegistry()
@@ -182,9 +301,17 @@ func bootRecoveryAndScrubber(ctx context.Context, state *bootState) error {
 			if clusterIncidentRecorder != nil {
 				gb.SetIncidentRecorder(clusterIncidentRecorder)
 			}
+			// Route the quarantine SET through the coordinator so the owning
+			// group's RMW lock serializes it: the placement monitor can run on a
+			// non-owner node (balancer floats shards), where a leaf-local blob RMW
+			// would only hold THIS node's lock and could lose the quarantine flag
+			// to a concurrent owner-side write on the MetaSeq LWW tiebreak.
+			if state.clusterCoord != nil {
+				gb.SetQuarantineRouter(state.clusterCoord)
+			}
 			placementMonitor := cluster.NewShardPlacementMonitor(gb.FSMRef(), gb, shardSvc, gb.NodeID(), cfg.ScrubInterval)
 			placementMonitor.SetOnMissing(func(target cluster.ECShardScanTarget, shardIdx int) {
-				correlationID := uuid.Must(uuid.NewV7()).String()
+				correlationID := uuidutil.MustNewV7()
 				receiptID := "rcpt-" + correlationID
 				repairReq := cluster.IncidentRepairRequest{
 					Bucket:        target.Bucket,

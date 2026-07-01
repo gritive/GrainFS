@@ -22,9 +22,6 @@ type ClusterMode string
 const (
 	ClusterModeDynamicJoin ClusterMode = "dynamic-join"
 	ClusterModeStaticPeers ClusterMode = "static-peers"
-
-	// joinPendingFile mirrors serveruntime.JoinPendingFile to avoid an import cycle.
-	joinPendingFile = ".join-pending"
 )
 
 type e2eClusterOptions struct {
@@ -35,8 +32,6 @@ type e2eClusterOptions struct {
 	SecretKey     string
 	LogPrefix     string
 	ScrubInterval string
-	DisableNFS    bool
-	DisableNBD    bool
 	EnablePprof   bool
 	// NoBootstrap when true skips the bootstrapAdminViaUDSAnyResult call so
 	// the cluster starts with an empty IAM store. Only supported in
@@ -57,8 +52,6 @@ type e2eCluster struct {
 	httpPorts     []int
 	raftPorts     []int
 	joinPorts     []int
-	nfs4Ports     []int
-	nbdPorts      []int
 	pprofPorts    []int
 	httpURLs      []string
 	clusterKey    string
@@ -175,8 +168,6 @@ func tryStartE2ECluster(t testing.TB, opts e2eClusterOptions) (*e2eCluster, erro
 	c.httpPorts = make([]int, opts.Nodes)
 	c.raftPorts = make([]int, opts.Nodes)
 	c.joinPorts = make([]int, opts.Nodes)
-	c.nfs4Ports = make([]int, opts.Nodes)
-	c.nbdPorts = make([]int, opts.Nodes)
 	c.pprofPorts = make([]int, opts.Nodes)
 	c.httpURLs = make([]string, opts.Nodes)
 
@@ -188,16 +179,8 @@ func tryStartE2ECluster(t testing.TB, opts e2eClusterOptions) (*e2eCluster, erro
 	for i := 0; i < opts.Nodes; i++ {
 		c.httpPorts[i] = ports[i]
 		c.raftPorts[i] = ports[opts.Nodes+i]
-		if opts.DisableNFS {
-			c.nfs4Ports[i] = 0
-		} else {
-			c.nfs4Ports[i] = ports[2*opts.Nodes+i]
-		}
-		if opts.DisableNBD {
-			c.nbdPorts[i] = 0
-		} else {
-			c.nbdPorts[i] = ports[3*opts.Nodes+i]
-		}
+		// Slots ports[2*opts.Nodes+i] and ports[3*opts.Nodes+i] left reserved
+		// (formerly NFS4 and NBD) so the join/pprof port indices below stay stable.
 		// Zero-CA join-listener port: every clustered node gets a stable one so
 		// the seed can mint invites and any node remains addressable as leader.
 		c.joinPorts[i] = ports[4*opts.Nodes+i]
@@ -428,13 +411,8 @@ func (c *e2eCluster) spawnNode(t testing.TB, i int, extraEnv []string) *exec.Cmd
 		"--node-id", c.nodeID(i),
 		"--raft-addr", c.raftAddr(i),
 		"--join-listen-addr", c.joinAddr(i),
-		"--nfs4-port", fmt.Sprintf("%d", c.nfs4Ports[i]),
-		"--nbd-port", fmt.Sprintf("%d", c.nbdPorts[i]),
 		"--scrub-interval", c.scrubIntervalArg(),
 		"--lifecycle-interval", "0",
-		// Match helpers_test.go: shrink NFS write buffer idle for e2e so
-		// fdatasync-only flows don't wait 30s for the flusher.
-		"--nfs-write-buffer-idle", "1s",
 	}
 	if c.pprofPorts[i] != 0 {
 		args = append(args, "--pprof-port", fmt.Sprintf("%d", c.pprofPorts[i]))

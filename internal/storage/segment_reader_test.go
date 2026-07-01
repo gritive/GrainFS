@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestSegmentReader_ReassemblesInOrder(t *testing.T) {
@@ -18,12 +20,8 @@ func TestSegmentReader_ReassemblesInOrder(t *testing.T) {
 	r := NewSegmentReader(fakeStore, segs.refs)
 
 	got, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if !bytes.Equal(got, segs.flat) {
-		t.Fatalf("reassembled bytes differ at offset %d", firstDiff(got, segs.flat))
-	}
+	require.NoError(t, err, "read")
+	require.True(t, bytes.Equal(got, segs.flat), "reassembled bytes differ at offset %d", firstDiff(got, segs.flat))
 }
 
 func TestSegmentReader_OutOfOrderArrivalStillInOrderOutput(t *testing.T) {
@@ -40,12 +38,8 @@ func TestSegmentReader_OutOfOrderArrivalStillInOrderOutput(t *testing.T) {
 
 	r := NewSegmentReader(store, segs.refs)
 	got, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if !bytes.Equal(got, segs.flat) {
-		t.Fatal("output not in order")
-	}
+	require.NoError(t, err, "read")
+	require.True(t, bytes.Equal(got, segs.flat), "output not in order")
 }
 
 func TestSegmentReader_OneSegmentFailsAbortsCleanly(t *testing.T) {
@@ -56,9 +50,7 @@ func TestSegmentReader_OneSegmentFailsAbortsCleanly(t *testing.T) {
 
 	r := NewSegmentReader(store, segs.refs)
 	_, err := io.ReadAll(r)
-	if !errors.Is(err, io.ErrUnexpectedEOF) {
-		t.Fatalf("want ErrUnexpectedEOF, got %v", err)
-	}
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
 }
 
 func TestSegmentReader_ReleasesBackingArrayAfterConsumption(t *testing.T) {
@@ -73,9 +65,7 @@ func TestSegmentReader_ReleasesBackingArrayAfterConsumption(t *testing.T) {
 	consumed := 0
 	for consumed < len(segs.flat) {
 		n, err := r.Read(buf)
-		if err != nil && err != io.EOF {
-			t.Fatalf("read: %v", err)
-		}
+		require.True(t, err == nil || err == io.EOF, "read: %v", err)
 		consumed += n
 		if n == 0 {
 			break
@@ -83,9 +73,7 @@ func TestSegmentReader_ReleasesBackingArrayAfterConsumption(t *testing.T) {
 	}
 	// After full drain, every pending slot must be nil.
 	for i, p := range r.pending {
-		if p != nil {
-			t.Fatalf("pending[%d] not released after consumption", i)
-		}
+		require.Nil(t, p, "pending[%d] not released after consumption", i)
 	}
 }
 
@@ -100,17 +88,15 @@ func TestSegmentReader_CloseCancelsWorkers(t *testing.T) {
 	select {
 	case <-store.entered:
 	case <-time.After(time.Second):
-		t.Fatal("worker did not enter OpenSegment")
+		require.Fail(t, "worker did not enter OpenSegment")
 	}
 
-	if err := r.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
+	require.NoError(t, r.Close(), "close")
 
 	select {
 	case <-store.exited:
 	case <-time.After(time.Second):
-		t.Fatal("worker did not exit after Close")
+		require.Fail(t, "worker did not exit after Close")
 	}
 }
 
@@ -131,23 +117,19 @@ func TestSegmentReader_CloseDoesNotScheduleRemainingSegments(t *testing.T) {
 		select {
 		case <-store.entered:
 		case <-time.After(time.Second):
-			t.Fatalf("worker %d did not enter OpenSegment", i)
+			require.Failf(t, "worker did not enter OpenSegment", "worker %d did not enter OpenSegment", i)
 		}
 	}
-	if err := r.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
+	require.NoError(t, r.Close(), "close")
 	for i := 0; i < DefaultGetWorkers; i++ {
 		select {
 		case <-store.exited:
 		case <-time.After(time.Second):
-			t.Fatalf("worker %d did not exit after Close", i)
+			require.Failf(t, "worker did not exit after Close", "worker %d did not exit after Close", i)
 		}
 	}
 	time.Sleep(100 * time.Millisecond)
-	if got := len(store.entered); got != 0 {
-		t.Fatalf("Close scheduled %d extra segments after cancellation", got)
-	}
+	require.Zero(t, len(store.entered), "Close scheduled extra segments after cancellation")
 }
 
 func TestSegmentReader_LegacyConstructorStillWorks(t *testing.T) {
@@ -157,12 +139,8 @@ func TestSegmentReader_LegacyConstructorStillWorks(t *testing.T) {
 	r := NewSegmentReader(store, segs.refs)
 
 	got, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if !bytes.Equal(got, segs.flat) {
-		t.Fatalf("reassembled bytes differ at offset %d", firstDiff(got, segs.flat))
-	}
+	require.NoError(t, err, "read")
+	require.True(t, bytes.Equal(got, segs.flat), "reassembled bytes differ at offset %d", firstDiff(got, segs.flat))
 }
 
 func TestSegmentReader_UsesProvidedSegmentBytesWithoutSecondReadAll(t *testing.T) {
@@ -172,15 +150,97 @@ func TestSegmentReader_UsesProvidedSegmentBytesWithoutSecondReadAll(t *testing.T
 	r := NewSegmentReader(store, []SegmentRef{{BlobID: "materialized", Size: int64(len(want))}})
 
 	got, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatalf("read: %v", err)
+	require.NoError(t, err, "read")
+	require.Equal(t, want, got)
+	require.True(t, store.closed, "materialized reader was not closed")
+}
+
+func TestStreamingSegmentReader_StreamsOneSegmentAtATime(t *testing.T) {
+	t.Parallel()
+	segs := makeTestSegments(t, []int{1024, 2048, 512})
+	store := newTrackingStreamingSegmentStore(segs)
+	r := NewStreamingSegmentReaderCtx(context.Background(), store, segs.refs)
+
+	got, err := io.ReadAll(r)
+	require.NoError(t, err)
+	require.Equal(t, segs.flat, got)
+	require.Equal(t, 1, store.maxOpen)
+	require.Equal(t, []string{"blob-0", "blob-1", "blob-2"}, store.openOrder)
+	require.Equal(t, []string{"blob-0", "blob-1", "blob-2"}, store.closeOrder)
+}
+
+func TestStreamingSegmentReader_ContinuesAfterSegmentShortReadEOF(t *testing.T) {
+	t.Parallel()
+	store := &shortEOFSegmentStore{
+		segments: map[string][]byte{
+			"blob-0": []byte("abc"),
+			"blob-1": []byte("def"),
+		},
 	}
-	if !bytes.Equal(got, want) {
-		t.Fatalf("got %q want %q", got, want)
+	refs := []SegmentRef{
+		{BlobID: "blob-0", Size: 3},
+		{BlobID: "blob-1", Size: 3},
 	}
-	if !store.closed {
-		t.Fatal("materialized reader was not closed")
+	r := NewStreamingSegmentReaderCtx(context.Background(), store, refs)
+
+	buf := make([]byte, 3)
+	n, err := r.Read(buf)
+	require.NoError(t, err)
+	require.Equal(t, 3, n)
+	require.Equal(t, "abc", string(buf[:n]))
+
+	n, err = r.Read(buf)
+	require.NoError(t, err)
+	require.Equal(t, 3, n)
+	require.Equal(t, "def", string(buf[:n]))
+
+	n, err = r.Read(buf)
+	require.Equal(t, io.EOF, err)
+	require.Zero(t, n)
+}
+
+func TestStreamingSegmentReader_CloseWhileOpeningClosesReturnedReader(t *testing.T) {
+	t.Parallel()
+	store := &closeDuringOpenSegmentStore{
+		entered:  make(chan struct{}),
+		release:  make(chan struct{}),
+		closed:   make(chan struct{}),
+		openDone: make(chan struct{}),
 	}
+	refs := []SegmentRef{{BlobID: "blocked", Size: 1}, {BlobID: "not-opened", Size: 1}}
+	r := NewStreamingSegmentReaderCtx(context.Background(), store, refs)
+	readDone := make(chan error, 1)
+	go func() {
+		_, err := r.Read(make([]byte, 1))
+		readDone <- err
+	}()
+
+	select {
+	case <-store.entered:
+	case <-time.After(time.Second):
+		require.Fail(t, "OpenSegment was not entered")
+	}
+
+	require.NoError(t, r.Close())
+	close(store.release)
+
+	select {
+	case <-store.openDone:
+	case <-time.After(time.Second):
+		require.Fail(t, "OpenSegment did not return")
+	}
+	select {
+	case <-store.closed:
+	case <-time.After(time.Second):
+		require.Fail(t, "reader returned after Close was not closed")
+	}
+	select {
+	case err := <-readDone:
+		require.Error(t, err)
+	case <-time.After(time.Second):
+		require.Fail(t, "Read did not unblock after Close")
+	}
+	require.Equal(t, []string{"blocked"}, store.openOrder)
 }
 
 // --- helpers ---
@@ -251,6 +311,116 @@ func (r *materializedSegmentReadCloser) Read([]byte) (int, error) {
 
 func (r *materializedSegmentReadCloser) Close() error {
 	r.store.closed = true
+	return nil
+}
+
+type trackingStreamingSegmentStore struct {
+	mu         sync.Mutex
+	data       map[string][]byte
+	open       int
+	maxOpen    int
+	openOrder  []string
+	closeOrder []string
+}
+
+func newTrackingStreamingSegmentStore(segs *testSegments) *trackingStreamingSegmentStore {
+	s := &trackingStreamingSegmentStore{data: make(map[string][]byte)}
+	for i, ref := range segs.refs {
+		s.data[ref.BlobID] = segs.data[i]
+	}
+	return s
+}
+
+func (s *trackingStreamingSegmentStore) OpenSegment(_ context.Context, ref SegmentRef) (io.ReadCloser, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	data, ok := s.data[ref.BlobID]
+	if !ok {
+		return nil, fmt.Errorf("missing ref %s", ref.BlobID)
+	}
+	s.open++
+	if s.open > s.maxOpen {
+		s.maxOpen = s.open
+	}
+	s.openOrder = append(s.openOrder, ref.BlobID)
+	return &trackingSegmentReadCloser{
+		Reader: bytes.NewReader(data),
+		store:  s,
+		blobID: ref.BlobID,
+	}, nil
+}
+
+type trackingSegmentReadCloser struct {
+	*bytes.Reader
+	store  *trackingStreamingSegmentStore
+	blobID string
+}
+
+func (r *trackingSegmentReadCloser) Close() error {
+	r.store.mu.Lock()
+	defer r.store.mu.Unlock()
+	r.store.open--
+	r.store.closeOrder = append(r.store.closeOrder, r.blobID)
+	return nil
+}
+
+type shortEOFSegmentStore struct {
+	segments map[string][]byte
+}
+
+func (s *shortEOFSegmentStore) OpenSegment(_ context.Context, ref SegmentRef) (io.ReadCloser, error) {
+	data, ok := s.segments[ref.BlobID]
+	if !ok {
+		return nil, fmt.Errorf("missing ref %s", ref.BlobID)
+	}
+	return &shortEOFReadCloser{data: data}, nil
+}
+
+type shortEOFReadCloser struct {
+	data []byte
+	done bool
+}
+
+func (r *shortEOFReadCloser) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, io.EOF
+	}
+	r.done = true
+	return copy(p, r.data), io.EOF
+}
+
+func (r *shortEOFReadCloser) Close() error { return nil }
+
+type closeDuringOpenSegmentStore struct {
+	entered   chan struct{}
+	release   chan struct{}
+	closed    chan struct{}
+	openDone  chan struct{}
+	openOrder []string
+}
+
+func (s *closeDuringOpenSegmentStore) OpenSegment(ctx context.Context, ref SegmentRef) (io.ReadCloser, error) {
+	s.openOrder = append(s.openOrder, ref.BlobID)
+	close(s.entered)
+	select {
+	case <-s.release:
+	case <-ctx.Done():
+	}
+	close(s.openDone)
+	return &closeSignalReadCloser{closed: s.closed}, nil
+}
+
+type closeSignalReadCloser struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (r *closeSignalReadCloser) Read([]byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (r *closeSignalReadCloser) Close() error {
+	r.once.Do(func() { close(r.closed) })
 	return nil
 }
 

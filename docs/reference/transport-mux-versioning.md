@@ -1,8 +1,21 @@
 # Transport Mux Protocol Versioning
 
+> **HISTORICAL — the mux transport this describes was removed in v0.0.551.0 (Phase 8 N1).**
+> The `grainfs-mux-v1` ALPN and its capability-exchange handshake no longer exist in the code.
+> The current cluster transport is streaming HTTP over SPKI-pinned mTLS, which negotiates the
+> `grainfs-http-v1` ALPN and does NOT perform a capability-exchange handshake (version skew is a
+> greenfield/flag-day concern — there is no rolling-upgrade compat with an older transport). Kept
+> for the design rationale of the retired mux protocol.
+>
+> As of Phase 8 N8 every identifier this document names is deleted from the code:
+> `ProtocolVersionMux`, the `StreamCapabilityExchange` (0x12) stream type, the `BinaryCodec`
+> frame, and the `grainfs_transport_ce_total` metric (`TransportCECounter`). The internal wire
+> is fully envelope-free — each RPC family rides its own native HTTP route; `StreamType` survives
+> only as an internal admission/metrics key.
+
 ## ALPN
 
-- `grainfs-mux-v1` is the current ALPN. It uses capability exchange and
+- Historical ALPN: `grainfs-mux-v1`. It used capability exchange and
   BinaryCodec framing.
 
 ## Capability Exchange Wire Format

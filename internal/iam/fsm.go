@@ -233,8 +233,21 @@ func (a *Applier) ApplyKeyRevoke(payload []byte) error {
 // upstream record. SecretKeyEnc is decrypted with AAD = "bucket-upstream:"+bucket
 // (per /plan-eng-review override A2 — namespace-prefixed AAD provably disjoint
 // from sa_id AAD space). Resulting plaintext SecretKey is held in-memory only
-// and never persisted.
+// and never persisted. The live apply path recomputes the CAS generation as
+// current+1, deterministic across replicas.
 func (a *Applier) ApplyBucketUpstreamPut(payload []byte) error {
+	return a.applyBucketUpstreamPut(payload, false) // live: recompute current+1
+}
+
+// ApplyBucketUpstreamPutFromSnapshot restores an upstream during snapshot
+// read, taking Generation verbatim from the payload (NOT recomputing) so the
+// CAS generation survives a restore/InstallSnapshot. Mirrors
+// applyKeyCreateFromSnapshot.
+func (a *Applier) ApplyBucketUpstreamPutFromSnapshot(payload []byte) error {
+	return a.applyBucketUpstreamPut(payload, true) // snapshot: trust payload gen
+}
+
+func (a *Applier) applyBucketUpstreamPut(payload []byte, fromSnapshot bool) error {
 	p := iampb.GetRootAsBucketUpstreamPutPayload(payload, 0)
 	bucket := string(p.Bucket())
 	if bucket == "" {
@@ -269,6 +282,16 @@ func (a *Applier) ApplyBucketUpstreamPut(payload []byte) error {
 	if status != BucketUpstreamStatusActive && status != BucketUpstreamStatusCutover {
 		return fmt.Errorf("iam: BucketUpstreamPut invalid status %q", status)
 	}
+	// CAS generation: snapshot restore trusts the payload verbatim; the live
+	// apply path recomputes current+1 so every replica derives the same gen
+	// from the ordered raft log (snapshot determinism — see Step 4 plan note).
+	casGen := p.Generation()
+	if !fromSnapshot {
+		casGen = uint64(1)
+		if existing, ok := a.store.LookupBucketUpstream(bucket); ok {
+			casGen = existing.Generation + 1
+		}
+	}
 	a.store.applyBucketUpstreamPut(BucketUpstream{
 		Bucket:          bucket,
 		Endpoint:        string(p.Endpoint()),
@@ -279,6 +302,7 @@ func (a *Applier) ApplyBucketUpstreamPut(payload []byte) error {
 		CreatedAt:       time.Unix(0, p.CreatedAtUnixNs()),
 		CreatedBy:       string(p.CreatedBy()),
 		Status:          status,
+		Generation:      casGen,
 	})
 	return nil
 }
@@ -299,10 +323,37 @@ func (a *Applier) ApplyBucketUpstreamStatusSet(bucket string, status BucketUpstr
 	return nil
 }
 
-// ApplyBucketUpstreamDelete removes the upstream record for the given bucket.
-// Idempotent on missing buckets.
+// ApplyBucketUpstreamDelete removes the upstream record for the given bucket,
+// gated by a CAS on the observed generation. If observedGen is not the
+// unconditional sentinel and the stored generation differs, the delete is a
+// no-op: a newer put won the delete→recreate race and now owns this
+// bucket-upstream. Idempotent on missing buckets.
+//
+// An old-format delete payload (written before per-record generations) carries
+// no generation field, so p.Generation() returns the FB default 0. On a present
+// upstream (gen ≥ 1) that is a CAS mismatch → no-op; the cascade's idempotent
+// retry reconciles. Acceptable under the greenfield assumption. New explicit
+// deletes pass UnconditionalDeleteGen.
 func (a *Applier) ApplyBucketUpstreamDelete(payload []byte) error {
 	p := iampb.GetRootAsBucketUpstreamDeletePayload(payload, 0)
-	a.store.applyBucketUpstreamDelete(string(p.Bucket()))
+	bucket := string(p.Bucket())
+	observedGen := p.Generation()
+	if observedGen != UnconditionalDeleteGen {
+		if cur, ok := a.store.LookupBucketUpstream(bucket); ok && cur.Generation != observedGen {
+			return nil // CAS mismatch: a newer put owns this bucket-upstream
+		}
+	}
+	a.store.applyBucketUpstreamDelete(bucket)
+	return nil
+}
+
+// ApplyBucketUpstreamDeleteUnconditional removes bucket-upstream state as part
+// of a bucket deletion apply. It avoids a second raft command, so the bucket
+// record and its upstream credentials cannot be split by a coordinator crash.
+func (a *Applier) ApplyBucketUpstreamDeleteUnconditional(bucket string) error {
+	if bucket == "" {
+		return fmt.Errorf("iam: BucketUpstreamDelete missing bucket")
+	}
+	a.store.applyBucketUpstreamDelete(bucket)
 	return nil
 }

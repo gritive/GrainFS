@@ -115,20 +115,36 @@ func TestLocalExecution_ResolveWrite_NonLeaderSignalsForward(t *testing.T) {
 	require.Nil(t, got)
 }
 
+func TestLocalExecution_ResolveOwnerWrite_LocalOwnerIgnoresRaftLeadership(t *testing.T) {
+	gb := newGroupBackendWithRaftForTest(&flippableRaftNode{leaderSeq: []bool{false}})
+	groups := &fakeLocalGroups{backends: map[string]*GroupBackend{"g1": gb}}
+	e := NewLocalExecution(groups)
+	got, err := e.ResolveOwnerWrite(context.Background(), RouteTarget{
+		GroupID:          "g1",
+		SelfIsVoter:      true,
+		SelfIsWriteOwner: true,
+	})
+	require.NoError(t, err)
+	require.Same(t, gb, got)
+}
+
+func TestLocalExecution_ResolveOwnerWrite_NonOwnerSignalsForward(t *testing.T) {
+	gb := newGroupBackendWithRaftForTest(&flippableRaftNode{leaderSeq: []bool{true}})
+	groups := &fakeLocalGroups{backends: map[string]*GroupBackend{"g1": gb}}
+	e := NewLocalExecution(groups)
+	got, err := e.ResolveOwnerWrite(context.Background(), RouteTarget{
+		GroupID:     "g1",
+		SelfIsVoter: true,
+	})
+	require.NoError(t, err)
+	require.Nil(t, got)
+}
+
 func TestLocalExecution_ResolveObjectWrite_NonLeaderVoterReturnsLocalBackend(t *testing.T) {
 	gb := newGroupBackendWithRaftForTest(&flippableRaftNode{leaderSeq: []bool{false}})
 	groups := &fakeLocalGroups{backends: map[string]*GroupBackend{"g1": gb}}
 	e := NewLocalExecution(groups)
 	got, err := e.ResolveObjectWrite(context.Background(), RouteTarget{GroupID: "g1", SelfIsVoter: true})
-	require.NoError(t, err)
-	require.Same(t, gb, got)
-}
-
-func TestLocalExecution_ResolveObjectPlacementRead_NonLeaderVoterReturnsLocalBackend(t *testing.T) {
-	gb := newGroupBackendWithRaftForTest(&flippableRaftNode{leaderSeq: []bool{false}})
-	groups := &fakeLocalGroups{backends: map[string]*GroupBackend{"g1": gb}}
-	e := NewLocalExecution(groups)
-	got, err := e.ResolveObjectPlacementRead(context.Background(), RouteTarget{GroupID: "g1", SelfIsVoter: true})
 	require.NoError(t, err)
 	require.Same(t, gb, got)
 }

@@ -139,9 +139,9 @@ func TestCredentialBearerMiddlewareDoesNotAffectOtherAdminRoutes(t *testing.T) {
 	d.ProtocolCredAuthz = &credentialAuthorizerStub{decision: policy.DecisionAllow}
 	cli := startCredentialRouteTestServer(t, d)
 
-	raw := doCredentialHTTP(t, cli, http.MethodGet, "http://unix/v1/volumes", "Bearer bad-token", nil, http.StatusOK)
+	raw := doCredentialHTTP(t, cli, http.MethodGet, "http://unix/v1/cluster/peers", "Bearer bad-token", nil, http.StatusOK)
 
-	require.Contains(t, string(raw), `"volumes"`)
+	require.Contains(t, string(raw), `"peers"`)
 }
 
 type actorAuthStub struct {
@@ -207,7 +207,7 @@ func doCredentialCreateHTTP(t *testing.T, cli *http.Client, bearer string) admin
 
 func doCredentialListHTTP(t *testing.T, cli *http.Client, bearer string, wantStatus int) admin.CredentialListResp {
 	t.Helper()
-	raw := doCredentialHTTP(t, cli, http.MethodGet, "http://unix/v1/credentials?protocol=nbd&resource=volume/devdisk", bearer, nil, wantStatus)
+	raw := doCredentialHTTP(t, cli, http.MethodGet, "http://unix/v1/credentials?protocol=s3&resource=bucket/devdisk", bearer, nil, wantStatus)
 	var resp admin.CredentialListResp
 	require.NoError(t, json.Unmarshal(raw, &resp))
 	return resp
@@ -233,5 +233,5 @@ func doCredentialHTTP(t *testing.T, cli *http.Client, method, url, bearer string
 }
 
 func credentialCreateBody() io.Reader {
-	return bytes.NewBufferString(`{"sa_id":"sa-app","protocol":"nbd","resource":"volume/devdisk","mode":"rw"}`)
+	return bytes.NewBufferString(`{"sa_id":"sa-app","protocol":"s3","resource":"bucket/devdisk","mode":"rw"}`)
 }

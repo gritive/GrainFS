@@ -58,7 +58,7 @@ Complete ALL items before proceeding with deployment. If ANY item fails, do NOT 
 ### Infrastructure Readiness
 
 - [ ] **Server resources**: Minimum 4 CPU, 8GB RAM, 100GB disk
-- [ ] **Network connectivity**: Port 9000 is reachable by S3 clients. Keep NFSv4 2049, NBD 10809, and 9P listeners on loopback, private networks, or firewall-restricted addresses when enabled.
+- [ ] **Network connectivity**: Port 9000 is reachable by S3 clients.
 - [ ] **Disk mounting**: Data directory mounted on reliable storage (SSD recommended)
 - [ ] **Backup repository**: Restic repo initialized and accessible
 - [ ] **Monitoring**: Prometheus scraping configured and receiving data
@@ -200,77 +200,13 @@ sum(grainfs_volumes_by_health{health!="healthy"}) by (health)
 increase(grainfs_operator_state_scrape_errors_total{source="buckets"}[10m])
 ```
 
-After a node restart, data WAL replay flags metadata-only EC shards whose local file is missing or the wrong size, and a non-blocking background worker rebuilds them from surviving peers. Watch the startup repair counters to confirm boot-time self-healing landed:
+After a node restart, committed objects are durable on disk (small / no-redundancy shards were fsynced at write time; large redundant shards are EC-reconstructable) -- there is no shard WAL replay since S4. Missing or corrupt EC shards are healed lazily: read-time EC reconstruction serves reads, and the periodic placement monitor + background scrubber proactively repair between boots.
 
-```bash
-curl -s http://localhost:9000/metrics | grep '^grainfs_datawal_startup_repair_'
-```
-
-`discovered`/`candidates` show what replay flagged; `successes` should converge toward `attempts`. Sustained `failures_total{reason="insufficient_survivors"}` means too few peers were readable to reconstruct — bring peers back before it becomes data loss.
-
-Skip-reason diagnosis:
-
-- `skips_total{reason="placement_scan_capped"}` — the resolver scanned more than 1000 versions looking for the owning SegmentRef/CoalescedShardRef and gave up. The shard stays covered by read-time EC reconstruction. If this counter is non-zero, investigate whether the affected object has an unusually large version history.
-- `skips_total{reason="stale"}` — the shard was already present and healthy (or the WAL record was superseded). Also absorbs the rare case where an S3 object key literally contains `/segments/` or `/coalesced/` (a marker-collision); the previous `unsupported_shardkey` label is retired and no longer emitted.
-- Other reasons (`no_group`, `no_backend`, `invalid_shard_key`, `placement_corrupt`, `not_local_owner`) — see metric labels for details.
-
-Startup repair now reconstructs segment (`<key>/segments/<blobID>`) and coalesced (`<key>/coalesced/<id>`) EC shard keys in addition to object-version shards. The periodic placement monitor now also proactively detects and repairs segment and coalesced EC shards for **latest-version** objects between boots, complementing boot-time startup repair and read-time reconstruction. Non-latest-version segment/coalesced shards are not proactively scanned by the placement monitor; they remain covered by read-time EC reconstruction. Corrupt segment or coalesced shards trigger quarantine of the parent object (object-level, using the scanned version). The new metric `grainfs_placement_monitor_invalid_ec_ref_total{kind="segment|coalesced"}` is incremented when a ref has malformed placement (`len(NodeIDs) != ECData+ECParity`); a non-zero rate indicates corrupt object metadata and warrants investigation. Repair is best-effort and not re-attempted from the WAL on the next boot (the WAL checkpoint advances after replay), so with periodic scrub and placement-monitor disabled, rely on operator-initiated repair if a startup repair is interrupted.
+The periodic placement monitor proactively detects and repairs segment (`<key>/segments/<blobID>`) and coalesced (`<key>/coalesced/<id>`) EC shards for **latest-version** objects between boots, complementing read-time reconstruction. Non-latest-version segment/coalesced shards are not proactively scanned by the placement monitor; they remain covered by read-time EC reconstruction. Corrupt segment or coalesced shards trigger quarantine of the parent object (object-level, using the scanned version). The metric `grainfs_placement_monitor_invalid_ec_ref_total{kind="segment|coalesced"}` is incremented when a ref has malformed placement (`len(NodeIDs) != ECData+ECParity`); a non-zero rate indicates corrupt object metadata and warrants investigation.
 
 The placement monitor quarantines an object **only** on confirmed shard corruption (CRC mismatch, structural decode failure, truncation, or AEAD auth failure). Every other non-ENOENT local shard read error — `EIO`, `EMFILE` ("too many open files"), `EBUSY`, permission denied, or unknown — is treated as **transient**: it is logged at Debug level, counted by `grainfs_placement_monitor_transient_read_error_total{kind="object_version|segment|coalesced|unknown"}`, and skipped (the next scan retries it), **not** quarantined. This prevents a transient or failing-disk node-day from mass-quarantining otherwise healthy objects. A sustained transient rate is a signal about the **node's** disk/FD health (failing disk, fd exhaustion), not about the objects — investigate the node (`dmesg`, SMART, open-fd count, `--max-open-files`), not the named objects.
 
-## NFS Multi-Bucket Export
-
-Use explicit exports for every bucket mounted through NFSv4:
-
-```bash
-export GRAINFS_ADMIN_SOCKET=<data>/admin.sock
-grainfs nfs export list
-grainfs nfs export add <bucket>
-grainfs nfs debug <bucket>
-```
-
-Triage:
-
-- `No such file or directory` at the pseudo-root: check `grainfs nfs debug <bucket>` and register the bucket if `registered=false`.
-- Stale handles after export changes: unmount/remount affected clients and check the export generation in `grainfs nfs debug`.
-- Backend exists but NFS is missing: create the export; S3 bucket creation alone does not expose the bucket over NFS.
-
-Metrics:
-
-- `grainfs_nfs_exports_total{state}`
-- `grainfs_nfs_export_propagation_seconds`
-- `grainfs_nfs_lookup_unknown_export_total`
-- `grainfs_nfs_revoked_stateids_total{reason}`
-
-## NFS Write Buffer
-
-NFS WRITE ops are coalesced into a local file under `<data>/nfs-writebuf/`. The buffer flushes to backend `PutObject` on:
-
-- NFS COMMIT op
-- `SETATTR` truncate (discard semantics — buffered writes are dropped)
-- Idle timeout (`--nfs-write-buffer-idle`, default 30s)
-- Server shutdown drain
-
-### Disk sizing
-
-Plan for `max(concurrent NFS objects) × max(object size)` of disk under `<data>/nfs-writebuf/`. The idle timeout bounds dwell time. For most workloads the live set is small (open files only); long-lived idle keys are flushed on the next idle tick.
-
-### Cluster mode limitation
-
-Buffering is per-node. Two NFS clients mounted to **different** GrainFS nodes that write the **same** key may see last-write-wins on flush (no cross-node coordination yet). For strict consistency in a multi-node cluster: pin all NFS clients to a single GrainFS node, or wait for cluster-scoped buffer support.
-
-### Recovery
-
-On startup the buffer dir is scanned and leftover files are flushed to backend. If a flush fails (backend unreachable), files are renamed to `<sha1>.failed.<reason>.<timestamp>` so subsequent writes for the same key cannot collide. Inspect `*.failed.*` files manually and either:
-
-- Replay them via `dd if=<failed-file> | aws s3 cp - s3://<bucket>/<key>` (read the `.meta` sidecar for `bucket`/`key`), or
-- Delete them after confirming the data is recoverable from elsewhere.
-
-### Disable buffering
-
-Set `--nfs-write-buffer-idle=0` to disable. NFS WRITE then falls back to the per-write RMW path (older behaviour, ~10× slower on sequential workloads, no buffer correctness concerns).
-
-Grafana example: `docs/observability/nfs-multi-export.json`.
+**Quarantine storage (Slice 2+):** Object quarantine status (`IsQuarantined`/`QuarantineCause`) is stored in the quorum-meta blob alongside the object's regular metadata, not as a separate FSM key. Quarantine state is replicated across quorum nodes exactly like other object metadata and persists across restarts without FSM replay. A PUT to a quarantined key is rejected with `ErrObjectQuarantined` — re-upload does not clear quarantine. Recovery requires a direct operator repair: rewrite the quorum-meta blob on all placement nodes clearing `IsQuarantined`, then confirm the object is accessible. In a cluster, the quarantine-set call is owner-routed to the node that holds the object's placement group; no raft consensus is required. **Consistency note:** because quarantine is now a K-of-N blob write with local-first reads (the same model as all object metadata), it is eventually consistent rather than raft-strong — a node that was outside the write quorum (e.g. briefly unreachable during the set) can serve a GET of the quarantined object until its replica converges. The prior raft-replicated quarantine was the only per-object state with all-node-strong consistency. If instant cluster-wide quarantine is operationally required for a specific object, force a read-repair / re-set after confirming all placement nodes are reachable.
 
 For `fd_exhaustion_risk`, inspect the decision text first. It includes current FD usage, projected threshold ETA when available, and best-effort categories such as `socket`, `badger`, or `nfs_session`.
 
@@ -491,6 +427,41 @@ for the concrete per-group reason, such as `leaderless`, `unwired`, or
 
 ---
 
+## Growing the Cluster (Adding Placement Groups)
+
+`GrainFS` (v0.0.543.0+, Phase 7) can add raft placement groups to a running cluster without remapping existing objects. The object→group placement is pinned per topology *generation*; new groups become a new generation, and reads probe newest-generation-first (existing objects stay served from the prior generation).
+
+Two steps:
+
+1. **Form the new groups.** Add nodes to the cluster (zero-CA join). New shard groups are formed automatically as nodes join (`expandShardGroupsForJoinedNode`). At this point the groups exist but are not yet used for object placement.
+
+2. **Activate them.** Run the operator command to record the current shard groups as a new placement generation:
+
+```bash
+grainfs cluster expand-placement --endpoint <data>/admin.sock
+```
+
+The command reports `previous groups`, `new groups`, and the `active set`. It is a no-op when no new groups are present. If a newly-joined group is *wider* (more peers) than the existing groups, narrower groups drop out of the active set (the command prints a `WARNING` with the dropped groups — they stop receiving new writes but their existing objects stay readable).
+
+3. **Retire a drained old generation if groups were removed from the active set.** After
+   every object that lived on the old groups has been rewritten to the active placement
+   set, stop probing that generation:
+
+```bash
+grainfs cluster retire-placement-generation --endpoint <data>/admin.sock --epoch <n>
+```
+
+Notes:
+
+- **Drain first:** retiring a generation removes it from future read probes. Do this only
+  after object drain has completed; the generation record remains in meta-raft snapshots
+  for audit/replay.
+- **Run on the leader.** The command proposes through the meta-raft; on a follower it returns an error — target the current leader (`grainfs cluster status`).
+- **Reads stay correct** during and after growth: existing objects are found via the older generation; the cross-generation last-writer-wins fence resolves the brief add-window.
+- **Not yet validated:** multi-node concurrent growth under heavy load and throughput parity were not benchmarked (the fence arms per-node on the generation-count transition). Grow during a maintenance window for the first time.
+
+---
+
 ## Rollback Procedure
 
 If ANY verification step fails, execute rollback immediately.
@@ -636,20 +607,6 @@ grainfs cluster --endpoint $ENDPOINT peers
 
 ---
 
-## NFSv4 Conformance Testing
-
-`GrainFS` tracks NFSv4 RFC 8881 attribute behavior in `docs/reference/nfsv4-attribute-audit.md`. Update the audit in the same PR as any NFS attribute behavior change.
-
-The external pynfs suite is advisory and non-blocking:
-
-```bash
-make test-pynfs-colima
-```
-
-The runner clones the pinned upstream pynfs commit, starts a local `GrainFS` server, creates a test bucket/export, and writes results to `tests/conformance/results/summary.json` plus a timestamped log. Failures should be copied into `TODOS.md` follow-ups; they do not block ordinary PRs unless a PR explicitly changes NFS protocol behavior.
-
----
-
 ## Monitoring Setup
 
 ### Prometheus Alerts
@@ -727,29 +684,31 @@ ss -s
 - Check network bandwidth
 - Check for lock contention
 
-### Issue: AppendObject HTTP 503 SlowDown
+### Known limitation: off-raft append/coalesce is not failover-safe across a same-generation leader handoff
 
-**Symptoms:** `503 SlowDown` responses on AppendObject requests; clients reporting
-`Retry-After: 1` backoff loops; `grainfs_cluster_append_forward_buffer_rejected_total`
-counter climbing.
+**Scope:** affects `AppendObject` and the background coalesce path only. Regular PUT, multipart
+upload, GET, DELETE, and ListObjects are unaffected.
 
-**Diagnosis:**
-```bash
-curl http://<node>:9000/metrics | grep -E 'grainfs_cluster_append_forward_buffer_(inflight_bytes|rejected_total)'
-```
+**What happens:** since append/coalesce metadata was moved off the raft FSM to the quorum-meta
+blob (Slice 1), concurrent ownership of the append CAS resides per-node. During the brief
+window of a same-generation leader handoff, two nodes can each believe they hold the owner lock
+and race the CAS — an acknowledged append may be lost (split-brain within the handoff window).
 
-`inflight_bytes` near the configured pool size means the forward buffer is
-saturated. This is expected backpressure under sustained high concurrency, but
-chronic saturation means the pool is undersized for the workload.
+**Deployment assumption:** this risk is accepted under the **single-stable-leader** assumption:
+only one node serves as the effective owner for a given appendable object at a time, with no
+concurrent leader handoffs in the same Raft generation. Under this assumption, the placement
+fence + `MetaSeqCAS` discriminator shrink the race window to effectively zero.
 
-**Fix:**
-- Increase pool: `--cluster-append-forward-buffer-total-bytes` (default 512 MiB).
-- If individual requests are large, raise per-request cap:
-  `--cluster-append-forward-buffer-max-per-request` (default 64 MiB).
-- If clients want bigger objects, raise per-object cap:
-  `--append-size-cap-bytes` (default 5 TiB).
-- Calibrate with `warp append --concurrent 32 --duration 60s --obj.size '1-16MiB'`
-  and target rejection ratio < 1%.
+**If you need strict failover safety for append:** track the follow-up
+`[P2] off-raft append fencing-lease` in TODOS.md. A proper single-writer fencing lease
+(leader-term token + quorum-intersecting read) would close the gap. Do not use AppendObject
+as a strict durability primitive across planned leader elections without implementing that lease.
+
+**Observable symptom (if the race fires):** an append appears to succeed (HTTP 200) but the
+bytes are absent from a subsequent GET. This requires a concurrent leader handoff during the
+append; it is not expected in normal steady-state operation.
+
+---
 
 ### Issue: Disk usage drift on AppendObject buckets
 
@@ -775,7 +734,7 @@ Walk/delete errors > 0 indicates filesystem permission or I/O issues.
   24h). Set `--segment-gc-retention 0` to disable the time-based grace period
   (the 5-minute age gate still applies). If disk reclamation lags after a large
   delete/overwrite, this window is usually why — shorten it deliberately, not
-  reflexively (it protects in-flight reads and recent-PITR margin).
+  reflexively (it protects in-flight reads and recent-write margin).
 - Deletion is reference-counted: a segment is removed only when no live object
   version and no snapshot references it. If `found` stays high but `deleted` is
   zero, the segments are still referenced (expected) rather than stuck.
@@ -789,6 +748,111 @@ Walk/delete errors > 0 indicates filesystem permission or I/O issues.
   than raising the cap (cap protects I/O burst).
 - EC shard orphans from coalesce-time failures are NOT covered by this sweep
   (separate follow-up).
+
+---
+
+### Issue: CompleteMultipartUpload retry returns `ErrUploadNotFound`
+
+**Symptoms:** a client re-issues `CompleteMultipartUpload` for an upload that
+already completed successfully, and instead of an idempotent success it gets
+`ErrUploadNotFound`.
+
+**Diagnosis:** completion idempotency is provided by the deterministic
+version-id per-version quorum-meta blob. `CompleteMultipartUpload` derives a
+stable version-id from the uploadID; a retried or concurrent complete re-derives
+the same version-id and short-circuits on the existing per-version blob
+(versioned bucket) or the latest-only blob whose `VersionID` matches
+(non-versioned bucket). There is no `mpudone:` marker and no 24h sweep — the
+completed object's quorum-meta blob is the sole idempotency record, and it
+persists as long as the object exists. An `ErrUploadNotFound` response therefore
+means the uploadID itself was never completed (or the completed object was
+subsequently deleted), not that an idempotency window expired.
+
+**Fix / expectation:** verify the uploadID is correct and that the object has
+not been deleted since the original complete. If the object exists (`HEAD
+<bucket>/<key>`) the prior complete succeeded; a duplicate complete on a live
+object will short-circuit cleanly. No operator action is required for normal
+retry scenarios — idempotency is not time-bounded.
+
+---
+
+### Issue: hard-deleted version reappears in LIST / HEAD ?versionId (versioned buckets)
+
+**Symptoms:** on a versioning-enabled bucket, a version you removed with
+`DELETE ?versionId=<vid>` still appears in `ListObjects`/`HEAD ?versionId` after
+the delete returned success; `grainfs_scrub_orphan_quorum_meta_versions_found_total`
+increasing across scrub cycles.
+
+**Diagnosis:** the per-version metadata write is K-of-N replicated; the S2a
+hard-delete fans the per-version-blob removal across the version's placement
+nodes fail-closed, but a missed/offline node can leave a lingering blob. Because
+LIST and `HEAD ?versionId` derive from the per-version blobs, a lingering blob
+resurfaces the dead version until reclaimed. The per-version orphan scrubber
+removes any blob whose authoritative FSM `obj:` record is gone — track:
+
+```bash
+curl http://<node>:9000/metrics | grep -E 'grainfs_scrub_orphan_quorum_meta_version(s_found|s_deleted|_sweep_capped)_total'
+```
+
+`found` rising with `deleted` rising means the sweep is reclaiming residuals as
+expected. `found` rising while `deleted` stays flat means the candidates are not
+yet eligible (age gate / two-cycle tombstone) or the node cannot authoritatively
+judge them — see the fix notes.
+
+**Fix:**
+- Same age gate as the shard/segment sweeps (`--scrub-orphan-age`, floored to
+  `minOrphanShardAge` = the bounded EC write+commit window, ~466s) plus a
+  two-cycle tombstone: a blob is deleted only
+  after it has appeared orphan in two consecutive cycles. Reclamation lag of a
+  few scrub intervals after a delete is expected, not a fault.
+- Authority is fail-closed: a blob is kept whenever any metadata read errors, the
+  bucket's owning group is not locally hosted, or the version's `obj:` record is
+  found in any hosted group (incl. a delete-marker / soft-delete version, which is
+  legitimately retained). So `found` > `deleted` on a node that does not host the
+  bucket's owner is expected — that node keeps the blob and another reclaims it.
+- Genesis 1+0 versions whose owning group moved to a non-hosted group after
+  cluster growth are intentionally NOT reclaimed here (kept, never mis-deleted);
+  that case is covered by the genesis re-fan-out work (foundation S5).
+- Sweep cap is 50 per cycle. If `OrphanQuorumMetaVersionSweepCappedTotal` climbs,
+  shorten the scrub interval rather than raising the cap.
+
+---
+
+### EC-redundancy upgrade sweep (relocating genesis 1+0 objects)
+
+**What it does:** when a cluster that started genuinely single-node (genesis boot,
+no `--bootstrap-expect-nodes`) later grows, objects written during the single-node
+window live in a non-redundant `1+0` group — a single-node loss would lose them. The
+background sweep (default ON) detects these and re-encodes them into a redundant wide
+EC group, preserving identity (key/version/ETag/size/content-type/metadata/tags/ACL
+**and LastModified**). The old shards are reclaimed by the orphan-segment sweep above.
+
+**Track:**
+```bash
+curl http://<node>:9000/metrics | grep -E 'grainfs_ec_redundancy_upgrade_(relocated|failed)_total'
+```
+`relocated_total` rising then plateauing = the backlog of pre-growth `1+0` objects is
+being drained. `failed_total` rising = relocations are erroring (check logs for
+`redundancy-upgrade: relocate failed`); benign skips (object changed underneath / no
+longer a candidate) are NOT counted as failures.
+
+**Controls:**
+- `--ec-redundancy-upgrade=false` — kill switch (default on).
+- `--ec-redundancy-upgrade-max` (default 8) — relocations per scrub cycle; this moves
+  real data, so it is a deliberate slow drip. Raise only if the backlog drains too
+  slowly and foreground I/O has headroom.
+- `--ec-redundancy-upgrade-min-age` (default 5m) — an object must be at least this old
+  before relocation, so the sweep never races an in-flight write. `0` relocates
+  immediately (tests only).
+
+**Safety:** the sweep runs only on the caught-up leader of each group (no two nodes
+relocate the same object); an interrupted relocation leaves reclaimable orphans and
+the object stays readable via its old placement; and a concurrent client overwrite
+always wins (the relocation preserves the original ModTime, which loses the
+quorum-meta last-writer-wins to any newer write). Common multi-node patterns
+(form-then-write, `--bootstrap-expect-nodes`) never produce `1+0` objects, so the
+sweep is a no-op there. Non-latest versions in versioning-enabled buckets are not yet
+covered (tracked follow-up).
 
 ---
 
@@ -894,8 +958,6 @@ spec:
         ports:
         - containerPort: 9000
           name: s3
-        - containerPort: 2049
-          name: nfsv4
         volumeMounts:
         - name: data
           mountPath: /grainfs/data
@@ -977,7 +1039,7 @@ cluster identity; nodes that keep the old key fail authentication against nodes
 that use the new key.
 
 **v0.0.39 and newer support online rolling rotation.** The PSK can be replaced
-without S3, NFS, or NBD downtime. The CLI sends rotation commands through the
+without S3 downtime. The CLI sends rotation commands through the
 meta-Raft leader's localhost-only Unix socket (`$DATA/rotate.sock`, mode 0600).
 
 ### Online rotation (recommended)
@@ -1066,95 +1128,9 @@ leader with:
 
 ### Offline fallback (all nodes older than v0.0.39)
 
-1. Stop every node. This causes S3, NFS, and NBD downtime.
+1. Stop every node. This causes S3 downtime.
 2. Write the new key to every node's `keys.d/current.key`, then restart each node.
 3. Confirm peer reconnection with `grainfs cluster --endpoint <data-dir>/admin.sock status`.
-
----
-
-## NFS / 9P Mount Operations
-
-### Creating a Mount SA
-
-A Mount SA scopes NFS/9P access to a named principal with an attached IAM policy.
-Use the `NFSMountOnly` builtin for NFSv4 clients and `9PAttachOnly` for 9P clients.
-
-```bash
-# Create the Mount SA with a numeric UID hint (advisory, for AUTH_SYS mapping).
-grainfs iam mount-sa create alice-mount --uid 1000 --endpoint <data>/admin.sock
-
-# Attach a builtin policy.
-grainfs iam mount-sa policy attach alice-mount NFSMountOnly --endpoint <data>/admin.sock
-
-# Register the target bucket as an NFS export if not already present.
-grainfs nfs export add my-bucket --endpoint <data>/admin.sock
-
-# List existing Mount SAs.
-grainfs iam mount-sa list --endpoint <data>/admin.sock
-```
-
-Mount path for NFSv4: `:<bucket>/<mount-sa>` (e.g. `localhost:/my-bucket/alice-mount`).
-Mount path for 9P: `aname=<mount-sa>@<bucket>` (e.g. `aname=alice-mount@my-bucket`).
-
-### Cross-namespace policy rejection
-
-Attaching a regular IAM policy (action namespace `s3:*`) to a Mount SA returns
-HTTP 412 Precondition Failed. Mount SAs accept only policies whose actions
-are in the `grainfs:` namespace (`NFSMountOnly`, `9PAttachOnly`, or a custom
-policy that uses only `grainfs:NFSRead` / `grainfs:NFSWrite` / `grainfs:9PAttach`).
-
-Remediation: create or use a policy in the `grainfs:` action namespace, then retry
-`grainfs iam mount-sa policy attach`.
-
-### Read-only export
-
-```bash
-# Register as read-only from the start.
-grainfs nfs export add my-bucket --ro --endpoint <data>/admin.sock
-
-# Flip an existing export to read-only (with optional quiesce).
-grainfs nfs export update my-bucket --ro --quiesce-wait 30s --endpoint <data>/admin.sock
-```
-
-Clients on a read-only export receive `NFS4ERR_ROFS` / 9P `EROFS` on writes.
-
-### Auditing NFS/9P access
-
-The `audit.s3` Iceberg table records every NFS and 9P operation with
-`source = 'nfs4'` or `source = '9p'` and the client `source_ip`:
-
-```bash
-grainfs audit query "
-  SELECT sa_id, source, source_ip, operation, bucket, ts
-  FROM grainfs_iceberg.audit.s3
-  WHERE source IN ('nfs4', '9p')
-  ORDER BY ts DESC
-  LIMIT 20
-" --endpoint <data>/admin.sock
-```
-
-### TLS posture gate for authenticated clusters
-
-For network-exposed deployments, run NFS/9P behind a private network boundary
-or TLS-terminating proxy. Recommended hardening:
-
-- A TLS certificate is on disk (`<data>/tls/cert.pem`), or
-- `trusted-proxy.cidr` is set (TLS is terminated by a front-end proxy).
-
-Boot error prefix: `NFS/9P boot: auth required + no TLS cert + no trusted proxy`.
-
-Remediation options:
-
-```bash
-# Option A: place the TLS cert (and restart).
-cp server.crt <data>/tls/cert.pem
-cp server.key <data>/tls/key.pem
-
-# Option B: configure a trusted proxy CIDR (hot-applied, no restart needed).
-grainfs config set trusted-proxy.cidr 10.0.0.0/8 --endpoint <data>/admin.sock
-```
-
-See also: `docs/operators/deploy-production-cluster.md` for TLS posture details.
 
 ---
 
@@ -1195,18 +1171,13 @@ volume, so there is no nonce-exhaustion cliff forcing rotation. The per-generati
 seal count below is a cumulative-usage signal for rotation hygiene and
 compromise-recovery, not a hard limit.
 
-**Data-DEK rotation is deferred in this release.** The `encryption.rotate-dek`
-trigger is intentionally rejected (`grainfs config set encryption.rotate-dek now`
-returns a "deferred — not supported in this release" error) — the append-only
-at-rest writers pin the DEK generation at open. Data WAL segment creation now
-persists the active generation in its encrypted segment header, but live rotation
-still needs a rollover or seal-under-pinned-generation boundary. Node-local data
-WALs and cluster-shard data WALs use distinct AEAD namespaces (`datawal/node`
-and `datawal/shard`), so frames cannot be swapped between those physical WAL
-families even when sequence numbers match. Every remaining ciphertext-bearing
-lane must have equivalent generation framing before rotation is re-enabled. Because
-XAES removed the nonce-exhaustion cliff, the seal count below is **observability
-only** (cumulative-usage / compromise-recovery signal), not an action threshold.
+**Data-DEK rotation is enabled.** The `encryption.rotate-dek` trigger advances
+the active data-encryption generation through meta-raft
+(`grainfs config set encryption.rotate-dek now`). Data-plane writers either carry
+generation framing or seal under a pinned generation, so pre-rotation objects
+remain readable while new writes use the new generation. Because XAES removed the
+nonce-exhaustion cliff, the seal count below is **observability only**
+(cumulative-usage / compromise-recovery signal), not an action threshold.
 **KEK rotation** (`cluster rotate-key`, which re-wraps the existing DEKs without
 changing the DEK keys) remains fully available and is unaffected.
 
@@ -1252,30 +1223,12 @@ KEK removal is two-phase: `grainfs encrypt kek retire --version N` marks an old
 KEK version draining, then `grainfs encrypt kek prune --version N` permanently
 removes it once every voter attests no active lease holds it.
 
-> **Prune-refusal for object snapshots is now ENFORCED.** `grainfs encrypt kek prune`
-> refuses if any voter reports a retained object-metadata snapshot
-> (`<data>/snapshots/snapshot-*.json.zst`) sealed under the target version. The error
-> names the blocking node and count, e.g.:
-> `KEKPrune: node 127.0.0.1:7001 has 2 retained object snapshot(s) sealed under version 1`
->
-> Both cluster-metadata (Raft FSM) and object-metadata snapshots embed a per-snapshot
-> ephemeral DEK wrapped by the KEK version active at snapshot time. Data DEKs are
-> rewrapped automatically before retire; **object snapshots are not** — they are sealed
-> once and never rewrapped. Pruning the KEK version while a snapshot references it
-> would make that snapshot permanently unreadable on restore.
->
-> Pre-prune checklist (defense-in-depth; the automatic guard below catches remaining cases):
-> 1. Confirm `grainfs_snapshot_legacy_plaintext_reads_total` has been flat at zero
->    across a full snapshot cycle (runtime signal that all active snapshots are
->    enveloped — necessary but not sufficient alone).
-> 2. Review your snapshot retention policy: if you keep snapshots older than the last
->    KEK rotation, those snapshots reference the old version. Delete them or let them
->    expire before pruning.
-> 3. Then prune: `grainfs encrypt kek prune --version N`. The cluster automatically
->    refuses prune if any voter still holds a snapshot sealed under version N — delete
->    the snapshot and retry.
+> **Note:** the object-metadata snapshot feature was removed, so there is no longer an
+> object-snapshot prune-refusal — no object snapshot can pin a KEK version. The KEK-lease
+> attestation still carries a snapshot-ref count, but it is always 0. The raft-store-key
+> guard below remains the active prune-refusal mechanism.
 
-> **Prune-refusal for raft-store keys is also enforced.** If a node's
+> **Prune-refusal for raft-store keys is enforced.** If a node's
 > `keys.d/raft-store.key.enc` is still sealed under the target KEK version,
 > prune fails with an error naming the raft-store sidecar. KEK rotation rewraps
 > this sidecar automatically; retry prune after the rotation has applied on all

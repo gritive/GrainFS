@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/stretchr/testify/require"
 )
 
 func aadFor(blobID, offset uint64, key string, flags byte) string {
@@ -20,8 +21,6 @@ func TestBlobEntryAAD_DistinctPerField(t *testing.T) {
 		"flags":  aadFor(1, 100, "k", 0x03),
 	}
 	for name, got := range cases {
-		if got == base {
-			t.Fatalf("AAD must differ when %s changes", name)
-		}
+		require.NotEqual(t, base, got, "AAD must differ when %s changes", name)
 	}
 }

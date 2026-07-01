@@ -12,9 +12,9 @@
 package storage
 
 import (
-	"bytes"
 	"context"
 	"crypto/md5"
+	"encoding"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -24,10 +24,9 @@ import (
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
-	"github.com/google/uuid"
 
 	"github.com/gritive/GrainFS/internal/chunkref"
-	"github.com/gritive/GrainFS/internal/storage/datawal"
+	"github.com/gritive/GrainFS/internal/uuidutil"
 )
 
 // MaxAppendSegments caps appendable segments per object.
@@ -44,9 +43,15 @@ var (
 // AppendObjecter is the optional interface for S3 Express AppendObject support.
 // Server-side HTTP handler probes via type assertion; backends without support
 // get a clean 501 NotImplemented. Mirrors existing optional-interface pattern
-// (Truncatable, ACLSetter, RequestPutter, UserMetadataPutter).
+// (ACLSetter, RequestPutter, UserMetadataPutter).
 type AppendObjecter interface {
 	AppendObject(ctx context.Context, bucket, key string, expectedOffset int64, r io.Reader) (*Object, error)
+}
+
+type appendBase struct {
+	object     *Object
+	summary    appendSummary
+	hasSummary bool
 }
 
 // AppendObject appends data to an existing appendable object, or creates a new
@@ -55,23 +60,28 @@ type AppendObjecter interface {
 // Returns ErrAppendOffsetMismatch if expectedOffset != current object size,
 // ErrAppendCapExceeded if the object already has MaxAppendSegments segments.
 func (b *LocalBackend) AppendObject(ctx context.Context, bucket, key string, expectedOffset int64, r io.Reader) (*Object, error) {
-	existing, err := b.HeadObject(ctx, bucket, key)
+	base, err := b.readAppendBase(ctx, bucket, key)
 	if err != nil && !errors.Is(err, ErrObjectNotFound) {
-		return nil, fmt.Errorf("head: %w", err)
+		return nil, fmt.Errorf("head append base: %w", err)
 	}
-	if existing == nil {
+	if base.object == nil {
 		if expectedOffset != 0 {
 			return nil, ErrAppendOffsetMismatch
 		}
 		return b.appendNew(ctx, bucket, key, r)
 	}
+	existing := base.object
 	if existing.Size != expectedOffset {
 		return nil, ErrAppendOffsetMismatch
 	}
-	if len(existing.Segments) >= MaxAppendSegments {
+	segmentCount := len(existing.Segments)
+	if base.hasSummary {
+		segmentCount = appendSummaryLogicalAppendCount(base.summary)
+	}
+	if segmentCount >= MaxAppendSegments {
 		return nil, ErrAppendCapExceeded
 	}
-	return b.appendExisting(ctx, bucket, key, existing, r)
+	return b.appendExisting(ctx, bucket, key, base, r)
 }
 
 func (b *LocalBackend) appendNew(ctx context.Context, bucket, key string, r io.Reader) (*Object, error) {
@@ -82,24 +92,32 @@ func (b *LocalBackend) appendNew(ctx context.Context, bucket, key string, r io.R
 	// TODO(Task 3.1): replace segment-checksum-as-MD5-proxy with the real
 	// AppendObject call payload MD5 captured via TeeReader at the API boundary.
 	// Stopgap mirrors the cluster path (internal/cluster/apply.go).
-	callMD5s := [][]byte{append([]byte(nil), seg.Checksum...)}
-	obj := &Object{
-		Key:            key,
-		Size:           seg.Size,
-		ContentType:    "application/octet-stream",
-		ETag:           CompositeETag(callMD5s),
-		LastModified:   time.Now().Unix(),
-		Segments:       []SegmentRef{seg},
-		AppendCallMD5s: callMD5s,
-		IsAppendable:   true,
+	state, count, err := appendETagStateAppend(nil, 0, seg.Checksum)
+	if err != nil {
+		return nil, err
 	}
-	if err := b.PutObjectRecord(ctx, bucket, key, obj); err != nil {
+	etag, err := compositeETagFromState(state, count)
+	if err != nil {
+		return nil, err
+	}
+	obj := &Object{
+		Key:          key,
+		Size:         seg.Size,
+		ContentType:  "application/octet-stream",
+		ETag:         etag,
+		LastModified: time.Now().Unix(),
+		Segments:     []SegmentRef{seg},
+		IsAppendable: true,
+	}
+	summary := appendSummary{Size: obj.Size, SegmentCount: 1, ETagPartCount: count, ETagDigestState: state}
+	if err := b.putAppendSideRecordObject(ctx, bucket, key, obj, summary, []SegmentRef{seg}); err != nil {
 		return nil, fmt.Errorf("persist: %w", err)
 	}
 	return obj, nil
 }
 
-func (b *LocalBackend) appendExisting(ctx context.Context, bucket, key string, existing *Object, r io.Reader) (*Object, error) {
+func (b *LocalBackend) appendExisting(ctx context.Context, bucket, key string, base appendBase, r io.Reader) (*Object, error) {
+	existing := base.object
 	existing, err := b.ensureAppendableBase(ctx, bucket, key, existing)
 	if err != nil {
 		return nil, err
@@ -109,21 +127,90 @@ func (b *LocalBackend) appendExisting(ctx context.Context, bucket, key string, e
 		return nil, fmt.Errorf("write segment: %w", err)
 	}
 	segs := append(existing.Segments, seg)
-	// TODO(Task 3.1): replace segment-checksum-as-MD5-proxy with the real
-	// AppendObject call payload MD5 captured via TeeReader at the API boundary.
-	// Stopgap mirrors the cluster path (internal/cluster/apply.go).
-	callMD5s := append(append([][]byte(nil), existing.AppendCallMD5s...), append([]byte(nil), seg.Checksum...))
 	obj := *existing
 	obj.Segments = segs
 	obj.Size = existing.Size + seg.Size
 	obj.IsAppendable = true
-	obj.AppendCallMD5s = callMD5s
-	obj.ETag = CompositeETag(callMD5s)
 	obj.LastModified = time.Now().Unix()
-	if err := b.PutObjectRecord(ctx, bucket, key, &obj); err != nil {
-		return nil, fmt.Errorf("persist: %w", err)
+
+	var persistErr error
+	if base.hasSummary || len(obj.Coalesced) == 0 {
+		state, count, err := appendETagStateForAppend(base.summary, base.hasSummary, existing, seg.Checksum)
+		if err != nil {
+			return nil, err
+		}
+		obj.AppendCallMD5s = nil
+		obj.ETag, err = compositeETagFromState(state, count)
+		if err != nil {
+			return nil, err
+		}
+		summary := appendSummary{Size: obj.Size, SegmentCount: len(segs), ETagPartCount: count, ETagDigestState: state}
+		if base.hasSummary {
+			summary.Size = base.summary.Size + seg.Size
+			summary.SegmentCount = base.summary.SegmentCount + 1
+			summary.CompactedPrefixCount = base.summary.CompactedPrefixCount
+			persistErr = b.putAppendSideRecordAppend(ctx, bucket, key, &obj, summary, seg)
+		} else {
+			persistErr = b.putAppendSideRecordObject(ctx, bucket, key, &obj, summary, segs)
+		}
+	} else if len(existing.Segments) > 0 || len(existing.Coalesced) > 0 {
+		// TODO(Task 3.1): replace segment-checksum-as-MD5-proxy with the real
+		// AppendObject call payload MD5 captured via TeeReader at the API boundary.
+		// Stopgap mirrors the cluster path (internal/cluster/apply.go).
+		callMD5s := appendCallMD5History(existing)
+		callMD5s = append(callMD5s, append([]byte(nil), seg.Checksum...))
+		obj.AppendCallMD5s = callMD5s
+		obj.ETag = CompositeETag(callMD5s)
+		persistErr = b.putObjectRecordAppend(ctx, bucket, key, &obj, []string{ParseLocator(seg.BlobID).String()})
+	} else {
+		// TODO(Task 3.1): replace segment-checksum-as-MD5-proxy with the real
+		// AppendObject call payload MD5 captured via TeeReader at the API boundary.
+		// Stopgap mirrors the cluster path (internal/cluster/apply.go).
+		callMD5s := appendCallMD5History(existing)
+		callMD5s = append(callMD5s, append([]byte(nil), seg.Checksum...))
+		obj.AppendCallMD5s = callMD5s
+		obj.ETag = CompositeETag(callMD5s)
+		persistErr = b.PutObjectRecord(ctx, bucket, key, &obj)
+	}
+	if persistErr != nil {
+		return nil, fmt.Errorf("persist: %w", persistErr)
 	}
 	return &obj, nil
+}
+
+func (b *LocalBackend) readAppendBase(ctx context.Context, bucket, key string) (appendBase, error) {
+	_ = ctx
+	var base appendBase
+	err := b.db.View(func(txn *badger.Txn) error {
+		raw, err := b.readObjectInTxn(txn, b.objectMetaKey(bucket, key))
+		if err == nil {
+			if raw.IsAppendable && raw.Size > 0 && len(raw.Segments) == 0 {
+				summary, hasSummary, err := b.readAppendSummaryForObjectInTxn(txn, bucket, key, raw)
+				if err != nil {
+					return err
+				}
+				if hasSummary && summary.SegmentCount > 0 && summary.ETagPartCount == 0 && len(summary.ETagDigestState) == 0 {
+					if err := b.loadAppendSideSegmentsInTxn(txn, bucket, key, raw); err != nil {
+						return err
+					}
+				}
+				base.summary = summary
+				base.hasSummary = hasSummary
+			}
+			base.object = raw
+			return nil
+		}
+		if err != badger.ErrKeyNotFound {
+			return err
+		}
+		if _, berr := txn.Get(b.bucketKey(bucket)); berr == badger.ErrKeyNotFound {
+			return ErrBucketNotFound
+		} else if berr != nil {
+			return berr
+		}
+		return ErrObjectNotFound
+	})
+	return base, err
 }
 
 func (b *LocalBackend) ensureAppendableBase(ctx context.Context, bucket, key string, existing *Object) (*Object, error) {
@@ -164,31 +251,8 @@ func (b *LocalBackend) ensureAppendableBase(ctx context.Context, bucket, key str
 // regression test TestEncryptedSegment_PerSegmentAADIsolation locks in
 // this contract — do not collapse the domain to a per-object value.
 func (b *LocalBackend) WriteSegmentBlob(bucket, key string, r io.Reader) (SegmentRef, error) {
-	blobID := uuid.Must(uuid.NewV7()).String()
+	blobID := uuidutil.MustNewV7()
 	path := b.segmentPath(bucket, key, blobID)
-	if b.dataWAL != nil {
-		payload, err := io.ReadAll(io.LimitReader(r, datawal.MaxPayloadBytes+1))
-		if err != nil {
-			return SegmentRef{}, err
-		}
-		if len(payload) > datawal.MaxPayloadBytes {
-			return SegmentRef{}, fmt.Errorf("datawal: payload too large: %d", len(payload))
-		}
-		_, err = b.dataWAL.AppendReader(context.Background(), datawal.Record{
-			Op:     datawal.OpSegmentPut,
-			Bucket: bucket,
-			Key:    key,
-			Target: blobID,
-			Size:   int64(len(payload)),
-		}, bytes.NewReader(payload))
-		if err != nil {
-			return SegmentRef{}, err
-		}
-		if err := b.dataWAL.Flush(); err != nil {
-			return SegmentRef{}, err
-		}
-		r = bytes.NewReader(payload)
-	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return SegmentRef{}, err
 	}
@@ -242,11 +306,133 @@ func CompositeETag(callMD5s [][]byte) string {
 	return fmt.Sprintf("%s-%d", hex.EncodeToString(h.Sum(nil)), len(callMD5s))
 }
 
+func appendETagStateAppend(state []byte, count int, digest []byte) ([]byte, int, error) {
+	h := md5.New()
+	if len(state) > 0 {
+		unmarshaler, ok := h.(encoding.BinaryUnmarshaler)
+		if !ok {
+			return nil, 0, errors.New("append etag state: md5 does not support binary unmarshal")
+		}
+		if err := unmarshaler.UnmarshalBinary(state); err != nil {
+			return nil, 0, fmt.Errorf("append etag state: unmarshal: %w", err)
+		}
+	}
+	if _, err := h.Write(digest); err != nil {
+		return nil, 0, fmt.Errorf("append etag state: write digest: %w", err)
+	}
+	marshaler, ok := h.(encoding.BinaryMarshaler)
+	if !ok {
+		return nil, 0, errors.New("append etag state: md5 does not support binary marshal")
+	}
+	next, err := marshaler.MarshalBinary()
+	if err != nil {
+		return nil, 0, fmt.Errorf("append etag state: marshal: %w", err)
+	}
+	return next, count + 1, nil
+}
+
+func AppendETagStateAppend(state []byte, count int, digest []byte) ([]byte, int, error) {
+	return appendETagStateAppend(state, count, digest)
+}
+
+func compositeETagFromState(state []byte, count int) (string, error) {
+	h := md5.New()
+	if len(state) > 0 {
+		unmarshaler, ok := h.(encoding.BinaryUnmarshaler)
+		if !ok {
+			return "", errors.New("append etag state: md5 does not support binary unmarshal")
+		}
+		if err := unmarshaler.UnmarshalBinary(state); err != nil {
+			return "", fmt.Errorf("append etag state: unmarshal: %w", err)
+		}
+	}
+	return fmt.Sprintf("%s-%d", hex.EncodeToString(h.Sum(nil)), count), nil
+}
+
+func CompositeETagFromState(state []byte, count int) (string, error) {
+	return compositeETagFromState(state, count)
+}
+
+func appendETagStateForAppend(summary appendSummary, hasSummary bool, existing *Object, digest []byte) ([]byte, int, error) {
+	if hasSummary && len(summary.ETagDigestState) > 0 {
+		return appendETagStateAppend(summary.ETagDigestState, summary.ETagPartCount, digest)
+	}
+	state, count, err := appendETagStateFromDigests(appendCallMD5History(existing))
+	if err != nil {
+		return nil, 0, err
+	}
+	return appendETagStateAppend(state, count, digest)
+}
+
+func appendETagStateFromDigests(digests [][]byte) ([]byte, int, error) {
+	var (
+		state []byte
+		count int
+		err   error
+	)
+	for _, digest := range digests {
+		state, count, err = appendETagStateAppend(state, count, digest)
+		if err != nil {
+			return nil, 0, err
+		}
+	}
+	return state, count, nil
+}
+
+func AppendETagStateFromDigests(digests [][]byte) ([]byte, int, error) {
+	return appendETagStateFromDigests(digests)
+}
+
+func appendCallMD5History(obj *Object) [][]byte {
+	if len(obj.AppendCallMD5s) > 0 {
+		callMD5s := make([][]byte, 0, len(obj.AppendCallMD5s))
+		for _, digest := range obj.AppendCallMD5s {
+			callMD5s = append(callMD5s, append([]byte(nil), digest...))
+		}
+		return callMD5s
+	}
+	callMD5s := make([][]byte, 0, len(obj.Segments))
+	for _, seg := range obj.Segments {
+		callMD5s = append(callMD5s, append([]byte(nil), seg.Checksum...))
+	}
+	return callMD5s
+}
+
 // PutObjectRecord persists Object into the backend's BadgerDB. Self-managed txn.
 func (b *LocalBackend) PutObjectRecord(ctx context.Context, bucket, key string, obj *Object) error {
 	return b.db.Update(func(txn *badger.Txn) error {
 		return b.PutObjectRecordInTxn(txn, bucket, key, obj)
 	})
+}
+
+func (b *LocalBackend) putObjectRecordAppend(ctx context.Context, bucket, key string, obj *Object, newChunkLocators []string) error {
+	return b.db.Update(func(txn *badger.Txn) error {
+		return b.putObjectRecordAppendInTxn(txn, bucket, key, obj, newChunkLocators)
+	})
+}
+
+func (b *LocalBackend) putObjectRecordAppendInTxn(txn *badger.Txn, bucket, key string, obj *Object, newChunkLocators []string) error {
+	mk := b.objectMetaKey(bucket, key)
+	if _, err := txn.Get(mk); errors.Is(err, badger.ErrKeyNotFound) {
+		newChunkLocators = obj.ChunkLocators()
+	} else if err != nil {
+		return err
+	}
+	data, err := marshalObject(obj)
+	if err != nil {
+		return err
+	}
+	if err := setBadgerValue(txn, mk, data); err != nil {
+		return err
+	}
+	store := NewChunkRefStore(txn)
+	m := chunkref.ObjectVersionID(bucket, key, obj.VersionID)
+	for _, c := range newChunkLocators {
+		if err := store.AddRef(m, chunkref.ChunkID(c)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // PutObjectRecordInTxn persists Object within a caller-provided txn and
@@ -266,6 +452,9 @@ func (b *LocalBackend) PutObjectRecordInTxn(txn *badger.Txn, bucket, key string,
 			if err := store.RemoveRef(prevM, chunkref.ChunkID(c), now); err != nil {
 				return err
 			}
+		}
+		if err := b.deleteAppendSideRecordsInTxn(txn, bucket, key, prev.VersionID, now); err != nil {
+			return err
 		}
 	} else if err != nil && !errors.Is(err, badger.ErrKeyNotFound) {
 		return err

@@ -28,7 +28,7 @@ install -d -m 0700 "$DATA_DIR"
 - `<data>/keys.d/raft-store.key.enc` is generated on each node and seals that node's local raft v2 Badger encryption key under the cluster KEK
 - A fixed/externally-managed transport key is supplied by writing `<data>/keys.d/current.key` before first boot (a file, never an argv literal)
 - `default` bucket is auto-created with anonymous read/write access
-- `_grainfs` reserved bucket + `_grainfs/audit/evaluations` Iceberg table seeded
+- `_grainfs` reserved bucket seeded
 
 New joining nodes do not hand-copy `<data>/keys/0.key`, `<data>/cluster.id`, or
 the cluster transport key. They receive the required sealed bootstrap material
@@ -157,14 +157,6 @@ Each block independent.
 Convention path: `<data>/tls/cert.pem` + `<data>/tls/key.pem` (or `GRAINFS_TLS_CERT/KEY` env). After placing files: `kill -SIGHUP $(pidof grainfs)` for hot-swap.
 
 TLS is strongly recommended for any network-exposed authenticated deployment.
-
-### Reverse-proxy mode
-
-```bash
-grainfs config set trusted-proxy.cidr 10.0.0.0/8,172.16.0.0/12
-```
-
-Accepts plaintext token endpoint behind a validated proxy (`Forwarded` or `X-Forwarded-Proto: https`).
 
 ### Operator-managed KEK source
 

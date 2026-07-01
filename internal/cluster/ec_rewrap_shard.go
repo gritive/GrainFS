@@ -7,12 +7,6 @@ import (
 	"github.com/gritive/GrainFS/internal/storage/eccodec"
 )
 
-// rewrapTestHook, when non-nil, runs between the gen-stale shard's plaintext
-// read and its re-seal. Tests use it to widen the read-modify-write window and
-// prove the per-shard write lock makes the rewrap atomic versus a concurrent
-// config-upgrade re-split. nil in production.
-var rewrapTestHook func()
-
 // RewrapShardIfStaleAt migrates a single owned EC shard onto activeGen if its
 // on-disk DEK generation differs. It is idempotent (a shard already at activeGen
 // is a no-op) and multi-gen-safe (it inspects only the shard's own header, never
@@ -47,9 +41,6 @@ func (b *DistributedBackend) RewrapShardIfStaleAt(bucket, canonicalKey string, s
 	if err != nil {
 		return false, fmt.Errorf("rewrap read shard %s/%s/%d: %w", bucket, canonicalKey, shardIdx, err)
 	}
-	if rewrapTestHook != nil {
-		rewrapTestHook()
-	}
 	// Re-seal at the active gen.
 	encoded, err := b.shardSvc.EncodeEncryptedShardBuffer(bucket, canonicalKey, shardIdx, plain)
 	if err != nil {
@@ -59,13 +50,6 @@ func (b *DistributedBackend) RewrapShardIfStaleAt(bucket, canonicalKey string, s
 		return false, fmt.Errorf("rewrap write shard %s/%s/%d: %w", bucket, canonicalKey, shardIdx, err)
 	}
 	return true, nil
-}
-
-// RewrapShardIfStale migrates a single owned EC shard of a regular versioned
-// object onto activeGen. It is a thin wrapper around RewrapShardIfStaleAt that
-// derives the canonical shard key from (key, versionID).
-func (b *DistributedBackend) RewrapShardIfStale(bucket, key, versionID string, shardIdx int, activeGen uint32) (bool, error) {
-	return b.RewrapShardIfStaleAt(bucket, ecObjectShardKey(key, versionID), shardIdx, activeGen)
 }
 
 // readOwnedShardRaw locates and returns the raw on-disk shard bytes (pack-first,
@@ -79,13 +63,6 @@ func (b *DistributedBackend) readOwnedShardRaw(bucket, canonicalKey string, shar
 	path, err := b.shardSvc.getShardPath(bucket, canonicalKey, shardIdx)
 	if err != nil {
 		return nil, "", fmt.Errorf("rewrap locate shard %s/%s/%d: %w", bucket, canonicalKey, shardIdx, err)
-	}
-	if b.shardSvc.shardPack != nil {
-		if raw, ok, err := b.shardSvc.shardPack.get(bucket, canonicalKey, shardIdx); err != nil {
-			return nil, "", fmt.Errorf("rewrap read pack shard %s/%s/%d: %w", bucket, canonicalKey, shardIdx, err)
-		} else if ok {
-			return raw, path, nil
-		}
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {

@@ -73,5 +73,9 @@ func parseTransferLeaderError(e *adminapi.Error) *TransferLeaderError {
 // asAdminError extracts a *adminapi.Error from an error chain.
 func asAdminError(err error) (*adminapi.Error, bool) {
 	var e *adminapi.Error
-	return e, errors.As(err, &e)
+	// Hoist errors.As ahead of the return so e is populated before it is read:
+	// in `return e, errors.As(err, &e)` the Go spec leaves the ordering of the
+	// plain `e` read versus the mutating call unspecified.
+	ok := errors.As(err, &e)
+	return e, ok
 }

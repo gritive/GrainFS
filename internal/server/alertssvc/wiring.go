@@ -1,0 +1,80 @@
+package alertssvc
+
+import (
+	"github.com/gritive/GrainFS/internal/alerts"
+	"github.com/gritive/GrainFS/internal/encrypt"
+	"github.com/gritive/GrainFS/internal/metrics"
+)
+
+// NewState wires the dispatcher and tracker together. The dispatcher's
+// OnResult callback is captured here so the state can record success counters
+// and the last failed alert for the Force Resend button.
+func NewState(webhookURL string, opts alerts.Options, trackerCfg alerts.DegradedConfig) *State {
+	return newStateFromDispatcher(trackerCfg, func(s *State) *alerts.Dispatcher {
+		opts.OnResult = s.onResult
+		return alerts.NewDispatcher(webhookURL, opts, nil)
+	})
+}
+
+// NewStateWithConfig builds a State whose dispatcher reads its webhook URL +
+// wrapped secret from cfg on every Send. This is the production wiring used by
+// serveruntime: a cluster-config PATCH that flips the URL or rotates the
+// secret takes effect on the next alert without a process restart.
+//
+// cfg must not be nil; enc may be nil (in which case the secret is treated as
+// disabled even if the wrapped blob is populated, matching the static
+// empty-secret path).
+//
+// alertKind is forwarded to the underlying Dispatcher and surfaces as the
+// alert_kind label on WebhookSignatureDecryptFailureTotal so operators can
+// tell which State saw stale wrapped secrets after DEK rotation.
+func NewStateWithConfig(
+	cfg alerts.AlertCfgReader,
+	enc alerts.SecretOpener,
+	secretFields []encrypt.AADField,
+	opts alerts.Options,
+	trackerCfg alerts.DegradedConfig,
+	alertKind string,
+) *State {
+	return newStateFromDispatcher(trackerCfg, func(s *State) *alerts.Dispatcher {
+		opts.OnResult = s.onResult
+		return alerts.NewDispatcherWithConfig(cfg, enc, secretFields, opts, nil, alertKind)
+	})
+}
+
+func newStateFromDispatcher(trackerCfg alerts.DegradedConfig, build func(*State) *alerts.Dispatcher) *State {
+	s := &State{}
+	s.dispatcher = build(s)
+	// When the tracker trips into hold mode, send a critical webhook so
+	// the on-call human knows the system is being held degraded for them.
+	// Dispatcher.Send is now fire-and-forget — the controller goroutine owns
+	// retry, so OnHold callers (scrubber, raft monitor, disk collector) are
+	// never blocked. onResult records delivery failures for the dashboard
+	// banner and Force Resend.
+	trackerCfg.OnHold = func(reason string) {
+		s.dispatcher.Send(alerts.Alert{
+			Type:     "degraded_hold",
+			Severity: alerts.SeverityCritical,
+			Message:  "Tracker held in degraded mode: " + reason,
+		})
+	}
+	// Mirror tracker state into the Prometheus gauge. Runs in the actor
+	// goroutine (see DegradedConfig.OnStateChange godoc), so the gauge
+	// cannot observe a stale value between a concurrent Report and the
+	// mirror update.
+	trackerCfg.OnStateChange = func(degraded bool) {
+		if degraded {
+			metrics.Degraded.Set(1)
+		} else {
+			metrics.Degraded.Set(0)
+		}
+		// Call secondary callbacks (e.g. Server.degradedFlag.Store) with a lock-free read.
+		if cbs := s.secondaryCallbacks.Load(); cbs != nil {
+			for _, cb := range *cbs {
+				cb(degraded)
+			}
+		}
+	}
+	s.tracker = alerts.NewDegradedTracker(trackerCfg)
+	return s
+}

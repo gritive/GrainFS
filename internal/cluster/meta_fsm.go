@@ -17,18 +17,14 @@ import (
 	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/iam"
-	"github.com/gritive/GrainFS/internal/iam/bucketpolicy"
 	"github.com/gritive/GrainFS/internal/iam/group"
 	iamjwt "github.com/gritive/GrainFS/internal/iam/jwt"
-	"github.com/gritive/GrainFS/internal/iam/mountsastore"
 	"github.com/gritive/GrainFS/internal/iam/policy"
 	"github.com/gritive/GrainFS/internal/iam/policyattach"
 	"github.com/gritive/GrainFS/internal/iam/policystore"
-	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/lifecycle"
 	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/migration"
-	"github.com/gritive/GrainFS/internal/nfsexport"
 	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/scrubber"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -38,71 +34,58 @@ import (
 type MetaCmdType = clusterpb.MetaCmdType
 
 const (
-	MetaCmdTypeNoOp                         = clusterpb.MetaCmdTypeNoOp
-	MetaCmdTypeAddNode                      = clusterpb.MetaCmdTypeAddNode
-	MetaCmdTypeRemoveNode                   = clusterpb.MetaCmdTypeRemoveNode
-	MetaCmdTypePutShardGroup                = clusterpb.MetaCmdTypePutShardGroup        // PR-C
-	MetaCmdTypePutBucketAssignment          = clusterpb.MetaCmdTypePutBucketAssignment  // PR-D
-	MetaCmdTypeSetLoadSnapshot              = clusterpb.MetaCmdTypeSetLoadSnapshot      // PR-D
-	MetaCmdTypeProposeRebalancePlan         = clusterpb.MetaCmdTypeProposeRebalancePlan // PR-D
-	MetaCmdTypeAbortPlan                    = clusterpb.MetaCmdTypeAbortPlan            // PR-D
-	MetaCmdTypeIcebergCreateNamespace       = clusterpb.MetaCmdTypeIcebergCreateNamespace
-	MetaCmdTypeIcebergDeleteNamespace       = clusterpb.MetaCmdTypeIcebergDeleteNamespace
-	MetaCmdTypeIcebergCreateTable           = clusterpb.MetaCmdTypeIcebergCreateTable
-	MetaCmdTypeIcebergCommitTable           = clusterpb.MetaCmdTypeIcebergCommitTable
-	MetaCmdTypeIcebergDeleteTable           = clusterpb.MetaCmdTypeIcebergDeleteTable
-	MetaCmdTypeRotateKeyBegin               = clusterpb.MetaCmdTypeRotateKeyBegin
-	MetaCmdTypeRotateKeySwitch              = clusterpb.MetaCmdTypeRotateKeySwitch
-	MetaCmdTypeRotateKeyDrop                = clusterpb.MetaCmdTypeRotateKeyDrop
-	MetaCmdTypeRotateKeyAbort               = clusterpb.MetaCmdTypeRotateKeyAbort
-	MetaCmdTypeScrubTrigger                 = clusterpb.MetaCmdTypeScrubTrigger // PR4
-	MetaCmdTypePutObjectIndex               = clusterpb.MetaCmdTypePutObjectIndex
-	MetaCmdTypeDeleteObjectIndex            = clusterpb.MetaCmdTypeDeleteObjectIndex
-	MetaCmdTypeIAMSACreate                  = clusterpb.MetaCmdTypeIAMSACreate
-	MetaCmdTypeIAMSADelete                  = clusterpb.MetaCmdTypeIAMSADelete
-	MetaCmdTypeIAMKeyCreate                 = clusterpb.MetaCmdTypeIAMKeyCreate
-	MetaCmdTypeIAMKeyCreateScoped           = clusterpb.MetaCmdTypeIAMKeyCreateScoped
-	MetaCmdTypeIAMKeyRevoke                 = clusterpb.MetaCmdTypeIAMKeyRevoke
-	MetaCmdTypeIAMGrantPut                  = clusterpb.MetaCmdTypeIAMGrantPut
-	MetaCmdTypeIAMGrantDelete               = clusterpb.MetaCmdTypeIAMGrantDelete
-	MetaCmdTypeIAMGrantWildcardPut          = clusterpb.MetaCmdTypeIAMGrantWildcardPut
-	MetaCmdTypeIAMGrantWildcardDelete       = clusterpb.MetaCmdTypeIAMGrantWildcardDelete
-	MetaCmdTypeIAMInitFirstSA               = clusterpb.MetaCmdTypeIAMInitFirstSA
-	MetaCmdTypeIAMBucketUpstreamPut         = clusterpb.MetaCmdTypeIAMBucketUpstreamPut
-	MetaCmdTypeIAMBucketUpstreamDelete      = clusterpb.MetaCmdTypeIAMBucketUpstreamDelete
-	MetaCmdTypeBucketLifecyclePut           = clusterpb.MetaCmdTypeBucketLifecyclePut
-	MetaCmdTypeBucketLifecycleDelete        = clusterpb.MetaCmdTypeBucketLifecycleDelete
-	MetaCmdTypeNfsExportUpsert              = clusterpb.MetaCmdTypeNfsExportUpsert
-	MetaCmdTypeNfsExportDelete              = clusterpb.MetaCmdTypeNfsExportDelete
-	MetaCmdTypeNfsExportBucketDeleteCascade = clusterpb.MetaCmdTypeNfsExportBucketDeleteCascade
-	MetaCmdTypeNfsExportCreate              = clusterpb.MetaCmdTypeNfsExportCreate
-	MetaCmdTypeCapabilityActivate           = clusterpb.MetaCmdTypeCapabilityActivate
-	MetaCmdTypeMigrationCutover             = clusterpb.MetaCmdTypeMigrationCutover
-	MetaCmdTypeConfigPut                    = clusterpb.MetaCmdTypeConfigPut
-	MetaCmdTypeConfigDelete                 = clusterpb.MetaCmdTypeConfigDelete
-	MetaCmdTypeDEKRotate                    = clusterpb.MetaCmdTypeDEKRotate
-	MetaCmdTypeDEKReplicatedRotate          = clusterpb.MetaCmdTypeDEKReplicatedRotate
-	MetaCmdTypeDEKVersionPrune              = clusterpb.MetaCmdTypeDEKVersionPrune
-	MetaCmdTypeDEKRewrapProgress            = clusterpb.MetaCmdTypeDEKRewrapProgress
-	MetaCmdTypePolicyPut                    = clusterpb.MetaCmdTypePolicyPut
-	MetaCmdTypePolicyDelete                 = clusterpb.MetaCmdTypePolicyDelete
-	MetaCmdTypeGroupPut                     = clusterpb.MetaCmdTypeGroupPut
-	MetaCmdTypeGroupDelete                  = clusterpb.MetaCmdTypeGroupDelete
-	MetaCmdTypeGroupMemberPut               = clusterpb.MetaCmdTypeGroupMemberPut
-	MetaCmdTypeGroupMemberDelete            = clusterpb.MetaCmdTypeGroupMemberDelete
-	MetaCmdTypePolicyAttachToSAPut          = clusterpb.MetaCmdTypePolicyAttachToSAPut
-	MetaCmdTypePolicyAttachToSADelete       = clusterpb.MetaCmdTypePolicyAttachToSADelete
-	MetaCmdTypePolicyAttachToGroupPut       = clusterpb.MetaCmdTypePolicyAttachToGroupPut
-	MetaCmdTypePolicyAttachToGroupDelete    = clusterpb.MetaCmdTypePolicyAttachToGroupDelete
-	MetaCmdTypeBucketPolicyPut              = clusterpb.MetaCmdTypeBucketPolicyPut
-	MetaCmdTypeBucketPolicyDelete           = clusterpb.MetaCmdTypeBucketPolicyDelete
+	MetaCmdTypeNoOp                      = clusterpb.MetaCmdTypeNoOp
+	MetaCmdTypeAddNode                   = clusterpb.MetaCmdTypeAddNode
+	MetaCmdTypeRemoveNode                = clusterpb.MetaCmdTypeRemoveNode
+	MetaCmdTypePutShardGroup             = clusterpb.MetaCmdTypePutShardGroup             // PR-C
+	MetaCmdTypeAddPlacementGeneration    = clusterpb.MetaCmdTypeAddPlacementGeneration    // Phase 7
+	MetaCmdTypeRetirePlacementGeneration = clusterpb.MetaCmdTypeRetirePlacementGeneration // Phase 7 follow-up
+	MetaCmdTypePutBucketAssignment       = clusterpb.MetaCmdTypePutBucketAssignment       // PR-D
+	MetaCmdTypeSetLoadSnapshot           = clusterpb.MetaCmdTypeSetLoadSnapshot           // PR-D
+	// 9-13 reserved — do not reuse (no renumber).
+	MetaCmdTypeRotateKeyBegin            = clusterpb.MetaCmdTypeRotateKeyBegin
+	MetaCmdTypeRotateKeySwitch           = clusterpb.MetaCmdTypeRotateKeySwitch
+	MetaCmdTypeRotateKeyDrop             = clusterpb.MetaCmdTypeRotateKeyDrop
+	MetaCmdTypeRotateKeyAbort            = clusterpb.MetaCmdTypeRotateKeyAbort
+	MetaCmdTypeScrubTrigger              = clusterpb.MetaCmdTypeScrubTrigger // PR4
+	MetaCmdTypeIAMSACreate               = clusterpb.MetaCmdTypeIAMSACreate
+	MetaCmdTypeIAMSADelete               = clusterpb.MetaCmdTypeIAMSADelete
+	MetaCmdTypeIAMKeyCreate              = clusterpb.MetaCmdTypeIAMKeyCreate
+	MetaCmdTypeIAMKeyCreateScoped        = clusterpb.MetaCmdTypeIAMKeyCreateScoped
+	MetaCmdTypeIAMKeyRevoke              = clusterpb.MetaCmdTypeIAMKeyRevoke
+	MetaCmdTypeIAMGrantPut               = clusterpb.MetaCmdTypeIAMGrantPut
+	MetaCmdTypeIAMGrantDelete            = clusterpb.MetaCmdTypeIAMGrantDelete
+	MetaCmdTypeIAMGrantWildcardPut       = clusterpb.MetaCmdTypeIAMGrantWildcardPut
+	MetaCmdTypeIAMGrantWildcardDelete    = clusterpb.MetaCmdTypeIAMGrantWildcardDelete
+	MetaCmdTypeIAMInitFirstSA            = clusterpb.MetaCmdTypeIAMInitFirstSA
+	MetaCmdTypeIAMBucketUpstreamPut      = clusterpb.MetaCmdTypeIAMBucketUpstreamPut
+	MetaCmdTypeIAMBucketUpstreamDelete   = clusterpb.MetaCmdTypeIAMBucketUpstreamDelete
+	MetaCmdTypeBucketLifecyclePut        = clusterpb.MetaCmdTypeBucketLifecyclePut
+	MetaCmdTypeBucketLifecycleDelete     = clusterpb.MetaCmdTypeBucketLifecycleDelete
+	MetaCmdTypeCapabilityActivate        = clusterpb.MetaCmdTypeCapabilityActivate
+	MetaCmdTypeMigrationCutover          = clusterpb.MetaCmdTypeMigrationCutover
+	MetaCmdTypeConfigPut                 = clusterpb.MetaCmdTypeConfigPut
+	MetaCmdTypeConfigDelete              = clusterpb.MetaCmdTypeConfigDelete
+	MetaCmdTypeDEKRotate                 = clusterpb.MetaCmdTypeDEKRotate
+	MetaCmdTypeDEKReplicatedRotate       = clusterpb.MetaCmdTypeDEKReplicatedRotate
+	MetaCmdTypeDEKVersionPrune           = clusterpb.MetaCmdTypeDEKVersionPrune
+	MetaCmdTypeDEKRewrapProgress         = clusterpb.MetaCmdTypeDEKRewrapProgress
+	MetaCmdTypePolicyPut                 = clusterpb.MetaCmdTypePolicyPut
+	MetaCmdTypePolicyDelete              = clusterpb.MetaCmdTypePolicyDelete
+	MetaCmdTypeGroupPut                  = clusterpb.MetaCmdTypeGroupPut
+	MetaCmdTypeGroupDelete               = clusterpb.MetaCmdTypeGroupDelete
+	MetaCmdTypeGroupMemberPut            = clusterpb.MetaCmdTypeGroupMemberPut
+	MetaCmdTypeGroupMemberDelete         = clusterpb.MetaCmdTypeGroupMemberDelete
+	MetaCmdTypePolicyAttachToSAPut       = clusterpb.MetaCmdTypePolicyAttachToSAPut
+	MetaCmdTypePolicyAttachToSADelete    = clusterpb.MetaCmdTypePolicyAttachToSADelete
+	MetaCmdTypePolicyAttachToGroupPut    = clusterpb.MetaCmdTypePolicyAttachToGroupPut
+	MetaCmdTypePolicyAttachToGroupDelete = clusterpb.MetaCmdTypePolicyAttachToGroupDelete
+	// MetaCmdTypeBucketPolicyPut (60) and MetaCmdTypeBucketPolicyDelete (61) are
+	// retired — bucket policy now lives in BucketRecord.Policy (SetBucketPolicy /
+	// DeleteBucketPolicy commands). Enum slots reserved; do not renumber.
 	MetaCmdTypeCreateBucketWithPolicyAttach = clusterpb.MetaCmdTypeCreateBucketWithPolicyAttach
 	MetaCmdTypeJWTSigningKeyRotate          = clusterpb.MetaCmdTypeJWTSigningKeyRotate
 	MetaCmdTypeJWTSigningKeyPrune           = clusterpb.MetaCmdTypeJWTSigningKeyPrune
-	MetaCmdTypeMountSACreate                = clusterpb.MetaCmdTypeMountSACreate
-	MetaCmdTypeMountSADelete                = clusterpb.MetaCmdTypeMountSADelete
-	MetaCmdTypeMountSAAttachPolicy          = clusterpb.MetaCmdTypeMountSAAttachPolicy
-	MetaCmdTypeMountSADetachPolicy          = clusterpb.MetaCmdTypeMountSADetachPolicy
 	// KEK envelope rotation (Phase B): rotate the cluster KEK in lockstep with
 	// the FSM-deterministic install of the rewrapped DEK set.
 	MetaCmdTypeKEKRotate = clusterpb.MetaCmdTypeKEKRotate
@@ -126,6 +109,11 @@ const (
 	MetaCmdTypePreparePresentFlip          = clusterpb.MetaCmdTypePreparePresentFlip   // zero-CA cutover: PR-2a §8c
 	MetaCmdTypeBeginPresentFlip            = clusterpb.MetaCmdTypeBeginPresentFlip     // zero-CA cutover: PR-2a §8c
 	MetaCmdTypeDropClusterKeyAccept        = clusterpb.MetaCmdTypeDropClusterKeyAccept // zero-CA cutover: PR-2b §8 H2
+	MetaCmdTypeCreateBucket                = clusterpb.MetaCmdTypeCreateBucket         // group0-demotion: atomic existence + group assignment
+	MetaCmdTypeDeleteBucket                = clusterpb.MetaCmdTypeDeleteBucket         // group0-demotion: idempotent bucket deletion + router unassign
+	MetaCmdTypeSetBucketVersioning         = clusterpb.MetaCmdTypeSetBucketVersioning  // group0-demotion: RMW versioning state on existing bucket record
+	MetaCmdTypeSetBucketPolicy             = clusterpb.MetaCmdTypeSetBucketPolicy      // group0-demotion: RMW policy blob on existing bucket record
+	MetaCmdTypeDeleteBucketPolicy          = clusterpb.MetaCmdTypeDeleteBucketPolicy   // group0-demotion: idempotent nil-out of bucket record policy
 )
 
 // MetaNodeEntry is the plain-Go representation of a cluster member.
@@ -135,11 +123,20 @@ type MetaNodeEntry struct {
 	Role    uint8 // 0=Voter 1=Learner
 }
 
-// ShardGroupEntry describes data Raft group membership.
+// ShardGroupEntry describes placement group membership.
 // bucket→group mapping is managed separately by Router. key-range sharding excluded.
 type ShardGroupEntry struct {
 	ID      string
 	PeerIDs []string
+}
+
+// BucketRecord is the unified per-bucket record stored in MetaFSM.
+// It replaces the old bucket→groupID string map with a struct that can carry
+// versioning state and a JSON policy document.
+type BucketRecord struct {
+	GroupID    string
+	Versioning string // "Enabled", "Suspended", or "" (unset)
+	Policy     []byte // raw JSON bucket policy; nil means no policy
 }
 
 // LoadStatEntry is the plain-Go representation of per-node load statistics.
@@ -152,7 +149,7 @@ type LoadStatEntry struct {
 }
 
 // ObjectIndexEntry is the meta-Raft global object index row used to route an
-// object version to its owning data Raft group before touching group-local FSMs.
+// object version to its owning placement group.
 type ObjectIndexEntry struct {
 	Bucket           string
 	Key              string
@@ -181,68 +178,11 @@ type ObjectIndexSummary struct {
 	PlacementGroupCounts map[string]int `json:"placement_group_counts"`
 }
 
-// RebalancePlan describes a single voter migration between data Raft group nodes.
-type RebalancePlan struct {
-	PlanID    string
-	GroupID   string
-	FromNode  string
-	ToNode    string
-	CreatedAt time.Time
-}
-
-type IcebergNamespaceEntry struct {
-	Warehouse  string
-	Namespace  []string
-	Properties map[string]string
-}
-
-type IcebergTableEntry struct {
-	Warehouse        string
-	Identifier       icebergcatalog.Identifier
-	MetadataLocation string
-	Properties       map[string]string
-}
-
-type IcebergCreateNamespaceCmd struct {
-	RequestID  string
-	Warehouse  string
-	Namespace  []string
-	Properties map[string]string
-}
-
-type IcebergDeleteNamespaceCmd struct {
-	RequestID string
-	Warehouse string
-	Namespace []string
-}
-
-type IcebergCreateTableCmd struct {
-	RequestID        string
-	Warehouse        string
-	Identifier       icebergcatalog.Identifier
-	MetadataLocation string
-	Properties       map[string]string
-}
-
-type IcebergCommitTableCmd struct {
-	RequestID                string
-	Warehouse                string
-	Identifier               icebergcatalog.Identifier
-	ExpectedMetadataLocation string
-	NewMetadataLocation      string
-}
-
-type IcebergDeleteTableCmd struct {
-	RequestID  string
-	Warehouse  string
-	Identifier icebergcatalog.Identifier
-}
-
 // MetaFSM implements raft.Snapshotter for the meta-Raft group.
 // It holds cluster membership state.
 //
 // Lock discipline: mu is a RWMutex shared by all three state maps (nodes,
-// shardGroups, bucketAssignments) and the callback field.
+// shardGroups, bucketRecords) and the callback field.
 // RWMutex is justified here because:
 //   - There is exactly ONE writer goroutine (runApplyLoop), so write contention
 //     is zero and write locks are never contended.
@@ -258,23 +198,19 @@ type IcebergDeleteTableCmd struct {
 // that call InstallKEKRotation() hold f.mu and then acquire keeper.mu inside
 // InstallKEKRotation. Never acquire keeper.mu before f.mu.
 type MetaFSM struct {
-	mu                sync.RWMutex
-	nodes             map[string]MetaNodeEntry
-	shardGroups       map[string]ShardGroupEntry // key = group ID
-	bucketAssignments map[string]string          // bucket → group_id (PR-D)
-	objectIndex       map[string]ObjectIndexEntry
-	objectLatest      map[string]string
-	loadSnapshot      map[string]LoadStatEntry                    // node_id → stats (PR-D)
-	activePlan        *RebalancePlan                              // nil = no active plan (PR-D)
-	icebergNamespaces map[string]map[string]IcebergNamespaceEntry // warehouse → nsKey → entry
-	icebergTables     map[string]map[string]IcebergTableEntry     // warehouse → tableKey → entry
-	onBucketAssigned  func(string, string)                        // protected by mu; set before Start() (PR-D)
-	onRebalancePlan   func(*RebalancePlan)                        // must not block; set before Start() (PR-D)
-	onShardGroupAdded func(ShardGroupEntry)                       // fired after PutShardGroup applies; protected by mu (v0.0.7.0)
-	onIcebergResult   func(string, error)                         // requestID, typed catalog result; must not block
-	onScrubTrigger    func(scrubber.ScrubTriggerEntry)            // PR4: cluster-wide scrub trigger applied; must not block
-	onNfsExportChange func()                                      // fired after NFS export registry apply; must not block
-
+	mu          sync.RWMutex
+	nodes       map[string]MetaNodeEntry
+	shardGroups map[string]ShardGroupEntry // key = group ID
+	// placementGenerations is the Phase 7 topology-generation registry (ordered,
+	// ascending epoch). Empty for single-generation legacy clusters; appended by
+	// AddPlacementGeneration. Consumed by OpRouter from S7-4 onward.
+	placementGenerations []placementGeneration
+	bucketRecords        map[string]BucketRecord          // bucket → BucketRecord (PR-D; replaces bucketAssignments)
+	loadSnapshot         map[string]LoadStatEntry         // node_id → stats (PR-D)
+	onBucketAssigned     func(string, string)             // protected by mu; set before Start() (PR-D)
+	onBucketUnassigned   func(string)                     // protected by mu; set before Start() (group0-demotion)
+	onShardGroupAdded    func(ShardGroupEntry)            // fired after PutShardGroup applies; protected by mu (v0.0.7.0)
+	onScrubTrigger       func(scrubber.ScrubTriggerEntry) // PR4: cluster-wide scrub trigger applied; must not block
 	// 클러스터 키 회전 — 결정론적 FSM은 여기, side-effect (디스크 I/O,
 	// transport identity swap)는 onRotationApplied 콜백으로 분리 (D16).
 	rotation          *RotationFSM
@@ -291,10 +227,9 @@ type MetaFSM struct {
 	// revokedNodeIDs is the durable Zero-CA revoked-node set (node IDs only).
 	// Captured in applyRevokePeer. Survives snapshots so the DataGroupEvacuator
 	// can re-derive eviction targets after restart/replay (req #4) and so
-	// candidate-selection can exclude revoked nodes. Address is NOT stored: the
-	// revoked node remains in f.nodes (revoke never removes meta membership), so
-	// EvacuateVoter resolves its removal address live via resolveAddr. Mirrors
-	// the revoked_peer_spkis denylist vector.
+	// candidate-selection can exclude revoked nodes. Address is not stored; shard
+	// group rosters are node-ID based and older address-shaped PeerIDs are
+	// normalized during applyPutShardGroup/Restore.
 	revokedNodeIDs map[string]struct{}
 
 	onNodeRevoked func(string) // fired after a node is recorded revoked; must not block; set before Start()
@@ -326,11 +261,6 @@ type MetaFSM struct {
 	// an error (not configured).
 	lifecycleStore *lifecycle.Store
 
-	// exportStore is wired via SetExportStore. nil = NFS export commands return
-	// an error (not configured).
-	exportStore     *nfsexport.Store
-	exportFsidMajor uint64
-
 	// migrationStore is wired via SetMigration. nil = migration commands return
 	// an error (not configured).
 	migrationStore *migration.JobStore
@@ -355,17 +285,9 @@ type MetaFSM struct {
 	// Group* commands are safe no-ops when nil.
 	groupStore *group.InMemoryStore
 
-	// policyAttachStore is the SA/group/MountSA→policy attachment store. nil until
+	// policyAttachStore is the SA/group→policy attachment store. nil until
 	// SetPolicyAttachStore is called; PolicyAttach* commands are safe no-ops when nil.
 	policyAttachStore *policyattach.InMemoryStore
-
-	// bucketPolicyStore is the per-bucket policy document store. nil until
-	// SetBucketPolicyStore is called; BucketPolicy* commands are safe no-ops when nil.
-	bucketPolicyStore *bucketpolicy.InMemoryStore
-
-	// mountSAStore is the NFS/9P mount service account store backed by Badger.
-	// nil until SetMountSAStore is called; MountSA* commands return an error when nil.
-	mountSAStore *mountsastore.Store
 
 	// protocolCredentialStore is the durable protocol credential snapshot store.
 	// Phase 1A snapshots/restores it; Phase 1B wires command apply semantics.
@@ -384,9 +306,8 @@ type MetaFSM struct {
 	dekKeeper *encrypt.DEKKeeper
 
 	// dekRefCounts holds the per-generation reference count: how many
-	// ObjectIndexEntry records reference each DEK generation. Incremented on
-	// applyPutObjectIndex, decremented on applyDeleteObjectIndex. Persisted
-	// in the DKVS snapshot trailer alongside DEK versions (Task 12).
+	// quorum-meta records reference each DEK generation. Persisted in the
+	// DKVS snapshot trailer alongside DEK versions (Task 12).
 	dekRefCounts map[uint32]uint64
 
 	// dekRewrapDone tracks per-generation rewrap completion: gen → (nodeID →
@@ -672,12 +593,8 @@ func NewMetaFSM() *MetaFSM {
 	return &MetaFSM{
 		nodes:                      make(map[string]MetaNodeEntry),
 		shardGroups:                make(map[string]ShardGroupEntry),
-		bucketAssignments:          make(map[string]string),
-		objectIndex:                make(map[string]ObjectIndexEntry),
-		objectLatest:               make(map[string]string),
+		bucketRecords:              make(map[string]BucketRecord),
 		loadSnapshot:               make(map[string]LoadStatEntry),
-		icebergNamespaces:          make(map[string]map[string]IcebergNamespaceEntry),
-		icebergTables:              make(map[string]map[string]IcebergTableEntry),
 		rotation:                   NewRotationFSM(),
 		invites:                    newInviteFSM(),
 		peers:                      newPeerRegistry(),
@@ -787,28 +704,15 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		return f.applyRemoveNode(cmd.DataBytes())
 	case clusterpb.MetaCmdTypePutShardGroup:
 		return f.applyPutShardGroup(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeAddPlacementGeneration:
+		return f.applyAddPlacementGeneration(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeRetirePlacementGeneration:
+		return f.applyRetirePlacementGeneration(cmd.DataBytes())
 	case clusterpb.MetaCmdTypePutBucketAssignment:
 		return f.applyPutBucketAssignment(cmd.DataBytes())
-	case clusterpb.MetaCmdTypePutObjectIndex:
-		return f.applyPutObjectIndex(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeDeleteObjectIndex:
-		return f.applyDeleteObjectIndex(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeSetLoadSnapshot:
 		return f.applySetLoadSnapshot(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeProposeRebalancePlan:
-		return f.applyProposeRebalancePlan(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeAbortPlan:
-		return f.applyAbortPlan(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeIcebergCreateNamespace:
-		return f.applyIcebergCreateNamespace(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeIcebergDeleteNamespace:
-		return f.applyIcebergDeleteNamespace(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeIcebergCreateTable:
-		return f.applyIcebergCreateTable(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeIcebergCommitTable:
-		return f.applyIcebergCommitTable(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeIcebergDeleteTable:
-		return f.applyIcebergDeleteTable(cmd.DataBytes())
+	// 9-13 reserved — fall through to default (skip); no renumber.
 	case clusterpb.MetaCmdTypeRotateKeyBegin:
 		return f.applyRotateKeyBegin(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeRotateKeySwitch:
@@ -870,14 +774,6 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		return f.applyBucketLifecyclePut(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeBucketLifecycleDelete:
 		return f.applyBucketLifecycleDelete(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeNfsExportUpsert:
-		return f.applyNfsExportUpsert(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeNfsExportCreate:
-		return f.applyNfsExportCreate(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeNfsExportDelete:
-		return f.applyNfsExportDelete(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeNfsExportBucketDeleteCascade:
-		return f.applyNfsExportBucketDeleteCascade(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeClusterConfigPatch:
 		return f.applyClusterConfigPatch(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeMigrationJobStart:
@@ -914,18 +810,8 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		return f.applyPolicyAttachToGroupPut(cmd.DataBytes())
 	case clusterpb.MetaCmdTypePolicyAttachToGroupDelete:
 		return f.applyPolicyAttachToGroupDelete(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeBucketPolicyPut:
-		return f.applyBucketPolicyPut(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeBucketPolicyDelete:
-		return f.applyBucketPolicyDelete(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeMountSACreate:
-		return f.applyMountSACreate(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeMountSADelete:
-		return f.applyMountSADelete(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeMountSAAttachPolicy:
-		return f.applyMountSAAttachPolicy(cmd.DataBytes())
-	case clusterpb.MetaCmdTypeMountSADetachPolicy:
-		return f.applyMountSADetachPolicy(cmd.DataBytes())
+	// MetaCmdTypeBucketPolicyPut (60) and MetaCmdTypeBucketPolicyDelete (61) are
+	// retired — bucket policy lives in BucketRecord.Policy. Slots reserved.
 	case clusterpb.MetaCmdTypeCreateBucketWithPolicyAttach:
 		return f.applyCreateBucketWithPolicyAttach(cmd.DataBytes())
 	case clusterpb.MetaCmdTypeKEKRotate:
@@ -963,6 +849,16 @@ func (f *MetaFSM) applyCmdInner(cmd *clusterpb.MetaCmd) error {
 		return nil
 	case clusterpb.MetaCmdTypeDropClusterKeyAccept:
 		return f.applyDropClusterKeyAccept(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeCreateBucket:
+		return f.applyCreateBucket(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeDeleteBucket:
+		return f.applyDeleteBucket(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeSetBucketVersioning:
+		return f.applySetBucketVersioning(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeSetBucketPolicy:
+		return f.applySetBucketPolicy(cmd.DataBytes())
+	case clusterpb.MetaCmdTypeDeleteBucketPolicy:
+		return f.applyDeleteBucketPolicy(cmd.DataBytes())
 	default:
 		metrics.UnknownMetaCmdTotal.WithLabelValues(strconv.Itoa(int(cmd.Type()))).Inc()
 		log.Warn().Stringer("type", cmd.Type()).Msg("meta_fsm: unknown command type, ignoring")
@@ -1034,29 +930,6 @@ func cloneStringMap(in map[string]string) map[string]string {
 	out := make(map[string]string, len(in))
 	for k, v := range in {
 		out[k] = v
-	}
-	return out
-}
-
-func cloneObjectIndexEntry(in ObjectIndexEntry) ObjectIndexEntry {
-	in.NodeIDs = cloneStringSlice(in.NodeIDs)
-	if len(in.Parts) > 0 {
-		cp := make([]storage.MultipartPartEntry, len(in.Parts))
-		copy(cp, in.Parts)
-		in.Parts = cp
-	} else {
-		in.Parts = nil
-	}
-	return in
-}
-
-func readStringVector(n int, at func(int) []byte) []string {
-	if n == 0 {
-		return nil
-	}
-	out := make([]string, n)
-	for i := range out {
-		out[i] = string(at(i))
 	}
 	return out
 }

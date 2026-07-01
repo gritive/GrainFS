@@ -1,7 +1,6 @@
 package transport
 
 import (
-	"context"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
@@ -36,21 +35,9 @@ func certSPKI(cert tls.Certificate) ([32]byte, error) {
 	return sha256.Sum256(leaf.RawSubjectPublicKeyInfo), nil
 }
 
-// JoinHandler processes an inbound zero-CA join. It receives the joiner's pinned
-// peer SPKI, the RFC 5705 channel-binding value derived from this connection's
-// TLS session (binds the invite transcript to this exact handshake), and the
-// connection's first accepted stream as an io.ReadWriteCloser (a *tls.Conn-backed
-// half-close wrapper on the TCP join listener, S4).
-//
-// HALF-CLOSE CONTRACT: stream.Close() closes only the WRITE direction (it sends
-// a FIN; the read side stays open so the reply can still be read). The consumer
-// relies on this (write request → stream.Close() → read reply); full teardown of
-// the underlying connection is a separate concern owned by the listener (server
-// side) / the closer returned by DialJoinTCP (client side). The handler owns the
-// stream.
-type JoinHandler func(ctx context.Context, peerSPKI [32]byte, bind []byte, stream io.ReadWriteCloser)
-
-// JoinPutField appends a length-prefixed field to buf.
+// JoinPutField appends a length-prefixed field to buf. JoinPutField/JoinReadFields
+// are a small length-prefixed codec reused for the on-disk invite-join resume
+// record (serveruntime); the join WIRE itself is now HTTP-framed.
 func JoinPutField(buf []byte, f []byte) []byte {
 	var hdr [4]byte
 	binary.BigEndian.PutUint32(hdr[:], uint32(len(f)))

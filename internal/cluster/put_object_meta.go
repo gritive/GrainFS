@@ -1,10 +1,14 @@
 package cluster
 
 import (
-	"fmt"
-
-	"github.com/dgraph-io/badger/v4"
+	"errors"
 )
+
+// ErrPutObjectMetaCAS is returned (wrapped) when a PutObjectMeta command carries
+// an ExpectedETag that no longer matches the current object's ETag. Callers that
+// perform a compare-and-swap meta write (e.g. relocation) use errors.Is to map
+// this to a benign "object changed" skip rather than a hard failure.
+var ErrPutObjectMetaCAS = errors.New("put object meta CAS: etag mismatch")
 
 func buildPutObjectMeta(cmd PutObjectMetaCmd) objectMeta {
 	etag := cmd.ETag
@@ -19,35 +23,17 @@ func buildPutObjectMeta(cmd PutObjectMetaCmd) objectMeta {
 		LastModified:     cmd.ModTime,
 		ECData:           cmd.ECData,
 		ECParity:         cmd.ECParity,
+		StripeBytes:      cmd.StripeBytes,
 		NodeIDs:          cmd.NodeIDs,
 		PlacementGroupID: cmd.PlacementGroupID,
 		UserMetadata:     cmd.UserMetadata,
 		SSEAlgorithm:     cmd.SSEAlgorithm,
 		Parts:            cmd.Parts,
 		Segments:         segmentMetaEntriesToRefs(cmd.Segments),
+		Coalesced:        cmd.Coalesced,
+		IsAppendable:     cmd.IsAppendable,
 		Tags:             cmd.Tags,
+		ACL:              cmd.ACL,
+		MetaSeq:          cmd.MetaSeq,
 	}
-}
-
-func (f *FSM) checkPutObjectExpectedETag(txn *badger.Txn, bucket, key, expectedETag string) error {
-	if expectedETag == "" {
-		return nil
-	}
-	item, err := txn.Get(f.keys.ObjectMetaKey(bucket, key))
-	if err != nil {
-		return fmt.Errorf("put object meta CAS: read current meta: %w", err)
-	}
-	val, err := f.itemValueCopy(item)
-	if err != nil {
-		return fmt.Errorf("put object meta CAS: read current meta value: %w", err)
-	}
-	current, err := unmarshalObjectMeta(val)
-	if err != nil {
-		return fmt.Errorf("put object meta CAS: decode current meta: %w", err)
-	}
-	if current.ETag != expectedETag {
-		return fmt.Errorf("put object meta CAS: etag changed for %s/%s: got %q, want %q",
-			bucket, key, current.ETag, expectedETag)
-	}
-	return nil
 }

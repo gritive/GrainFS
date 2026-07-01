@@ -9,25 +9,14 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"math/big"
-	"sync"
 	"time"
 
 	"golang.org/x/crypto/hkdf"
 )
-
-// recycleJitter returns 0..250ms to de-synchronize cluster-wide reconnects.
-func recycleJitter() time.Duration {
-	var b [2]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return 0
-	}
-	return time.Duration(binary.BigEndian.Uint16(b[:])%251) * time.Millisecond
-}
 
 // pinAcceptedSPKI returns a VerifyPeerCertificate callback that accepts any
 // peer cert whose SPKI hash is in snap's accept set (O(1) map lookup).
@@ -47,28 +36,6 @@ func pinAcceptedSPKI(snap *IdentitySnapshot) func([][]byte, [][]*x509.Certificat
 		return nil
 	}
 }
-
-// checkResponseStatus maps a transport response's status to an error (nil on OK).
-func checkResponseStatus(addr string, resp *Message) (*Message, error) {
-	if resp == nil {
-		return nil, errors.New("transport: nil response")
-	}
-	if resp.Status == StatusOK {
-		return resp, nil
-	}
-	return nil, fmt.Errorf("transport response from %s status %d: %s", addr, resp.Status, string(resp.Payload))
-}
-
-// StreamHandler processes an incoming request message and returns a response.
-type StreamHandler func(req *Message) *Message
-
-// StreamBodyHandler processes a framed request followed by raw body bytes on
-// the same stream. The handler must read body before returning a response.
-type StreamBodyHandler func(req *Message, body io.Reader) *Message
-
-// StreamReadHandler processes a framed request and returns a framed metadata
-// response followed by a raw response body on the same stream.
-type StreamReadHandler func(req *Message) (*Message, io.ReadCloser)
 
 type TrafficLimits struct {
 	Control int
@@ -124,81 +91,6 @@ func (l *TrafficLimiter) Acquire(ctx context.Context, st StreamType) (func(), er
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-}
-
-// StreamRouter routes incoming messages to different handlers based on StreamType.
-type StreamRouter struct {
-	mu           sync.RWMutex
-	handlers     map[StreamType]StreamHandler
-	bodyHandlers map[StreamType]StreamBodyHandler
-	readHandlers map[StreamType]StreamReadHandler
-}
-
-// NewStreamRouter creates a router that dispatches by StreamType.
-func NewStreamRouter() *StreamRouter {
-	return &StreamRouter{
-		handlers:     make(map[StreamType]StreamHandler),
-		bodyHandlers: make(map[StreamType]StreamBodyHandler),
-		readHandlers: make(map[StreamType]StreamReadHandler),
-	}
-}
-
-// Handle registers a handler for a specific stream type.
-func (r *StreamRouter) Handle(st StreamType, h StreamHandler) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.handlers[st] = h
-}
-
-// HandleBody registers a handler that receives the framed request payload plus
-// any remaining bytes on the same stream as a streaming body.
-func (r *StreamRouter) HandleBody(st StreamType, h StreamBodyHandler) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.bodyHandlers[st] = h
-}
-
-// HandleRead registers a handler that writes a framed metadata response and
-// then streams any returned body bytes on the same stream.
-func (r *StreamRouter) HandleRead(st StreamType, h StreamReadHandler) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.readHandlers[st] = h
-}
-
-// Dispatch finds the handler for the message's stream type and calls it.
-func (r *StreamRouter) Dispatch(req *Message) *Message {
-	r.mu.RLock()
-	h, ok := r.handlers[req.Type]
-	r.mu.RUnlock()
-	if !ok {
-		return nil
-	}
-	return h(req)
-}
-
-// Lookup returns the handler for the given stream type, if registered.
-func (r *StreamRouter) Lookup(st StreamType) (StreamHandler, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	h, ok := r.handlers[st]
-	return h, ok
-}
-
-// LookupBody returns the streaming body handler for the stream type, if any.
-func (r *StreamRouter) LookupBody(st StreamType) (StreamBodyHandler, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	h, ok := r.bodyHandlers[st]
-	return h, ok
-}
-
-// LookupRead returns the streaming read handler for the stream type, if any.
-func (r *StreamRouter) LookupRead(st StreamType) (StreamReadHandler, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	h, ok := r.readHandlers[st]
-	return h, ok
 }
 
 // IdentitySnapshot is the active TLS identity state of a cluster transport.
@@ -327,10 +219,17 @@ func derivePrivKeyFromHKDF(r io.Reader, curve elliptic.Curve) (*ecdsa.PrivateKey
 		if k.Sign() == 0 {
 			continue
 		}
-		priv := new(ecdsa.PrivateKey)
-		priv.PublicKey.Curve = curve
-		priv.D = k
-		priv.PublicKey.X, priv.PublicKey.Y = curve.ScalarBaseMult(k.Bytes())
+		// k is already reduced mod N and non-zero (loop above). Encode it
+		// fixed-width big-endian (byteLen) so ParseRawPrivateKey accepts it and
+		// computes the public point identically to the old ScalarBaseMult path:
+		// ParseRawPrivateKey derives (X,Y)=k·G, so D/X/Y are byte-identical to
+		// the deprecated priv.D / priv.PublicKey.X,Y assignment it replaces.
+		scalar := make([]byte, byteLen)
+		k.FillBytes(scalar)
+		priv, err := ecdsa.ParseRawPrivateKey(curve, scalar)
+		if err != nil {
+			return nil, fmt.Errorf("parse raw ecdsa scalar: %w", err)
+		}
 		return priv, nil
 	}
 	return nil, errors.New("hkdf produced 8 consecutive zero scalars (impossible without a broken PSK)")

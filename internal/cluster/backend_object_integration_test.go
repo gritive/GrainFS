@@ -5,9 +5,7 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
-	"errors"
 	"io"
-	"os"
 	"strings"
 
 	"github.com/gritive/GrainFS/internal/storage"
@@ -36,7 +34,8 @@ var _ = Describe("Backend object integration", func() {
 		GinkgoHelper()
 		b.SetECConfig(ECConfig{DataShards: 2, ParityShards: 1})
 		keeper, clusterID := testDEKKeeper(GinkgoT())
-		b.SetShardService(NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID)), []string{b.selfAddr, b.selfAddr, b.selfAddr})
+		b.SetShardService(NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID)), []string{b.selfAddr, b.selfAddr, b.selfAddr})
+		wireTestShardGroup(b)
 	}
 
 	It("puts and gets objects", func() {
@@ -57,34 +56,13 @@ var _ = Describe("Backend object integration", func() {
 		Expect(gotObj.Size).To(Equal(obj.Size))
 	})
 
-	It("skips body and EC shard spools for small sized-reader parity EC puts", func() {
+	It("round-trips small parity EC puts via the streaming chunked path", func() {
+		// The disk spool was removed; a sized body streams straight through the
+		// chunked EC write path. This asserts the round-trip is preserved.
 		configureParityEC()
 
 		payload := bytes.Repeat([]byte("a"), 64<<10)
-		obj, err := b.PutObject(ctx, "bucket", "small.bin", bytes.NewReader(payload), "application/octet-stream")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(obj.Size).To(Equal(int64(len(payload))))
-
-		rc, gotObj, err := b.GetObject(ctx, "bucket", "small.bin")
-		Expect(err).NotTo(HaveOccurred())
-		got, readErr := io.ReadAll(rc)
-		closeErr := rc.Close()
-		Expect(readErr).NotTo(HaveOccurred())
-		Expect(closeErr).NotTo(HaveOccurred())
-		Expect(got).To(Equal(payload))
-		Expect(gotObj.ETag).To(Equal(obj.ETag))
-
-		_, err = os.Stat(b.spoolDir())
-		Expect(errors.Is(err, os.ErrNotExist)).To(BeTrue())
-		_, err = os.Stat(b.ecSpoolDir())
-		Expect(errors.Is(err, os.ErrNotExist)).To(BeTrue())
-	})
-
-	It("uses the body spool but skips EC shard spool for small streaming parity EC puts", func() {
-		configureParityEC()
-
-		payload := bytes.Repeat([]byte("a"), 64<<10)
-		body := io.LimitReader(bytes.NewReader(payload), int64(len(payload)))
+		body := bytes.NewReader(payload)
 		obj, err := b.PutObject(ctx, "bucket", "small-streaming.bin", body, "application/octet-stream")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(obj.Size).To(Equal(int64(len(payload))))
@@ -97,22 +75,18 @@ var _ = Describe("Backend object integration", func() {
 		Expect(closeErr).NotTo(HaveOccurred())
 		Expect(got).To(Equal(payload))
 		Expect(gotObj.ETag).To(Equal(obj.ETag))
-
-		_, err = os.Stat(b.spoolDir())
-		Expect(err).NotTo(HaveOccurred())
-		_, err = os.Stat(b.ecSpoolDir())
-		Expect(errors.Is(err, os.ErrNotExist)).To(BeTrue())
 	})
 
-	It("streams single-local shards with request size hints", func() {
+	It("round-trips known-size streaming puts with request size hints", func() {
 		payload := bytes.Repeat([]byte("x"), 2<<20)
 		sizeHint := int64(len(payload))
 		obj, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{
-			Bucket:      "bucket",
-			Key:         "stream.bin",
-			Body:        backendReaderOnly{Reader: bytes.NewReader(payload)},
-			SizeHint:    &sizeHint,
-			ContentType: "application/octet-stream",
+			Bucket:        "bucket",
+			Key:           "stream.bin",
+			Body:          backendReaderOnly{Reader: bytes.NewReader(payload)},
+			SizeHint:      &sizeHint,
+			SizeHintExact: true,
+			ContentType:   "application/octet-stream",
 		})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(obj.Size).To(Equal(sizeHint))

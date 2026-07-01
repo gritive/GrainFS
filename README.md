@@ -1,14 +1,7 @@
 # `GrainFS`
 
-`GrainFS` is a single-binary distributed storage server. It runs as one local
-node or as a Raft-backed cluster.
-
-It exposes object, file, and block interfaces over one storage layer:
-
-- **Object storage:** S3-compatible HTTP API
-- **File storage:** NFSv4 and 9P2000.L
-- **Block storage:** NBD for Linux clients
-- **Table/catalog integration:** Iceberg REST Catalog for DuckDB-oriented lake workflows
+`GrainFS` is a high-performance distributed S3-compatible storage server with
+zero-config cluster management and at-rest encryption on by default.
 
 ## Quick Start (2-5 minutes)
 
@@ -33,16 +26,14 @@ upload: ./file.txt to s3://default/file.txt
 ... file.txt
 ```
 
-That's it. You have a working local S3 server. To verify the same data through
-NFS on Linux, continue with [`docs/users/nfs-mount-quickstart.md`](docs/users/nfs-mount-quickstart.md).
-That guide also covers 9P mounts, authenticated Mount SAs, and read-only exports.
+That's it. You have a working local S3 server.
 
-> ⚠ **Anonymous default bucket**: any client on this port can read/write `s3://default` until you install an explicit bucket policy for `default`. Create service accounts through the admin socket under the data directory (`<data-dir>/admin.sock`); the Auth + Iceberg block below shows the Quick Start command. See [`docs/operators/deploy-production-cluster.md`](docs/operators/deploy-production-cluster.md).
+> ⚠ **Anonymous default bucket**: any client on this port can read/write `s3://default` until you install an explicit bucket policy for `default`. Create service accounts through the admin socket under the data directory (`<data-dir>/admin.sock`); the Auth block below shows the Quick Start command. See [`docs/operators/deploy-production-cluster.md`](docs/operators/deploy-production-cluster.md).
 
 ### Optional: cluster / production setup
 
 <details>
-<summary>Cluster</summary>
+<summary>Cluster (zero-CA join)</summary>
 
 GrainFS uses Zero-CA invite join for new peers. There is no separate `cluster
 join` command and no `--cluster-key` flag in the current CLI. A fresh leader
@@ -82,10 +73,11 @@ GRAINFS_INVITE_BUNDLE='<bundle-token>' ./bin/grainfs serve \
 
 For production steps, verification, cutover, and revocation, see
 [`docs/operators/zero-ca-cluster-join.md`](docs/operators/zero-ca-cluster-join.md).
+
 </details>
 
 <details>
-<summary>Auth + Iceberg</summary>
+<summary>Auth</summary>
 
 ```bash
 DATA_DIR=./tmp
@@ -94,13 +86,6 @@ DATA_DIR=./tmp
 ./bin/grainfs iam bucket create analytics --attach-sa <id> --attach-policy readwrite --endpoint "$DATA_DIR/admin.sock"
 ```
 
-For Iceberg client config (DuckDB / Trino / Spark / PyIceberg / warp):
-
-```bash
-./bin/grainfs iceberg config --warehouse analytics --sa <id> --endpoint "$DATA_DIR/admin.sock"
-```
-
-See [`docs/users/oauth2-iceberg-quickstart.md`](docs/users/oauth2-iceberg-quickstart.md).
 </details>
 
 <details>
@@ -108,37 +93,50 @@ See [`docs/users/oauth2-iceberg-quickstart.md`](docs/users/oauth2-iceberg-quicks
 
 TLS / encryption-key / audit / proxy-trust — all hot-applyable via `config set`.
 See [`docs/operators/deploy-production-cluster.md`](docs/operators/deploy-production-cluster.md).
+
 </details>
 
 ## What It Supports
 
-| Area | Summary | Details |
-| --- | --- | --- |
-| S3 API | Bucket/object basics, AppendObject (S3 Express), multipart upload/listing, SigV4, presigned URL, form upload | [S3 compatibility](docs/reference/s3-compatibility.md) |
-| File protocols | NFSv4 explicit bucket exports, 9P2000.L | [NFSv4 compatibility](docs/reference/nfs-compatibility.md), [9P compatibility](docs/reference/9p-compatibility.md) |
-| Block protocol | Linux NBD protocol surface | [NBD compatibility](docs/reference/nbd-compatibility.md) |
-| Iceberg | DuckDB-compatible REST Catalog | [Iceberg compatibility](docs/reference/iceberg-compatibility.md) |
-| Cluster durability | Custom Raft, zero-config EC profile, shard integrity envelope | [Runbook](docs/operators/runbook.md) |
-| Operations | Object browser, metrics, balancer status, incidents, recovery drills | [Documentation](#documentation) |
+| Area               | Summary                                                                                                      | Details                                                                     |
+| ------------------ | ------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------- |
+| S3 API             | Bucket/object basics, AppendObject (S3 Express), multipart upload/listing, SigV4, presigned URL, form upload | [S3 compatibility](docs/reference/s3-compatibility.md)                      |
+| Cluster durability | Custom Raft, zero-config topology (EC profile, join, key hierarchy), shard integrity envelope                | [Runbook](docs/operators/runbook.md)                                        |
+| Encryption         | XAES-256-GCM at rest by default, KEK/DEK rotation, hot-applyable via `config set`                            | [Production deploy](docs/operators/deploy-production-cluster.md)            |
+| Auth               | Service accounts, access keys, bucket policies, SigV4 request signing                                        | [Admin and identity](docs/architecture/admin-identity-and-bucket-config.md) |
+| Operations         | Object browser, metrics, balancer status, incidents, recovery drills                                         | [Documentation](#documentation)                                             |
 
 The compatibility tables use `Supported` only for features covered by e2e,
 conformance, or real client integration tests. Unit tests alone do not qualify.
 
 ## Performance
 
-Latest same-host single-node `warp` runs, 64 KiB objects, concurrency 32,
-signed S3 requests, 0 errors:
+Both runs used `warp`, 10 MiB object size. `GrainFS` ran with XAES-256-GCM
+at-rest encryption; MinIO ran with SSE-S3 auto-encryption.
+
+Latest GCP single-node `warp` run:
 
 | Target    | PUT MiB/s | GET MiB/s | vs MinIO PUT | vs MinIO GET |
 | --------- | --------: | --------: | -----------: | -----------: |
-| `GrainFS` |    548.30 |   1849.34 |        3.13x |        4.04x |
-| MinIO     |    175.14 |    457.81 |        1.00x |        1.00x |
-| RustFS    |     26.62 |    437.77 |        0.15x |        0.96x |
+| `GrainFS` |    215.50 |    437.02 |        1.03x |        0.92x |
+| MinIO     |    209.77 |    472.65 |        1.00x |        1.00x |
 
-Methodology and raw artifacts:
-[benchmark reference](docs/reference/benchmarks.md#latest-local-result).
+Latest GCP 4-node cluster `warp` run (all-sizes streaming, profiling disabled):
+
+| Target            | PUT MiB/s | GET MiB/s | vs MinIO PUT | vs MinIO GET |
+| ----------------- | --------: | --------: | -----------: | -----------: |
+| `GrainFS` cluster |    434.79 |   1834.58 |        0.93x |        1.11x |
+| MinIO distributed |    468.67 |   1646.07 |        1.00x |        1.00x |
 
 ## Core Concepts
+
+**Zero-config cluster.** Operators set no topology parameters. `GrainFS` derives
+the erasure-coding profile from cluster size, manages join ceremonies without
+pre-shared secrets, and handles the full key hierarchy (KEK/DEK) automatically.
+
+**At-rest encryption.** All data is encrypted with XAES-256-GCM by default, no
+configuration needed. The cluster manages its own key hierarchy (KEK/DEK); rotate
+keys live via `encrypt kek rotate`.
 
 **Admin socket first.** Mutating admin operations use the local Unix domain
 socket by default (`<data>/admin.sock`). Set `GRAINFS_ADMIN_SOCKET` to avoid
@@ -147,36 +145,23 @@ passing `--endpoint` on every command.
 **Secure bootstrap.** A fresh cluster has no S3 credentials. Create the first
 service account through the admin socket; the secret key is shown once.
 
-**Zero-config EC.** Operators do not choose `k/m` at startup. `GrainFS` derives
-the desired erasure-coding profile from cluster size and placement group voters.
-Temporary target loss does not silently lower durability; writes fail until the
-required targets are writable.
-
-**Same data, multiple protocols.** S3, NFSv4, 9P, NBD, and Iceberg use the same
-storage backend contracts. Use the compatibility docs for protocol-specific
-limits.
-
-**Protocol network boundary.** S3 uses IAM. NFSv4, 9P, and NBD do not use S3
-IAM; expose those listeners only on loopback, private networks, or
-firewall-restricted addresses.
-
 ## Common Workflows
 
-| Workflow | Command or entry point |
-| --- | --- |
-| Create/list service accounts, keys, and policies | `grainfs iam --endpoint <data>/admin.sock ...` |
-| Inspect cluster peers | `grainfs cluster --endpoint <data>/admin.sock peers` |
-| Add a peer with zero-CA invite join | [`docs/operators/zero-ca-cluster-join.md`](docs/operators/zero-ca-cluster-join.md) |
-| Mint a zero-CA join invite (leader) | `grainfs cluster invite create --endpoint <data>/admin.sock --ttl 1h` |
-| Drop the shared cluster-key accept path | `grainfs cluster --endpoint <data>/admin.sock complete-cutover` |
-| Revoke a zero-CA node identity | `grainfs cluster --endpoint <data>/admin.sock revoke-node <node-id>` |
-| Inspect object placement | `grainfs cluster --endpoint <data>/admin.sock placement [bucket] [key]` |
-| Configure cluster policy | `grainfs cluster config --endpoint <data>/admin.sock ...` |
-| Export a bucket over NFSv4 | `grainfs nfs export add <bucket> --endpoint <data>/admin.sock` |
-| Rotate / inspect the cluster encryption key (KEK) | `grainfs encrypt kek status\|rotate\|retire\|prune --endpoint <data>/admin.sock` |
-| Create an NBD volume | `grainfs volume create <name> --size 10Gi --endpoint <data>/admin.sock` |
-| Check balancer status | `curl http://localhost:9000/api/cluster/balancer/status` |
-| Check incidents | `curl http://localhost:9000/api/incidents` |
+| Workflow                                          | Command or entry point                                                                 |
+| ------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| Create/list service accounts, keys, and policies  | `grainfs iam --endpoint <data>/admin.sock ...`                                         |
+| Inspect cluster peers                             | `grainfs cluster --endpoint <data>/admin.sock peers`                                   |
+| Add a peer with zero-CA invite join               | [`docs/operators/zero-ca-cluster-join.md`](docs/operators/zero-ca-cluster-join.md)     |
+| Mint a zero-CA join invite (leader)               | `grainfs cluster invite create --endpoint <data>/admin.sock --ttl 1h`                  |
+| Drop the shared cluster-key accept path           | `grainfs cluster --endpoint <data>/admin.sock complete-cutover`                        |
+| Revoke a zero-CA node identity                    | `grainfs cluster --endpoint <data>/admin.sock revoke-node <node-id>`                   |
+| Inspect object placement                          | `grainfs cluster --endpoint <data>/admin.sock placement [bucket] [key]`                |
+| Grow placement groups on a running cluster        | `grainfs cluster expand-placement --endpoint <data>/admin.sock`                        |
+| Retire a drained placement generation             | `grainfs cluster retire-placement-generation --endpoint <data>/admin.sock --epoch <n>` |
+| Configure cluster policy                          | `grainfs cluster config --endpoint <data>/admin.sock ...`                              |
+| Rotate / inspect the cluster encryption key (KEK) | `grainfs encrypt kek status\|rotate\|retire\|prune --endpoint <data>/admin.sock`       |
+| Check balancer status                             | `curl http://localhost:9000/api/cluster/balancer/status`                               |
+| Check incidents                                   | `curl http://localhost:9000/api/incidents`                                             |
 
 Operational details live in [docs/index.md](docs/index.md#operators).
 
@@ -187,7 +172,8 @@ Requirements:
 - Go 1.26+
 - `golangci-lint` (run by `make lint`, which `make build` depends on)
 - `warp` for S3-compatible comparison benchmarks
-- Linux client tooling for NFS, NBD, 9P, and FUSE-over-S3 integration tests
+- `gcloud` CLI and project access for GCP performance benchmarks
+- Linux client tooling for FUSE-over-S3 integration tests
 
 Common commands:
 
@@ -199,18 +185,18 @@ make test-e2e
 make lint
 ```
 
-Benchmark targets:
+GCP benchmark entry point:
+
+```bash
+./benchmarks/gcp/bench_gcp_cluster.sh {up|build|single|grainfs-cluster|minio|minio-cluster|single-verdict|cluster-minio-verdict|down}
+```
+
+Local benchmark targets:
 
 ```bash
 make bench
 make bench-cluster
 make bench-s3-compat-compare
-make bench-iceberg-table
-make bench-iceberg-table-cluster
-make bench-nfs
-make bench-nbd
-make bench-nfs-cluster
-make bench-nbd-cluster
 ```
 
 Use [docs/reference/benchmarks.md](docs/reference/benchmarks.md) for benchmark
@@ -219,13 +205,13 @@ methodology and result interpretation. Use
 
 ## Documentation
 
-| Topic | Document |
-| --- | --- |
-| Documentation hub | [docs/index.md](docs/index.md) |
-| Users | [docs/users/guide.md](docs/users/guide.md) |
-| Operators | [docs/index.md#operators](docs/index.md#operators) |
-| Reference | [docs/index.md#reference](docs/index.md#reference) |
-| Explanation | [docs/index.md#explanation](docs/index.md#explanation) |
+| Topic             | Document                                               |
+| ----------------- | ------------------------------------------------------ |
+| Documentation hub | [docs/index.md](docs/index.md)                         |
+| Users             | [docs/users/guide.md](docs/users/guide.md)             |
+| Operators         | [docs/index.md#operators](docs/index.md#operators)     |
+| Reference         | [docs/index.md#reference](docs/index.md#reference)     |
+| Explanation       | [docs/index.md#explanation](docs/index.md#explanation) |
 
 ## License
 

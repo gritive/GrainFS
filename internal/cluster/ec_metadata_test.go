@@ -7,7 +7,8 @@ package cluster
 //
 // To force EC active (IsActive requires >= 3 nodes), we set allNodes to
 // contain the same selfAddr repeated 3 times. liveNodes() returns 3 entries,
-// IsActive(3)=true, and PlacementForNodes routes all shards to selfAddr (local).
+// IsActive(3)=true, and HRW placement routes all shards to selfAddr (local):
+// identical node strings tie on score, so the top-count are all selfAddr.
 
 import (
 	"bytes"
@@ -22,7 +23,7 @@ import (
 
 // setupECBackend creates a backend with EC active (k=1, m=1) but no ring.
 // The selfAddr is repeated 3 times in allNodes so IsActive(3)=true and all
-// shards are placed locally (PlacementForNodes maps all to selfAddr).
+// shards are placed locally (HRW maps all to selfAddr — identical node strings).
 func setupECBackend(t *testing.T) *DistributedBackend {
 	t.Helper()
 	backend := NewSingletonBackendForTest(t)
@@ -30,12 +31,13 @@ func setupECBackend(t *testing.T) *DistributedBackend {
 	const selfAddr = "self"
 	shardDir := t.TempDir()
 	keeper, clusterID := testDEKKeeper(t)
-	svc := NewShardService(shardDir, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(shardDir, nil, WithShardDEKKeeper(keeper, clusterID))
 	// Set allNodes to 3 copies of selfAddr: IsActive(3)=true, all shards local.
 	backend.shardSvc = svc
 	backend.selfAddr = selfAddr
 	backend.allNodes = []string{selfAddr, selfAddr, selfAddr}
 	backend.SetECConfig(ECConfig{DataShards: 1, ParityShards: 1})
+	wireTestShardGroup(backend)
 	return backend
 }
 
@@ -94,10 +96,16 @@ func TestRepairShard_MetadataOnlyPlacement(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, obj.VersionID)
 
-	shardKey := "obj/" + obj.VersionID
+	// The chunked PUT records per-segment placement; repair targets the segment
+	// shard key with that placement (the production segment-repair path —
+	// RepairShard's whole-object key resolution does not apply to segmented objects).
+	require.NotEmpty(t, obj.Segments, "chunked PUT must record at least one segment")
+	shardKey := "obj/segments/" + obj.Segments[0].BlobID
+	// setupECBackend is a 1+1 single-node stripe (all shards on "self").
+	rec := PlacementRecord{Nodes: []string{"self", "self"}, K: 1, M: 1}
 	require.NoError(t, os.Remove(mustShardPath(backend.shardSvc, "b", shardKey, 0)))
 
-	require.NoError(t, backend.RepairShard(t.Context(), "b", "obj", obj.VersionID, 0))
+	require.NoError(t, backend.RepairShardAtShardKey(t.Context(), "b", shardKey, rec, 0))
 
 	rc, _, err := backend.GetObject(context.Background(), "b", "obj")
 	require.NoError(t, err)

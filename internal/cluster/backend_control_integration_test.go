@@ -10,6 +10,8 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/gritive/GrainFS/internal/gossip"
 )
 
 var _ = Describe("Backend control integration", func() {
@@ -27,7 +29,13 @@ var _ = Describe("Backend control integration", func() {
 		Expect(b.CreateBucket(ctx, "bucket")).To(Succeed())
 		b.SetECConfig(ECConfig{DataShards: 2, ParityShards: 1})
 		keeper, clusterID := testDEKKeeper(GinkgoT())
-		b.SetShardService(NewShardService(GinkgoT().TempDir(), nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID)), []string{"n1", "n2", "n3"})
+		b.SetShardService(NewShardService(GinkgoT().TempDir(), nil, WithShardDEKKeeper(keeper, clusterID)), []string{"n1", "n2", "n3"})
+		// All topology targets are unavailable (reported down). The streaming
+		// write-placement plan rejects them up front, before any shard write, so
+		// the no-spool path never attempts a doomed write.
+		b.peerHealth.MarkUnhealthy("n1")
+		b.peerHealth.MarkUnhealthy("n2")
+		b.peerHealth.MarkUnhealthy("n3")
 
 		group := ShardGroupEntry{ID: "group-1", PeerIDs: []string{"n1", "n2", "n3"}}
 		baseCtx, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
@@ -42,7 +50,7 @@ var _ = Describe("Backend control integration", func() {
 		Expect(b.CreateBucket(ctx, "bucket")).To(Succeed())
 		b.SetECConfig(ECConfig{DataShards: 2, ParityShards: 1})
 		keeper, clusterID := testDEKKeeper(GinkgoT())
-		b.SetShardService(NewShardService(GinkgoT().TempDir(), nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID)), []string{"n1", "n2", "n3"})
+		b.SetShardService(NewShardService(GinkgoT().TempDir(), nil, WithShardDEKKeeper(keeper, clusterID)), []string{"n1", "n2", "n3"})
 		b.peerHealth.MarkUnhealthy("n2")
 
 		group := ShardGroupEntry{ID: "group-1", PeerIDs: []string{"n1", "n2", "n3"}}
@@ -56,7 +64,7 @@ var _ = Describe("Backend control integration", func() {
 	It("allows cluster node updates while readers inspect derived state", func() {
 		b.SetECConfig(ECConfig{DataShards: 3, ParityShards: 2})
 		keeper, clusterID := testDEKKeeper(GinkgoT())
-		b.SetShardService(NewShardService(GinkgoT().TempDir(), nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID)), []string{"n1", "n2", "n3"})
+		b.SetShardService(NewShardService(GinkgoT().TempDir(), nil, WithShardDEKKeeper(keeper, clusterID)), []string{"n1", "n2", "n3"})
 
 		var wg sync.WaitGroup
 		wg.Add(2)
@@ -71,7 +79,6 @@ var _ = Describe("Backend control integration", func() {
 			for i := 0; i < 200; i++ {
 				_ = b.LiveNodes()
 				_ = b.ECActive()
-				_ = b.EffectiveECConfig()
 				_ = b.NodeID()
 				if ph := b.PeerHealth(); ph != nil {
 					_ = ph.Snapshot()
@@ -83,13 +90,17 @@ var _ = Describe("Backend control integration", func() {
 
 	It("waits for backend apply progress", func() {
 		Expect(b.CreateBucket(ctx, "bucket")).To(Succeed())
-		applied := b.lastApplied.Load()
-		Expect(applied).NotTo(BeZero())
+		// CreateBucket now goes through MetaBucketStore (direct FSM), not raft.
+		// Commit a raft no-op explicitly to get an applied log index.
+		raw := []byte("cursor-only control entry")
+		applied, err := b.node.ProposeWait(ctx, raw)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(b.WaitApplied(ctx, applied)).To(Succeed())
 		b.lastApplied.Store(0)
 
 		waitCtx, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
 		defer cancel()
-		err := b.WaitApplied(waitCtx, applied)
+		err = b.WaitApplied(waitCtx, applied)
 		Expect(errors.Is(err, context.DeadlineExceeded)).To(BeTrue())
 	})
 
@@ -97,7 +108,7 @@ var _ = Describe("Backend control integration", func() {
 		var fakeBL *BoundedLoads
 
 		BeforeEach(func() {
-			store := NewNodeStatsStore(time.Minute)
+			store := gossip.NewNodeStatsStore(time.Minute)
 			params := BoundedLoadsParams{C: 1.25, CLow: 1.0}
 			fakeBL = NewBoundedLoads(store, params)
 		})

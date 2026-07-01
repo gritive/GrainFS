@@ -10,17 +10,12 @@ package e2e
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"os/exec"
 	"strings"
-	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
@@ -148,68 +143,6 @@ func runPresignedCases(getTgt func() s3Target) {
 		ginkgo.DeferCleanup(resp.Body.Close)
 		gomega.Expect(resp.StatusCode).To(gomega.Equal(http.StatusForbidden))
 	})
-}
-
-// ----- non-S3-op tests (kept as-is; not part of the target-table refactor) -----
-
-// authServer is the handle returned by startAuthServer. The credentials
-// are bootstrapped via the admin UDS after server start, so callers must
-// thread them through to s3auth.PresignURL etc.
-type authServer struct {
-	Client    *s3.Client
-	Endpoint  string
-	DataDir   string
-	AccessKey string
-	SecretKey string
-	Cleanup   func()
-}
-
-// startAuthServer starts grainfs and bootstraps an admin SA via UDS.
-func startAuthServer(t testing.TB) authServer {
-	t.Helper()
-	dir, err := os.MkdirTemp("", "grainfs-auth-e2e-*")
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-
-	binary := getBinary()
-	port := freePort()
-
-	cmd := exec.Command(binary, "serve",
-		"--data", dir,
-		"--port", fmt.Sprintf("%d", port),
-		"--nfs4-port", fmt.Sprintf("%d", freePort()),
-		"--nbd-port", fmt.Sprintf("%d", freePort()),
-	)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	gomega.Expect(cmd.Start()).To(gomega.Succeed())
-
-	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
-	waitForPort(t, port, 30*time.Second)
-
-	ak, sk := bootstrapAdminViaUDS(t, dir)
-
-	client := s3.New(s3.Options{
-		BaseEndpoint: aws.String(endpoint),
-		Region:       "us-east-1",
-		Credentials:  credentials.NewStaticCredentialsProvider(ak, sk, ""),
-		UsePathStyle: true,
-	})
-	gomega.Expect(waitForIAMReady(client, 30*time.Second)).To(gomega.Succeed())
-
-	cleanup := func() {
-		cmd.Process.Kill()
-		cmd.Wait()
-		removeE2EDir(dir)
-	}
-
-	return authServer{
-		Client:    client,
-		Endpoint:  endpoint,
-		DataDir:   dir,
-		AccessKey: ak,
-		SecretKey: sk,
-		Cleanup:   cleanup,
-	}
 }
 
 func runMetricsEndpointCases(getTgt func() s3Target) {

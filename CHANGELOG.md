@@ -1,5 +1,5028 @@
 # Changelog
 
+## [0.0.775.0] - 2026-07-01
+
+### Fixed
+- **Segment compressed-size now survives the ObjectMeta wire codec.** The
+  `clusterpb.SegmentRef` schema carried no `stored_size` field, so encoding an
+  object's segment metadata through this path dropped a segment's compressed
+  byte length (used to read per-segment zstd blobs). The live compressed-read
+  path was unaffected (it reads `stored_size` from a different record), so this
+  is a latent-corruption guard, not a live fix: the new field defaults to 0
+  (uncompressed), carries no upgrade risk, and prevents a future read via this
+  codec from decompressing a compressed segment as plaintext.
+
+## [0.0.774.0] - 2026-07-01
+
+### Performance
+- **Object bodies stream at every size, not just large ones.** PUT, GET,
+  UploadPart, CopyObject, AppendObject and their cross-node forwards previously
+  buffered small bodies whole in memory (PUT < 8 MiB, GET < 128 KiB, forward
+  < 4 MiB) and only streamed above those thresholds. Those thresholds are now 0,
+  so every known-length object body streams straight through — giving a flat,
+  size-independent memory profile instead of one that scales with object size.
+  Client-visible responses are unchanged; only zero-byte objects still take a
+  trivial buffered path.
+  - One behavior change: if the storage backend errors partway through reading a
+    small object, the GET now returns a truncated `200` (the status is already
+    committed once streaming starts) instead of upgrading to `500`. This matches
+    how large objects have always behaved.
+
+### Removed (BREAKING)
+- **AppendObject forward buffer removed.** Cross-node AppendObject forwards now
+  stream the body to the owner instead of buffering it in a byte-budget
+  semaphore. The pool is obsolete under streaming, so the following are removed:
+  - CLI flags `--cluster-append-forward-buffer-total-bytes` and
+    `--cluster-append-forward-buffer-max-per-request`.
+  - The forward-buffer-saturation `503 SlowDown` backpressure signal.
+  - Prometheus metrics `grainfs_cluster_append_forward_buffer_inflight_bytes` and
+    `grainfs_cluster_append_forward_buffer_rejected_total`.
+  The 64 MiB AppendObject body cap (HTTP layer + receiver) is unchanged.
+
+## [0.0.773.0] - 2026-07-01
+
+### Performance
+- **Object writes no longer spool the body to a temp file.** Every PUT used to
+  have a fallback that buffered the whole body to a disk temp file, re-read it,
+  then erasure-coded it — a full extra write+read of the object. That path is
+  gone: all writes now stream straight through the chunked EC writer.
+  - Content-MD5 PUTs are validated in a pre-commit hook (digest computed over the
+    streamed body, checked before the metadata commit) instead of over a spooled
+    copy; a wrong digest still returns 400 BadDigest and leaves no object.
+  - Unknown-length internal writes were taught their size: sized in-memory bodies
+    stream via length detection, pull-through cache-fill and cross-node forwarded
+    streams thread the exact object length (the forward wire frame gained an
+    additive `decoded_length` field), and server-side copy marks its size exact.
+  - EC relocation and coalescing feed the encoder a reader directly instead of
+    staging the source to a temp file.
+  - Removing the double-staging cuts allocations per PUT (~9% at small sizes,
+    ~26%/~4MB on an 8MiB object) and closes the brief plaintext-at-rest window the
+    spool opened under at-rest encryption. Client-visible behavior is unchanged.
+
+## [0.0.772.0] - 2026-07-01
+
+### Performance
+- **Per-segment zstd compression on the EC write path.** Large-object (chunked
+  EC) PUTs now zstd-compress each ≤16MiB segment before erasure coding, keeping
+  the smaller of {compressed, raw} so incompressible data is stored as-is and
+  never expands. This reduces disk usage for compressible data; on the standard
+  4-node warp PUT benchmark (10MiB objects) cluster disk usage dropped ~11% with
+  PUT throughput within run-to-run noise. Existing objects read back unchanged,
+  and the S3 ETag is unaffected (it stays the plaintext MD5). Byte-range GETs of
+  compressed objects are served by decompressing the containing segment.
+
+## [0.0.771.0] - 2026-06-30
+
+### Performance
+- **Adaptive chunk size for chunked PUT.** Mid-size objects are now split into
+  ~2 segments instead of landing in a single 16MiB chunk, so the 8-worker
+  SegmentWriter overlaps EC encode and shard writes (read‖EC‖write pipeline)
+  instead of running them serially in one worker. On a 4-node cluster this lifts
+  10MiB PUT throughput ~+13% (391→446 MB/s, 0.95× of MinIO on identical
+  hardware). Small objects stay single-segment (splitting them loses throughput
+  to per-segment overhead) and large objects cap at the default chunk size.
+
+## [0.0.770.0] - 2026-06-30
+
+### Performance
+- **Direct shard writes are now the default.** Large EC shard writes use
+  O_DIRECT (page-cache-bypassing, aligned) writes by default. Set
+  `GRAINFS_SHARD_DIRECT_IO=0` to opt back into buffered writes.
+- **Promote skips the directory fsync for large EC-redundant shards.** The
+  staging→final promote at commit no longer fsyncs the final directory chain for
+  large redundant shards — EC reconstruction and the background scrubber own
+  their durability, exactly as the shard write path already skips file fsync.
+  This removes the promote round from the cluster PUT commit-tail latency. The
+  rename stays synchronous, so read-after-write is unchanged.
+- **Staged-shard promotes run in parallel across placement nodes at commit.**
+- **EC shard writes are sized and streamed.** Cluster shard writes send a known
+  content length and stream aligned shard data, reducing write-path buffering.
+
+## [0.0.769.0] - 2026-06-30
+
+### Performance
+- **Reduced EC split allocations on cluster PUTs.**
+  EC data/parity split now reuses padding shard buffers across writes while
+  preserving byte-identical output and clearing reused padding before encoding.
+
+### Removed
+- **Removed the retired shard data WAL package.**
+  The obsolete `internal/storage/datawal` package, wiring, replay tests, and
+  stale test fixtures are gone. Current shard durability is covered by direct
+  fsync decisions and EC reconstruction paths.
+
+### Changed
+- **Refreshed GCP benchmark documentation.**
+  The README and benchmark reference now show the latest single-node and 4-node
+  encrypted GrainFS vs MinIO `warp` results.
+
+## [0.0.768.0] - 2026-06-30
+
+### Performance
+- **Avoided impossible owner-local quorum-meta fsyncs.**
+  Hot-key `AppendObject` publishes now reject placement sets that cannot satisfy
+  their quorum before durably writing the owner-local metadata copy, eliminating
+  a wasted owner disk sync on doomed CAS attempts.
+
+### Fixed
+- **Kept owner-local CAS ordering explicit.**
+  The owner-local-first quorum-meta path now documents why peer publishes cannot
+  safely overlap the owner CAS/fsync under the current one-phase protocol without
+  a compare-and-rollback peer primitive.
+
+## [0.0.767.0] - 2026-06-30
+
+### Performance
+- **Cluster PUTs return after data-shard quorum.**
+  EC object writes now unblock once the required data-shard acknowledgements are
+  durable, while remaining parity shard writes continue in the background.
+
+### Fixed
+- **Preserved fail-closed cleanup around late shard writes.**
+  Pre-quorum shard failures and caller cancellation still drain outstanding writes
+  and delete landed shards, while metadata/relocation commit failures now abort
+  any background writes before deleting the planned shard set.
+
+## [0.0.766.0] - 2026-06-30
+
+### Performance
+- **Exact-size encrypted PUTs bypass the spool entirely.**
+  When the client sends a `Content-Length` header with no `Content-MD5`, GrainFS
+  now streams the request body directly into the EC encoder without first
+  spooling to a temp file. This eliminates one full copy of the object from memory
+  on every standard S3 PUT.
+- **Segment GET reads are now streaming.**
+  The cluster segment reader opens and reads one shard at a time rather than
+  reading all shards into memory before returning data. Large multi-segment
+  objects no longer require buffering more than one segment worth of data during
+  a GET.
+- **Segment writer pool buffers are reused across PUT requests.**
+  The `SegmentWriter` chunk pool now reuses 16 MiB backing buffers across calls.
+  Repeated PUTs of the same or similarly sized objects allocate no new chunk
+  memory after the first request warms the pool.
+
+### Fixed
+- **Fixed oversized-body detection in exact-size PUT fast path.**
+  When a request body exceeded the declared `Content-Length`, the overflow probe
+  in `exactObjectSizeReader` could be misinterpreted as a clean EOF by the chunk
+  loop, causing the excess to be silently ignored rather than rejected.
+- **Added payload cap to staged sized shard writes.**
+  The new staged-streaming shard write path for sized shards did not apply the
+  same `maxRawShardPayload` guard enforced by the unsized and non-staged paths.
+  An over-limit staged shard write now fails immediately instead of streaming
+  the full body to disk.
+- **Bounded pre-body allocation for exact-size PUT requests.**
+  A client supplying a very large `Content-Length` header with the exact-size
+  fast path could cause GrainFS to allocate segment metadata (blob IDs, placement
+  records) proportional to the declared size before reading any body bytes. Capped
+  at 5 TiB, matching the S3 single-PUT limit.
+
+## [0.0.765.0] - 2026-06-29
+
+### Performance
+- **Removed redundant double-encryption from the PUT spool write path.**
+  The original path encrypted data three times: once into the put-spool buffer,
+  again into each EC-spool shard, and a final time via `eccodec.EncodeEncryptedShard`
+  into durable storage. Only the third layer is necessary; the first two were
+  eliminated. Put-spool files and EC-spool shards are now written as plaintext
+  temporaries on disk. Microbenchmark on an 8 MiB object: put-spool allocations
+  −95% (1087 KB → 57 KB per op); full EC pipeline allocations −79% (2.2 MB →
+  455 KB per op); EC encode throughput +7.5%. The MPU (multipart upload) spool
+  path retains its encryption because parts survive across requests and must
+  remain opaque on disk.
+
+### Fixed
+- **Crash-residue spool files are now cleaned up on restart.**
+  Renamed put-spool (`put-spool-*.tmp`) and EC-spool (`ec-{data,parity,empty}-N-*.tmp`)
+  temp-file patterns to end in `.tmp`, matching the startup sweep that removes
+  orphaned temporaries after an unclean shutdown.
+- **Tightened spool directory permissions from 0755 to 0700.**
+  Both `{root}/tmp/put-spool/` and `{root}/tmp/ec-spool/` are now created with
+  mode 0700 so no other local user can read plaintext spool files while a PUT
+  is in progress. An explicit `os.Chmod(dir, 0o700)` call is now issued after
+  `os.MkdirAll` so that existing directories (upgrades or MPU-first deployments
+  that landed at 0755) are also corrected at first use.
+- **Fixed nil-interface panic in EC-spool deferred close loop** (pre-existing).
+  The loop that closes data-reader handles after EC encoding could panic when
+  the parity-shard reader slot was nil. Added a nil guard before each `rc.Close()`.
+
+## [0.0.764.8] - 2026-06-29
+
+### Performance
+- **Skip MD5 computation on PUT hot path when no `Content-MD5` header is sent.**
+  `spoolObject` / `spoolObjectEncrypted` now accept a `needsMD5 bool` parameter.
+  When false (no client-supplied digest and the shard-group EC path handles ETag
+  independently), the body is copied without running `md5.Sum`, saving one full
+  read of the object payload for crypto and reducing per-PUT allocations.
+  `writeDataShards` no longer computes MD5 at all; the segment checksum remains
+  xxhash3-128. Multipart-complete and object-relocate callers continue to set
+  `needsMD5=true` because they store the spool ETag as the final object ETag.
+  Benchmark: 485 MB/s → 1509 MB/s (3.1×) for the uncached spool path.
+
+## [0.0.764.7] - 2026-06-29
+
+### Removed
+- **Removed orphaned single-key `PromoteStagedShards` RPC and its transport handler.**
+  The single-key variant was superseded by `PromoteStagedShardsBatch` (PR #930)
+  and had no remaining callers; the dead code was deleted and the handler regression
+  test was converted to cover the batch path (`TestHandlePromoteStagedBatch_Failure_ReturnsErrorEnvelope`).
+
+## [0.0.764.6] - 2026-06-29
+
+### Fixed
+- **Eliminated data race in `globalPutTraceSink` under `-race`.**
+  Changed the global put-trace sink from a plain pointer to `atomic.Pointer[putTraceSink]`
+  so concurrent reads in `ObservePutTraceStage` and test-setup writes in
+  `reloadPutTraceSinkForTest` are sequentially consistent without a mutex.
+  Added goroutine drain to the forward-sender concurrency test to prevent
+  goroutines from outliving the test and triggering cross-test races.
+
+## [0.0.764.5] - 2026-06-29
+
+### Changed
+- **Extended S3 compatibility matrix with CopyObject and DeleteObjects entries.**
+  Added CopyObject (including versioned-source, metadata-directive, tagging-directive,
+  and per-version ACL enforcement) and DeleteObjects (batch delete POST `?delete`)
+  rows to `docs/reference/s3-compatibility.md`.
+
+## [0.0.764.4] - 2026-06-29
+
+### Added
+- **Added fail-closed 501 NotImplemented guards for unsupported canned ACL values
+  and `x-amz-grant-*` explicit-grant headers on PutObject, CopyObject, and
+  CreateMultipartUpload.** Recognized-but-unsupported AWS canned values
+  (`authenticated-read`, `bucket-owner-read`, `bucket-owner-full-control`,
+  `aws-exec-read`) and all `x-amz-grant-*` headers are now rejected with
+  `NotImplemented` (501) on every object-write surface rather than being silently
+  downgraded to private. Supported canned ACLs (`private`, `public-read`,
+  `public-read-write`) and requests with no ACL header continue to be accepted.
+  E2e tests cover the fail-closed rejection surface across both SingleNode and
+  4-node cluster topologies. The `ACL header on object write/copy` row in
+  `docs/reference/s3-compatibility.md` has been updated from Supported to Partial
+  to reflect the current scope.
+
+## [0.0.764.3] - 2026-06-29
+
+### Changed
+- **Documented governance-bypass header behavior.** The `x-amz-bypass-governance-retention`
+  header on DELETE and DeleteObjects is accepted as a no-op — there is no
+  governance retention to bypass, matching AWS S3 behavior when no Object Lock is active.
+  Tools such as rclone and aws-cli that pass `--bypass-governance-retention` on all deletes
+  continue to work without modification.
+
+## [0.0.764.2] - 2026-06-29
+
+### Fixed
+- **CopyObject and UploadPartCopy now enforce the ACL of the requested version,
+  not the latest.** When a copy source specifies `?versionId=`, the server
+  previously checked the latest-version ACL instead of the specified version's
+  ACL, allowing anonymous callers to copy a private older version if the latest
+  version was public-read. Both the versioned and non-versioned copy-source
+  head paths now correctly stamp the bucket-versioning context so per-version
+  ACL enforcement works in multi-group clusters.
+
+## [0.0.764.1] - 2026-06-29
+
+### Changed
+- **Verified DeleteObjects (`POST /?delete`) end-to-end against real cluster and single-node fixtures.**
+  Multi-key bulk delete, quiet mode, absent-key success semantics, and empty-key `InvalidArgument`
+  error shape are now covered by live e2e tests in both SingleNode and Cluster4Node topologies.
+
+## [0.0.763.0] - 2026-06-27
+
+### Fixed
+- **Kept HTTP streaming-read bulk admission active until response bodies close.**
+  Shard, forward-read, and append-segment read handlers now hold their bulk
+  admission slot for the lifetime of the streamed Hertz response body, so large
+  internal reads cannot bypass the configured concurrency limit after handler
+  setup returns.
+
+### Changed
+- **Retired stale QUIC/mux wording from current transport paths.** Operator docs,
+  FlatBuffer comments, and e2e port helpers now describe the current HTTP/TCP
+  cluster transport instead of reserving UDP ports or presenting historical
+  `grainfs-mux-v1` material as live behavior.
+
+## [0.0.762.0] - 2026-06-27
+
+### Fixed
+- **Persisted local coalesced object metadata in the storage object codec.**
+  LocalBackend object records now round-trip `Coalesced` references through
+  `storagepb.Object`, preserving post-coalesce append/read metadata across
+  local metadata reloads.
+
+## [0.0.761.0] - 2026-06-27
+
+### Added
+- **Added placement-generation retirement after group drain.** Operators can now
+  run `grainfs cluster retire-placement-generation --epoch <n>` after drained
+  groups leave the active placement set, so future reads stop probing that
+  generation while the meta-raft registry keeps the retired record for replay
+  and audit.
+
+## [0.0.760.0] - 2026-06-27
+
+### Fixed
+- **Kept append segment limits accurate after coalescing appendable objects.**
+  Append admission now counts the logical append history recorded in side
+  summaries, so a coalesced object cannot reset the segment cap by hiding older
+  append parts behind the compacted prefix.
+- **Aligned local append side-record tail handling with compacted prefixes.**
+  Local append metadata now reads and writes tail segment records after the
+  compacted prefix cursor and validates summaries against the live tail size,
+  preserving post-coalesce append accounting.
+
+## [0.0.759.0] - 2026-06-27
+
+### Changed
+- **Enabled EC redundancy relocation for appendable and coalesced objects.**
+  The redundancy-upgrade path now preserves append composite ETag state for
+  embedded-history objects and relocates side-record appendables as redundant
+  coalesced prefixes while keeping future appends consistent.
+
+## [0.0.758.0] - 2026-06-27
+
+### Changed
+- **Reduced encrypted spool read-side buffering for multipart complete and copy.**
+  Encrypted spool readers now reuse pooled plaintext/ciphertext buffers and
+  per-record AAD scratch across records, cutting read-side allocation pressure
+  in EC multipart Complete and Copy benchmarks.
+
+## [0.0.757.0] - 2026-06-27
+
+### Added
+- **Added AppendObject allocation slope gates for incremental metadata.**
+  Single-node and cluster append tests now assert per-append allocations stay
+  flat across 4/8/16 sequential append sweeps, protecting the side-record
+  metadata path from regressing back to O(N) manifest growth per append.
+
+## [0.0.756.0] - 2026-06-26
+
+### Changed
+- **Integrated coalesce publish with cluster append side-record summaries.**
+  Coalescing a side-record-backed appendable object now advances the side-record
+  summary tail and compacted-prefix cursor, so Head/Get and later appends
+  continue from the remaining non-coalesced tail instead of re-reading consumed
+  side records.
+- Removed a stale quorum-meta raw-read helper that was left unused after the
+  paged LIST read-path optimization.
+
+## [0.0.755.0] - 2026-06-26
+
+### Added
+- **Added a Go S3 API micro-benchmark harness with automatic scratch cleanup.**
+  `make bench-go-api-micro` now runs focused single-node and cluster API
+  benchmarks, keeps profiles under `benchmarks/profiles`, and removes temporary
+  benchmark data on exit, interrupt, and termination paths.
+
+### Changed
+- **Made cluster LIST pagination read only the requested quorum-meta page.**
+  Single-node and multi-peer LIST page calls now scan page-sized local/remote
+  quorum-meta slices, verify candidate winners across peers, and batch raw
+  winner reads instead of scanning and decoding the full bucket prefix.
+- **Reduced fixed allocation costs in copy, spool, and encrypted shard paths.**
+  COPY now carries the source size hint into destination writes, encrypted spool
+  records reuse AAD fields, and encrypted shard encoding reuses the initial seal
+  buffer.
+
+### Fixed
+- **Cleaned benchmark scratch directories on early benchmark exits.**
+  The S3 compatibility benchmark now installs cleanup traps before early
+  dependency checks, so temporary data directories are removed even when the
+  benchmark exits before backends start.
+
+## [0.0.754.0] - 2026-06-26
+
+### Added
+- **Added short-lived bucket-versioning caching on the cluster mutating edge.**
+  `GetBucketVersioning` now caches stable states for a short window and reuses
+  that cache on subsequent calls to avoid repeated linearization reads during
+  burst writes.
+
+### Changed
+- **Retired legacy data-group proposal/command paths and advanced append metadata
+  sequencing for cluster-side processing.**
+  Removed obsolete proposal forwarding and decode branches, and landed the
+  coalesced-prefix append side-record flow that keeps append metadata moving
+  efficiently through side records.
+
+### Fixed
+- **Fixed mutating read/write consistency around bucket versioning and tombstone
+  handling.**
+  Bucket versioning state is now refreshed on writes and purged on delete, and
+  delete/versioning paths now rely on completed state transitions.
+
+### Removed
+- **Cleaned up dead follow-up items and test debt in implementation and test
+  suites.**
+  Removed completed items from `TODOS.md`, dropped finished test-helper scaffolding
+  where covered by coverage/testing, and migrated raw `t.Fatal`/`t.Error` assertions
+  to testify `require`/`assert` in the storage and cluster test slices.
+
+## [0.0.753.0] - 2026-06-26
+
+### Changed
+- **Persisted cluster AppendObject manifests through quorum-meta side records.**
+  Distributed append now stores non-coalesced segment refs and running ETag
+  state outside the growing quorum-meta manifest, hydrates them for Head/Get,
+  and fails closed when a summary side record is missing.
+
+## [0.0.752.0] - 2026-06-26
+
+### Changed
+- **Retired the dead data-group propose wire and command schema.**
+  Removed the unused `/forward/propose/data-group` buffered route, its private
+  raft-command payload/reply codecs, and the obsolete `clusterpb.Command`
+  envelope so the remaining forwarding surface only carries live owner and
+  meta-raft operations.
+
+## [0.0.751.0] - 2026-06-26
+
+### Changed
+- **Removed remaining unused cluster test helpers reported by staticcheck.**
+  Deleted dead `_test.go` helper symbols from cluster key, reseal, backend,
+  config, IAM snapshot, meta-FSM, meta-raft, and scrubber wiring tests. The
+  only remaining standalone `staticcheck` U1000 findings are the documented
+  intentional production scaffolding entries.
+
+## [0.0.750.0] - 2026-06-26
+
+### Changed
+- **Retired data-group raft command decoding from the apply loop.**
+  Data-group raft command entries now drain as opaque cursor markers while
+  snapshot entries still restore brownfield state. Legacy command envelope
+  validators, apply callbacks, data-group apply-error storage, and decode-only
+  tests were removed from the cluster package.
+
+## [0.0.749.0] - 2026-06-26
+
+### Changed
+- **Finished converting storage raw test assertions to testify.**
+  Replaced the remaining raw `t.Fatal*` / `t.Error*` assertions in storage
+  datawal, eccodec shard I/O, and LocalBackend tests with `require`.
+
+## [0.0.748.0] - 2026-06-26
+
+### Changed
+- **Converted a second storage assertion batch to testify.**
+  Replaced raw `t.Fatal*` / `t.Error*` assertions with `require` in data
+  encryptor, encrypted object file, encrypted object allocation, and range
+  chunk-boundary tests.
+
+## [0.0.747.0] - 2026-06-26
+
+### Changed
+- **Converted a storage test assertion batch to testify.**
+  Replaced raw `t.Fatal*` / `t.Error*` assertions with `require` / `assert`
+  in segment reader/writer, pullthrough resolver, directio, context
+  passthrough, buffer right-sizing, and small packblob seam/list/AAD tests.
+
+## [0.0.746.0] - 2026-06-26
+
+### Changed
+- **Persisted running AppendObject ETag state in single-node side records.**
+  LocalBackend side-record appends now update the composite ETag from stored
+  running MD5 state and validate append offset/cap from the append summary,
+  avoiding full side-segment expansion and raw manifest digest-history growth
+  on the steady-state append path.
+
+## [0.0.745.0] - 2026-06-26
+
+### Changed
+- **Persisted single-node AppendObject manifests through side records.**
+  LocalBackend now stores non-coalesced append segment lists outside the object
+  manifest, converts brownfield embedded append manifests on the next append,
+  appends new side records incrementally, and removes side-record chunk refs
+  and metadata on overwrite/delete.
+
+## [0.0.744.0] - 2026-06-26
+
+### Changed
+- **Removed per-group raft membership mirroring.**
+  Local data-group raft nodes now start as single-node local logs instead of
+  mirroring `ShardGroupEntry.PeerIDs` as raft voters. Revoked-node evacuation
+  reconciles the meta-FSM shard-group roster directly, and delete/version-delete,
+  ACL, tags, and quarantine RMW paths now use deterministic owner routing instead
+  of data-group raft leadership.
+
+## [0.0.743.0] - 2026-06-26
+
+### Changed
+- **Added the single-node AppendObject side-record read foundation.**
+  LocalBackend can now expand appendable object summaries from append side
+  segment records for Head/Get, and fails closed when a side-record summary is
+  missing instead of silently returning an unreadable object.
+
+## [0.0.742.0] - 2026-06-26
+
+### Changed
+- **Documented the AppendObject incremental metadata design.**
+  Added the side-record format, migration strategy, chunkref/GC implications,
+  coalesce handling, and implementation slices needed to remove the remaining
+  full-manifest rewrite and ETag rehash cost.
+
+## [0.0.741.0] - 2026-06-26
+
+### Fixed
+- **Reduced single-node AppendObject metadata churn.**
+  Already chunk-referenced appendable objects now persist appends without
+  re-decoding the previous object record or remove/add churning every existing
+  chunk ref; legacy plain-PUT conversion keeps the full path so its base
+  segment remains referenced.
+
+## [0.0.740.0] - 2026-06-26
+
+### Changed
+- **Routed append and multipart writes to a deterministic data-group owner.**
+  AppendObject and multipart create/upload/complete/abort/list-parts now resolve a
+  single owner peer from the shard-group voter set instead of using the data-group
+  Raft leader. Local owner execution bypasses Raft leadership checks, forwarded owner
+  writes dial only that owner, and forward receivers reject owner-routed writes on
+  non-owner nodes even if that node is currently the Raft leader. This advances the
+  data-group Raft removal roadmap while leaving ordinary PUT/read forwarding on the
+  existing leader-hinted path.
+
+## [0.0.739.0] - 2026-06-26
+
+### Fixed
+- **Removed e2e unused test scaffolding.**
+  Deleted default-build e2e `staticcheck` U1000 helper leftovers and moved
+  integration-only e2e helpers behind the `integration` build tag, keeping
+  both default and integration compile-only test passes clean.
+
+## [0.0.738.0] - 2026-06-26
+
+### Changed
+- **Added e2e coverage for `ListObjects` V1 (legacy) Marker pagination.**
+  New cases exercise listing without `list-type=2`: paging with an exclusive
+  `Marker`/`NextMarker` cursor returns every key exactly once in ascending
+  lexicographic order with no duplicates or gaps, and a marker past the last
+  key yields an empty, non-truncated page. Both run on the single-node and
+  4-node cluster fixtures. No production behavior change.
+
+## [0.0.737.0] - 2026-06-26
+
+### Fixed
+- **Removed storage/lifecycle unused test scaffolding.**
+  Deleted the remaining non-conflicting `staticcheck` U1000 findings in
+  `internal/storage` and `internal/lifecycle`; the remaining tracked dead
+  test helpers are in cluster/e2e files that overlap the active PR fleet.
+
+## [0.0.736.0] - 2026-06-26
+
+### Changed
+- **Made data-group GC freshness and redundancy-upgrade relocation raft-free.**
+  Production scrubber boot now wires a transport-reachability GC freshness gate into existing and
+  future owned data-group backends, so segment GC no longer depends on data-group Raft `ReadIndex`.
+  Redundancy-upgrade relocation is additionally limited to the canonical first peer of each shard
+  group, with legacy raft-address matching and fail-closed behavior when group metadata or peers are
+  unavailable.
+
+### Fixed
+- **Closed GC gate wiring races and latest-base lint blockers.**
+  GC freshness/singleton callbacks are stored through atomic holders, `DataGroupManager` serializes
+  gate updates against new group registration, and stale `ShardService` quorum-meta decode forwarding
+  helpers plus a superseded segment-staging promote helper were removed after latest base merges
+  exposed them as unused.
+
+## [0.0.735.0] - 2026-06-26
+
+### Changed
+- **Renamed incidental `__grainfs_volumes` test fixtures.**
+  Tests that only needed an arbitrary internal bucket now use the neutral
+  `__grainfs_test_internal` name, leaving the removed historical volumes bucket
+  out of unrelated fixture data.
+
+## [0.0.734.0] - 2026-06-26
+
+### Fixed
+- **Routed internal-bucket scrub requests to the registered production source.**
+  The scrub Director no longer sends `__grainfs_*` buckets to an unregistered
+  `"replication"` source; internal and user buckets both route to the registered
+  `"ec"` source so explicit scrub requests do not become logged no-ops.
+
+## [0.0.733.0] - 2026-06-26
+
+### Changed
+- **Made `group-0` participate in object placement as a normal data group.**
+  Object and segment placement no longer exclude `group-0` when other data
+  groups exist, production boot no longer installs an unassigned-bucket
+  `group-0` router default, and append/object-write fallbacks now prefer the
+  backend group or sole active placement candidate before legacy test fallback.
+
+## [0.0.732.0] - 2026-06-26
+
+### Fixed
+- **Batched segment-staging promote RPCs by target node.**
+  Chunked PUT commit now promotes all staged segment shards for the same node in
+  one RPC, reducing segment-staging promote fanout from segment-by-node calls to
+  one batch per placement node.
+
+## [0.0.731.0] - 2026-06-26
+
+### Fixed
+- **Pruned empty segment-staging transaction directories.**
+  The orphan-shard walker now removes an empty `.segstaging/<txn>` parent after
+  reclaiming its last abandoned staged shard leaf, avoiding residual empty
+  transaction directories.
+
+## [0.0.730.0] - 2026-06-26
+
+### Tests
+- **Pinned Suspended HEAD/LIST agreement against stale `lat:` pointers.**
+  Suspended LIST already follows the latest-only quorum-meta path, matching HEAD;
+  the new regression test records that stale legacy `lat:` metadata is ignored.
+
+## [0.0.729.0] - 2026-06-26
+
+### Fixed
+- **Added convergence-gated GC for non-versioned delete tombstones.**
+  The scrubber's quorum-meta tombstone reconciler now also reclaims latest-only
+  delete markers once every placement node is reachable and none still holds a
+  live latest-only data blob, preventing unbounded marker growth in churny buckets.
+
+## [0.0.728.0] - 2026-06-26
+
+### Fixed
+- **Restored non-versioned multipart-complete retry idempotency after intervening PUTs.**
+  Completed multipart uploads now leave a hidden uploadID-keyed completion sentinel, so a retry can
+  return the original completed object even after a later same-key PUT replaces the latest-only blob.
+
+## [0.0.727.0] - 2026-06-26
+
+### Fixed
+- **Made tag/ACL quorum-meta RMWs honor versioned per-version blobs.**
+  Versioning-enabled object tag writes now target the requested version blob, latest tag/ACL writes
+  mutate the derived latest live version, and non-versioned buckets keep the latest-only blob path.
+
+## [0.0.726.0] - 2026-06-26
+
+### Fixed
+- **Made bucket delete apply clear lifecycle and IAM bucket-upstream state atomically.**
+  `DeleteBucket` meta-FSM apply now removes the bucket record, lifecycle config, and bucket-upstream
+  credentials under the same committed log entry, eliminating the coordinator-crash window between
+  separate post-delete cascade proposes.
+
+## [0.0.725.0] - 2026-06-26
+
+### Fixed
+- **Made local quorum-meta and multipart manifest publishes fsync their directory links after
+  rename.** Latest-only quorum-meta, per-version quorum-meta, rollback restores, and MPU manifest
+  writes now persist the target directory chain after atomic rename so a crash cannot lose the
+  namespace entry after the blob bytes were fsynced.
+
+## [0.0.724.0] - 2026-06-26
+
+### Changed
+- **Carved node-local quorum-meta filesystem semantics into `LocalQuorumMetaStore`.**
+  `ShardService` keeps the quorum-meta RPC facade while local quorum-meta reads, writes, scans,
+  deletes, CAS/LWW acceptance, and per-target publish locks now live behind the focused store
+  used by `QuorumMetaStore`'s local adapter.
+
+## [0.0.723.0] - 2026-06-26
+
+### Fixed
+- **Closed the `DeleteBucket` emptiness-scan TOCTOU window for object writes.**
+  Bucket-scoped object writes now hold a per-bucket admission fence from bucket existence check
+  through metadata commit, while `DeleteBucket` holds the exclusive side across emptiness checks and
+  meta delete.
+
+## [0.0.722.0] - 2026-06-26
+
+### Fixed
+- **Failed owner-local-first CAS quorum-meta writes now roll back their local latest-only blob.**
+  If an append/coalesce RMW publishes the owner-local blob but cannot reach peer quorum, GrainFS
+  compare-rolls back that fresh publish so readers do not observe a phantom manifest. Rollback also
+  restores any previously committed local blob instead of deleting it, while idempotent replays and
+  CAS/LWW no-op skips remain untouched.
+
+## [0.0.721.0] - 2026-06-26
+
+### Fixed
+- **Extended committed `DeleteBucket` physical cleanup to peer nodes.** After meta-Raft commits the
+  bucket delete, the coordinator now best-effort fan-outs an idempotent shard RPC so each peer removes
+  its local bucket data tree plus `.quorum_meta{,_versions}` bucket trees.
+
+## [0.0.720.0] - 2026-06-26
+
+### Changed
+- **Removed the stale legacy single-file read-path follow-up after verifying `WriteAt` still
+  produces that fixture shape.** Comments now name the live `WriteAt` producer instead of the
+  retired `__grainfs_volumes` path, and the non-actionable TODO is gone.
+
+## [0.0.719.0] - 2026-06-26
+
+### Changed
+- **Carved node-local multipart manifest blob I/O into `LocalManifestStore`.**
+  `ShardService` now keeps manifest RPC and fan-out orchestration as a facade while delegating
+  local `.qmeta_mpu` writes, reads, deletes, and strict scans to the focused store.
+
+## [0.0.718.0] - 2026-06-26
+
+### Changed
+- **Cleaned up the remaining cluster ST1005 error-string nits from the health backlog.**
+  Rotation and DEK boundary error messages now follow Go stylecheck casing and punctuation
+  rules, and the corresponding TODO entry is removed.
+
+## [0.0.717.0] - 2026-06-26
+
+### Fixed
+- **Removed a stale AppendObject follow-up after confirming the versioning-read fault gate already
+  fails closed.** `appendObject` maps genuine linearized versioning-read errors before appending, and
+  `TestAppendObjectGateFailsClosedOnVersioningReadFault` covers the regression.
+
+## [0.0.716.0] - 2026-06-26
+
+### Changed
+- **Removed a stale follow-up for the old `__grainfs_nfs4` design note.** The referenced
+  `docs/superpowers` design tree is no longer present on `master`, and the remaining test fixture
+  comment already records that NFS support was removed.
+
+## [0.0.715.0] - 2026-06-26
+
+### Fixed
+- **Admin bucket-policy display reads now have storage-level regression coverage for malformed
+  committed policies.** A `GetBucketPolicy` display read still returns malformed legacy bytes for
+  operators, but the test now proves that a compile failure drops any stale negative authz cache so
+  the next authorization check re-pulls the committed policy and fail-closes to deny.
+
+## [0.0.714.0] - 2026-06-26
+
+### Removed
+- **The last FSM-value reseal dependency on data-group Raft is retired.** `policy:` and `obj:`
+  FSM values are now rewrapped by the node-local rewrap lane on every holder, and
+  the old data-group command constants, payload schema, generated code, codecs, no-op hooks, and
+  apply tests are gone. Brownfield data-group command envelopes now pass through the generic no-op
+  replay path instead of decoding or mutating state.
+- **The automatic data-group rebalancer plan surface is removed.** The dead `GroupRebalancer`
+  abstraction, automatic `Rebalancer` loop, meta `RebalancePlan`/`AbortPlan` commands, active-plan
+  snapshot slot, generated schema, and tests are gone. Revoked-node evacuation still keeps its live
+  data-group membership executor.
+
+### Changed
+- **DEK rewrap completion no longer needs a raft marker re-kick.** The FSM-value lane now drains
+  local stale values during the normal rewrap controller kick, while the kick path retries boundedly
+  on transient lane failures and still suppresses epoch progress reports until every lane is clean.
+
+## [0.0.713.0] - 2026-06-26
+
+### Removed
+- **The balancer no longer proposes or executes Raft-backed shard migrations.** Disk and request-rate
+  gossip still run, the balancer status endpoint still reports skew and active hysteresis, and
+  load-based leader transfer remains gated off by default, but the old data-group migration producer,
+  executor, pending queue, retry helper, object picker, and apply hooks are gone. Fresh clusters
+  cannot enqueue new balancer data movement through meta-Raft.
+
+### Changed
+- **Old balancer migration log entries now replay as inert compatibility slots.** Command types 10
+  and 11 remain reserved so brownfield Raft logs can replay without decoding legacy payloads or
+  blocking on missing executors; replay does not create `pending-migration:` keys. Existing legacy
+  pending keys still survive snapshot/restore as inert state, and legacy Prometheus metric names
+  remain registered with help text that says they should stay at zero.
+- **Balancer operations docs now describe the current runtime.** The runbook explains that migration
+  flags are legacy inert knobs, how to spot stale binaries still emitting migration counters or
+  `pending-migration:` keys, and how to use the remaining gossip/skew metrics during incidents.
+
+## [0.0.712.0] - 2026-06-26
+
+### Removed
+- **Removed the dead `CmdSetRing` data-group Raft proposer path while keeping old log replay safe.**
+  The consistent-hash ring command no longer has a named command constant, payload struct, live
+  encoder, or apply helper; command type 17 is now an explicit retired-slot tombstone that quietly
+  no-ops if a brownfield Raft log still replays an old SetRing entry with legacy payload bytes.
+  FlatBuffers schema/generated compatibility code remains in place for old data and benchmark
+  fixtures, and the wire-slot test now reserves type 17 numerically so it cannot be reused.
+
+## [0.0.711.0] - 2026-06-26
+
+### Fixed
+- **`GetObjectTags` on a non-versioned (or version-Suspended) bucket now returns `404 NoSuchKey` for
+  a soft-deleted object and for a mismatched `versionId`, instead of returning `200` with empty tags
+  or the latest version's tags.** A tag read of a soft-deleted object (whose latest-only record is a
+  delete-marker tombstone) returned `200` + empty tags, and a specific-`versionId` read that did not
+  match the stored version returned the latest version's tags; both now `404`, matching the behavior
+  of `HEAD`/`GET` for the same input. (Found in review while removing the dead metadata read path
+  below.)
+
+### Changed
+- **Removed the dead Raft/FSM object-metadata read scaffolding; object metadata is now served from a
+  single source.** Object metadata (regular/chunked/multipart/appendable/coalesced PUT, tags, ACL,
+  quarantine, delete) is written only to the off-raft, EC-co-located quorum-meta blob store; the
+  meta-raft FSM is a pure control plane (bucket config/policy/versioning, IAM, keys, lifecycle) and
+  holds no per-object records. The writer-less FSM `obj:`/`lat:` read fallbacks and carve-out
+  machinery — which a greenfield cluster never populates — were removed across the read, list,
+  tagging, scrub, orphan-reclaim, EC-rewrap, and bucket-delete paths. Behavior-neutral; no API, wire,
+  or on-disk format change.
+
+## [0.0.710.0] - 2026-06-26
+
+### Removed
+- **Internal dead-code removal, no user-facing behavior change.** Removed two leftovers from the
+  already-removed volume/NBD and NFS subsystems:
+  - The dead `__grainfs_volumes` erasure-coding scrub-routing branch in `internal/scrubber`
+    (`routeSourceFor`). The volume subsystem was removed (#781-785), so no internal bucket needs the
+    EC scrub source anymore; `routeSourceFor` now routes internal buckets to the replication source
+    and all other buckets to the EC source. The now-unused `keyPrefix` parameter and `strings`
+    import are dropped with the branch.
+  - The `__grainfs_nfs4` carve-out in `storage.IsInternalBucket` (`internal/storage`). The NFS mount
+    protocol was removed, so `__grainfs_nfs4` is now classified as a normal internal bucket instead
+    of being excluded. Behavior-neutral in practice — nothing in production creates either bucket
+    (greenfield, no on-disk objects), and the read-side `VerifyETag` selects its hash by ETag length,
+    not by bucket classification.
+  Plus the stale comments that referenced the removed `__grainfs_volumes` Volume Device blocks and
+  the `__grainfs_nfs4` bucket across scrubber/storage/cluster/colima-fixture files. The "formerly
+  NFS4" port-reservation comments in the e2e cluster harnesses are intentionally kept (they document
+  removed protocol ports, not the bucket).
+
+## [0.0.709.0] - 2026-06-26
+
+### Changed
+- **Internal style fix, no behavior change.** Dropped trailing punctuation from two error-string
+  messages flagged by staticcheck ST1005 (`encrypt` legacy-KEK boot error, `iam/oidc` `group_prefix`
+  validation error). Wording/meaning preserved; the sentinel error identity is unchanged.
+
+## [0.0.708.0] - 2026-06-26
+
+### Changed
+- **Documentation accuracy: the S3-compatibility matrix now backs its "Conditional headers — Supported"
+  claim with end-to-end tests.** RFC 7232 read conditional headers (If-Match / If-None-Match /
+  If-Modified-Since / If-Unmodified-Since) were already implemented and correct on GET / HEAD / Range,
+  but had no e2e coverage, so the matrix overclaimed under the project's "Supported requires e2e" policy.
+  Single-node and 4-node cluster e2e now characterize the 200 / 304 / 412 outcomes on GET and HEAD plus
+  Range-GET precondition precedence, and the matrix Notes were tightened to state exactly what is covered
+  and to flag that conditional writes (PutObject If-None-Match CAS) remain out of scope. Test- and
+  docs-only; no server behavior change.
+
+## [0.0.707.0] - 2026-06-26
+
+### Changed
+- **Performance: reuse the Reed-Solomon stream encoder across EC PUTs instead of
+  rebuilding it per request.** The chunked EC write path created a fresh
+  `reedsolomon.NewStream` encoder for every PUT; each encoder owns an internal
+  pool of aligned scratch buffers that never survived the call, so every encode
+  re-allocated that scratch — profiling showed it at ~22% of EC-write allocation,
+  the single largest reducible allocator on the path. The encoder is now cached
+  and shared per (EC config, block size), mirroring the existing non-stream
+  encoder cache, so its scratch pool is reused. Measured allocation on a 16 MiB EC
+  PUT drops ~6% (the pool is GC-cleared between collections, so steady production
+  traffic keeps it warmer); throughput is unchanged (the path is disk-I/O bound).
+  No protocol, API, CLI, or on-disk format change; EC output is byte-identical.
+
+## [0.0.706.0] - 2026-06-26
+
+### Removed
+- **Internal test-only cleanup, no production code or behavior change.** Removed 12 unused
+  (staticcheck U1000) dead test-helper symbols across `internal/raft`, `internal/scrubber`, and
+  `internal/server` `_test.go` files.
+
+## [0.0.705.0] - 2026-06-25
+
+### Changed
+- **Internal refactor: extracted `QuorumMetaStore` from the `DistributedBackend` god-struct (no
+  behavior, API, wire, or on-disk format change).** The quorum-meta orchestration — K-of-N fan-out
+  write (per-version-blob-before-latest), peer read + Last-Write-Wins merge, version resolution, and
+  cluster-wide scatter-gather LIST — moved into a new `QuorumMetaStore` module; `DistributedBackend`
+  keeps it as a `qms` field and is a facade that delegates. The store injects narrow adapters today's
+  `ShardService`/`DistributedBackend` satisfy, conflict resolution stays as package-level pure
+  functions, and the fan-out write ordering and LWW merge are now unit-tested with fake adapters and
+  no transport. Second slice of the ShardService/DistributedBackend decomposition (the first was
+  LocalShardStore).
+
+## [0.0.704.0] - 2026-06-25
+
+### Removed
+- **Internal dead-code removal, no user-facing behavior change.** Removed the now-unused `AdminAPI`
+  `PostureChecker` optional first-SA pre-check seam (`internal/iam`): the interface, the `posture`
+  field, `SetPostureChecker`, and the `CheckAnonOff` pre-check in `CreateSA`. It existed only for the
+  earlier anon-switch feature whose only implementation and wiring were already removed, so the
+  pre-check was already always-skipped in production — `CreateSA` behavior is unchanged.
+
+## [0.0.703.0] - 2026-06-25
+
+### Changed
+- **Internal crypto-API migration, no behavior change.** The deterministic cluster-identity key
+  derivation (`internal/transport`, PSK → ECDSA TLS key) now constructs the key via the
+  non-deprecated `ecdsa.ParseRawPrivateKey` instead of hand-setting the deprecated
+  `PrivateKey.D` / `PublicKey.X` / `PublicKey.Y` fields with `elliptic.Curve.ScalarBaseMult`
+  (deprecated since Go 1.21/1.25). The scalar derivation is unchanged and the derived key — and thus
+  the pinned SPKI — is byte-identical (proven by golden regression vectors), so existing clusters
+  keep the same identity.
+
+## [0.0.702.0] - 2026-06-25
+
+### Removed
+- **Internal dead-code removal, no user-facing behavior change.** Removed the dead anon-switch
+  TLS-posture compatibility shims (`enforceTLSPosture`, `bootTLSPostureGate`,
+  `iamPostureChecker`/`CheckAnonOff`, `newIAMPostureChecker`) and their boot wiring (the
+  `bootTLSPostureGate` boot phase and the two `SetPostureChecker` injection sites). All were no-ops
+  left over from the earlier anon-switch removal, so production first-SA creation behavior is
+  unchanged. The generic `AdminAPI` `PostureChecker` extension seam is left in place.
+
+## [0.0.701.0] - 2026-06-25
+
+### Changed
+- **Performance: encode the sized EC shard ciphertext straight to the shard file — the last
+  whole-shard write buffer is gone.** The sized EC shard-write path (large PUT, multipart Complete,
+  server-side COPY) previously materialized each shard's GFSENC3 ciphertext as a `[]byte` before
+  writing it to disk. `LocalShardStore` now runs the AEAD encode directly against the shard file's
+  descriptor via a new `atomicShardFileWrite` helper, so no whole encrypted shard is ever held in
+  memory; writes are unbuffered because the encoder already emits in ~1 MiB units. Same-machine
+  write-path allocation drops: server-side COPY (16 MiB) 56 → 29 MB/op (−48%), multipart Complete
+  (32 MiB) 91 → 40 MB/op (−56%); throughput is unchanged (crypto-bound). The fsync durability class
+  is now derived from the ciphertext bytes actually written (identical to the prior length-based
+  decision); the locked write → fsync → rename → directory-fsync order and the data-loss guards
+  (partial-write cleanup, short-body reject) are preserved. No protocol, API, CLI, or on-disk format
+  change. Read-side staged-part buffering on GET/COPY-read remains a separate follow-up.
+
+## [0.0.700.0] - 2026-06-25
+
+### Removed
+- **Internal dead-code removal, no user-facing behavior change.** Removed the unused
+  `config.Store.SetPostRestore` callback capability (the method, its `postRestore` field, and the
+  post-`Restore` callback fire-site). Its only caller was the proxy-CIDR snapshot reconcile removed
+  with the ProxyTrust subsystem, leaving zero production callers. `Restore`'s value
+  validation/install path is unchanged and reload hooks are still not fired during `Restore`.
+
+## [0.0.699.0] - 2026-06-25
+
+### Changed
+- **Internal refactor, no user-facing behavior change.** Split the 2,519-line
+  `internal/cluster/cluster_coordinator.go` god-file into five themed same-package files
+  (`_bucket.go`, `_object_io.go`, `_multipart.go`, `_scan.go`, `_placement.go`) while keeping the
+  `ClusterCoordinator` struct, constructor, builder methods, and small shared core in
+  `cluster_coordinator.go`. This is a move-only change: methods were relocated verbatim with no
+  signature, logic, or ordering changes, following the same behavior-neutral themed-file-split
+  playbook used on `backend.go` (PR #713). Behavior-neutrality is proven by a sorted-line-diff that
+  is empty between the original single file and the concatenation of the new files (modulo
+  per-file package/import boundaries); the god-object and method counts are unchanged by design —
+  the win is navigability.
+
+## [0.0.698.0] - 2026-06-25
+
+### Changed
+- **Internal refactor, no user-facing behavior change.** The cluster-mode server boot sequence
+  (`internal/serveruntime`) now drives its ~30 startup phases from an explicit ordered registry
+  (`bootSequence()`) instead of a hand-inlined call list. Boot failures now carry a phase label
+  (`boot phase <name>: ...`) for easier operator diagnosis; the success path and phase ordering are
+  unchanged. No protocol, API, CLI, or on-disk format change.
+
+## [0.0.697.0] - 2026-06-25
+
+### Changed
+- **Internal refactor: extracted `LocalShardStore` from the `ShardService` god-struct (no behavior,
+  API, wire, or on-disk format change).** The local-shard concern — shard-blob physical I/O, the
+  at-rest seal, the `syncDirChain` durability state machine (ancestor-fsync dedup), and the
+  staging→promote-local path — moved into a new `LocalShardStore` module; `ShardService` keeps it as
+  a field and is a facade that delegates every local-shard method to it. First slice of a
+  decomposition of the 1,940-LOC `ShardService`; the fsync-order durability tests now construct a
+  `LocalShardStore` directly, with no transport.
+
+## [0.0.696.0] - 2026-06-25
+
+### Changed
+- **Performance: stream the sized EC shard write instead of buffering the whole plaintext shard.**
+  Every sized EC shard write (large PUT, multipart Complete, server-side COPY) buffered the plaintext
+  shard as a `[]byte` (`readShardPayload`) and then re-encoded it into the encrypted payload — two
+  whole-shard buffers per shard. The sized path now streams the body straight into the encoder
+  (`writeLocalShardAADStream` / `EncodeEncryptedShardStreamToBuffer`), dropping the plaintext buffer;
+  a bounded counting read still rejects a short or oversized body so a truncated shard fails loudly.
+  Measured: a cluster COPY of a 16 MiB object drops from ~84 MB to ~58 MB allocated per call (−31%);
+  an EC multipart Complete of a 32 MiB object from ~142 MB to ~91 MB (−36%). The encrypted payload
+  still materializes for the shard-file write contract — that residual is unchanged. No API, wire, or
+  on-disk format change.
+
+## [0.0.695.0] - 2026-06-25
+
+### Changed
+- **Internal reliability change, no user-facing behavior change.** The orphan-shard scrubber now
+  reclaims abandoned segment-staging shard directories (`.segstaging`, introduced in 0.0.691.0), closing
+  the disk leak that a crash between a chunked PUT's promote and commit, a failed upload, or a
+  concurrent-completer last-writer-wins loser could otherwise leave behind forever. The walker decides
+  safety by delete-time liveness — it reclaims a staged directory only when it is older than a generous
+  24h floor (so a slow in-flight upload is never touched), is not referenced by live object metadata
+  (the same full-object liveness check the scrubber already applies to every object), and is not a
+  chunked object's segment data. Any committed object is kept regardless of how it was written, and
+  GET/PUT are unchanged. A new `grainfs_scrub_segstaging_reclaimed_total` metric counts reclaimed
+  staging directories.
+
+## [0.0.694.0] - 2026-06-25
+
+### Changed
+- **Performance: cut allocation in the cluster EC shard-encode path (lower memory and GC pressure on
+  EC multipart Complete and large EC writes).** `EncodeEncryptedShard` sealed each 1 MiB chunk into a
+  freshly allocated slice, and its buffered callers (`writeLocalShardAAD`, the EC shard-file writer,
+  and `EncodeEncryptedShardBuffer`) collected the output in a `bytes.Buffer` that doubled from empty
+  on every write — so an EC multipart Complete re-encoded every shard with per-chunk sealed
+  allocations on top of a repeatedly-grown buffer. It now seals through the existing
+  `SealTo`/`SealAtGenTo` seam into one reused buffer and pre-sizes the output buffer to a guaranteed
+  upper bound (single allocation, no doubling); the on-disk output is byte-identical. Measured: an
+  encrypted EC multipart Complete of a 32 MiB object drops from ~231 MB to ~142 MB allocated per call
+  (−39%), a 10 MiB object from ~107 MB to ~71 MB (−34%). No API, wire, or on-disk format change.
+
+## [0.0.693.0] - 2026-06-25
+
+### Changed
+- **Performance: pooled the per-record ciphertext buffer in encrypted object writes (lower memory
+  and GC pressure on multipart and large encrypted writes).** `writeEncryptedObjectFile` sealed each
+  128 KiB record into a freshly allocated slice, so an N-record object allocated ~object-size of
+  transient ciphertext buffers on every write — every multipart UploadPart, every multipart Complete
+  (which re-encodes the whole object), and every large encrypted PUT. It now seals through the
+  existing `SealTo`/`SealAtGenTo` seam into one reused buffer (pooled across writes); the on-disk
+  output is byte-identical. Measured: an encrypted multipart Complete of a 10 MiB object drops from
+  ~11.4 MiB to ~760 KiB allocated per call (−93%); a 5 MiB UploadPart from ~5.5 MiB to ~187 KiB
+  (−97%). No API, wire, or on-disk format change.
+
+## [0.0.692.0] - 2026-06-25
+
+### Changed
+- **Performance: right-sized the object write-path buffers (much lower memory and GC pressure on
+  PUT).** The segment-writer pipeline allocated a fixed 16 MiB chunk buffer for every object whose
+  body it could not size-sniff — which is the common case in production: a streaming HTTP body and a
+  packed-blob passthrough both reach the writer without a measurable length, so even a 4 KiB PUT
+  allocated 16 MiB (and a large PUT held up to `16 MiB × (workers+1)`). The writer now sizes its
+  chunk buffers from two sources:
+  - an in-memory body that reports `Len() int` (authoritative) sizes the buffer exactly; and
+  - the request `Content-Length` (already plumbed as `SizeHint`) sizes the buffers for opaque
+    streams. The hint is advisory only — a body that outruns its hint is still written in full
+    (confirmed at the boundary with a 1-byte probe, no truncation), and a shorter body persists only
+    its real bytes.
+
+  Additionally, each encrypted object write allocated a fresh 1 MiB bufio buffer plus a 128 KiB
+  working buffer; both are now pooled (`sync.Pool`), so they no longer recur per write.
+
+  The same right-sizing applies to the cluster chunked-write path (`putObjectChunked`,
+  multipart-complete, and relocation all carry the known object size into the segment writer), so
+  cluster PUTs no longer allocate a 16 MiB chunk per object either.
+
+  Measured: a 4 KiB single-node PUT drops from ~16 MiB to ~60 KiB allocated (−99.6%); encrypted
+  small PUTs from ~17 MiB to ~170 KiB; a 256 KiB cluster chunked PUT from ~16 MiB to ~274 KiB
+  (−98.3%); geomean across the single-node PUT/COPY micro-benchmarks −88%. Output bytes are
+  byte-identical (encrypt/decrypt round-trip unchanged); no API, wire, or on-disk format change.
+  (Remaining follow-up: the encrypted server-side COPY re-encode still allocates a full chunk
+  because its source reader exposes neither a length nor a hint.)
+
+## [0.0.691.0] - 2026-06-25
+
+### Changed
+- **Internal reliability change, no user-facing behavior change.** Chunked-PUT segment writes now
+  stage their erasure-coded shards in a per-node staging area (`.segstaging/<txn>/<blobID>`) and
+  promote (atomically rename) them to their final path only at commit time, right before the object
+  manifest is written (data-before-meta). Each shard is sealed with its FINAL logical key as
+  encryption AAD even while staged, so a post-promote read decrypts unchanged; the promote is
+  fail-closed and all-or-fail (a promote error aborts the commit and the staged/final shards are
+  reclaimed). GET/PUT remain byte-identical. This narrows the window in which an interrupted or
+  failed chunked write could leave orphaned segment shards in the final namespace — a mid-write
+  failure now strands shards under `.segstaging` instead. It does not fully close the orphan class:
+  a crash between promote and commit, or a concurrent-completer last-writer-wins loser, can still
+  leave final-path shards with no manifest reference (a disk leak, never data loss). A background
+  age-out reclaimer for `.segstaging` is follow-up work.
+
+## [0.0.690.0] - 2026-06-25
+
+### Fixed
+- **Object Lock operations now fail closed (501 NotImplemented) instead of falsely succeeding.**
+  Object Lock / retention / legal-hold are not implemented, but several paths returned misleading
+  success: `PutObjectRetention` validated and then returned `200` without storing anything;
+  `GetBucketObjectLockConfiguration` advertised `Enabled`; and `GET ?retention`, `PUT/GET ?legal-hold`,
+  and `PutObject` carrying `x-amz-object-lock-*` headers had no dedicated routing, so they fell through
+  to plain GetObject/PutObject — returning object bytes as a "retention document" or, worst, silently
+  overwriting the object body with legal-hold XML (data corruption). All of these are now rejected with
+  `501 NotImplemented`, consistent with the existing SSE-C/KMS and lifecycle fail-closed convention. No
+  object is mutated on the legal-hold path. WORM/compliance support remains future work.
+
+## [0.0.689.0] - 2026-06-25
+
+### Fixed
+- **UploadPartCopy data loss (CRITICAL).** A multipart server-side copy request
+  (`PUT /b/k?partNumber=N&uploadId=ID` with `x-amz-copy-source`) was mis-routed to the plain
+  UploadPart handler, which read the empty request body and stored it as the part — the copy source
+  was silently dropped and the client received `200` + an ETag. CompleteMultipartUpload then assembled
+  an object missing the copied bytes. This is the standard large-object copy path used by the AWS SDK
+  (multipart copy uses UploadPartCopy), so the corruption was silent and data-losing. UploadPartCopy is
+  now handled correctly: it copies the source object (or a `x-amz-copy-source-range` byte range,
+  inclusive `bytes=START-END`, and an optional source `versionId`) into the part through the full
+  source GetObject authorization chain (pre-load IAM/bucket-policy + post-load ACL) and returns a
+  `CopyPartResult` XML body.
+
+## [0.0.688.0] - 2026-06-25
+
+### Changed
+- **Internal refactor, no user-facing behavior change.** Decomposed the ~365-line procedural
+  `(*MetaFSM).Snapshot()` encoder into per-section `build*Vector` helpers (one per snapshot
+  section), mirroring the existing `Restore()`-side `decode*` symmetry. The FlatBuffers wire
+  output is byte-identical to before — builder operation order is load-bearing, so the extraction
+  preserves the exact sequence and is guarded by a new byte-identity golden test
+  (`TestByteIdentity_MetaFSMSnapshot`) that freezes the deterministic snapshot root.
+## [0.0.687.0] - 2026-06-25
+
+### Changed
+- **Internal refactor, no user-facing behavior change.** Routed the AppendObject S3 handler
+  through `storage.Operations.AppendObject` so it no longer reaches the backend via a concrete
+  `s.backend.(storage.AppendObjecter)` capability assertion. The handler is now backend-blind like
+  every other object op (Get/Put/Multipart). Append capability is resolved on the outermost backend
+  only — byte-identical to the former assertion — so behavior is preserved (single-node and 4-node
+  cluster append e2e green).
+
+### Fixed
+- **Developer tooling.** Fixed `TestBenchS3CompatUsesUniqueDefaultBenchDir`, which asserted the
+  pre-`bench_tmp_base` mktemp form and had been failing since the macOS bench socket-path fix.
+
+## [0.0.686.0] - 2026-06-25
+
+### Fixed
+- **Developer tooling, no user-facing behavior change.** Fixed `benchmarks/bench_s3_compat_compare.sh`
+  passing the removed `--nbd-port` flag to `grainfs serve`, which broke `make bench` and
+  `make bench-cluster` on every platform after NBD support was removed (the server aborted on the
+  unknown flag before any warp op ran). Also use a short `BENCH_DIR` base on macOS so each target's
+  admin Unix socket path stays within the 104-byte `sun_path` limit; the default `$TMPDIR` under
+  `/var/folders/...` overflowed it and failed admin-socket bind during IAM bootstrap.
+
+## [0.0.685.0] - 2026-06-25
+
+### Changed
+- **Internal refactor, no user-facing behavior change.** Centralized fatal-on-error UUIDv7 string
+  generation into a single `internal/uuidutil.MustNewV7()` helper, replacing the fragmented
+  `uuid.Must(uuid.NewV7()).String()` pattern that was duplicated across the cluster, storage,
+  scrubber, serveruntime, receiptsvc, and iam packages. Generated IDs are unchanged (still
+  k-sortable UUIDv7 strings) and the panic-on-entropy-failure contract is preserved. Sites with a
+  deliberately different error contract (graceful v4 fallback, error propagation, or raw-bytes use)
+  were intentionally left untouched.
+
+## [0.0.684.0] - 2026-06-25
+
+### Changed
+- **The latest version of an object is now the LAST COMPLETED write, not the one with the newest
+  version ID.** Previously the "latest" version (what `GET`/`HEAD` without a version ID return, and
+  which version `ListObjectVersions` flags `IsLatest`) was decided by version-ID order, which is
+  creation-time order. A multipart upload created before a same-key `PutObject` but completed after it
+  therefore stayed non-latest even though it was written last. Latest is now resolved by modification
+  time (the completion time), with the version ID as a deterministic tiebreaker; `GET`/`HEAD` and
+  `ListObjectVersions` agree on the same winner. Note: modification time is second-granular, so a
+  multipart and a `PutObject` that complete within the same one-second window still tie-break by
+  version ID.
+
+## [0.0.683.0] - 2026-06-25
+
+### Changed
+- **Internal refactor, no user-facing behavior change.** Deduplicated the FlatBuffers encode-side
+  vector-build loops that were repeated across the storage and cluster codecs, folding them into
+  in-package helpers (`buildCoalescedVector` / `buildPartsVector` in the cluster codec,
+  `buildTagsVector` / `readTagsVector` in the storage codec, and reuse of the existing
+  `appendForwardTagsVector` on the forward path). Wire output is byte-identical before and after
+  (verified by new golden byte-equality tests); the storage tags fast path keeps its
+  stack-local offset buffer so the encode hot path allocates no extra slice.
+
+## [0.0.682.0] - 2026-06-25
+
+### Changed
+- **Internal refactor, no user-facing behavior change.** Decomposed the distributed
+  erasure-coding read path (`ecObjectReader.readShards`) into a small `ecShardCollector`
+  type with named methods, and removed a verified-dead branch. K-of-N shard collection,
+  parity failover, peer-health marking, and cache accounting are unchanged. Production
+  read behavior is identical.
+
+## [0.0.681.0] - 2026-06-25
+
+### Changed
+- **Internal refactor, no user-facing behavior change.** Decomposed the background-scrubber cycle
+  driver `(*BackgroundScrubber).runOnce` (the package's highest-complexity function) into a thin
+  per-cycle sequencer plus phase sub-functions (`resolveSigningState`, `scanAndRepair` /
+  `scrubOneObject`, `sweepOrphanSegments`, `upgradeRedundancy`). The phase order, the cycle-global
+  repair cap, cross-bucket known-dir accumulation, every metric/stat/emit call, and the
+  abort-everything-on-cancellation contract (a mid-scan context cancellation still skips all
+  downstream sweeps and the stats finalization, distinct from per-object skips) are preserved
+  unchanged.
+
+## [0.0.680.0] - 2026-06-25
+
+### Changed
+- **Internal refactor, no user-facing behavior change.** Decomposed the storage decorator
+  capability resolver `buildOperationsPlan` (cognitive complexity 81) into a thin orchestrator plus
+  two named helpers (`assignFirstWinsCapabilities`, `resolveCopyCapability`), mirroring the sibling
+  `buildACLCapabilityPlan`. The two distinct resolution rules are preserved exactly: the 13
+  order-independent capabilities stay first-implementer-across-the-chain wins, and the copy fast
+  path (accelerator + copier) stays outermost-only so it cannot bypass inner decorators such as
+  encryption. Pinned by characterization tests and a 50k-iteration equivalence fuzz against the
+  prior implementation.
+
+## [0.0.679.0] - 2026-06-25
+
+### Changed
+- **Internal refactor, no user-facing behavior change.** Decomposed the raft propose path
+  `(*DistributedBackend).propose` into a thin orchestrator plus named sub-functions
+  (`proposeAsLeader`, `proposeViaForward`, `waitLocalApplied`), collapsing the apply-wait loop and
+  leader-commit block that were previously inlined multiple times. Error sentinels
+  (`ErrProposeTimeout`, `raft.ErrNotLeader`) and client-cancellation surfacing are preserved
+  byte-for-byte; behavior is unchanged.
+
+## [0.0.678.0] - 2026-06-25
+
+### Removed
+- **Internal refactor, no user-facing behavior change.** Removed two dead optional storage
+  capability interfaces, `Truncatable` and `Syncable`, from `internal/storage`. Neither had any
+  runtime type-assertion probe; they survived only as compile-time `var _` assertions and doc
+  comments. `Truncate` is still reached through `PartialIO` (which embeds it) and `Sync` is still
+  called on the concrete `*LocalBackend`, so both method bodies and their behavior are retained. The
+  remaining split-by-design capability interfaces (intentionally granular for the recovery
+  write-gate and packblob partial implementations) are unchanged.
+
+## [0.0.677.0] - 2026-06-25
+
+### Changed
+- **Internal refactor, no user-facing behavior change.** Hoisted the `errors.As` call out of the
+  multi-value return in the cluster-admin client's `asAdminError` helper. The previous
+  `return e, errors.As(err, &e)` relied on the Go spec leaving the evaluation order of the plain
+  `e` read versus the mutating call unspecified; the current compiler sequences the call first, so
+  behavior is unchanged, but the helper now binds the result explicitly before returning. This
+  removes a latent dependency on unspecified evaluation order in the `RemovePeer` / `TransferLeader`
+  error-classification path.
+
+## [0.0.676.0] - 2026-06-25
+
+### Changed
+- **Test-only, no user-facing behavior change.** Fixed a flaky `internal/server` test
+  teardown race: two test helpers closed the eventstore's Badger DB before draining the
+  event-worker goroutine, so a buffered event could `Append` to a closed DB and panic
+  (`send on closed channel`) under full-suite load. The helpers now shut the server
+  down (draining the worker) before the DB closes, matching the production shutdown
+  order. Production code is unchanged.
+
+## [0.0.675.0] - 2026-06-25
+
+### Fixed
+- **The orphan-shard scrubber now reclaims unreferenced coalesced erasure-coded shards** left behind
+  by an interrupted append-coalesce (previously leaked on disk forever). A coalesced shard is deleted
+  only after a certainty-aware, peer-fallback metadata read proves no live object references it
+  (matched on the shard's physical key), failing closed on any uncertainty; a real object whose key
+  ends in `/coalesced` is protected by a dual-interpretation check. Segment shards remain skipped
+  (separate follow-up); coalesced orphans in a bucket later switched to versioning-Enabled are kept
+  (a bounded, deliberate fail-closed tradeoff).
+- **`GET`/`HEAD` on a key whose name is a directory prefix (or whose parent is an object) now returns
+  `404 Not Found` instead of `500`.** The local quorum-meta read mapped only "file does not exist" to
+  not-found; a path-shape collision (`ENOTDIR`/`EISDIR`) surfaced as an internal error. Such a key
+  cannot hold an object, so it is now reported as not-found.
+
+## [0.0.674.0] - 2026-06-25
+
+### Fixed
+- **Orphan-shard scrubber no longer reclaims an in-flight write's EC shards.** The reclaim age gate
+  was floored at 60s, but a full-object write places its EC shards before committing metadata and a
+  remote shard write can retry for minutes, so a slow in-flight write's already-written shards could
+  be deleted before its commit landed (data loss). The floor is now the bounded EC write+commit
+  window (~466s). `--scrub-orphan-age` set between 60s and that window is now raised to the floor;
+  genuine-orphan reclaim is delayed accordingly (a background sweep, no correctness impact).
+- **Orphan-shard scrubber now fails closed when a metadata peer is briefly unreachable.** A reclaim
+  read that exhausted its peer fan-out was treated as "object not found" even when the only nodes
+  holding the object's K-of-N quorum-meta were merely unreachable, so a live object could be
+  reclaimed while a peer was briefly down (data loss). The reclaim path now distinguishes a proven
+  not-found (every contacted peer answered) from peer-unreachability and keeps the shard on any
+  uncertainty.
+
+## [0.0.673.0] - 2026-06-25
+
+### Removed
+- **`grainfs serve --shard-pack-threshold` flag.** Cluster shard-packing was retired earlier (a
+  durable pack index was never built), leaving the flag inert except to hard-fail boot when set
+  above `0`. The flag and its config plumbing are now gone, so passing it is an unknown-flag error
+  at argument parsing. The `GRAINFS_SHARD_PACK_THRESHOLD` environment variable still refuses to boot
+  when set above `0`, so an operator who relied on the env var is not silently ignored.
+
+## [0.0.672.0] - 2026-06-25
+
+### Changed
+- **Internal refactor, no user-facing behavior change.** Decomposed the meta-Raft snapshot
+  `(*MetaFSM).Restore` (the codebase's highest-complexity function) into a package-private carrier
+  struct plus a sequence of phase sub-functions (parse, per-section decode, core/satellite commit,
+  peer-registry commit + side-effect callbacks). The snapshot wire format, restore semantics, lock
+  ordering, the DEK-before-IAM two-pass decode, and the side-effect callback firing order are all
+  preserved unchanged.
+
+## [0.0.671.0] - 2026-06-25
+
+### Fixed
+- Object PUT returned `500 InternalError` ("MetaBucketStore not wired") for any bucket placed off
+  group-0 — including the auto-created `default` bucket on a fresh single-node or cluster server, so
+  an anonymous PUT to `s3://default` failed out of the box. Bucket-versioning resolution is now wired
+  into every owned data group, not just group-0, so writes routed to any group succeed.
+
+## [0.0.670.0] - 2026-06-25
+
+### Changed
+- **Internal refactor, no user-facing behavior change.** Deduplicated the two streamed-response
+  framed-read transport clients (`ForwardRead` and `AppendSegmentRead`) behind a shared
+  `framedRead` helper with a per-family knob struct, and extracted the matching server-side
+  `decodeFramedHeader` / `writeFramedReply` handler logic. Per-family reply-size bounds (64 MiB for
+  Forward, 256 KiB for append-segment) and the streamed-response ownership contract are preserved
+  unchanged.
+
+## [0.0.669.0] - 2026-06-25
+
+### Fixed
+- **AppendObject now fails closed on a versioning-read fault.** A genuine fault while resolving a
+  bucket's versioning status during AppendObject is now surfaced (the request is rejected) instead of
+  silently allowing the append, matching the mutating-edge contract PUT / Copy / CompleteMultipartUpload
+  already follow. A backend that does not track versioning is still treated as unversioned (unchanged).
+- **The composite ETag of an appendable object stays correct after an internal coalesce.** The
+  per-append-call digest history is now persisted in the object's metadata, so an append that lands
+  after the object's segments are coalesced returns the full S3 multipart-style composite ETag
+  (the MD5 of all per-call digests) instead of one derived only from the surviving post-coalesce
+  segments.
+- **A bucket policy that fails to compile now reliably denies.** Reading or setting a malformed bucket
+  policy no longer leaves a stale cached "allow" decision behind; authorization re-resolves the policy
+  from the committed replica and fails closed (deny) until the policy is rewritten.
+- **Bucket delete no longer leaves per-bucket metadata residue.** Deleting a bucket now also removes the
+  off-raft quorum-meta blob trees on the node that runs the delete, instead of stranding hard-delete
+  tombstone blobs under `.quorum_meta_versions/{bucket}/`.
+
+## [0.0.668.0] - 2026-06-25
+
+### Removed
+- **Internal cleanup, no user-facing behavior change.** Removed the unused in-memory object read
+  cache (`storage.CachedBackend`). It was never wired into the live S3 read path, so it cached
+  nothing. A prior change already retired the dead boot wiring and the cluster cache-invalidator
+  registry; this removes the now-constructorless type and its tests, plus two leftover Prometheus
+  metrics that no longer had a producer: `grainfs_cache_invalidation_total` and
+  `grainfs_cache_invalidation_duration_seconds` (operators will no longer see these on `/metrics`).
+
+## [0.0.667.0] - 2026-06-25
+
+### Changed
+- **Internal cleanup, no user-facing change.** Renamed the vestigial `soleAuth*` identifiers left over
+  from the removed "sole authority" machinery to `blobAuth*` (the concept is now blob-authoritative
+  read), and centralized the admin CLI `--endpoint` flag registration onto a single parametrized
+  `registerAdminEndpointFlag` helper. All `--endpoint` help text is byte-identical and the renamed
+  identifiers are internal/unexported, so there is no behavior or CLI change.
+
+## [0.0.666.0] - 2026-06-25
+
+### Changed
+- **Internal cleanup, no user-facing change.** Removed two dead internal symbols and the leftover
+  harness around one of them: the disabled "quorum-meta shadow" Phase 0 perf-spike (a
+  measurement-only, permanently-off code path, including its `WriteShadowMeta` shard RPC route, its
+  benchmark harness under `benchmarks/phase0_quorum_meta_shadow/`, and the `GRAINFS_QUORUM_META_SHADOW`
+  developer env knob); and an unused `operatorStateSource` scaffolding struct. No wire format, API,
+  CLI, or runtime behavior change — the metrics and quorum-meta paths keep their existing live code.
+
+## [0.0.665.0] - 2026-06-25
+
+### Changed
+- **`HeadObject` / `HeadObjectVersion` now reject a quarantined object** with the same quarantine
+  error `GetObject` already returns, instead of replying `200 OK`. A corrupt/quarantined object is no
+  longer HEAD-able while GET fails on it — HEAD and GET now agree. Forwarded HEAD requests (served by a
+  non-owning node) are covered too.
+
+### Removed
+- The `grainfs_cache_registry_size` Prometheus gauge was removed along with the dead apply-driven
+  cache-invalidator registry it tracked; the registry had no live consumer after the earlier NFS/VFS
+  and group-0 control-plane removals. No other metric or S3 behavior changed.
+
+## [0.0.664.0] - 2026-06-25
+
+### Removed
+- **The orphaned `trusted-proxy.cidr` reverse-proxy feature has been removed.** The `trusted-proxy.cidr`
+  cluster config key, the `grainfs config set trusted-proxy.cidr` path, and the `trusted_proxy` field in
+  the admin status report (`grainfs status` / `GET /v1/status`) are gone. The underlying ProxyTrust
+  client-IP attribution machinery was built only for the Iceberg-backed S3 audit log lake, which was
+  removed in 0.0.663.0; it had no other consumer. For network-exposed authenticated traffic, use TLS (a
+  cert on disk or `GRAINFS_TLS_CERT/KEY`) instead of a trusted reverse proxy.
+
+### Changed
+- **Internal cleanup, no user-facing change.** Reserved the three dead Iceberg slots in the internal
+  `MetaStateSnapshot` FlatBuffers schema (renamed to `(deprecated)` placeholders) and deleted the
+  leftover `Iceberg*` table definitions, dropping the last Iceberg identifiers from the codebase. The
+  meta-snapshot wire format is unchanged — slot positions are preserved, so existing cluster snapshots
+  restore identically.
+
+## [0.0.663.0] - 2026-06-24
+
+### Removed
+- **The Iceberg REST Catalog has been removed.** The `/iceberg/` REST Catalog endpoint, its OAuth2
+  token endpoint, the `grainfs iceberg config` CLI command, and the `--enable-iceberg` serve flag are
+  gone. GrainFS no longer exposes an Iceberg catalog to DuckDB/Trino/Spark — it is now a pure S3
+  (plus Web UI) server.
+- **The Iceberg-backed audit "log lake" has been removed** (the `--audit-iceberg` and
+  `--audit-commit-interval` serve flags, the admin `/audit/query`, `/audit/recent-denies`,
+  `/audit/by-sa/:said`, and `/audit/by-request-id/:rid` endpoints, and the `grainfs audit` query CLI).
+  S3 access events are no longer committed to a queryable Iceberg table. The IAM authorization audit
+  log (`iam.authz` structured log lines) and the general S3 request log are unaffected and continue to
+  emit.
+- The `iceberg` protocol-credential type and the `iceberg:*` IAM policy actions have been removed.
+
+## [0.0.662.0] - 2026-06-24
+
+### Changed
+- **Internal cleanup, no user-facing change.** Removed the now-dead "group-0 BadgerDB" read fallback
+  from the bucket existence/policy/versioning read paths left over from the meta-raft control-plane
+  demotion in 0.0.661.0. Those reads now fail fast when the meta-raft bucket store is unwired, which is
+  unreachable in production (it is wired unconditionally at boot before any bucket read), matching the
+  write paths. The three retired group-0 bucket key-builders were deleted. S3 client behavior is
+  unchanged.
+- Added an at-rest-encryption regression test proving the live meta-raft bucket policy is sealed inside
+  the snapshot envelope, restoring coverage the demotion removed.
+
+## [0.0.661.0] - 2026-06-24
+
+### Changed
+- **Bucket existence, policy, and versioning are now control-plane state on the cluster meta-raft,
+  not the group-0 data-group raft.** A bucket's record (its assigned data group, versioning state,
+  and policy) was split across two raft layers — the assignment on meta-raft, but existence/policy/
+  versioning in the group-0 FSM — so group-0 doubled as a control-plane carrier. They are now one
+  unified `BucketRecord` on meta-raft, and group-0 carries no bucket control-plane state. Consensus is
+  preserved (these are mutable compare-and-swap cells that need it); only the raft layer changed.
+  Bucket create/delete/versioning/policy behave the same for S3 clients. Bucket writes now forward to
+  the meta-raft leader from any node.
+- **Two bucket-lifecycle atomicity gaps closed.** Create is now a single meta-raft commit (existence +
+  assignment atomically), removing the observable half-state the old two-phase propose could leave on
+  failure. Delete now removes the meta-raft assignment and unassigns the in-memory router in the same
+  committed step (previously the assignment leaked permanently and a deleted bucket could still resolve
+  via stale routing), and the physical data directory is removed only after the delete commits.
+- **On-disk meta-snapshot format extended additively (greenfield).** The bucket-assignment snapshot
+  entry gains versioning and policy fields. On an in-place binary upgrade, existing buckets keep their
+  existence and data-group routing; their versioning and policy reset to defaults (that state lived in
+  the now-retired group-0 path). Fresh installs are unaffected. No migration command.
+
+### Fixed
+- **Bucket policy authz-cache invalidation is lossless and never blocks consensus.** Policy changes now
+  invalidate the compiled-policy cache via a non-blocking hand-off off the meta-raft apply loop; if the
+  hand-off queue ever overflows it escalates to a full cache flush rather than dropping an invalidation,
+  so a committed policy change can never leave a stale authorization decision cached.
+- **The per-mutation bucket-versioning linearizing read degrades to a local read on any meta-raft
+  barrier failure** (leaderless window, leader unreachable, or stale leader hint), so object writes are
+  never failed because the control-plane barrier is transiently unavailable (availability over strict
+  consistency, matching the documented contract).
+
+## [0.0.660.0] - 2026-06-24
+
+### Changed
+- **The off-raft data plane no longer serializes quorum-meta blobs with the raft command envelope
+  (BREAKING on-disk format; greenfield only).** Object metadata, per-version blobs, delete markers,
+  hard-delete tombstones, the multipart manifest, and GC known-set entries were stored as a
+  `clusterpb.Command{Type=CmdPutObjectMeta, Data=…}` FlatBuffer — the same envelope as a raft command,
+  but never proposed — leaving the off-raft data plane coupled to the raft command codec/enum. They are
+  now serialized with a dedicated bare `PutObjectMetaCmd` codec (`encodeQuorumMetaBlob`/
+  `decodeQuorumMetaBlob`). **The on-disk quorum-meta blob wire format changes**: a cluster carrying
+  blobs written by an older binary cannot be read by this one, and mixed-version rolling upgrade across
+  this boundary is unsupported — consistent with the data-plane raft-free epic's greenfield stance. No
+  migration.
+- **Retired per-object / multipart raft command machinery removed.** With the data plane fully
+  decoupled, the no-op `CommandType` constants left reserved by earlier slices (`CmdPutObjectMeta`,
+  `CmdDeleteObject`, `CmdDeleteObjectVersion`, `CmdSetObjectACL`/`CmdSetObjectTags`,
+  `CmdPutObjectQuarantine`, `CmdAppendObject`/`CmdCoalesceSegments`, the multipart commands, and the
+  ring-derived placement pair) and their dead apply/encode/notify cases are deleted. Live control-plane
+  command wire values are unchanged (explicit enum values; retired slot numbers are recorded to prevent
+  reuse). The dead legacy object-metadata migration re-propose (a no-op since data-plane raft-free
+  Slice 2) is removed; `MigrateLegacyMetaToCluster` migrates buckets only. Hardening: a corrupt
+  quorum-meta blob now fails closed (decode returns an error) instead of panicking — the old envelope
+  had masked the inner field-accessor panic.
+
+## [0.0.659.0] - 2026-06-24
+
+### Fixed
+- **Non-force bucket delete no longer silently deletes a non-empty bucket whose versioning is not
+  `Enabled` (never-versioned or `Suspended`) — a data-loss bug.** Greenfield non-versioned (and
+  `Suspended`) objects live in the latest-only quorum-meta blob tree (and, for a `Suspended` bucket,
+  the per-version tree carries versions preserved from a prior `Enabled` era), but the emptiness
+  check scanned only the now-dead FSM `obj:` records, so it always saw the bucket as empty and
+  removed it. The check now probes both blob trees cluster-wide and fail-closed (latest-only via
+  `scanQuorumMetaClusterAll`, excluding `IsDeleteMarker`/`IsHardDeleted` tombstones so an all-deleted
+  bucket still deletes; per-version via the existing blob-authoritative reader), returning
+  `BucketNotEmpty` (HTTP 409) when any live object remains. Single-node and cluster.
+- **Admin force-delete (`grainfs bucket delete --force`) is now version-aware.** It previously ran a
+  generic latest-only object walk that soft-deleted objects without purging the per-version tree, so
+  a versioned or `Suspended` bucket could not be force-deleted (it failed the per-version emptiness
+  check) and non-versioned objects' EC shards were orphaned. Force-delete now hard-purges BOTH blob
+  trees — latest-only shards + qmeta, and per-version blobs (versioned shards are then reclaimed by
+  the orphan-shard walker) — so `--force` correctly empties and removes non-versioned, `Suspended`,
+  and versioned buckets. Force-deleting a missing bucket still returns `NoSuchBucket` (404).
+
+## [0.0.658.0] - 2026-06-24
+
+### Changed
+- **Unified EC shard local/remote dispatch behind a single shard-target endpoint (behavior-neutral
+  refactor).** The scattered `if node == selfID { local } else { remote RPC }` branches in the EC
+  data plane (2 in `ec_object_writer.go`, 4 in `ec_object_reader.go`) are collapsed into one
+  consumer-defined seam: a new `shardEndpoint` interface (`internal/cluster/shard_target.go`) with
+  `localShardEndpoint` / `remoteShardEndpoint` implementations and a single `endpointFor(node)`
+  selector that makes the local-vs-remote decision exactly once per placement slot. Single-node
+  deployments (where every placement slot resolves to self) now flow through the general path
+  instead of a special branch. On-disk format, wire protocol, metrics, PutTrace stages, and
+  peerHealth marking are unchanged; the reader's `localDataFastPath` goroutine-skip optimization is
+  preserved (the per-slot local test now uses `endpointFor(node).IsLocal()`). The retry/backoff,
+  buffered-vs-stream size threshold, and trace breakdown logic moved verbatim into
+  `remoteShardEndpoint`. The cancel-aware peerHealth marking in the reader's k-of-n early-exit path
+  stays in the reader. The previously split write-only (`ecObjectShardStore`) and read-only
+  (`ecObjectShardFetcher`) interfaces are consolidated into one `ecShardStore` interface satisfied
+  by `*ShardService`.
+
+## [0.0.657.0] - 2026-06-24 — data-plane raft-free Slice 2
+
+### Changed
+- **Raft FSM is now pure control-plane — all per-object FSM commands retired (BREAKING: mixed-version
+  rolling upgrade across this boundary is unsupported; greenfield deployments only).** The remaining
+  per-object raft commands (`CmdSetObjectTags`, `CmdSetObjectACL`, `CmdPutObjectMeta` apply path,
+  `CmdPutObjectQuarantine`, `CmdDeleteObject`, `CmdDeleteObjectVersion`) are retired. Their
+  `CommandType` slots are reserved (no enum renumber); apply returns nil (no-op) for replay safety.
+  After this change the FSM carries only control-plane state: bucket create/delete, bucket policy,
+  bucket versioning, ring membership, shard migration, FSM-value reseal, and the multipart/append/
+  coalesce no-ops already retired in earlier slices.
+- **Object quarantine status is now stored in the quorum-meta blob (set-once, blob-resident),
+  not as a separate `quarantine:` FSM key.** Quarantine is a flag+cause pair written via an
+  owner-serialized blob RMW (`IsQuarantined`/`QuarantineCause` in `PutObjectMetaCmd`). In a cluster
+  the quarantine-set call is owner-routed via a new `ForwardOpSetObjectQuarantine=24` forward op
+  (four-file extension to the forward-RPC layer). Semantics: set-once/monotonic; a PUT to a quarantined
+  key is rejected with `ErrObjectQuarantined` — re-upload cannot clear the flag. Recovery requires a
+  direct operator repair (quorum-meta blob rewrite clearing `IsQuarantined`). The scrubber/verifier inject a
+  narrow `QuarantineRouter` interface so only the quarantine call is owner-routed; the `Scrubbable`
+  leaf backend for shard ops is unchanged.
+- **`ForceDeleteBucket` now physically purges non-versioned (latest-only) blobs and EC shards,
+  fixing a pre-existing greenfield leak.** Previously `os.RemoveAll(bucketDir)` reached neither
+  `.quorum_meta/<bucket>/` blobs nor `shards/<bucket>/` EC shards. Non-versioned force-delete now
+  enumerates live objects via `scanQuorumMetaBucketStrict` (single-node) or `scanQuorumMetaClusterAll`
+  (cluster, fail-closed fan-out), then for each object deletes shards first (fail-closed synchronous
+  `deleteShardsQuorum`) and then the quorum-meta blob (`deleteQuorumMetaQuorum`). Shards-before-qmeta
+  ordering prevents shard-stranding if a crash occurs mid-purge. Versioned force-delete already
+  purged per-version blobs and shards; this change closes the equivalent gap for non-versioned buckets.
+- **New physical-purge RPC and local primitive for latest-only quorum-meta blobs.** Added
+  `deleteQuorumMetaLocal`, `DeleteQuorumMeta` RPC client, `handleQuorumMetaDelete` receiver, and
+  `deleteQuorumMetaQuorum` fail-closed fan-out (mirroring the existing per-version equivalents) so the
+  non-versioned purge path fans out to all peer nodes. Added `deleteShardsQuorum` fail-closed
+  synchronous shard delete (vs the best-effort `deleteShardsAsync` used for normal PUT GC).
+
+### Known limitation
+- **Mixed-version rolling upgrade across the Slice 2 retirement boundary is explicitly unsupported.**
+  Nodes running the old code proposing any of the retired per-object commands against a cluster
+  that has applied this change will find the apply side is a no-op. This is safe for greenfield
+  deployments (no live proposers existed before this change); it is not safe for a mixed-version
+  rolling upgrade where old nodes were actively proposing these commands.
+- **Object quarantine is now K-of-N eventually consistent (previously raft-strong / all-node).**
+  Folding quarantine into the quorum-meta blob makes it follow the same consistency model as all
+  other object metadata (tags, ACL, delete markers): the set is a K-of-N blob write and reads are
+  local-first. A node that was outside the write quorum (e.g. briefly unreachable during the
+  quarantine write) can serve a GET of a quarantined object until its replica converges. This is a
+  deliberate consequence of the data-plane-raft-free model and matches the consistency of every
+  other per-object mutation; the prior raft-replicated quarantine was the only per-object state with
+  all-node-strong consistency. Operators relying on instant cluster-wide quarantine should account
+  for this convergence window.
+- **`ForceDeleteBucket` racing a concurrent PUT can leave the racing object's blob/shards.**
+  Force-delete enumerates the live objects, purges each, then deletes the bucket. A PUT that commits
+  its quorum-meta blob + shards after the enumeration (but around bucket deletion) is not seen by the
+  purge and its bytes can remain under `.quorum_meta/<bucket>/` or `shards/<bucket>/` (outside the
+  `os.RemoveAll(bucketDir)` reach). This is a narrow TOCTOU window; deleting a bucket concurrently
+  with writes to it is undefined under S3 semantics. Stranded bytes are reclaimable by the orphan/
+  segment scrubber.
+
+## [0.0.656.0] - 2026-06-24
+
+### Changed
+- **Appendable and coalesced object metadata is now stored in the quorum-meta blob, off the raft
+  FSM (BREAKING: `CmdAppendObject` and `CmdCoalesceSegments` are retired).** Both FSM commands
+  apply as no-ops and their `CommandType` slots are reserved (no enum renumber). Append and
+  coalesce operations now use an owner-locked compare-and-swap (CAS) read-modify-write against
+  the quorum-meta blob, gated by a per-write `MetaSeqCAS` discriminator and a placement fence.
+  CAS is used for append/coalesce; LWW (last-writer-wins) is used for everything else (PUT,
+  DELETE marker, tags, ACL). This completes the per-object data-plane off-raft work for
+  append/coalesce; after this change the remaining per-object FSM commands are
+  delete/tags/acl/quarantine + `CmdPutObjectMeta` (to be retired in Slice 2).
+
+### Fixed
+- **`ListObjects` now returns appendable objects (pre-existing S3 LIST bug, now fixed).** Appendable
+  object metadata was previously stored only in the FSM and was therefore invisible to
+  `ListObjects` / `ListObjectsPage` / `WalkObjects`, which read the quorum-meta blob store
+  exclusively. Because append/coalesce now write metadata to the quorum-meta blob, appendable
+  objects appear in LIST results for the first time.
+
+### Known limitation
+- **Off-raft append/coalesce is not failover-safe across a same-generation leader handoff
+  (single-stable-leader deployment assumption).** The per-node CAS can split-brain — an
+  acknowledged append may be lost — during the brief window of a same-generation leader
+  handoff. The placement fence and CAS shrink but do not eliminate this window. This is an
+  eyes-open accepted limitation under the single-stable-leader deployment assumption.
+  Operators relying on strict append durability across leader failovers should be aware of
+  this risk. A proper single-writer fencing lease (leader-term token + quorum-intersecting
+  read) is tracked as a follow-up and can be added if the failover-safety gap must be closed.
+
+## [0.0.655.0] - 2026-06-23
+
+### Removed
+- **Internal-bucket object storage capability (BREAKING for the internal `__grainfs_` namespace).**
+  Object data-plane operations (PUT/GET/HEAD/ReadAt/Delete/Append/tags/ACL/List/Walk and the full
+  multipart family) targeting an internal `__grainfs_*` bucket are now rejected with `405
+  MethodNotAllowed` (`ErrInternalBucketNotObjectStore`), consistently in-process and across forwarded
+  cluster paths. Internal buckets are admin-UDS-only and had no production object writer — the
+  capability existed only to back the already-removed NFS/9P/FUSE mount and volume-block features. A
+  startup scan logs a warning and increments `grainfs_internal_bucket_orphan_objects_total` if any
+  pre-existing internal-bucket object is found, so an operator can clean it up. The ~27
+  `IsInternalBucket` object-routing branches across the cluster data path collapse to the single
+  external (blob) path. ETag XXH3 hashing, `reservedname` access control, and the orphan/scrubber
+  maintenance walkers are unchanged. External (user) bucket behavior is unchanged.
+- **Vestigial VFS layer.** Removed `internal/vfs/` (the GrainVFS filesystem shim), the
+  `POST /admin/debug/vfs/stat` diagnostic endpoint, and `storage.VFSBucketPrefix` / `IsVFSBucket`. VFS
+  backed the removed NFS/9P/FUSE server-side mounts; FUSE-over-S3 uses `rclone mount` (a standard S3
+  client) and is unaffected.
+- **Dead shard-placement raft commands.** Removed the `PutShardPlacementCmd` /
+  `DeleteShardPlacementCmd` structs, codec, and FlatBuffers tables. The commands were already no-op on
+  apply (shard placement is derived deterministically from the ring); the `CommandType` constants
+  (12, 13) are kept reserved (no enum renumber).
+
+Net: ~3.6k LOC removed; no on-disk format change.
+
+## [0.0.654.0] - 2026-06-23
+
+### Changed
+- **Metadata data-stores now route through the `metastore.Store` interface instead of a raw `*badger.DB`.**
+  The `lifecycle.Store`, `migration.JobStore`, and `icebergcatalog.Store` constructors took a raw
+  `*badger.DB` and reached straight into the BadgerDB transaction API, leaking the storage engine
+  through what should have been a clean metadata boundary. They now accept `metastore.Store` (the same
+  5-method contract `internal/cluster` already consumes) and their bodies are rewritten against
+  `metastore.Txn`/`Iterator` with `metastore.ErrKeyNotFound`. `serveruntime` injects the already-wrapped
+  `sharedFSMStore` for lifecycle/migration and wraps the meta DB once via `badgermeta.Wrap` for the
+  legacy singleton Iceberg catalog. Behavior-preserving mechanical refactor — no on-disk format change,
+  no new features. The previously reported "broad MetadataStore leak" was narrow: the cluster↔metastore
+  boundary and metadata-migration were already abstracted; this closes the residual data-store
+  constructor leaks.
+- `eventstore` deliberately stays on the raw `*badger.DB` handle: it uses BadgerDB per-entry TTL
+  (`NewEntry().WithTTL()`), which `metastore.Store` does not (and should not) expose. It is a leaf infra
+  store, not part of the metadata contract.
+
+### Removed
+- Deleted the dead `DBProvider` escape hatch that let callers reach back to the raw `*badger.DB`:
+  `storage.DBProvider`, `LocalBackend.DB()`, `server.storageDBProvider`, the `ServerStorage.DBProvider`
+  field, the now-unused `unwrapBackend`/`unwrapper` helpers, and the iceberg-catalog auto-fallback in
+  `server.ensureRuntimeDefaults`. The fallback was prod-unreachable (production always wires the catalog
+  explicitly via `WithIcebergCatalog`/`WithIcebergDisabled`); `WithIcebergDisabled()` is retained as a
+  documented no-op so the boot wiring keeps a symmetric `EnableIceberg=false` branch.
+
+## [0.0.653.0] - 2026-06-23
+
+### Changed
+- **S3 multipart upload lifecycle is now fully raft-free.** Completing a multipart upload no longer
+  proposes to data-raft. The completed object's version-id is derived deterministically from the
+  uploadID (a create-time UUIDv7), so concurrent or retried `CompleteMultipartUpload` calls target the
+  same per-version quorum-meta blob and converge with no consensus — the single-winner decision the old
+  raft done-marker provided is dissolved rather than replaced. The upload manifest moves from the raft
+  FSM (`mpu:<uploadID>`) to a sibling-root quorum-meta blob (`.qmeta_mpu/{bucket}/{uploadID}`) placed on
+  the uploadID's owning group; `CreateMultipartUpload` / `AbortMultipartUpload` / `UploadPart` /
+  `ListParts` read and write that blob, and `ListMultipartUploads` scans it cluster-wide (strict,
+  fail-closed) with a completed-blob reconcile that filters leaked manifests. Non-versioned multipart
+  completion is now sole-authoritative on the latest-only quorum-meta blob, written fail-closed (the
+  legacy FSM `obj:`/`lat:` write is gone). The per-version blob placement is keyed on the version-id and
+  uses the same weighted HRW as segment writes, so concurrent completers converge.
+
+### Removed
+- **The four multipart raft commands and the done-marker machinery.** `CmdCreateMultipartUpload`,
+  `CmdCompleteMultipart`, `CmdAbortMultipart`, and `CmdDeleteMultipartDone` (with their apply functions,
+  codecs, and FlatBuffers tables), the `mpudone:` done-marker (struct + codec), and the leader-gated
+  done-marker scrubber sweep plus its boot wiring are deleted. The data-plane `CommandType` constants
+  5/6/7/43 are reserved, not renumbered. BREAKING (greenfield only): no in-place upgrade across a
+  persisted raft log/snapshot carrying these commands.
+
+### Notes
+- Completion idempotency is now provided by the deterministic-version-id per-version quorum-meta blob,
+  not the `mpudone:` marker (there is no 24h GC sweep); the operator runbook diagnosis is updated. Two
+  follow-ups are tracked in `TODOS.md`: (1) the latest-version pointer for a multipart object interleaved
+  with a same-key PUT during the upload window stays create-ordered (vid-primary; a ModTime-primary fix
+  is deferred), and (2) the non-versioned retry idempotency fence is narrower than the removed
+  done-marker — a retry of an already-completed non-versioned upload that is preceded by an intervening
+  same-key PUT returns an error instead of an idempotent 200 (not data loss).
+
+## [0.0.652.0] - 2026-06-23
+
+### Fixed
+- **EC intra-group shard placement is now unified on weighted HRW (was FNV-32 modulo on the chunked
+  hot path).** The dominant data path — every normal PUT flows `PutObject → putObjectChunked →
+  clusterSegmentBackend.WriteSegmentBytes → writeOneSegment` — placed shards via
+  `(FNV32(key)+shardIdx) % N` (`PlacementForNodes`/`Placement`), ignoring disk-capacity weights, while
+  only the non-chunked fallback (rewrap / multipart-complete / test backends) used weighted Rendezvous
+  Hashing (`hrw.PlaceShards`). The chunked path now routes through a single shared
+  `selectShardPlacement` helper extracted from `selectECPlacementFromNodeStates`, so the chunked PUT,
+  multipart-complete, and redundancy-relocation paths all honor `WeightedHRWEnabled` and per-peer
+  disk-availability weighting (`b.nodeStatsStore`). The writer computes placement once and records the
+  chosen NodeIDs in segment metadata; reads are record-driven and replay those NodeIDs verbatim, so
+  already-written objects are unaffected (no on-disk migration). Falls back to unweighted HRW when
+  weighting is disabled, no node stats are available (boot before first gossip), or weight-0 (stale)
+  peers would shrink the stripe below `NumShards` — a distinct `weight_shortfall_fallback` metric makes
+  that degradation observable. The RFC's failure-domain motivation was not the real driver (there is no
+  rack model and modulo already placed all shards on distinct nodes when group N == k+m); the real wins
+  are disk-capacity-weighted balancing and HRW's minimal-reshuffle property on cluster expansion.
+- **Flaky `TestSegmentedReaderEncryptedTamperRejected` fixed.** The 1-byte tamper overwrote offset 100
+  with a fixed `0xff`, a no-op ~1/256 of the time when the random ciphertext already held `0xff` there.
+  It now flips the existing byte (`b ^ 0xff`), guaranteeing the AES-GCM tag mismatch the test asserts.
+
+### Removed
+- **Dead FNV-32 modulo placement code.** Deleted `Placement` and `PlacementForNodes`
+  (`internal/cluster/ec.go`) — zero non-test callers after the HRW unification — plus the throwaway
+  `internal/cluster/ecspike` de-risk-spike package and its `tests/e2e/cluster_ecspike_test.go`. Net
+  −262 LOC.
+
+## [0.0.651.0] - 2026-06-23
+
+### Fixed
+- **Client-side HTTP connection pool is now an explicit, observable contract.** The sole
+  node-to-node Hertz client (`internal/transport/http_transport.go` `httpClient()`) was built with no
+  pool options, relying entirely on opaque Hertz `HostClient` defaults even though the keep-alive pool
+  and the `httpRetryIf` `ErrBadPoolConn` retry already depend on pooling being on. The client now sets
+  explicit `WithMaxConnsPerHost(512)`, `WithMaxIdleConnDuration(10s)`, and `WithKeepAlive(true)` so the
+  pool sizing is intentional and inspectable via `GetOptions()`. `WithMaxConnWaitTimeout` is
+  deliberately omitted: with a 512-conn cap control-RPC pool exhaustion is not expected, and any
+  queue-wait would eat into the 80ms `groupRaftRPCTimeout` / raft election budget — exhaustion stays an
+  immediate `ErrNoFreeConns` (transient; raft retries next tick). NOTE: Hertz v0.10.3+ defaults
+  `MaxConnsPerHost` to 0 (unlimited), so the prior implicit pool was unbounded; the 512 cap is an
+  intentional bound (high enough that normal control traffic never queues) against pathological
+  per-peer fan-out.
+
+### Added
+- **Pool dial observability.** A new Prometheus counter `grainfs_transport_client_dials_total`
+  (`internal/metrics`) increments on each cold (pool-miss) dial at the single dial seam
+  (`httpFreshDialer.DialConnection`), so connection churn is visible: under steady load with keep-alive
+  reuse it stays flat; a sustained rise relative to RPC volume means the pool is not reusing
+  connections. Client-side only — the server accept path is untouched. Heartbeat batching (Option C)
+  is deferred behind a Linux load benchmark.
+
+## [0.0.650.0] - 2026-06-23
+
+### Fixed
+- **Bucket-policy authz cache now enforces a committed Deny on a node that never served the policy
+  write.** In cluster mode a follower (or a single-node node after a restart) whose in-memory
+  `CompiledPolicyStore` was never populated for a bucket default-ALLOWed S3 requests, so a committed
+  **Deny** bucket-policy was silently unenforced (a real Layer-2 authz gap, masked only by the Layer-1
+  IAM grant). `CompiledPolicyStore.Allow` now pulls the policy on a cache miss from the local committed
+  Raft replica — a loader injected by `storage.NewOperations` over `PolicyBackend.GetBucketPolicy` —
+  compiles it, and caches the result positive or negative, so a committed Deny is honored on the first
+  request no matter which node served the write. The cluster apply path invalidates the cached entry on
+  a committed `SetBucketPolicy`/`DeleteBucketPolicy` (so deletes and tightening propagate to every node)
+  via `DistributedBackend.SetOnBucketPolicyApply`, and flushes the whole policy cache on a snapshot
+  install. A global generation stamp drops an in-flight pull's result if a concurrent mutation raced it,
+  so a stale view can never overwrite a newer one. Structural/fault reads fail **open** (legacy
+  default-allow, uncached, self-healing — no spurious-deny regression); an unparseable committed policy
+  fails **closed** (deny, cached). The `internal/policy` package stays free of any `internal/storage`
+  dependency (the loader is injected as a plain func).
+
+## [0.0.649.0] - 2026-06-23
+
+### Fixed
+- **AppendObject's versioning-enabled 501 feature-gate now resolves bucket versioning via the linearized
+  read at the mutating edge.** The gate that rejects AppendObject on versioning-enabled buckets read the
+  plain LOCAL group-0 replica, so a just-joined follower whose replica lags (~90s) could observe
+  Unversioned for an Enabled bucket and let an append bypass the 501 gate (a feature-gate bypass, not
+  data mis-versioning). The gate now resolves via `GetBucketVersioningLinearized` — the same
+  mutating-edge contract PUT / Copy / CompleteMultipart already follow (shipped in 0.0.648.0) — which
+  degrades to the local read during a group-0 leaderless window, so the append path is never coupled to
+  control-plane leadership. Read paths keep the plain local read.
+
+## [0.0.648.0] - 2026-06-23
+
+### Fixed
+- **Linearized the bucket-versioning read at the mutating S3 edge so a follower no longer mis-versions
+  writes.** A multipart-complete / PUT / Copy issued to a group-0 follower resolved bucket versioning from
+  that node's LOCAL group-0 replica, which can lag a just-joined follower (Unversioned observed for ~90s
+  after another node enabled versioning) — so the object was silently written non-versioned. The mutating
+  edge now resolves versioning via a linearizing read (`GetBucketVersioningLinearized`: a group-0 ReadIndex
+  barrier, forwarded to the leader when this node is a follower, plus WaitApplied — the same primitive object
+  reads use), so the follower observes the leader-committed state. It DEGRADES to the local read during a
+  group-0 leaderless window rather than failing, so object writes (even to unversioned buckets) are never
+  coupled to control-plane leadership — preserving the multiraft property that data writes don't depend on
+  one group's leader. Read paths (GET/HEAD/LIST/scrub) keep the cheap local read and stay available during a
+  group-0 outage. Versioning stays on the group-0 raft log: a mutable single-cell config
+  (Enabled↔Suspended↔deleted) needs a total order and the generation-CAS delete cascade, which a quorum LWW
+  blob cannot provide.
+
+## [0.0.647.0] - 2026-06-23
+
+### Fixed
+- **Closed the delete→recreate race in the bucket-delete config cascade (generation-CAS-on-delete).** When a
+  bucket is deleted, the cascade clears its lifecycle config and IAM bucket-upstream record (both meta-Raft,
+  keyed by bucket name) after the data-Raft bucket delete. A client that recreated the same-name bucket and
+  wrote fresh config in the window between the data-Raft delete and the cascade propose could have that
+  fresh config wiped. Each config PUT now stamps a monotonic per-record generation; `AdminDeleteBucket`
+  captures the observed generation BEFORE the data-Raft delete; the cascade-delete carries it and the FSM
+  apply deletes only when the stored generation still matches (CAS). A concurrent recreate bumps the
+  generation past the captured value, so the stale cascade-delete becomes a no-op and the recreated bucket's
+  config survives. Both records are fenced. Generation is computed deterministically at FSM-apply time and
+  round-trips through the IAM snapshot, so it survives restart and snapshot-install without resetting.
+  Explicit operator deletes (S3 `DeleteBucketLifecycle`, admin `DeleteBucketUpstream`) remain unconditional.
+  The guarantee is bounded to a single delete→recreate incarnation; a higher-order double-cascade ABA is out
+  of scope.
+
+## [0.0.646.0] - 2026-06-22
+
+### Fixed
+- **Guarded the `BucketWithPolicyProp` admin wiring against a typed-nil proposer.** `boot_phases_admin.go`
+  boxed the concrete `*iam.MetaProposer` straight into the `admin.Deps.BucketWithPolicyProp` interface; a
+  nil proposer would have become a non-nil typed-nil interface and defeated the `!= nil` guard at
+  `handlers_bucket.go:43`. A new `bucketWithPolicyProposer` helper collapses a nil concrete pointer to an
+  untyped-nil interface, mirroring the existing `bucketUpstreamDeleteProposer` guard. Defensive only —
+  unreachable on the serve path today (boot fails hard when `IAMStore` is absent).
+
+### Changed
+- **docs(runbook):** documented the mpudone marker 24h retention bound. A `CompleteMultipartUpload` retry
+  arriving more than 24h after the original success returns `ErrUploadNotFound` because the scrubber's
+  mpudone GC sweep (`EnableMultipartDoneSweep(256, 24*time.Hour)`) has expired the idempotency marker. 24h
+  conservatively outlives realistic client retries and Raft replay, so legitimate retries are always
+  covered; no operator action required.
+- **test(cluster):** strengthened the S4c-0 PR1 characterization tests. The concurrent ACL RMW test now also
+  asserts the surviving quorum-meta blob holds a coherent ACL value (catching a torn write), and a new
+  `TestWriteQuorumMetaLocal_OverwritesOnTie` locks in the latest-only writer's overwrite-on-`(ModTime,
+  VersionID, MetaSeq)`-tie intent that previously lived only in a code comment.
+- **docs:** pruned resolved bucket-delete follow-ups from `TODOS.md` (the typed-nil guard, the RMW test
+  strengthening, the mpudone retention doc, and the v8 §MPU spec amendment that was applied to the
+  git-untracked design doc out of band).
+
+## [0.0.645.0] - 2026-06-22
+
+### Changed
+- **docs:** pruned completed items from `TODOS.md` — removed the finished mount-protocol removal epic
+  (slices A/B/C, PRs #827–#833) and the Run 2 quick-wins section (PR #835). Remaining backlog is the
+  pending bucket-delete-cascade follow-ups, test/doc/spec polish, and the historical do-not-resurrect
+  notes. No code change.
+
+## [0.0.644.0] - 2026-06-22
+
+### Changed
+- **mpudone GC sweep is now leader-only.** `SweepStaleMultipartDoneMarkers` (the scrubber's periodic GC of
+  stale multipart-done idempotency markers) returns early on non-leaders. Correctness never required every
+  node to run it — each node's deletes forward to the raft leader, who dedups — but the `mpudone:` keyspace
+  is fully replicated meta-Raft state, so the leader already holds every marker. Letting followers also scan
+  the whole keyspace and run the per-version blob-durability probes (FS/peer reads) each cycle was pure
+  N-way redundant work. Single-node mode is unaffected.
+- **Per-key lock maps are now memory-bounded.** The `shardLocks` (ReadShard/WriteShard), `objectMetaRMWLocks`
+  (tag/ACL/relocation quorum-meta RMW), and `quorumMetaTargetLocks` (leaf-writer LWW-guard + rename) maps
+  previously stored one `sync.RWMutex` per `(bucket,key)` / target ever seen and never evicted — an unbounded
+  leak on a long-running process. They now use a shared refcounted `keyedRWMutex` that reclaims a key's lock
+  once the last holder releases, bounding memory to currently-held keys while preserving exact per-key
+  serialization (no striping / false contention) and mutual exclusion. No behavior change.
+
+## [0.0.643.0] - 2026-06-22
+
+### Changed
+- **docs:** marked the Slice C deferred-cleanup backlog in `TODOS.md` as done — all four follow-ups shipped
+  (PRs #830–#833). No code change.
+
+## [0.0.642.0] - 2026-06-22
+
+### Changed
+- **`internal/volumeadmin` renamed to `internal/admincli` (stale name from the volume-removal epic).**
+  Despite the name, the package was never volume-specific: it is the shared admin HTTP client used by every
+  `grainfs` admin CLI command (iam/cluster/credential/scrub) plus the live S3 EC bucket-scrub session client.
+  The volume-removal epic (#781–#785) repurposed it without renaming. This is a behavior-neutral rename of the
+  package + its callers (`cmd/grainfs`) and a refresh of the doc comments in sibling admin packages that
+  referenced it by name.
+
+### Removed
+- **Dead `adminapi.VolumeInfo` type removed** (a volume-removal-epic leftover referenced only by its own test).
+- **Duplicate `adminapi.ScrubVolumeResp` collapsed into the canonical `adminapi.ScrubResp`.** The scrub-trigger
+  server handler + route already returned `ScrubResp`; the admin client aliased a separate, byte-identical
+  `ScrubVolumeResp`. The client alias now points at the one `ScrubResp`, removing the duplicate wire type. No
+  behavior change (identical JSON shape).
+
+## [0.0.641.0] - 2026-06-22
+
+### Added
+- **Bucket-upstream admin-route authz regression tests.** Added `TestIAMBucketUpstreamRoutes*` covering the
+  bearer-actor authz gate on the `/v1/upstreams`, `/v1/buckets/:bucket/upstream`, and `/v1/migration/cutover`
+  routes: a denied bearer gets 403 before the handler runs (no upstream operation reaches the service, all
+  five `grainfs:IAMBucketUpstream*` actions consulted), and without a bearer the routes fall back to the
+  trusted UDS path with the authz gate never consulted. Restores upstream-route authz coverage that had
+  ridden inside the removed combined MountSA+upstream tests (Slice C, #829). Test-only — no behavior change.
+
+## [0.0.640.0] - 2026-06-22
+
+### Changed
+- **`policy.PrincipalType` removed (single-value enum collapse).** After the mount-SA removal (#829) the
+  `PrincipalType` enum had only one value (`PrincipalTypeS3`). The type, the `RequestContext.PrincipalType`
+  field, and the `ptype` parameter on `Resolver.Effective`/`cacheKey` are removed; `Effective(ctx, saID,
+  bucket)` now always resolves via the S3 service-account path (SAPolicies + SAGroups expansion). Pure
+  internal cleanup — no behavior change to S3/OIDC/protocol-credential authorization.
+
+## [0.0.639.0] - 2026-06-22
+
+### Removed
+- **Dead `volume/` protocol-credential resource prefix removed.** `protocred.validResource` no longer
+  accepts a `volume/` resource prefix — it was a leftover from the removed NBD/volume subsystem and could
+  never pair with a valid protocol (`validProtocol` permits only `s3`/`iceberg`). Only `bucket/` and
+  `catalog/` remain, aligning the protocred validator with the policy ARN grammar. No behavior change for
+  S3/Iceberg credentials.
+
+## [0.0.638.0] - 2026-06-22
+
+### Removed
+- **Shared mount-SA authentication layer + dormant compat capability removed; mount-protocol removal
+  epic complete (BREAKING).** With NFS (v0.0.637.0) and 9P (v0.0.636.0) gone, the mount service-account
+  (MountSA) infrastructure they shared is dead and is now deleted: the `internal/iam/mountsastore`
+  package, the `MountSACreate`/`MountSADelete`/`MountSAAttachPolicy`/`MountSADetachPolicy` meta-Raft
+  commands and their apply handlers, the MountSA snapshot fields and FlatBuffers tables
+  (`MetaMountSAEntry`, `MetaIAMPolicyAttachMountSAEntry`, the four `MountSA*Payload` tables), the
+  `policy.PrincipalType` mount value (the enum collapses to S3-only), `principal.KindMountSA`, the
+  `cross_namespace` mount-vs-S3 attach guard, the `NFSMountOnly` built-in policy and the
+  `grainfs:NFSMount` action, and the mount-SA admin API + HTTP routes + `grainfs iam mount-sa` CLI
+  tree. The dormant `NfsExportCreate` compat capability/operation (kept in v0.0.637.0 only because
+  gate/gossip/roundtrip tests used it as a generic example) is removed; those tests migrate to the
+  surviving `CapabilityMigrationCutoverV1` (same meta-Raft scope/severity). Leftover NBD/volume/NFS
+  dead references are swept: the `DomainNBD` AAD domain constant, the `nbd`/`nfs`/`volume`/`nbd/volume`/
+  `nfs/bucket` protocol-credential policy-resource strings, the IAM-admin `mount-sa` resource grammar,
+  the `FDCategoryNFSSession` FD-observability category and its `resourceguard` consumer, a dead Web-UI
+  NFS storage section, and stale comments/operator-doc references. FlatBuffers enum values are left as
+  numbered gaps (no renumber); the at-rest encryption domain values are unchanged. This is the final
+  slice of the mount-protocol removal epic (9P → v0.0.636.0, NFS → v0.0.637.0): GrainFS is now a pure
+  S3 + Iceberg system. S3, Iceberg, and the `internal/protocred` credential layer are unaffected.
+
+## [0.0.637.0] - 2026-06-22
+
+### Removed
+- **NFSv4 protocol support removed (BREAKING).** GrainFS no longer ships an NFSv4 server. The
+  `--nfs4-port`, `--nfs-write-buffer-dir`, and `--nfs-write-buffer-idle` serve flags are gone (passing
+  them now fails with "unknown flag"), the `grainfs nfs` command tree and the admin NFS-export API are
+  removed, the `/admin` storage-protocols endpoint is removed (it reported only mount-protocol status,
+  all now gone), and the `internal/nfs4server`, `internal/nfsadmin`, `internal/nfsexport` packages plus
+  the `NfsExport*` meta-Raft commands (and their FlatBuffers) are deleted. The `protocred` `Protocol`
+  enum drops `ProtocolNFS` (S3 + Iceberg remain). The bucket-delete NFS-export cascade is removed; the
+  per-bucket config cascade (lifecycle + IAM upstream, v0.0.635.0) is preserved unchanged. NFS export
+  tests, `tests/nfs4_colima`, and the `test-nfs4-colima`/`test-pynfs-colima`/`bench-nfs*` Makefile
+  targets are deleted. S3 and Iceberg are unaffected. This is the second slice of the mount-protocol
+  removal epic (9P was removed in v0.0.636.0); the shared mount-SA authentication layer
+  (`internal/iam/mountsastore`, the `MountSA*` meta-Raft commands) survives for a final teardown slice.
+
+## [0.0.636.0] - 2026-06-22
+
+### Removed
+- **9P protocol support removed (BREAKING).** GrainFS no longer ships a 9P2000.L server. The
+  `--9p-bind` and `--9p-port` serve flags are gone (passing them now fails with "unknown flag"), the
+  admin storage-protocols response no longer carries a `p9` field, and the `Protocol9P` credential
+  type, the `9PAttachOnly` built-in IAM policy, the `grainfs:9PAttach` action, and the
+  `protocol-credential/9p/*` policy resources are all removed. The `internal/p9server` package and all
+  9P e2e/colima tests and `bench-9p*` / `test-9p-colima` Makefile targets are deleted. NFS, S3, and
+  Iceberg are unaffected: the `internal/protocred` credential layer (S3/Iceberg/NFS) and
+  `internal/iam/mountsastore` survive. This is the first slice of the mount-protocol removal epic;
+  NFS removal and the shared mount-SA infrastructure teardown follow in later PRs.
+
+## [0.0.635.0] - 2026-06-22
+
+### Fixed
+- **Bucket delete now cascades to per-bucket meta-Raft config.** Deleting a bucket (admin UDS) also
+  deletes its lifecycle configuration (`lifecycle:{bucket}`) and IAM bucket-upstream record. These live
+  on the meta-Raft, outside the data-Raft bucket keyspace that `applyDeleteBucket` clears, so they
+  previously leaked into a recreated same-name bucket. The cascade runs only once the bucket is
+  confirmed gone (delete succeeded, or already absent) and never strips a surviving bucket's config
+  (a non-empty bucket that fails to delete keeps its config). The lifecycle-delete proposer is gated on
+  the same condition that wires the lifecycle store (`--lifecycle-interval > 0`, default `1h`), so a
+  lifecycle-disabled node does not fail bucket deletes. A narrow delete-then-recreate concurrency race
+  (sub-millisecond window) is tracked as a follow-up.
+
+## [0.0.634.0] - 2026-06-21
+
+### Removed
+- **BREAKING: the per-version cutover verifier is removed** (the `cluster verify-per-version-cutover`
+  CLI command + its admin route/UDS handler + the `grainfs_per_version_cutover_*` Prometheus gauges).
+  The verifier was a readiness checker for the per-bucket soleauth cutover flip; that migration
+  approach is being abandoned for a greenfield project (no existing data to migrate — versioned
+  objects will be blob-authoritative by construction rather than via a gated per-bucket flip), so the
+  verifier is dead weight. The per-version backfill walker (which writes the per-version quorum-meta
+  blobs) is unaffected, and the soleauth flag/fence machinery is removed in a later change. First in a
+  staged teardown of the dormant soleauth cutover scaffolding (~2k LOC removed here).
+
+## [0.0.633.0] - 2026-06-21
+
+### Removed
+- **BREAKING: the object-metadata snapshot feature is removed** (auto-snapshotter, the
+  `/admin/snapshots` create/list/restore/delete API, the snapshot `Manager`, and per-bucket
+  capture/restore). Object data durability never depended on it — objects are durable via
+  erasure-coding replication plus the scrubber sweep, and cluster/metadata via Raft — so this is a
+  pure removal of a metadata backup/restore convenience (~6.5k LOC). It eliminates the S4c-d
+  "routed per-node snapshot" cutover precondition outright (there is no longer a cluster-wide
+  snapshot of soleauth-on buckets to make work) and leaves the admin flip as the sole
+  `soleauth=on` activation path.
+  - **Operator impact:** the `/admin/snapshots` endpoints and the dashboard "Snapshots" tab are
+    gone; the `snapshot-interval` / `snapshot-retain` cluster-config keys are removed (ignored if
+    still present in a stored config). The **Raft snapshot** (log compaction, `/admin/raft/snapshot`)
+    is a different feature and is **unchanged**. KEK prune no longer has an object-snapshot
+    prune-refusal (no object snapshot can pin a KEK); the raft-store-key prune guard is unchanged.
+  - **Internals:** the scrubber's live-version known-set (`ListAllObjectsStrict` and the
+    object-manifest type) is retained and relocated to `object_manifest.go`; the EC segment-GC and
+    orphan-shard reclaim now run against that known-set with empty no-op frozen sources (they keep
+    running rather than failing closed). `SetBucketSoleAuthorityCmd.EpochFloor` is left inert
+    (no emitter) to avoid a wire-format change; a follow-up may drop the field.
+
+## [0.0.632.0] - 2026-06-20
+
+### Fixed
+- **Bucket-name reuse — clear per-bucket state on delete, preserve the soleauth epoch floor (S4c-d
+  cutover precondition).** `applyDeleteBucket` deleted only the bucket existence record (`bucket:{b}`),
+  leaking the per-bucket policy, versioning, and soleauth state into a recreated same-name bucket. It now
+  also clears `policy:{b}`, `bucketver:{b}`, and the soleauth STATE (`soleauth:{b}`), so a recreated
+  bucket starts fresh (no inherited policy, unversioned, and not stuck in a prior incarnation's terminal
+  soleauth `on`). It **deliberately preserves** `soleauthepoch:{b}`: that epoch is a monotonic
+  cross-incarnation floor — clearing it would reset a recreated+reflipped bucket to epoch 1 and let a
+  dead incarnation's stale forwarded write pass the soleauth fence (`soleAuthEpochStale(1, 5)` is false),
+  the exact hazard the cutover fence prevents. The policy/versioning clears are live S3-correctness (a
+  new bucket inherits nothing); the soleauth state-clear + epoch-preserve are **DORMANT** (the flip is
+  unreachable today). Per-bucket state in other subsystems (lifecycle config, IAM bucket-upstream) lives
+  outside this FSM keyspace and is tracked as a separate cross-subsystem follow-up.
+
+## [0.0.631.0] - 2026-06-20
+
+### Fixed
+- **Multi-group soleauth epoch source — stop a routed data group from clobbering the fence's epoch
+  reader (S4c-d cutover precondition).** The per-version sole-authority fence on a quorum-meta leaf
+  consults one shared per-node epoch reader (`ShardService.soleAuthEpochFn`). The soleauth epoch is
+  **group-0-global**: the flip is applied by group-0's FSM under group-0's keyspace, and the coordinator
+  always reads the epoch from group-0 (group-0 is the cluster's "legacy data raft"). But the reader is
+  wired by **every** backend's `SetShardService` as a closure over *that* backend's keyspace: group-0
+  wires it correctly at boot, then a runtime-owned data group (`group-1`, …) on the same node calls
+  `SetShardService` on the **same shared** service and OVERWRITES the reader with a closure over its own
+  (epoch-less) keyspace — so the fence read epoch 0 for every bucket on a node owning group-0 plus a data
+  group, silently admitting a stale write. The epoch reader is now installed only by the soleauth
+  **authority** backend (group-0, or a legacy/identity single-group backend); a routed data group no
+  longer clobbers it (`SetDEKKeeper`/`SetFenceLock` stay wired for every group). Readiness is unchanged
+  (the single group-0 readiness gate is the correct cluster-wide signal; a non-group-0-member node stays
+  fail-closed via the gate, never fail-open). **DORMANT** (every admitted epoch is 0 today, so the fence
+  admits regardless — this removes a latent fail-open, not a live regression). Scoped to the clobber;
+  soleauth-epoch availability on non-group-0-member leaf nodes in stable node-ID deployments is tracked
+  as its own (larger) precondition.
+
+## [0.0.630.0] - 2026-06-20
+
+### Fixed
+- **Close the soleauth-fence boot-window — single-group (S4c-d cutover precondition).** The per-version
+  sole-authority cutover fences a quorum-meta write/delete that carries a STALE per-bucket "soleauth epoch" (one from a
+  coordinator a newer flip has since fenced out). During boot the shard RPC route goes live (so the leaf fence is
+  reachable) BEFORE the epoch source callback is wired, and the wired callback then reads a metadata store that lags
+  until the data-raft apply loop replays its committed backlog — so the fence was bypassed (admitted any epoch) during
+  that window. Once a bucket is flipped (a future slice), a restarting node could have admitted a stale write. The
+  fence now **fails closed for any non-zero admitted epoch until the node can reliably read its committed epoch** (the
+  callback is wired AND the group-0 FSM has applied its boot-committed backlog, established via a `ReadIndex` +
+  `WaitApplied` linearizability fence that retries through transient leader-loss); epoch-0 traffic (legit boot-time
+  replication; every bucket today) is still admitted. The epoch-source callback is now race-safe (atomic). **DORMANT**
+  (no bucket is ever flipped today). Scoped to single-group (group-0) clusters — see the multi-group note in the
+  development notes; for multi-group clusters this is strictly safer than before (fail-closed during boot) but not yet
+  complete.
+
+## [0.0.629.0] - 2026-06-20
+
+### Fixed
+- **Raft-read-fence the forwarded version / tag / partial reads (S4c-d cutover precondition).** A coordinator that
+  doesn't own a bucket forwards the read to a peer that may be lagging in applying committed Raft entries. The
+  forwarded **latest** HEAD/GET and `ListObjectVersions` handlers already ran a `ReadIndex` + `WaitApplied`
+  linearizability fence before resolving, but the forwarded **specific-version** read (`HeadObjectVersion`,
+  `GetObjectVersion`), **`GetObjectTags`**, and **partial-read (`ReadAt`)** handlers did not — even though each
+  resolves through the same authority path that, under the per-version sole-authority cutover (`soleauth=on`), reads
+  the node's local cutover state. A lagging receiver could therefore read a stale local state and take the wrong
+  authority branch (e.g. resurrect a hard-deleted object). These six forwarded read handlers now run the same read
+  fence before resolving, bringing them to parity with the already-fenced latest-read handlers. A forwarded read on a
+  node that cannot obtain a `ReadIndex` now fails closed instead of returning possibly-stale data (identical to the
+  existing fenced handlers); when the receiver is current the result is unchanged.
+
+## [0.0.628.0] - 2026-06-20
+
+### Fixed
+- **Single-object reads under `soleauth=on` are now decode-strict — close a deleted-object resurrection window
+  (dormant S4c-d precondition).** When a bucket's `soleauth` state is `on` (a per-bucket cutover tri-state;
+  **never `on` in production yet** — the admin flip is a future slice), the single-object read paths (HEAD/GET of
+  the latest version, a specific-version read, and `GetObjectTags`) treated the per-version quorum-meta blob tree as
+  the sole authority but read it through a **tolerant** reader that **silently dropped a corrupt/undecodable blob**.
+  A corrupt delete-marker-latest blob would therefore be omitted, the latest-version derive would see only an older
+  live version, and the read would **resurrect a hard-deleted object**. These paths now read through a new
+  **decode-strict, availability-tolerant** reader: any per-version blob that fails to decode — served by this node or
+  any reachable peer — fails the read closed (no resurrection, no fallthrough to a stale FSM record), while an
+  unreachable / not-yet-upgraded / disk-erroring peer is still tolerated (no spurious unavailability from an unrelated
+  peer). Peers serve the raw blob bytes (a new internal read RPC) so corruption is caught at decode rather than
+  dropped en route. `off`/`pending` and every non-`on` consumer (the availability-first off-path derive, the delete
+  blob purge, the cutover verifier) keep the existing tolerant reader and are **byte-identical**. Dormant until the
+  cutover flip.
+
+## [0.0.627.0] - 2026-06-20
+
+### Added
+- **Bucket emptiness + force-delete + scrubber object-scan authority under `soleauth=on` — dormant cutover slice
+  (S4c-c-read2b), Enabled-only scope; completes the S4c-c READ-derive stage.**
+  The remaining all-version / enumeration paths now treat the per-version quorum-meta blob tree as the authority
+  when a bucket's `soleauth` state is `on` (a per-bucket tri-state; **never `on` in production yet** — the admin
+  flip is a future slice). `off`/`pending` (every bucket today) is **byte-identical**; the `on` branches are
+  unreachable until the future flip. In `internal/cluster`:
+  - **`DeleteBucket` emptiness** under `on` derives from the cluster-wide per-version blobs (delete markers
+    included) plus carve-out FSM records, not the local FSM `obj:` prefix scan. A stale, non-authoritative
+    vid-bearing FSM record no longer falsely blocks the deletion of an authoritatively-empty bucket. The leaf runs
+    the authority probe outside the metadata read txn; the coordinator probes via `ListObjectVersions`.
+  - **`ForceDeleteBucket`** under `on` enumerates the authoritative deletion set cluster-wide (fail-closed) and
+    deletes each object routed to its owning group: versioned objects via the generation-aware delete that also
+    purges the per-version blob, and legacy unversioned bare records via a hard delete fanned out to every shard
+    group (idempotent, so the record is removed wherever it resides). A trailing blob-aware `DeleteBucket` is the
+    fail-closed completeness backstop. This adds one new internal, `on`-gated forward op (`HardDeleteObject`) for
+    the routed hard delete of a legacy-bare record (distinct from the tombstone-writing `DeleteObject`).
+  - **Scrubber `ScanObjects`** under `on` enumerates the EC scrub work-list (latest-version-per-key, repair-only,
+    local-node) from the per-version blob authority (strict, fail-closed — a corrupt blob surfaces synchronously)
+    plus local EC carve-out records, each reported with its own EC profile (a genesis 1+0 object stays 1+0) so the
+    redundancy-upgrade sweep still sees it.
+  - The carve-out record walk is now single-sourced (`forEachLocalCarveout`) so the `ListObjectVersions` on-branch
+    and the scrubber scan classify carve-out records (appendable / coalesced / legacy unversioned bare) through one
+    rule and cannot drift.
+
+## [0.0.626.0] - 2026-06-20
+
+### Added
+- **Cluster-wide all-version fan-in + ListObjectVersions authority under `soleauth=on` — dormant cutover slice (S4c-c-read2a), Enabled-only scope.**
+  The first all-version-enumeration sub-slice of the S4c per-version sole-authority cutover. When a bucket's
+  `soleauth` state is `on` (a per-bucket tri-state; **never `on` in production yet** — the admin flip is a future
+  slice), `ListObjectVersions` derives the version listing from the per-version quorum-meta blob tree cluster-wide
+  instead of the FSM `obj:`/`lat:` records. In `internal/cluster`:
+  - A new cluster-wide, **end-to-end fail-closed** all-version blob enumerator: it fans the existing
+    `ScanQuorumMetaVersionsAll` peer RPC out across every shard group, merges by `(Key, VersionID)` (highest
+    MetaSeq wins), and returns an error on ANY local-scan / peer-resolve / peer-RPC / per-blob-decode failure
+    (a partial authoritative version list would be silent data loss). The peer handler now serves from the strict
+    local scan and the RPC client errors on a per-entry decode failure (both were silent skips).
+  - `ListObjectVersions` under `on`: the leaf returns the cluster-wide blob versions (IsLatest = per-key max
+    VersionID, a delete-marker latest still marked IsLatest, markers included) merged with this node's **local**
+    carve-out FSM records (appendable / coalesced / legacy unversioned bare records — via a carve-out predicate
+    shared with the single-object read path so the two cannot drift); a stale vid-bearing FSM record is dropped
+    (no resurrection), and a blob wins a `(Key, VersionID)` collision. The coordinator fans out, dedups by
+    `(Key, VersionID)`, sorts, and applies `maxKeys` once.
+  - No user-facing behavior change: the `off`/`pending` path (every bucket today) is **byte-identical**, and the
+    `on` branch is unreachable until the future flip. The remaining all-version consumers (bucket emptiness,
+    force-delete enumeration, scrubber object scan) are a separate sub-slice (S4c-c-read2b).
+
+## [0.0.625.0] - 2026-06-20
+
+### Added
+- **Single-object read authority under `soleauth=on` — dormant cutover slice (S4c-c-read1), Enabled-only scope.**
+  The first READ-derive sub-slice of the S4c per-version sole-authority cutover. When a bucket's `soleauth`
+  state is `on` (a per-bucket tri-state; **never `on` in production yet** — the admin flip is a future slice),
+  the single-object read path treats the per-version quorum-meta blob tree as the **sole authority** instead of
+  the availability-first behavior (try blob, fall back to the FSM `obj:`/`lat:` record). In `internal/cluster`:
+  - **HEAD/GET (latest)**, **specific-version read**, and **GetObjectTags** each gain an `on` branch: derive from
+    the per-version blob; a blob-absent vid-bearing versioned object is a 404 (a stale FSM record is never
+    resurrected); a specific delete-marker version folds (405); a not-live latest is a 404.
+  - **Carve-out** classes stay FSM-authoritative under `on` (they have no per-version blob): appendable,
+    coalesced, and legacy unversioned bare records (`obj:{bucket}/{key}` with no version — pre-versioning objects
+    in an Enabled bucket). The classification is single-sourced in a shared helper (`fsmCarveoutObject`) so the
+    three readers cannot drift; bare-vs-versioned is resolved from which FSM key is actually read, not the
+    caller's versionID.
+  - A `GetBucketSoleAuthority` read error **fails closed** (the read errors out; it is never treated as `off`).
+
+  No user-facing behavior change (the `off`/`pending` path — every bucket today — is byte-identical; the `on`
+  branch is unreachable until the future flip). `GetObjectAcl` (latest and specific-version) is covered, since the
+  ACL rides in the object metadata these readers return. The all-version enumeration consumers (ListObjectVersions,
+  bucket emptiness/force-delete, scrubber ScanObjects) and the cluster-wide all-version fan-in are a separate
+  sub-slice (S4c-c-read2).
+
+## [0.0.624.0] - 2026-06-20
+
+### Added
+- **Per-node soleauth-on snapshot/restore + verifier cutover-ineligibility — dormant cutover slice (S4c-b), Enabled-only scope.**
+  The snapshot/restore and readiness-verifier support for sole-authority buckets, dormant in production
+  (no bucket is ever `on` until a future slice ships the admin flip). **Scoped to Enabled (versioned)
+  buckets only**: the S4c-b plan/spec gates proved the non-versioned/Suspended authority model is a
+  separate unsolved problem, now a tracked deferred epic (the cutover refuses non-Enabled buckets).
+  In `internal/cluster`, `internal/scrubber`, `internal/server`, `internal/serveruntime`,
+  `internal/clusteradmin`, `internal/snapshot`, `internal/metrics`:
+  - **Verifier ineligibility.** Non-Enabled (Suspended / never-versioned) buckets are flagged with a
+    definitive per-bucket `Ineligible` signal keyed on the bucket's versioning state — NOT an object
+    count. The previous Excluded-count went through an iterator that silently skips legacy unversioned
+    records, so a legacy-only bucket could tally all-zero and read **READY** when it must not. Threaded
+    cluster → scrubber → server → CLI; `grainfs cluster verify-per-version` now treats
+    `gaps+stuck+unknown+ineligible > 0` as not-ready. A new `grainfs_per_version_cutover_ineligible`
+    gauge is published for observability but is intentionally OUT of the cluster-wide metrics blocking
+    gate (ineligible buckets are normal; blocking on them would never let coverage read ready).
+  - **Per-node snapshot capture/restore for `on` buckets.** Capture reads the per-version blob tree via
+    the fail-closed strict enumerator with full placement fidelity (NodeIDs / EC profile / StripeBytes /
+    PlacementGroupID / MetaSeq / UserMetadata / Parts); `IsLatest` is the max-VID per key. Restore uses
+    the raw snapshot VIDs (no rewrite), runs under the per-bucket fence write-lock (quiesce), **purges**
+    on-disk per-version blobs absent from the snapshot (first consumer of S4c-a3's all-versions strict
+    scan), and gates each write on an **exact-version, this-node-local** data-presence check
+    (`objectPathV` or any EC shard index enumerated from the snapshot's captured placement — never via a
+    legacy unversioned plain file, a same-content sibling version, or the live EC config). A version
+    whose local share is missing is recorded stale and skipped (its metadata is not published).
+  - **Soleauth-epoch restore fidelity.** Additive `SetBucketSoleAuthorityCmd.EpochFloor` (default 0,
+    backward-compatible) carried by restore and applied as a monotonic floor (`newEpoch = max(computed,
+    EpochFloor)`), so a restored bucket preserves its epoch instead of resetting to 0.
+  - **Snapshot format gate.** `minReader` bumps to 2 for any snapshot containing a bucket with
+    `SoleAuthState=="on"` or `SoleAuthEpoch>0`, so an older binary refuses such a snapshot; ordinary
+    snapshots stay at `minReader=1` and remain readable by old binaries.
+
+  The routed (multi-group) `ClusterCoordinator` snapshot path **fails closed** (refuses) for any
+  soleauth-on bucket — cluster-wide capture/restore cannot correctly handle per-node per-version shares;
+  a routed-cluster per-node snapshot path is a tracked S4c-d precondition. No user-facing behavior change
+  (all dormant); the only wire/format changes are additive and backward-compatible.
+
+## [0.0.623.0] - 2026-06-19
+
+### Added
+- **Backfill soleauth-skip + all-versions quorum-meta enumerator — dormant cutover primitives (S4c-a3).**
+  Two foundations for the sole-authority cutover, both dormant in production (no bucket is ever
+  `pending`/`on` until a future slice ships the admin flip). In `internal/cluster`:
+  - The per-version backfill walker now **fail-CLOSES** for a bucket whose `soleauth` is `pending`/`on`
+    (a mid/post-cutover bucket must not have leaderless backfill writing per-version blobs under the
+    fence) — and also skips on a soleauth read error, so an unreadable state can never become a
+    write-under-fence.
+  - A true **all-versions** quorum-meta enumerator: `ScanQuorumMetaVersionsBucketAll` (local scan that
+    returns every version blob, not collapsed to the per-key max like `ScanQuorumMetaVersionsBucket`) +
+    a new `ScanQuorumMetaVersionsAll` peer RPC, **fail-closed** on an un-upgraded peer (a partial
+    all-version enumeration would miss orphan blobs/versions). It ships ahead of its consumers (later
+    slices' snapshot absent-blob purge + flag-on LIST) as a rolling-upgrade primitive, so the RPC is on
+    every node before any consumer fans out.
+
+  No on-disk format change, no wire/FlatBuffers change (the RPC reuses the existing shard envelope +
+  blob-list format), and no user-facing API change. The existing max-per-key scan and its LIST consumer
+  are untouched.
+
+## [0.0.622.0] - 2026-06-19
+
+### Added
+- **Forwarded-PUT soleauth-epoch stamp — closes the forwarded-write fence window, still dormant (S4c-a2-B).**
+  Extends the dormant cutover fence (0.0.621.0) so a forwarded S3 PUT carries the **originating** node's
+  soleauth epoch on the forward wire, instead of the owner re-reading its own. During a future cutover this
+  fences a write that a lagging originator admitted under a stale epoch; today it stays dormant (every bucket
+  is epoch 0). Mirrors the existing bucket-versioning forward-stamp pattern. In `internal/cluster`,
+  `internal/server`, `internal/raft`:
+  - Additive `soleauth_epoch` scalar on the `PutObjectArgs` forward wire, with **+1 encoding** (0 = absent →
+    receiver falls back to a local read; n = epoch n-1) so a valid epoch 0 is distinguishable from "unstamped".
+    Backward-compatible (old peers omit it → default 0 → fallback).
+  - Context primitives `ContextWithBucketSoleAuthEpoch` + the wire codec, stamped at the S3 PUT edge
+    (`ctxWithSoleAuthEpoch` reading `Operations.GetBucketSoleAuthEpoch`), carried on the forward send, and
+    re-stamped on the forward receiver.
+  - `writeQuorumMeta` now prefers the context-stamped epoch over a local read (`resolveQuorumMetaEpoch`);
+    behavior-neutral for non-forwarded PUTs (same node).
+
+  No on-disk format change and no user-facing API change. The delete forward-wire epoch (deletes are still
+  fenced by the owner's local epoch) is tracked as a follow-up, consistent with the versioning forward stamp
+  being PUT-only.
+
+## [0.0.621.0] - 2026-06-19
+
+### Added
+- **Soleauth cutover fence — armed on the inter-node path, still dormant (S4c-a2-A).** Builds the
+  per-bucket fence the later sole-authority cutover relies on, wiring the inert `soleauth` flag
+  (added in 0.0.620.0) into the quorum-meta replication path. It stays **dormant**: every bucket is
+  `off` with epoch 0, and the reject predicate (`localEpoch > 0 && wireEpoch < localEpoch`) never
+  fires until a future slice (S4c-d) ships the admin flip. All in `internal/cluster` +
+  `internal/raft`:
+  - A per-bucket monotonic **soleauth epoch** (`soleauthepoch:{bucket}` FSM state), bumped on each
+    real state transition in `applySetBucketSoleAuthority` (deterministic across raft replicas).
+  - A per-bucket **fence `RWMutex`**: the flip apply write-locks the bucket (race-free accessor) so
+    the four quorum-meta leaves can read-lock it around their epoch check + fsync/rename.
+  - An additive `admitted_soleauth_epoch` scalar on the shard wire envelope (`ShardRequest`,
+    backward-compatible — old peers omit it → default 0).
+  - A **stale-epoch reject** at the four quorum-meta leaves, fed by a backend-injected committed-epoch
+    callback; every legitimate-mutation caller threads the live coordinator epoch so a flipped bucket
+    never false-rejects its own writes.
+
+  No on-disk format change for existing data and no user-facing API change. The S3-edge epoch stamp
+  (forwarded-PUT correctness) is deferred to S4c-a2-B; epoch snapshot/restore fidelity to S4c-b.
+
+## [0.0.620.0] - 2026-06-19
+
+### Added
+- **Per-bucket `soleauth` tri-state flag — inert cutover foundation (S4c-a1).** Adds the one-way
+  `soleauth` state machine (`off` → `pending` → `on`, with `pending` → `off` as a cutover abort and
+  `on` terminal) that later S4c slices will use to make per-version quorum-meta blobs the sole
+  authority for non-appendable versioned objects. This slice is deliberately **inert**: the flag is
+  wired only into its own command, apply, backend, and snapshot paths and is read by nothing in the
+  object read/write/fence paths, so the fence-arming and LIST-rewrite slices land as their own
+  reviewable changes. All in `internal/cluster`:
+  - New raft command `CmdSetBucketSoleAuthority` (FlatBuffers `SetBucketSoleAuthorityCmd`, codec
+    round-trip) and key `soleauth:{bucket}`, mirroring `SetBucketVersioning`.
+  - `applySetBucketSoleAuthority` enforces the one-way transition guard (`soleAuthTransitionAllowed`)
+    and rejects an invalid state; backend `SetBucketSoleAuthority`/`Propose` + `GetBucketSoleAuthority`
+    (absent key = `off`), with the refusal surfaced as an apply error.
+  - Snapshot persists `soleauth` on `SnapshotBucket` and restores it on `RestoreBuckets`, faithfully
+    reconciling restore-onto-existing in both directions via guard-permitted transitions (a live
+    `pending` bucket aborts back to `off`; a stale snapshot that would downgrade a terminal `on`
+    bucket fails loudly), with the reconciliation pre-validated before versioning is mutated so a
+    rejected restore never leaves a half-restored bucket.
+
+  No on-disk format change for existing data and no user-facing API change (the flag has no admin
+  surface yet; that arrives with the flag-on WRITE slice).
+
+## [0.0.619.0] - 2026-06-19
+
+### Fixed
+- **Multipart-complete idempotency — no duplicate version on a phantom-commit retry (foundation S4c-0).**
+  A `CompleteMultipartUpload` whose `CmdCompleteMultipart` raft propose timed out (phantom-commit) and
+  was retried could publish a SECOND completed version, and a retry-after-success returned
+  `ErrUploadNotFound` instead of the committed object. Closed with an FSM-visible `mpudone:{uploadID}`
+  marker, written in the same BadgerDB txn that deletes the upload manifest (`applyCompleteMultipart`):
+  - **Idempotent apply:** a second `CmdCompleteMultipart` for the same upload finds the manifest gone +
+    the marker present → no-ops (no duplicate `obj:{vid}`); a `(bucket,key)` mismatch returns a
+    descriptive error.
+  - **Idempotent client retry:** `CompleteMultipartUpload` whose manifest is gone returns the committed
+    object via `headObjectMetaV(marker.VersionID)` instead of `ErrUploadNotFound`.
+  - **Phantom-winner guard:** after the completion propose succeeds, the client reads the marker; if a
+    different completion won the upload, it skips the duplicate quorum-meta mirror and returns the
+    winner — preventing a second version from being mirrored (and, on versioning-enabled buckets, a
+    duplicate `CmdPutObjectMeta`).
+  - **Read-your-writes on forwarded proposes:** a follower that forwards a propose now waits for its own
+    local apply of the committed index (and surfaces apply errors), mirroring the leader path. This
+    makes the phantom-winner guard's local marker read reliable on every node.
+  - **Deterministic bounded GC:** a new raft command `CmdDeleteMultipartDone` + a periodic scrubber
+    sweep (enabled at boot, 24h retention, ≤256/cycle) GC the markers — a TTL would diverge replicas, so
+    deletion goes through raft.
+
+  The completion `VersionID` is still minted at completion time (UUIDv7, time-ordered) — NOT pinned at
+  create — so the per-version "max live VID = latest" derive is preserved. No on-disk format change and
+  no user-facing API change beyond the corrected idempotency semantics.
+
+## [0.0.618.0] - 2026-06-19
+
+### Fixed
+- **Quorum-meta metadata lost-update closed (tag/ACL/relocation/backfill) — foundation S4c-0 prerequisite.**
+  Concurrent metadata writers to the same object could silently lose a mutation: two `PutObjectTagging` /
+  `PutObjectAcl` read the same per-version blob and both wrote it (last rename wins, one update dropped),
+  and a leaderless backfill or an object relocation could clobber a newer blob with a stale reconstruction.
+  Three mechanisms close it, all in `internal/cluster`:
+  - A **write-time LWW guard** in both quorum-meta leaf writers (`writeQuorumMetaLocal`,
+    `writeQuorumMetaVersionLocal`): before the atomic rename, decode the existing on-disk blob and skip the
+    write when it already wins `quorumMetaBlobWins(ModTime, VersionID, MetaSeq)`. The per-version writer
+    skips on tie (immutable blobs); the latest writer overwrites on tie (mutable, RMW-written).
+  - The guard's read-then-rename is made **atomic per target** via a new per-target `sync.Mutex`
+    (`ShardService.quorumMetaTargetLocks`), so a stale writer can no longer read-then-clobber between a
+    concurrent writer's rename. Covers local fan-out, relocation, backfill, and the remote
+    `WriteQuorumMeta` / `WriteQuorumMetaVersion` RPC handlers.
+  - A shared per-`(bucket,key)` meta-RMW lock (`DistributedBackend.objectMetaRMWLock`) serializes
+    `SetObjectTags` / `SetObjectACL` and relocation, and the tag/ACL RMW now bumps `MetaSeq` so a serialized
+    write strictly wins. The lock relies on `SetObjectTags` / `SetObjectACL` forwarding to the owning peer;
+    the cross-coordinator window during ownership transitions is a pre-existing distributed limit, not
+    regressed by this change.
+
+  No on-disk format change and no user-facing API change. The next S4c-0 PRs (MPU completion idempotency,
+  ACL versionID plumbing) and the S4c cutover slices build on this.
+
+## [0.0.617.0] - 2026-06-18
+
+### Changed
+- **Cluster-wide bucket-versioning context for `ListObjectVersions` (foundation slice S4b PR-A).** A
+  BEHAVIOR-NEUTRAL plumbing change that threads an authoritative, edge-stamped version-history decision
+  through the entire `ListObjectVersions` read path, so the later per-version derive (S4b PR-B) can gate on
+  it without the read/commit backend ever reading control-plane bucket-versioning state itself. Mirrors the
+  S2b PR-A mechanism already used for `ListObjects`. Changes: `ListObjectVersions` gains a leading
+  `ctx context.Context` parameter across the `storage.ObjectVersionLister` interface and every implementer
+  (cluster `DistributedBackend`, `Operations`, `RecoveryWriteGate`, lifecycle) and is threaded through
+  `ClusterCoordinator` instead of a fresh `context.Background()`; a `versioning_state` field is appended to
+  the `ListObjectVersionsArgs` forward RPC FlatBuffers message, populated by the forward sender from the ctx
+  and re-stamped by the receiver (old peers that omit it decode as unknown → local fallback, exactly today's
+  behavior); and a new `Server.ctxWithVersionHistory` stamps the decision at the S3 `?versions` edge using
+  `Enabled || Suspended` (version history can exist), NOT the Enabled-only `ctxWithBucketVersioning` — so a
+  Suspended bucket's version history is not dropped once the flag becomes authoritative. The backend still
+  serves results from the existing FSM `obj:`/`lat:` scan; nothing reads the new flag yet, so
+  `GET /<bucket>?versions` responses are byte-identical.
+
+## [0.0.616.0] - 2026-06-18
+
+### Added
+- **Per-version cutover-readiness verification gate (foundation slice S4a).** A NON-BREAKING, read-only
+  safety gate that reports whether every versioned non-appendable object's FSM `obj:{bucket}/{key}/{vid}`
+  record has a per-version quorum-meta blob readable via the post-cutover read path — the precondition the
+  later breaking S4 cutover (which removes the FSM read/write fallback) needs before it can run, since the
+  S3 backfill is best-effort. `verifyPerVersionCutover` walks FSM `obj:` records across all locally-hosted
+  generation groups (Enabled AND Suspended buckets — Suspended buckets retain versioned history) and
+  classifies each version COMPLETE / GAP / STUCK / UNKNOWN / EXCLUDED (appendable/coalesced/internal stay
+  FSM-authoritative). **Completeness is the exact post-cutover read criterion, not a local `os.Stat`**: the
+  VersionID must be present and decoded in a STRICT all-groups readback (`readQuorumMetaVersionsStrict`,
+  which surfaces errors the tolerant runtime readback skips) AND the decoded metadata must dispatch to the
+  same readable layout `getObjectVersionCtx` uses (delete-marker, segments, or EC-resolvable). **Fail-closed
+  throughout**: any decode/panic (a recover guard converts a corrupt FlatBuffers record to UNKNOWN),
+  strict-readback, versioning-state-read, or scan error classifies as UNKNOWN or returns an error — never a
+  silent COMPLETE. Surfaced three ways: per-node Prometheus gauges
+  `grainfs_per_version_cutover_{complete,gaps,stuck,unknown,excluded,verify_errors}` (verify_errors starts
+  at 1 and reaches 0 only after a fully clean completed sweep, so a never-run/partial/failed sweep reads
+  not-ready), a background scrubber-tick verification sweep, and a node-local admin CLI
+  `grainfs cluster verify-per-version` (JSON over the admin API; exit non-zero if gaps+stuck+unknown>0).
+  Cutover-ready = `gaps+stuck+unknown+verify_errors == 0` on every node. Removes nothing; the breaking
+  cutover (S4b repoint, S4c removal) is deferred and gated on this reading clean.
+
+## [0.0.615.0] - 2026-06-18
+
+### Added
+- **Background per-version metadata backfill sweep (foundation slice S3 — migrate existing data).**
+  S1 dual-writes a per-version quorum-meta blob (`.quorum_meta_versions/{bucket}/{key}/{vid}`) on every
+  versioned write, and S2 switched reads/LIST/version-list/delete to derive from those blobs with a
+  legacy/FSM fallback. S3 closes the gap for EXISTING objects: a new idempotent background sweep
+  (`per_version_backfill_walker.go` + `scrubber/per_version_backfill.go`, wired into the scrubber tick
+  beside the orphan version sweep) backfills the per-version blob for any versioned object written
+  before S1, or where S1's best-effort write failed, so the S4 cutover can later drop the FSM/legacy
+  fallback. It enumerates FSM `obj:{bucket}/{key}/{vid}` records across ALL locally-hosted
+  generation-group stores (a single-store scan would miss older-generation versions on a grown
+  cluster), yields only versions whose per-version blob is ABSENT on disk (direct `os.Stat` — it never
+  overwrites an existing blob), age-gates by the VersionID's UUIDv7 timestamp (not `LastModified`,
+  which is 0 for a fresh delete marker), and replays S1's K-of-N fan-out to the version's placement
+  nodes. Delete markers are backfilled with `IsDeleteMarker` reconstructed from the `ETag` sentinel;
+  a degraded marker whose placement was unreadable at delete time gets RDH-direct placement from its
+  owning group (sufficient because the tombstone metadata blob need only be discoverable by the
+  all-groups version readback, not byte-match a data write's shard placement). Appendable/coalesced
+  versions are skipped (the foundation carve-out — they stay FSM-authoritative), as are unversioned
+  `obj:` records and objects with no placement. New metrics:
+  `grainfs_scrub_quorum_meta_versions_backfill_{found,migrated,capped,error}_total`. Behavior-neutral
+  for current reads (S2's fallback already returns these versions); the backfill only changes the
+  source the derive-by-scan path resolves from.
+
+## [0.0.614.0] - 2026-06-17
+
+### Fixed
+- **Hard-deleted versions no longer resurface in LIST / `HEAD ?versionId` on versioning-enabled
+  buckets (foundation slice S2b residual — per-version orphan reconciliation scrubber).** The S2a
+  hard-delete fans the per-version metadata-blob removal across the version's placement nodes
+  fail-closed, but a missed/offline node could leave a lingering blob; because LIST and per-version
+  HEAD/GET derive from those blobs, the dead version kept reappearing until the blob was reclaimed.
+  A new background sweep (`orphan_quorum_meta_version_walker.go`, the metadata-blob analog of the EC
+  orphan-shard scrubber) reclaims any `.quorum_meta_versions` blob whose authoritative FSM `obj:`
+  record is gone. Liveness is judged across all locally-hosted groups (a record present in any of them
+  — including a delete-marker / soft-delete version — keeps the blob) and is fail-closed on any read
+  error, the bucket's owner not being locally hosted, or the candidate being within the age gate. It
+  reuses the shard sweep's enable gate, all-hosted caught-up gate, owning-group-hosted gate, floored
+  age gate, and two-cycle tombstone delay; deletion is node-local (each placement node reclaims its own
+  copy). Genesis 1+0 versions whose owner moved to a non-hosted group after cluster growth are
+  intentionally left for the S5 re-fan-out work, never mis-deleted. New metrics:
+  `grainfs_scrub_orphan_quorum_meta_versions_found_total`,
+  `grainfs_scrub_orphan_quorum_meta_versions_deleted_total`,
+  `grainfs_scrub_orphan_quorum_meta_version_sweep_capped_total`.
+
+## [0.0.613.0] - 2026-06-17
+
+### Fixed
+- **`ListObjects` is now per-version-authoritative on versioning-enabled buckets (foundation slice
+  S2b PR-B).** S2a/PR-A made `HEAD`/`GET` derive the latest version from the per-version quorum-meta
+  blobs, but `ListObjects` still scatter-gathered the legacy latest-only blobs — so after
+  `DELETE ?versionId=<latest>` the object kept appearing in a LIST (with the stale deleted version)
+  even though `HEAD`/`GET` correctly returned the previous version. LIST now derives each key's latest
+  live version by scanning the per-version blobs across all placement generations (new
+  `ScanQuorumMetaVersionsBucket` walker + `ScanQuorumMetaVersions` RPC, max-VersionID per key,
+  tombstone-excluded), closing the HEAD/GET-vs-LIST window. The derive is scoped to the S3 LIST edge:
+  it activates only when the bucket-versioning decision was stamped into the request context at the
+  server edge (mirroring PUT and the read paths), so internal LIST consumers (the `DeleteBucket`
+  empty-check, vfs/nfs4/p9/metrics) keep their existing quorum-acked latest-only view and a best-effort
+  per-version write failure cannot make `DeleteBucket` drop a non-empty bucket. `scatterGatherList`,
+  `ListObjectVersions`, non-versioned buckets, internal buckets, and single-node paths are unchanged.
+
+## [0.0.612.0] - 2026-06-17
+
+### Fixed
+- **Versioned reads are now per-version-authoritative in multi-group / multi-node clusters (foundation
+  slice S2b PR-A).** S2a (v0.0.611.0) made `HEAD`/`GET`/`GET ?versionId` derive from per-version metadata,
+  but the versioning gate read the local shard-group store while bucket versioning lives only on the
+  control-plane (meta-raft) backend — so for buckets not on the meta group, or any forwarded read, the
+  per-version path silently fell back to the legacy (stale) read. The bucket-versioning decision is now
+  resolved at the server edge (mirroring object PUT) and carried into the cluster via request context and
+  a `versioning_state` field on the read/list forward messages; the coordinator only reads the stamped
+  decision and never touches the control-plane backend on the data path. `GetObjectVersion`/
+  `HeadObjectVersion` gained a context parameter so the decision reaches the per-version gate, and a copy
+  whose source is a versioned object now resolves the source bucket's versioning decision (not the
+  destination's). Non-versioned, internal, and single-node paths are unchanged.
+
+### Fixed
+- **Versioned hard-delete consistency: `HEAD`/`GET` are now per-version-authoritative (foundation slice
+  S2a).** On versioning-enabled buckets, `HEAD`/`GET` (latest and `?versionId=`) now resolve from the
+  per-version quorum-meta blobs introduced in S1 via derive-by-scan (latest = max live VersionID),
+  unioned across all placement generations, and `DeleteObjectVersion` now fail-closed dual-deletes the
+  per-version blob. Result: after `DELETE ?versionId=<latest>`, `HEAD`/`GET` correctly return the
+  previous version (and `GET ?versionId=<deleted>` returns 404) instead of the stale deleted version.
+  Objects with no per-version blob (non-versioned buckets, pre-S1 / not-yet-migrated versions) fall back
+  to the unchanged metadata path, so legacy and mixed-era reads are preserved. `ListObjects` LIST
+  consistency for this case follows in S2b; `ListObjectVersions` is unchanged (already correct).
+
+### Added
+- **Per-version quorum-meta dual-write (foundation slice S1).** Every write to a versioning-enabled
+  bucket now also stores an immutable per-version metadata blob in a separate
+  `.quorum_meta_versions/{bucket}/{key}/{versionID}` subtree, K-of-N replicated to the same placement
+  nodes, in addition to the existing latest-only quorum-meta blob. This is the first step of moving
+  versioned object metadata off the data-raft FSM into quorum-meta (completing the no-raft GET/PUT
+  bypass for versioning), so version history lives in the rendezvous-hashed, replicated quorum-meta
+  world. The write is best-effort (a failure is logged and never fails the PUT) and **behavior-neutral**:
+  no read, LIST, version-list, scan, or delete path observes the new subtree yet — it is invisible to
+  the `.quorum_meta`-rooted walkers and harmless to the `shard_<N>`-filtered shard walkers. Subsequent
+  slices switch reads/LIST/delete to per-version (derive-by-scan latest), migrate existing data, retire
+  the FSM object-meta path, and make non-latest EC-redundancy durable via metadata re-replication.
+
+### Fixed
+- **`DeleteObjectVersion` now deletes versions whose metadata lives in an older
+  placement generation (clusters grown from single-node).** A per-version record
+  (`obj:bucket/key/versionID`) is sharded into the one group the key hashes to at
+  the generation the version was written; after the cluster grows, that key hashes
+  to a different group, so a pre-growth version's record stays in the original
+  group. `DeleteObjectVersion` routed only to the newest generation, so deleting
+  such an old version silently did nothing. It now fans the delete out across all
+  placement generations (deduped); `applyDeleteObjectVersion` is idempotent, so
+  non-resident generation groups no-op and the resident older-generation group
+  deletes the record. Single-generation clusters are unaffected (exactly one
+  delete, byte-identical to before).
+
+## [0.0.608.0] - 2026-06-17
+
+### Added
+- **Retroactive EC-redundancy upgrade: a background sweep relocates non-redundant
+  (1+0) objects into a redundant EC group after the cluster grows.** Objects written
+  while a cluster was genuinely single-node (genesis boot, no `--bootstrap-expect-nodes`)
+  land in a single-peer (1+0) group with no redundancy; once the cluster grows, a
+  single-node loss would lose them. The scrubber now detects such objects and
+  re-encodes them into a redundant wide EC group, preserving object identity
+  (key/version/ETag/size/content-type/user-metadata/tags/ACL **and LastModified**),
+  then lets the orphan-segment sweep reclaim the old shards. The relocation is
+  crash-safe (an interrupted re-write leaves reclaimable orphans and the object stays
+  readable via its old placement) and concurrency-safe (it preserves the original
+  ModTime, so a concurrent client write — carrying a newer ModTime — always wins the
+  quorum-meta last-writer-wins; a new internal `MetaSeq` tiebreak lets only the
+  identity-preserving re-write win the otherwise-exact tie). Latest-version-only; an
+  owner-kill e2e proves a relocated genesis object survives losing its original
+  single-owner node. New flags:
+  - `--ec-redundancy-upgrade` (default **on**; `=false` is the kill switch),
+  - `--ec-redundancy-upgrade-max` (default 8) — relocations per scrub cycle,
+  - `--ec-redundancy-upgrade-min-age` (default 5m) — minimum object age before
+    relocation, so the sweep never races an in-flight write.
+
+### Fixed
+- **`ScanObjects` reports each object's own EC profile on the FSM-resident scan
+  path.** The FSM `lat:` scan branch emitted the cluster's *current* EC config
+  instead of the object's recorded `ECData`/`ECParity`, so an object whose profile
+  differed from the current config (e.g. a versioned 1+0 object in a grown 4+2
+  cluster) was enumerated with the wrong shard count — mis-driving EC scrub and
+  hiding non-redundant objects from the new upgrade sweep. It now reports the
+  per-object profile, matching the quorum-meta scan branch.
+
+## [0.0.607.0] - 2026-06-16
+
+### Fixed
+- **Cluster objects are no longer placed in non-redundant single-peer groups during
+  formation — killing one node no longer loses data.** In a per-join multi-node EC
+  cluster, the object→group placement candidate set could be frozen (boot-frozen, or
+  the gen-0 lazy capture from v0.0.606.0) while only single-peer (1+0, no-redundancy)
+  formation groups existed, before the wide EC groups (one shard per node) formed. An
+  object that hash-routed to such a group had its only copy on one node, so killing
+  that node lost it — the `AppendObject Cluster4Node` "survives owner kill after
+  coalesce" case. Placement now refuses non-redundant groups in a multi-node cluster:
+  a redundancy gate requires the chosen group to survive a single-node loss (≥2 peers,
+  parity > 0) whenever the cluster has ≥2 member nodes, so writes during the formation
+  window get a transient `503 SlowDown` instead of a non-redundant placement, and the
+  gen-0 capture is deferred until redundant groups form. A placement generation
+  recorded over a non-redundant set during the one-node formation race self-heals: the
+  next write advances it to the redundant set, while objects written under the old
+  generation stay readable via the newest-first read probe. The operator
+  `expand-placement` path likewise refuses to record a non-redundant generation in a
+  multi-node cluster, so the self-heal invariant cannot be broken from that side. A
+  genuine single-node
+  cluster is unaffected (1+0 is the best available). The forward read path now also
+  waits out a data-group leader re-election (the read-side mirror of the write path's
+  readiness retry), so a GET racing the killed leader's re-election reaches the new
+  leader instead of returning 500. Fixes the last of the six `AppendObject
+  Cluster4Node` e2e cases.
+
+## [0.0.606.0] - 2026-06-16
+
+### Fixed
+- **Cross-node AppendObject on a multi-node cluster no longer fragments.** In a
+  cluster formed by per-join (no `--bootstrap-expect-nodes`), each node froze its
+  object→group placement candidate set at boot from its then-partial view of the
+  shard-group registry — group registration does not trigger a placement rebuild (by
+  design, to avoid re-routing existing objects). Nodes therefore froze **divergent**
+  subsets, so the same key hash-routed (`hash % len(candidateSet)`) to different
+  data-Raft groups on different nodes; an append issued from a second node landed in
+  a different group than the original write and failed the offset check
+  (`InvalidWriteOffset`) or read back stale / 404. The cluster now establishes a
+  consistent initial placement generation (gen-0) once, lazily on the first object
+  write, recorded into the meta-Raft control plane and applied identically on every
+  node, so all nodes route a key to the same group. Subsequent topology growth keeps
+  using the existing `cluster expand-placement` generation model; the placement-
+  generation registry now dedups against its whole history, so a late gen-0 proposal
+  can never silently revert an operator expansion. Fixes 5 of the 6 `AppendObject
+  Cluster4Node` e2e cases (forwarded append, concurrent offset-0 race,
+  stat-then-append, coalesce, 8 MiB body). The remaining case (`survives owner kill
+  after coalesce`) now fails for a separate, tracked reason — read-failover after a
+  data-group leader dies (no EC-reconstruct / surviving-peer fallback) — not
+  placement routing.
+
+## [0.0.605.0] - 2026-06-16
+
+### Fixed
+- **Audit log search and the Iceberg REST catalog work out of the box.**
+  `--audit-iceberg` defaults ON and writes audit rows to an Iceberg table, and its
+  search path (a DuckDB client attaching to the server's own `/iceberg/v1/config`
+  REST catalog) therefore requires the catalog to be available. But
+  `--enable-iceberg` defaulted OFF, so `s.icebergCatalog` was nil and every Iceberg
+  REST call returned `501 NotImplemented` — audit search 500'd ("audit search
+  warmup failed") and any Iceberg REST client (DuckDB, `warp iceberg`) failed at the
+  mandatory `GET /v1/config` handshake. `--enable-iceberg` now defaults to **true**
+  so the default-on audit lake is actually queryable and the REST catalog is
+  reachable. Fixes the `Audit policy decisions` (SingleNode + Cluster3Node), the
+  `Protocol credential ... attaches DuckDB to the REST catalog`, and the
+  `Multi-Raft ... splits Iceberg catalog` e2e cases. Set `--enable-iceberg=false`
+  to opt out (which also makes audit search unavailable).
+
+## [0.0.604.0] - 2026-06-16
+
+### Fixed
+- **AppendObject onto a plain-PUT object now reads back correctly on a multi-node
+  cluster (single-append case).** An appended object is migrated to BadgerDB (the
+  quorum-meta `PutObjectMetaCmd` format cannot represent appendable objects), then
+  the quorum-meta entry must be removed so reads fall through to BadgerDB. The
+  removal used a LOCAL-only delete, but quorum-meta is K-of-N replicated across the
+  object's placement nodes; the surviving peer replicas shadowed the append because
+  `headObjectMeta` reads quorum-meta first (with peer fan-out), so GET returned the
+  pre-append object on a cluster (single-node passed — the only replica was local).
+  Added a `DeleteQuorumMeta` shard RPC and a `deleteQuorumMetaQuorum` fan-out that
+  removes the replica on every placement node, mirroring `writeQuorumMeta`.
+  - Note: the remaining cross-node `AppendObject Cluster4Node` cases (appends
+    issued from different nodes) need a separate placement-routing-determinism fix
+    (object hash-placement candidate sets are boot-frozen per-node and diverge in
+    dynamically-seeded clusters); that fix is specced separately because making it
+    growth-safe requires recording topology generations under serialization.
+
+## [0.0.603.0] - 2026-06-16
+
+### Removed
+- **Point-In-Time Recovery (PITR) and the logical WAL it replayed.** PITR
+  restored object metadata to an arbitrary timestamp by replaying a per-mutation
+  logical write-ahead log on top of a base snapshot. After the data-WAL removal
+  epic, this logical WAL was the *only* remaining WAL, and PITR was its *only*
+  reader — every S3 mutation paid an advisory async WAL append that nothing
+  consumed. Removing PITR therefore also removes that write-only overhead.
+  - **BREAKING:** the `POST /admin/pitr` admin endpoint is gone. Object-level
+    snapshots and `POST /admin/snapshots`, `POST /admin/snapshots/:seq/restore`,
+    and `DELETE /admin/snapshots/:seq` are **unchanged** — coarse-grained
+    point-in-time *snapshot* restore, the auto-snapshotter, and KEK-sealing of
+    retained snapshots all remain. Only arbitrary-timestamp WAL replay is removed.
+  - Deleted `internal/storage/wal` (the logical WAL package + its `wal.Backend`
+    mutation-capture decorator), `internal/snapshot/pitr.go`, the `/admin/pitr`
+    handler, the `bootLogicalWALOpen` boot phase, and the snapshot `WALOffset`
+    anchor (`Manager.SetPITRWALSealer`, the `WALProvider` interface, the
+    `Snapshot.WALOffset` field, and the pull-through `WALOffset` forwarder).
+    Snapshot files written by older builds still load — the now-absent
+    `wal_offset` JSON field is simply ignored on read.
+
+## [0.0.602.0] - 2026-06-16
+
+### Fixed
+- **AppendObject onto a plain (chunked-PUT) object now reads back correctly on a
+  single node.** Two independent pre-existing bugs were fixed:
+  1. **Placement-group selection.** `lookupPlacementGroupForAppend` ignored the
+     object's own stored `PlacementGroupID` and instead sent the routed data-group
+     from context (or a `group-0` default) as the propose-time PG. The FSM
+     stale-placement check compares that against the freshly-read object's stored
+     PG, so the routed-group ≠ stored-PG mismatch falsely tripped
+     `ErrStalePlacement` ("placement group changed mid-request"). The propose-time
+     PG is now the object's authoritative stored PG (`storage.Object` carries it
+     since the read-plane unification); a real placement move still trips the check.
+  2. **EC-backed base segment misread as a plain append blob.** A chunked PUT
+     stores its bytes as EC-backed segments (`ECData>0`, `NodeIDs` set), read via
+     EC reconstruction. Appending flips the object to `IsAppendable`, so the GET
+     goes through `openAppendableSegments` / `readAtAppendable` — which only knew
+     how to open plain `_segments/<blobID>` files and so failed on the EC base
+     segment with "open segment … (local missing, peer fetch failed)". Both the
+     streaming reader and the range (`ReadAt`) path now detect an EC-backed
+     `SegmentRef` (`segmentRefIsECBacked`) and reconstruct it through the segment
+     store, stitching EC base segments and plain append blobs into one stream.
+  Note: the cluster (multi-group) append read-visibility path remains a separate
+  pre-existing failure tracked outside this change; this fix covers the single-node
+  path and removes the spurious 500 on the EC base segment in all modes.
+- Removed a stale e2e assertion for the long-removed "Volumes" Web UI tab
+  (regression introduced when the volume block-storage subsystem was deleted).
+
+## [0.0.601.0] - 2026-06-16
+
+### Changed
+- **Unified the forwarded PutObject / UploadPart streaming floor to 4 MiB**
+  (`minForwardStreamBytes`, replacing PutObject's implicit 64 MiB cap and
+  UploadPart's 5 MiB `minMultipartForwardStreamBytes`; one shared
+  `shouldStreamForwardBody`). On the cold (forwarded-to-owning-group) path, a
+  forwarded PUT/UploadPart at or above this floor streams its body (body-less
+  args FlatBuffer + a separate body stream); below it the body rides in the args
+  FlatBuffer in a single frame. Previously a forwarded PutObject only streamed
+  above the 64 MiB single-frame cap, so it buffered the whole body (up to tens of
+  MiB) into the request FlatBuffer.
+- Value chosen from an end-to-end forward benchmark (`BenchmarkForwardPutObjectWire`:
+  two real HTTPTransports + a real receiver, so it includes Hertz HTTP processing
+  and receiver-side body parsing). It shows the single-frame path is actually
+  *faster* than streaming across the 0.5–5 MiB range, with the gap widening with
+  size (1 MiB: frame 9.1 ms vs stream 13.0 ms; 5 MiB: 26.9 vs 44.6 ms), because
+  streaming chunks the body into ~11x more allocations plus per-chunk HTTP framing.
+  So the floor is a **memory cap for large objects** (stream to avoid buffering a
+  huge body), not a latency optimization — 4 MiB caps a framed request at
+  ~41 MB/op while keeping the faster frame path for the common 1–4 MiB range.
+  The `body > maxBody` single-frame cap, the frame-path size cap, and the
+  AppendObject buffering cap are unchanged.
+
+## [0.0.600.0] - 2026-06-16
+
+### Changed
+- **S3 read plane unified onto the SegmentReader** — Phase D2 (final) of the
+  volume-removal epic. Removed the whole-object/whole-replica read fallbacks
+  (Branch D local-file reads via objectPath/objectPathV, Branch E peer-fetch
+  whole-replica) from `GetObject`, `readAtPreparedObject`, and `GetObjectVersion`.
+  The read dispatch is now exactly: appendable | SegmentReader | EC reader |
+  terminal error. Deleted the dead `openObjectIfSizeMatches` helper.
+- These fallbacks only ever served volume blocks and legacy N×-replicated objects,
+  neither of which exists (greenfield, owner-confirmed) — every object is created
+  appendable, segmented, or EC. `objectPath`/`objectPathV` are kept (they back the
+  appendable `_segments` and coalesce `_coalesced` path construction); the delete/
+  scrubber cleanup calls are unchanged.
+
+This completes the volume block-storage removal epic (Phases A–D): NBD frontend,
+the `grainfs volume` CLI + admin API, `volume.Manager` + volume-health metrics, the
+N×-replica durability + `internal/volume` package, and now the read-plane fallbacks.
+
+## [0.0.599.0] - 2026-06-16
+
+### Removed
+- **Volume N×-replica durability + the `internal/volume` package** — Phase D1 of the
+  volume-removal epic. Deleted `RepairReplica`/`writeRepairedReplica` (the only writer
+  of whole-replica local files), the scrubber `"replication"` source
+  (`internal/scrubber/replication.go`, `ReplicationObjectSource`/`ReplicationVerifier`)
+  and its boot wiring, `ReplicaRepairerFunc`, `OpenLocalReplica` (concrete method on
+  both DistributedBackend and LocalBackend — not an interface method), the now-dead
+  `writeFileAtomicFromReader` helper, and the vestigial `ServerStorage.VolumeBackend`
+  field (it only ever aliased the primary backend). The `internal/volume` package is
+  fully removed.
+- Safe per owner confirmation: no legacy N×-replicated or volume objects exist on disk
+  (greenfield). The EC scrub source and the orphan-segment/shard scrubbers are
+  unaffected. The S3 read plane is UNCHANGED in this phase — the Branch D/E
+  whole-object/whole-replica read fallbacks are removed in Phase D2.
+
+## [0.0.598.0] - 2026-06-16
+
+### Removed
+- **Volume data-plane wiring + volume-health observability** — Phase C of removing the
+  volume block-storage feature. `volume.Manager` is no longer constructed or wired into
+  the running server (`BuildVolumeManager`, `state.volMgr`, `server.WithVolumeManager`,
+  the VFS thin-provisioning hook). Also removed: the volume block cache
+  (`internal/cache/blockcache`, volume-only), the volume-health Prometheus metrics
+  (`grainfs_volume*` series + their operator-state source), the `VolumePlacementAdapter`,
+  and the admin volume-health helpers.
+- **BREAKING (config):** the `--block-cache-size` flag is removed (it sized only the
+  volume block cache). Passing it now errors.
+- **API:** `GET /api/cache/status` no longer includes the `block_cache` section
+  (`shard_cache` is unchanged).
+- NFS/VFS behavior is unchanged — the VFS volume hook was thin-provisioning accounting
+  only and was never wired in production (the nil path was already the live path). The
+  `internal/volume` package itself, the scrubber replication source, and the read-plane
+  whole-replica fallbacks remain (removed in Phase D). S3/NFSv4/9P/Iceberg unaffected.
+
+## [0.0.597.0] - 2026-06-16
+
+### Removed
+- **BREAKING: the `grainfs volume` CLI and the admin volume HTTP API** — Phase B of
+  removing the volume block-storage feature. Deleted the whole `grainfs volume`
+  command tree (list/create/info/stat/delete/resize/recalculate/write-at/read-at and
+  the volume-scrub subcommands), the admin volume handlers/routes
+  (`GET/POST /v1/volumes`, `/v1/volumes/:name[/stat|/scrub]`, the `/ui/api/volumes`
+  UI routes), the dead Web UI "Volumes" dashboard tab, and the volume-specific code
+  in the shared `volumeadmin` package (volume client methods, volume ops, volume wire
+  types). The shared admin client (`volumeadmin.NewClient`/`PrintJSON`, used by every
+  `grainfs` admin subcommand) and the `grainfs scrub <bucket>` EC bucket scrub are
+  unaffected.
+- `volume.Manager`, the block-cache monitoring panel, the volume-health Prometheus
+  metrics, and the read-plane are untouched in this phase (removed in Phase C/D).
+  S3/NFSv4/9P/Iceberg are unaffected.
+
+## [0.0.596.0] - 2026-06-16
+
+### Removed
+- **BREAKING: the NBD block-device frontend** (`internal/nbd`, the NBD server, the
+  `--nbd-port` flag, the `nbd` protocol-credential type, and the `nbd` entry in the
+  admin storage-protocol-status response). NBD was disabled by default
+  (`--nbd-port 0`); the flag and protocol now error/are absent. This is Phase A of
+  removing the volume block-storage feature — the goal is to collapse the S3 read
+  plane onto the SegmentReader by eventually deleting the whole-object/whole-replica
+  read fallbacks that exist only for N×-replicated volume blocks. The `volume.Manager`,
+  the `grainfs volume` CLI, the admin volume API, and N×-replica durability are
+  untouched in this phase (removed in later phases). S3/NFSv4/9P/Iceberg are unaffected.
+- Deleted the NBD test suites (`tests/nbd_colima`, `tests/nbd_interop`,
+  `tests/e2e/nbd_*`, `internal/cluster/nbd_bench_test.go`) and the NBD compatibility
+  doc; de-NBD'd README/docs and the `grainfs credential` protocol help.
+
+### Note
+- The IAM policy grammar still accepts `nbd` / `nbd/volume` tokens
+  (`internal/iam/policy/parse.go`); these are tied to the volume resource grammar and
+  are removed in the later volume-removal phase, not here.
+
+## [0.0.595.0] - 2026-06-16
+
+### Removed
+- **The unused N×-replication → EC-conversion reshard subsystem** (`ReshardManager`,
+  `ConvertObjectToEC`, `upgradeObjectEC`, `EffectiveECConfig`, the reshard boot loop
+  and registry). Every object is EC-from-PUT (segmented); the reshard manager only
+  acted on non-EC (N×-replicated) objects, which are never produced, so the whole
+  path was dead. EC peer-shard recovery (`RepairShard`) and volume-block replica
+  repair (`RepairReplica`) are unaffected; the shared EC reconstruct core stays.
+  This is Phase 1 of unifying the S3 read plane onto the SegmentReader — production
+  reads are unchanged (they already go through it).
+- **BREAKING (config):** the `--reshard-interval` and `--datagroup-refresh-interval`
+  flags are removed (they drove only the deleted reshard loop). Passing them now
+  errors. The `ValidateRequiredIntervals` always-on check now covers scrub only.
+
+## [0.0.594.0] - 2026-06-16
+
+### Removed
+- **Final sweep of test-only dead production symbols in `internal/cluster`.** Each
+  was referenced only by tests; removals reroute the test to a live equivalent or
+  relocate the helper, with no production behavior change and no coverage loss:
+  - `newECReconstructStreamReader` (thin wrapper) — tests rerouted to the live
+    `newECReconstructStreamReaderWithPrefetch(.., true)`.
+  - `MetaRaft.ProposeIcebergCreateNamespace` (dead wrapper; the live path is
+    `MetaCatalog.CreateNamespace`) — its redundant raft-integration test removed
+    and its end-to-end `ErrNamespaceExists` coverage relocated to the real-raft
+    `TestMetaCatalogLeaderListCommitAndDelete`.
+  - `appendForwardBuffer.InflightBytes` plus the write-only `inflight` mirror
+    field and its two stores (the Prometheus gauge remains the accounting sink).
+  - `ForwardSender.WithMaxForwardReadStreams` (test-only builder) — the one test
+    sets the read-slot pool directly; production keeps the default of 64.
+  - 6 never-emitted `PutTraceStageMetaIndex*` trace-stage constants.
+  - The unprefixed `apply.go` Badger key helpers (`bucketKey`, `multipartKey`,
+    `bucketPolicyKey`, `bucketVerKey`, `objectMetaKey`, `objectMetaKeyV`,
+    `latestKey`, `shardPlacementKey`) moved out of the production file into a
+    `_test.go` helper (they only ever built keys for tests; production apply uses
+    the prefixed `f.keys.*`). No call-site changes.
+
+## [0.0.593.0] - 2026-06-16
+
+### Removed
+- **Production-unreachable EC write fast paths.** The single-local-shard and
+  EC-memory-shards fast branches in the EC PUT dispatcher are removed. Every
+  production simple PUT already takes the chunked path (`shardGroup` is always
+  wired by `bootOwnedGroupsAndEC`), and `ConvertObjectToEC`/coalesce use
+  `writeSpooledShards` directly — only `shardGroup==nil` test fixtures reached the
+  fast paths. They now route through the kept `writeSpooledShards`, which writes
+  the identical on-disk shard format (`[8-byte header ‖ body]`). Behavior-
+  preserving for production: no data-format change, same at-write-time durability.
+  Removed: `putObjectSingleLocalShardSpooled`, `putObjectSingleLocalShardFromReader`,
+  `tryPutObjectECMemoryShards`, `writeMemoryShards`, `writeSingleLocalReader`,
+  `ecMemoryShardFastPathEnabled`, `maxECMemoryShardFastPathBytesForCfg` + caps.
+- **Dead symbols surfaced by a test-only-dead-code sweep** (zero references
+  repo-wide, or test-only): `PlacementGroupHasFullEntry`; the unused
+  `MetaRaft.ProposeIceberg{DeleteNamespace,CreateTable,CommitTable,DeleteTable}`
+  wrapper methods (the live Iceberg catalog path goes through `iceberg_catalog.go`
+  directly; the apply/decode/snapshot path and `MetaCmdType*` constants are
+  unchanged); the orphaned `raftSnapshotTimeout` constant (duplicate of the live
+  `metaRaftSnapshotTimeout`); and the test-only `writeShardReaders` wrapper. Net
+  ~490 fewer lines; no production or wire-format change.
+
+## [0.0.592.0] - 2026-06-16
+
+### Performance
+- **`syncDirChain` no longer re-fsyncs ancestor shard directories whose child
+  link a prior completed write already made durable.** On the fsync classes
+  (small / no-redundancy shards), each shard write previously fsynced the leaf
+  shard dir AND every ancestor up to the data dir, on every write — so a shared
+  ancestor (`<bucket>`, `<obj>_segments`) was re-fsynced once per shard/segment.
+  Now the leaf is fsynced every write (a new shard file always lands there) but an
+  ancestor is fsynced only the first time its child entry is created and
+  persisted; a process-local `dirDurable` marker (Stored only AFTER the persisting
+  fsync returns) lets later writes skip it. A newly-created directory is absent
+  from the marker, so a new child's namespace entry is always persisted before the
+  write returns — and the marker is consulted on the CHILD, so a new sibling is
+  never skipped. The at-write-time durability boundary is byte-identical to before
+  (leaf + full ancestor chain durable at success; the data-dir's own bucket entry
+  remains out of scope, exactly as before). Race-free under the concurrent
+  same-leaf shard writes the EC data-shard path issues (post-fsync marking).
+  The fsync reduction is deployment-dependent (proportional to shards/segments
+  sharing an ancestor sub-tree); no end-to-end latency delta is claimed.
+
+## [0.0.591.0] - 2026-06-16
+
+### Changed
+- **Orphan-segment GC now runs across all locally-hosted groups (was group-0
+  only).** The background scrubber reclaims leaked raw append-segment blobs
+  (`{dataDir}/groups/<gid>/data/<bucket>/<key>_segments/<blobID>`) for every group
+  this node LEADS and is caught-up for — previously only group-0's buckets were
+  swept, so a node leading other groups leaked their segment blobs forever (disk
+  waste, no data loss). Unlike EC shards, segments live per-group on disk and do
+  not float by disk (the balancer touches only the shard tree), so each bucket's
+  segments belong to exactly one owning group. The fix:
+  - The scrubber's per-bucket segment loop is driven by the union of every hosted
+    group's buckets (`SegmentSweepBuckets`) instead of the group-0-scoped
+    `ListBuckets`; a bucket-list error fails closed (skips the sweep that cycle).
+  - Each per-bucket walk/scan/delete dispatches to the bucket's owning-group
+    backend (its own `b.root` subtree), gated per-bucket on that group's caught-up
+    state — only the caught-up leader of a group GCs its segments, so a lagging or
+    follower FSM can never false-orphan a committed segment. This replaces the
+    single group-0 caught-up top gate, so a node that leads group-N while
+    following group-0 now correctly GCs group-N's segments.
+  - The GC known-set (`ListAllObjectsStrict`) unions live object versions across
+    all hosted groups, so a sibling group's live segment is never false-orphaned.
+
+  Single-node serve is unchanged (one hosted group; every bucket resolves to it).
+
+## [0.0.590.0] - 2026-06-15
+
+### Changed
+- **EC orphan-shard sweep now runs on multi-group nodes (single-group gate
+  removed).** The sweep added in 0.0.589.0 was gated to single-group nodes
+  because the group-0 backend could only judge group-0's metadata. The root cause
+  was not the on-disk shard path (a layout epic was investigated and rejected: the
+  balancer is group-blind *by design* — it floats shards to the lowest-disk node
+  cluster-wide, so a shard's location is intentionally decoupled from its group,
+  and placement metadata tracks where it lives). The fix makes the sweep judge
+  each candidate against **authoritative metadata**:
+  - **Union live-set across all locally-hosted groups.** A versioned object owned
+    by any hosted group (its FSM `obj:` record lives under that group's keyspace
+    prefix on the shared store) is now in the known-set, so a sibling group's live
+    shards are protected — previously only group-0's were.
+  - **Owning-group gate (keeps balancer-floated shards).** A candidate whose
+    router-resolved owning group is **not locally hosted** is kept, never deleted:
+    the node lacks the metadata to prove it dead (it was floated in by the
+    balancer from a group this node does not host). Documented residual: such a
+    shard, if genuinely dead, leaks (disk waste) rather than risking data loss —
+    identical to what the rejected layout epic would have left.
+  - **All-hosted caught-up gate.** The replication-lag gate now covers *every*
+    hosted group, not just self, so a lagging sibling group cannot false-orphan
+    its own committed-but-not-yet-applied shard.
+
+  Behavior for single-node serve is unchanged (one hosted group group-0, every
+  bucket routes to it). Segment GC remains group-0-scoped (separate follow-up).
+
+## [0.0.589.0] - 2026-06-15
+
+### Added
+- **EC full-object orphan-shard scrubber (reclaims leaked EC shard dirs).**
+  `*DistributedBackend` now implements `scrubber.OrphanWalkable`
+  (`WalkOrphanShards`/`DeleteOrphanDir`), so the background scrubber finally
+  reclaims leaked full-object EC shard directories
+  (`<dataDir>/shards/<bucket>/<key>/<versionID>/shard_N`) — previously the
+  interface was unimplemented and these leaked forever (e.g. a multipart-complete
+  propose timeout that preserved shards for a genuinely-uncommitted entry). The
+  sweep is exhaustively fail-closed against data loss:
+  - **Single-group safety gate.** The `ShardService` dataDirs are shared across
+    every local group, but the scrubber's group-0 backend only sees group-0's
+    metadata. The sweep runs only when the node hosts exactly one data group that
+    is group-0 (== the scrubber's backend); multi-group nodes leak (never lose)
+    until the per-group fan-out follow-up. Default is fail-closed (no sweep).
+  - **All-versions liveness, cleanable-key safe.** `ScanObjects` is latest-only,
+    so live retained versions are protected by forward-mapping every FSM `obj:`
+    record to its canonical shard dir via the same `getShardDir` the writer used
+    (a reverse-parse of the on-disk path would mis-identify a cleanable logical
+    key like `a/../b` or `dir/`, whose shards land in a `filepath.Join`-cleaned
+    dir, and delete a live version). Regular-PUT objects (no `obj:` record) are
+    re-checked against the peer-fallback quorum-meta (K-of-N: a parity node holds
+    shards without a local record; quorum-meta storage is itself cleaned-keyed so
+    the lookup matches). Any read uncertainty keeps the shards.
+  - **Snapshot pins.** Snapshot-pinned full-object versions are added to the
+    known-set via the new `snapshot.Manager.AllFrozenObjectVersions` (mirrors
+    `AllFrozenSegmentPaths`, strict/fail-closed), so PITR-referenced shards are
+    never swept even after their live metadata is hard-deleted.
+  - **Caught-up gate**, **in-flight `.tmp` skip**, an age gate floored at
+    `2*proposeForwardTimeout` (so the bounded write→commit window can never reach
+    it), a two-cycle tombstone delay, segment/coalesced shard-class exclusion, and
+    a delete-time re-validation (gate + caught-up + snapshot + liveness re-checked
+    before each `DeleteOrphanDir`). Resolves the phantom-commit residual-leak
+    TODO as a side effect.
+
+## [0.0.588.0] - 2026-06-15
+
+### Changed
+- **Renamed two WAL-era misnomer identifiers in the shard service
+  (behavior-neutral).** After the data WAL was removed (S2–S4), the constant
+  `walPayloadInlineThreshold` and the function `maxRawShardPayloadForWAL` no
+  longer relate to any WAL — the threshold gates write-time fsync vs. EC
+  durability, and the cap is purely a buffering memory bound. They are now
+  `largeShardFsyncThreshold` and `maxRawShardPayload` respectively. Internal
+  symbols only; no behavior, value, or wire change.
+
+## [0.0.587.0] - 2026-06-15
+
+### Fixed
+- **Versioned `ListObjectVersions` now enumerates every version across all shard
+  groups (no longer latest-only under multi-group sharding).** Objects are
+  key-hash placed across shard groups (`RouteObjectWrite` → `groupIDForObject`,
+  a pure function of `(bucket, key)`), but `ListObjectVersions` routed via
+  `RouteBucket` to the bucket's single assigned group — so versions of keys that
+  hashed to other groups were invisible (the LIST returned the latest-only set,
+  often zero old versions). It now fans out across all groups
+  (`c.meta.ShardGroups()`), reading each group's per-version FSM enumeration
+  (local backend or forwarded, read-fenced), unions the results, and reconciles
+  a single authoritative `IsLatest` per key from the groups' `lat:` pointers
+  (never promoting a non-flagged `PreserveLatest` version; on a cross-group
+  `lat:` split the newest UUIDv7 version wins). Fan-out is fail-closed (a group
+  error fails the LIST rather than silently dropping versions). The single-group
+  / internal-bucket path is unchanged. Snapshots (`ListAllObjects`) inherit the
+  fix. Also fixes the per-group leaf: a versioned `obj:{bucket}/{key}/{vid}` row
+  whose `lat:` pointer lives in another group (split key, or a `PreserveLatest`
+  write) was emitted as a corrupt legacy row (`Key="{key}/{vid}"`,
+  `VersionID=""`, `IsLatest=true`); it now disambiguates via the stored
+  `objectMeta.Key` and emits a proper non-latest version.
+
+## [0.0.586.0] - 2026-06-15
+
+### Fixed
+- **S3 versioning now retains old versions on a versioning-enabled bucket
+  (GET/HEAD `?versionId=<old>` no longer 404s).** A simple PUT commits via
+  per-node quorum-meta (latest-only, one record per bucket/key), so an
+  overwritten version's per-version FSM metadata was never written and a read of
+  the older version returned `ErrObjectNotFound`. The S3 edge now resolves the
+  bucket's versioning state once (the same read `AppendObject` already does) and
+  threads an **authoritative** decision down to the commit path; for a
+  versioning-enabled bucket the per-group backend also persists the per-version
+  FSM key (`obj:{bucket}/{key}/{versionID}`) for retention. The per-group commit
+  backend never reads bucket versioning itself — that would cross the
+  control/data-plane boundary, since it holds no replicated `bucketver` state.
+  The decision threads via request context locally and over the forward wire
+  (new `PutObjectArgs.versioning_state` tri-state: 0=unknown/old-peer,
+  1=disabled, 2=enabled), so forwarded PUTs on a multi-node cluster behave
+  identically. Coverage also includes form-POST and CopyObject destination
+  writes.
+- **HEAD/GET `?versionId=<deleteMarkerID>` now returns 405 MethodNotAllowed
+  instead of 200.** `headObjectMetaV`'s quorum-meta fast path returned the
+  latest record without folding a delete marker; after a soft-delete the latest
+  quorum-meta record IS the marker tombstone, so a versioned read of the marker
+  wrongly succeeded. It now folds `IsDeleteMarker` to `ErrMethodNotAllowed`,
+  matching the BadgerDB fallback (`deleteMarkerETag`) and the method contract.
+
+### Known issues
+- Versioned `ListObjectVersions` does not enumerate old versions under
+  multi-group sharding (returns latest only). `ListObjectVersions` iterates a
+  single group backend's FSM `obj:` keys, while a bucket's objects are sharded
+  across groups by key-hash and regular LIST uses cross-group quorum-meta
+  scatter-gather (which is latest-only). Pre-existing; a proper fix needs a
+  cross-group scatter-gather over per-version FSM keys — tracked as a separate
+  slice.
+
+## [0.0.585.0] - 2026-06-15
+
+### Changed
+- **Multipart-complete now takes the single chunked path regardless of total
+  size.** `CompleteMultipartUpload` no longer branches on `manifest.TotalSize`
+  (large→chunked vs small→spool); every completion routes through
+  `putMultipartObjectChunked` when a `ShardGroupSource` is wired (always in
+  production), matching the simple-PUT single path. Small / single-part / empty
+  completions now chunk into one segment. ETag is unchanged (whole-object MD5 —
+  GrainFS does not use AWS `<hash>-N` multipart ETags); `Parts` metadata is
+  preserved. The legacy spool path remains only for backends without a
+  `ShardGroupSource`. Removed the now-dead `chunkedPathThresholdMet` predicate.
+
+
+## [0.0.584.0] - 2026-06-15
+
+### Changed
+- **Single PUT path now covers every simple PUT (no exemptions).** Building on
+  v0.0.583.0, empty (0-byte) objects and internal `__grainfs_*` buckets now take
+  the same chunked/segment path as all other simple PUTs — so object size and
+  bucket class no longer pick a path. The chunked `SegmentWriter` computes a
+  bucket-aware whole-object ETag (xxhash3 for internal buckets, MD5 for
+  S3-exposed) so EC-rewrap verification still holds; a 0-byte object writes one
+  empty segment and reads back empty (`clusterSegmentStore` returns an empty
+  reader for a 0-byte segment, and the non-appendable segmented-object read
+  routing — versioned and unversioned — no longer requires `Size > 0`). Only
+  genuinely distinct operations keep separate paths: multipart-complete and
+  internal EC-rewrap. Single-node (1+0) and multi-node (k+m) share the path; the
+  EC width is a parameter, not a branch.
+
+
+## [0.0.583.0] - 2026-06-15
+
+### Changed
+- **Single PUT write path (size-independent).** Removed the three pre-spool
+  fast paths (single-local in-memory, known-size single-local streaming, EC
+  in-memory) — they duplicated placement + size routing and, lacking a size cap
+  on the known-size path, wrote a large object as one over-cap whole-object
+  shard (a `>64 MiB` simple PUT with `Content-Length` 500'd with
+  `shard payload too large`). Every PUT now spools, then routes through one
+  dispatcher. **Every non-empty, non-internal simple PUT now takes the chunked/
+  segmented path regardless of size** (small objects get a single segment), so
+  the route no longer branches on object size. The 64 MiB shard memory cap is
+  never reached by a well-formed PUT. ETag/Content-MD5 semantics are unchanged
+  for user buckets (md5(plaintext)).
+  - **Exemptions (keep the existing path):** empty (0-byte) objects; internal
+    `__grainfs_*` buckets (their xxhash3 ETag is an EC-rewrap corruption oracle
+    and must not be overwritten with the chunked MD5); multipart-complete and
+    internal EC-rewrap (distinct operations); and any backend without a
+    `ShardGroupSource` (never the case in production — `bootOwnedGroupsAndEC`
+    always wires it).
+
+## [0.0.582.0] - 2026-06-15
+
+### Removed
+- **Production shard data WAL teardown (WAL-removal epic S4, final).** Boot no
+  longer opens, wires, or replays a shard data WAL: `datawal.Open`,
+  `WithDataWAL`, `WithDataWALRepairSink`, and the boot-time `RecoverDataWAL`
+  replay are gone. The `ShardService` WAL surface (`DataWALAppender`,
+  `AppendShardMetadataBatch`, `RecoverDataWAL`, the WAL-replay materializer, the
+  data-WAL startup-repair subsystem) and its 6 `grainfs_datawal_startup_repair_*`
+  metrics are deleted. Shard PUT durability is fully write-time now: small /
+  no-redundancy shards fsync the file + parent-dir chain; large redundant shards
+  rely on EC reconstruction + the background scrubber. **Migration:** the boot
+  path performs NO WAL replay — a pre-S2 node that crashed with shards covered
+  only by the WAL (not yet fsynced) loses those shards on upgrade. The
+  `{dataDir}/datawal` directory is no longer created or read; any pre-existing
+  one is ignored.
+- **`--direct-io` flag removed (breaking, hidden flag).** The direct-I/O shard
+  write path was reachable **only** through the deleted WAL-replay materializer;
+  the production write path (`writeEncryptedShardFile`) never honored it after
+  the S2 refactor, so `--direct-io` had already been a no-op for production
+  shard writes. The flag, the `WithDirectIO` option, and the buffered/direct
+  writer helpers are removed.
+
+### Internal
+- The `internal/storage/datawal` Go package and the `internal/storage` LocalBackend
+  test-fixture WAL (`NamespaceNode`) are **retained** — they are an independent
+  WAL instance, unaffected by the shard-side teardown.
+
+## [0.0.581.0] - 2026-06-15
+
+### Removed
+- Cluster shard-packing (EC shards packed into node-local `.pack` blobs) is
+  disabled and removed. The `--shard-pack-threshold` flag now defaults to `0`
+  and any value `> 0` (or `GRAINFS_SHARD_PACK_THRESHOLD > 0`) is a hard boot
+  error: a durable pack index was never built, so per-blob fsync cannot replace
+  the WAL-replay-reconstructed index (this is why packing is removed rather than
+  re-homed onto the new fsync model). The pack store, writer actor, write/read
+  paths, and the WAL-replay materializer case are deleted. **Note:** this is the
+  `internal/cluster` shard-pack only; the `internal/storage/packblob`
+  packed-object backend is a separate subsystem and is unaffected.
+
+### Internal
+- Rolling upgrades are safe: a data WAL containing legacy `OpShardPackPut` /
+  `OpShardPackDelete` records still replays (the records are skipped by the
+  materializer's default arm; the `datawal` op constants are retained for
+  decode). Any data that lived only in a `.pack` blob is dropped — shard-packing
+  was not relied upon (GrainFS has no production deployment). The
+  `--shard-pack-threshold` flag is retained as a hard-error gate so an operator
+  with it set gets a clear message rather than an unknown-flag failure.
+
+## [0.0.580.0] - 2026-06-15
+
+### Durability
+- Small shards (< 1 MiB) and large no-redundancy shards (`ParityShards==0`) now
+  establish durability with a write-time shard-file fsync **plus a fsync of the
+  shard's directory chain** (leaf shard dir + each newly-created ancestor up to
+  the data dir; locked order `write → Sync(tmp) → rename → syncDirChain`) instead
+  of a data-WAL record. The `OpShardPut` record and WAL `Flush` are no longer
+  written for these classes. After this change the production shard PUT path
+  writes no `OpShardPut` data-WAL record for any non-packed shard class
+  (small / no-redundancy → write-time fsync; large-redundant → EC, v0.0.579.0).
+  Shard-packing remains the off-by-default `OpShardPackPut`-backed exception
+  (disabled in a later slice). The Durability-before-visibility invariant is
+  enforced: a shard-durability failure aborts the PUT before the object becomes
+  visible, on both the single-local and EC commit paths.
+
+### Performance
+- The new directory-chain fsync ADDS fsyncs to the small-object and
+  no-redundancy-large PUT path (the data WAL's N→1 group-commit fsync
+  amortization is gone — this matches minio's per-object fsync model). The
+  large-redundant PUT path (the benchmark path) is unchanged: it remains
+  fsync-free, with durability owned by EC reconstruction.
+
+### Internal
+- The data WAL wiring and boot recovery remain in place for now: pre-upgrade
+  inline `OpShardPut` records still replay on boot, so rolling upgrades keep
+  in-flight small shards durable. The regular shard-write path no longer
+  requires a wired WAL (durability is fsync/EC); the stream write path still
+  does until the WAL teardown slice.
+
+## [0.0.579.0] - 2026-06-15
+
+### Performance
+- Large EC shards with redundancy (`ParityShards>0`) no longer write a
+  metadata-only data-WAL record per shard write — one fewer WAL fsync on the
+  dominant PUT path. The record only served eager startup-repair detection; with
+  the background scrubber now covering regular-PUT objects (v0.0.578.0),
+  durability and repair for these shards come from EC reconstruction plus the
+  scrubber. On-disk shard durability is unchanged — redundant shards were never
+  fsynced before either (durability has always been EC). The only behavioral
+  change is repair detection: eager (restart WAL replay) becomes lazy (read-time
+  EC reconstruction plus the scrubber sweep). Small shards keep their
+  inline-payload WAL durability; large no-redundancy shards (`ParityShards==0`)
+  keep the metadata-only record and a direct fsync.
+
+### Operators
+- Single-node deployments that relied on a process restart to eagerly repair a
+  missing EC shard should consider a shorter `--scrub-interval` (default 24h):
+  with the large-shard WAL record gone, the background scrubber is now the
+  proactive repair trigger (a single node has no peer to reconstruct from at
+  restart).
+
+## [0.0.578.0] - 2026-06-15
+
+### Fixed
+- The EC background scrubber now proactively repairs ordinary (single-PUT)
+  objects. Its work-list source (`DistributedBackend.ScanObjects`) previously
+  walked only the group-raft FSM `lat:` index, which holds internal-bucket and
+  multipart-complete objects — but NOT regular single-PUT objects, which are
+  recorded in per-node quorum-meta and never proposed to the FSM. As a result
+  the scrubber never saw the bulk of user data and never proactively repaired a
+  missing/corrupt shard for it (only read-time EC reconstruction and
+  process-restart recovery covered those objects). `ScanObjects` now also merges
+  quorum-meta entries, deduped by key against the `lat:` walk with the FSM
+  authoritative (so a stale-live quorum-meta file for a deleted key is
+  suppressed); tombstones and non-EC entries are skipped. This is repair-only —
+  it adds no deletion path and only enlarges the scrubber's orphan known-set
+  (protective, never deletion-expanding). It is also the prerequisite repair
+  backstop for the planned data-WAL removal.
+
+## [0.0.577.0] - 2026-06-14
+
+### Performance
+- The shard-file, quorum-meta, and shadow-meta durability fsyncs now honor the
+  `GRAINFS_FSYNC_MODE` policy instead of always calling `os.File.Sync()`. On
+  macOS `os.File.Sync()` issues `F_FULLFSYNC` (a full drive-cache→platter
+  barrier, ~10-20ms); these three sites bypassed the policy, so a PUT paid 2×
+  `F_FULLFSYNC` per object even in `fast` mode — making `GRAINFS_FSYNC_MODE=fast`
+  a no-op for the dominant fsyncs. Routing them through `directio.Sync` (the
+  same helper the data WAL already uses) makes `fast` issue a plain `fsync(2)`
+  and `off` skip the fsync, matching the documented reduced-durability contract.
+  Measured single-node macOS PUT (1MiB, conc 16, fast mode): **191 → 1017 obj/s
+  (5.3×)**; default `full` mode is unchanged (still `F_FULLFSYNC`, durability
+  preserved). On Linux this is a no-op (`fast` already equals `full` — there is
+  no `F_FULLFSYNC`). The win is a macOS-durability-matched comparison: against
+  single-node MinIO (no per-object `F_FULLFSYNC`), GrainFS single-node fast-mode
+  PUT goes from 0.14× to ~0.77×.
+
+## [0.0.576.0] - 2026-06-14
+
+### Fixed
+- Multipart-complete propose failures no longer risk deleting a committed
+  object's shards. `CompleteMultipartUpload` commits via a raft propose; that
+  propose can fail with a server-side timeout (`ErrProposeTimeout`) or client
+  cancellation while the raft entry **still commits later** (the phantom-commit
+  window). The completion paths previously eager-deleted the object's EC /
+  segment shards on any propose error, so a phantom commit would leave object
+  metadata pointing at deleted shards — an unreadable object with no retry. Eager
+  shard deletion is now gated by `shardCleanupSafeOnProposeError`: it runs for
+  definite-no-commit errors (encode failure, FSM apply error, terminal
+  non-leader) and is suppressed only for the phantom-commit window. Covers both
+  the EC-spooled completion path and the chunked (segmented) completion path.
+  (Note: there is no EC orphan-shard scrubber yet, so a shard retained on the
+  phantom window leaks if the entry ultimately does not commit — a rare, bounded
+  trade against destroying committed data; tracked in TODOS.)
+
+## [0.0.575.0] - 2026-06-14
+
+### Fixed
+- Multipart-completed objects were missing from `ListObjectsV2`. A regular PUT
+  commits object metadata to per-node quorum-meta, which the Phase 4 index-free
+  LIST scans; `CompleteMultipartUpload` committed only to the group-raft FSM, so
+  `GET`/`HEAD` worked (via the BadgerDB fallback) but LIST never enumerated the
+  object. Completion now **dual-writes**: the group-raft propose stays the
+  authoritative atomic commit (it writes the object meta and deletes the
+  multipart manifest in one transaction, which prevents manifest leak / upload-ID
+  reuse), and quorum-meta is then written as a best-effort LIST-visibility
+  mirror. If the mirror write fails the object is still durably committed and
+  served by `GET`/`HEAD`; only LIST visibility lags until a repair re-derives it.
+  Applies to both the in-memory/EC-spooled completion path and the chunked
+  (segmented) completion path.
+
+## [0.0.574.0] - 2026-06-13
+
+### Fixed
+- `Content-MD5` is now honored on the last two PUT paths, completing the
+  cross-path validation story. (1) `UploadPart` validates a supplied
+  `Content-MD5`: the digest is threaded through the storage `UploadPart`
+  interface and checked in the impls that own the part file, which **delete the
+  staged part on mismatch** (400 `BadDigest`) so a rejected part cannot be
+  completed; a malformed `Content-MD5` header on `UploadPart` returns 400
+  `InvalidDigest`. (2) `LocalBackend.PutObjectWithRequest` now compares the
+  computed body MD5 to `req.ContentMD5Hex` before committing (400 `BadDigest`),
+  closing the single-node object-PUT gap; the packblob and generic `Operations`
+  request fast paths no longer drop `ContentMD5Hex`, so it reaches the inner
+  backend for large objects.
+
+## [0.0.573.0] - 2026-06-13
+
+### Fixed
+- `Content-MD5` validation now covers the remaining PUT paths. (1) A single-node
+  packblob small-object PUT whose body does not match the supplied `Content-MD5`
+  now returns 400 `BadDigest` instead of committing — the digest is checked
+  against the in-memory body before the pack/inner write. (2) A malformed
+  `Content-MD5` header (not base64, or not a 16-byte digest) now returns 400
+  `InvalidDigest` instead of being silently ignored; the header is rejected at
+  the S3 handler before the PUT runs.
+- A cluster `PutObject` carrying `x-amz-acl` now persists the ACL in the
+  object's metadata on every node (direct or forwarded), so `HeadObject` and
+  `GetObjectACL` reflect it. Previously the PUT path ignored `req.ACL` entirely
+  (only `SetObjectACL` stored an ACL), so a PUT-with-ACL silently dropped it.
+  The ACL bitmask is threaded into the `PutObjectMetaCmd` on every PUT write
+  path and carried on the forward wire, matching how SSE/user-metadata/tags are
+  already persisted atomically on PUT.
+
+## [0.0.572.0] - 2026-06-13
+
+### Changed
+- Cluster object PUTs now take a **single write path**. The streaming-EC "put
+  pipeline" (taken by direct-to-voter PUTs when a size hint was present) has
+  been removed; every PUT — direct or forwarded — now goes through the spool EC
+  writer, so a PUT has the same effect and the same commit semantics on any
+  node. Commit semantics unify to **strict all-shards-durable** (every K+M shard
+  must be written before the PUT is acknowledged): a direct PUT now matches what
+  a forwarded PUT already did, guaranteeing full redundancy at ack time. Under a
+  degraded cluster (a shard peer down) a PUT now fails until the peer recovers,
+  rather than acking with parity written best-effort. Normal-cluster throughput
+  is unaffected (streaming and spool measured equivalent in the put-streaming-EC
+  benchmarks). Objects already written with the interleaved stripe layout remain
+  fully readable — the de-interleave read path is unchanged; new objects use the
+  contiguous (non-interleaved) layout.
+
+### Fixed
+- `Content-MD5` is now validated on the single cluster PUT path on every node. A
+  PUT whose body does not match the supplied `Content-MD5` returns 400
+  `BadDigest` whether it lands on a voter or is forwarded to one (forwarded PUTs
+  carry `content_md5_hex` over the wire and a mismatch round-trips as
+  `BadDigest`, not a generic 500). Previously a forwarded PUT skipped the check
+  entirely and a direct mismatch surfaced as a 500.
+
+### Removed
+- Deleted the `internal/cluster/putpipeline` package and its boot wiring,
+  including the experimental `GRAINFS_PUT_MULTINODE_STREAM` opt-out (the
+  streaming-EC write path it gated no longer exists).
+
+## [0.0.571.0] - 2026-06-13
+
+### Fixed
+- A cluster `PutObject` carrying user metadata (`x-amz-meta-*`) now succeeds on
+  any node. Previously, when such a PUT landed on a node that had to forward it
+  to a voter, the coordinator rejected it with `UnsupportedOperationError` (501)
+  because the forward wire format did not carry user metadata — the identical
+  request succeeded on a voter but failed on a non-voter. The forward
+  `PutObjectArgs` FlatBuffers message now carries a `user_metadata:[Tag]` field
+  (wire-compatible append; old peers read it as empty), both forward receive
+  paths (buffered and streaming) restore it onto the `PutObjectRequest`, and the
+  coordinator's reject-on-metadata guard is removed. ACL is intentionally not
+  forwarded: a local cluster PUT ignores `req.ACL` today (it is only honored via
+  `SetObjectACL`), so a forwarded PUT now drops `x-amz-acl` exactly as a local
+  one does — result-identical. True ACL persistence and forwarded `Content-MD5`
+  (BadDigest) validation are tracked as separate follow-ups in `TODOS.md`.
+
+### Removed
+- Deleted the unused `LocalExecution.ResolveObjectPlacementRead` method (no
+  production caller).
+
+## [0.0.570.0] - 2026-06-13
+
+### Changed
+- Inbound traffic admission for the cluster transport's streaming routes (shard
+  read/write, forward write/read, append-segment read) is now a single Hertz
+  `admissionMiddleware` registered ahead of each route, replacing the
+  per-handler `TrafficLimiter.Acquire`/503/`defer release()` boilerplate they
+  each repeated. Those routes already acquired before reading their large
+  request body, so the move is behavior-equivalent. The buffered and gossip
+  routes keep admission in-handler (after reading their bounded payload, via a
+  shared `acquireAdmission` helper) so a slow-body peer cannot hold a traffic
+  slot during the read. Under limiter saturation a streaming route's
+  readiness/validation now yields 503-overloaded rather than 503-not-ready /
+  400 (both retryable; the routes are SPKI-pinned authenticated peers, so a
+  malformed request is a trusted-peer bug and the status change is immaterial);
+  non-saturated behavior is unchanged.
+
+## [0.0.569.0] - 2026-06-13
+
+### Changed
+- Zero-CA invite-join now runs over HTTP (Hertz) instead of raw TLS-over-TCP,
+  removing the last hand-rolled `crypto/tls` listener and accept loop from
+  `internal/transport`. `NewHTTPJoinListener` serves a single `POST /_grainfs/join`
+  on the dedicated join port; it passes a plain listener with `WithTLS` so Hertz's
+  standard transport surfaces the per-request `tls.ConnectionState` the handler
+  needs to capture the peer SPKI and RFC5705 channel binding. `DialJoinHTTP` is a
+  one-shot client (dial, pin server SPKI, derive the binding, build the request
+  from it, single round-trip). Security semantics are preserved byte-for-byte:
+  permissive client-cert accept, peer-SPKI capture, channel binding, client SPKI
+  pin, and the not-leader gate; the request body is capped at 1 MiB. HTTP framing
+  replaces the manual length-prefix fields, half-close contract, and leader
+  RST-drain, which are deleted along with `tcp_join.go`. The cross-session relay
+  and forged-binding adversarial e2e tests pass over the HTTP path.
+
+  **Breaking (flag-day):** the join wire is not backward compatible — a node on
+  this version cannot complete an invite-join handshake with a peer on an older
+  (TCP-join) version. Upgrade is a coordinated cutover, consistent with the
+  greenfield transport policy.
+
+## [0.0.568.0] - 2026-06-13
+
+### Changed
+- Phase 6.5 S3 (final slice) — `internal/cluster` no longer imports BadgerDB
+  in production code, completing the MetadataStore abstraction.
+  `NewDistributedBackend`/`ForGroup` take an injected `MetadataStore` (the
+  composition root opens and wraps the DB; ownership is explicit — non-shared
+  backends close the injected store, shared backends never touch it), the raw
+  `db` field and `FSMDB()` accessor are gone, and serveruntime wires the
+  lifecycle/migration stores from the raw shared-FSM handle it already owns.
+  The legacy-meta auto-migration opens its DB at the boot layer and passes a
+  wrapped store into `MigrateLegacyMetaToCluster`. Opening the raft store
+  BadgerDB moved to `internal/raft` (`OpenV2Stores`). The package-test
+  singleton backend now injects the in-memory `MemStore` — the Phase 6.5
+  testability goal in practice. A recursive guard test pins the invariant:
+  non-test files under `internal/cluster` must not import
+  badger/badgermeta/badgerutil (mutation-verified).
+
+### Fixed
+- serveruntime now stops the group-0 backend's coalesce worker and backstop
+  scanner via the boot cleanup stack before the shared FSM-state BadgerDB
+  closes. Previously `DistributedBackend.Close` was never called on the main
+  backend, so those goroutines could outlive shutdown or boot-error cleanup
+  and read a closed BadgerDB (pre-existing; surfaced by the Phase 6.5 S3
+  review).
+
+## [0.0.567.0] - 2026-06-13
+
+### Changed
+- Phase 6.5 S2 — `internal/cluster`'s entire badger transaction closure now runs
+  through the metastore contract: 81 `*badger.Txn` signatures and 48 View/Update
+  closures across 26 production files (plus 27 test files) converted to
+  `MetadataTxn`/`MetaItem`/`MetaIterator`, badger sentinels replaced by
+  `ErrMetaKeyNotFound`/`ErrMetaTxnTooBig`. Transaction-opening holders (FSM,
+  apply actor, segment orphan log, putpipeline metadata sink) take a
+  `MetadataStore`; `DistributedBackend` keeps the raw `*badger.DB` handle
+  (FSMDB/Close/constructors) alongside the wrapped store until the final
+  Phase 6.5 slice. Behavior-neutral: the adapter forwards 1:1, iterator
+  prefetch defaults are preserved explicitly, and the apply actor's
+  ErrTxnTooBig split-and-retry flow is untouched. The metastore contract now
+  also guarantees Discard idempotence (pinned by the conformance suite).
+  Direct badger imports in cluster are down to six handle/lifecycle files.
+
+## [0.0.566.0] - 2026-06-13
+
+### Added
+- Phase 6.5 S1 — metadata-store contract package, groundwork for removing direct
+  BadgerDB imports from `internal/cluster`. New leaf package `internal/metastore`
+  defines the Store/Txn/Item/Iterator interfaces (mirroring the badger API subset
+  cluster actually uses, zero-copy access shapes included), the sentinel errors
+  (`ErrKeyNotFound`, `ErrTxnTooBig`, `ErrDiscardedTxn`), and an in-memory `MemStore`
+  built on copy-on-write snapshots (snapshot isolation, no lock held across a
+  transaction, badger-exact finished-transaction semantics). New `internal/badgermeta`
+  adapts `*badger.DB` to the contract with per-Get item allocation (badger Get-items
+  stay independently valid until txn end) and a zero-allocation iterator item pinned
+  by an AllocsPerRun test. A shared conformance suite (`internal/metastore/storetest`,
+  19 cases) pins both implementations to identical semantics, including snapshot
+  isolation across commits and discarded-transaction behavior verified against badger
+  v4 source. Dormant: no production consumer yet — `internal/cluster` gains type
+  aliases (`MetadataStore`, `MetadataTxn`, `MetaItem`, `MetaIterator`) and sentinels
+  only; behavior is byte-identical.
+
+## [0.0.565.0] - 2026-06-13
+
+### Changed
+- Phase 9 primitive separation, executed in-repo: the HRW placement algorithm moved to
+  `internal/hrw` (pure function, stdlib+xxh3 only) and the gossip primitive (sender,
+  receiver, receipt gossip, NodeStatsStore) moved to `internal/gossip`. The gossip
+  package no longer references cluster types: the capability gate is consumed through a
+  new `EvidenceReporter` interface (satisfied by `cluster.CapabilityGate`) and node-ID
+  resolution through an `AddressResolver` func adapted by `cluster.NodeAddressBookResolver`,
+  so `internal/gossip` imports no cluster code (the generated `clusterpb` schemas only).
+  `GossipSender.BroadcastOnce` is now exported (synchronous flush — the body of one Run
+  tick). Wire behavior is byte-identical: routes, FlatBuffers encoding, TTL semantics,
+  and the panic-containment decode paths are untouched. raft was already a separate
+  package (`internal/raft`, no cluster imports) and the bounded family is already split
+  (pool / resourceguard / domain-specific putpipeline), so no further extraction applies.
+
+## [0.0.564.0] - 2026-06-13
+
+### Changed
+- The Phase 8 N4 raft RPC timeout question is settled with data: a gated measurement
+  tool (`TestMeasureRaftRPCLatency`, `GRAINFS_MEASURE_RAFT_RPC=1`) measures the exact
+  span `raftRPCTimeout`/`metaRaftRPCTimeout` bound — FB encode → warm pooled HTTP POST →
+  decode against real inbound codec work. Local run (macOS 8-core, 9,000+ samples):
+  zero 80ms breaches in every condition, including 2×-core CPU saturation plus 8×
+  concurrent bulk RPC load (p99.9 11.5ms, max 32.2ms). The proven values stay: 80ms is
+  not too tight, and must not be lowered (the saturated tail reaches within 2.5× of it);
+  500ms meta keeps 15× headroom. The tool is reusable for a Linux re-run if R1
+  throughput work reopens the question.
+
+## [0.0.563.0] - 2026-06-13
+
+### Changed
+- ROADMAP Phase 9 (primitive library extraction) now carries a progress ledger. The
+  prerequisite review — adopt Layer-1 OSS (hashicorp/raft, memberlist) vs keep the
+  in-house implementations — is complete: all four primitives (raft, HRW placement,
+  bounded, gossip) stay in-house. Switching raft would forfeit GrainFS-specific
+  features (Path B single-phase membership, learner catch-up promotion gates, election
+  priority, the lock-free actor hot path, the meta+per-group two-tier topology) for no
+  functional gain; memberlist's SWIM failure detection and dedicated transport run
+  against the Phase 8 single-HTTP-transport convergence. The extraction slices remain
+  on hold: their stated trigger ("a second consumer") is unmet — the repository has a
+  single binary entry point and zero external consumers of these packages.
+
+## [0.0.562.0] - 2026-06-13
+
+### Fixed
+- Quorum-meta store walkers (`IterQuorumMetaECShardTargets`, `ScanQuorumMetaBucket`) no
+  longer treat in-flight `.qmeta-*.tmp` atomic-publish temp files as stored objects. A
+  scan racing an in-flight quorum-meta write fabricated a phantom object keyed by the
+  temp name: the shard placement monitor reported phantom missing shards (shard key
+  `.qmeta-<ts>.tmp/segments/<id>`) and triggered repairs that cannot succeed, and bucket
+  LIST scans could return a duplicate entry. Captured under full-suite load as the
+  long-standing `TestShardPlacementMonitor_RepairsMissingSegmentShard_EndToEnd` flake
+  ("repair: only 0/1 other shards readable").
+- Two load flakes in the test suite are root-caused and fixed: the multi-node streaming
+  PUT harness now wires a `ShardGroupSource` (production boot always does) so the
+  quorum-meta GET peer-fallback — the designed read-your-writes path when the
+  coordinator's own K-of-N meta write loses the K-th-ack race — is reachable, with a
+  deterministic regression test; and the IAM PDP flip-invariant test pre-consults the
+  PDP so its sanity check no longer depends on goroutine scheduling.
+
+## [0.0.561.0] - 2026-06-12
+
+### Changed
+- M5 raft v1→v2 migration tail: the stale `v2*` raft naming in `internal/cluster` is gone
+  (v1 was deleted long ago, so the prefix carried no information). `v2EncodeRPC`/`v2DecodeRPC`/
+  `v2RPCType*`/`v2RaftBuilderPool` → unprefixed, `v2RaftRPCTimeout`/`v2MetaRPCTimeout` →
+  `raftRPCTimeout`/`metaRaftRPCTimeout`, `raftv2_*.go` files renamed, and the
+  `MetaTransportMux = RaftV2MetaTransport` type alias collapsed into a concrete
+  `MetaRaftTransport` (constructor stays `NewMetaTransport`). Behavior-neutral: wire
+  literals (RPC type strings, route paths) are byte-identical; internal naming only.
+
+## [0.0.560.0] - 2026-06-12
+
+### Fixed
+- Multipart sessions no longer misroute across nodes whose boot-frozen placement
+  candidate sets diverge (dynamically grown clusters: join-time group expansion records
+  no FSM placement generation, so older nodes keep a smaller candidate set and hash the
+  same object onto a different group). `CreateMultipartUpload` now returns an uploadID
+  that encodes the owning shard group (`mpg:<groupID>:<raw>`); UploadPart / ListParts /
+  Complete / Abort parse it and route directly to that group instead of re-hashing
+  against the local candidate set. S3 uploadIDs are opaque to clients; un-prefixed IDs
+  keep the legacy hash routing. `ListMultipartUploads` and the lifecycle MPU scan
+  re-encode collected IDs with their source group, so listing-then-abort (including
+  lifecycle expiry of incomplete uploads) routes correctly from any node.
+- Cluster-join e2e specs that assert Iceberg availability now start nodes with
+  `--enable-iceberg` (the flag defaults to off since non-S3 protocols became opt-in),
+  and the multipart fanout e2e gates on every node's `multipart_listing_v1` capability
+  evidence (gossip-fed, first round ~30s) before creating fixtures — both were test
+  bugs, not product regressions.
+
+## [0.0.559.0] - 2026-06-12
+
+### Fixed
+- Gossip receivers no longer crash the process on a malformed gossip payload from an
+  authenticated peer: `decodeNodeStatsMsg`/`decodeReceiptGossipMsg` now read every
+  FlatBuffers field inside their panic-recovery scope (FB accessors are lazy — a corrupt
+  vtable previously panicked the gossip drain goroutine at the accessor, outside the
+  recover). Malformed payloads are dropped with a warning; valid gossip continues.
+- The cluster HTTP server now installs Hertz recovery middleware: a panic in any native
+  route handler (the same corrupt-FlatBuffer class) surfaces as a 500 on that request
+  instead of killing the node. Native-route clients already map non-200 to a per-RPC
+  error, so consumers degrade gracefully.
+- Dynamic invite-join no longer deadlocks when `--node-id` equals `--raft-addr`: the
+  joiner's data-plane raft actor now starts immediately after the raft RPC bridge is
+  wired (before invite-join Phase-2) instead of in the storage-runtime boot phase.
+  Previously the cluster leader's post-join `AddVoter` replicated AppendEntries to a
+  joiner whose actor was not yet draining its command channel, blocking the join until
+  the leader's 60s timeout (the long-standing 5-node EC e2e failure). Early start is
+  safe: the apply loop buffers entries unbounded until the storage runtime drains them,
+  and join-mode guards already prevent the joiner from campaigning before the leader
+  installs the real cluster configuration.
+
+## [0.0.558.0] - 2026-06-12
+
+### Changed
+- Phase 8 N7-3: every remaining RPC family now travels its own native route — the
+  generic buffered-Call primitive (`POST <path>`, raw request/reply bodies, handler
+  error → 500 + text) carries the raft bridges (`/raft/data/rpc`, `/raft/meta/rpc`,
+  `/raft/group/rpc`), the shard RPC family (`/shard/rpc`), the proposal/read-index
+  forwards (`/forward/propose/{legacy,group,data-group}`, `/forward/read-index`),
+  the meta forwards (`/raft/meta/propose`, `/raft/meta/catalog-read`), the receipt
+  query (`/receipt/query`), the capability/KEK/applied-index probes
+  (`/probe/{capability,kek-disk,kek-lease,applied-index}`), and the audit ship
+  (`/audit/ship`); the gossip primitive (`POST <path>`, enqueue-then-200, consumer
+  callback on a per-route drain goroutine) carries `/gossip/admin` and
+  `/gossip/receipt`; and `GET /append-segment/read` carries the append-segment
+  peer fetch as a bespoke streaming-read route.
+- Phase 8 N8: the envelope tunnel is deleted. `POST /_grainfs/rpc`, the `X-Gfs-*`
+  frame headers, the `transport.Message` envelope, the `StreamRouter`/`Handle*`
+  registration surface, the `Call*`/`Send`/`Receive`/`Connect` client surface, and
+  the binary wire codec are all gone — the internal cluster wire is fully
+  envelope-free (per-family HTTP routes over SPKI-pinned mTLS, ALPN
+  `grainfs-http-v1`). `StreamType` survives internally as an admission/metrics key
+  only. Internal cluster wire only; mixed-version clusters across this boundary
+  are unsupported (existing flag-day stance).
+
+### Removed
+- Operator note: the `grainfs_transport_ce_total` Prometheus metric
+  (`TransportCECounter`, mux capability-exchange outcomes) is removed. It has had
+  no writer since the mux subsystem was deleted in v0.0.551.0 (Phase 8 N1) and
+  always reported 0; dashboards referencing it should drop the panel. The orphaned
+  `ProtocolVersionMux` constant is gone with it.
+
+## [0.0.557.0] - 2026-06-12
+
+### Changed
+- Phase 8 N7-2: the S3 forward streaming family (streamed-body write forwards and
+  streamed-response read forwards between group leaders) now travels native routes —
+  `POST /forward/write` and `GET /forward/read`, with the FlatBuffers forward frame in a
+  typed family header and raw bytes streamed — instead of the `/_grainfs/rpc` StreamType
+  envelope tunnel. Application-level forward status (leader hints, bucket errors) stays
+  in-band in the FlatBuffers reply, preserving the sender's redirect protocol unchanged.
+  Third and fourth ops on the envelope-free wire. The tunnel remains for the remaining
+  RPC families until N8. Internal cluster wire only; mixed-version clusters across this
+  boundary are unsupported (existing flag-day stance).
+
+## [0.0.556.0] - 2026-06-12
+
+### Changed
+
+- Phase 8 N7-1: the shard-read streaming family (whole-shard and bounded-range shard
+  streams) now travels the native `GET /shard/read` route — URL-encoded query metadata,
+  a raw streaming response body, HTTP status codes — instead of the `/_grainfs/rpc`
+  StreamType envelope tunnel. Second family on the envelope-free wire (after `/shard/write`
+  in v0.0.555.0); pins the streaming-response conventions for the remaining read-shaped
+  RPC families. The tunnel remains for all other families until N8. Internal cluster wire
+  only — no operator-visible API change; mixed-version clusters across this boundary are
+  unsupported (existing flag-day stance).
+
+## [0.0.555.0] - 2026-06-12
+
+### Changed
+
+- Phase 8 N6: the shard-write family (plaintext-stream and sealed-stream shard writes)
+  now travels a genuinely native HTTP route — `POST /shard/write` with URL-encoded query
+  metadata, a raw streamed body, and HTTP status codes — instead of the `/_grainfs/rpc`
+  StreamType envelope tunnel. No FlatBuffers RPC envelope, no `X-Gfs-*` frame headers,
+  no `Message.ID` on this family's wire. The sealed path keeps the 8-byte completeness
+  trailer (mid-stream abort rejection). The tunnel remains in place for all other RPC
+  families; it is removed in N8 after the remaining families migrate (N7). Internal
+  cluster wire only — no operator-visible API change. Flag-day note: mixed-version
+  clusters across this boundary are unsupported (existing project stance).
+
+## [0.0.554.0] - 2026-06-12
+
+### Changed
+
+- **Phase 8 N5: docs reflect the HTTP-only cluster transport (docs + one stale comment; no code
+  behavior change).** After the QUIC→TCP→HTTP migration and the mux/TCP teardown (N1–N3), several
+  docs still described the node-to-node transport as QUIC / TCP-mux / `--transport` / `--quic-mux-*`.
+  Updated: `docs/architecture/quic-stream-multiplex.md` (R+H mux design — re-banner as HISTORICAL;
+  the whole mux subsystem and its `--mux-pool`/`--mux-flush` flags were removed in v0.0.551.0, raft
+  RPCs now ride plain HTTP `transport.Call`), `docs/architecture/lock-free-audit.md` (drop deleted
+  mux/QUIC files from the lock inventory; the HTTP transport's locks are in `http_transport.go`),
+  `docs/reference/transport-mux-versioning.md` (HISTORICAL banner — `grainfs-mux-v1` ALPN +
+  capability-exchange handshake are gone; the HTTP transport uses `grainfs-http-v1` with no
+  handshake), and the "via QUIC" phrasing in `docs/operators/balancer.md`,
+  `docs/operators/sli-slo.md`, `docs/reference/s3-compatibility.md`. Also fixed a stale
+  `tcpALPN/tcpMuxALPN` reference in the `httpALPN` comment (`internal/transport/http_transport.go`).
+  README/CONTEXT.md had no stale transport vocabulary; there is no `docs/adr/` to update.
+
+## [0.0.553.0] - 2026-06-12
+
+### Changed
+
+- **Phase 8 N4: unfreeze the raft RPC wire codec/timeout (comment + test cleanup; no behavior
+  change).** The cluster raft RPC codec (`raftv2_codec.go`) and the per-RPC timeout
+  (`v2RaftRPCTimeout`, `raft_rpc.go`) carried a "byte-identical to v1 / frozen until PR 30 deletes the
+  v1 package" constraint. That v1 package (`internal/raft/quic_rpc.go`) was already deleted in the
+  QUIC→TCP migration, so the freeze no longer binds: dropped the stale "mirrors v1 / frozen / PR 30"
+  comments and reframed the golden-hex test `TestV2EncodeRPC_ByteIdenticalToV1` →
+  `TestV2EncodeRPC_WireGolden` (the goldens are now the canonical wire-format regression guard, not a
+  v1-conformance gate). Added `raft.DefaultElectionTimeout` (exported) and
+  `TestRaftRPCTimeout_BelowElectionTimeout`, a compile-time guard that the per-RPC timeout (80ms) stays
+  below the minimum election timeout (150ms) so an in-flight heartbeat completes before a spurious
+  election. The `v2RaftRPCTimeout` value and the `v2*` raft naming are intentionally unchanged — the
+  value is an unmeasurable-on-macOS throughput question (deferred to a Linux load gate), and `v2*` is
+  separate M5-migration naming whose family rename is its own slice (both captured in TODOS).
+
+## [0.0.552.0] - 2026-06-12
+
+### Removed
+
+- **Phase 8 N2+N3: delete the TCP cluster transport — HTTP is now the only cluster
+  transport.** Removes `tcp_transport.go`, `tcp_call.go`, `tcp_identity.go`, `tcp_mux.go`,
+  `tcp_chunk.go`, `tcp_pool.go`, `tcp_config.go`, and `mux_carrier.go` (~1,900 LOC + their
+  tests), the `MuxCarrier`/`GetOrConnectMux`/`SetMuxConnHandler`/`EvictMux` methods from the
+  `ClusterTransport` interface (nothing referenced them after the raft mux subsystem went in
+  N1), the HTTP transport's mux stubs, and the boot transport-selection branch. The Zero-CA
+  join listener (`tcp_join.go`, always its own TLS handshake) is independent of the cluster
+  transport and is untouched.
+- **BREAKING (operator flag): `--transport` is removed.** There is no longer a transport to
+  select — the cluster always uses the Phase 8 Hertz HTTP transport over SPKI-pinned mTLS.
+  **This removes the `--transport tcp` escape hatch: the TCP→HTTP migration is now
+  irreversible** (like the QUIC removal). `UseHTTPTransport`/`Transport` config + options are
+  removed with the flag.
+
+### Fixed
+
+- **HTTP abort-truncation: a mid-stream-aborted shard write no longer commits a truncated
+  shard.** Removing the TCP transport surfaced a pre-existing HTTP gap (live since the
+  0.0.550.0 flip): when the streaming sink aborts mid-body, Hertz logs the body-reader error
+  as a warning and ends the chunked request cleanly, so the receiver reads a *short* body as a
+  normal EOF and `HandleWriteBody` committed the truncated shard. The streaming path does not
+  know the sealed length up front (shards are produced incrementally with `LastInPut`), so the
+  fix is an explicit completeness trailer: `remoteSealedShardSink.Finalize` appends an 8-byte
+  big-endian payload length after the last chunk (never on `Abort`), and the receiver
+  (`SplitSealedShardTrailer`) rejects the write when the declared length does not match the
+  bytes received. `TestRemoteSealedShardSink_AbortDoesNotCommit` is un-skipped and now passes
+  (the partial commits no shard); `TestRemoteSealedShardSink_RoundTrip` confirms the trailer
+  round-trips. Wire body is now `ciphertext + 8-byte trailer`; the receiver stores the
+  ciphertext verbatim as before.
+
+### Notes
+
+- **Eyes-open, no throughput proof.** Like the original flip (0.0.550.0), this ships
+  macOS-functional-only: full unit suite green; **Linux multi-node throughput parity was NOT
+  measured** (macOS cannot surface the signal). The user accepted removing the escape hatch
+  without a load proof.
+
+## [0.0.551.0] - 2026-06-12
+
+### Removed
+
+- **Phase 8 N1: remove the raft mux subsystem; raft RPCs ride `transport.Call` only.**
+  The QUIC-era per-group/meta raft multiplexing layer — persistent `RaftConn` streams,
+  `HeartbeatCoalescer`, the `MuxCarrier` driver, the sender mux primary path, and the
+  `IsMuxFallbackErr` fallback — existed only to serve a mux that the HTTP transport (the
+  default since 0.0.550.0) never used: with HTTP active, boot already skipped `EnableMux`,
+  so every group/meta raft RPC already went through `transport.Call`. This deletes that
+  dormant machinery (~2,900 LOC net): `internal/raft/group_transport_mux.go`,
+  `heartbeat_coalescer.go`, `raft_conn.go`, `meta_mux_send.go`, the mux fields on
+  `GroupRaftMux`, the unused zero-copy codec helpers, and the now-orphaned mux/lane/carrier
+  tests. `GroupRaftSender` and `RaftV2MetaTransport` now have a single `Call` path; the
+  inbound dispatch (`handleRPC`, meta `StreamMetaRaft` handler) is unchanged.
+  **Behavior-neutral** on the HTTP default (the deleted path was already dormant at runtime);
+  the group-raft-over-HTTP integration test (`raftv2_group_http_test.go`) is the unchanged
+  safety net. The TCP transport remains selectable via `--transport tcp`, but for it this is a
+  steady-state change, NOT neutral: TCP raft now rides connection-per-RPC `Call` (a fresh TLS
+  handshake per RPC) as its only path instead of the persistent mux — correctness is preserved
+  (raft RPCs are independent request/response), but under real inter-node latency a cold
+  handshake could approach the 80ms `groupRaftRPCTimeout` and risk a spurious election. TCP is
+  EXPERIMENTAL and is removed in a later slice; HTTP (the default) reuses pooled keep-alive
+  conns, so its RPCs stay warm.
+- **BREAKING (operator flags): `--mux-pool` and `--mux-flush` are removed.** They tuned the
+  deleted mux carrier's stream pool and heartbeat-coalescing window. No replacement — raft no
+  longer multiplexes. (Already renamed from `--quic-mux-*` in S6; now gone entirely.) The
+  `MuxEnabled`/`MuxPoolSize`/`MuxFlushWindow` config fields and the `--mux-flush` timing
+  validation are removed with them.
+
+## [0.0.550.0] - 2026-06-12
+
+### Changed
+
+- **Phase 8 S8-5: flip the default cluster transport TCP → HTTP.** The node-to-node
+  cluster transport now defaults to the Phase 8 Hertz `HTTPTransport` (streaming HTTP over
+  the same zero-CA SPKI-pinned mTLS + live identity rotation the TCP transport used).
+  `--transport` now defaults to `http`; `optionsToConfig` maps any value other than `tcp`
+  to the HTTP transport (empty → HTTP, matching the cobra default). **Reversible:** the
+  `--transport tcp` opt-out remains, so operators can pin the legacy TCP transport (unlike
+  the QUIC removal, this flip removes nothing). The dormant runway that made this safe
+  shipped across S8-1..S8-5 (scaffold → data-plane → control-plane → selectable →
+  idle-deadline + multi-node e2e). **Validation: macOS functional-only** — full unit suite
+  + representative multi-node e2e green; **Linux throughput parity NOT measured** (eyes-open,
+  the same posture as the QUIC→TCP flip; the HTTP transport runs raft over per-message
+  `Call` with mux disabled, so heartbeat fan-out under sustained cluster load is unmeasured
+  on macOS where the perf signal does not surface).
+
+### Fixed
+
+- **HTTP transport: retry once on a stale keep-alive pooled connection (`ErrBadPoolConn`).**
+  HTTP keep-alive pools connections, and a peer routinely reaps an idle pooled conn ("Apache
+  and nginx usually do this", per Hertz); the TCP→HTTP default flip makes this production-
+  relevant (TCP's connection-per-RPC `Call` never pooled, so it never hit a reaped conn). The
+  Hertz client now retries once (`httpRetryIf`) on `ErrBadPoolConn` only. That error is raised
+  when the pooled conn was found closed BEFORE the request was delivered, so the retry is a
+  first delivery on a fresh conn — **provably replay-safe for every Call-path RPC type**,
+  including the non-idempotent proposal forwards `CallPooled` carries
+  (`ShardService.SendRequest`). It deliberately does NOT retry Hertz's ambiguous
+  "server closed connection before returning the first response byte" (which fires after the
+  request was written, where the server may have processed it — replaying a proposal forward
+  could double-propose); that case stays a transient error absorbed by raft/S3-client retries.
+  Retry also refuses `IsBodyStream` requests (the S3b "retry-after-body" landmine). This retry
+  is unrelated to the pre-existing `node-id == raft-addr` join deadlock (TODOS.md). Pinned by
+  `TestHTTPDataPlane_RetryIf_RefusesBodyStream`.
+
+## [0.0.549.0] - 2026-06-12
+
+### Added
+
+- **Phase 8 S8-5 (Phase A, Task 2): multi-node HTTP data-plane e2e** (dormant; TCP is
+  still the default). The existing in-process multi-node streaming-EC PUT/GET harness is
+  now transport-parameterized, and a new HTTP variant brings up a 5-node cluster on the
+  Phase 8 `HTTPTransport`: a 3+2 object's shards spread across distinct nodes, so the PUT
+  streams sealed shards to remote peers over HTTP `CallWithBody` and the GET reconstructs
+  by fetching remote shards over HTTP `CallRead` — the first real data-plane-over-HTTP
+  exercise (S8-2 was method-isolated, S8-3 was raft). A parity-shard-failure variant
+  proves best-effort commit holds over HTTP too. macOS functional-only (no throughput
+  bench; eyes-open, the QUIC→TCP flip posture).
+
+### Fixed
+
+- **HTTP transport: tolerate `(0, nil)` request-body reads** (dormant path). The PUT
+  pipeline streams a sealed shard through an `io.Pipe`, and a zero-length pipe write
+  surfaces to the reader as `(0, nil)` — legal per the `io.Reader` contract (callers must
+  treat it as "nothing happened") and tolerated by the TCP transport's chunked writer, but
+  Hertz's `WriteBodyChunked` panics on it. `doRPC` now wraps the request body so empty
+  non-EOF reads are skipped, restoring TCP parity. Surfaced by the new HTTP data-plane e2e.
+- **HTTP transport: immediate `Close`** (dormant path). `Close` closed the Hertz server via
+  a 5s graceful `Shutdown`, which blocks the full window waiting for idle keep-alive
+  connections held open by remote clients to drain (the standard transport waits for
+  active==0 and never force-closes them) — adding ~5s per server at teardown with no
+  benefit. `Close` now closes the listener immediately (TCP-parity: the TCP transport
+  closes its conns at once and the cluster tolerates abrupt peer loss) and drops idle
+  client conns.
+
+## [0.0.548.0] - 2026-06-11
+
+### Added
+
+- **Phase 8 S8-5 (Phase A, Task 1): HTTP CallRead idle-read deadline** (dormant; TCP is
+  still the default transport). The Hertz HTTP client sets no read deadline of its own
+  (it computes 0/unbounded when neither `WithClientReadTimeout` nor a per-request
+  `RequestTimeout` is set — both unset here), so an HTTP `CallRead` whose peer stalls
+  mid-body would pin the client goroutine and its pooled connection forever. A new
+  `idleReadConn` wraps the client dialer's connection and arms a reset-per-Read idle
+  deadline (`SetReadTimeout(clientBodyTimeout)`, default 5m — mirrors the TCP transport's
+  `tcpReadCloser`/`ClientBodyTimeout`) before every blocking network read, so a stall
+  surfaces as a timeout **in the same goroutine** rather than the cross-goroutine
+  `CloseBodyStream` watchdog Hertz forbids (the reverted S8-2 attempt). Because the client
+  never sets a shorter deadline, this clobbers nothing — it only replaces "unbounded" with
+  the idle bound. `ConnTLSer`/`ErrorNormalization` are delegated explicitly (embedding the
+  `network.Conn` interface would hide the optional interfaces the Hertz client asserts).
+  This is the mandatory availability gate for the S8-5 data-plane flip. Verified by a
+  FIRING test (stalled peer → next `Read` errors within the idle window; mutation-verified
+  RED when the bound is disabled) plus a reuse test (a poisoned connection is not silently
+  reused) under `-race`.
+
+## [0.0.547.0] - 2026-06-11
+
+### Added
+
+- **Phase 8 S8-4: selectable cluster transport** (EXPERIMENTAL, dormant). A new
+  `--transport tcp|http` flag chooses the cluster transport at boot; **the default is
+  `tcp`, so production behavior is unchanged**. With `--transport http`,
+  `bootClusterTransport` constructs the Phase 8 `HTTPTransport` (everything downstream is
+  transport-agnostic via the `ClusterTransport` interface) and the raft mux is forced off
+  (raft rides HTTP Call; the HTTP transport has no mux carrier). The Zero-CA join listener
+  is orthogonal and stays on its existing path. Verified by a boot-selection test
+  (`--transport http` → `*HTTPTransport`); the default-TCP branch is the existing test, so
+  the two discriminate the selection.
+
+## [0.0.546.0] - 2026-06-11
+
+### Added
+
+- **Phase 8 S8-3: control plane over HTTP** (still dormant). `HTTPTransport` now
+  satisfies the full `transport.ClusterTransport` interface (enforced by a compile-time
+  assertion), so the cluster control plane — per-group raft, meta-raft, InstallSnapshot,
+  forward/probe RPCs, and gossip — runs over it. Raft RPCs are request/response, so with
+  the raft mux **disabled** they ride `tr.Call` (an HTTP POST round-trip); Hertz's
+  keep-alive connection pool subsumes what the hand-rolled mux/corrID/lanes provided. The
+  mux-carrier methods are stubs (never invoked when mux is off).
+  - **Large control-plane payloads**: `Call`/`CallFlatBuffer`/`CallRead` send the request
+    payload in the request BODY (entries-bearing AppendEntries ~16 MiB, InstallSnapshot),
+    not a header — fixing a latent S8-2 flaw that only surfaced on the control plane.
+  - **Gossip**: `Send` (fire-and-forget) + `Receive` (inbox); `RecycleConns`/`ClosePeer`
+    recycle the client pool on rotation; `SetTrafficLimits` installs inbound admission.
+  - **Verified**: a 3-node group-raft cluster over HTTP (mux off) elects + replicates, with
+    a positive carrier signal (`InboundRPCCount(StreamGroupRaft) > 0`) and neuter-verified
+    (no HTTP serving → no election). **Performance is unverified** (no multi-node bench;
+    HTTP/1.1 is one-in-flight-per-conn vs the mux's corrID multiplexing, so it needs more
+    pooled connections under concurrency) — the same eyes-open bet as the flip. Legacy mode
+    also sends heartbeats individually (no coalescing).
+  - **Dormant**: not wired into boot (the production default transport is unchanged).
+
+## [0.0.545.0] - 2026-06-11
+
+### Added
+
+- **Phase 8 S8-2: data-plane RPC over streaming HTTP** (still dormant). `HTTPTransport`
+  now carries the shard data-plane RPC surface — `Call`, `CallFlatBuffer`, `CallWithBody`
+  (streaming request body), `CallRead` (streaming response body), plus the
+  `Handle`/`HandleBody`/`HandleRead`/`SetStreamHandler` server side — mirroring the TCP
+  transport. The `transport.Message` frame travels in `X-Gfs-*` headers; bodies are raw
+  byte streams. A generic `POST /_grainfs/rpc` endpoint routes by `StreamType` via the
+  shared `StreamRouter` (the transport never parses the shard envelope).
+  - **Streaming, not buffering:** large shard bodies stream both ways
+    (`WithStreamBody`/`req.SetBodyStream` + `WithResponseBodyStream`). Verified by a
+    256 MiB round-trip whose `TotalAlloc` delta stays under body/4 — mutation-verified
+    (disabling streaming or buffering the body turns it RED).
+  - **TCP parity:** RPC-level `StatusError`/`StatusOverloaded` map to a Go error
+    (`checkResponseStatus`); the buffered response read is capped at 64 MiB. No client
+    retry of streamed bodies (Hertz `DefaultRetryIf` refuses body streams + POST; pinned
+    by test). The `CallRead` body idle-read deadline (TCP's S3b-cbd hardening) is deferred
+    to S8-3 wiring — Hertz forbids a cross-goroutine close-vs-read watchdog and hides the
+    conn behind its buffered reader, so the in-goroutine bound is designed at wiring.
+  - **Dormant:** not wired into boot; the production default transport is unchanged.
+
+## [0.0.544.0] - 2026-06-11
+
+### Added
+
+- **Phase 8 S8-1: dormant HTTP transport scaffold** (`internal/transport/HTTPTransport`).
+  A Hertz HTTP server + Hertz HTTP client over the SAME zero-CA SPKI-pinned mTLS and
+  live identity rotation the TCP transport uses — the secure substrate for the Phase 8
+  data-plane move (shard PUT/GET over streaming HTTP, S8-2).
+  - **Reuses, does not reinvent**, the shared identity machinery: `DeriveClusterIdentity`,
+    `NewIdentitySnapshot`, `pinAcceptedSPKI`, and `identityComposer`. The rotation surface
+    (`SwapIdentity`/`UpdateRegistryAccept`/`SeedInitialPeerSPKIs`/`ApplyRotation`/
+    `FlipPresent`/`SetDropped`) delegates to the composer exactly as the TCP transport does.
+  - **Fresh-read per handshake/dial:** the server's `GetConfigForClient` and a custom Hertz
+    client `network.Dialer` both rebuild their `tls.Config` from the live `IdentitySnapshot`,
+    so a post-Listen rotation/flip takes effect on new connections without a restart
+    (mirrors the TCP transport; mutation-verified).
+  - **Streaming enabled now:** `WithStreamBody(true)` on the server + `WithResponseBodyStream`
+    on the client, so S8-2 can stream large shard bodies without buffering.
+  - **Dormant:** not wired into boot — the production default transport is unchanged
+    (`HTTPTransport` is referenced only inside `internal/transport/`).
+
+## [0.0.543.0] - 2026-06-11
+
+### Added
+
+- **Phase 7 S7-7: operator trigger to grow placement groups on a running
+  cluster (`grainfs cluster expand-placement`).** This makes the S7-6 machinery
+  reachable — S7-6 was production-inert (no entry point), so this is what actually
+  lifts Phase 7's "cannot add groups to a running cluster" operational constraint.
+  - **Flow:** after scaling out (adding nodes, which forms new shard groups via the
+    existing join machinery — `expandShardGroupsForJoinedNode`), the operator runs
+    `grainfs cluster expand-placement`. The server records the current shard groups
+    as a new topology placement generation. Existing objects are NOT remapped — the
+    generation-probe read path (S7-4) serves them from the prior generation, and the
+    cross-generation LWW fence (S7-6) keeps add-window reads correct.
+  - **Why the base must come from the OpRouter (correctness).** `rebuild()` does not
+    fire on `PutShardGroup`/group-join, so the OpRouter keeps its boot-frozen
+    placement set — that frozen set is the only authoritative source of what existing
+    objects were placed under. `ClusterCoordinator.PlanPlacementExpansion` reads Base
+    from the OpRouter and Expanded from the live candidate groups
+    (`candidateGroupsFor(ShardGroups())`); sourcing Base from the live groups instead
+    would freeze the wrong (already-grown) set as gen-0 and lose existing objects.
+  - **No-op guard:** when no new candidate groups are present (Base == Expanded), no
+    generation is recorded (returns `no_op`).
+  - **Narrowing transparency:** `candidateGroupsFor` keeps only the widest-peer-count
+    groups, so if a newly-joined group is wider than the Base groups, the narrower Base
+    groups drop out of the active set. The plan/result surface these as `removed` and the
+    CLI prints a warning (those groups stop receiving new writes; their existing objects
+    stay readable) — the operator is not misled by an additions-only report.
+  - **Wiring:** CLI (`cmd/grainfs`, thin-runner → `clusteradmin.RunExpandPlacement`)
+    → admin UDS `POST /v1/cluster/expand-placement` (JSON, the established
+    operator-plane convention; node-to-node stays FlatBuffers) → serveruntime closure
+    holding the coordinator (Base) + meta-raft (`AddTopologyGeneration`, gen-0 capture
+    before expanded). Mirrors the existing transfer-leader command end-to-end.
+  - **Tests (RED on revert of the mechanism):** `PlanPlacementExpansion` frozen-Base
+    vs live-Base, no-op guard; handler 503-when-unwired / 200-JSON / no-op. Builds the
+    full project; `make test-unit` + `make lint` green.
+  - This is the activation slice the S7-6 entry flagged as deferred; with it, Phase 7
+    growth is operator-reachable. Group **formation** (forming the new raft groups) is
+    still the existing node-join machinery — `expand-placement` records the generation
+    on top.
+
+## [0.0.542.0] - 2026-06-11
+
+### Added
+
+- **Phase 7 S7-6 (the topology flip — irreversible): cross-generation
+  last-writer-wins read fence + add-protocol that activate running-cluster group
+  growth.** This is the flip gate of the Phase 7 epic. The user chose GO (build the
+  irreversible add-protocol + flip, eyes-open, without a GCP throughput bench — like
+  the QUIC→TCP flip). It builds the machinery that lets an operator add a topology
+  generation (grow the object→group placement set) on a running cluster while reads
+  stay correct.
+  - **⚠️ This slice is production-inert as merged.** No CLI/adminapi entry point wires
+    `ProposeAddPlacementGeneration` / `AddTopologyGeneration`, so in production
+    `generationCount()` stays 1, `multiGeneration` stays false, and the fence/merge are
+    unreachable. Unlike the QUIC→TCP flip (which flipped a default), merging S7-6 has no
+    production effect on its own. Lifting the can't-grow-groups operational constraint
+    requires wiring an operator trigger (a follow-on mechanical slice). The add-protocol
+    machinery and the GO decision are complete and verified; operator-facing activation
+    is deferred.
+  - **Cross-generation LWW read fence (must-solve ①).** When a cluster has more than
+    one placement generation, an add-window split-brain write can land a fresher copy
+    of a key in an OLDER generation than the routed (newest-generation) leader holds.
+    `readQuorumMeta`/`readQuorumMetaCmd` now share a `readQuorumMetaWinningRaw` funnel:
+    at a single generation it is the byte-identical local-first fast path; at >1
+    generation it merges the local blob with the cross-generation peer fan-out
+    (`fetchQuorumMetaFromPeers` already spans every `ShardGroups()` peer) and returns
+    the last-writer-wins blob. Because the EC data fetch is record-driven off the
+    winning blob's `NodeIDs` (`ResolvePlacement`), the winner's data is read
+    cross-group with no coordinator re-route. Tombstones participate: a higher-ModTime
+    delete marker wins the LWW and folds to not-found. The merge arms per-node via an
+    `atomic.Bool` the coordinator propagates from `rebuild()`.
+  - **On-add → rebuild trigger (must-solve, wiring).** The coordinator registers a
+    meta-FSM post-commit hook that re-runs `rebuild()` when an `AddPlacementGeneration`
+    command is applied, so an added generation takes effect immediately on every node
+    (re-reading the registry into the OpRouter and re-arming the backend merge) rather
+    than staying inert until a restart.
+  - **Add-protocol orchestration (must-solve ②).** `MetaRaft.ProposeAddPlacementGeneration`
+    (the irreversible flip primitive) and `MetaRaft.AddTopologyGeneration`, which —
+    on the first growth — records gen-0 (the base group set) BEFORE the expanded
+    generation so existing objects placed by the original modulo stay readable. The
+    ordering makes every intermediate crash state a valid single-generation
+    (byte-identical) or fully multi-generation view; a second growth appends only the
+    expanded set. The new groups must already be formed/registered via existing
+    group-add machinery — this records the placement generation on top.
+  - **Deterministic same-second tiebreak (advisor D).** ModTime is second-granularity,
+    so cross-generation same-key same-second ties were resolved nondeterministically and
+    point-GET vs LIST could disagree. A single `quorumMetaBlobWins` comparison (higher
+    ModTime, then lexicographically higher VersionID) is now used by the merge, the peer
+    fan-out, AND `scatterGatherList`, so they agree. This is deterministic agreement,
+    NOT a recency guarantee at second granularity (pre-existing LWW property; only
+    already-nondeterministic outcomes change). The `scatterGatherList` tiebreak applies
+    unconditionally (all generations) — it is a generation-independent determinism
+    improvement, so the "single-generation byte-identical" statement below scopes to the
+    point-read funnel, not to the LIST tiebreak.
+  - **In-place mutations (advisor B) are already correct cross-generation.** `SetObjectACL`,
+    `SetObjectTags`, and `DeleteObject` RMW the FULL `PutObjectMetaCmd` via
+    `readQuorumMetaCmd` (now merge-aware) and write it back whole, so there is no
+    partial-write that would win the LWW with missing NodeIDs. The merge symmetry on
+    `readQuorumMetaCmd` additionally prevents a silent lost mutation in the add window.
+  - **Default single-generation path is byte-identical** (merge disarmed, fast path
+    untouched) — no throughput regression on the default. Tests: cross-generation LWW
+    merge for both read consumers, cross-generation tombstone, VersionID tiebreak (unit +
+    merge), the post-commit-hook arming, and the gen-0-capture ordering — each RED on
+    revert of its mechanism. `make test-unit` + `make lint` green.
+  - **Decision rendered (honest scope):** machinery built and in-proc LWW correctness
+    validated. NOT validated: multi-node concurrent topology growth under live load, and
+    throughput parity (no GCP bench was run, per the GO choice). The fence arms
+    **per-node** on the generation-count transition — during the brief multi-node raft
+    apply-skew window a lagging node serves reads on its unarmed fast path and can return
+    stale; this is inherent to async raft apply and is the "multi-node growth NOT
+    validated" caveat. The flip is irreversible: a placement generation, once appended,
+    is never removed.
+
+## [0.0.541.0] - 2026-06-11
+
+### Added
+
+- **Phase 7 S7-5 (internal, verification): cross-generation LIST coverage is
+  guaranteed by construction.** `scatterGatherList` (the fan-out behind
+  `ListObjects`/`ListObjectsPage`/`WalkObjects`) enumerates the peers of EVERY shard
+  group in `ShardGroups()`, not a generation- or candidate-scoped subset. Because a
+  new topology generation's groups are seeded as ordinary shard groups, they appear
+  in `ShardGroups()` and are scanned, so object listings span all generations with no
+  generation-specific code on the LIST path. Added `TestScatterGatherList_SpansAllShardGroups`
+  (two groups on two nodes; the listing returns objects from both — RED if the fan-out
+  scanned only the bucket-routed group). No production code change.
+  - **Pre-existing limitation noted (orthogonal to generations):** `ListObjectVersions`
+    reads only the local BadgerDB versioned store via the bucket-routed group, so it
+    does not scatter-gather across groups and is incomplete in multi-group clusters
+    regardless of topology generations. Versioned GET/HEAD route correctly (S7-4c probe);
+    only the versioned LIST enumeration has this gap, which predates Phase 7 and is left
+    for a separate scatter-gather-versioned-list fix.
+
+## [0.0.540.0] - 2026-06-11
+
+### Added
+
+- **Phase 7 S7-4c (internal, dormant): version-aware generation probe for
+  versioned and range reads.** `GetObjectVersion`, `HeadObjectVersion`, `ReadAt`, and
+  `ReadAtObject` now route through the S7-4b `probeRead` helper, so a specific
+  version or a range read of an object placed in an older topology generation is
+  found by walking generations newest-first (advancing only on a definitive
+  not-found, fail-closed on any other error). With no generations recorded (the
+  default) each makes exactly one attempt against the same target as before —
+  byte-identical. `ListObjectVersions` cross-generation union is the scatter-gather
+  concern handled in S7-5; conditional PUT (If-Match/If-None-Match) is already
+  covered because its server-side current-version check reads through the now
+  generation-aware `HeadObject`/`GetObject`. In-place metadata writes
+  (SetObjectACL/SetObjectTags/DeleteObjectVersion) stay single-target — also
+  byte-identical at a single generation; their write-to-the-owning-generation
+  behavior is deferred to the S7-6 add protocol.
+
+## [0.0.539.0] - 2026-06-11
+
+### Added
+
+- **Phase 7 S7-4a+4b (internal, dormant): generation-aware read routing + probe.**
+  `OpRouter` now consumes the FSM topology-generation registry (via the coordinator's
+  `rebuild`): when generations are recorded, write/read placement uses the latest
+  generation's pinned group set, and `RouteObjectReadGenerations` yields one target per
+  generation newest-first. The coordinator's `GetObject`/`HeadObject` route through a new
+  `probeRead` helper that tries each generation newest-first, advancing to an older
+  generation ONLY on a definitive `ErrObjectNotFound` and returning any other error
+  immediately (fail-closed — a transiently-unavailable older-generation group never
+  masquerades as a 404). With no generations recorded (the default) every path makes
+  exactly one attempt against the same target as before, so this is byte-identical and
+  behavior-neutral. No production code records a generation yet (the first append is the
+  S7-6 flip). Versioned reads, `ListObjectVersions`, and conditional PUT get
+  generation-aware semantics in S7-4c; cross-group `LIST` fan-out is S7-5. RED-on-revert
+  tests cover single-generation byte-identity, newest-first ordering, probe fallthrough,
+  and fail-closed.
+
+## [0.0.538.0] - 2026-06-11
+
+### Added
+
+- **Phase 7 S7-3 (internal, dormant): `AddPlacementGeneration` control-plane command
+  family.** The MetaFSM now carries an ordered, snapshotted placement-generation
+  registry (`placementGenerations`, ascending epoch) plus a new `AddPlacementGeneration`
+  meta-raft command (FlatBuffers `MetaAddPlacementGenerationCmd`, enum 90) that appends
+  a generation. Epochs are assigned monotonically by `apply` from the list length (not
+  carried on the wire) so replay/re-encode are deterministic; empty `group_ids` is
+  rejected. Snapshot/restore round-trips the registry; a snapshot lacking the new slot
+  (legacy binaries, fresh clusters) restores to an empty registry. This is a pure
+  data-model slice — the registry is empty by default and no production path proposes
+  the command yet (OpRouter consumes generations from S7-4; the first append is the
+  S7-6 irreversible flip), so it is behavior-neutral. Dispatch wiring, monotonic
+  append, snapshot round-trip, and legacy-snapshot compatibility are each covered by
+  RED-on-revert tests.
+
+## [0.0.537.0] - 2026-06-11
+
+### Changed
+
+- **Phase 7 S7-2 (internal, dormant): object→group placement now flows through a
+  `GenerationPlacement` seam.** `OpRouter` previously held a frozen sorted candidate
+  ID list (`placementGroupIDs`) and hashed objects into it directly. That list is now
+  wrapped in a single-generation `GenerationPlacement` whose `currentGroupIDs()`
+  returns the identical set, so object read/write placement is byte-identical — this
+  is a pure representational refactor with no behavior change. The seam is the dormant
+  foundation for Phase 7 topology-generation growth (S7-3 appends generations on group
+  addition; S7-4 adds newest-first read probe). Segment/EC placement is deliberately
+  out of scope: it is recorded in the object metadata (`storage.SegmentRef`
+  self-describes `PlacementGroupID` + `NodeIDs`) and read record-driven, so a
+  generation change never reroutes an existing object's shards — only object→group
+  metadata placement is recomputed on read (Phase 4 index-free) and thus needs the
+  seam.
+
+## [0.0.536.0] - 2026-06-11
+
+### Fixed
+
+- **Quorum-meta torn read: a concurrent write could make an object briefly read as
+  "not found".** `writeQuorumMetaLocal` published the per-node quorum metadata with
+  an in-place `O_WRONLY|O_TRUNC` write, which leaves a window where the file is 0
+  bytes (truncated, data not yet written). A reader hitting that window
+  (`readQuorumMetaRaw` → `os.ReadFile`) decoded an empty blob, and `headObjectMeta`
+  then fell through to BadgerDB — which has no row for a quorum-meta object — and
+  returned `ErrObjectNotFound`. The quorum-meta path is keyed by `bucket/key` (not
+  versioned), so this surfaces whenever a write overlaps a read of the same key: a
+  same-key overwrite PUT racing a GET/HEAD, or a lingering best-effort quorum write
+  still in flight after `fanOutQuorumMeta` returned on the k-th ack. The write is
+  now atomic (temp file in the same directory, fsync, then rename), so a reader sees
+  either the previous complete blob or the new one, never a torn one. This was the
+  root cause of the flaky `TestECRewrap_ConfigUpgradeRace` ("upgrade head object:
+  object not found"); added `TestWriteQuorumMetaLocal_ConcurrentWriteReadNeverTorn`
+  as a deterministic regression guard (RED on the in-place write, GREEN on rename).
+
+## [0.0.535.0] - 2026-06-11
+
+### Added
+
+- **Phase 6 S6-2: gossip load-signal supply chain completed (RequestsPerSec
+  producer) + leader-transfer gated off.** The gossip → BoundedLoads/balancer chain
+  was fully wired but had no production producer for `RequestsPerSec`: it was always
+  0, so BoundedLoads' hot-set was always empty and hot-node read reranking was
+  inert. Added a `RequestRateCollector` that samples the existing, label-sharded
+  `ServiceRequestsTotal` counter off the hot path (once per gossip interval) and
+  writes the derived rate via `NodeStatsStore.UpdateRequestStats`, mirroring the
+  disk collector. Gossip then propagates it cluster-wide. New gauge
+  `grainfs_node_requests_per_sec`. Adds zero per-request cost (the counter is
+  already incremented per request; only the periodic sample is new).
+
+### Changed
+
+- **Load-based meta-Raft leader transfer is now gated off by default.** Producing
+  `RequestsPerSec` would otherwise activate `selectPeerByLoad → TransferLeadership`
+  — a never-validated path that transfers control-plane (meta-Raft) leadership in
+  response to a data-plane S3 load signal, risking election churn. It is gated off
+  (`BalancerProposer.SetLeaderLoadTransferEnabled`, default false) and never fires
+  until validated and enabled in code. Disk-skew migration and hot-node read
+  reranking are unaffected. See `docs/operators/balancer.md`.
+
+## [0.0.534.0] - 2026-06-11
+
+### Added
+
+- **Phase 6 S6-1: control/data plane boundary audit + dynamic regression guard.**
+  Audited (static) that the object PUT/GET/HEAD critical path routes only through
+  the data plane (per-group raft + per-node quorum-meta) and never touches the
+  control plane (meta-raft: bucket membership / IAM / multipart manifest). Verdict:
+  **clean** — the sole hot-path touch of the control-plane backend is a local
+  BadgerDB `HeadBucket` read on a bucket-assignment cache miss (not a raft
+  propose/ReadIndex), and `bucketAssigned()` short-circuits it in steady state.
+  Added `TestControlDataPlaneBoundary_ObjectHotPathDoesNotTouchControlRaft`, a
+  regression guard that runs PUT+GET+HEAD on a *non-collapsed* topology (a real
+  group-raft `GroupBackend` distinct from the control-plane backend) and asserts
+  the control plane sees zero calls; a positive-control `CreateBucket` proves the
+  spy is non-vacuous (and the guard RED-able by mutation).
+
+### Notes
+
+- Boundary-labeling reconciliation: multipart completion proposes on the **group
+  raft** (data plane), not the meta-raft control plane — the manifest lives on
+  group-raft (not quorum-meta) only for single-txn atomicity, and it is off the
+  PUT/GET/HEAD hot path. ROADMAP's "multipart manifest" under the meta-raft scope
+  was the loose label; clarified the `commitCompleteMultipartObjectWriteResult`
+  comment accordingly.
+- Legacy single-backend deployments intentionally collapse the two planes
+  (`WrapDistributedBackend` shares one raft node); the boundary holds for
+  multi-group topologies with a dedicated meta-raft.
+
+## [0.0.533.0] - 2026-06-11
+
+### Fixed
+
+- **Multi-host cluster forward read fence deadlock — PUT/GET/HEAD failed on every
+  non-leader node.** On a fresh data group the first committed raft entry is a
+  NoOp (leader election) or ConfChange; the `ApplyCh` bridge filtered those out
+  and the apply loop never advanced `DistributedBackend.lastApplied`, leaving it
+  at 0 while `commitIndex` was 1. The forwarded read fence
+  (`waitForwardReadFence` → `ReadIndex` barrier → `WaitApplied`) polls
+  `lastApplied >= barrier`, which could never hold when the committed log tail
+  was a non-command entry, so every forwarded `HeadObject`/`GetObject` (including
+  the PUT previous-object-lookup) timed out at 5s. Because a PUT runs its
+  previous-lookup as a fenced read, the group deadlocked: reads waited for an
+  apply that no write could land. Localhost (RTT≈0, direct-to-leader PUTs) masked
+  it; real multi-host did not. The bridge now forwards all committed entries and
+  the apply loop advances `lastApplied` past non-command entries (NoOp/ConfChange
+  are trivially applied). Verified on a real 4-node GCP cluster: warp PUT
+  343 MiB/s, GET 676 MiB/s, HEAD 2080 obj/s, 0 errors (was total failure).
+
+## [0.0.532.0] - 2026-06-11
+
+### Added
+
+- **Phase 5 S5-1: cross-binary A/B benchmark harness + pre-registered decision
+  rule.** `benchmarks/cross_binary_ab.sh` is the merge go/no-go gate driver for
+  ROADMAP Phase 5 — it builds the NEW binary (`devel`: `data_raft` + meta-index
+  removed = "신규 전체") and the OLD binary (`master`: both consensus rounds
+  present = "옛 전체"), then runs them back-to-back on the same host through the
+  existing `bench_s3_compat_compare.sh` cluster machinery (4-node boot + warp +
+  optional minio anchor). Scope `PUT + GET + HEAD` (`warp put,get,stat`). It
+  computes within-run `new/old` throughput ratios, medians them across `RUNS`,
+  and applies the merge-blocker rule: **① PUT win** (`new/old` PUT ≥
+  `PUT_WIN_MIN`, default 1.05x) **AND ② GET/HEAD no-regress** (`new/old` GET &
+  HEAD ≥ `NOREG_MIN`, default 0.95x), failing the verdict on any warp error or
+  missing sample. Output: `benchmarks/profiles/cross-binary-ab-<stamp>/verdict.md`.
+  Decision rule and run procedure (multi-node GCP vs local smoke):
+  `benchmarks/cross_binary_ab/README.md`. The actual Phase 5 verdict is a
+  user-run multi-node benchmark (S5-2) — a local run is a harness smoke test, not
+  the gate (`dev bench != parity`).
+
+## [0.0.531.0] - 2026-06-10
+
+### Fixed
+
+- **Phase 4 S4-4d: admin volume replica summaries restored from quorum meta.**
+  S4-4b removed the object index that fed per-volume EC replica layout facts, so
+  the admin volume-health endpoint had lost its replica signal. New
+  `DistributedBackend.ScanObjectMetaEntries` scatter-gathers a bucket's live
+  (tombstone-filtered) quorum meta and returns each block as an entry carrying
+  its EC placement fields; `VolumeReplicaSummaries` scans `__grainfs_volumes` and
+  classifies each block against its placement group (`ClassifyObjectLayout`),
+  aggregated per volume. A nil backend or scan error degrades gracefully to the
+  incident-only signal as before.
+
+## [0.0.530.0] - 2026-06-10
+
+### Fixed
+
+- **Phase 4 S4-4c: index-free GET/HEAD/ReadAt read path (resolves the S4-4b
+  read-path regression).** Removing the object index (S4-4b) left the cluster
+  read path comparing the local object against a now-always-empty index entry,
+  so followers always forwarded and internal-bucket (volume/VFS/NBD) reads
+  errored with "coordinator: router not configured". The read methods now route
+  via deterministic placement (`routeReadOrBucket`) and serve through
+  `ResolveRead`: sole-voter and internal buckets read locally, a user-bucket
+  leader does a linearizable read, and a non-leader voter forwards to the leader.
+  Object metadata comes from the GroupBackend's quorum-meta read (local file →
+  peer fan-out). The index-comparison helpers (`getObjectLocalCurrentFollower`,
+  `readAtLocalCurrentFollower`, `objectMatchesIndexForFollowerRead`) are removed.
+- **Versioned delete-marker reads return 405.** `decodeQuorumMetaBlob` now carries
+  the `IsDeleteMarker` flag, so `GetObjectVersion` of a quorum-meta delete marker
+  folds to `MethodNotAllowed` instead of erroring (500).
+
+### Notes
+
+- **Behavior change — follower reads forward.** With the object index gone, a
+  voter that is not the group leader no longer serves user-bucket reads from a
+  local index-validated copy; it forwards to the leader (correct, linearizable).
+  The follower-local-read latency optimization is intentionally dropped, to be
+  re-evaluated against the Phase-5 GET/HEAD benchmark.
+- **Availability change — leader-down EC reads.** The index-gated path that let a
+  surviving voter reconstruct an EC object while the group leader was down is
+  removed (it depended on index-supplied EC metadata). This is a transient
+  election-window regression, intentionally dropped under the reduce→measure
+  discipline; revisit after the Phase-5 bench if it proves material.
+- `VolumeReplicaSummaries` still returns empty (S4-4d restores it from quorum
+  meta; it is an optional admin observability signal that degrades gracefully).
+- This branch remains WIP behind the Phase-5 GET/HEAD-regression merge gate.
+
+## [0.0.529.0] - 2026-06-10
+
+### Changed
+
+- **Phase 4: index-free LIST + meta-index removal (S4-4a, S4-4b).** The cluster
+  object listing path no longer depends on the meta-raft object index. `ListObjects`/
+  `ListObjectsPage`/`WalkObjects` now resolve entries via per-group quorum-meta
+  scatter-gather with last-writer-wins merge and tombstone filtering (S4-4a), and the
+  entire object-index write path is removed (S4-4b): `ProposeObjectIndex`/
+  `ProposeDeleteObjectIndex`, the `MetaFSM` `objectIndex`/`objectLatest` maps and their
+  apply/encode functions, the `index_group` machinery, `ObjectIndexShardSet`, and the
+  serveruntime index-group boot/seed wiring. This removes the second consensus round
+  from the object write path. Old snapshots containing object-index entries are decoded
+  and discarded (forward-compatible).
+
+### Removed
+
+- **`--object-index-groups` flag (EXPERIMENTAL, breaking).** The sharded object-index
+  raft-group feature is removed along with the object index itself. The flag had no
+  effect at its default (`1`) and was greenfield-only; no alias is provided.
+
+### Notes
+
+- DEK reference counting lost its driver (the object-index apply path); DEK version
+  pruning already refuses unconditionally until S7's full prune-safety predicate, so
+  zero refcounts are harmless. The refcount machinery stays wired for S7.
+- Admin volume replica summaries (`VolumeReplicaSummaries`) return empty pending the
+  S4-4c read-path migration to quorum meta.
+- **⚠️ Known read-path regression — do NOT merge/deploy this branch as-is; fixed in
+  S4-4c.** Removing the object index left the GET/HEAD/ReadAt/Truncate routing
+  (`routeIndexedReadOrBucket` + `objectMatchesIndexForFollowerRead`, 5 call sites) still
+  comparing the local object against a now-always-empty index entry. Observed impact:
+  (1) a follower that holds the object always concludes "local is stale" and forwards to
+  the group leader instead of serving locally — functional when a leader is reachable but
+  a latency regression and a hard failure where no leader resolves; (2) **internal-bucket
+  reads (volume/VFS/NBD via `Truncate`/`WriteAt`/`GetObject`) currently error with
+  "coordinator: router not configured"** — a functional outage for those paths. 11 unit
+  tests + 1 ginkgo table are gated behind `t.Skip("Phase 4 S4-4c: ...")` rather than
+  deleted. S4-4c migrates these reads to quorum-meta lookups and updates the tests to the
+  new contract; this branch is WIP behind the Phase-5 benchmark merge gate until then.
+
+## [0.0.528.0] - 2026-06-10
+
+### Changed
+
+- **Phase 3: object metadata bypasses data_raft (quorum write + peer-fallback read).**
+  User-bucket object PUT now writes metadata directly to each placement node's local
+  filesystem (`{dataDir}/.quorum_meta/{bucket}/{key}`) via K-of-N fan-out (k = ECData),
+  removing the per-PUT data_raft consensus round that was the dominant PUT latency bottleneck.
+
+  - **K-of-N write quorum**: ECData (= 4 in the default 4+2 configuration) placement nodes
+    must acknowledge the write. Parity nodes are best-effort. Any single unreachable parity
+    node no longer fails the PUT.
+
+  - **Peer fan-out read (N-K hazard fix)**: when a parity node that missed the K-of-N write
+    becomes the shard-group leader and serves a GET/HEAD, `readQuorumMeta` fans out
+    `ReadQuorumMeta` RPCs to all shard-group peers and returns the first hit. Fallback chain:
+    local file → peer fan-out → `ErrObjectNotFound` → BadgerDB (pre-Phase-3 objects).
+
+  - **AppendObject migration-first**: before proposing `CmdAppendObject`, if a quorum meta
+    file exists, it is migrated to BadgerDB via a raft commit then deleted locally. Prevents
+    offset-0 corruption on the AppendObject raft path which reads BadgerDB.
+
+  - **ACL round-trip in quorum meta**: `PutObjectMetaCmd` gains an `acl:uint8` FlatBuffers
+    field (backward-compatible, default 0 = private). `SetObjectACL` / `SetObjectTags` now
+    read-modify-write the quorum meta file directly for Phase-3 objects.
+
+  - **Delete cleanup**: `DeleteObject` removes the local quorum meta file after the raft
+    delete-marker commit.
+
+  - **EC maintenance coverage**: `ShardPlacementMonitor` and `ec_maintenance` now walk
+    `.quorum_meta/` to include Phase-3 objects in repair and EC shard-placement scans.
+
+  Internal buckets (`_grainfs_*`) still use raft (control-plane); only user buckets use the
+  quorum meta path.
+
+### For contributors
+
+- `DistributedBackend.readQuorumMetaCmd(bucket, key)` replaces direct
+  `b.shardSvc.readQuorumMetaRawCmd` calls; use the backend method so peer fan-out is applied.
+- `ShardService.ReadQuorumMetaRaw(ctx, addr, bucket, key)` — new shard RPC for peer fallback.
+- `ShardService.decodeQuorumMetaBlob` / `decodeQuorumMetaCmdBlob` — shared decode helpers.
+- `DistributedBackend.fetchQuorumMetaFromPeers(bucket, key)` — fans out to all shard-group
+  peers concurrently; LWW-best blob wins within `quorumMetaReadTimeout` (5 s).
+
+## [0.0.527.0] - 2026-06-09
+
+### Changed
+
+- **Deterministic object placement: group = `hash(bucket+key) % numGroups`.** Object placement
+  now maps every `(bucket, key)` pair to a placement group via a stable FNV-64a hash mod the
+  sorted candidate count. The group assignment is frozen at write time and can be recomputed
+  identically on reads — enabling index-free GET routing on fixed topologies without consulting
+  the object index. `OpRouter` captures a sorted candidate snapshot at construction time so all
+  routing decisions in a single coordinator view are consistent. `SelectObjectPlacementGroup` and
+  the index-free read path in `RouteObjectRead` share the same `groupIDForObject` function,
+  making write/read equivalence structural rather than asserted.
+
+- **BoundedLoads hot-demotion removed from write placement.** Dynamic RPS-based node demotion
+  on writes was a non-deterministic perturbation that made GET re-derivation impossible without
+  the object index (a hot node at write time might not be hot at read time, causing `GET` to
+  pick a different node set). The `Hot` field and `BoundedLoadsEnabled` parameter are removed
+  from `ObjectWritePlacementInput`; the write placement path is now purely capacity-weighted
+  (WRH). BoundedLoads is retained for reads (shard re-ranking during EC decode) and monitoring.
+  The two write-specific Prometheus metrics (`grainfs_cluster_bl_spilled_writes_total`,
+  `grainfs_cluster_bl_bypassed_writes_total`) are retired.
+
+### For contributors
+
+- `selectECPlacementFromNodeStates` lost its `blEnabled bool` sixth parameter (removed).
+  Update call sites to the 5-argument form.
+- `ObjectWritePlacementInput.BoundedLoadsEnabled` and `ObjectWritePlacementNodeState.Hot` are
+  removed. Any test fixtures constructing these structs must drop those fields.
+
+## [0.0.526.0] - 2026-06-09
+
+### Fixed
+
+- **Sharded object index — Slice 4b-2 prerequisite #2: open the admin socket before the N>1
+  index-group boot wait (invite-join deferred boot-ordering deadlock).** With
+  `--object-index-groups N>1` and `--bootstrap-expect-nodes`, `bootIndexGroupsPostSeed` ran (and
+  blocked on `WaitForIndexGroupCount`) *before* `bootHTTPServerAndAdmin` opened `admin.sock`. But
+  invite-join needs the genesis node's admin endpoint (`/v1/cluster/invite/create`) to mint the join
+  bundle, so the genesis node blocked waiting for joiners that could never join (no bundle could be
+  minted) — quorum was never reached, the deferred seed never fired, and boot died at the 30s
+  `WaitForIndexGroupCount` timeout. The post-seed index-group phase now runs *after*
+  `bootHTTPServerAndAdmin` (so `admin.sock` and invite-minting are live before the blocking wait) but
+  still *before* `srv.Run()` serves S3 — the consumers (forward receiver, coordinator) are rewired
+  in place, so the "object-index façade assembled before S3 serves" invariant holds and no PUT is
+  ever routed to the placeholder meta-FSM. The wait timeout now tracks `--bootstrap-expect-timeout`
+  (default 10m) instead of a hardcoded 30s, so a slow multi-node join (sequential bundle-mint +
+  IAP-SSH startup on GCP) does not fail boot; immediate-genesis (`--bootstrap-expect-nodes<=1`) keeps
+  30s. At the default N=1 this is **byte-identical** (`bootIndexGroupsPostSeed` early-returns at
+  `IndexGroupCount<=1`).
+  - **Proven:** a local 2-node invite-join deferred N>1 e2e (`tests/e2e/cluster_invite_join_test.go`)
+    opens `admin.sock` and round-trips an S3 PUT/GET, with RED-on-revert verified (reverting the boot
+    reorder reproduces the 30s admin-socket-never-opens deadlock). The N=1 invite-join regression and
+    the full `serveruntime` unit suite stay green. The GCP multi-node deferred N>1 boot at scale is
+    still the 4b-2 benchmark's job — this slice unblocks running it, it does not stand in for it.
+
+## [0.0.525.0] - 2026-06-09
+
+### Fixed
+
+- **Sharded object index — Slice 4b-2 prerequisite: seed object-index groups on the Option-B
+  deferred-seed boot path.** `handleDeferredSeed` (`--bootstrap-expect-nodes`) seeded only the shard
+  groups, so `--object-index-groups N>1` combined with `--bootstrap-expect-nodes` never seeded the N
+  `IndexGroupEntry` records and boot failed when `bootIndexGroupsPostSeed`'s `WaitForIndexGroupCount`
+  (30s) timed out (4b-1 seeded index groups on the immediate-genesis path only). The deferred
+  `seedNow` block now seeds the index groups before the shard groups — the deferred-seed verdict keys
+  on the shard-group count, so seeding shard groups last keeps a re-entry after an index-seed failure
+  convergent instead of silently skipping — with RF=N voters derived from the joined live nodes (not
+  the empty deferred-mode peer list, which would yield a self-only RF=1 group). At the default N=1 the
+  deferred path is **byte-identical**. Unit-proven (`TestHandleDeferredSeed_SeedsIndexGroupsAtQuorum`)
+  that the deferred path now fills the meta-FSM with the configured N index groups at RF=N. (This
+  entry originally claimed the end-to-end multi-node deferred N>1 boot was "correct by construction";
+  that overstated it — #725 fixed only the *seeding* gap, while a second boot-ordering deadlock kept
+  the invite-join deferred N>1 path from booting at all. That deadlock is fixed in 0.0.526.0 below.)
+  EXPERIMENTAL flag, so this is the only doc surface (no
+  README/runbook entry, per the `--transport` / Slice 4b-1 precedent); **not** the default flip (4b-3).
+
+## [0.0.524.0] - 2026-06-09
+
+### Added
+
+- **Sharded object index — Slice 4b-1: boot-wire N object-index raft groups (EXPERIMENTAL,
+  default 1 = meta-FSM, byte-identical).** Behind the experimental `--object-index-groups` flag
+  (default 1): at N>1 the boot path seeds N fixed `IndexGroupEntry` records at genesis, instantiates
+  one Slice-4a `indexGroup` per record on every node (RF=N) over the shared `groupRaftMux` carrier,
+  assembles the `ObjectIndexShardSet` façade from them, and rewires the coordinator + forward
+  receiver in a post-seed boot phase — so object-index point-reads/writes/lists route by
+  `hash(bucket,key) % N` to separate index-group raft FSMs. At the default N=1 the meta-FSM
+  single-shard path is unchanged (**byte-identical**). Per-group raft RPCs ride
+  `raft.GroupRaftMux.ForGroup`/`Register`, identical to data groups (this fixed a `Transport: nil`
+  gap that left multi-node index groups unable to elect/replicate). Greenfield-only; **this is NOT
+  the default flip** (4b-3, gated by the 4b-2 GCP bench).
+  - **Proven:** N>1 index-group raft replicates over the real TCP mux carrier (inbound-mux-session
+    discriminator, the same bar as the data-group proof) and writes route by `hash%N` to the correct
+    shard's own FSM with PUT/DELETE round-trip + read-back across nodes (in-proc multi-node harness,
+    RED-on-revert verified); N=1 byte-identical (façade reader is the meta-FSM).
+  - **Scoped (not yet proven here):** 4b-1 is a ROUTING/correctness proof, **not** a
+    commit-parallelism proof (that is 4b-2 under concurrent multi-key load). Per-group leader
+    distribution is NOT staggered — `ElectionPriorityKey` is an inert raft.Config field (4b-2
+    BLOCKER). The follower→leader proposal-forward over `CallPooled` and the `Run()` post-seed boot
+    timing are covered by structural identity with the data/meta paths + unit tests, to be confirmed
+    on the GCP multi-node cluster in 4b-2.
+
+## [0.0.523.0] - 2026-06-08
+
+### Added
+
+- **Sharded object index — Slice 4a: dormant index-group raft primitive.** Introduces
+  `internal/cluster/index_group.go` — an object-index-only raft replica that reuses `MetaFSM` as
+  its store (applying only `PutObjectIndex`/`DeleteObjectIndex` via the FSM leaf methods, bypassing
+  the meta-FSM post-commit hooks) on the generic `newRaftNode` machinery. It carries its own
+  FSM-applied watermark (read-your-write), a panic-safe command-type coupling guard,
+  follower→leader forward with a bounded local-apply timeout, and snapshot take / restore-on-restart
+  / lagging-follower InstallSnapshot. It satisfies the `ObjectIndexShard{Reader, Writer, Lister}`
+  façade interfaces. Proven in-process (single-node round-trip, 3-node loopback follower-forward,
+  and lagging-follower InstallSnapshot). **Dormant: NOT wired into boot** — the object-index shard
+  façade remains N=1 over the meta-FSM. No behavior change. Slice 4b (greenfield N>1 flip) is next,
+  GCP-gated.
+
+## [0.0.522.0] - 2026-06-08
+
+### Added
+
+- **Sharded object index — Slice 2: LIST k-way merge + remaining read seams (N=1,
+  behavior-neutral).** Extends the `ObjectIndexShardSet` façade (0.0.521.0) to implement the
+  object-index LIST surface (`ObjectIndexLatestEntriesPage` / `ObjectIndexLatestEntries` /
+  `ObjectIndexVersionEntries`) via a scatter-gather k-way merge across shards, and routes the
+  coordinator's LIST source plus every remaining direct meta-FSM object-index point-read
+  (`previousObjectForMutation`, `ListObjectVersions` latest check, append routing, object-index
+  orphan reconcile) through the façade. **No behavior change in this slice** — at N=1 the merge
+  returns shard 0 verbatim (fast path, zero added alloc) and the façade reader/lister resolve to
+  the same `*MetaFSM` the coordinator already used (byte-identical; fallback to the meta adapter
+  when no façade reader is injected is preserved exactly). Merge correctness is independently
+  verified: marker-exclusive pagination, prefix, maxKeys cap, and `truncated` accounting match the
+  meta-FSM contract, and `truncated` is provably never wrongly false (no silent listing gaps).
+  This completes the read/write/LIST seam; later slices add per-shard DEK refcount and the
+  greenfield-only N>1 flip. No performance change yet.
+
+## [0.0.521.0] - 2026-06-08
+
+### Added
+
+- **Sharded object index — Slice 1: `ObjectIndexShardSet` façade (N=1, behavior-neutral
+  groundwork).** First slice of the epic that attacks the single-meta-raft object-index
+  serialization flagged as [P1] in 0.0.520.0 — the structural cluster-PUT bottleneck where
+  every PUT's object-index commit funnels through one global meta-raft (~341 ms/put at
+  conc32, 15-26× queueing inflation), while the data-group raft that holds the object's full
+  metadata is already ~16-way parallel at 0.09 ms. Introduces an `ObjectIndexShardSet` that
+  routes object-index point-reads and writes to one of N shards by `hash(bucket,key)`, wired
+  at boot with **N=1** so it is a pass-through to today's single meta-raft. **No behavior
+  change in this slice** — at N=1 the selector always returns shard 0 and every call
+  delegates to the existing meta-FSM reader and forwarding proposer (byte-identical: boot
+  `c.meta == metaRaft.FSM()`, so the new shard-0 reader resolves to the same `*MetaFSM`). This
+  installs the realization-agnostic seam for the later slices that deliver the throughput win
+  (LIST scatter-gather merge, per-shard DEK refcount, and the greenfield-only N>1 flip). No
+  performance change yet.
+
+## [0.0.520.0] - 2026-06-07
+
+### Fixed
+
+- **Cluster CompleteMultipartUpload-under-load: forward readiness deadline aligned to
+  commit latency (the errors lever) + metadata-forward hardening.** Measured (4-node GCP,
+  64MiB/conc32): errors **171 → 28** and throughput **142 → 291 MiB/s (~2×)**; the dominant
+  `context deadline exceeded` 500s, `:7000` dial-timeouts, and `NoSuchUpload` 404s all went
+  to **0**. The errors lever: the follower→leader `CompleteMultipartUpload`
+  forward carries **no caller deadline**, so `ForwardSender.readinessRetry` was the binding
+  bound — and it was hardcoded to **5s, BELOW the operation's normal under-load commit
+  latency (~5.5s p50, 9.4s p99 at conc32)**. Proof: the local-leader path is uncapped and
+  finishes at that same ~5.5s without erroring; only the forward path had a knife set below
+  it. That premature 5s cut produced the dominant `context deadline exceeded` 500s AND the
+  `NoSuchUpload` retry-tail (phantom commit: sender gave up at 5s, the commit landed at
+  ~5.5s, the uploadId was consumed, the client retried → 404 — confirmed: 100% of observed
+  404s had a prior 5xx on the same uploadId, zero first-attempt). The readiness bound now
+  uses `ProposeForwardTimeout` (30s), matching the receiver's commit bound. Plus correct
+  conn-reuse hygiene (below). **NOTE — the residual 28 errors and the throughput gap are the
+  SAME root, NOT closed here:** the residual is dominated by `forward: ProposeObjectIndex
+  failed` (meta-raft step-down under load) — and CompleteMultipart commit is ~5.5s for the
+  same reason: every object-index commit funnels through the single cluster meta-raft, which
+  serializes (and sheds leadership) under conc32. Both the last errors and throughput parity
+  (291 vs ~719 MiB/s) are that one meta-raft-serialization problem, tracked as [P1] in TODOS,
+  not addressed here.
+  Supporting hardening (correct, but NOT the lever — a re-bench showed it only trimmed dials
+  ~50→37, not the dominant deadline cut):
+  - **(sender) control-plane forward starvation.** Control metadata forwards
+    (`CallPooled`) shared one per-peer connection pool with bulk shard-stream
+    transfers (`CallWithBody`/`CallFlatBuffer`/read-streams). A flood of large-object
+    shard streams exhausted the shared cap and starved the short control forward,
+    surfacing as `forward: no reachable peer (dial :7000 i/o timeout)`. Control forwards
+    now use a SEPARATE per-peer pool (`MaxControlConnsPerPeer`, internal default 16), so
+    bulk saturation can no longer block them. Identity rotation/revocation
+    (`RecycleConns`/`ClosePeer`) and shutdown recycle BOTH pools (the S5a gen-guard
+    invariant holds for the control pool identically).
+  - **(receiver) hardcoded 5s forward deadline.** The leader-side forwarded
+    propose/read-index handlers rebuilt a `context.Background()` + hardcoded 5s timeout,
+    ignoring the originator's budget and aborting a raft commit at 5s that the caller was
+    still willing to wait for (`context deadline exceeded`, exactly 5000ms — the dominant
+    mode observed under load). The bound is now `proposeForwardTimeout` (30s), above burst
+    raft-commit p99 and below typical S3 client timeouts.
+  - **(sender) propose path shared the same 5s cap, and a residual timeout returned a
+    fatal 500.** The earlier fix only touched the *receiver* handlers; the originating
+    `DistributedBackend.propose` still wrapped both the leader-commit and the
+    follower-forward branches in a hardcoded 5s, so the request-side bound aborted the
+    same commits the receiver was now willing to wait 30s for. Both branches now use
+    `proposeForwardTimeout`. Additionally, a propose that *does* exhaust its deadline now
+    surfaces a retryable **503 SlowDown** (sentinel `cluster.ErrProposeTimeout`) instead
+    of a 500 — S3 clients auto-retry SlowDown but not 500. The sentinel fires only on
+    `DeadlineExceeded` (never client cancellation) and masks the transient `ErrNotLeader`
+    the follower loop accumulates, which bare context-error matching would otherwise leak
+    as a 500. **Scope note:** this makes a residual timeout *retryable*; it is not
+    load-shedding backpressure — under sustained >30s overload the retry can still add
+    load. True admission control (reject-before-work) is tracked separately.
+  - **forward dialers use `CallPooled` (conn-reuse hygiene).** The boot follower→leader
+    forward dialers (group propose, meta propose, meta read) used connection-per-RPC `Call`,
+    opening a fresh TLS handshake per forward; the bounded control pool now backs them, same
+    as `shardSvc.SendRequest`. Correct hygiene — but a re-bench showed it only trimmed dial
+    failures (~50→37), so it is NOT the errors lever (the readiness-deadline alignment above
+    is).
+
+## [0.0.519.0] - 2026-06-06
+
+### Changed
+
+- **Multi-node streaming-EC PUT is now the DEFAULT.** `GRAINFS_PUT_MULTINODE_STREAM`
+  flips from opt-IN to opt-OUT: multi-node PUTs now stream sealed shards straight to
+  peers (seal-at-source), eliminating the whole-object encrypt→spool→read-back→re-encode
+  double-staging. Set `GRAINFS_PUT_MULTINODE_STREAM` to a falsey value
+  (`0`/`false`/`no`/`off`, case-insensitive) to fall back to the legacy spool path.
+  **Durability note:** the streaming path commits *data-shards-required /
+  parity-best-effort* — a PUT acks once all K data shards are durable, with parity
+  written best-effort. As the default, a multi-node PUT may therefore commit with
+  thinner-than-target parity if a peer parity write fails (likelier than a single-node
+  disk write). This matches the previously-opt-in streaming semantics; it is a
+  deliberate, documented trade for removing the spool staging. Throughput is on par with
+  spool (the win is lower RSS/CPU from no double-staging, not speed — see v0.0.518.0).
+
+### Fixed
+
+- **Streaming shard-RPC deadline is now an IDLE deadline, not a fixed total wall-clock.**
+  The per-shard remote-write RPC was bounded by a fixed `ShardRPCTimeout` (2 min) armed
+  before the first stripe — which, on the streaming path, covered ingest + seal + RPC and
+  so could abort a slow-but-progressing large upload even while bytes kept flowing. It is
+  now a per-PUT idle watchdog shared by all remote shards that resets on any data-plane
+  progress (a client byte ingested, or a sealed stripe flushed to a peer) and fires only
+  after `ShardRPCTimeout` of NO progress. A dead/stalled peer is still bounded; a
+  slow-but-steady upload is no longer aborted. Required before making streaming the
+  default (above). Note: this intentionally removes the former *absolute* ~2-min cap
+  on a streaming PUT's lifetime — a PUT is now bounded by inactivity, not total wall
+  clock — so a forever-trickling client is no longer aborted by this deadline. An
+  absolute per-PUT/slowloris backstop is tracked as a separate follow-up (TODOS).
+
+## [0.0.518.0] - 2026-06-05
+
+### Fixed
+
+- **Multi-node streaming-EC PUT (`GRAINFS_PUT_MULTINODE_STREAM=1`) now actually
+  dispatches; it was silently falling back to spool.** v0.0.517.0 wired the
+  opt-in flag onto the group-0 backend only, but group-0 is excluded from object
+  placement, so every PUT routed to a per-group serving backend (group-1..N) —
+  none of which received the flag — and took the legacy spool path despite the
+  boot log reporting `multinode_stream:true`. The flag is now propagated to every
+  per-group backend at boot (`instantiateGroupWithConfig`), env-gated, default
+  unchanged (OFF). This is a wiring fix that lets the experimental path execute;
+  it is not itself a performance change — the streaming-vs-spool delta is measured
+  separately once the path runs on a real cluster.
+
+- **Multi-node streaming-EC PUT now encodes at the per-object placement EC, not the
+  pipeline's stale boot ECConfig.** Enabling the flag (above) on a 4-node cluster
+  surfaced a pre-existing #717 bug the spool fallback had masked: the put pipeline froze
+  its EC config at boot (`refreshRuntimeTopologyFromMetaNodes` updates `state.effectiveEC`
+  but not the pipeline), so on a joiner the pipeline held the solo width while a
+  multi-node object's placement used the per-group width → every non-coordinator PUT
+  failed with `pipeline: placement length N != shards M` (10.97 MiB/s, 102 errors). The
+  per-object placement EC is now threaded through both dispatch paths (multi-node
+  `PutShardPlaced` and all-local `PutShard`) so no path trusts the boot EC. After the fix
+  a 4-node GCP run streams clean: PUT 319 MiB/s, GET 1637/1370 MiB/s warm/cold, **0 errors
+  across all ops** (PUT + GET round-trip verified).
+
+### Performance note (EXPERIMENTAL streaming, default OFF)
+
+- With the path now correct, the measured multi-node streaming PUT throughput is **on par
+  with the spool path, not faster**: grainfs streaming PUT ≈ 319 MiB/s vs spool ≈ 328 MiB/s
+  (within Spot noise; cross-run vs-MinIO ratios 0.54x vs 0.50x, with the MinIO anchor itself
+  drifting ~10% between runs). Eliminating the encrypt→spool→read-back→re-encode double
+  staging did **not** materially improve PUT throughput at 10 MiB / 16-concurrent — the
+  dominant cost is elsewhere (at-rest encryption + EC compute + Raft commit; MinIO runs
+  plaintext in this harness). `GRAINFS_PUT_MULTINODE_STREAM` stays OFF by default; it is
+  now correct and safe to enable, but it is not a PUT-throughput win on its own.
+
+## [0.0.517.0] - 2026-06-05
+
+### Added
+
+- **Opt-in multi-node streaming-EC PUT (`GRAINFS_PUT_MULTINODE_STREAM=1`, default off).**
+  When enabled, K>=2 PUTs whose erasure-coded shards land on multiple cluster nodes
+  stream through the EC pipeline (shards written stripe-interleaved, peers sealing
+  their shard over the shard RPC) and stamp a `StripeBytes` marker, instead of
+  spooling to disk and re-encoding. The StripeBytes-aware GET reader (shipped in
+  v0.0.516.0) de-interleaves these objects on read. With the env var unset the path
+  is inert: K>=2 multi-node PUTs keep using the legacy spool writer exactly as before.
+
+### Upgrade / rollback note
+
+- After the first K>=2 multi-node streamed PUT (opt-in), rolling this binary back
+  past this release corrupts reads of those objects (interleaved shard layout
+  requires the StripeBytes-aware reader). Forward-only. Default is OFF; legacy spool
+  path is unchanged when disabled.
+
+### Operator note (durability)
+
+- The streaming path commits **data-shards-required, parity-best-effort** (inherited
+  unchanged from the all-local pipeline): a PUT returns success once all K data shards
+  are durable, even if one or more parity shards failed to write. Across peers a parity
+  write failure (peer down, network) is more *likely* than across a single node's disks,
+  so an operator opting in should expect that some PUTs may commit with reduced erasure
+  redundancy (still fully readable; reconstruct margin is thinner until the scrubber
+  re-encodes). A stricter quorum that guarantees parity-at-commit is tracked as a
+  deferred follow-up (see `TODOS.md`).
+
+## [0.0.516.0] - 2026-06-05
+
+### Added
+
+- **All-local multi-drive K>=2 PUT now streams through the erasure-coding pipeline
+  again, with a striping-aware reader.** v0.0.515.0 fixed a silent corruption by
+  forcing K>=2 all-local writes through the spool writer (re-encode to a contiguous
+  layout). This release re-enables the streaming pipeline for that case: writes lay
+  shards out stripe-interleaved and stamp a `StripeBytes` marker, and every read path
+  de-interleaves through a shared stripe codec. A single multi-drive node (default
+  `4+2`) now gets the streaming PUT path without the >1 MiB read corruption.
+  - The marker is threaded through every reconstruct path that this configuration
+    reaches: full GET (`ReadObject` buffered + `OpenObject` bounded streaming),
+    versioned GET, appendable base and range reads, range GET, and shard repair
+    (startup-WAL repair and the background scrubber both regenerate a missing shard
+    in the correct interleaved layout). `StripeBytes == 0` stays the contiguous
+    default, so objects written before this format read back unchanged.
+
+### Changed
+
+- **Striped range reads (`Range:` / `partNumber=`) are served from a single
+  sequential stream instead of chunked random-access reads.** The de-interleave
+  reader has no random-access seek, so a striped `ReadAt(offset)` decodes the whole
+  prefix; the generic range reader's per-chunk `ReadAt` calls would have turned one
+  `Range: bytes=0-` into O(N^2) decode work. Striped objects now open one
+  de-interleave stream, skip to the range start once, and read sequentially — O(N)
+  for a full-range GET. (NBD-style high-offset random `ReadAt` is still O(offset) per
+  call until stripe-aligned seek lands; see TODOS.)
+
+### Fixed
+
+- A test deflake: two TCP transport deadline-reaper tests polled for connection
+  reaping inside a 1s window that a CPU-saturated full parallel suite could exceed
+  (the deadline fires deterministically; observing it depends on goroutine
+  scheduling). Widened to 5s. Production is untouched.
+
+### Upgrade / rollback note
+
+- **The on-disk striped format is forward-only.** After the first all-local K>=2
+  striped PUT, rolling this binary back past this release corrupts reads of those
+  objects: an older binary ignores the `StripeBytes` marker, reconstructs the
+  interleaved shards as if contiguous, and returns garbage with no error. This
+  release scopes striped writes to single-node all-local placement (no peer stores a
+  striped shard), so the only exposure is same-node binary rollback; a cluster-wide
+  minimum-version capability gate is deferred to the multi-node slice. Deploy
+  forward, do not roll back past this release once striped objects exist.
+- Numbers from this work are directional macOS-dev measurements, not Linux
+  throughput/memory parity figures.
+
+## [0.0.515.0] - 2026-06-04
+
+### Fixed
+
+- **Multi-drive single-node EC silently corrupted objects larger than 1 MiB on
+  read (since v0.0.473.0).** The all-local put pipeline writes a stripe-interleaved
+  shard layout, but the GET reader reconstructs each shard as a contiguous 1/K slice
+  of the object. Those layouts only agree when there is one data shard. A single node
+  with N drives runs `N-2 + 2` erasure coding (`AutoECConfigForClusterSize`) — the
+  default 4+2 with 6 drives — so any multi-drive single-node deployment dispatched
+  K>=2 writes through the pipeline and returned garbage when reading back any object
+  that spanned more than one stripe (objects larger than the 1 MiB stripe size). The
+  bug was never caught because every test pinned the pipeline to a single data shard.
+  Fix: pipeline dispatch is now restricted to `DataShards == 1`; K>=2 writes fall
+  through to the spool writer, which produces the contiguous layout the reader
+  expects. A `K=2` multi-stripe PUT->GET integration test covers the round-trip.
+  - **Consequence:** K>=2 cluster PUT no longer uses the streaming path — it spools
+    to disk and re-encodes, the same as before v0.0.473.0. The streaming path returns
+    for K>=2 once a stripe-aware (de-interleaving) reader lands.
+  - **Recovery:** objects already written in the broken state were never readable and
+    are not auto-recovered — re-upload them. The background scrubber's behavior on any
+    such pre-existing striped object is undefined; making the scrubber striping-aware
+    is part of the same follow-up (tracked in TODOS.md).
+
+### For contributors
+
+- **Dormant multi-node streaming-EC sender machinery landed (default off, no operator
+  knob).** Internal infrastructure for streaming erasure-coded shards to remote peers
+  during PUT — a `shardSink` seam in the drive actor, a sealed-shard remote sink, a
+  verbatim `WriteSealedShard` receiver, per-shard placement routing, and ephemeral
+  per-shard pumps for mixed placement. None of it is reachable: the multi-node dispatch
+  is hard-coded off (it would also write the K>=2 interleaved layout the GET reader can
+  not yet read), and the all-local guard above keeps every reachable PUT on a readable
+  layout. The machinery exists for the de-interleaving-reader work that will re-enable
+  K>=2 streaming.
+
+## [0.0.514.0] - 2026-06-04
+
+### Changed
+
+- **Stream aws-chunked PUT/AppendObject bodies ≥8MiB instead of buffering the
+  whole object** (single-node PUT-path memory). `putObjectShouldStream` excluded
+  aws-chunked payloads, and every real S3 client (minio-go, AWS SDK) over HTTP
+  sends `STREAMING-AWS4-HMAC-SHA256-PAYLOAD` (aws-chunked) — so every PUT ≥8MiB
+  fell to the buffered `c.Request.Body()` path and materialized the full object
+  in Hertz's `bytebufferpool`. A GCP single-node 1-drive Linux profile (10MiB,
+  conc16) showed that pool at **252 MB / 43% of live heap**, the top RSS
+  contributor. The streaming machinery already decodes aws-chunked incrementally
+  (`NewAWSChunkedReader`) and the put pipeline reads stripe-by-stripe, so the body
+  need not be buffered; SigV4 verification is header-based and never re-hashes the
+  body. Fix: enable streaming for aws-chunked using `X-Amz-Decoded-Content-Length`
+  (the true object size; wire `Content-Length` is the larger encoded size incl.
+  chunk framing) for the exact-length reader. AppendObject gets the same treatment
+  (shared `putObjectStreamLength` helper) under its 64MiB cap; stale-placement
+  retry stays safe because the coordinator re-buffers a non-seekable reader once.
+  Absent/malformed decoded length falls back to the buffered path. **Measured
+  (same GCP profile): grainfs avg RSS 970 → 474 MiB (2.13x → 1.05x of MinIO's
+  453); peak 1278 → 781 MiB; PUT-load live heap 588 → 114 MB with `bytebufferpool`
+  eliminated. Throughput preserved (PUT 1.02x, GET warm 1.01x, cold 1.23x vs
+  MinIO).** The win applies to the all-local placement path (single-node);
+  multi-node remote placement spools to disk / re-buffers separately (no
+  regression, no measured change there).
+
+## [0.0.513.0] - 2026-06-03
+
+### Changed
+
+- **Split `internal/cluster/backend.go` into themed files** (navigability, no
+  behavior change). The `DistributedBackend` data-plane API (~149 methods) lived
+  in one 4610-LOC file. Moved the object operations into 8 same-package files —
+  `bucket.go`, `object_put.go`, `object_get.go`, `ec_maintenance.go`,
+  `object_delete.go`, `object_list.go`, `multipart.go`, `object_version.go` —
+  leaving the struct, constructors, config setters, topology/snapshot/propose/
+  apply core, and path helpers in `backend.go` (now 1302 LOC). This does **not**
+  decompose the god-struct (a prior seam-check ruled that infeasible); it is
+  pure file-organization. Proven behavior-neutral by a sorted-line diff (only
+  import/package/blank lines redistribute; zero code or comment lines change).
+
+## [0.0.512.0] - 2026-06-03
+
+### Added
+
+- **Uniform genesis shard-group seeding (Option B, EXPERIMENTAL, opt-in via
+  `--bootstrap-expect-nodes N`).** Today a cluster bootstrapped by starting a
+  genesis node solo and growing it with invite-join seeds its first batch of
+  shard groups while solo — at replication factor 1 (single voter = the genesis
+  node, no redundancy). Roughly half the keyspace then lives on one node with
+  **zero fault tolerance** (node loss = data loss), and that half is structurally
+  pinned to the genesis node (its leader can never move — a single-voter group
+  has no transfer target). `--bootstrap-expect-nodes N` (>1) defers the genesis
+  seed until N nodes have joined, then seeds **all** initial groups uniformly at
+  the target size's EC width — eliminating the RF=1 batch.
+  - **Result (deterministic):** RF distribution goes from `{1:8, 3:4, 4:4}` to
+    `{4:16}` on a 4-node cluster — no RF=1 zero-redundancy groups, and the
+    genesis-node pin is gone. This is a **durability/balance fix**, not a memory
+    win: with uniform EC every GET pays the cross-node erasure path, so absolute
+    per-node RSS rises (the prior RF=1 half served cheap whole-object local
+    reads). Directional supporting evidence from one paired local run: per-node
+    GET RSS skew 1.37x → 1.09x and leadership no longer genesis-dominated.
+  - **Default unchanged:** `0`/unset keeps today's seed-immediately behavior, so
+    existing single-node and cluster deployments are byte-for-byte unaffected.
+  - **Mechanism:** the genesis node derives its EC width from the declared N at
+    boot (so every boot consumer latches the final uniform width) and keeps the
+    router closed until seed; the leader-side post-join hook seeds the missing
+    groups once the target count joins. The "should I seed" decision is derived
+    from the flag + replicated group count + live node count (no persistent
+    marker), so it survives a leader change mid-bootstrap, and the seed proposes
+    only-absent groups so it is idempotent and convergent under re-entry. Joiners
+    skip the groups-visible boot gate under `--bootstrap-expect-nodes>1` (the DEK
+    readiness gate is meta-raft based, independent of shard groups); groups and
+    bucket assignments propagate live to every node once seeded.
+  - `--bootstrap-expect-timeout` (default 10m) bounds the wait.
+  - Scope: decision logic + seed wiring are unit/integration tested (suppress
+    below quorum, uniform RF at quorum, leader-change re-entry, idempotency); the
+    end-to-end joiner boot path is validated via the cluster benchmark
+    (`optionb-ab-221445`), not yet by an automated multi-node boot test.
+
+### Fixed
+
+- **`make build` / `make lint` on master** — `internal/raft/rpc_codec.go` carried
+  a trailing blank line (introduced by #708) that failed the `gofmt -l` lint gate.
+  Re-formatted; no behavior change.
+
+## [0.0.511.0] - 2026-06-03
+
+### Changed
+
+- **Three behavior-neutral architecture-deepening refactors** (concentrate
+  scattered behavior behind small seams; no behavior change), each in its own
+  commit:
+  - **s3auth**: collapsed a private `deriveSigningKey` in `post_policy.go` that
+    was a byte-identical clone of the public `DeriveSigningKey` in `sigv4.go`.
+    Its single caller now uses the public function (already exercised by 4 other
+    call sites), so this security-critical SigV4 key-derivation chain has one
+    implementation and one test surface.
+  - **resourceguard**: concentrated the three hand-copied `recordXDecision`
+    functions (FD / goroutine / vlog, ~50 identical lines each) behind one
+    `recordResourceDecision(spec)`. The control flow — an Observed fact plus a
+    Level→fact-type switch — is identical across resources; only data and two
+    vlog-specific toggles (`diagMessage` breakdown, `causeOnDerived`) vary,
+    captured in a `decisionIncidentSpec`. A new facts-capturing test pins both
+    toggles in each direction.
+  - **vfs**: concentrated the copy-on-write stat/dir cache protocol
+    (Load→Lock→reLoad→clone→Store, hand-copied at six mutation sites) behind a
+    generic `cowMap[V]` with a closure-`update` method. The closure form
+    preserves the absent-key abort (zero-allocation) and the
+    multi-delete / existed-reporting sites exactly; verified under `-race`.
+
+## [0.0.510.0] - 2026-06-03
+
+### Changed
+
+- **Concentrated the NFSv4 parent-SA filehandle-inheritance rule behind one
+  helper** (behavior-neutral). The T12 "inherit the parent fh's saID binding,
+  else fall back to a generation-only binding" block was copy-pasted verbatim
+  across three COMPOUND op handlers (`opOpen`, `opLookup`, `opCreate`). It now
+  lives in a single `Dispatcher.bindFHInheritingParent(fh, bucket, gen)` helper
+  so the inheritance precedence invariant (the `(pending)` sentinel + readOnly
+  propagation) has one home. Pure refactor, no behavior change.
+
+## [0.0.509.0] - 2026-06-03
+
+### Changed
+
+- **Zero-alloc per-chunk reads in the encrypted object reader** (GET hot path,
+  GC-hygiene; throughput unchanged). The streaming reader for at-rest-encrypted
+  objects allocated twice per 128 KiB chunk: a fresh AAD field slice
+  (`append`-to-nil) and a heap-escaping `[8]byte` record header. A 5 MiB GET
+  streams as ~40 chunks, so ~80 throwaway allocations per request. The reader now
+  reuses a per-reader AAD scratch slice (rewriting only the chunk ordinal each
+  iteration, mirroring the writer) and a caller-owned header buffer passed into
+  `readEncryptedObjectRecordInto`, so the per-record header read no longer
+  escapes. Microbench (`BenchmarkEncryptedObjectFileRead`, 8 MiB = 64 chunks):
+  **393 -> 202 allocs/op (-49%)**, B/op -3.4%, ns/op within noise. Behavior-neutral:
+  the AAD blob is byte-identical per chunk (existing multi-chunk round-trip and
+  chunk-swap-fails-decrypt tests prove the ordinal is still correct), and the
+  plaintext-zeroize invariant is untouched. Resolves the reader's own deferred
+  "zero-alloc reader pass" TODO. The remaining GET throughput gap vs plaintext
+  stores is inherent (mandatory at-rest XAES-256-GCM decrypt defeats sendfile),
+  not allocation.
+
+## [0.0.508.0] - 2026-06-03
+
+### Changed
+
+- **Removed the superseded v1 meta-Raft transport** (`raft.MetaRaftTransport`,
+  behavior-neutral). The v2 `cluster.RaftV2MetaTransport` took over meta-Raft
+  RPC delivery on the `StreamMetaRaft` wire during the M6.2 migration; the v1
+  stack (struct + constructors + `Send{RequestVote,AppendEntries,InstallSnapshot}`
+  + mux fallback + `handleRPC`, ~330 LOC) had zero call sites in production or
+  tests and was fully orphaned. The dead implementation and its v1-only
+  InstallSnapshot decoders are deleted. Live symbols that happened to live in
+  the deleted file are relocated byte-identical to their consumers: the
+  `metaRPC*` legacy-envelope constants move to `rpc_codec.go` (the decoders
+  still accept that envelope so cross-version peers keep talking — wire-compat
+  retained), and `isMuxFallbackErr`/`errIsCtxBudget` move to `meta_mux_send.go`
+  (behind the existing `IsMuxFallbackErr`). No runtime behavior changes.
+
+## [0.0.507.0] - 2026-06-03
+
+### Changed
+
+- **Removed the vestigial `AuthEnabled()` indirection from the authorizer**
+  (behavior-neutral). `iam.Store.AuthEnabled()` had been a constant-`true`
+  compatibility shim ever since v0.0.107.0 made authz always-on, yet the
+  `s3auth.RequestAuthorizer` still reached it through a one-method
+  `s3auth.IAMStore` interface. The interface and the shim method are deleted;
+  the authorizer now carries a plain `authEnabled bool` set at construction
+  (`buildAuthorizer` computes `s.iamStore != nil`, exactly the prior derivation
+  since the shim was constant-true). The no-IAM / `anonymous_pass` path is
+  preserved verbatim and still tested. `grep AuthEnabled` is now empty.
+- **Write-blocking decorators are detected by capability, not concrete type**
+  (behavior-neutral). The three storage-facade plan sites that special-cased the
+  recovery write gate asserted the concrete `*storage.RecoveryWriteGate` type;
+  they now key off a small unexported `writeBlocker` capability the gate
+  advertises (exposing the error it returns for blocked mutations). Only
+  `RecoveryWriteGate` satisfies it today, so runtime behavior is identical, and a
+  future write-blocking decorator (quota gate, read-only-mount gate) is handled
+  without editing the plan sites.
+
+## [0.0.506.0] - 2026-06-03
+
+### Fixed
+
+- **Iceberg cluster benchmark now forms a real cluster.** `bench_iceberg_table_cluster.sh`
+  used the dead `.join-pending` + KEK-copy follower-join (the same pattern fixed for the
+  S3 harness): nodes 1..N booted as isolated solo clusters, so the SA bootstrapped on
+  node 0 was unknown to the others and `warp iceberg` failed at catalog-pool creation
+  with "NotAuthorizedException: unknown access key". Joiners now boot with a single-use
+  `GRAINFS_INVITE_BUNDLE` minted on the seed's admin socket (per-node `--join-listen-addr`,
+  seed-only PSK staging). All four warp modes (catalog-read/commits/mixed/sustained) run.
+
+### Changed
+
+- **S3-compat benchmark reports the active fsync mode + a durability caveat.** The grainfs
+  vs minio PUT comparison was durability-asymmetric on macOS (grainfs defaults to
+  `SyncFull` = `F_FULLFSYNC`, a full drive-cache barrier minio's ~3.7ms PUT median shows
+  it does not pay). `summary.md` now records the fsync mode and documents that a
+  durability-matched comparison runs grainfs with `GRAINFS_FSYNC_MODE=fast`; at matched
+  durability grainfs beats minio on macOS (PUT ~1.48x, GET ~2.58x), and on Linux
+  `SyncFull` == plain `fsync(2)` so the default already runs at that level.
+
+## [0.0.505.0] - 2026-06-03
+
+### Changed
+
+- **NFSv4 COMPOUND dispatcher split into op-family files** (behavior-neutral). The
+  2185-LOC `internal/nfs4server/compound.go` god-file had its 28 op-handler methods
+  relocated into five family files (`compound_fh.go`, `compound_namespace.go`,
+  `compound_attr.go`, `compound_io.go`, `compound_session.go`), mirroring the
+  documented `meta_fsm_*` family-file pattern. `Dispatch` and the op switch are the
+  unchanged interface; every moved method body is byte-identical. compound.go drops
+  to 1086 LOC. Locality/navigability only — no behavior change.
+- **Shared `skipWords`/`skipBitmap` helper in NFSv4 arg decoding** (behavior-neutral).
+  The recurring "read a bitmap4 length prefix, loop to discard N words" idiom in
+  `readOpArgs` (CREATE / OPEN / EXCHANGE_ID / IO_ADVISE / CREATE_SESSION) is now one
+  helper. The pooled encode paths (`getOpArg8/16/32` for GETATTR/READDIR) and the
+  underflow-sensitive SETATTR partial skip are left untouched — the per-op pooling is
+  a hot-path optimization a generic table would obscure, so no opcode→schema table was
+  introduced.
+- **Alerts subsystem extracted from the `server` god-package into an
+  `internal/server/alertssvc` satellite** (behavior-neutral), using the established
+  closure-rich `Deps` pattern (iceberg / receiptsvc / incidentsvc / snapshotsvc).
+  `AlertsState` becomes `alertssvc.State`; the HTTP handlers move behind a
+  `Deps{State, LocalhostOnly, MutationDisabled, FeatureVisible, StatusPath,
+  ResendPath}` seam. Production wiring keeps the real `localhostOnly` middleware,
+  mutation gate, and feature predicate, so `/api/admin/alerts/*` access control is
+  unchanged. The new `internal/server/servertest` package lifts the transport-level
+  test helpers (`FreePort`/`WaitTCP`/`ShutdownServer`) into an importable seam so both
+  `server` and `alertssvc` test suites share one harness. `servertest` does not reach
+  the production binary. Build + vet + full unit suite green.
+
+## [0.0.504.0] - 2026-06-03
+
+### Changed
+
+- **Cluster PUT hot-path RPCs reuse pooled TCP connections instead of dialing per
+  request.** Three node-to-node control RPCs on the PUT path each previously paid a
+  fresh TLS 1.3 handshake per call: meta-raft AppendEntries/RequestVote (now routed
+  over the persistent mux carrier with a `Call` fallback), the shard-write
+  `CallFlatBuffer`, and `ShardService.SendRequest` (the leader index/group-proposal
+  forward). They now check a connection out of the data-plane pool and return it
+  after a clean request/response cycle. On a 4-node cluster PUT benchmark this drops
+  per-RPC handshake CPU from ~62% to ~0% of the PUT profile. No throughput-parity
+  claim on macOS — that path is latency-bound; the win is eliminated handshake CPU
+  plus full connection reuse across every PUT hot-path RPC.
+- **Dependency refresh** (`go.mod`/`go.sum`): aws-sdk-go-v2 (s3 1.101→1.103,
+  smithy 1.25.1→1.27.0), OpenTelemetry 1.43→1.44, duckdb-go 2.10503.0→.1, and their
+  transitive pins. Build + vet + unit suite stay green.
+
+### Fixed
+
+- **Benchmark harness forms a real 4-node cluster.** `bench_s3_compat_compare.sh`
+  replaced a dead `.join-pending` follower-join path — which left nodes 2..N as
+  isolated single-node clusters, so every shard group ended up single-voter (RF=1)
+  on the seed — with the Zero-CA invite-bundle join flow. The genesis seed mints a
+  single-use `GRAINFS_INVITE_BUNDLE` per joiner on its admin socket; joiners boot
+  with the bundle (sealed PSK/KEK + cluster.id + seed join-listener address) and
+  pre-stage no keys. `grainfs-cluster` benchmarks now measure an actual distributed
+  cluster.
+
 ## [0.0.503.0] - 2026-06-03
 
 ### Removed

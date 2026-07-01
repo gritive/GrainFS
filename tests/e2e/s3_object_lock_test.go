@@ -1,0 +1,211 @@
+package e2e
+
+import (
+	"context"
+	"io"
+	"strings"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
+)
+
+// S3ObjectLock exercises the Object Lock surface (retention / legal-hold /
+// lock-configuration / object-lock PutObject headers). None of it is
+// implemented; every operation must be rejected fail-closed with 501
+// NotImplemented rather than the prior fail-open behavior (false 200, mis-
+// delivered object bytes, or — for legal-hold PUT — silent object overwrite).
+var _ = ginkgo.Describe("S3 Object Lock", ginkgo.Label("s3"), func() {
+	describeS3ObjectLockContext("SingleNode", func() s3Target {
+		return newSingleNodeS3Target()
+	})
+	describeS3ObjectLockContext("Cluster4Node", func() s3Target {
+		return newSharedClusterS3Target(ginkgo.GinkgoTB())
+	})
+})
+
+func describeS3ObjectLockContext(name string, factory func() s3Target) {
+	ginkgo.Context(name, ginkgo.Ordered, func() {
+		var (
+			tgt s3Target
+			cli *s3.Client
+		)
+
+		ginkgo.BeforeAll(func() {
+			tgt = factory()
+			cli = tgt.pickNode(0)
+		})
+
+		runS3ObjectLockCases(func() s3Target { return tgt }, func() *s3.Client { return cli })
+	})
+}
+
+func runS3ObjectLockCases(getTgt func() s3Target, getClient func() *s3.Client) {
+	ginkgo.It("rejects PutObjectRetention as not implemented", func(ctx context.Context) {
+		bucket := createSpecBucket(getTgt(), "lockret")
+		cli := getClient()
+		putPlainObjectEventually(ctx, getTgt(), bucket, "obj.txt", "body")
+
+		_, err := cli.PutObjectRetention(ctx, &s3.PutObjectRetentionInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String("obj.txt"),
+			Retention: &types.ObjectLockRetention{
+				Mode:            types.ObjectLockRetentionModeGovernance,
+				RetainUntilDate: aws.Time(time.Now().Add(48 * time.Hour)),
+			},
+		})
+		requireS3ErrorCode(err, "NotImplemented")
+	}, ginkgo.NodeTimeout(60*time.Second))
+
+	ginkgo.It("rejects GetObjectRetention as not implemented", func(ctx context.Context) {
+		bucket := createSpecBucket(getTgt(), "lockgetret")
+		cli := getClient()
+		putPlainObjectEventually(ctx, getTgt(), bucket, "obj.txt", "body")
+
+		_, err := cli.GetObjectRetention(ctx, &s3.GetObjectRetentionInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String("obj.txt"),
+		})
+		requireS3ErrorCode(err, "NotImplemented")
+	}, ginkgo.NodeTimeout(60*time.Second))
+
+	ginkgo.It("rejects GetObjectLockConfiguration as not implemented", func(ctx context.Context) {
+		bucket := createSpecBucket(getTgt(), "lockcfg")
+		cli := getClient()
+
+		_, err := cli.GetObjectLockConfiguration(ctx, &s3.GetObjectLockConfigurationInput{
+			Bucket: aws.String(bucket),
+		})
+		requireS3ErrorCode(err, "NotImplemented")
+	}, ginkgo.NodeTimeout(60*time.Second))
+
+	ginkgo.It("rejects GetObjectLegalHold as not implemented", func(ctx context.Context) {
+		bucket := createSpecBucket(getTgt(), "lockgetlh")
+		cli := getClient()
+		putPlainObjectEventually(ctx, getTgt(), bucket, "obj.txt", "body")
+
+		_, err := cli.GetObjectLegalHold(ctx, &s3.GetObjectLegalHoldInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String("obj.txt"),
+		})
+		requireS3ErrorCode(err, "NotImplemented")
+	}, ginkgo.NodeTimeout(60*time.Second))
+
+	ginkgo.It("rejects PutObjectLegalHold without corrupting the object", func(ctx context.Context) {
+		bucket := createSpecBucket(getTgt(), "lockputlh")
+		cli := getClient()
+		const original = "original-bytes"
+		putPlainObjectEventually(ctx, getTgt(), bucket, "obj.txt", original)
+
+		_, err := cli.PutObjectLegalHold(ctx, &s3.PutObjectLegalHoldInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String("obj.txt"),
+			LegalHold: &types.ObjectLockLegalHold{
+				Status: types.ObjectLockLegalHoldStatusOn,
+			},
+		})
+		requireS3ErrorCode(err, "NotImplemented")
+
+		// #4 regression guard: the rejected legal-hold PUT must NOT have
+		// overwritten the object body with the legal-hold XML.
+		getOut, getErr := cli.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String("obj.txt"),
+		})
+		gomega.Expect(getErr).NotTo(gomega.HaveOccurred())
+		got, _ := io.ReadAll(getOut.Body)
+		gomega.Expect(getOut.Body.Close()).To(gomega.Succeed())
+		gomega.Expect(string(got)).To(gomega.Equal(original))
+	}, ginkgo.NodeTimeout(60*time.Second))
+
+	ginkgo.It("rejects PutObject carrying Object Lock headers as not implemented", func(ctx context.Context) {
+		bucket := createSpecBucket(getTgt(), "lockhdr")
+		cli := getClient()
+
+		_, err := cli.PutObject(ctx, &s3.PutObjectInput{
+			Bucket:                    aws.String(bucket),
+			Key:                       aws.String("locked.txt"),
+			Body:                      strings.NewReader("locked"),
+			ObjectLockMode:            types.ObjectLockModeGovernance,
+			ObjectLockRetainUntilDate: aws.Time(time.Now().Add(48 * time.Hour)),
+			ObjectLockLegalHoldStatus: types.ObjectLockLegalHoldStatusOn,
+		})
+		requireS3ErrorCode(err, "NotImplemented")
+	}, ginkgo.NodeTimeout(60*time.Second))
+
+	// Regression guard: x-amz-bypass-governance-retention on DELETE must be
+	// treated as a no-op (ignored), not as a 501 NotImplemented. There is no
+	// governance retention to bypass, so the header is harmless and AWS itself
+	// treats it as a no-op when no retention is in place. Fail-closing with 501
+	// here would break legitimate rclone / aws-cli --bypass-governance-retention
+	// deletes against buckets that have no Object Lock active.
+	ginkgo.It("ignores x-amz-bypass-governance-retention on DeleteObject (no-op: no retention to bypass)", func(ctx context.Context) {
+		bucket := createSpecBucket(getTgt(), "lockbypass")
+		cli := getClient()
+		putPlainObjectEventually(ctx, getTgt(), bucket, "obj.txt", "body")
+
+		_, err := cli.DeleteObject(ctx, &s3.DeleteObjectInput{
+			Bucket:                    aws.String(bucket),
+			Key:                       aws.String("obj.txt"),
+			BypassGovernanceRetention: aws.Bool(true),
+		})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+		// Verify the object was actually deleted (not silently skipped).
+		_, headErr := cli.HeadObject(ctx, &s3.HeadObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String("obj.txt"),
+		})
+		requireS3ErrorCode(headErr, "NotFound")
+	}, ginkgo.NodeTimeout(60*time.Second))
+
+	// Regression guard: x-amz-bypass-governance-retention on DeleteObjects (batch)
+	// must also be a no-op. The doc note names both DELETE and DeleteObjects.
+	ginkgo.It("ignores x-amz-bypass-governance-retention on DeleteObjects batch (no-op: no retention to bypass)", func(ctx context.Context) {
+		bucket := createSpecBucket(getTgt(), "lockbatchbypass")
+		cli := getClient()
+		putPlainObjectEventually(ctx, getTgt(), bucket, "obj.txt", "body")
+
+		out, err := cli.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+			Bucket:                    aws.String(bucket),
+			BypassGovernanceRetention: aws.Bool(true),
+			Delete: &types.Delete{
+				Objects: []types.ObjectIdentifier{
+					{Key: aws.String("obj.txt")},
+				},
+				Quiet: aws.Bool(false),
+			},
+		})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(out.Errors).To(gomega.BeEmpty())
+		gomega.Expect(out.Deleted).To(gomega.HaveLen(1))
+
+		// Verify the object was actually deleted.
+		_, headErr := cli.HeadObject(ctx, &s3.HeadObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String("obj.txt"),
+		})
+		requireS3ErrorCode(headErr, "NotFound")
+	}, ginkgo.NodeTimeout(60*time.Second))
+}
+
+func putPlainObjectEventually(ctx context.Context, tgt s3Target, bucket, key, body string) {
+	ginkgo.GinkgoHelper()
+	gomega.Eventually(func() error {
+		var err error
+		for i := 0; i < tgt.nodes; i++ {
+			_, err = tgt.pickNode(i).PutObject(ctx, &s3.PutObjectInput{
+				Bucket: aws.String(bucket),
+				Key:    aws.String(key),
+				Body:   strings.NewReader(body),
+			})
+			if err == nil {
+				return nil
+			}
+		}
+		return err
+	}, 30*time.Second, 500*time.Millisecond).Should(gomega.Succeed())
+}

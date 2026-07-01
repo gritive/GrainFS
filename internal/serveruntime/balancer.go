@@ -4,14 +4,14 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/rs/zerolog/log"
 
 	"github.com/gritive/GrainFS/internal/cluster"
+	"github.com/gritive/GrainFS/internal/gossip"
+	"github.com/gritive/GrainFS/internal/metrics"
 	"github.com/gritive/GrainFS/internal/raft"
-	"github.com/gritive/GrainFS/internal/transport"
 )
 
 // RaftBalancerAdapter wraps cluster.RaftNode to implement
@@ -38,8 +38,7 @@ func (a *RaftBalancerAdapter) PeerIDs() []string         { return a.peers }
 func (a *RaftBalancerAdapter) TransferLeadership() error { return a.node.TransferLeadership() }
 
 // StartBalancer wires and launches the BalancerProposer, GossipSender,
-// GossipReceiver, MigrationExecutor and migration task channel, then
-// replays any persisted pending tasks. Returns the GossipReceiver so the
+// GossipReceiver, disk collector, and request-rate collector. Returns the GossipReceiver so the
 // caller can wire additional StreamType consumers (e.g. Phase 16 Slice 2
 // receipt gossip) onto the same receiver.
 //
@@ -50,39 +49,23 @@ func (a *RaftBalancerAdapter) TransferLeadership() error { return a.node.Transfe
 func StartBalancer(
 	ctx context.Context,
 	nodeID, dataDir string,
-	statsStore *cluster.NodeStatsStore,
+	statsStore *gossip.NodeStatsStore,
 	node cluster.RaftNode,
 	peers []string,
 	fsm *cluster.FSM,
-	clusterTransport transport.Transport,
+	clusterTransport gossip.GossipTransport,
 	shardSvc *cluster.ShardService,
 	numShards int,
 	clusterCfg cluster.BalancerClusterCfg,
 	diskCfg cluster.DiskCfgReader,
 	capabilityGate *cluster.CapabilityGate,
-	capabilityEvidence cluster.CapabilityEvidenceSource,
+	capabilityEvidence gossip.CapabilityEvidenceSource,
 	addrBook cluster.NodeAddressBook,
 	gossipPeerProvider func() []string,
-) (*cluster.BalancerProposer, *cluster.GossipReceiver, error) {
+) (*cluster.BalancerProposer, *gossip.GossipReceiver, error) {
 	gossipInterval := clusterCfg.BalancerGossipInterval()
-	migrationPendingTTL := clusterCfg.BalancerMigrationPendingTTL()
-	migrationMaxRetries := int(clusterCfg.BalancerMigrationMaxRetries())
-
 	adapter := NewRaftBalancerAdapter(node, peers)
 	balancer := cluster.NewBalancerProposer(nodeID, statsStore, adapter, clusterCfg)
-
-	balancer.SetObjectPicker(cluster.NewLocalObjectPicker(filepath.Join(dataDir, "shards")))
-
-	taskCh := make(chan cluster.MigrationTask, 256)
-
-	exec := cluster.NewMigrationExecutorWithTTL(shardSvc, adapter, numShards, migrationPendingTTL)
-	if migrationMaxRetries > 0 {
-		exec.SetMaxWriteRetries(migrationMaxRetries)
-	}
-	exec.SetShardCounter(ECShardCounterFor(fsm))
-	exec.Start(ctx)
-
-	fsm.SetMigrationHooks(taskCh, exec, balancer)
 
 	capabilityEvidenceAliasProvider := func() []string {
 		if addrBook == nil {
@@ -94,21 +77,23 @@ func StartBalancer(
 		}
 		return []string{addr}
 	}
-	sender := cluster.NewGossipSender(nodeID, peers, clusterTransport, statsStore, gossipInterval).
+	sender := gossip.NewGossipSender(nodeID, peers, clusterTransport, statsStore, gossipInterval).
 		WithPeerProvider(gossipPeerProvider).
 		WithCapabilityEvidenceSource(capabilityEvidence).
 		WithCapabilityGate(capabilityGate).
 		WithCapabilityEvidenceAliasProvider(capabilityEvidenceAliasProvider)
-	receiver := cluster.NewGossipReceiver(clusterTransport, statsStore).
+	receiver := gossip.NewGossipReceiver(clusterTransport, statsStore).
 		WithCapabilityGate(capabilityGate).
-		WithNodeAddressBook(addrBook)
+		WithAddressResolver(cluster.NodeAddressBookResolver(addrBook))
 
 	go sender.Run(ctx)
-	go receiver.Run(ctx)
-	go exec.Run(ctx, taskCh)
+	// Phase 8 N7-3: the receiver consumes the native /gossip/admin +
+	// /gossip/receipt routes (the transport's per-route drain goroutines
+	// replace the Receive()-loop goroutine).
+	receiver.RegisterNativeGossipRoutes()
 	go balancer.Run(ctx)
 
-	statsStore.Set(cluster.NodeStats{
+	statsStore.Set(gossip.NodeStats{
 		NodeID:   nodeID,
 		JoinedAt: time.Now(),
 	})
@@ -133,9 +118,11 @@ func StartBalancer(
 	}
 	go collector.Run(ctx)
 
-	if err := fsm.RecoverPending(ctx, taskCh); err != nil {
-		log.Warn().Err(err).Msg("balancer: recover pending failed")
-	}
+	// Request-rate collector: samples the local service-request counter off the
+	// hot path and writes RequestsPerSec into the stats store, completing the
+	// gossip → BoundedLoads/balancer load-signal supply chain (Phase 6 S6-2).
+	rpsCollector := cluster.NewRequestRateCollector(nodeID, statsStore, gossipInterval, metrics.ServiceRequestCount)
+	go rpsCollector.Run(ctx)
 
 	log.Info().Str("component", "balancer").
 		Dur("gossip_interval", gossipInterval).

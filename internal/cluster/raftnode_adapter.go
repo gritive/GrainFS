@@ -189,8 +189,14 @@ done:
 
 // --- Apply channel ---
 
-// The bridge filters out Raft protocol log entries (ConfChange,
-// JointConfChange, NoOp) that cluster FSMs do not consume directly.
+// The bridge forwards ALL committed entries. Cluster FSMs do not consume Raft
+// protocol entries (ConfChange, JointConfChange, NoOp), but the apply loop must
+// still SEE them to advance its applied cursor (DistributedBackend.lastApplied)
+// to the commit frontier. Filtering them out left lastApplied stuck below
+// commitIndex whenever the committed log tail was a non-command entry (e.g. a
+// fresh data group whose only committed entry is the leader's election NoOp),
+// which deadlocked the forward read fence (WaitApplied(commitIndex) could never
+// be satisfied). apply_actor treats non-command entries as trivially applied.
 func (a *raftNodeAdapter) ApplyCh() <-chan raft.LogEntry {
 	a.applyOnce.Do(func() {
 		ch := make(chan raft.LogEntry, 64)
@@ -198,9 +204,6 @@ func (a *raftNodeAdapter) ApplyCh() <-chan raft.LogEntry {
 		src := a.n.ApplyCh()
 		go func() {
 			for entry := range src {
-				if entry.Type != raft.LogEntryCommand && entry.Type != raft.LogEntrySnapshot {
-					continue
-				}
 				ch <- raft.LogEntry{
 					Term:    entry.Term,
 					Index:   entry.Index,
@@ -359,12 +362,6 @@ func (b *raftTransportBridge) SendTimeoutNow(peer string, args *raft.TimeoutNowA
 	return (*sendPtr)(peer, args)
 }
 
-// --- No-op stubs ---
-
-// SetNoOpCommand is a no-op. The actor emits no-op entries on leader
-// election internally without requiring an externally supplied FSM payload.
-func (a *raftNodeAdapter) SetNoOpCommand(_ []byte) {}
-
 // RegisterObserver is a no-op; leadership detection uses State() polling.
 func (a *raftNodeAdapter) RegisterObserver(_ chan<- raft.Event) {
 	a.once.Do(func() {
@@ -427,8 +424,7 @@ func (a *raftNodeAdapter) TransferLeadership() error {
 // --- PeerMatchIndex: v2 does not expose per-peer replication state ---
 
 // PeerMatchIndex returns (0, false) for v2. v2 does not expose per-peer
-// matchIndex; callers (DataGroupPlanExecutor.peerCaughtUp) must treat (0, false)
-// as "not caught up" and either time out or skip the wait.
+// matchIndex.
 func (a *raftNodeAdapter) PeerMatchIndex(_ string) (uint64, bool) { return 0, false }
 
 // --- Membership: sequenced bridge (v2 has no atomic ChangeMembership) ---

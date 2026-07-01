@@ -5,29 +5,7 @@ import (
 	"strings"
 
 	"github.com/gritive/GrainFS/internal/scrubber"
-	"github.com/gritive/GrainFS/internal/server/execution"
-	"github.com/gritive/GrainFS/internal/volume"
 )
-
-// ScrubVolume triggers a scrub session over the named volume's blocks.
-// Idempotent — repeating the same request returns the existing session id.
-func ScrubVolume(ctx context.Context, d *Deps, req ScrubVolumeReq) (ScrubVolumeResp, error) {
-	if d.Director == nil {
-		return ScrubVolumeResp{}, NewInternal("scrub director not configured")
-	}
-	if req.Name == "" {
-		return ScrubVolumeResp{}, NewInvalid("name required")
-	}
-	id, created := d.Director.Trigger(scrubber.TriggerReq{
-		Bucket:    volume.VolumeBucketName,
-		KeyPrefix: volume.BlockKeyPrefix(req.Name),
-		DryRun:    req.DryRun,
-	})
-	if id == "" {
-		return ScrubVolumeResp{}, NewInternal("scrub queue full")
-	}
-	return ScrubVolumeResp{SessionID: id, Created: created}, nil
-}
 
 // ListScrubJobs returns every scrub session the Director currently tracks.
 func ListScrubJobs(ctx context.Context, d *Deps) (ListScrubJobsResp, error) {
@@ -48,25 +26,6 @@ func ListScrubJobs(ctx context.Context, d *Deps) (ListScrubJobsResp, error) {
 func TriggerScrub(ctx context.Context, d *Deps, req ScrubReq) (ScrubResp, error) {
 	if req.Bucket == "" {
 		return ScrubResp{}, NewInvalid("bucket required")
-	}
-	if d.Execution != nil {
-		// Scrub keeps its existing session_id contract; Operation.ID stays zero here.
-		plan, err := (execution.Planner{ClusterAvailable: true}).Plan(execution.Operation{
-			Kind: execution.OperationScrub,
-			Scrub: execution.ScrubOperation{
-				Bucket:    req.Bucket,
-				KeyPrefix: req.KeyPrefix,
-				DryRun:    req.DryRun,
-			},
-		})
-		if err != nil {
-			return ScrubResp{}, executionErrorToAdmin(err)
-		}
-		result, err := d.Execution.Execute(ctx, plan)
-		if err != nil {
-			return ScrubResp{}, executionErrorToAdmin(err)
-		}
-		return ScrubResp{SessionID: result.Scrub.SessionID, Created: result.Scrub.Created}, nil
 	}
 	if d.ScrubProposer == nil {
 		return ScrubResp{}, NewInternal("scrub proposer not configured")

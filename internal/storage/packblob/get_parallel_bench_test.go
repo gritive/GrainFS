@@ -15,8 +15,8 @@ import (
 // BenchmarkParallelGetSmallObjects measures the RLock contention on
 // PackedBackend.mu under read-only parallel load. This is the workload the
 // lock-free audit names as the trigger condition ("if packed small object
-// reads become a hot-path bottleneck, convert this to the same immutable
-// snapshot pattern used by CachedBackend").
+// reads become a hot-path bottleneck, convert this to an immutable
+// snapshot pattern — atomic.Pointer + CompareAndSwap").
 //
 // Pre-populates N small objects, then runs b.RunParallel readers picking
 // keys uniformly at random. Run with -mutexprofile to see whether the

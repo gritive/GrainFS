@@ -14,7 +14,6 @@ import (
 // are handled by the FSM post-commit hook in Task 14, not by reload-hook closures.
 type ReloadHooks struct {
 	OnAllowAnonBucketPolicy func(context.Context, bool) error
-	OnTrustedProxyCIDR      func(context.Context, string) error
 	OnJWTSigningKeyRotate   func(context.Context) error
 	OnJWTSigningKeyPrune    func(context.Context) error
 	OnClusterReadOnlyChange func(context.Context, bool) error
@@ -65,17 +64,6 @@ func RegisterClusterKeys(s *Store, h ReloadHooks) {
 		},
 	})
 
-	s.Register("trusted-proxy.cidr", StringSpec{
-		Default: "",
-		Desc:    "CIDR range of trusted reverse proxies (e.g. 10.0.0.0/8)",
-		OnReload: func(ctx context.Context, v string) error {
-			if h.OnTrustedProxyCIDR == nil {
-				return nil
-			}
-			return h.OnTrustedProxyCIDR(ctx, v)
-		},
-	})
-
 	s.Register("jwt.signing-key-rotate", TriggerSpec{
 		Desc: "Rotate the JWT signing key (set to \"now\" to trigger)",
 		OnTrigger: func(ctx context.Context) error {
@@ -97,9 +85,9 @@ func RegisterClusterKeys(s *Store, h ReloadHooks) {
 	})
 
 	// encryption.rotate-dek: ENABLED (S5). All data lanes now carry gen framing
-	// or self-roll on a gen advance (packblob per-entry gen S1; datawal/logical-WAL
-	// rotation boundaries S2/S3; EC/object seal-at-pinned-gen S4; datawal Append
-	// roll-then-retry S5), so advancing the active gen is safe. OnTrigger is a
+	// or seal under a pinned generation (packblob per-entry gen S1; logical-WAL
+	// rotation boundaries S2/S3; EC/object seal-at-pinned-gen S4), so advancing
+	// the active gen is safe. OnTrigger is a
 	// no-op accept: it runs SYNCHRONOUSLY inside the raft apply loop
 	// (applyConfigPut → cfgStore.Set → fireReload), where calling the blocking
 	// ProposeDEKRotate would deadlock the apply loop. The actual rotation is

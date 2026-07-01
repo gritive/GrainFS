@@ -9,6 +9,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/gossip"
 )
 
 type mockLoadProposer struct {
@@ -38,8 +40,8 @@ type nonLeaderProposer struct{ mockLoadProposer }
 func (n *nonLeaderProposer) IsLeader() bool { return false }
 
 func TestLoadReporter_FiresOnTick(t *testing.T) {
-	store := NewNodeStatsStore(5 * time.Minute)
-	store.Set(NodeStats{NodeID: "n1", DiskUsedPct: 55.0, DiskAvailBytes: 8000, RequestsPerSec: 10, UpdatedAt: time.Now()})
+	store := gossip.NewNodeStatsStore(5 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "n1", DiskUsedPct: 55.0, DiskAvailBytes: 8000, RequestsPerSec: 10, UpdatedAt: time.Now()})
 
 	proposer := &mockLoadProposer{}
 	r := NewLoadReporter("n1", store, proposer, 50*time.Millisecond)
@@ -58,8 +60,8 @@ func TestLoadReporter_FiresOnTick(t *testing.T) {
 }
 
 func TestLoadReporter_SkipsIfNotLeader(t *testing.T) {
-	store := NewNodeStatsStore(5 * time.Minute)
-	store.Set(NodeStats{NodeID: "n1", DiskUsedPct: 50.0, DiskAvailBytes: 5000, UpdatedAt: time.Now()})
+	store := gossip.NewNodeStatsStore(5 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "n1", DiskUsedPct: 50.0, DiskAvailBytes: 5000, UpdatedAt: time.Now()})
 
 	proposer := &nonLeaderProposer{}
 	r := NewLoadReporterWithLeaderCheck("n1", store, &proposer.mockLoadProposer, proposer, 50*time.Millisecond)
@@ -69,7 +71,7 @@ func TestLoadReporter_SkipsIfNotLeader(t *testing.T) {
 }
 
 func TestLoadReporter_EmptyStoreSkips(t *testing.T) {
-	store := NewNodeStatsStore(5 * time.Minute)
+	store := gossip.NewNodeStatsStore(5 * time.Minute)
 	proposer := &mockLoadProposer{}
 	r := NewLoadReporter("n1", store, proposer, 50*time.Millisecond)
 

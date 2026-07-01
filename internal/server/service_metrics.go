@@ -28,9 +28,6 @@ func classifyServiceMetricRoute(method, path, rawQuery string) serviceMetricRout
 	if path == routePathMetrics {
 		return serviceMetricRoute{service: "metrics", operation: "Scrape"}
 	}
-	if strings.HasPrefix(path, routePrefixIceberg) || strings.HasPrefix(path, routePrefixIcebergAIStor) {
-		return serviceMetricRoute{service: "iceberg", operation: classifyIcebergServiceOperation(method, path)}
-	}
 	if strings.HasPrefix(path, "/api/cluster/") {
 		return serviceMetricRoute{service: "cluster", operation: classifyAPIOperation(path)}
 	}
@@ -60,7 +57,7 @@ func isS3MetricPath(path string) bool {
 	}
 	first, _, _ = strings.Cut(first, "/")
 	switch first {
-	case "api", "admin", "iceberg", "_iceberg", "metrics", "ui":
+	case "api", "admin", "metrics", "ui":
 		return false
 	default:
 		return true
@@ -101,43 +98,6 @@ func classifyS3ServiceOperation(method, path, rawQuery string) string {
 		return "CreateBucket"
 	case method == "DELETE":
 		return "DeleteBucket"
-	default:
-		return method
-	}
-}
-
-func classifyIcebergServiceOperation(method, path string) string {
-	switch {
-	case strings.HasSuffix(path, "/v1/config") && method == "GET":
-		return "GetCatalogConfig"
-	case strings.HasSuffix(path, "/v1/warehouses") && method == "POST":
-		return "CreateWarehouse"
-	case strings.Contains(path, "/v1/warehouses/") && method == "DELETE":
-		return "DropWarehouse"
-	case strings.HasSuffix(path, "/v1/namespaces") && method == "GET":
-		return "ListNamespaces"
-	case strings.HasSuffix(path, "/v1/namespaces") && method == "POST":
-		return "CreateNamespace"
-	case strings.Contains(path, "/v1/namespaces/") && !strings.Contains(path, "/tables") && method == "GET":
-		return "LoadNamespace"
-	case strings.Contains(path, "/v1/namespaces/") && !strings.Contains(path, "/tables") && method == "HEAD":
-		return "LoadNamespace"
-	case strings.Contains(path, "/v1/namespaces/") && !strings.Contains(path, "/tables") && method == "DELETE":
-		return "DropNamespace"
-	case strings.Contains(path, "/v1/namespaces/") && strings.HasSuffix(path, "/tables") && method == "GET":
-		return "ListTables"
-	case strings.Contains(path, "/v1/namespaces/") && strings.HasSuffix(path, "/tables") && method == "POST":
-		return "CreateTable"
-	case strings.Contains(path, "/v1/namespaces/") && strings.Contains(path, "/tables/") && method == "POST":
-		return "CommitTable"
-	case strings.Contains(path, "/v1/namespaces/") && strings.Contains(path, "/tables/") && method == "GET":
-		return "LoadTable"
-	case strings.Contains(path, "/v1/namespaces/") && strings.Contains(path, "/tables/") && method == "HEAD":
-		return "LoadTable"
-	case strings.Contains(path, "/v1/namespaces/") && strings.Contains(path, "/tables/") && method == "DELETE":
-		return "DropTable"
-	case strings.HasSuffix(path, "/v1/transactions/commit") && method == "POST":
-		return "CommitTransaction"
 	default:
 		return method
 	}

@@ -17,11 +17,6 @@ type Store interface {
 	SAPolicies(ctx context.Context, saID string) ([]string, error)
 	SAGroups(ctx context.Context, saID string) ([]string, error)
 	GroupPolicies(ctx context.Context, group string) ([]string, error)
-	// MountSAPolicies returns policies directly attached to the given
-	// mount-SA name. Mount-SA principals do NOT expand through groups
-	// (cross-namespace separation, NFS§A T4) — this is the only mount-SA
-	// pool lookup the resolver performs.
-	MountSAPolicies(ctx context.Context, mountSA string) ([]string, error)
 	PolicyDoc(ctx context.Context, name string) (*Document, error)
 	BucketPolicy(ctx context.Context, bucket string) (*Document, error)
 }
@@ -47,18 +42,9 @@ func NewResolver(store Store, ttl time.Duration) *Resolver {
 	return &Resolver{ttl: ttl, store: store, cache: make(map[string]cacheEntry)}
 }
 
-// cacheKey is type-aware so an S3-SA "alice" and a mount-SA "alice" never
-// collide in the resolver cache. The type byte goes before the name to keep
-// Invalidate's prefix scan unambiguous (sa portion runs name|bucket).
-func cacheKey(ptype PrincipalType, sa, bucket string) string {
-	var prefix string
-	switch ptype {
-	case PrincipalTypeMount:
-		prefix = "m|"
-	default:
-		prefix = "s|"
-	}
-	return prefix + sa + "|" + bucket
+// cacheKey produces a stable cache key for a (sa, bucket) pair.
+func cacheKey(sa, bucket string) string {
+	return "s|" + sa + "|" + bucket
 }
 
 func principalCacheKey(p principal.Principal, bucket string) string {
@@ -68,12 +54,10 @@ func principalCacheKey(p principal.Principal, bucket string) string {
 }
 
 // Effective returns the union of principal-attached and bucket policies for
-// the given (saID, bucket, principalType), using the cache when the entry
-// is still fresh. principalType selects which attach pool to read:
-//   - PrincipalTypeS3 (default): SAPolicies + SAGroups expansion
-//   - PrincipalTypeMount: MountSAPolicies only (no group expansion)
-func (r *Resolver) Effective(ctx context.Context, saID, bucket string, ptype PrincipalType) (EvalInput, error) {
-	k := cacheKey(ptype, saID, bucket)
+// the given (saID, bucket) pair, using the cache when the entry is still fresh.
+// Resolution is SAPolicies + SAGroups → GroupPolicies expansion.
+func (r *Resolver) Effective(ctx context.Context, saID, bucket string) (EvalInput, error) {
+	k := cacheKey(saID, bucket)
 	r.mu.Lock()
 	if e, ok := r.cache[k]; ok && time.Now().Before(e.expires) {
 		r.mu.Unlock()
@@ -87,31 +71,20 @@ func (r *Resolver) Effective(ctx context.Context, saID, bucket string, ptype Pri
 	}
 	r.mu.Unlock()
 
-	var names []string
-	var err error
-	switch ptype {
-	case PrincipalTypeMount:
-		// Mount-SA: direct attach only; no group expansion.
-		names, err = r.store.MountSAPolicies(ctx, saID)
+	names, err := r.store.SAPolicies(ctx, saID)
+	if err != nil {
+		return EvalInput{}, err
+	}
+	groups, err := r.store.SAGroups(ctx, saID)
+	if err != nil {
+		return EvalInput{}, err
+	}
+	for _, g := range groups {
+		gp, err := r.store.GroupPolicies(ctx, g)
 		if err != nil {
 			return EvalInput{}, err
 		}
-	default:
-		names, err = r.store.SAPolicies(ctx, saID)
-		if err != nil {
-			return EvalInput{}, err
-		}
-		groups, err := r.store.SAGroups(ctx, saID)
-		if err != nil {
-			return EvalInput{}, err
-		}
-		for _, g := range groups {
-			gp, err := r.store.GroupPolicies(ctx, g)
-			if err != nil {
-				return EvalInput{}, err
-			}
-			names = append(names, gp...)
-		}
+		names = append(names, gp...)
 	}
 	var pp []*Document
 	var ppNames []string
@@ -147,12 +120,8 @@ func (r *Resolver) Effective(ctx context.Context, saID, bucket string, ptype Pri
 // plus external group-name attachments from token claims.
 func (r *Resolver) EffectivePrincipal(ctx context.Context, p principal.Principal, bucket string) (EvalInput, error) {
 	switch p.Kind {
-	case principal.KindServiceAccount:
-		return r.Effective(ctx, p.ID, bucket, PrincipalTypeS3)
-	case principal.KindMountSA:
-		return r.Effective(ctx, p.ID, bucket, PrincipalTypeMount)
-	case principal.KindProtocolCredential:
-		return r.Effective(ctx, p.ID, bucket, PrincipalTypeS3)
+	case principal.KindServiceAccount, principal.KindProtocolCredential:
+		return r.Effective(ctx, p.ID, bucket)
 	case principal.KindOIDC:
 		return r.effectiveOIDC(ctx, p, bucket)
 	default:
@@ -238,10 +207,6 @@ func (r *Resolver) HasBucketPolicy(ctx context.Context, bucket string) (bool, er
 // Invalidate removes cache entries matching any of the given SA IDs or bucket names.
 // Passing empty slices for both arguments nukes the entire cache (global mutation path,
 // e.g. a policy document body edit that affects unknown consumers).
-//
-// Names are matched type-agnostically: passing saID="alice" invalidates both
-// the S3-SA "alice|bucket-x" and the mount-SA "alice|bucket-x" entries.
-// Operators specify names, not pool kinds.
 func (r *Resolver) Invalidate(saIDs, buckets []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -274,7 +239,7 @@ func parseCacheKey(k string) (principalID, bucket string, ok bool) {
 		return "", "", false
 	}
 	switch parts[0] {
-	case "s", "m":
+	case "s":
 		return parts[1], parts[2], true
 	case "p":
 		if len(parts) != 5 {

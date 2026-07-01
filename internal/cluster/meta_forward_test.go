@@ -8,7 +8,6 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/compat"
-	"github.com/gritive/GrainFS/internal/icebergcatalog"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/stretchr/testify/require"
 )
@@ -74,7 +73,7 @@ func TestMetaForwardRequest_RejectsLegacyV1Magic(t *testing.T) {
 	_, _, framed, err := decodeMetaForwardRequest(payload)
 	require.True(t, framed, "v1 magic must be detected (framed=true)")
 	require.Error(t, err)
-	require.ErrorIs(t, err, icebergcatalog.ErrServiceUnavailable)
+	require.ErrorIs(t, err, errMetaForwardUnavailable)
 	require.Contains(t, err.Error(), "GFSMFWD1")
 }
 
@@ -83,7 +82,7 @@ func TestMetaForwardRequest_MalformedFB(t *testing.T) {
 	_, _, framed, err := decodeMetaForwardRequest(payload)
 	require.True(t, framed)
 	require.Error(t, err)
-	require.ErrorIs(t, err, icebergcatalog.ErrServiceUnavailable)
+	require.ErrorIs(t, err, errMetaForwardUnavailable)
 }
 
 func TestMetaForwardReply_Success(t *testing.T) {
@@ -101,8 +100,6 @@ func TestMetaForwardReply_AllErrorTypes(t *testing.T) {
 	}{
 		{"not-leader", raft.ErrNotLeader, raft.ErrNotLeader},
 		{"capability-rejected", compat.ErrCapabilityRejected, compat.ErrCapabilityRejected},
-		{"namespace-not-found", icebergcatalog.ErrNamespaceNotFound, icebergcatalog.ErrNamespaceNotFound},
-		{"namespace-exists", icebergcatalog.ErrNamespaceExists, icebergcatalog.ErrNamespaceExists},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -148,7 +145,7 @@ func TestCompatEnumConverters_RoundTrip(t *testing.T) {
 	require.Equal(t, compat.Severity(""), severityFromFB(clusterpb.CompatSeverityUnknown))
 
 	ops := []compat.Operation{
-		compat.OperationMigrationCutover, compat.OperationNfsExportCreate,
+		compat.OperationMigrationCutover,
 		compat.OperationCreateMultipartUpload, compat.OperationListMultipartUploads,
 		compat.OperationListParts,
 	}
@@ -175,7 +172,7 @@ func TestCompatEnumDriftGuard(t *testing.T) {
 	}
 
 	ops := []compat.Operation{
-		compat.OperationMigrationCutover, compat.OperationNfsExportCreate,
+		compat.OperationMigrationCutover,
 		compat.OperationCreateMultipartUpload, compat.OperationListMultipartUploads,
 		compat.OperationListParts,
 	}

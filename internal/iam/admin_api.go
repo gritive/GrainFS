@@ -15,6 +15,7 @@ import (
 	"github.com/gritive/GrainFS/internal/adminapi"
 	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/uuidutil"
 )
 
 // SACreateRequest is the JSON body for POST /admin/iam/sa.
@@ -54,20 +55,12 @@ type GrantDeleteRequest struct {
 	Bucket string `json:"bucket"`
 }
 
-// PostureChecker is an optional dependency retained for compatibility with
-// older serveruntime wiring. First-SA creation no longer changes anonymous
-// access posture.
-type PostureChecker interface {
-	CheckAnonOff(ctx context.Context) error
-}
-
 // AdminAPI hosts HTTP handlers for /admin/iam/* endpoints. Stdlib handlers
 // are wrapped onto Hertz at the admin UDS in Task 21.
 type AdminAPI struct {
 	store    *Store
 	proposer Proposer
 	enc      atomic.Pointer[storage.DataEncryptor] // nil until SetEncryptor; swapped after DEK keeper is ready
-	posture  PostureChecker                        // optional; nil = skip first-SA pre-check (legacy/test default)
 }
 
 // NewAdminAPI returns an AdminAPI bound to the given Store and Proposer. The
@@ -100,27 +93,16 @@ func (a *AdminAPI) SetEncryptor(de storage.DataEncryptor) {
 	a.enc.Store(&de)
 }
 
-// SetPostureChecker installs the optional PostureChecker.
-func (a *AdminAPI) SetPostureChecker(pc PostureChecker) { a.posture = pc }
-
 // CreateSA creates a new ServiceAccount and an initial access key for it.
 // Returns *adminapi.Error on validation or conflict; use errors.As to inspect.
 func (a *AdminAPI) CreateSA(ctx context.Context, req SACreateRequest) (SACreateResponse, error) {
 	if req.Name == "" {
 		return SACreateResponse{}, &adminapi.Error{Code: "invalid", Message: "name required"}
 	}
-	// Retain the optional first-SA pre-check hook for compatibility. The
-	// default serveruntime checker is now a no-op because SA creation no longer
-	// flips a global anonymous-access config key.
-	if a.posture != nil && a.store.IsEmpty() {
-		if err := a.posture.CheckAnonOff(ctx); err != nil {
-			return SACreateResponse{}, &adminapi.Error{Code: "precondition", Message: err.Error()}
-		}
-	}
 	now := time.Now().UTC()
 	accessKey, secretKey := genCredentialPair()
 	sa := ServiceAccount{
-		ID: NewUUIDv7(), Name: req.Name, Description: req.Description,
+		ID: uuidutil.MustNewV7(), Name: req.Name, Description: req.Description,
 		CreatedAt: now, CreatedBy: PrincipalFromContext(ctx),
 	}
 	// R2 code-gate codex P2: check encryptor + wrap the secret BEFORE the SA
@@ -389,6 +371,7 @@ type BucketUpstreamItem struct {
 	CreatedAt   time.Time            `json:"created_at"`
 	CreatedBy   string               `json:"created_by,omitempty"`
 	Status      BucketUpstreamStatus `json:"status"`
+	Generation  uint64               `json:"generation"`
 }
 
 func (a *AdminAPI) PutBucketUpstream(ctx context.Context, req BucketUpstreamPutRequest) error {
@@ -467,7 +450,7 @@ func (a *AdminAPI) GetBucketUpstream(_ context.Context, bucket string) (BucketUp
 	if status == "" {
 		status = BucketUpstreamStatusActive
 	}
-	return BucketUpstreamItem{Bucket: u.Bucket, UpstreamURL: u.Endpoint, AccessKey: u.AccessKey, CreatedAt: u.CreatedAt, CreatedBy: u.CreatedBy, Status: status}, nil
+	return BucketUpstreamItem{Bucket: u.Bucket, UpstreamURL: u.Endpoint, AccessKey: u.AccessKey, CreatedAt: u.CreatedAt, CreatedBy: u.CreatedBy, Status: status, Generation: u.Generation}, nil
 }
 
 func (a *AdminAPI) HandleBucketUpstreamGet(w http.ResponseWriter, r *http.Request, bucket string) {
@@ -488,7 +471,7 @@ func (a *AdminAPI) ListBucketUpstreams(_ context.Context) ([]BucketUpstreamItem,
 		if status == "" {
 			status = BucketUpstreamStatusActive
 		}
-		out = append(out, BucketUpstreamItem{Bucket: u.Bucket, UpstreamURL: u.Endpoint, AccessKey: u.AccessKey, CreatedAt: u.CreatedAt, CreatedBy: u.CreatedBy, Status: status})
+		out = append(out, BucketUpstreamItem{Bucket: u.Bucket, UpstreamURL: u.Endpoint, AccessKey: u.AccessKey, CreatedAt: u.CreatedAt, CreatedBy: u.CreatedBy, Status: status, Generation: u.Generation})
 	}
 	return out, nil
 }
@@ -503,7 +486,7 @@ func (a *AdminAPI) DeleteBucketUpstream(ctx context.Context, bucket string) erro
 	if _, ok := a.store.LookupBucketUpstream(bucket); !ok {
 		return &adminapi.Error{Code: "not_found", Message: "not found"}
 	}
-	if err := a.proposer.ProposeBucketUpstreamDelete(ctx, bucket); err != nil {
+	if err := a.proposer.ProposeBucketUpstreamDelete(ctx, bucket, UnconditionalDeleteGen); err != nil {
 		return &adminapi.Error{Code: "internal", Message: "propose: " + err.Error()}
 	}
 	return nil

@@ -5,6 +5,7 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/app/server"
+	"github.com/gritive/GrainFS/internal/server/alertssvc"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -12,22 +13,25 @@ import (
 func (s *Server) registerRoutes(h *server.Hertz) {
 	s.registerMetricsAPI(h)
 	s.registerDashboardUI(h)
-	s.iceberg.Register(h, routePrefixIceberg, routePrefixIcebergAIStor)
 	s.registerS3API(h)
 	s.registerClusterAPI(h)
 	s.registerBalancerAPI(h)
 	s.registerLifecycleStatusAPI(h)
 	s.registerLifecycleTestCtlAPI(h)
-	s.snapshotH.Register(h, routePathAdminSnapshots, routePathSnapshotSeqRestore, routePathSnapshotSeq)
 	s.registerRaftSnapshotAPI(h)
-	s.registerPITRAPI(h)
 	s.registerScrubAPI(h)
 	s.registerDashboardHealthAPI(h)
 	s.registerAdminAPI(h)
 	s.registerConfigAPI(h)
 	s.registerEventsAPI(h)
-	s.registerAuditAPI(h)
-	s.registerAlertsAPI(h)
+	alertssvc.NewHandler(alertssvc.Deps{
+		State:            s.alerts,
+		LocalhostOnly:    localhostOnly,
+		MutationDisabled: s.blockIfMutationDisabled,
+		FeatureVisible:   func() bool { return s.routeFeatureRoutesVisible(routeFeatureAlerts) },
+		StatusPath:       routePathAlertsStatus,
+		ResendPath:       routePathAlertsResend,
+	}).Register(h)
 	s.receipt.Register(h, routePathReceiptByID, routePathReceipts)
 	s.incidentH.Register(h, routePathIncidents, routePrefixIncidents)
 }

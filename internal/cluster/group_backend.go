@@ -7,8 +7,6 @@ import (
 	"sync"
 	"sync/atomic"
 
-	badger "github.com/dgraph-io/badger/v4"
-
 	"github.com/gritive/GrainFS/internal/resourcewatch"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -69,7 +67,7 @@ func newGroupBackendWithRaftForTest(p raftLeaderProbe) *GroupBackend {
 type GroupBackendConfig struct {
 	ID        string
 	Root      string
-	DB        *badger.DB
+	Store     MetadataStore
 	Node      RaftNode
 	VlogEntry *resourcewatch.RegisteredDB // optional — owned by GroupBackend (deregistered on Close)
 	ShardSvc  *ShardService               // may be nil for in-process / single-node tests
@@ -107,11 +105,11 @@ func NewGroupBackend(cfg GroupBackendConfig) (*GroupBackend, error) {
 	if cfg.ID == "" {
 		return nil, fmt.Errorf("GroupBackend: empty ID")
 	}
-	if cfg.Root == "" || cfg.DB == nil || cfg.Node == nil {
+	if cfg.Root == "" || cfg.Store == nil || cfg.Node == nil {
 		return nil, fmt.Errorf("GroupBackend %s: Root/DB/Node required", cfg.ID)
 	}
 
-	dist, err := NewDistributedBackend(cfg.Root, cfg.DB, cfg.Node, cfg.Keyspace, cfg.Shared)
+	dist, err := NewDistributedBackend(cfg.Root, cfg.Store, cfg.Node, cfg.Keyspace, cfg.Shared)
 	if err != nil {
 		return nil, fmt.Errorf("GroupBackend %s: NewDistributedBackend: %w", cfg.ID, err)
 	}
@@ -192,8 +190,8 @@ func (g *GroupBackend) CreateMultipartUploadWithTags(ctx context.Context, bucket
 	return g.DistributedBackend.CreateMultipartUploadWithTags(g.placementContext(ctx), bucket, key, contentType, tags)
 }
 
-func (g *GroupBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader) (*storage.Part, error) {
-	return g.DistributedBackend.UploadPart(g.placementContext(ctx), bucket, key, uploadID, partNumber, r)
+func (g *GroupBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader, contentMD5Hex string) (*storage.Part, error) {
+	return g.DistributedBackend.UploadPart(g.placementContext(ctx), bucket, key, uploadID, partNumber, r, contentMD5Hex)
 }
 
 func (g *GroupBackend) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []storage.Part) (*storage.Object, error) {

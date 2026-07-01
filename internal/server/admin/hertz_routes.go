@@ -21,7 +21,6 @@ type router interface {
 func RegisterAdmin(h *server.Hertz, d *Deps) {
 	h.Use(peerCredMiddleware())
 	g := h.Group(routePrefixAdmin)
-	registerVolume(g, d)
 	registerScrub(g, d)
 	registerCluster(g, d)
 	registerResource(g, d)
@@ -30,11 +29,8 @@ func RegisterAdmin(h *server.Hertz, d *Deps) {
 	registerConfig(g, d)
 	registerIAMPDP(g, d)
 	registerBucket(g, d)
-	registerNfsExports(g, d)
 	registerCredentials(g, d)
-	registerAudit(g, d)
 	registerStatus(g, d)
-	registerIceberg(g, d)
 }
 
 // RegisterUI wires a subset of admin handlers under `/ui/api/...` on the
@@ -43,7 +39,6 @@ func RegisterAdmin(h *server.Hertz, d *Deps) {
 // handler logic).
 func RegisterUI(h *server.Hertz, d *Deps) {
 	g := h.Group(routePrefixUI)
-	registerVolumeUI(g, d)
 	registerScrubUI(g, d)
 	registerCluster(g, d)
 	registerResource(g, d)
@@ -71,13 +66,6 @@ func RegisterIAMOnly(h *server.Hertz, d *Deps) {
 
 func registerStatus(g router, d *Deps) {
 	g.GET(routePathStatus, wrapZero(d, GetStatus))
-}
-
-func registerIceberg(g router, d *Deps) {
-	if d.IcebergConfig == nil {
-		return
-	}
-	g.POST(routePathIcebergConfig, wrapBody[IcebergConfigRequest, IcebergConfigResponse](d, IcebergConfig))
 }
 
 func registerCluster(g router, d *Deps) {

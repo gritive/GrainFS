@@ -274,8 +274,140 @@ func (rcv *PutObjectMetaCmd) TagsLength() int {
 	return 0
 }
 
+func (rcv *PutObjectMetaCmd) StripeBytes() uint32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(42))
+	if o != 0 {
+		return rcv._tab.GetUint32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *PutObjectMetaCmd) MutateStripeBytes(n uint32) bool {
+	return rcv._tab.MutateUint32Slot(42, n)
+}
+
+func (rcv *PutObjectMetaCmd) Acl() byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(44))
+	if o != 0 {
+		return rcv._tab.GetByte(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *PutObjectMetaCmd) MutateAcl(n byte) bool {
+	return rcv._tab.MutateByteSlot(44, n)
+}
+
+func (rcv *PutObjectMetaCmd) MetaSeq() uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(46))
+	if o != 0 {
+		return rcv._tab.GetUint64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *PutObjectMetaCmd) MutateMetaSeq(n uint64) bool {
+	return rcv._tab.MutateUint64Slot(46, n)
+}
+
+func (rcv *PutObjectMetaCmd) IsHardDeleted() bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(48))
+	if o != 0 {
+		return rcv._tab.GetBool(o + rcv._tab.Pos)
+	}
+	return false
+}
+
+func (rcv *PutObjectMetaCmd) MutateIsHardDeleted(n bool) bool {
+	return rcv._tab.MutateBoolSlot(48, n)
+}
+
+func (rcv *PutObjectMetaCmd) Coalesced(obj *CoalescedShardRef, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(50))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *PutObjectMetaCmd) CoalescedLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(50))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func (rcv *PutObjectMetaCmd) IsAppendable() bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(52))
+	if o != 0 {
+		return rcv._tab.GetBool(o + rcv._tab.Pos)
+	}
+	return false
+}
+
+func (rcv *PutObjectMetaCmd) MutateIsAppendable(n bool) bool {
+	return rcv._tab.MutateBoolSlot(52, n)
+}
+
+func (rcv *PutObjectMetaCmd) MetaSeqCas() bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(54))
+	if o != 0 {
+		return rcv._tab.GetBool(o + rcv._tab.Pos)
+	}
+	return false
+}
+
+func (rcv *PutObjectMetaCmd) MutateMetaSeqCas(n bool) bool {
+	return rcv._tab.MutateBoolSlot(54, n)
+}
+
+func (rcv *PutObjectMetaCmd) IsQuarantined() bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(56))
+	if o != 0 {
+		return rcv._tab.GetBool(o + rcv._tab.Pos)
+	}
+	return false
+}
+
+func (rcv *PutObjectMetaCmd) MutateIsQuarantined(n bool) bool {
+	return rcv._tab.MutateBoolSlot(56, n)
+}
+
+func (rcv *PutObjectMetaCmd) QuarantineCause() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(58))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
+func (rcv *PutObjectMetaCmd) AppendCallMd5s(obj *BytesValue, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(60))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *PutObjectMetaCmd) AppendCallMd5sLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(60))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
 func PutObjectMetaCmdStart(builder *flatbuffers.Builder) {
-	builder.StartObject(19)
+	builder.StartObject(29)
 }
 func PutObjectMetaCmdAddBucket(builder *flatbuffers.Builder, bucket flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(bucket), 0)
@@ -347,6 +479,42 @@ func PutObjectMetaCmdAddTags(builder *flatbuffers.Builder, tags flatbuffers.UOff
 	builder.PrependUOffsetTSlot(18, flatbuffers.UOffsetT(tags), 0)
 }
 func PutObjectMetaCmdStartTagsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
+}
+func PutObjectMetaCmdAddStripeBytes(builder *flatbuffers.Builder, stripeBytes uint32) {
+	builder.PrependUint32Slot(19, stripeBytes, 0)
+}
+func PutObjectMetaCmdAddAcl(builder *flatbuffers.Builder, acl byte) {
+	builder.PrependByteSlot(20, acl, 0)
+}
+func PutObjectMetaCmdAddMetaSeq(builder *flatbuffers.Builder, metaSeq uint64) {
+	builder.PrependUint64Slot(21, metaSeq, 0)
+}
+func PutObjectMetaCmdAddIsHardDeleted(builder *flatbuffers.Builder, isHardDeleted bool) {
+	builder.PrependBoolSlot(22, isHardDeleted, false)
+}
+func PutObjectMetaCmdAddCoalesced(builder *flatbuffers.Builder, coalesced flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(23, flatbuffers.UOffsetT(coalesced), 0)
+}
+func PutObjectMetaCmdStartCoalescedVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
+}
+func PutObjectMetaCmdAddIsAppendable(builder *flatbuffers.Builder, isAppendable bool) {
+	builder.PrependBoolSlot(24, isAppendable, false)
+}
+func PutObjectMetaCmdAddMetaSeqCas(builder *flatbuffers.Builder, metaSeqCas bool) {
+	builder.PrependBoolSlot(25, metaSeqCas, false)
+}
+func PutObjectMetaCmdAddIsQuarantined(builder *flatbuffers.Builder, isQuarantined bool) {
+	builder.PrependBoolSlot(26, isQuarantined, false)
+}
+func PutObjectMetaCmdAddQuarantineCause(builder *flatbuffers.Builder, quarantineCause flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(27, flatbuffers.UOffsetT(quarantineCause), 0)
+}
+func PutObjectMetaCmdAddAppendCallMd5s(builder *flatbuffers.Builder, appendCallMd5s flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(28, flatbuffers.UOffsetT(appendCallMd5s), 0)
+}
+func PutObjectMetaCmdStartAppendCallMd5sVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
 }
 func PutObjectMetaCmdEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {

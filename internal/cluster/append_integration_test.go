@@ -8,8 +8,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/dgraph-io/badger/v4"
-
 	"github.com/gritive/GrainFS/internal/storage"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -26,44 +24,6 @@ var _ = Describe("Append object integration", func() {
 		b = newTestDistributedBackend(GinkgoT())
 		ctx = context.Background()
 		Expect(b.CreateBucket(ctx, "test")).To(Succeed())
-	})
-
-	It("applies duplicate append commands idempotently", func() {
-		seg := storage.SegmentRef{
-			BlobID:   "blob-1",
-			Size:     4,
-			Checksum: bytes.Repeat([]byte{0xde}, storage.ChecksumLen),
-		}
-		cmd := AppendObjectCmd{
-			Bucket:         "test",
-			Key:            "k",
-			ExpectedOffset: 0,
-			BlobID:         seg.BlobID,
-			SegmentSize:    seg.Size,
-			SegmentETag:    "deadbeefcafebabedeadbeefcafebabe",
-		}
-		data, err := encodeAppendObjectCmd(cmd)
-		Expect(err).NotTo(HaveOccurred())
-
-		Expect(b.fsm.db.Update(func(txn *badger.Txn) error {
-			return b.fsm.applyAppendObjectFromCmd(txn, data)
-		})).To(Succeed())
-
-		obj1, err := b.HeadObject(ctx, "test", "k")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(obj1.Segments).To(HaveLen(1))
-		Expect(obj1.Segments[0].BlobID).To(Equal("blob-1"))
-		Expect(obj1.Size).To(Equal(seg.Size))
-		Expect(obj1.IsAppendable).To(BeTrue())
-
-		Expect(b.fsm.db.Update(func(txn *badger.Txn) error {
-			return b.fsm.applyAppendObjectFromCmd(txn, data)
-		})).To(Succeed())
-
-		obj2, err := b.HeadObject(ctx, "test", "k")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(obj2.Segments).To(HaveLen(1))
-		Expect(obj2.Size).To(Equal(seg.Size))
 	})
 
 	It("serializes concurrent appends through Raft apply", func() {
@@ -146,28 +106,6 @@ var _ = Describe("Append object integration", func() {
 
 		Expect(first.VersionID).NotTo(BeEmpty())
 		Expect(second.VersionID).To(Equal(first.VersionID))
-	})
-
-	It("uses command modified time when applying append commands", func() {
-		cmd := AppendObjectCmd{
-			Bucket:          "test",
-			Key:             "k",
-			ExpectedOffset:  0,
-			BlobID:          "blob-1",
-			SegmentSize:     4,
-			SegmentETag:     "deadbeefcafebabedeadbeefcafebabe",
-			ModifiedUnixSec: 1234,
-		}
-		data, err := encodeAppendObjectCmd(cmd)
-		Expect(err).NotTo(HaveOccurred())
-
-		Expect(b.fsm.db.Update(func(txn *badger.Txn) error {
-			return b.fsm.applyAppendObjectFromCmd(txn, data)
-		})).To(Succeed())
-
-		obj, err := b.HeadObject(ctx, "test", "k")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(obj.LastModified).To(Equal(int64(1234)))
 	})
 
 	It("converts plain puts at current offset", func() {

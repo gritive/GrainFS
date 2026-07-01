@@ -33,7 +33,6 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/nodeconfig"
-	"github.com/gritive/GrainFS/internal/snapshot"
 	"github.com/gritive/GrainFS/internal/transport"
 )
 
@@ -88,26 +87,28 @@ func bootKEKRotationLeader(state *bootState) error {
 	state.metaRaft.FSM().SetAuditSink(auditFile)
 	state.AddCleanup(func() { _ = auditFile.Close() })
 
-	// snapshotsDir is the node-local directory where object snapshots are stored.
-	// snapshot.CountSnapshotsSealedUnderKEK scans this directory to count
-	// snapshots that reference a given KEK version (prune refusal guard).
-	snapshotsDir := filepath.Join(state.cfg.DataDir, "snapshots")
 	snapRefCount := func(version uint32) (uint64, error) {
 		if err := checkRaftStoreKeyPruneRef(state, version); err != nil {
 			return 0, err
 		}
-		return snapshot.CountSnapshotsSealedUnderKEK(snapshotsDir, version)
+		// The object-metadata snapshot feature was removed, so no object snapshot
+		// can reference a KEK version: the count is always 0. The raft-store-key
+		// prune-ref guard above is retained (it gates raft-store key pruning).
+		return 0, nil
 	}
 
 	// 2. Peer probe RPC handlers. Register on the shared cluster transport so a
 	//    leader's GetKEKDiskSpace / GetKEKLeaseSnapshot reaches this node as a
 	//    voter.
-	state.clusterTransport.Handle(transport.StreamKEKDiskSpaceProbe,
-		cluster.NewKEKDiskSpaceHandler(raftServerID, keystoreDir, nil /* statfs default */).Handle)
-	state.clusterTransport.Handle(transport.StreamKEKLeaseSnapshotProbe,
-		cluster.NewKEKLeaseSnapshotHandler(raftServerID, state.kekLeaseTracker, func() uint64 {
-			return state.metaRaft.LastApplied()
-		}, snapRefCount).Handle)
+	diskHandler := cluster.NewKEKDiskSpaceHandler(raftServerID, keystoreDir, nil /* statfs default */)
+	leaseHandler := cluster.NewKEKLeaseSnapshotHandler(raftServerID, state.kekLeaseTracker, func() uint64 {
+		return state.metaRaft.LastApplied()
+	}, snapRefCount)
+	// Native /probe/kek-disk + /probe/kek-lease buffered routes. Handler
+	// errors (decode/statfs/snapshot-count failure) map to a 500 → client
+	// error, exactly as the tunnel surfaced them.
+	state.clusterTransport.RegisterBufferedRoute(transport.RouteProbeKEKDisk, diskHandler.Handle)
+	state.clusterTransport.RegisterBufferedRoute(transport.RouteProbeKEKLease, leaseHandler.Handle)
 
 	// 3. Production PeerKEKProbe with self-shortcut. Self-call computes the
 	//    disk-space + lease values directly (no wire codec roundtrip) so the
@@ -210,7 +211,10 @@ func wireCapabilityGateDirectProbe(state *bootState, raftServerID string) error 
 		state.kekStore,
 		state.metaRaft.FSM(),
 	)
-	state.clusterTransport.Handle(transport.StreamCapabilityProbe, handler.Handle)
+	// Native /probe/capability buffered route. Handler errors (decode/identity/
+	// seal failure) map to a 500 → client error, exactly as the tunnel
+	// surfaced them.
+	state.clusterTransport.RegisterBufferedRoute(transport.RouteProbeCapability, handler.Handle)
 
 	dialer := cluster.NewCapabilityProbeDialer(state.clusterTransport)
 	state.capabilityGate.WithDirectProbe(clusterID, state.kekStore, dialer)

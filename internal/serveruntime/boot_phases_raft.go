@@ -4,8 +4,8 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -14,14 +14,151 @@ import (
 	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/config"
 	"github.com/gritive/GrainFS/internal/iam"
-	"github.com/gritive/GrainFS/internal/iam/mountsastore"
 	"github.com/gritive/GrainFS/internal/metrics"
-	"github.com/gritive/GrainFS/internal/nfsexport"
-	"github.com/gritive/GrainFS/internal/nodeconfig"
 	"github.com/gritive/GrainFS/internal/protocred"
-	"github.com/gritive/GrainFS/internal/server"
+	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/transport"
 )
+
+// bootDataRaftNode constructs the data-plane raft node (between the transport
+// and meta-raft phases), wires the v2 Raft RPC bridge, and Starts the data-raft
+// actor early. It is consumed by both PR 4 (RPC transport wiring) and PR 5
+// (storage runtime). Bootstrap runs in non-join mode.
+//
+// MOVE-ONLY EXTRACTION (Slice 1): this body is the former Run() inline block
+// verbatim; the only edit is cfg.RaftLogGCInterval → state.cfg.RaftLogGCInterval
+// (the cfg param is gone now that this is a phase). ctx is reserved for the
+// uniform phase signature and intentionally unused here. The escaping outputs
+// are state.node = v2Node plus two state.AddCleanup registrations; every other
+// local (v2Node/v2Close/v2RPCTransport/raftCfg/raftPeers) stays internal.
+func bootDataRaftNode(ctx context.Context, state *bootState) error {
+	// Construct the data-plane raft node here (between transport and meta-raft
+	// phases) — consumed by both PR 4 (RPC transport wiring) and PR 5 (storage
+	// runtime). Bootstrap runs in non-join mode.
+	//
+	// In join mode, state.peers carries the join target transport address
+	// (used by PerformMetaJoin); it is NOT a node-ID
+	// list and must NOT be fed to raft as cfg.Peers — doing so makes v2's
+	// reconstructConfig seed the initial voter set with a transport address
+	// as a voter ID, triggering a term storm that step-downs n1 mid-promote.
+	// The joiner enters the cluster as a learner via PromoteToVoter from the
+	// leader's perspective; its local raft starts as a single-voter {selfID}.
+	// state.joinMode is set by bootValidateConfig (Task 3 populates it from
+	// the .join-pending sentinel file).
+	raftPeers := state.peers
+	if state.inviteJoinMode {
+		raftPeers = nil
+	}
+	raftCfg := raft.DefaultConfig(state.nodeID, raftPeers)
+	raftCfg.ManagedMode = true
+	raftCfg.LogGCInterval = state.cfg.RaftLogGCInterval
+	// JoinMode is forwarded to v2 so the joiner's solo-voter local config
+	// ({selfID} when raftPeers is nil) does NOT auto-promote to Leader —
+	// see internal/raft/v2/types.go JoinMode docstring. Without this gate
+	// the joiner becomes a phantom leader of its own 1-node cluster and
+	// the cluster leader's joint AddVoter wait deadlocks.
+	raftCfg.JoinMode = state.inviteJoinMode
+
+	// M5 PR 29: raft v2 is the only path. The GRAINFS_RAFT_V2 flag is gone;
+	// v1 (*raft.Node) is unreachable from serveruntime. PR 30 deletes the v1
+	// package outright. Durable LogStore + StableStore + SnapshotStore live
+	// in <raftDir>/raft-v2/.
+	v2Node, v2Close, err := cluster.NewRaftV2NodeForServeruntimeWithStoreOptions(raftCfg, state.raftDir, cluster.RaftV2StoreOptions{
+		EncryptionKey: state.raftStoreKey,
+	})
+	if err != nil {
+		return fmt.Errorf("raft v2 init: %w", err)
+	}
+	state.AddCleanup(func() {
+		if v2Close != nil {
+			_ = v2Close()
+		}
+	})
+	if !state.inviteJoinMode {
+		if err := v2Node.Bootstrap(); err != nil && !errors.Is(err, raft.ErrAlreadyBootstrapped) {
+			return fmt.Errorf("raft v2 bootstrap: %w", err)
+		}
+	}
+	state.node = v2Node
+	// M5 PR 27: wire the v2 Raft RPC bridge so multi-node v2 clusters can
+	// exchange Raft RPCs. The bridge re-implements v1's Raft RPC dispatch on
+	// top of cluster.RaftNode.Handle* (the v2 adapter translates to
+	// raftv2.Node). Wire format is byte-identical to v1; v1 is frozen until
+	// PR 30 deletes it.
+	v2RPCTransport := cluster.NewRaftRPCTransport(state.clusterTransport, v2Node)
+	v2RPCTransport.SetTransport()
+	v2RPCTransport.SetTimeoutNowTransport()
+	log.Info().Msg("raft v2: Raft RPC transport wired (TimeoutNow enabled)")
+	// Start the data-raft actor IMMEDIATELY after the RPC bridge is wired —
+	// BEFORE invite-join Phase-2 (inside bootWALAndForwardersPart1). During
+	// Phase-2 the leader's post-join hook calls AddVoterCtx and replicates
+	// AppendEntries to this joiner; if the actor isn't draining cmdCh yet,
+	// HandleAppendEntries blocks forever and the leader's AddVoter times out —
+	// the join deadlocks (the long-standing 5-node EC e2e failure, TODOS §6).
+	// Early start is safe: the applyLoop buffers applied entries UNBOUNDED
+	// until distBackend.RunApplyLoop (bootOwnedGroupsAndEC) drains them, and
+	// JoinMode (set above for invite-joiners) suppresses both the solo-voter
+	// auto-promote and election-timer campaigns until the leader's AE installs
+	// the real multi-voter config (actor.go JoinMode guards).
+	state.node.Start()
+	state.AddCleanup(func() { state.node.Close() })
+	return nil
+}
+
+// bootWaitDEKReady gates boot on the DEK keeper being populated. The keeper is
+// guaranteed populated by the join / invite catch-up at the end of
+// bootWALAndForwardersPart1 (the meta-raft apply loop, started in
+// bootMetaRaftStart, installs gen-0). Bounded so a joiner that cannot install
+// fails fast instead of deadlocking. No-op when encryption is disabled (nil
+// keeper). Extracted from Run() in Slice 1 — behavior-preserving.
+func bootWaitDEKReady(ctx context.Context, state *bootState) error {
+	if state.dekKeeper != nil {
+		readyCtx, readyCancel := context.WithTimeout(ctx, dekReadyBootTimeout)
+		err := WaitDEKReady(readyCtx, state.dekKeeper)
+		readyCancel()
+		if err != nil {
+			return fmt.Errorf("DEK readiness: %w", err)
+		}
+	}
+	return nil
+}
+
+// bootGreenfieldDEKBoundary refuses to boot if the replayed raft log contained a
+// legacy type-48 DEKRotate (pre-Phase-D). Live-log path guard; snapshot path is
+// covered by LoadFromFSM AAD-unwrap failing during Restore. Extracted from Run()
+// in Slice 1 — behavior-preserving.
+//
+// REPLAY-ORDERING BARRIER: applyDEKRotate sets legacyDEKRotateSeen during the
+// apply loop, which runs ASYNC after MetaRaft.Start() returns. We must drain the
+// apply loop up to the current COMMITTED index before reading the flag, or the
+// guard passes silently on an un-replayed legacy log.
+//
+// We target CommittedIndex (captured HERE). This phase runs late in boot — after
+// bootMetaRaftStart, the becomeLeader no-op (single voter), join, and
+// AppendEntries catch-up (follower) have all advanced commit past the snapshot
+// floor to cover every legacy type-48 entry that was committed on the
+// pre-Phase-D cluster. Committed entries are exactly the ones that WILL apply, so
+// waiting on them is sufficient. We do NOT wait on LastLogIndex: an uncommitted
+// tail (e.g. a former leader that appended but never replicated before crashing)
+// may be truncated by the new leader and would otherwise block this drain until
+// the 10s timeout, failing boot spuriously during leader churn. Bounded: a
+// genuinely stuck apply fails loud rather than booting divergent.
+func bootGreenfieldDEKBoundary(ctx context.Context, state *bootState) error {
+	if state.metaRaft != nil {
+		if committed := state.metaRaft.Node().CommittedIndex(); committed > 0 {
+			drainCtx, drainCancel := context.WithTimeout(ctx, 10*time.Second)
+			err := state.metaRaft.WaitApplied(drainCtx, committed)
+			drainCancel()
+			if err != nil {
+				return fmt.Errorf("greenfield DEK boundary: wait for log drain: %w", err)
+			}
+		}
+		if err := state.metaRaft.FSM().CheckGreenfieldDEKBoundary(); err != nil {
+			return fmt.Errorf("greenfield DEK boundary: %w", err)
+		}
+	}
+	return nil
+}
 
 // bootMetaRaftWiring constructs the meta-raft control plane and its cluster-transport
 // transport. NO callbacks are registered and Start is NOT called here — that
@@ -67,30 +204,11 @@ func bootMetaRaftWiring(state *bootState) error {
 	state.capabilityGate = cluster.NewCapabilityGate(compat.DefaultRegistry, capabilityEvidenceTTL(state))
 	state.metaRaft.SetCapabilityGate(state.capabilityGate)
 
-	// Mux-aware constructor: auto-registers metaRaft.Node() on groupRaftMux
-	// under the magic groupID "__meta__" so receiver-side mux dispatch is
-	// wired before any meta heartbeat hits the wire.
-	state.metaTransport = cluster.NewMetaTransportMux(state.clusterTransport, metaRaft.Node(), state.groupRaftMux)
+	// Meta-raft RPCs go over transport.Call (StreamMetaRaft); inbound dispatch is
+	// registered by the constructor. Receiver-side group dispatch stays on
+	// groupRaftMux (StreamGroupRaft) independently.
+	state.metaTransport = cluster.NewMetaTransport(state.clusterTransport, metaRaft.Node())
 	metaRaft.SetTransport(state.metaTransport)
-
-	exportStore, err := nfsexport.OpenStore(state.db)
-	if err != nil {
-		return fmt.Errorf("open NFS export store: %w", err)
-	}
-	metaRaft.FSM().SetExportStore(exportStore)
-	metaRaft.FSM().SetExportFsidMajor(1)
-	state.nfsExportSvc = nfsexport.NewExportService(nfsexport.ServiceConfig{
-		Store: exportStore,
-		Proposer: &cluster.NfsExportProposer{
-			Propose:         metaRaft.ProposeWithIndex,
-			ProposeWithGate: metaRaft.ProposeWithGate,
-			GatePlan: func(operation compat.Operation) (compat.GatePlan, error) {
-				refreshCapabilityGate(state)
-				return state.capabilityGate.RequireMetaRaftCapability(compat.CapabilityNfsExportCreateV1, operation, time.Now())
-			},
-		},
-		Barrier: metaRaft,
-	})
 
 	// Phase 2 IAM: wire IAM store + applier into the meta-FSM apply path.
 	// SetIAM is nil-safe for test configurations that do not provide IAM.
@@ -152,16 +270,6 @@ func bootMetaRaftWiring(state *bootState) error {
 	}
 	state.iamPolicyStores = iamStores
 
-	// NFS§A T5: wire the MountSA Badger-backed store into the meta-FSM apply path.
-	// MetaCmds 65-68 (MountSACreate/Delete/AttachPolicy/DetachPolicy) require
-	// the store to be wired before Start fires the apply loop.
-	mountSAStore, err := mountsastore.NewStore(state.db)
-	if err != nil {
-		return fmt.Errorf("open mountsa store: %w", err)
-	}
-	metaRaft.FSM().SetMountSAStore(mountSAStore)
-	state.mountSAStore = mountSAStore
-
 	protocolCredentialStore := protocred.NewStore()
 	metaRaft.FSM().SetProtocolCredentialStore(protocolCredentialStore)
 	state.protocolCredentialStore = protocolCredentialStore
@@ -172,58 +280,23 @@ func bootMetaRaftWiring(state *bootState) error {
 	// propagates the MetaCmd to the meta-raft FSM on every node.
 	cfgStore := config.NewStore()
 	hooks := wireJWTReloadHooks(metaRaft, state.dekKeeper)
-	_, onProxy, refreshProxy := wireTLSPostureHooks("")
-
-	// §5 T45: construct the ProxyTrust validator and wrap onProxy so a single
-	// OnTrustedProxyCIDR firing updates BOTH (a) the TLS-posture atomic
-	// snapshot used by the anon-change hook and (b) the live CIDR set used by
-	// (*Server).authoritativeClientIP. ReloadHooks.OnTrustedProxyCIDR is
-	// single-slot (one func), so we compose at the wire site rather than
-	// touching the hook plumbing.
-	proxyTrust := server.NewProxyTrust(nil)
-	state.proxyTrust = proxyTrust
-	hooks.OnTrustedProxyCIDR = func(ctx context.Context, v string) error {
-		proxyTrust.SetCIDRs(splitTrustedProxyCIDRSpec(v))
-		return onProxy(ctx, v)
-	}
-	state.refreshProxyCIDR = refreshProxy
-
-	// §6 T52': route audit.deny-only reloads to the audit outbox.
-	// The outbox is constructed later in boot_phases_srvopts, so the closure
-	// reads through state.auditOutbox at fire time (nil-safe). When audit
-	// iceberg is disabled, state.auditOutbox stays nil and the hook is a
-	// silent no-op — consistent with the config key's BoolSpec default of
-	// false (no operator-visible flip happens at boot).
-	hooks.OnAuditDenyOnly = func(_ context.Context, v bool) error {
-		state.auditOutbox.SetDenyOnly(v) // Outbox.SetDenyOnly is nil-safe
-		return nil
-	}
 
 	config.RegisterClusterKeys(cfgStore, hooks)
-	// F25+F26: fire a post-restore callback so atomic snapshots (proxy CIDR set
-	// and banner-prev) are reconciled on every raft InstallSnapshot. Restore does
-	// not fire reload hooks, so without this the ProxyTrust CIDR set and the
-	// banner-prev bool would drift from the newly restored cfgStore values on
-	// peer-join and log-compaction restores after boot.
-	cfgStore.SetPostRestore(func(values map[string]string) {
-		// F25: update ProxyTrust and the TLS-posture refreshProxy snapshot.
-		cidr := values["trusted-proxy.cidr"]
-		proxyTrust.SetCIDRs(splitTrustedProxyCIDRSpec(cidr))
-		refreshProxy(cidr)
-	})
 	metaRaft.FSM().SetConfigStore(cfgStore)
 	state.cfgStore = cfgStore
-	return nil
-}
 
-// splitTrustedProxyCIDRSpec splits the comma-separated trusted-proxy.cidr value
-// into entries suitable for ProxyTrust.SetCIDRs. Empty entries are tolerated;
-// ProxyTrust.SetCIDRs additionally trims and silently drops invalid CIDRs.
-func splitTrustedProxyCIDRSpec(v string) []string {
-	if v == "" {
-		return nil
-	}
-	return strings.Split(v, ",")
+	// Task 10: register meta policy-invalidation post-commit hook BEFORE Start.
+	// The worker is started here so it is ready before the apply loop fires.
+	// SetInvalidate is called later in bootHTTPServerAndAdmin once the compiled
+	// policy store (srv.PolicyStore()) is available. Events arriving before
+	// SetInvalidate are silently dropped (pull-on-miss ensures eventual consistency).
+	policyWorker := cluster.NewMetaPolicyInvalidationWorker()
+	policyWorker.Start()
+	state.AddCleanup(policyWorker.Stop)
+	metaRaft.FSM().RegisterPostCommit(policyWorker.Hook)
+	state.metaPolicyInvalidationWorker = policyWorker
+
+	return nil
 }
 
 func refreshCapabilityGate(state *bootState) {
@@ -256,13 +329,15 @@ func capabilityEvidenceTTL(state *bootState) time.Duration {
 func bootDataGroupRouter(state *bootState) error {
 	state.dgMgr = cluster.NewDataGroupManager()
 	state.clusterRouter = cluster.NewRouter(state.dgMgr)
-	state.clusterRouter.SetDefault("group-0")
 
-	// SetOnBucketAssigned uses f.mu.Lock() internally; must be called
+	// SetOnBucketAssigned/SetOnBucketUnassigned use f.mu.Lock() internally; must be called
 	// before Start() (which is bootMetaRaftStart's job).
 	router := state.clusterRouter
 	state.metaRaft.FSM().SetOnBucketAssigned(func(bucket, groupID string) {
 		router.AssignBucket(bucket, groupID)
+	})
+	state.metaRaft.FSM().SetOnBucketUnassigned(func(bucket string) {
+		router.Unassign(bucket)
 	})
 	return nil
 }
@@ -371,15 +446,17 @@ func bootRotationAndAdminAPI(state *bootState) error {
 		})
 	}
 	// PR-2a §8b: applied-index probe handler for the leader's barrier fan-out.
-	state.clusterTransport.Handle(transport.StreamAppliedIndexProbe,
-		func(req *transport.Message) *transport.Message {
-			respPayload, err := cluster.HandleAppliedIndexProbe(req.Payload, state.nodeID, state.metaRaft.LastApplied)
-			if err != nil {
-				log.Warn().Err(err).Msg("applied-index probe: bad request")
-				return nil
-			}
-			return &transport.Message{Type: transport.StreamAppliedIndexProbe, Payload: respPayload}
-		})
+	// Native /probe/applied-index buffered route. A bad request maps to a 500
+	// → client error, matching the tunnel's nil-response StatusError.
+	appliedIndexHandler := func(payload []byte) ([]byte, error) {
+		respPayload, err := cluster.HandleAppliedIndexProbe(payload, state.nodeID, state.metaRaft.LastApplied)
+		if err != nil {
+			log.Warn().Err(err).Msg("applied-index probe: bad request")
+			return nil, err
+		}
+		return respPayload, nil
+	}
+	state.clusterTransport.RegisterBufferedRoute(transport.RouteProbeAppliedIndex, appliedIndexHandler)
 	// Seed rotation FSM steady state with active SPKI so RotateKeyBegin can
 	// be validated against the current cluster key (D10).
 	if _, activeSPKI, err := transport.DeriveClusterIdentity(state.transportPSK); err == nil {
@@ -398,15 +475,6 @@ func bootRotationAndAdminAPI(state *bootState) error {
 	if state.cfg.IAMStore != nil && state.cfg.IAMApplier != nil {
 		state.iamProposer = &iam.MetaProposer{Propose: state.metaRaft.Propose}
 		state.iamAdminAPI = iam.NewAdminAPI(state.cfg.IAMStore, state.iamProposer, nil)
-		// F#26-tls-posture: gate the first SA create on local TLS posture so
-		// the admin UDS rejects with a remediation hint instead of letting
-		// the FSM-level anon flip silently fail. cfgStore is populated by
-		// bootHTTPServerAndAdmin which runs before this phase.
-		if state.cfgStore != nil {
-			state.iamAdminAPI.SetPostureChecker(
-				newIAMPostureChecker(state.cfgStore, nodeconfig.New(state.cfg.DataDir)),
-			)
-		}
 	}
 
 	// R2: install the live DEKKeeperAdapter into BOTH the IAM applier and
@@ -428,10 +496,12 @@ func bootRotationAndAdminAPI(state *bootState) error {
 // finishes replay inside Start, so calling Sync afterwards seeds the router
 // with all buckets persisted before Start returned.
 //
-// startRotationSocket is plumbed via parameter to keep this phase testable
-// without a real admin UDS. Production callers pass StartRotationSocket;
-// tests can pass a no-op.
-func bootMetaRaftStart(ctx context.Context, state *bootState, startRotationSocket func(context.Context, string, Config, *cluster.MetaRaft) error) error {
+// The rotation-socket starter is read from state.startRotationSocket (a
+// bootState field, defaulted to StartRotationSocket in Run; nil in tests that
+// exercise the phase without a real admin UDS). Keeping it a field rather than a
+// parameter lets this phase fit the uniform bootSequence() signature while
+// preserving the test-override seam.
+func bootMetaRaftStart(ctx context.Context, state *bootState) error {
 	// An invite-joiner (inviteJoinMode) must NOT bootstrap its own meta-raft —
 	// same as joinMode, the leader adds it as a voter via the Phase-2 ACK.
 	if !state.inviteJoinMode {
@@ -463,8 +533,8 @@ func bootMetaRaftStart(ctx context.Context, state *bootState, startRotationSocke
 	// RotationPreviousGrace expires. Runs on all nodes (FSM state is
 	// identical via raft); each node deletes its own local file.
 	state.metaRaft.StartPreviousKeyCleanup(ctx, state.rotationKeystore)
-	if startRotationSocket != nil {
-		if err := startRotationSocket(ctx, state.cfg.DataDir, state.cfg, state.metaRaft); err != nil {
+	if state.startRotationSocket != nil {
+		if err := state.startRotationSocket(ctx, state.cfg.DataDir, state.cfg, state.metaRaft); err != nil {
 			log.Warn().Err(err).Msg("rotation socket failed to start; cluster rotate-key CLI will be unavailable")
 		}
 	}

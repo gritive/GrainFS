@@ -6,25 +6,23 @@ import (
 )
 
 type ObjectWritePlacementInput struct {
-	Operation           string
-	PlacementGroupID    string
-	PlacementGroup      *ShardGroupEntry
-	LiveNodes           []string
-	CurrentECConfig     ECConfig
-	BypassBucketCheck   bool
-	ShardKey            string
-	NodeStates          []ObjectWritePlacementNodeState
-	WeightedHRWEnabled  bool
-	BoundedLoadsEnabled bool
-	PeerHealth          []PeerHealthEntry
-	HasPeerHealth       bool
-	SelfID              string
+	Operation          string
+	PlacementGroupID   string
+	PlacementGroup     *ShardGroupEntry
+	LiveNodes          []string
+	CurrentECConfig    ECConfig
+	BypassBucketCheck  bool
+	ShardKey           string
+	NodeStates         []ObjectWritePlacementNodeState
+	WeightedHRWEnabled bool
+	PeerHealth         []PeerHealthEntry
+	HasPeerHealth      bool
+	SelfID             string
 }
 
 type ObjectWritePlacementNodeState struct {
 	NodeID         string
 	DiskAvailBytes uint64
-	Hot            bool
 }
 
 type ObjectWritePlacementPlan struct {
@@ -43,10 +41,7 @@ func PlanObjectWritePlacement(in ObjectWritePlacementInput) (ObjectWritePlacemen
 	in.Operation = operation
 	placementGroupID := in.PlacementGroupID
 	if placementGroupID == "" {
-		if in.BypassBucketCheck {
-			return ObjectWritePlacementPlan{}, fmt.Errorf("putObjectEC: missing placement_group_id")
-		}
-		placementGroupID = "group-0"
+		return ObjectWritePlacementPlan{}, fmt.Errorf("putObjectEC: missing placement_group_id")
 	}
 
 	liveNodes := cloneStringSlice(in.LiveNodes)
@@ -64,7 +59,6 @@ func PlanObjectWritePlacement(in ObjectWritePlacementInput) (ObjectWritePlacemen
 		in.ShardKey,
 		in.NodeStates,
 		in.WeightedHRWEnabled,
-		in.BoundedLoadsEnabled,
 	)
 	plan := ObjectWritePlacementPlan{
 		PlacementGroupID: placementGroupID,
@@ -161,6 +155,18 @@ func (b *DistributedBackend) planObjectWritePlacement(ctx context.Context, in Ob
 			in.PlacementGroup = &group
 		}
 	}
+	if in.PlacementGroupID == "" && b.groupID != "" {
+		in.PlacementGroupID = b.groupID
+	}
+	if in.PlacementGroupID == "" && in.PlacementGroup == nil && b.shardGroup != nil {
+		if group, ok := b.onlyPlacementCandidate(); ok {
+			in.PlacementGroupID = group.ID
+			in.PlacementGroup = &group
+		}
+	}
+	if in.PlacementGroupID == "" && in.PlacementGroup == nil && b.shardGroup == nil && !in.BypassBucketCheck {
+		in.PlacementGroupID = "group-0"
+	}
 	if in.LiveNodes == nil {
 		in.LiveNodes = b.effectivePlacementNodes()
 	}
@@ -171,8 +177,18 @@ func (b *DistributedBackend) planObjectWritePlacement(ctx context.Context, in Ob
 		in.HasPeerHealth = true
 	}
 	in.SelfID = b.currentSelfAddr()
-	in.NodeStates = objectWritePlacementNodeStatesFromRuntime(in.LiveNodes, b.nodeStatsStore, b.bl)
+	in.NodeStates = objectWritePlacementNodeStatesFromRuntime(in.LiveNodes, b.nodeStatsStore)
 	in.WeightedHRWEnabled = b.clusterCfg.WeightedHRWEnabled()
-	in.BoundedLoadsEnabled = b.clusterCfg.BoundedLoadsEnabled()
 	return PlanObjectWritePlacement(in)
+}
+
+func (b *DistributedBackend) onlyPlacementCandidate() (ShardGroupEntry, bool) {
+	if b.shardGroup == nil {
+		return ShardGroupEntry{}, false
+	}
+	candidates, err := candidateGroupsFor(b.shardGroup.ShardGroups(), b.currentECConfig())
+	if err != nil || len(candidates) != 1 {
+		return ShardGroupEntry{}, false
+	}
+	return candidates[0], true
 }

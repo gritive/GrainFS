@@ -6,12 +6,29 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"sync"
 )
 
 // DefaultGetWorkers is the per-request fetch concurrency for segment reads.
 const DefaultGetWorkers = 8
+
+// readExactlySizedObject reads exactly size bytes from r into a freshly
+// allocated buffer. Avoids io.ReadAll's geometric grow on known-size reads.
+func readExactlySizedObject(r io.Reader, size int64) ([]byte, error) {
+	if size < 0 {
+		return nil, fmt.Errorf("negative object size %d", size)
+	}
+	if size == 0 {
+		return nil, nil
+	}
+	buf := make([]byte, size)
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return nil, err
+	}
+	return buf, nil
+}
 
 // segmentStore abstracts the source of segment bytes (LocalBackend in single
 // node, ECStreamingReader-backed adapter in cluster).
@@ -75,6 +92,24 @@ func NewSegmentReaderCtx(ctx context.Context, store segmentStore, refs []Segment
 	return r
 }
 
+// NewStreamingSegmentReader builds a reader that opens one segment at a time and
+// streams it directly to the caller. It avoids SegmentReader's parallel
+// materialization path for full-body GETs where lower layers already stream.
+func NewStreamingSegmentReader(store segmentStore, refs []SegmentRef) io.ReadCloser {
+	return NewStreamingSegmentReaderCtx(context.Background(), store, refs)
+}
+
+// NewStreamingSegmentReaderCtx builds a sequential streaming segment reader.
+func NewStreamingSegmentReaderCtx(ctx context.Context, store segmentStore, refs []SegmentRef) io.ReadCloser {
+	cctx, cancel := context.WithCancel(ctx)
+	return &streamingSegmentReader{
+		store:  store,
+		refs:   refs,
+		ctx:    cctx,
+		cancel: cancel,
+	}
+}
+
 // Close cancels background fetch workers. It does not discard bytes already
 // fetched into pending buffers.
 func (r *SegmentReader) Close() error {
@@ -82,6 +117,131 @@ func (r *SegmentReader) Close() error {
 		r.cancel()
 	}
 	return nil
+}
+
+type streamingSegmentReader struct {
+	store  segmentStore
+	refs   []SegmentRef
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	mu     sync.Mutex
+	cur    io.ReadCloser
+	idx    int
+	closed bool
+}
+
+func (r *streamingSegmentReader) Close() error {
+	if r.cancel != nil {
+		r.cancel()
+	}
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return nil
+	}
+	r.closed = true
+	cur := r.cur
+	r.cur = nil
+	r.mu.Unlock()
+	if cur != nil {
+		return cur.Close()
+	}
+	return nil
+}
+
+func (r *streamingSegmentReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	total := 0
+	for {
+		cur, err := r.current()
+		if err != nil {
+			if total > 0 {
+				if err == io.EOF {
+					return total, nil
+				}
+				return total, err
+			}
+			return 0, err
+		}
+		n, err := cur.Read(p[total:])
+		total += n
+		if err == io.EOF {
+			_ = r.closeCurrent(cur)
+			if total == len(p) {
+				return total, nil
+			}
+			continue
+		}
+		if err != nil {
+			return total, err
+		}
+		if total == len(p) {
+			return total, nil
+		}
+		if n == 0 {
+			return total, nil
+		}
+	}
+}
+
+func (r *streamingSegmentReader) current() (io.ReadCloser, error) {
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return nil, context.Canceled
+	}
+	if r.cur != nil {
+		cur := r.cur
+		r.mu.Unlock()
+		return cur, nil
+	}
+	for r.idx < len(r.refs) && r.refs[r.idx].Size == 0 {
+		r.idx++
+	}
+	if r.idx >= len(r.refs) {
+		r.mu.Unlock()
+		return nil, io.EOF
+	}
+	idx := r.idx
+	r.mu.Unlock()
+
+	rc, err := r.store.OpenSegment(r.ctx, r.refs[idx])
+	if err != nil {
+		return nil, err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		_ = rc.Close()
+		return nil, context.Canceled
+	}
+	if err := r.ctx.Err(); err != nil {
+		_ = rc.Close()
+		return nil, err
+	}
+	if r.idx != idx {
+		_ = rc.Close()
+		if r.cur != nil {
+			return r.cur, nil
+		}
+		return nil, context.Canceled
+	}
+	r.cur = rc
+	return rc, nil
+}
+
+func (r *streamingSegmentReader) closeCurrent(cur io.ReadCloser) error {
+	r.mu.Lock()
+	if r.cur == cur {
+		r.cur = nil
+		r.idx++
+	}
+	r.mu.Unlock()
+	return cur.Close()
 }
 
 func (r *SegmentReader) fetchAll(ctx context.Context) {

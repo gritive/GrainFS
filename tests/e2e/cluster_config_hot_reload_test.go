@@ -19,11 +19,9 @@ var _ = ginkgo.Describe("Cluster config hot reload", func() {
 
 		ginkgo.BeforeEach(func() {
 			c = startE2ECluster(ginkgo.GinkgoTB(), e2eClusterOptions{
-				Nodes:      3,
-				Mode:       ClusterModeStaticPeers,
-				LogPrefix:  "grainfs-clusterconfig-hotreload",
-				DisableNFS: true,
-				DisableNBD: true,
+				Nodes:     3,
+				Mode:      ClusterModeStaticPeers,
+				LogPrefix: "grainfs-clusterconfig-hotreload",
 			})
 		})
 

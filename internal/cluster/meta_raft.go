@@ -12,7 +12,6 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	"github.com/gritive/GrainFS/internal/cluster/clusterpb"
 	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/gritive/GrainFS/internal/raft"
 	"github.com/gritive/GrainFS/internal/scrubber"
@@ -77,6 +76,11 @@ type MetaRaft struct {
 	forwardFnWithIndex func(ctx context.Context, data []byte) (uint64, error)
 	forwardFnWithGate  func(ctx context.Context, data []byte, plan compat.GatePlan) (uint64, error)
 
+	// readIndexForwardFn is called when ReadIndex runs on a non-leader node.
+	// It RPCs the meta leader via RouteForwardMetaReadIndex and returns its
+	// committed index. nil = single-node or not yet wired (returns ErrNotLeader).
+	readIndexForwardFn func(ctx context.Context, leaderAddr string) (uint64, error)
+
 	capabilityGate *CapabilityGate
 
 	// membershipMu serializes meta-raft voter-set changes with irreversible
@@ -90,9 +94,6 @@ type MetaRaft struct {
 	applyNotify   chan struct{} // closed each time an entry is applied; replaced atomically
 	applyResultMu sync.Mutex
 	applyErrs     map[uint64]error
-
-	icebergMu      sync.Mutex
-	icebergWaiters map[string]chan error
 
 	lastSnapshotIndex uint64
 
@@ -148,25 +149,15 @@ func NewMetaRaft(cfg MetaRaftConfig) (*MetaRaft, error) {
 
 	fsm := NewMetaFSM()
 
-	// §5.4.2: new leader must commit an entry in its own term to allow previous-term
-	// entries to be committed (leader completeness). Wire a MetaCmdTypeNoOp so
-	// runLeader automatically proposes it on every leadership win, committing any
-	// backlogged entries (e.g. lifecycle config from the dead leader's term).
-	if noOp, err := encodeMetaCmd(MetaCmdTypeNoOp, nil); err == nil {
-		node.SetNoOpCommand(noOp)
-	}
-
 	m := &MetaRaft{
-		node:           node,
-		closeDB:        closeDB,
-		fsm:            fsm,
-		cfg:            cfg,
-		done:           make(chan struct{}),
-		applyNotify:    make(chan struct{}),
-		applyErrs:      make(map[uint64]error),
-		icebergWaiters: make(map[string]chan error),
+		node:        node,
+		closeDB:     closeDB,
+		fsm:         fsm,
+		cfg:         cfg,
+		done:        make(chan struct{}),
+		applyNotify: make(chan struct{}),
+		applyErrs:   make(map[uint64]error),
 	}
-	fsm.SetOnIcebergApplyResult(m.publishIcebergResult)
 
 	if cfg.Transport != nil {
 		m.wireTransport(cfg.Transport)
@@ -224,6 +215,39 @@ func (m *MetaRaft) ClusterKeyDropped() bool { return m.fsm.ClusterKeyDropped() }
 func (m *MetaRaft) SetTransport(t MetaTransport) {
 	m.cfg.Transport = t
 	m.wireTransport(t)
+}
+
+// SetReadIndexForwarder injects the follower→leader read-index forwarding
+// closure. When ReadIndex is called on a non-leader and this is set, the call
+// is forwarded to the meta leader via RouteForwardMetaReadIndex instead of
+// returning raft.ErrNotLeader. Wire from the boot path before Start.
+func (m *MetaRaft) SetReadIndexForwarder(fn func(ctx context.Context, leaderAddr string) (uint64, error)) {
+	m.readIndexForwardFn = fn
+}
+
+// ReadIndex returns a linearizable read fence index for the meta-Raft group.
+// On the leader it confirms leadership via heartbeat quorum (same node primitive
+// as DistributedBackend.ReadIndex). On a follower it forwards to the meta leader
+// via RouteForwardMetaReadIndex if a forwarder has been wired; otherwise it
+// returns raft.ErrNotLeader so callers can degrade to a local (possibly stale)
+// read.
+func (m *MetaRaft) ReadIndex(ctx context.Context) (uint64, error) {
+	idx, err := m.node.ReadIndex(ctx)
+	if err == nil {
+		return idx, nil
+	}
+	if !errors.Is(err, raft.ErrNotLeader) {
+		return 0, err
+	}
+	// Not the leader: try forwarding to the meta leader.
+	if m.readIndexForwardFn == nil {
+		return 0, raft.ErrNotLeader
+	}
+	leaderAddr := m.node.LeaderID()
+	if leaderAddr == "" {
+		return 0, raft.ErrNotLeader
+	}
+	return m.readIndexForwardFn(ctx, leaderAddr)
 }
 
 // SetForwarder injects the follower→leader propose-forwarding closure. Wire
@@ -399,69 +423,6 @@ func (m *MetaRaft) ProposeBucketAssignment(ctx context.Context, bucket, groupID 
 	return m.waitAppliedResult(ctx, idx)
 }
 
-// ProposeObjectIndex encodes a PutObjectIndex command and proposes it to the
-// meta-Raft group, blocking until the entry is applied to the local FSM.
-func (m *MetaRaft) ProposeObjectIndex(ctx context.Context, entry ObjectIndexEntry, preserveLatest bool) error {
-	encodeStart := time.Now()
-	payload, err := encodeMetaPutObjectIndexCmd(entry, preserveLatest)
-	if err != nil {
-		ObservePutTraceStage(ctx, PutTraceStageMetaIndexEncode, encodeStart, PutTraceStageFields{
-			MetaProposeSite: "local",
-			Error:           err.Error(),
-		})
-		return fmt.Errorf("meta_raft: encode PutObjectIndex: %w", err)
-	}
-	data, err := encodeMetaCmd(MetaCmdTypePutObjectIndex, payload)
-	if err != nil {
-		ObservePutTraceStage(ctx, PutTraceStageMetaIndexEncode, encodeStart, PutTraceStageFields{
-			MetaProposeSite: "local",
-			Error:           err.Error(),
-		})
-		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
-	}
-	ObservePutTraceStage(ctx, PutTraceStageMetaIndexEncode, encodeStart, PutTraceStageFields{
-		MetaProposeSite: "local",
-	})
-	proposeStart := time.Now()
-	idx, err := m.node.ProposeWait(ctx, data)
-	if err != nil {
-		ObservePutTraceStage(ctx, PutTraceStageMetaIndexLocalPropose, proposeStart, PutTraceStageFields{
-			MetaProposeSite: "local",
-			Error:           err.Error(),
-		})
-		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
-	}
-	ObservePutTraceStage(ctx, PutTraceStageMetaIndexLocalPropose, proposeStart, PutTraceStageFields{
-		MetaProposeSite: "local",
-	})
-	applyStart := time.Now()
-	err = m.waitAppliedResult(ctx, idx)
-	fields := PutTraceStageFields{MetaProposeSite: "local"}
-	if err != nil {
-		fields.Error = err.Error()
-	}
-	ObservePutTraceStage(ctx, PutTraceStageMetaIndexLocalApply, applyStart, fields)
-	return err
-}
-
-// ProposeDeleteObjectIndex removes one object-index version row and updates
-// the key's latest pointer in the meta-Raft FSM.
-func (m *MetaRaft) ProposeDeleteObjectIndex(ctx context.Context, bucket, key, versionID string) error {
-	payload, err := encodeMetaDeleteObjectIndexCmd(bucket, key, versionID)
-	if err != nil {
-		return fmt.Errorf("meta_raft: encode DeleteObjectIndex: %w", err)
-	}
-	data, err := encodeMetaCmd(MetaCmdTypeDeleteObjectIndex, payload)
-	if err != nil {
-		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
-	}
-	idx, err := m.node.ProposeWait(ctx, data)
-	if err != nil {
-		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
-	}
-	return m.waitAppliedResult(ctx, idx)
-}
-
 // ProposeShardGroup proposes a PutShardGroup command to the cluster and blocks until
 // it is applied to the local FSM.
 func (m *MetaRaft) ProposeShardGroup(ctx context.Context, sg ShardGroupEntry) error {
@@ -483,12 +444,102 @@ func (m *MetaRaft) ProposeShardGroup(ctx context.Context, sg ShardGroupEntry) er
 	return m.waitAppliedResult(ctx, idx)
 }
 
+// ProposeAddPlacementGeneration encodes an AddPlacementGeneration command and
+// proposes it to the cluster, blocking until applied to the local FSM (S7-6).
+// groupIDs is the pinned candidate group-ID set for the new topology generation;
+// the FSM assigns the epoch monotonically (len of the existing registry) and
+// rejects an empty set. This is the irreversible flip primitive — once a
+// generation is appended, the registry never shrinks.
+func (m *MetaRaft) ProposeAddPlacementGeneration(ctx context.Context, groupIDs []string) error {
+	if len(groupIDs) == 0 {
+		return fmt.Errorf("meta_raft: ProposeAddPlacementGeneration: empty group set")
+	}
+	payload := encodeMetaAddPlacementGenerationCmd(groupIDs)
+	data, err := encodeMetaCmd(MetaCmdTypeAddPlacementGeneration, payload)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
+	}
+	idx, err := m.node.ProposeWait(ctx, data)
+	if err != nil {
+		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
+	}
+	return m.waitAppliedResult(ctx, idx)
+}
+
+// ProposeAddPlacementGenerationForwarding is ProposeAddPlacementGeneration that
+// forwards to the meta leader when this node is a follower. The lazy gen-0
+// establishment (first object write on any node) needs to record the initial
+// placement generation regardless of which node serves the write, so it cannot
+// require the writer to be the meta leader. The FSM apply dedups an identical
+// latest generation, so concurrent first-writers converge to a single gen-0.
+func (m *MetaRaft) ProposeAddPlacementGenerationForwarding(ctx context.Context, groupIDs []string) error {
+	if len(groupIDs) == 0 {
+		return fmt.Errorf("meta_raft: ProposeAddPlacementGenerationForwarding: empty group set")
+	}
+	payload := encodeMetaAddPlacementGenerationCmd(groupIDs)
+	data, err := encodeMetaCmd(MetaCmdTypeAddPlacementGeneration, payload)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
+	}
+	return m.proposeOrForward(ctx, m.node, data)
+}
+
+// ProposeRetirePlacementGeneration marks a drained placement generation retired,
+// blocking until applied locally. Retired generations stay in the registry for
+// replay/snapshot audit but are removed from object read probes.
+func (m *MetaRaft) ProposeRetirePlacementGeneration(ctx context.Context, epoch uint64) error {
+	payload := encodeMetaRetirePlacementGenerationCmd(epoch)
+	data, err := encodeMetaCmd(MetaCmdTypeRetirePlacementGeneration, payload)
+	if err != nil {
+		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
+	}
+	idx, err := m.node.ProposeWait(ctx, data)
+	if err != nil {
+		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
+	}
+	return m.waitAppliedResult(ctx, idx)
+}
+
+// AddTopologyGeneration records a new topology generation that grows the object→
+// group placement set from baseGroupIDs to expandedGroupIDs (S7-6 add-protocol,
+// must-solve ②). The new groups must already be formed and registered
+// (PutShardGroup) via existing group-add machinery — this records the placement
+// generation on top.
+//
+// Crash-safe ordering: when the registry is empty (first-ever growth) it first
+// records gen-0 = baseGroupIDs, so existing objects placed by the original
+// modulo stay readable, THEN records the expanded generation. gen-0 is recorded
+// before the expanded gen, so every intermediate crash state is a valid
+// single-generation (original modulo, byte-identical) or fully multi-generation
+// view — never a state that loses existing objects. A second growth (registry
+// already non-empty) skips the gen-0 capture and appends only the expanded set.
+//
+// Concurrency: this reads PlacementGenerations() then issues two non-atomic
+// proposals, so it is NOT safe against concurrent callers — two simultaneous
+// first-growth calls on an empty registry could both capture gen-0 and interleave
+// into a malformed [base, expanded1, base, expanded2] history. Callers MUST
+// serialize topology growth through a single control-plane orchestrator (one
+// outstanding AddTopologyGeneration at a time). No production entry point wires
+// this yet (S7-6 builds the machinery; operator triggering is a follow-on).
+func (m *MetaRaft) AddTopologyGeneration(ctx context.Context, baseGroupIDs, expandedGroupIDs []string) error {
+	if len(expandedGroupIDs) == 0 {
+		return fmt.Errorf("meta_raft: AddTopologyGeneration: empty expanded group set")
+	}
+	if len(m.fsm.PlacementGenerations()) == 0 {
+		if len(baseGroupIDs) == 0 {
+			return fmt.Errorf("meta_raft: AddTopologyGeneration: empty base group set for gen-0 capture")
+		}
+		if err := m.ProposeAddPlacementGeneration(ctx, baseGroupIDs); err != nil {
+			return fmt.Errorf("meta_raft: capture gen-0: %w", err)
+		}
+	}
+	return m.ProposeAddPlacementGeneration(ctx, expandedGroupIDs)
+}
+
 // ProposeShardGroupForwarding is ProposeShardGroup that forwards to the meta
-// leader when this node is a follower (P1-1 convergence). proposeOrForward waits
-// for apply equivalently (leader applies locally; follower forwards), so a
-// non-meta-leader group leader can converge ITS group's PeerIDs mirror after a
-// real data-raft ChangeMembership. The shared ProposeShardGroup hot path is left
-// unchanged (minimal blast radius).
+// leader when this node is a follower. proposeOrForward waits for apply
+// equivalently (leader applies locally; follower forwards), so any node can
+// reconcile shard-group placement rosters without owning meta leadership.
 func (m *MetaRaft) ProposeShardGroupForwarding(ctx context.Context, sg ShardGroupEntry) error {
 	if err := raft.ValidateGroupID(sg.ID); err != nil {
 		return fmt.Errorf("meta_raft: ProposeShardGroupForwarding: %w", err)
@@ -522,24 +573,6 @@ func (m *MetaRaft) ProposeLoadSnapshot(ctx context.Context, entries []LoadStatEn
 	return m.waitAppliedResult(ctx, idx)
 }
 
-// ProposeRebalancePlan encodes a ProposeRebalancePlan command and proposes it to the
-// cluster, blocking until the entry is applied to the local FSM.
-func (m *MetaRaft) ProposeRebalancePlan(ctx context.Context, plan RebalancePlan) error {
-	payload, err := encodeMetaProposeRebalancePlanCmd(plan)
-	if err != nil {
-		return fmt.Errorf("meta_raft: encode ProposeRebalancePlan: %w", err)
-	}
-	data, err := encodeMetaCmd(MetaCmdTypeProposeRebalancePlan, payload)
-	if err != nil {
-		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
-	}
-	idx, err := m.node.ProposeWait(ctx, data)
-	if err != nil {
-		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
-	}
-	return m.waitAppliedResult(ctx, idx)
-}
-
 // ProposeScrubTrigger encodes a ScrubTrigger command and proposes it to the
 // cluster, blocking until the entry is applied to the local FSM. Each node's
 // onScrubTrigger callback (wired to Director.ApplyFromFSM) creates a session
@@ -559,64 +592,6 @@ func (m *MetaRaft) ProposeScrubTrigger(ctx context.Context, entry scrubber.Scrub
 		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
 	}
 	return m.waitAppliedResult(ctx, idx)
-}
-
-// ProposeAbortPlan encodes an AbortPlan command and proposes it to the cluster,
-// blocking until the entry is applied to the local FSM.
-func (m *MetaRaft) ProposeAbortPlan(ctx context.Context, planID string, reason clusterpb.AbortPlanReason) error {
-	payload, err := encodeMetaAbortPlanCmd(planID, reason)
-	if err != nil {
-		return fmt.Errorf("meta_raft: encode AbortPlan: %w", err)
-	}
-	data, err := encodeMetaCmd(MetaCmdTypeAbortPlan, payload)
-	if err != nil {
-		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
-	}
-	idx, err := m.node.ProposeWait(ctx, data)
-	if err != nil {
-		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
-	}
-	return m.waitAppliedResult(ctx, idx)
-}
-
-func (m *MetaRaft) ProposeIcebergCreateNamespace(ctx context.Context, cmd IcebergCreateNamespaceCmd) error {
-	payload, err := encodeMetaIcebergCreateNamespaceCmd(cmd)
-	if err != nil {
-		return fmt.Errorf("meta_raft: encode IcebergCreateNamespace: %w", err)
-	}
-	return m.proposeIcebergCommand(ctx, MetaCmdTypeIcebergCreateNamespace, payload, cmd.RequestID)
-}
-
-func (m *MetaRaft) ProposeIcebergDeleteNamespace(ctx context.Context, cmd IcebergDeleteNamespaceCmd) error {
-	payload, err := encodeMetaIcebergDeleteNamespaceCmd(cmd)
-	if err != nil {
-		return fmt.Errorf("meta_raft: encode IcebergDeleteNamespace: %w", err)
-	}
-	return m.proposeIcebergCommand(ctx, MetaCmdTypeIcebergDeleteNamespace, payload, cmd.RequestID)
-}
-
-func (m *MetaRaft) ProposeIcebergCreateTable(ctx context.Context, cmd IcebergCreateTableCmd) error {
-	payload, err := encodeMetaIcebergCreateTableCmd(cmd)
-	if err != nil {
-		return fmt.Errorf("meta_raft: encode IcebergCreateTable: %w", err)
-	}
-	return m.proposeIcebergCommand(ctx, MetaCmdTypeIcebergCreateTable, payload, cmd.RequestID)
-}
-
-func (m *MetaRaft) ProposeIcebergCommitTable(ctx context.Context, cmd IcebergCommitTableCmd) error {
-	payload, err := encodeMetaIcebergCommitTableCmd(cmd)
-	if err != nil {
-		return fmt.Errorf("meta_raft: encode IcebergCommitTable: %w", err)
-	}
-	return m.proposeIcebergCommand(ctx, MetaCmdTypeIcebergCommitTable, payload, cmd.RequestID)
-}
-
-func (m *MetaRaft) ProposeIcebergDeleteTable(ctx context.Context, cmd IcebergDeleteTableCmd) error {
-	payload, err := encodeMetaIcebergDeleteTableCmd(cmd)
-	if err != nil {
-		return fmt.Errorf("meta_raft: encode IcebergDeleteTable: %w", err)
-	}
-	return m.proposeIcebergCommand(ctx, MetaCmdTypeIcebergDeleteTable, payload, cmd.RequestID)
 }
 
 // ProposeConfigPut encodes a ConfigPut command and proposes it to the cluster,
@@ -663,52 +638,21 @@ func (m *MetaRaft) ProposeDEKRewrapProgress(ctx context.Context, nodeID string, 
 	return m.Propose(ctx, MetaCmdTypeDEKRewrapProgress, payload)
 }
 
-func (m *MetaRaft) ProposeIcebergMetaCommand(ctx context.Context, data []byte) error {
-	cmd := clusterpb.GetRootAsMetaCmd(data, 0)
-	requestID, err := icebergRequestID(cmd.Type(), cmd.DataBytes())
-	if err != nil {
-		return err
-	}
-	return m.proposeIcebergCommand(ctx, cmd.Type(), cmd.DataBytes(), requestID)
-}
-
-// ProposeMetaCommand proposes an already-encoded MetaCmd. Iceberg commands use
-// the request waiter path so semantic catalog errors are preserved; other meta
-// commands only need to wait until the entry is applied locally.
+// ProposeMetaCommand proposes an already-encoded MetaCmd and blocks until the
+// entry is applied locally.
 func (m *MetaRaft) ProposeMetaCommand(ctx context.Context, data []byte) error {
-	cmd := clusterpb.GetRootAsMetaCmd(data, 0)
-	switch cmd.Type() {
-	case MetaCmdTypeIcebergCreateNamespace,
-		MetaCmdTypeIcebergDeleteNamespace,
-		MetaCmdTypeIcebergCreateTable,
-		MetaCmdTypeIcebergCommitTable,
-		MetaCmdTypeIcebergDeleteTable:
-		return m.ProposeIcebergMetaCommand(ctx, data)
-	default:
-		_, err := m.ProposeMetaCommandWithIndex(ctx, data)
-		return err
-	}
+	_, err := m.ProposeMetaCommandWithIndex(ctx, data)
+	return err
 }
 
-// ProposeMetaCommandWithIndex proposes an already-encoded non-Iceberg MetaCmd
-// and returns the committed raft index. Iceberg commands use semantic request
-// waiters and do not expose a proposal index through this path.
+// ProposeMetaCommandWithIndex proposes an already-encoded MetaCmd and returns
+// the committed raft index.
 func (m *MetaRaft) ProposeMetaCommandWithIndex(ctx context.Context, data []byte) (uint64, error) {
-	cmd := clusterpb.GetRootAsMetaCmd(data, 0)
-	switch cmd.Type() {
-	case MetaCmdTypeIcebergCreateNamespace,
-		MetaCmdTypeIcebergDeleteNamespace,
-		MetaCmdTypeIcebergCreateTable,
-		MetaCmdTypeIcebergCommitTable,
-		MetaCmdTypeIcebergDeleteTable:
-		return 0, fmt.Errorf("meta_raft: iceberg commands do not expose proposal index through this path")
-	default:
-		idx, err := m.node.ProposeWait(ctx, data)
-		if err != nil {
-			return 0, fmt.Errorf("meta_raft: ProposeWait: %w", err)
-		}
-		return idx, m.waitAppliedResult(ctx, idx)
+	idx, err := m.node.ProposeWait(ctx, data)
+	if err != nil {
+		return 0, fmt.Errorf("meta_raft: ProposeWait: %w", err)
 	}
+	return idx, m.waitAppliedResult(ctx, idx)
 }
 
 func (m *MetaRaft) ProposeMetaCommandWithGate(ctx context.Context, plan compat.GatePlan, data []byte) (uint64, error) {
@@ -815,82 +759,6 @@ func (m *MetaRaft) validateGatePlanForProposal(plan compat.GatePlan) error {
 	}
 	_, err := m.capabilityGate.RequireMetaRaftCapability(plan.Capability, plan.Operation, time.Now())
 	return err
-}
-
-func icebergRequestID(typ MetaCmdType, payload []byte) (string, error) {
-	switch typ {
-	case MetaCmdTypeIcebergCreateNamespace:
-		cmd, err := decodeMetaIcebergCreateNamespaceCmd(payload)
-		return cmd.RequestID, err
-	case MetaCmdTypeIcebergDeleteNamespace:
-		cmd, err := decodeMetaIcebergDeleteNamespaceCmd(payload)
-		return cmd.RequestID, err
-	case MetaCmdTypeIcebergCreateTable:
-		cmd, err := decodeMetaIcebergCreateTableCmd(payload)
-		return cmd.RequestID, err
-	case MetaCmdTypeIcebergCommitTable:
-		cmd, err := decodeMetaIcebergCommitTableCmd(payload)
-		return cmd.RequestID, err
-	case MetaCmdTypeIcebergDeleteTable:
-		cmd, err := decodeMetaIcebergDeleteTableCmd(payload)
-		return cmd.RequestID, err
-	default:
-		return "", fmt.Errorf("meta_raft: non-iceberg command type %s", typ)
-	}
-}
-
-func (m *MetaRaft) proposeIcebergCommand(ctx context.Context, typ MetaCmdType, payload []byte, requestID string) error {
-	if requestID == "" {
-		return fmt.Errorf("meta_raft: iceberg command missing request ID")
-	}
-	waiter := m.registerIcebergWaiter(requestID)
-	defer m.unregisterIcebergWaiter(requestID)
-	data, err := encodeMetaCmd(typ, payload)
-	if err != nil {
-		return fmt.Errorf("meta_raft: encode MetaCmd: %w", err)
-	}
-	idx, err := m.node.ProposeWait(ctx, data)
-	if err != nil {
-		return fmt.Errorf("meta_raft: ProposeWait: %w", err)
-	}
-	if err := m.waitApplied(ctx, idx); err != nil {
-		return err
-	}
-	select {
-	case err := <-waiter:
-		return err
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-m.done:
-		return fmt.Errorf("meta_raft: apply loop stopped before iceberg result %q was delivered", requestID)
-	}
-}
-
-func (m *MetaRaft) registerIcebergWaiter(requestID string) chan error {
-	ch := make(chan error, 1)
-	m.icebergMu.Lock()
-	m.icebergWaiters[requestID] = ch
-	m.icebergMu.Unlock()
-	return ch
-}
-
-func (m *MetaRaft) unregisterIcebergWaiter(requestID string) {
-	m.icebergMu.Lock()
-	delete(m.icebergWaiters, requestID)
-	m.icebergMu.Unlock()
-}
-
-func (m *MetaRaft) publishIcebergResult(requestID string, err error) {
-	m.icebergMu.Lock()
-	ch := m.icebergWaiters[requestID]
-	m.icebergMu.Unlock()
-	if ch == nil {
-		return
-	}
-	select {
-	case ch <- err:
-	default:
-	}
 }
 
 // waitApplied blocks until the FSM apply loop has processed the entry at idx.

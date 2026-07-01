@@ -8,16 +8,21 @@ make test-unit           # unit 테스트만 (colima/e2e 제외)
 make test                # test-unit + test-colima (colima VM 필요)
 make test-race           # race detector 포함
 make test-e2e            # E2E (binary 필요, 자동 빌드)
-make test-nbd-colima     # NBD 테스트 (colima VM)
-make test-nfs4-colima    # NFSv4 테스트 (colima VM)
 make test-fuse-s3-colima # FUSE/S3 테스트 (colima VM)
 make lint                # golangci-lint
 make fbs                 # FlatBuffers (.fbs → .go) 재생성
-make bench-iceberg-table # Iceberg table API benchmark (single-node)
-make bench-iceberg-table-cluster # Iceberg table API benchmark (cluster)
 ```
 
 Module: `github.com/gritive/GrainFS`. 단일 binary `bin/grainfs`.
+
+## Health Stack
+
+- typecheck: go build ./...
+- lint: make lint
+- test: make test-unit
+- deadcode: staticcheck ./...
+- shell: shellcheck (benchmarks/ scripts/ tests/)
+- gbrain: gbrain doctor --json
 
 ## Codebase Review
 
@@ -26,17 +31,18 @@ Module: `github.com/gritive/GrainFS`. 단일 binary `bin/grainfs`.
 - HTTP Framework: Hertz (cloudwego/hertz)
 - CLI: Cobra (spf13/cobra)
 - Transport: TCP (crypto/tls TLS 1.3, cluster-PSK SPKI pinning) — QUIC/quic-go removed in S6
-- Metadata DB: BadgerDB (dgraph-io/badger/v4)
+- Metadata 저장:
+  - 객체 메타(데이터플레인, hot): quorum-meta 파일 — FlatBuffer blob을 EC 샤드와 같은 노드에 co-locate, placement 노드에 전체복제(K-of-N 쿼럼, parity best-effort), off-raft. `internal/cluster/quorum_meta.go`
+  - 컨트롤플레인 메타(bucket config/policy/ACL/versioning/IAM/lifecycle): BadgerDB (dgraph-io/badger/v4) + meta-raft FSM 복제
 - Erasure Coding: klauspost/reedsolomon
-- NFSv4: 자체 구현 (internal/nfs4server, XDR/RPC)
 - Monitoring: Prometheus client_golang
 - Test: go test + testify, MinIO warp (공식 S3 비교 벤치마크)
 
 ### 아키텍처 원칙
 - Go 표준 레이아웃: cmd/ (진입점), internal/ (비공개 패키지)
-- 단일 바이너리: S3 + NFSv4 + NBD + Web UI를 하나로 제공
-- 계층 분리: storage(블롭) → metadata(BadgerDB) → server(HTTP) → transport(TCP/Raft)
-- internal 하위 패키지: cluster, raft, transport(TCP), storage, vfs, volume, server, server/execution, server/iceberg, server/receiptsvc, server/incidentsvc, server/snapshotsvc, s3auth, iam, nfs4server, nbd, encrypt, badgerrole, badgerutil, cache, dashboard, adminapi, clusteradmin, volumeadmin, alerts, eventstore, icebergcatalog, incident, lifecycle, metrics, migration, otel, policy, pool, receipt, resourceguard, resourcewatch, scrubber, serveruntime, serveruntime/executioncluster, snapshot, chunkref, config, nodeconfig
+- 단일 바이너리: S3 + Web UI를 하나로 제공
+- 계층 분리: storage(블롭 + 객체 메타 quorum-meta 파일) → metadata(컨트롤플레인=BadgerDB/raft) → server(HTTP) → transport(TCP/Raft)
+- internal 하위 패키지: cluster, raft, transport(TCP), storage, vfs, volume, server, server/receiptsvc, server/incidentsvc, server/snapshotsvc, s3auth, iam, encrypt, badgerrole, badgerutil, badgermeta, metastore, cache, dashboard, adminapi, clusteradmin, volumeadmin, alerts, eventstore, incident, lifecycle, metrics, migration, otel, policy, pool, receipt, resourceguard, resourcewatch, scrubber, serveruntime, snapshot, chunkref, config, nodeconfig
 - FlatBuffers: 내부 통신은 `internal/**/*.fbs` → `make fbs`로 .go 생성 (메모리: "내부 통신 JSON 미사용")
 
 ### cmd 경계 계약 (cmd thin-runner)
@@ -60,10 +66,17 @@ HTTP/UDS client, 렌더링, 오케스트레이션 같은 비즈니스 로직은 
 - 인터페이스는 사용처에서 정의
 - 테이블 드리븐 테스트 사용
 
+### Clean Architecture 레이어 규칙
+Clean Architecture를 따른다. 패키지-레이어 매핑:
+- **Domain**: `internal/cluster`
+- **Application**: `internal/serveruntime`, `internal/<feature>admin`
+- **Infrastructure**: `internal/storage`, `internal/raft`, `internal/transport`
+- **Adapters**: `internal/server`
+
 ### 성능 규칙
 - Erasure Coding: Reed-Solomon 4+2 기본, 가변 설정 가능
 - TCP 멀티플렉싱(mux carrier)으로 클러스터 통신
-- 벤치마크: `make bench`/`make bench-cluster`/`make bench-s3-compat-compare`로 MinIO warp 기반 S3 PUT/GET/DELETE 측정, `make bench-iceberg-table`/`make bench-iceberg-table-cluster`로 `warp iceberg` 기반 Iceberg REST Catalog 측정
+- 벤치마크: `make bench`/`make bench-cluster`/`make bench-s3-compat-compare`로 MinIO warp 기반 S3 PUT/GET/DELETE 측정
 
 ## Persona Test
 
@@ -73,26 +86,21 @@ HTTP/UDS client, 렌더링, 오케스트레이션 같은 비즈니스 로직은 
 | CLI        | `./bin/grainfs serve --data ./tmp --port 9000` | Cobra, `--help`           |
 | S3 API     | `http://localhost:9000`                        | `aws --endpoint-url` 호환 |
 | Web UI     | `http://localhost:9000/ui/`                    | 브라우저 Object Browser   |
-| NFSv4      | `localhost:2049`                               | `mount -t nfs4` (Linux)   |
-| NBD        | `localhost:{nbd-port}`                         | Linux only, `nbd-client`  |
 
 ### 테스트 계정
 - S3 인증: admin UDS 통해 부트스트랩한 SA의 access_key/secret_key (`grainfs iam sa create admin --endpoint <data>/admin.sock`)
 
 ### 제품 스펙
 - CONTEXT.md: 도메인 용어/현재 상태 (루트, 13KB)
-- ROADMAP.md: 개발 로드맵 및 Phase별 기능 정의
 - README.md: Quick Start 및 CLI 옵션
 - CHANGELOG.md: 버전별 변경 기록 (`VERSION` 파일과 함께 릴리스 source of truth)
 - docs/adr/: 아키텍처 결정 기록
-- docs/architecture/request-single-cluster-flow.md: single/cluster request execution actor 설계
+- docs/architecture/request-single-cluster-flow.md: single/cluster request execution actor 설계 (Phase 1에서 actor 모델 제거됨 — 역사적 참고용)
 - docs/operators/runbook.md, docs/operators/sli-slo.md: 운영/SLO 문서
 
 ### 테스트 레이아웃
 - `tests/e2e/`: 일반 E2E (Go test)
-- `tests/nbd_interop/`: NBD interop (Linux 필요)
-- `tests/nbd_colima/`, `tests/nfs4_colima/`, `tests/fuse_s3_colima/`: colima VM, 빌드 태그 `colima` 필수
-- NBD 테스트는 colima VM에서 실행
+- `tests/fuse_s3_colima/`: FUSE/S3 colima VM, 빌드 태그 `colima` 필수
 
 ## Tasks
 

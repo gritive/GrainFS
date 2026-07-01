@@ -11,26 +11,34 @@ import (
 // interface in cluster/raft, so the boot-held value can be passed to those
 // narrower constructors (Go interface-to-interface assignment).
 //
-// The mux-connection methods speak MuxCarrier (S2b-1), so this interface is no
-// longer QUIC-shaped: a TCP mux carrier (S2b-2) can satisfy it. *TCPTransport
-// satisfies it today via muxCarrier.
+// Every RPC family rides a native per-family route: the typed surfaces below
+// plus the generic buffered-Call and gossip primitives. There is no envelope
+// tunnel and no stream-multiplexing surface (both removed in Phase 8).
+// HTTPTransport is the only implementation.
 type ClusterTransport interface {
-	// Transport covers Listen/Connect/Send/Receive/Close.
-	Transport
+	// Lifecycle + liveness.
+	Listen(ctx context.Context, addr string) error
+	Close() error
+	Ping(ctx context.Context, addr string) error
 
-	Call(ctx context.Context, addr string, req *Message) (*Message, error)
-	CallWithBody(ctx context.Context, addr string, req *Message, body io.Reader) (*Message, error)
-	CallRead(ctx context.Context, addr string, req *Message) (*Message, io.ReadCloser, error)
-	CallFlatBuffer(ctx context.Context, addr string, fw *FlatBuffersWriter) (*Message, error)
+	// Native route surfaces (Phase 8 N6+; the envelope-free per-family wire).
+	RegisterShardWriteHandler(h ShardWriteHandler)
+	ShardWrite(ctx context.Context, addr string, req ShardWriteRequest, body io.Reader) error
+	RegisterShardReadHandler(h ShardReadHandler)
+	ShardRead(ctx context.Context, addr string, req ShardReadRequest) (io.ReadCloser, error)
+	RegisterForwardWriteHandler(h ForwardWriteHandler)
+	RegisterForwardReadHandler(h ForwardReadHandler)
+	ForwardWrite(ctx context.Context, addr string, frame []byte, body io.Reader) ([]byte, error)
+	ForwardRead(ctx context.Context, addr string, frame []byte) ([]byte, io.ReadCloser, error)
+	RegisterAppendSegmentReadHandler(h AppendSegmentReadHandler)
+	AppendSegmentRead(ctx context.Context, addr string, frame []byte) ([]byte, io.ReadCloser, error)
 
-	Handle(st StreamType, h StreamHandler)
-	HandleBody(st StreamType, h StreamBodyHandler)
-	HandleRead(st StreamType, h StreamReadHandler)
-	SetStreamHandler(h StreamHandler)
-
-	SetMuxConnHandler(h MuxConnHandler)
-	GetOrConnectMux(ctx context.Context, addr string) (MuxCarrier, error)
-	EvictMux(addr string, carrier MuxCarrier)
+	// Generic native primitives (Phase 8 N7-3): buffered-Call and gossip
+	// routes for the long-tail families (route table in http_buffered_route.go).
+	RegisterBufferedRoute(path string, h BufferedRouteHandler)
+	CallBuffered(ctx context.Context, addr, path string, payload []byte) ([]byte, error)
+	RegisterGossipRoute(path string, h GossipHandler)
+	GossipSend(ctx context.Context, addr, path string, payload []byte) error
 
 	RecycleConns()
 	ClosePeer(addr string)
@@ -45,5 +53,5 @@ type ClusterTransport interface {
 	SetDropped()
 }
 
-// TCPTransport is the sole cluster transport (S6 removed the QUIC stack).
-var _ ClusterTransport = (*TCPTransport)(nil)
+// HTTPTransport is the sole cluster transport.
+var _ ClusterTransport = (*HTTPTransport)(nil)

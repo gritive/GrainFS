@@ -20,43 +20,40 @@ import (
 
 type recordingMultipartRaftNode struct {
 	RaftNode
-	mu    sync.Mutex
-	types []CommandType
+	mu       sync.Mutex
+	proposes int
 }
 
 func (n *recordingMultipartRaftNode) ProposeWait(ctx context.Context, command []byte) (uint64, error) {
-	if cmd, err := DecodeCommand(command); err == nil {
-		n.mu.Lock()
-		n.types = append(n.types, cmd.Type)
-		n.mu.Unlock()
-	}
+	n.mu.Lock()
+	n.proposes++
+	n.mu.Unlock()
 	return n.RaftNode.ProposeWait(ctx, command)
 }
 
-func (n *recordingMultipartRaftNode) commandTypes() []CommandType {
+func (n *recordingMultipartRaftNode) proposeCount() int {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	out := make([]CommandType, len(n.types))
-	copy(out, n.types)
-	return out
+	return n.proposes
 }
 
 var _ = Describe("Backend multipart integration", func() {
 	var (
 		b   *DistributedBackend
+		db  *badger.DB
 		ctx context.Context
 	)
 
 	BeforeEach(func() {
-		b = newTestDistributedBackend(GinkgoT())
+		b, db = newTestDistributedBackendWithDB(GinkgoT())
 		ctx = context.Background()
 		Expect(b.CreateBucket(ctx, "bucket")).To(Succeed())
 	})
 
-	It("completes multipart uploads without proposing a separate abort", func() {
+	It("completes multipart uploads raft-free (no CmdCompleteMultipart propose)", func() {
 		up, err := b.CreateMultipartUpload(ctx, "bucket", "mp.bin", "application/octet-stream")
 		Expect(err).NotTo(HaveOccurred())
-		part, err := b.UploadPart(ctx, "bucket", "mp.bin", up.UploadID, 1, bytes.NewReader([]byte("small-final-part")))
+		part, err := b.UploadPart(ctx, "bucket", "mp.bin", up.UploadID, 1, bytes.NewReader([]byte("small-final-part")), "")
 		Expect(err).NotTo(HaveOccurred())
 
 		rec := &recordingMultipartRaftNode{RaftNode: b.node}
@@ -65,24 +62,27 @@ var _ = Describe("Backend multipart integration", func() {
 		obj, err := b.CompleteMultipartUpload(ctx, "bucket", "mp.bin", up.UploadID, []storage.Part{*part})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(obj).NotTo(BeNil())
-		Expect(rec.commandTypes()).To(Equal([]CommandType{CmdCompleteMultipart}))
+		// M3: the complete commits the latest-only quorum-meta blob FAIL-CLOSED,
+		// without proposing to data-group raft.
+		Expect(rec.proposeCount()).To(Equal(0))
 	})
 
-	It("bypasses complete spooling for single-part multipart uploads", func() {
+	It("completes single-part multipart uploads without staging the body to a spool", func() {
+		// The PUT-body spool was removed; multipart complete always streams through
+		// the chunked path. This guards the single-part round-trip and asserts no
+		// put-spool dir is created during complete.
 		up, err := b.CreateMultipartUpload(ctx, "bucket", "mp.bin", "application/octet-stream")
 		Expect(err).NotTo(HaveOccurred())
 		payload := []byte("small-final-part")
-		part, err := b.UploadPart(ctx, "bucket", "mp.bin", up.UploadID, 1, bytes.NewReader(payload))
+		part, err := b.UploadPart(ctx, "bucket", "mp.bin", up.UploadID, 1, bytes.NewReader(payload), "")
 		Expect(err).NotTo(HaveOccurred())
-
-		Expect(os.MkdirAll(filepath.Dir(b.spoolDir()), 0o700)).To(Succeed())
-		Expect(os.Mkdir(b.spoolDir(), 0o500)).To(Succeed())
-		Expect(os.Chmod(b.spoolDir(), 0o500)).To(Succeed())
-		DeferCleanup(func() { _ = os.Chmod(b.spoolDir(), 0o700) })
 
 		obj, err := b.CompleteMultipartUpload(ctx, "bucket", "mp.bin", up.UploadID, []storage.Part{*part})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(obj.Size).To(Equal(int64(len(payload))))
+
+		_, statErr := os.Stat(filepath.Join(b.root, "tmp", "put-spool"))
+		Expect(os.IsNotExist(statErr)).To(BeTrue(), "multipart complete must not create a put-spool dir")
 
 		rc, _, err := b.GetObject(ctx, "bucket", "mp.bin")
 		Expect(err).NotTo(HaveOccurred())
@@ -101,12 +101,12 @@ var _ = Describe("Backend multipart integration", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(upload.UploadID).NotTo(BeEmpty())
 
-		p1, err := b.UploadPart(ctx, "bucket", "mp.bin", upload.UploadID, 1, bytes.NewReader(part1))
+		p1, err := b.UploadPart(ctx, "bucket", "mp.bin", upload.UploadID, 1, bytes.NewReader(part1), "")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(p1.PartNumber).To(Equal(1))
 		Expect(p1.Size).To(Equal(int64(5 << 20)))
 
-		p2, err := b.UploadPart(ctx, "bucket", "mp.bin", upload.UploadID, 2, bytes.NewReader(part2))
+		p2, err := b.UploadPart(ctx, "bucket", "mp.bin", upload.UploadID, 2, bytes.NewReader(part2), "")
 		Expect(err).NotTo(HaveOccurred())
 
 		obj, err := b.CompleteMultipartUpload(ctx, "bucket", "mp.bin", upload.UploadID, []storage.Part{
@@ -135,11 +135,11 @@ var _ = Describe("Backend multipart integration", func() {
 		part3 := []byte("C")
 		up, err := b.CreateMultipartUpload(ctx, "bucket", "large-mp.bin", "application/octet-stream")
 		Expect(err).NotTo(HaveOccurred())
-		p1, err := b.UploadPart(ctx, "bucket", "large-mp.bin", up.UploadID, 1, bytes.NewReader(part1))
+		p1, err := b.UploadPart(ctx, "bucket", "large-mp.bin", up.UploadID, 1, bytes.NewReader(part1), "")
 		Expect(err).NotTo(HaveOccurred())
-		p2, err := b.UploadPart(ctx, "bucket", "large-mp.bin", up.UploadID, 2, bytes.NewReader(part2))
+		p2, err := b.UploadPart(ctx, "bucket", "large-mp.bin", up.UploadID, 2, bytes.NewReader(part2), "")
 		Expect(err).NotTo(HaveOccurred())
-		p3, err := b.UploadPart(ctx, "bucket", "large-mp.bin", up.UploadID, 3, bytes.NewReader(part3))
+		p3, err := b.UploadPart(ctx, "bucket", "large-mp.bin", up.UploadID, 3, bytes.NewReader(part3), "")
 		Expect(err).NotTo(HaveOccurred())
 
 		obj, err := b.CompleteMultipartUpload(ctx, "bucket", "large-mp.bin", up.UploadID, []storage.Part{*p1, *p2, *p3})
@@ -168,9 +168,9 @@ var _ = Describe("Backend multipart integration", func() {
 
 		up, err := b.CreateMultipartUpload(ctx, "bucket", "large-mp.bin", "application/octet-stream")
 		Expect(err).NotTo(HaveOccurred())
-		p1, err := b.UploadPart(ctx, "bucket", "large-mp.bin", up.UploadID, 1, bytes.NewReader(bytes.Repeat([]byte("A"), testChunkedMultipartChunkSize)))
+		p1, err := b.UploadPart(ctx, "bucket", "large-mp.bin", up.UploadID, 1, bytes.NewReader(bytes.Repeat([]byte("A"), testChunkedMultipartChunkSize)), "")
 		Expect(err).NotTo(HaveOccurred())
-		p2, err := b.UploadPart(ctx, "bucket", "large-mp.bin", up.UploadID, 2, bytes.NewReader([]byte("B")))
+		p2, err := b.UploadPart(ctx, "bucket", "large-mp.bin", up.UploadID, 2, bytes.NewReader([]byte("B")), "")
 		Expect(err).NotTo(HaveOccurred())
 
 		b.testBeforeChunkedMultipartCommit = func() error { return errors.New("injected commit preflight failure") }
@@ -186,13 +186,13 @@ var _ = Describe("Backend multipart integration", func() {
 
 	It("encrypts multipart part storage", func() {
 		keeper, clusterID := testDEKKeeper(GinkgoT())
-		b.SetShardService(NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID)), []string{b.selfAddr})
+		b.SetShardService(NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID)), []string{b.selfAddr})
 
 		partBytes := []byte("cluster multipart sensitive payload")
 		upload, err := b.CreateMultipartUpload(ctx, "bucket", "mp.bin", "application/octet-stream")
 		Expect(err).NotTo(HaveOccurred())
 
-		part, err := b.UploadPart(ctx, "bucket", "mp.bin", upload.UploadID, 1, bytes.NewReader(partBytes))
+		part, err := b.UploadPart(ctx, "bucket", "mp.bin", upload.UploadID, 1, bytes.NewReader(partBytes), "")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(part.Size).To(Equal(int64(len(partBytes))))
 
@@ -222,7 +222,7 @@ var _ = Describe("Backend multipart integration", func() {
 		upload, err := b.CreateMultipartUpload(ctx, "bucket", "abort.bin", "application/octet-stream")
 		Expect(err).NotTo(HaveOccurred())
 
-		_, err = b.UploadPart(ctx, "bucket", "abort.bin", upload.UploadID, 1, strings.NewReader("data"))
+		_, err = b.UploadPart(ctx, "bucket", "abort.bin", upload.UploadID, 1, strings.NewReader("data"), "")
 		Expect(err).NotTo(HaveOccurred())
 
 		Expect(b.AbortMultipartUpload(ctx, "bucket", "abort.bin", upload.UploadID)).To(Succeed())
@@ -236,13 +236,13 @@ var _ = Describe("Backend multipart integration", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(os.RemoveAll(b.partDir(upload.UploadID))).To(Succeed())
 
-		part, err := b.UploadPart(ctx, "bucket", "mp.bin", upload.UploadID, 1, strings.NewReader("data"))
+		part, err := b.UploadPart(ctx, "bucket", "mp.bin", upload.UploadID, 1, strings.NewReader("data"), "")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(part.PartNumber).To(Equal(1))
 	})
 
 	It("returns upload-not-found for bad multipart upload IDs", func() {
-		_, err := b.UploadPart(ctx, "bucket", "file.bin", "bad-id", 1, strings.NewReader("data"))
+		_, err := b.UploadPart(ctx, "bucket", "file.bin", "bad-id", 1, strings.NewReader("data"), "")
 		Expect(err).To(MatchError(storage.ErrUploadNotFound))
 
 		err = b.AbortMultipartUpload(ctx, "bucket", "file.bin", "bad-id")
@@ -260,22 +260,22 @@ var _ = Describe("Backend multipart integration", func() {
 	It("filters, skips legacy rows, limits, and sorts multipart upload listings", func() {
 		Expect(b.CreateBucket(ctx, "other")).To(Succeed())
 
-		writeMultipartMetaSpec(b, "upload-late", clusterMultipartMeta{
+		writeMultipartMetaSpec(b, db, "upload-late", clusterMultipartMeta{
 			Bucket: "bucket", Key: "prefix/z.bin", CreatedAt: 300, ContentType: "application/octet-stream", PlacementGroupID: "group-1",
 		})
-		writeMultipartMetaSpec(b, "upload-early-b", clusterMultipartMeta{
+		writeMultipartMetaSpec(b, db, "upload-early-b", clusterMultipartMeta{
 			Bucket: "bucket", Key: "prefix/b.bin", CreatedAt: 100, ContentType: "application/octet-stream", PlacementGroupID: "group-1",
 		})
-		writeMultipartMetaSpec(b, "upload-early-a", clusterMultipartMeta{
+		writeMultipartMetaSpec(b, db, "upload-early-a", clusterMultipartMeta{
 			Bucket: "bucket", Key: "prefix/a.bin", CreatedAt: 100, ContentType: "application/octet-stream", PlacementGroupID: "group-1",
 		})
-		writeMultipartMetaSpec(b, "upload-other-prefix", clusterMultipartMeta{
+		writeMultipartMetaSpec(b, db, "upload-other-prefix", clusterMultipartMeta{
 			Bucket: "bucket", Key: "else/a.bin", CreatedAt: 50, ContentType: "application/octet-stream", PlacementGroupID: "group-1",
 		})
-		writeMultipartMetaSpec(b, "upload-other-bucket", clusterMultipartMeta{
+		writeMultipartMetaSpec(b, db, "upload-other-bucket", clusterMultipartMeta{
 			Bucket: "other", Key: "prefix/a.bin", CreatedAt: 25, ContentType: "application/octet-stream", PlacementGroupID: "group-1",
 		})
-		writeMultipartMetaSpec(b, "upload-legacy", clusterMultipartMeta{
+		writeMultipartMetaSpec(b, db, "upload-legacy", clusterMultipartMeta{
 			ContentType: "application/octet-stream", PlacementGroupID: "group-1",
 		})
 
@@ -298,7 +298,7 @@ func configureChunkedMultipartTestBackend(b *DistributedBackend) {
 	GinkgoHelper()
 	nodes := []string{b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr, b.selfAddr}
 	keeper, clusterID := testDEKKeeper(GinkgoT())
-	b.SetShardService(NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(GinkgoT(), keeper, clusterID)), nodes)
+	b.SetShardService(NewShardService(b.root, nil, WithShardDEKKeeper(keeper, clusterID)), nodes)
 	b.SetECConfig(ECConfig{DataShards: 4, ParityShards: 2})
 	b.chunkedPutChunkSize = testChunkedMultipartChunkSize
 	b.SetShardGroupSource(&fakeShardGroupSource{groups: map[string]ShardGroupEntry{
@@ -308,13 +308,19 @@ func configureChunkedMultipartTestBackend(b *DistributedBackend) {
 
 const testChunkedMultipartChunkSize = 5 << 20
 
-func writeMultipartMetaSpec(b *DistributedBackend, uploadID string, meta clusterMultipartMeta) {
+func writeMultipartMetaSpec(b *DistributedBackend, _ *badger.DB, uploadID string, meta clusterMultipartMeta) {
+	GinkgoHelper()
+	// M2b: the in-progress manifest lives on the .qmeta_mpu blob, not the FSM
+	// mpu: key. Write it where ListMultipartUploads (scanManifestBlobsCluster)
+	// reads it — the local owning-group replica.
+	Expect(b.shardSvc.writeManifestBlobLocal(meta.Bucket, uploadID, mustMarshalClusterMultipartMeta(meta))).To(Succeed())
+}
+
+func mustMarshalClusterMultipartMeta(meta clusterMultipartMeta) []byte {
 	GinkgoHelper()
 	raw, err := marshalClusterMultipartMeta(meta)
 	Expect(err).NotTo(HaveOccurred())
-	Expect(b.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(b.ks().MultipartKey(uploadID), raw)
-	})).To(Succeed())
+	return raw
 }
 
 func multipartUploadIDs(uploads []*storage.MultipartUpload) []string {

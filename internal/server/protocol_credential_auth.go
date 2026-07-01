@@ -3,15 +3,12 @@ package server
 import (
 	"context"
 	"net/http"
-	"strings"
 
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 
 	"github.com/gritive/GrainFS/internal/iam"
-	iamjwt "github.com/gritive/GrainFS/internal/iam/jwt"
 	"github.com/gritive/GrainFS/internal/protocred"
 	"github.com/gritive/GrainFS/internal/s3auth"
-	"github.com/gritive/GrainFS/internal/server/iceberg"
 )
 
 type protocolCredentialAuth struct {
@@ -34,7 +31,7 @@ func (a *protocolCredentialAuth) lookupSecret(accessKey string) (string, bool) {
 		return "", false
 	}
 	switch item.Protocol {
-	case protocred.ProtocolS3, protocred.ProtocolIceberg:
+	case protocred.ProtocolS3:
 		return secret, true
 	default:
 		return "", false
@@ -79,12 +76,6 @@ func (a *protocolCredentialAuth) authenticate(ctx context.Context, r *http.Reque
 	}
 	ctx = WithAccessKey(ctx, accessKey)
 	ctx = iam.WithPrincipal(ctx, decision.SAID)
-	if protocol == protocred.ProtocolIceberg {
-		ctx = context.WithValue(ctx, iceberg.ClaimsKey, &iamjwt.Claims{
-			Sub:       decision.SAID,
-			Warehouse: strings.TrimPrefix(resource, "catalog/"),
-		})
-	}
 	return ctx, nil
 }
 

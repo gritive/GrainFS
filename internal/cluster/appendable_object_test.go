@@ -6,6 +6,8 @@ import (
 	"io"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -62,6 +64,17 @@ func TestPlanAppendObjectAdmission(t *testing.T) {
 			want: storage.ErrAppendCapExceeded,
 		},
 		{
+			name: "existing side summary count rejects segment cap",
+			in: appendObjectAdmissionInput{
+				Existing:             &storage.Object{Size: 10},
+				ExistingSegmentCount: storage.MaxAppendSegments,
+				ExpectedOffset:       10,
+				ChunkSize:            1,
+				SizeCapBytes:         0,
+			},
+			want: storage.ErrAppendCapExceeded,
+		},
+		{
 			name: "existing rejects conservative size cap",
 			in: appendObjectAdmissionInput{
 				Existing:       existing,
@@ -101,6 +114,177 @@ func TestPlanAppendObjectAdmission(t *testing.T) {
 	}
 }
 
+func TestPlanAppendCompositeETagSurvivesCoalesce(t *testing.T) {
+	c1 := []byte("aaaaaaaaaaaaaaaa")
+	c2 := []byte("bbbbbbbbbbbbbbbb")
+	c3 := []byte("cccccccccccccccc")
+	base := PutObjectMetaCmd{Bucket: "b", Key: "k", Size: 48, IsAppendable: true, Segments: nil, Coalesced: []CoalescedShardRef{{CoalescedID: "x", Size: 48, ShardKey: "k/coalesced/x"}}, AppendCallMD5s: [][]byte{c1, c2, c3}, MetaSeq: 5}
+	seg := storage.SegmentRef{Size: 16, Checksum: []byte("dddddddddddddddd")}
+	next, _, _, err := planAppendObjectBlobRMWWithSide(appendBlobRMWInput{Bucket: "b", Key: "k", ExpectedOffset: 48, Segment: seg, Base: base, BaseExists: true, ModifiedUnixSec: 1})
+	require.NoError(t, err)
+	require.Equal(t, storage.CompositeETag([][]byte{c1, c2, c3, seg.Checksum}), next.ETag, "composite ETag must include the pre-coalesce per-call digests")
+	require.Equal(t, [][]byte{c1, c2, c3, seg.Checksum}, next.AppendCallMD5s)
+}
+
+func TestPlanAppendObjectBlobRMWCoalescedPrefixUsesSideRecords(t *testing.T) {
+	baseState, count, err := storage.AppendETagStateAppend(nil, 0, []byte("base-segment-md5"))
+	require.NoError(t, err)
+	etag, err := storage.CompositeETagFromState(baseState, count)
+	require.NoError(t, err)
+
+	base := PutObjectMetaCmd{
+		Bucket:           "b",
+		Key:              "k",
+		Size:             12,
+		IsAppendable:     true,
+		Segments:         nil,
+		Coalesced:        []CoalescedShardRef{{CoalescedID: "c1", Size: 4, ShardKey: "k/coalesced/c1"}},
+		MetaSeq:          3,
+		NodeIDs:          []string{"n1"},
+		ETag:             etag,
+		PlacementGroupID: "g0",
+		ECData:           1,
+		ECParity:         0,
+	}
+	seg := storage.SegmentRef{Size: 2, Checksum: []byte("new-segment-md5")}
+	summary := storage.AppendSummary{
+		Size:            8,
+		SegmentCount:    1,
+		ETagPartCount:   count,
+		ETagDigestState: baseState,
+	}
+	next, nextSummary, sideMode, err := planAppendObjectBlobRMWWithSide(appendBlobRMWInput{
+		Bucket:           "b",
+		Key:              "k",
+		ExpectedOffset:   12,
+		Segment:          seg,
+		Base:             base,
+		BaseExists:       true,
+		ModifiedUnixSec:  1,
+		UseSideRecords:   true,
+		BaseSummary:      summary,
+		BaseHasSummary:   true,
+		PlacementGroupID: "g0",
+		SizeCapBytes:     0,
+	})
+	require.NoError(t, err)
+	require.True(t, sideMode)
+	require.Len(t, next.Coalesced, 1)
+	require.Empty(t, next.Segments)
+	require.Equal(t, int64(14), next.Size)
+	require.Empty(t, next.AppendCallMD5s)
+	computedETag, err := storage.CompositeETagFromState(nextSummary.ETagDigestState, nextSummary.ETagPartCount)
+	require.NoError(t, err)
+	require.Equal(t, computedETag, next.ETag)
+	require.Greater(t, nextSummary.SegmentCount, summary.SegmentCount)
+}
+
+func TestPlanAppendObjectBlobRMWCoalescedPrefixUsesLogicalAppendCap(t *testing.T) {
+	orig := storage.MaxAppendSegments
+	t.Cleanup(func() { storage.MaxAppendSegments = orig })
+	storage.MaxAppendSegments = 2
+
+	baseState, count, err := storage.AppendETagStateFromDigests([][]byte{
+		[]byte("base-segment-md5"),
+		[]byte("tail-segment-md5"),
+	})
+	require.NoError(t, err)
+	etag, err := storage.CompositeETagFromState(baseState, count)
+	require.NoError(t, err)
+
+	base := PutObjectMetaCmd{
+		Bucket:           "b",
+		Key:              "k",
+		Size:             12,
+		IsAppendable:     true,
+		Coalesced:        []CoalescedShardRef{{CoalescedID: "c1", Size: 4, ShardKey: "k/coalesced/c1"}},
+		MetaSeq:          3,
+		NodeIDs:          []string{"n1"},
+		ETag:             etag,
+		PlacementGroupID: "g0",
+		ECData:           1,
+	}
+	_, _, _, err = planAppendObjectBlobRMWWithSide(appendBlobRMWInput{
+		Bucket:           "b",
+		Key:              "k",
+		ExpectedOffset:   12,
+		Segment:          storage.SegmentRef{Size: 2, Checksum: []byte("new-segment-md5")},
+		Base:             base,
+		BaseExists:       true,
+		ModifiedUnixSec:  1,
+		UseSideRecords:   true,
+		BaseSummary:      storage.AppendSummary{Size: 8, SegmentCount: 1, CompactedPrefixCount: 1, ETagPartCount: count, ETagDigestState: baseState},
+		BaseHasSummary:   true,
+		PlacementGroupID: "g0",
+	})
+	require.ErrorIs(t, err, storage.ErrAppendCapExceeded)
+}
+
+func TestPlanAppendSeedsAppendCallMD5sOnFirstCall(t *testing.T) {
+	seg := storage.SegmentRef{Size: 5, Checksum: []byte("0123456789abcdef")}
+	next, _, _, err := planAppendObjectBlobRMWWithSide(appendBlobRMWInput{Bucket: "b", Key: "k", ExpectedOffset: 0, Segment: seg, BaseExists: false, ModifiedUnixSec: 1})
+	require.NoError(t, err)
+	require.Equal(t, [][]byte{seg.Checksum}, next.AppendCallMD5s)
+	require.Equal(t, storage.CompositeETag([][]byte{seg.Checksum}), next.ETag)
+}
+
+func TestPlanCoalescePreservesAppendCallMD5s(t *testing.T) {
+	base := PutObjectMetaCmd{Bucket: "b", Key: "k", IsAppendable: true, Segments: []SegmentMetaEntry{{BlobID: "s1"}}, AppendCallMD5s: [][]byte{[]byte("aaaaaaaaaaaaaaaa")}}
+	next, _, res, err := planCoalesceBlobRMWWithSideSummary(base, storage.AppendSummary{}, false, CoalesceSegmentsPlan{Bucket: "b", Key: "k", CoalescedID: "x", ShardKey: "k/coalesced/x", ConsumedSegmentIDs: []string{"s1"}})
+	require.NoError(t, err)
+	require.False(t, res.Noop)
+	require.Equal(t, base.AppendCallMD5s, next.AppendCallMD5s, "coalesce must carry the per-call digest history forward unchanged")
+}
+
+func TestPlanCoalesceAdvancesAppendSideSummaryPrefix(t *testing.T) {
+	base := PutObjectMetaCmd{
+		Bucket:       "b",
+		Key:          "k",
+		Size:         12,
+		IsAppendable: true,
+		MetaSeq:      7,
+	}
+	summary := storage.AppendSummary{
+		Size:            12,
+		SegmentCount:    3,
+		ETagPartCount:   3,
+		ETagDigestState: []byte("running-md5-state"),
+	}
+
+	next, nextSummary, res, err := planCoalesceBlobRMWWithSideSummary(base, summary, true, CoalesceSegmentsPlan{
+		Bucket:             "b",
+		Key:                "k",
+		CoalescedID:        "c1",
+		ShardKey:           "k/coalesced/c1",
+		Size:               8,
+		ConsumedSegmentIDs: []string{"s1", "s2"},
+	})
+
+	require.NoError(t, err)
+	require.False(t, res.Noop)
+	require.Len(t, next.Coalesced, 1)
+	require.Equal(t, uint64(8), next.MetaSeq)
+	require.Equal(t, int64(4), nextSummary.Size)
+	require.Equal(t, 1, nextSummary.SegmentCount)
+	require.Equal(t, 2, nextSummary.CompactedPrefixCount)
+	require.Equal(t, summary.ETagPartCount, nextSummary.ETagPartCount)
+	require.Equal(t, summary.ETagDigestState, nextSummary.ETagDigestState)
+}
+
+// TestPlanAppendFirstAppendOntoChunkedPutPreservesETag: first append onto a
+// CHUNKED PUT base (Segments populated, AppendCallMD5s empty) must keep the
+// composite ETag byte-identical to the pre-fix Segments-derived value.
+func TestPlanAppendFirstAppendOntoChunkedPutPreservesETag(t *testing.T) {
+	s1 := []byte("1111111111111111")
+	s2 := []byte("2222222222222222")
+	base := PutObjectMetaCmd{Bucket: "b", Key: "k", Size: 32, IsAppendable: false, Segments: []SegmentMetaEntry{{BlobID: "s1", Size: 16, Checksum: s1}, {BlobID: "s2", Size: 16, Checksum: s2}}, AppendCallMD5s: nil, MetaSeq: 2}
+	seg := storage.SegmentRef{Size: 16, Checksum: []byte("3333333333333333")}
+	next, _, _, err := planAppendObjectBlobRMWWithSide(appendBlobRMWInput{Bucket: "b", Key: "k", ExpectedOffset: 32, Segment: seg, Base: base, BaseExists: true, ModifiedUnixSec: 1})
+	require.NoError(t, err)
+	require.Equal(t, storage.CompositeETag([][]byte{s1, s2, seg.Checksum}), next.ETag, "first append onto a chunked PUT must seed history from base.Segments")
+	require.Equal(t, [][]byte{s1, s2, seg.Checksum}, next.AppendCallMD5s)
+}
+
 func TestAppendChunkSizeRestoresSeekPosition(t *testing.T) {
 	r := bytes.NewReader([]byte("abcdef"))
 	if _, err := r.Seek(2, io.SeekStart); err != nil {
@@ -116,149 +300,5 @@ func TestAppendChunkSizeRestoresSeekPosition(t *testing.T) {
 	}
 	if pos != 2 {
 		t.Fatalf("reader position=%d want 2", pos)
-	}
-}
-
-func TestBuildAppendObjectCommand(t *testing.T) {
-	seg := storage.SegmentRef{
-		BlobID:   "blob-1",
-		Size:     42,
-		Checksum: []byte{0xde, 0xad, 0xbe, 0xef},
-	}
-
-	cmd := buildAppendObjectCommand(appendObjectCommandInput{
-		Bucket:           "b",
-		Key:              "k",
-		ExpectedOffset:   10,
-		Segment:          seg,
-		PlacementGroupID: "pg-1",
-		VersionID:        "version-1",
-		ModifiedUnixSec:  1234,
-	})
-
-	if cmd.Bucket != "b" || cmd.Key != "k" || cmd.ExpectedOffset != 10 {
-		t.Fatalf("command target fields = %+v", cmd)
-	}
-	if cmd.BlobID != seg.BlobID || cmd.SegmentSize != seg.Size || cmd.SegmentETag != "deadbeef" {
-		t.Fatalf("command segment fields = %+v", cmd)
-	}
-	if cmd.PlacementGroupID != "pg-1" || cmd.VersionID != "version-1" || cmd.ModifiedUnixSec != 1234 {
-		t.Fatalf("command metadata fields = %+v", cmd)
-	}
-}
-
-func TestApplyAppendObjectTransitionCreatesFirstAppendableObject(t *testing.T) {
-	updated, result, err := applyAppendObjectTransition(appendObjectTransitionInput{
-		Cmd: AppendObjectCmd{
-			Key:              "k",
-			ExpectedOffset:   0,
-			BlobID:           "blob-1",
-			SegmentSize:      4,
-			SegmentETag:      "deadbeef",
-			PlacementGroupID: "pg-1",
-		},
-		ModifiedUnixSec: 1234,
-	})
-	if err != nil {
-		t.Fatalf("applyAppendObjectTransition: %v", err)
-	}
-	if result.Noop || result.SizeCapRejected {
-		t.Fatalf("unexpected result flags: %+v", result)
-	}
-	if updated.Key != "k" || updated.Size != 4 || updated.ContentType != "application/octet-stream" {
-		t.Fatalf("updated target fields = %+v", updated)
-	}
-	if updated.ETag != storage.CompositeETag([][]byte{{0xde, 0xad, 0xbe, 0xef}}) {
-		t.Fatalf("updated ETag=%q", updated.ETag)
-	}
-	if updated.LastModified != 1234 || updated.PlacementGroupID != "pg-1" || !updated.IsAppendable {
-		t.Fatalf("updated metadata fields = %+v", updated)
-	}
-	if len(updated.Segments) != 1 || updated.Segments[0].BlobID != "blob-1" || updated.Segments[0].Size != 4 {
-		t.Fatalf("updated segments = %+v", updated.Segments)
-	}
-}
-
-func TestApplyAppendObjectTransitionConvertsPlainObject(t *testing.T) {
-	existing := &objectMeta{
-		Key:          "k",
-		Size:         5,
-		ContentType:  "text/plain",
-		ETag:         "base-etag",
-		ECData:       2,
-		ECParity:     1,
-		NodeIDs:      []string{"n1", "n2", "n3"},
-		UserMetadata: map[string]string{"a": "b"},
-	}
-
-	updated, result, err := applyAppendObjectTransition(appendObjectTransitionInput{
-		Existing:          existing,
-		ExistingVersionID: "v1",
-		Cmd: AppendObjectCmd{
-			Key:            "k",
-			ExpectedOffset: 5,
-			BlobID:         "blob-2",
-			SegmentSize:    3,
-			SegmentETag:    "01020304",
-		},
-		ModifiedUnixSec: 5678,
-	})
-	if err != nil {
-		t.Fatalf("applyAppendObjectTransition: %v", err)
-	}
-	if result.Noop || result.SizeCapRejected {
-		t.Fatalf("unexpected result flags: %+v", result)
-	}
-	if updated.Size != 8 || !updated.IsAppendable || updated.LastModified != 5678 {
-		t.Fatalf("updated fields = %+v", updated)
-	}
-	if len(updated.Coalesced) != 1 || updated.Coalesced[0].CoalescedID != "base-v1" ||
-		updated.Coalesced[0].Size != 5 || updated.Coalesced[0].ShardKey != ecObjectShardKey("k", "v1") {
-		t.Fatalf("updated coalesced = %+v", updated.Coalesced)
-	}
-	if len(updated.Segments) != 1 || updated.Segments[0].BlobID != "blob-2" {
-		t.Fatalf("updated segments = %+v", updated.Segments)
-	}
-}
-
-func TestApplyAppendObjectTransitionReportsNoopAndSizeCap(t *testing.T) {
-	existing := &objectMeta{
-		Key:          "k",
-		Size:         5,
-		Segments:     []storage.SegmentRef{{BlobID: "blob-1", Size: 5}},
-		IsAppendable: true,
-	}
-
-	_, result, err := applyAppendObjectTransition(appendObjectTransitionInput{
-		Existing: existing,
-		Cmd: AppendObjectCmd{
-			ExpectedOffset: 5,
-			BlobID:         "blob-1",
-			SegmentSize:    5,
-			SegmentETag:    "01020304",
-		},
-	})
-	if err != nil {
-		t.Fatalf("idempotent transition error: %v", err)
-	}
-	if !result.Noop {
-		t.Fatalf("Noop=false for duplicate blob: %+v", result)
-	}
-
-	_, result, err = applyAppendObjectTransition(appendObjectTransitionInput{
-		Existing: existing,
-		Cmd: AppendObjectCmd{
-			ExpectedOffset: 5,
-			BlobID:         "blob-2",
-			SegmentSize:    6,
-			SegmentETag:    "01020304",
-		},
-		CoalesceCfg: CoalesceConfig{SizeCapBytes: 10},
-	})
-	if !errors.Is(err, storage.ErrAppendObjectTooLarge) {
-		t.Fatalf("size cap error=%v", err)
-	}
-	if !result.SizeCapRejected {
-		t.Fatalf("SizeCapRejected=false: %+v", result)
 	}
 }

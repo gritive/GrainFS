@@ -173,8 +173,8 @@ func (sb *SwappableBackend) CreateMultipartUpload(ctx context.Context, bucket, k
 	return (*sb.inner.Load()).CreateMultipartUpload(ctx, bucket, key, contentType)
 }
 
-func (sb *SwappableBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader) (*Part, error) {
-	return (*sb.inner.Load()).UploadPart(ctx, bucket, key, uploadID, partNumber, r)
+func (sb *SwappableBackend) UploadPart(ctx context.Context, bucket, key, uploadID string, partNumber int, r io.Reader, contentMD5Hex string) (*Part, error) {
+	return (*sb.inner.Load()).UploadPart(ctx, bucket, key, uploadID, partNumber, r, contentMD5Hex)
 }
 
 func (sb *SwappableBackend) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, parts []Part) (*Object, error) {
@@ -201,36 +201,4 @@ func (sb *SwappableBackend) MultipartUploadPartCount(bucket, key, uploadID strin
 		return c.MultipartUploadPartCount(bucket, key, uploadID)
 	}
 	return 0, nil
-}
-
-// ListAllObjects implements Snapshotable by delegating to the inner backend.
-func (sb *SwappableBackend) ListAllObjects() ([]SnapshotObject, error) {
-	if snap, ok := (*sb.inner.Load()).(Snapshotable); ok {
-		return snap.ListAllObjects()
-	}
-	return nil, ErrSnapshotNotSupported
-}
-
-// RestoreObjects implements Snapshotable by delegating to the inner backend.
-func (sb *SwappableBackend) RestoreObjects(objects []SnapshotObject) (int, []StaleBlob, error) {
-	if snap, ok := (*sb.inner.Load()).(Snapshotable); ok {
-		return snap.RestoreObjects(objects)
-	}
-	return 0, nil, ErrSnapshotNotSupported
-}
-
-// ListAllBuckets implements BucketSnapshotable by delegating to the inner backend.
-func (sb *SwappableBackend) ListAllBuckets() ([]SnapshotBucket, error) {
-	if bs, ok := (*sb.inner.Load()).(BucketSnapshotable); ok {
-		return bs.ListAllBuckets()
-	}
-	return nil, nil
-}
-
-// RestoreBuckets implements BucketSnapshotable by delegating to the inner backend.
-func (sb *SwappableBackend) RestoreBuckets(buckets []SnapshotBucket) error {
-	if bs, ok := (*sb.inner.Load()).(BucketSnapshotable); ok {
-		return bs.RestoreBuckets(buckets)
-	}
-	return nil
 }

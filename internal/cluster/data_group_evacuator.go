@@ -2,7 +2,6 @@ package cluster
 
 import (
 	"context"
-	"errors"
 	"slices"
 	"sync"
 	"time"
@@ -11,34 +10,33 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// revocationSource is the evacuator's read view of the meta FSM.
-type revocationSource interface {
+// shardGroupRosterSource is the evacuator's read view of the meta FSM.
+type shardGroupRosterSource interface {
 	RevokedNodeIDs() map[string]struct{}
+	ShardGroups() []ShardGroupEntry
+	ShardGroup(id string) (ShardGroupEntry, bool)
 }
 
-// voterMover removes a revoked voter from a data group. Production impl is
-// *DataGroupPlanExecutor (EvacuateVoter); tests inject a fake. EvacuateVoter is
-// idempotent and itself decides shrink vs. move from the real raft config (P1-2).
-type voterMover interface {
-	EvacuateVoter(ctx context.Context, groupID, revokedID, replacementID string) error
+type shardGroupRosterUpdater interface {
+	ProposeShardGroupForwarding(ctx context.Context, sg ShardGroupEntry) error
 }
 
-// evacTarget is one (group I lead, revoked voter still present) pair.
+// evacTarget is one (group roster, revoked peer still present) pair.
 type evacTarget struct {
 	groupID     string
 	revokedNode string
 	peerIDs     []string
 }
 
-// DataGroupEvacuator evicts revoked nodes from the data groups THIS node leads.
-// Periodic tick (replay/crash-safe) plus an onNodeRevoked wake. Each group leader
-// evicts independently. It does NOT touch the PeerIDs mirror directly — convergence
-// is a consequence of EvacuateVoter's real ChangeMembership (P1-1).
+// DataGroupEvacuator evicts revoked nodes from shard-group placement rosters.
+// Periodic tick (replay/crash-safe) plus an onNodeRevoked wake makes the
+// reconciler idempotent across crashes and follower boots. The meta-FSM
+// ShardGroupEntry is the source of truth; per-group raft membership is not
+// consulted or mutated.
 type DataGroupEvacuator struct {
-	localNodeID string
-	src         revocationSource
-	mover       voterMover
-	logger      zerolog.Logger
+	src     shardGroupRosterSource
+	updater shardGroupRosterUpdater
+	logger  zerolog.Logger
 
 	ledTargets  func() []evacTarget
 	pickHealthy func(groupID string, exclude map[string]struct{}) (string, bool)
@@ -49,10 +47,9 @@ type DataGroupEvacuator struct {
 	stopOnce sync.Once
 }
 
-// reconcileOnce performs a single eviction pass over all led targets. Idempotent:
-// no-op when no led group contains a revoked voter. Errors (incl.
-// ErrLeadershipTransferred, transient not-leader, quorum-blocked) are logged and
-// retried on the next tick — never fatal.
+// reconcileOnce performs a single eviction pass over all shard-group rosters.
+// Idempotent: no-op when no group contains a revoked peer. Proposal errors are
+// logged and retried on the next tick — never fatal.
 func (e *DataGroupEvacuator) reconcileOnce(ctx context.Context) {
 	revoked := e.src.RevokedNodeIDs()
 	if len(revoked) == 0 {
@@ -64,11 +61,12 @@ func (e *DataGroupEvacuator) reconcileOnce(ctx context.Context) {
 	}
 
 	for _, tgt := range e.ledTargets() {
-		if !slices.Contains(tgt.peerIDs, tgt.revokedNode) {
+		entry, ok := e.src.ShardGroup(tgt.groupID)
+		if !ok || !slices.Contains(entry.PeerIDs, tgt.revokedNode) {
 			continue
 		}
 		survivors := 0
-		for _, p := range tgt.peerIDs {
+		for _, p := range entry.PeerIDs {
 			if p != tgt.revokedNode {
 				survivors++
 			}
@@ -83,12 +81,14 @@ func (e *DataGroupEvacuator) reconcileOnce(ctx context.Context) {
 		if to, ok := e.pickHealthy(tgt.groupID, exclude); ok && to != "" {
 			replacement = to
 		}
-		if err := e.mover.EvacuateVoter(ctx, tgt.groupID, tgt.revokedNode, replacement); err != nil {
-			if errors.Is(err, ErrLeadershipTransferred) {
-				e.logger.Info().Str("group", tgt.groupID).Str("revoked", tgt.revokedNode).
-					Msg("evacuator: leadership transferred; new leader will retry")
-				continue
-			}
+		nextPeers := removePeerID(entry.PeerIDs, tgt.revokedNode)
+		if replacement != "" && !slices.Contains(nextPeers, replacement) {
+			nextPeers = append(nextPeers, replacement)
+		}
+		if slices.Equal(entry.PeerIDs, nextPeers) {
+			continue
+		}
+		if err := e.updater.ProposeShardGroupForwarding(ctx, ShardGroupEntry{ID: tgt.groupID, PeerIDs: nextPeers}); err != nil {
 			e.logger.Error().Err(err).Str("group", tgt.groupID).
 				Str("revoked", tgt.revokedNode).Msg("evacuator: eviction failed; retry next tick")
 		}
@@ -125,22 +125,17 @@ func (e *DataGroupEvacuator) Run(ctx context.Context) {
 func (e *DataGroupEvacuator) Stop() { e.stopOnce.Do(func() { close(e.stopCh) }) }
 
 // NewDataGroupEvacuator builds the production evacuator. ledTargets derives groups
-// this node LEADS that still contain a revoked voter. loadPick picks a non-revoked,
-// non-member replacement. It drives the idempotent EvacuateVoter; PeerIDs
-// convergence is a CONSEQUENCE of that real ChangeMembership (P1-1) — the evacuator
-// NEVER prunes a mirror directly.
+// whose placement roster still contains a revoked peer. loadPick picks a
+// non-revoked, non-member replacement; no replacement means shrink.
 func NewDataGroupEvacuator(
-	localNodeID string,
 	fsm *MetaFSM,
-	dgMgr *DataGroupManager,
-	exec *DataGroupPlanExecutor,
+	updater shardGroupRosterUpdater,
 	loadPick func(groupID string, exclude map[string]struct{}) (string, bool),
 	tick time.Duration,
 ) *DataGroupEvacuator {
 	e := &DataGroupEvacuator{
-		localNodeID: localNodeID,
 		src:         fsm,
-		mover:       exec,
+		updater:     updater,
 		logger:      log.With().Str("component", "evacuator").Logger(),
 		pickHealthy: loadPick,
 		tick:        tick,
@@ -153,22 +148,26 @@ func NewDataGroupEvacuator(
 			return nil
 		}
 		var out []evacTarget
-		for _, dg := range dgMgr.All() {
-			if dg == nil || dg.Backend() == nil || dg.Backend().Node() == nil {
-				continue
-			}
-			if !dg.Backend().Node().IsLeader() {
-				continue
-			}
-			for _, p := range dg.PeerIDs() {
+		for _, sg := range fsm.ShardGroups() {
+			for _, p := range sg.PeerIDs {
 				if _, isRevoked := revoked[p]; isRevoked {
-					out = append(out, evacTarget{groupID: dg.ID(), revokedNode: p, peerIDs: dg.PeerIDs()})
+					out = append(out, evacTarget{groupID: sg.ID, revokedNode: p, peerIDs: sg.PeerIDs})
 				}
 			}
 		}
 		return out
 	}
 	return e
+}
+
+func removePeerID(peers []string, remove string) []string {
+	out := make([]string, 0, len(peers))
+	for _, p := range peers {
+		if p != remove {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // PickHealthyExcluding returns the lightest (lowest load) candidate not in exclude,

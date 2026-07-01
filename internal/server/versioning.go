@@ -30,11 +30,11 @@ func (s *Server) putBucketVersioning(c *app.RequestContext, bucket string) {
 }
 
 // listObjectVersions handles GET /<bucket>?versions.
-func (s *Server) listObjectVersions(_ context.Context, c *app.RequestContext, bucket string) {
+func (s *Server) listObjectVersions(ctx context.Context, c *app.RequestContext, bucket string) {
 	prefix := string(c.QueryArgs().Peek("prefix"))
 	maxKeys := 1000
 
-	vs, err := s.loadObjectVersions(bucket, prefix, maxKeys)
+	vs, err := s.loadObjectVersions(ctx, bucket, prefix, maxKeys)
 	if err != nil {
 		mapError(c, err)
 		return

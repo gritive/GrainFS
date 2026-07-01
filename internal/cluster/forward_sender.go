@@ -16,12 +16,12 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// ForwardSender encodes a single transport.Message frame for the 0x08 stream
-// type and delivers it via the supplied dialer. PutObject/UploadPart can use
-// StreamGroupForwardBody when a stream dialer is configured; the legacy
-// single-message path keeps body bytes inside the FBS args.
+// ForwardSender encodes a single forward frame for the /forward/propose/group
+// route and delivers it via the supplied dialer. PutObject/UploadPart can use
+// the streamed /forward/write route when a stream dialer is configured; the
+// legacy buffered path keeps body bytes inside the FBS args.
 //
-// Wire payload layout (single transport.Message of type=0x08):
+// Wire payload layout (one /forward/propose/group request body):
 //
 //	[4B BE groupIDLen][groupID bytes][1B opcode][4B BE argsLen][FBS args]
 //
@@ -36,8 +36,8 @@ var (
 const defaultMaxForwardStreams = 64
 
 // forwardDialer abstracts the request-response cluster transport for testability.
-// Production wires it to clusterTransport.Call; tests pass a fake that returns
-// canned replies.
+// Production wires it to clusterTransport.CallBuffered; tests pass a fake that
+// returns canned replies.
 type forwardDialer func(ctx context.Context, peer string, payload []byte) ([]byte, error)
 type forwardStreamDialer func(ctx context.Context, peer string, payload []byte, body io.Reader) ([]byte, error)
 type forwardReadStreamDialer func(ctx context.Context, peer string, payload []byte) ([]byte, io.ReadCloser, error)
@@ -100,14 +100,6 @@ func (s *ForwardSender) WithMaxForwardStreams(n int) *ForwardSender {
 		n = 1
 	}
 	s.streamSlots = make(chan struct{}, n)
-	return s
-}
-
-func (s *ForwardSender) WithMaxForwardReadStreams(n int) *ForwardSender {
-	if n < 1 {
-		n = 1
-	}
-	s.readSlots = make(chan struct{}, n)
 	return s
 }
 
@@ -184,6 +176,24 @@ func (s *ForwardSender) Send(
 	ctx context.Context, peers []string, groupID string,
 	op raftpb.ForwardOp, fbsArgs []byte,
 ) ([]byte, error) {
+	return s.sendFrame(ctx, peers, groupID, op, fbsArgs, true)
+}
+
+// SendOwner delivers an owner-routed forward call. It deliberately does not
+// follow Raft leader hints or update the cached leader, because owner-routed
+// RMWs must execute only on the deterministic owner.
+func (s *ForwardSender) SendOwner(
+	ctx context.Context, peers []string, groupID string,
+	op raftpb.ForwardOp, fbsArgs []byte,
+) ([]byte, error) {
+	return s.sendFrame(ctx, peers, groupID, op, fbsArgs, false)
+}
+
+func (s *ForwardSender) sendFrame(
+	ctx context.Context, peers []string, groupID string,
+	op raftpb.ForwardOp, fbsArgs []byte,
+	followLeaderHints bool,
+) ([]byte, error) {
 	_, callerHasDeadline := ctx.Deadline()
 	if !callerHasDeadline && s.readinessRetry > 0 {
 		var cancel context.CancelFunc
@@ -242,6 +252,10 @@ func (s *ForwardSender) Send(
 				ObservePutTraceStage(ctx, PutTraceStageForwardNotLeaderRetry, time.Now(), PutTraceStageFields{
 					NotLeaderRetries: notLeaderRetries,
 				})
+				if !followLeaderHints {
+					replyStatus = forwardReplyStatusString(op, reply)
+					return reply, nil
+				}
 				if hint := s.resolveLeaderHint(extractLeaderHint(reply)); hint != "" {
 					s.rememberLeader(groupID, hint)
 					leaderHintUsed = true
@@ -273,7 +287,9 @@ func (s *ForwardSender) Send(
 					continue
 				}
 			}
-			s.rememberLeader(groupID, peer)
+			if followLeaderHints {
+				s.rememberLeader(groupID, peer)
+			}
 			replyStatus = forwardReplyStatusString(op, reply)
 			return reply, nil
 		}
@@ -310,7 +326,7 @@ func (s *ForwardSender) ResolveLeaderPeers(ctx context.Context, peers []string, 
 	if cached := s.cachedLeader(groupID); cached != "" {
 		return preferForwardPeer(peers, cached)
 	}
-	payload := encodeForwardPayload(groupID, raftpb.ForwardOpHeadObject, buildHeadObjectArgs(bucket, key))
+	payload := encodeForwardPayload(groupID, raftpb.ForwardOpHeadObject, buildHeadObjectArgs(bucket, key, versioningStateUnknown))
 	for _, peer := range peers {
 		if err := ctx.Err(); err != nil {
 			return peers
@@ -384,6 +400,24 @@ func (s *ForwardSender) SendStream(
 	ctx context.Context, peers []string, groupID string,
 	op raftpb.ForwardOp, fbsArgs []byte, body io.Reader,
 ) ([]byte, error) {
+	return s.sendStream(ctx, peers, groupID, op, fbsArgs, body, true)
+}
+
+// SendStreamOwner delivers a streamed owner-routed forward call. It never
+// retries a Raft leader hint, so a non-owner cannot receive a consumed RMW body
+// after the deterministic owner rejects or fails.
+func (s *ForwardSender) SendStreamOwner(
+	ctx context.Context, peers []string, groupID string,
+	op raftpb.ForwardOp, fbsArgs []byte, body io.Reader,
+) ([]byte, error) {
+	return s.sendStream(ctx, peers, groupID, op, fbsArgs, body, false)
+}
+
+func (s *ForwardSender) sendStream(
+	ctx context.Context, peers []string, groupID string,
+	op raftpb.ForwardOp, fbsArgs []byte, body io.Reader,
+	followLeaderHints bool,
+) ([]byte, error) {
 	if s.streamDialer == nil {
 		return nil, ErrNoReachablePeer
 	}
@@ -454,6 +488,9 @@ func (s *ForwardSender) SendStream(
 				ObservePutTraceStage(ctx, PutTraceStageForwardNotLeaderRetry, time.Now(), PutTraceStageFields{
 					NotLeaderRetries: notLeaderRetries,
 				})
+				if !followLeaderHints {
+					return reply, nil
+				}
 				if hint := s.resolveLeaderHint(extractLeaderHint(reply)); hint != "" {
 					if err := rewindForwardBody(body); err != nil {
 						return nil, err
@@ -479,7 +516,9 @@ func (s *ForwardSender) SendStream(
 					continue
 				}
 			}
-			s.rememberLeader(groupID, peer)
+			if followLeaderHints {
+				s.rememberLeader(groupID, peer)
+			}
 			return reply, nil
 		}
 		if lastDialErr == nil && !retryableNotLeader {
@@ -528,6 +567,17 @@ func (s *ForwardSender) SendReadStream(
 	}()
 
 	_, callerHasDeadline := ctx.Deadline()
+	// Mirror Send's readiness-retry promotion: a deadline-less read (S3 GET carries
+	// no ctx deadline) otherwise returns immediately on the first not-leader/dial
+	// failure, so a read racing a data-group leader re-election fails instead of
+	// waiting it out. Imposing readinessRetry and marking callerHasDeadline enables
+	// the not-leader/dial-failure backoff loop below, symmetric with the write path.
+	if !callerHasDeadline && s.readinessRetry > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.readinessRetry)
+		defer cancel()
+		callerHasDeadline = true
+	}
 	if s.timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, s.timeout)

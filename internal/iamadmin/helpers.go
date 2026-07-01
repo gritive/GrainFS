@@ -20,7 +20,7 @@ func dialClient(opts BaseOptions) (*Client, error) {
 }
 
 // withTimeout returns ctx unchanged if d <= 0, otherwise applies a deadline.
-// Mirrors volumeadmin's withTimeout semantic: zero means "no cap".
+// Mirrors admincli's withTimeout semantic: zero means "no cap".
 func withTimeout(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) {
 	if d <= 0 {
 		return ctx, func() {}

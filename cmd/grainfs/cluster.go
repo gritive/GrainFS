@@ -61,9 +61,51 @@ func printClusterStatus(w io.Writer, s *clusteradmin.Status) {
 	}
 }
 
+var clusterExpandPlacementCmd = &cobra.Command{
+	Use:   "expand-placement",
+	Short: "Activate newly-formed shard groups for object placement (grow the cluster)",
+	Long: `Record the cluster's currently-formed shard groups as a new topology
+placement generation. After scaling out (adding nodes, which forms new shard
+groups), run this to start placing new objects across all groups. Existing
+objects are NOT remapped — they stay readable via the generation-probe read
+path. Irreversible: a placement generation, once recorded, is never removed.
+
+No-op when no new candidate groups are present.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		endpoint, err := clusterEndpointFromCmd(cmd)
+		if err != nil {
+			return err
+		}
+		return clusteradmin.RunExpandPlacement(cmd.Context(), clusteradmin.ExpandPlacementOptions{
+			Endpoint: endpoint,
+			Out:      cmd.OutOrStdout(),
+		})
+	},
+}
+
+var clusterRetirePlacementGenerationCmd = &cobra.Command{
+	Use:   "retire-placement-generation",
+	Short: "Stop probing a drained placement generation",
+	Long: `Mark a previously drained topology placement generation as retired.
+Retired generations remain in the replicated registry for audit/replay, but
+future object reads no longer probe them. Use only after every object that lived
+on the generation's groups has been rewritten to the active placement set.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		endpoint, err := clusterEndpointFromCmd(cmd)
+		if err != nil {
+			return err
+		}
+		epoch, _ := cmd.Flags().GetUint64("epoch")
+		return clusteradmin.RunRetirePlacementGeneration(cmd.Context(), clusteradmin.RetirePlacementGenerationOptions{
+			Endpoint: endpoint,
+			Epoch:    epoch,
+			Out:      cmd.OutOrStdout(),
+		})
+	},
+}
+
 func init() {
-	clusterCmd.PersistentFlags().String("endpoint", "",
-		"admin Unix socket path (required, e.g. ./tmp/admin.sock)")
+	registerAdminEndpointFlag(clusterCmd, "admin Unix socket path (required, e.g. ./tmp/admin.sock)")
 	clusterCmd.PersistentFlags().String("format", "text",
 		"Output format: text or json (status/peers/events; ignored elsewhere)")
 
@@ -76,6 +118,10 @@ func init() {
 	clusterCmd.AddCommand(clusterDrainCmd)
 	clusterCmd.AddCommand(clusterHealthCmd())
 	clusterCmd.AddCommand(clusterPlacementCmd())
+	clusterCmd.AddCommand(clusterExpandPlacementCmd)
+	clusterRetirePlacementGenerationCmd.Flags().Uint64("epoch", 0, "placement generation epoch to retire")
+	_ = clusterRetirePlacementGenerationCmd.MarkFlagRequired("epoch")
+	clusterCmd.AddCommand(clusterRetirePlacementGenerationCmd)
 	clusterCmd.AddCommand(clusterBalancerCmd)
 
 	// Task 12: read-only cluster config inspection.

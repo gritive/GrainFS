@@ -3,12 +3,98 @@
 For benchmark principles, result interpretation, and RustFS/MinIO comparison
 rules, see [`docs/reference/benchmarks.md`](../docs/reference/benchmarks.md).
 
-## S3-Compatible Comparison
+## GCP Single-Node Encrypted Comparison
+
+Use `gcp/bench_gcp_cluster.sh` for publishable single-node GrainFS vs MinIO
+performance comparisons. The script provisions a GCP client VM plus storage
+VMs, builds `NEW_REF` on Linux, runs GrainFS single-node on `node-0` with
+at-rest encryption, runs MinIO single-node on the same VM class with SSE-S3
+auto-encryption, and drives both from the in-network client with MinIO `warp`.
+
+Keep `RESULT_DIR` exported across subcommands; otherwise each invocation creates
+a new timestamped artifact directory. Commit the ref you want to measure before
+running the script because `build` uses `git archive`.
+
+```bash
+export PROJECT=grainfs
+export ZONE=asia-northeast3-a
+export PREFIX=gr-single
+export NODE_COUNT=1
+export NEW_REF=HEAD
+export RUNS=3
+export RESULT_DIR="$PWD/benchmarks/profiles/gcp-single-$(date +%Y%m%d-%H%M%S)"
+export WARP_OPS=put,get,stat
+export WARP_OBJ_SIZE=10MiB
+export WARP_CONCURRENT=32
+export WARP_DURATION=1m
+export WARP_OBJECTS=2048
+
+./benchmarks/gcp/bench_gcp_cluster.sh up
+./benchmarks/gcp/bench_gcp_cluster.sh build
+for i in $(seq 1 "$RUNS"); do
+  ./benchmarks/gcp/bench_gcp_cluster.sh single "$i"
+  ./benchmarks/gcp/bench_gcp_cluster.sh minio "$i"
+done
+./benchmarks/gcp/bench_gcp_cluster.sh single-verdict | tee "$RESULT_DIR/single-verdict.txt"
+./benchmarks/gcp/bench_gcp_cluster.sh down
+# results: benchmarks/profiles/gcp-single-<timestamp>/
+```
+
+The default GCP workload is signed S3 `warp` with 10 MiB objects, concurrency
+32, 1 minute per operation, `put,get,stat`, 2048 objects, and `WARP_NOCLEAR=1`
+inside the script so GET and stat measure the objects created by PUT. GrainFS
+pprof snapshots are saved under `single/run<N>/pprof/`; raw warp artifacts are
+saved under `single/run<N>/raw/` and `minio/run<N>/raw/`.
+
+Always run `down` after preserving results.
+
+## GCP Cluster Encrypted Comparison
+
+Use the same wrapper for a 4-node GrainFS cluster vs 4-node distributed MinIO
+comparison. GrainFS is booted with `grainfs-cluster`; MinIO distributed is booted across
+the same storage VMs with SSE-S3 auto-encryption. Both targets are driven from
+the in-network client with the same signed `warp` workload.
+
+```bash
+export PROJECT=grainfs
+export ZONE=asia-northeast3-a
+export PREFIX=gr-cluster
+export NODE_COUNT=4
+export NEW_REF=HEAD
+export RUNS=1
+export RESULT_DIR="$PWD/benchmarks/profiles/gcp-cluster-$(date +%Y%m%d-%H%M%S)"
+export WARP_OPS=put,get
+export WARP_OBJ_SIZE=10MiB
+export WARP_CONCURRENT=32
+export WARP_DURATION=1m
+export WARP_OBJECTS=2048
+
+./benchmarks/gcp/bench_gcp_cluster.sh up
+./benchmarks/gcp/bench_gcp_cluster.sh build
+for i in $(seq 1 "$RUNS"); do
+  ./benchmarks/gcp/bench_gcp_cluster.sh grainfs-cluster "$i"
+  ./benchmarks/gcp/bench_gcp_cluster.sh minio-cluster "$i"
+done
+./benchmarks/gcp/bench_gcp_cluster.sh cluster-minio-verdict | tee "$RESULT_DIR/cluster-minio-verdict.txt"
+./benchmarks/gcp/bench_gcp_cluster.sh down
+# results: benchmarks/profiles/gcp-cluster-<timestamp>/
+```
+
+Cluster result rows are saved under `grainfs-cluster/run<N>/warp-results.tsv`
+for GrainFS and `minio-cluster/run<N>/warp-results.tsv` for MinIO distributed.
+Raw warp output is saved under each run's `raw/` directory; MinIO node journals
+are saved under `minio-cluster/run<N>/logs/`. Set `CLUSTER_PPROF=1` to collect
+per-node GrainFS CPU and heap/alloc/goroutine/mutex/block profiles under
+`grainfs-cluster/run<N>/pprof/`.
+
+## Local Benchmarks
 
 `make bench`, `make bench-cluster`, and `make bench-s3-compat-compare` run the
-official S3 workload with MinIO `warp`. `make bench` targets a local GrainFS
-single-node server, `make bench-cluster` targets a local GrainFS 4-node cluster,
-and `make bench-s3-compat-compare` compares GrainFS single-node with any native
+official S3 workload with MinIO `warp` on the local machine. Use these targets
+for smoke checks and local regressions, not for publishable GrainFS vs MinIO
+claims. `make bench` targets a local GrainFS single-node server,
+`make bench-cluster` targets a local GrainFS 4-node cluster, and
+`make bench-s3-compat-compare` compares GrainFS single-node with any native
 MinIO/RustFS binaries available on `PATH`. The comparison script can also boot
 local 4-node MinIO and RustFS clusters with `TARGETS=minio-cluster` and
 `TARGETS=rustfs-cluster`. Set `MINIO_BIN`, `RUSTFS_BIN`, `MINIO_URL`,
@@ -81,77 +167,9 @@ adds summary warnings when the host already has `grainfs serve` processes or
 the benchmark filesystem is at least 90 percent full. The same file records
 `load1`, `cpu_count`, `load_per_cpu`, and `max_load_per_cpu`; strict mode fails
 when `load_per_cpu` exceeds `BENCH_MAX_LOAD_PER_CPU` (default `1.0`). Use
-strict mode for publishable runs so contaminated host state fails before any
-benchmark server starts:
+strict mode for local comparison runs so contaminated host state fails before
+any benchmark server starts:
 
 ```bash
 BENCH_STRICT_HOST=1 WARP_OPS=put,get make bench-s3-compat-compare
 ```
-
-## Iceberg Table API
-
-`make bench-iceberg-table` and `make bench-iceberg-table-cluster` run MinIO
-`warp iceberg` against GrainFS. The shell scripts start GrainFS, bootstrap IAM
-credentials, optionally collect pprof profiles, and write raw `warp` artifacts
-under `benchmarks/profiles/iceberg-table-*`.
-
-The default workload is `ICEBERG_WARP_COMMAND=catalog-mixed` with views and
-update operations disabled (`ICEBERG_VIEWS_PER_NS=0`,
-`ICEBERG_TABLE_UPDATE_DISTRIB=0`) so the benchmark targets read/list/head
-table-catalog behavior first. Use `ICEBERG_WARP_COMMAND=catalog-read` or
-`catalog-commits` to focus the workload, and opt into update distribution after
-commit-conflict behavior has been tuned.
-
-Tune the workload with:
-
-```bash
-VUS=16 DURATION=1m make bench-iceberg-table
-VUS=16 DURATION=1m make bench-iceberg-table-cluster
-```
-
-Iceberg benchmark scripts use the same host preflight and `BENCH_STRICT_HOST=1`
-fail-fast behavior as the S3 comparison script.
-
-## NFS Multi-Bucket Export Baseline
-
-The NFSv4 server now uses explicit bucket exports. Single-bucket benchmark runs
-therefore create a bucket, register it as an export, and mount `host:/<bucket>`.
-
-Prerequisites:
-
-- Colima running with at least 4 vCPUs for multi-export runs
-- `fio` installed inside the Colima VM
-- `jq` installed on the macOS host for summary parsing
-
-```bash
-make bench-nfs
-# results: benchmarks/profiles/nfs-<workload>-<timestamp>/fio_output.txt
-```
-
-Compare single-bucket throughput with the pre-multi-export baseline manually.
-The target is within +/-10 percent for equivalent workload settings; this PR
-does not add an automatic baseline gate.
-
-```bash
-make bench-nfs-multi
-# results: benchmarks/profiles/nfs-multi-<timestamp>/
-```
-
-The multi-export run creates four buckets by default and runs one fio worker
-per bucket, for four total fio workers. It records:
-
-- `summary.txt`
-- `fio_b<i>.log`
-- `cpu.pprof`
-- `heap.pprof`
-- `pseudo_root_lat_ms.txt`
-
-Tune the workload with:
-
-```bash
-NUM_BUCKETS=8 FIO_WORKERS_PER_BUCKET=8 READDIR_SAMPLES=1000 make bench-nfs-multi
-```
-
-Use `go tool pprof -top -focus='LockPath' cpu.pprof` to inspect export-level
-contention. Measure pseudo-root latency through a separate `host:/` mount and
-bucket throughput through `host:/bench-<i>` mounts.

@@ -42,14 +42,12 @@ func runClusterECPutGet5Node(t testing.TB) {
 
 	httpPorts := make([]int, numNodes)
 	raftPorts := make([]int, numNodes)
-	nfs4Ports := make([]int, numNodes)
-	nbdPorts := make([]int, numNodes)
+	// 4 ports/node; slots ports[i*4+2] (formerly NFS4) and ports[i*4+3] (formerly
+	// NBD) are left unallocated to keep the per-node port stride stable.
 	ports := uniqueFreePorts(numNodes * 4)
 	for i := range numNodes {
 		httpPorts[i] = ports[i*4]
 		raftPorts[i] = ports[i*4+1]
-		nfs4Ports[i] = ports[i*4+2]
-		nbdPorts[i] = ports[i*4+3]
 	}
 	joinPorts := make([]int, numNodes)
 	jp := uniqueFreePorts(numNodes)
@@ -81,8 +79,6 @@ func runClusterECPutGet5Node(t testing.TB) {
 			"--raft-addr", raftAddr(i),
 			"--join-listen-addr", joinAddr(i),
 			"--shard-cache-size=0",
-			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
-			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
 		)
@@ -259,8 +255,6 @@ func runClusterEC3NodeActiveKM21(t testing.TB) {
 		Mode:       ClusterModeStaticPeers,
 		ClusterKey: clusterKey,
 		LogPrefix:  "cluster-ec-3node",
-		DisableNFS: true,
-		DisableNBD: true,
 	})
 	gomega.Expect(adminCreateBucketWithPolicyAttachAny(c.dataDirs, c.saID, bucketName, 60*time.Second)).To(gomega.Succeed())
 	accessKey, secretKey := c.accessKey, c.secretKey
@@ -348,7 +342,7 @@ func runClusterEC3NodeActiveKM21(t testing.TB) {
 
 	// Poll until the surviving nodes serve the object. No fixed sleep —
 	// getObjectEC uses a 3s per-shard timeout, so each poll completes quickly
-	// even while the dead peer's QUIC connection is timing out. 30s covers
+	// even while the dead peer's cluster transport call is timing out. 30s covers
 	// both the per-shard timeout (3s) and any Raft re-election (~5-10s).
 	var gotAfterKill []byte
 	gomega.Eventually(func() bool {
@@ -403,14 +397,12 @@ func runClusterECTopologyChange(t testing.TB) {
 
 	httpPorts := make([]int, numNodes)
 	raftPorts := make([]int, numNodes)
-	nfs4Ports := make([]int, numNodes)
-	nbdPorts := make([]int, numNodes)
+	// 4 ports/node; slots ports[i*4+2] (formerly NFS4) and ports[i*4+3] (formerly
+	// NBD) are left unallocated to keep the per-node port stride stable.
 	ports := uniqueFreePorts(numNodes * 4)
 	for i := range numNodes {
 		httpPorts[i] = ports[i*4]
 		raftPorts[i] = ports[i*4+1]
-		nfs4Ports[i] = ports[i*4+2]
-		nbdPorts[i] = ports[i*4+3]
 	}
 	joinPorts := make([]int, numNodes)
 	jp := uniqueFreePorts(numNodes)
@@ -447,8 +439,6 @@ func runClusterECTopologyChange(t testing.TB) {
 			"--node-id", raftAddr(i),
 			"--raft-addr", raftAddr(i),
 			"--join-listen-addr", joinAddr(i),
-			"--nfs4-port", fmt.Sprintf("%d", nfs4Ports[i]),
-			"--nbd-port", fmt.Sprintf("%d", nbdPorts[i]),
 			"--scrub-interval", "0",
 			"--lifecycle-interval", "0",
 		)
@@ -587,8 +577,8 @@ func runClusterECTopologyChange(t testing.TB) {
 	// Old objects: FSM placement records are immutable. GET must reconstruct
 	// using the original 6-node placement even though one shard node is gone
 	// (k=3 data shards needed; the victim held 1 of 5 shards, so 4 remain ≥ 3).
-	// Use Eventually — dead node's QUIC connection takes up to 3s per shard
-	// to time out before the remaining shards are fetched.
+	// Use Eventually — the dead node's cluster transport call can take up to
+	// 3s per shard to time out before the remaining shards are fetched.
 	for _, obj := range preObjects {
 		obj := obj
 		deadline := time.Now().Add(60 * time.Second)

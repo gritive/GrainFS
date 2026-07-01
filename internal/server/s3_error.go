@@ -47,14 +47,25 @@ func mapError(c *app.RequestContext, err error) {
 		writeXMLError(c, consts.StatusConflict, "BucketNotEmpty", "The bucket you tried to delete is not empty")
 	case errors.Is(err, storage.ErrObjectNotFound):
 		writeXMLError(c, consts.StatusNotFound, "NoSuchKey", "The specified key does not exist")
+	case errors.Is(err, storage.ErrContentMD5Mismatch):
+		writeXMLError(c, consts.StatusBadRequest, "BadDigest", "The Content-MD5 you specified did not match what we received.")
+	case errors.Is(err, storage.ErrInvalidDigest):
+		writeXMLError(c, consts.StatusBadRequest, "InvalidDigest", "The Content-MD5 you specified is not valid.")
 	case errors.Is(err, storage.ErrUploadNotFound):
 		writeXMLError(c, consts.StatusNotFound, "NoSuchUpload", "The specified upload does not exist")
 	case errors.Is(err, storage.ErrEntityTooLarge):
 		writeXMLError(c, consts.StatusRequestEntityTooLarge, "EntityTooLarge", "Your proposed upload exceeds the maximum allowed object size")
 	case errors.Is(err, storage.ErrForwardBackpressure):
 		writeXMLError(c, consts.StatusServiceUnavailable, "SlowDown", "too many forwarded upload streams in flight")
+	case errors.Is(err, cluster.ErrStalePlacement):
+		writeXMLError(c, consts.StatusServiceUnavailable, "SlowDown", "placement group changed mid-request; retry")
+	case errors.Is(err, cluster.ErrProposeTimeout):
+		writeXMLError(c, consts.StatusServiceUnavailable, "SlowDown", "metadata commit timed out under load; retry")
 	case errors.Is(err, cluster.ErrPlacementTargetsUnavailable):
 		writeXMLError(c, consts.StatusServiceUnavailable, "ServiceUnavailable", err.Error())
+	case errors.Is(err, cluster.ErrPlacementNotRedundant):
+		writeXMLError(c, consts.StatusServiceUnavailable, "SlowDown",
+			"redundant placement groups still forming; retry")
 	case errors.Is(err, encrypt.ErrDEKGenUnknown):
 		writeXMLError(c, consts.StatusServiceUnavailable, "ServiceUnavailable",
 			"data encryption key generation not yet available; retry")
@@ -65,6 +76,13 @@ func mapError(c *app.RequestContext, err error) {
 			msg = gateErr.PublicMessage()
 		}
 		writeXMLError(c, consts.StatusServiceUnavailable, "ServiceUnavailable", msg)
+	case errors.Is(err, cluster.ErrInternalBucketNotObjectStore):
+		writeXMLError(c, consts.StatusMethodNotAllowed, "MethodNotAllowed", "Object data-plane operations are not supported on internal buckets")
+	case errors.Is(err, storage.ErrMethodNotAllowed):
+		// Covers forwarded-path rejections decoded as ErrMethodNotAllowed
+		// (e.g. internal-bucket guard on remote node, or delete-marker ops
+		// not already caught by GET/HEAD special-casing above).
+		writeXMLError(c, consts.StatusMethodNotAllowed, "MethodNotAllowed", err.Error())
 	case errors.Is(err, storage.ErrUnsupportedOperation):
 		writeXMLError(c, consts.StatusNotImplemented, "NotImplemented", err.Error())
 	default:

@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/raft"
+	"github.com/gritive/GrainFS/internal/server/servertest"
 )
 
 // TestRegisterClusterAdminUDS_RoutesRespond verifies that all three routes
@@ -253,7 +254,7 @@ func startUDSAdminTestServerWithSrv(t *testing.T, sock string, s *Server) *http.
 
 	go h.Spin() //nolint:errcheck
 	t.Cleanup(func() {
-		shutdownTestServer(t, h)
+		servertest.ShutdownServer(t, h)
 	})
 
 	deadline := time.Now().Add(2 * time.Second)

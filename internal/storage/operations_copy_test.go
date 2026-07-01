@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -39,6 +40,20 @@ func TestOperationsCopyObjectFallsBackStreamingAndPreservesContentType(t *testin
 	require.Equal(t, []string{"head:src/k", "head:dst/k2", "get:src/k", "put:dst/k2:text/plain:data"}, backend.calls)
 }
 
+func TestOperationsCopyObjectFallbackPassesSourceSizeHint(t *testing.T) {
+	backend := &copyFallbackRequestBackend{}
+	ops := NewOperations(backend)
+
+	result, err := ops.CopyObject(context.Background(), CopyObjectRequest{
+		Source:      ObjectRef{Bucket: "src", Key: "k"},
+		Destination: ObjectRef{Bucket: "dst", Key: "k2"},
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, "fallback-request", result.Object.ETag)
+	require.Equal(t, []string{"head:src/k", "head:dst/k2", "get:src/k", "putreq:dst/k2:text/plain:hint=4:data"}, backend.calls)
+}
+
 func TestOperationsCopyObjectFallbackPropagatesPutError(t *testing.T) {
 	putErr := errors.New("put failed")
 	backend := &copyFallbackBackend{putErr: putErr}
@@ -66,40 +81,6 @@ func TestOperationsCopyObjectWithACLUsesACLWritePath(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "fallback-acl", result.Object.ETag)
 	require.Equal(t, []string{"head:src/k", "head:dst/k2", "get:src/k", "putacl:dst/k2:text/plain:7:data"}, backend.calls)
-}
-
-func TestOperationsCopyObjectDoesNotBypassCachedBackendInvalidation(t *testing.T) {
-	inner, err := NewLocalBackend(t.TempDir())
-	require.NoError(t, err)
-	t.Cleanup(func() { inner.Close() })
-	require.NoError(t, inner.CreateBucket(context.Background(), "b"))
-	_, err = inner.PutObject(context.Background(), "b", "src", strings.NewReader("new"), "text/plain")
-	require.NoError(t, err)
-	_, err = inner.PutObject(context.Background(), "b", "dst", strings.NewReader("old"), "text/plain")
-	require.NoError(t, err)
-
-	cached := NewCachedBackend(inner)
-	ops := NewOperations(cached)
-
-	rc, _, err := cached.GetObject(context.Background(), "b", "dst")
-	require.NoError(t, err)
-	oldData, err := io.ReadAll(rc)
-	require.NoError(t, err)
-	require.NoError(t, rc.Close())
-	require.Equal(t, "old", string(oldData))
-
-	_, err = ops.CopyObject(context.Background(), CopyObjectRequest{
-		Source:      ObjectRef{Bucket: "b", Key: "src"},
-		Destination: ObjectRef{Bucket: "b", Key: "dst"},
-	})
-	require.NoError(t, err)
-
-	rc, _, err = cached.GetObject(context.Background(), "b", "dst")
-	require.NoError(t, err)
-	defer rc.Close()
-	newData, err := io.ReadAll(rc)
-	require.NoError(t, err)
-	require.Equal(t, "new", string(newData))
 }
 
 func TestOperationsCopyObjectHeadsSourceBeforeOpeningBodyAndAppliesReplaceContentType(t *testing.T) {
@@ -400,7 +381,7 @@ type copyFallbackBackend struct {
 
 func (b *copyFallbackBackend) HeadObject(_ context.Context, bucket, key string) (*Object, error) {
 	b.calls = append(b.calls, "head:"+bucket+"/"+key)
-	return &Object{Key: key, ContentType: "text/plain", ETag: "src-etag", LastModified: 100}, nil
+	return &Object{Key: key, Size: 4, ContentType: "text/plain", ETag: "src-etag", LastModified: 100}, nil
 }
 
 func (b *copyFallbackBackend) GetObject(_ context.Context, bucket, key string) (io.ReadCloser, *Object, error) {
@@ -418,6 +399,26 @@ func (b *copyFallbackBackend) PutObject(_ context.Context, bucket, key string, r
 		return nil, b.putErr
 	}
 	return &Object{Key: key, ETag: "fallback"}, nil
+}
+
+type copyFallbackRequestBackend struct {
+	copyFallbackBackend
+}
+
+func (b *copyFallbackRequestBackend) PutObjectWithRequest(_ context.Context, req PutObjectRequest) (*Object, error) {
+	data, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, err
+	}
+	hint := "nil"
+	if req.SizeHint != nil {
+		hint = fmt.Sprintf("%d", *req.SizeHint)
+	}
+	b.calls = append(b.calls, "putreq:"+req.Bucket+"/"+req.Key+":"+req.ContentType+":hint="+hint+":"+string(data))
+	if b.putErr != nil {
+		return nil, b.putErr
+	}
+	return &Object{Key: req.Key, ETag: "fallback-request"}, nil
 }
 
 func (b *copyFallbackBackend) PutObjectWithACL(bucket, key string, r io.Reader, contentType string, acl uint8) (*Object, error) {
@@ -453,7 +454,7 @@ func (b *semanticCopyBackend) GetObject(_ context.Context, bucket, key string) (
 	return io.NopCloser(strings.NewReader(b.body)), cloneObject(b.head), nil
 }
 
-func (b *semanticCopyBackend) HeadObjectVersion(bucket, key, versionID string) (*Object, error) {
+func (b *semanticCopyBackend) HeadObjectVersion(ctx context.Context, bucket, key, versionID string) (*Object, error) {
 	b.calls = append(b.calls, "headversion:"+bucket+"/"+key+":"+versionID)
 	if b.headVersion != nil {
 		return cloneObject(b.headVersion), nil
@@ -466,7 +467,7 @@ func (b *semanticCopyBackend) HeadObjectVersion(bucket, key, versionID string) (
 	return obj, nil
 }
 
-func (b *semanticCopyBackend) GetObjectVersion(bucket, key, versionID string) (io.ReadCloser, *Object, error) {
+func (b *semanticCopyBackend) GetObjectVersion(ctx context.Context, bucket, key, versionID string) (io.ReadCloser, *Object, error) {
 	b.calls = append(b.calls, "getversion:"+bucket+"/"+key+":"+versionID)
 	if b.headVersion != nil {
 		return io.NopCloser(strings.NewReader(b.body)), cloneObject(b.headVersion), nil

@@ -3,7 +3,25 @@ package cluster
 import (
 	"fmt"
 	"net"
+
+	"github.com/gritive/GrainFS/internal/gossip"
 )
+
+// NodeAddressBook resolves cluster node IDs to their transport addresses.
+// *MetaFSM implements this interface.
+type NodeAddressBook interface {
+	Nodes() []MetaNodeEntry
+}
+
+// NodeAddressBookResolver adapts a NodeAddressBook to the gossip package's
+// AddressResolver (gossip must not import cluster). Resolution semantics are
+// exactly ResolveNodeAddress's.
+func NodeAddressBookResolver(book NodeAddressBook) gossip.AddressResolver {
+	if book == nil {
+		return nil
+	}
+	return func(idOrAddr string) (string, bool) { return ResolveNodeAddress(book, idOrAddr) }
+}
 
 // NodeAddressResolver resolves a cluster node identifier to its dialable transport
 // address. MetaFSM implements this; tests can use fakes.

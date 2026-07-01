@@ -23,15 +23,9 @@ func (r *recordingIncident) Record(ctx context.Context, facts []incident.Fact) e
 	return nil
 }
 
-func (r *recordingIncident) count() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return len(r.facts)
-}
-
 func TestDirector_TriggerDedupSameRequest(t *testing.T) {
 	d := NewDirector(DirectorOpts{Incident: &recordingIncident{}, QueueSize: 8})
-	d.Register("replication", &countingSource{name: "replication"}, noopVerifier{})
+	d.Register("ec", &countingSource{name: "ec"}, noopVerifier{})
 	d.Start(context.Background())
 	defer d.Stop()
 	req := TriggerReq{Bucket: "__grainfs_volumes", KeyPrefix: "__vol/v/blk_"}
@@ -61,26 +55,20 @@ func TestDirector_ApplyFromFSM_Nonblocking(t *testing.T) {
 	}, 2*time.Second, 50*time.Millisecond)
 }
 
-func TestDirector_RoutesVolumeBlocksToECSource(t *testing.T) {
-	repl := &countingSource{name: "replication"}
-	ec := &countingSource{name: "ec"}
-	d := NewDirector(DirectorOpts{Incident: &recordingIncident{}, QueueSize: 8})
-	d.Register("replication", repl, noopVerifier{})
-	d.Register("ec", ec, noopVerifier{})
-	d.Start(context.Background())
-	defer d.Stop()
-
-	id, created := d.Trigger(TriggerReq{
-		Bucket:    "__grainfs_volumes",
-		KeyPrefix: "__vol/v/blk_",
-	})
-	require.NotEmpty(t, id)
-	require.True(t, created)
-
-	require.Eventually(t, func() bool {
-		return ec.calls.Load() == 1
-	}, 2*time.Second, 50*time.Millisecond)
-	require.Equal(t, int32(0), repl.calls.Load(), "volume blocks are EC objects, not full-object replicas")
+func TestRouteSourceFor(t *testing.T) {
+	tests := []struct {
+		name   string
+		bucket string
+		want   string
+	}{
+		{"internal buckets use the registered production source", "__grainfs_volumes", "ec"},
+		{"S3-exposed buckets ride the EC data path", "user-bucket", "ec"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, routeSourceFor(tt.bucket))
+		})
+	}
 }
 
 func TestDirector_LookupDedup_Hit(t *testing.T) {

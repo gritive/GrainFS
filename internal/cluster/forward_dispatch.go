@@ -4,7 +4,6 @@ import (
 	"io"
 
 	"github.com/gritive/GrainFS/internal/raft/raftpb"
-	"github.com/gritive/GrainFS/internal/transport"
 )
 
 type forwardTransportKind uint8
@@ -20,9 +19,10 @@ type bucketForwardOpSpec struct {
 	name        string
 	transport   forwardTransportKind
 	mutates     bool
-	handleFrame func(*ForwardReceiver, *DataGroup, []byte) *transport.Message
-	handleBody  func(*ForwardReceiver, *DataGroup, []byte, io.Reader) *transport.Message
-	handleRead  func(*ForwardReceiver, *DataGroup, []byte) (*transport.Message, io.ReadCloser)
+	ownerRouted bool
+	handleFrame func(*ForwardReceiver, *DataGroup, []byte) []byte
+	handleBody  func(*ForwardReceiver, *DataGroup, []byte, io.Reader) []byte
+	handleRead  func(*ForwardReceiver, *DataGroup, []byte) ([]byte, io.ReadCloser)
 }
 
 func (s bucketForwardOpSpec) allowedOn(kind forwardTransportKind) bool {
@@ -99,6 +99,7 @@ var bucketForwardOpSpecs = map[raftpb.ForwardOp]bucketForwardOpSpec{
 		name:        raftpb.ForwardOpCreateMultipartUpload.String(),
 		transport:   forwardFrameOnly,
 		mutates:     true,
+		ownerRouted: true,
 		handleFrame: (*ForwardReceiver).handleCreateMultipartUpload,
 	},
 	raftpb.ForwardOpUploadPart: {
@@ -106,6 +107,7 @@ var bucketForwardOpSpecs = map[raftpb.ForwardOp]bucketForwardOpSpec{
 		name:        raftpb.ForwardOpUploadPart.String(),
 		transport:   forwardBodyStream,
 		mutates:     true,
+		ownerRouted: true,
 		handleFrame: (*ForwardReceiver).handleUploadPart,
 		handleBody:  (*ForwardReceiver).handleUploadPartStream,
 	},
@@ -114,6 +116,7 @@ var bucketForwardOpSpecs = map[raftpb.ForwardOp]bucketForwardOpSpec{
 		name:        raftpb.ForwardOpCompleteMultipartUpload.String(),
 		transport:   forwardFrameOnly,
 		mutates:     true,
+		ownerRouted: true,
 		handleFrame: (*ForwardReceiver).handleCompleteMultipartUpload,
 	},
 	raftpb.ForwardOpAbortMultipartUpload: {
@@ -121,12 +124,14 @@ var bucketForwardOpSpecs = map[raftpb.ForwardOp]bucketForwardOpSpec{
 		name:        raftpb.ForwardOpAbortMultipartUpload.String(),
 		transport:   forwardFrameOnly,
 		mutates:     true,
+		ownerRouted: true,
 		handleFrame: (*ForwardReceiver).handleAbortMultipartUpload,
 	},
 	raftpb.ForwardOpListParts: {
 		op:          raftpb.ForwardOpListParts,
 		name:        raftpb.ForwardOpListParts.String(),
 		transport:   forwardFrameOnly,
+		ownerRouted: true,
 		handleFrame: (*ForwardReceiver).handleListParts,
 	},
 	raftpb.ForwardOpListMultipartUploads: {
@@ -149,6 +154,13 @@ var bucketForwardOpSpecs = map[raftpb.ForwardOp]bucketForwardOpSpec{
 		mutates:     true,
 		handleFrame: (*ForwardReceiver).handleDeleteObjectVersion,
 	},
+	raftpb.ForwardOpHardDeleteObject: {
+		op:          raftpb.ForwardOpHardDeleteObject,
+		name:        raftpb.ForwardOpHardDeleteObject.String(),
+		transport:   forwardFrameOnly,
+		mutates:     true,
+		handleFrame: (*ForwardReceiver).handleHardDeleteObject,
+	},
 	raftpb.ForwardOpListObjectVersions: {
 		op:          raftpb.ForwardOpListObjectVersions,
 		name:        raftpb.ForwardOpListObjectVersions.String(),
@@ -169,11 +181,19 @@ var bucketForwardOpSpecs = map[raftpb.ForwardOp]bucketForwardOpSpec{
 		handleRead:  (*ForwardReceiver).handleReadAtRead,
 	},
 	raftpb.ForwardOpAppendObject: {
-		op:         raftpb.ForwardOpAppendObject,
-		name:       raftpb.ForwardOpAppendObject.String(),
-		transport:  forwardBodyStream,
-		mutates:    true,
-		handleBody: (*ForwardReceiver).handleAppendObjectStream,
+		op:          raftpb.ForwardOpAppendObject,
+		name:        raftpb.ForwardOpAppendObject.String(),
+		transport:   forwardBodyStream,
+		mutates:     true,
+		ownerRouted: true,
+		handleBody:  (*ForwardReceiver).handleAppendObjectStream,
+	},
+	raftpb.ForwardOpSetObjectQuarantine: {
+		op:          raftpb.ForwardOpSetObjectQuarantine,
+		name:        raftpb.ForwardOpSetObjectQuarantine.String(),
+		transport:   forwardFrameOnly,
+		mutates:     true,
+		handleFrame: (*ForwardReceiver).handleSetObjectQuarantine,
 	},
 }
 

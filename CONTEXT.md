@@ -16,8 +16,8 @@ the command decoder, apply methods, snapshot trailer, and focused tests near
 each other while preserving the same external MetaFSM interface.
 
 Examples include cluster placement/object-index commands, IAM policy-store
-commands, cluster config commands, DEK/KEK/JWT key material commands, NFS export
-commands, lifecycle commands, migration commands, and Iceberg catalog commands.
+commands, cluster config commands, DEK/KEK/JWT key material commands,
+lifecycle commands, and migration commands.
 
 ### Storage Operations Facade
 
@@ -56,8 +56,7 @@ losing invalidation events. Any future wrapper that needs to invalidate the
 plan must either reuse `SwappableBackend` as its mutation point or extend the
 generation tracking design before adding a new source.
 
-Result-shape wrappers (`SwappableBackend`, `CachedBackend`, `wal.Backend`,
-`pullthrough.Backend`) hold a long-lived `*Operations` over their inner
+Result-shape wrappers (`SwappableBackend`, `pullthrough.Backend`) hold a long-lived `*Operations` over their inner
 backend rather than constructing a fresh one per call. `SwappableBackend.Swap`
 resets its cached `*Operations` (in addition to bumping `Generation`) so the
 next call rebuilds against the new inner.
@@ -142,8 +141,19 @@ request `ContentType`; arbitrary user metadata remains unsupported.
 S3 Express의 `AppendObject` API를 구현한 객체 형태. PutObject로 생성된 객체와 달리
 한 객체에 여러 번 write가 이어지며, 각 write는 raw segment blob 파일로 저장된다.
 HTTP `x-amz-write-offset-bytes` 헤더가 expected offset을 가져오고, 서버는 owner 노드의
-data-Raft 그룹을 통해 단조 증가 offset을 강제한다. 비 owner 노드가 받은 append는
-클러스터 transport(TCP) forward로 owner에게 위임된다.
+**quorum-meta blob**을 통해 단조 증가 offset을 강제한다 (Slice 1 이후 — raft FSM
+`CmdAppendObject`/`CmdCoalesceSegments` 은퇴, 두 커맨드는 no-op reserved slot). 비 owner
+노드가 받은 append는 클러스터 transport forward로 owner에게 위임된다.
+
+**Metadata write model (Slice 1+):** append와 coalesce 모두 owner-locked CAS
+(compare-and-swap) read-modify-write를 quorum-meta blob에 수행한다. 판별자는 per-write
+`MetaSeqCAS` + placement fence. CAS는 append/coalesce에만 사용하고, PUT/DELETE-marker/
+tags/ACL 등 나머지 mutation은 LWW(last-writer-wins)를 유지한다.
+
+**Known limitation (Slice 1):** off-raft append/coalesce는 동일 generation 내 leader
+handoff 시 failover-safe하지 않다 (acknowledged append loss 가능). single-stable-leader
+배포 가정 하에 eyes-open accepted risk. placement fence + CAS가 window를 축소하지만
+제거하지는 않는다.
 
 객체 metadata는 두 가지 referent slice를 가진다. `Segments[]`는 아직 합쳐지지 않은
 원시 segment blob ID(`<bucket>/<key>_segments/<blobID>` 파일)를 시간순으로 가리키고,
@@ -160,11 +170,10 @@ Coalesce는 segment 수 16 / 총 64 MiB / 30s idle / 60s backstop 중 먼저 도
 walk하고 2-cycle tombstone + cycle-shared cap 50 + age gate 5분으로 자동 회수한다
 (`--scrub-orphan-age`로 조정).
 
-Production 안전 보장은 4단계: (1) 객체별 size cap (default 5 TiB, `--append-size-cap-bytes`,
-FSM-side authoritative + coordinator pre-check fast-reject), (2) forward buffer 바이트 단위
-세마포어 (default 512 MiB pool, `--cluster-append-forward-buffer-total-bytes`, 포화 시
-HTTP 503 SlowDown), (3) per-request body cap 64 MiB (`--cluster-append-forward-buffer-max-per-request-bytes`),
-(4) HTTP `appendBodyMaxBytes` 64 MiB (S3 layer).
+Production 안전 보장은 2단계: (1) 객체별 size cap (default 5 TiB, `--append-size-cap-bytes`,
+FSM-side authoritative + coordinator pre-check fast-reject), (2) HTTP `appendBodyMaxBytes`
+64 MiB (S3 layer). AppendObject forward는 body를 통째로 버퍼링하지 않고 owner로 streaming
+하므로(single-attempt forward) 별도의 메모리 예약 풀/세마포어가 없다.
 
 ### Admin API Wire Schema
 
@@ -216,6 +225,67 @@ the operation. The plan decides whether that routed group can safely execute
 the EC write and what exact node IDs the write will use. Callers should consume
 the plan instead of re-reading placement group context and recomputing EC target
 rules in each write fast path.
+
+### Quorum Meta Store
+
+The quorum meta store is the per-node filesystem location that holds object
+metadata for user-bucket objects placed in Phase 3 and later. Each node writes
+metadata to its local `{dataDir}/.quorum_meta/{bucket}/{key}` file as part of
+a K-of-N fan-out rather than through a Raft consensus round.
+
+**Write path**: `writeQuorumMeta` fans out to ECData placement nodes
+(k = 4 in the default 4+2 profile). The write succeeds when k nodes
+acknowledge; parity nodes are best-effort. A 30-second bounded timeout
+(`quorumMetaWriteTimeout`) prevents unbounded hangs.
+
+**Read path**: `readQuorumMeta` checks the local file first. On a miss, it
+fans out `ReadQuorumMeta` RPCs to all shard-group peers and applies
+Last-Write-Wins (LWW) by `ModTime`. The fan-out waits for all peers within
+`quorumMetaReadTimeout` (5 s) so a concurrent PUT racing the read can be
+observed. If all peers miss, the object is absent (404) — there is NO FSM/BadgerDB
+read fallback for object metadata.
+
+**Control-plane vs data-plane boundary (load-bearing):** object metadata
+(regular/chunked/multipart/appendable/coalesced PUT, tags, ACL, quarantine,
+delete) is written ONLY to the off-raft quorum-meta blob — there is no raft
+propose and no second writer. The meta-raft FSM is a pure CONTROL plane (bucket
+config/policy/versioning, bucket→group assignment, placement generations, IAM,
+DEK/KEK, JWT keys, invites, peers, protocol credentials, lifecycle, config) and
+holds ZERO per-object records. The two stores never hold the same data, so
+"unify Raft vs Quorum" is a non-goal. The former writer-less FSM obj:/lat:
+object-read scaffolding was removed (greenfield — no residual obj:/lat: records,
+per the s4c_cutover greenfield decision). The per-object FSM commands
+(`CmdAppendObject`, `CmdCoalesceSegments`, `CmdPutObjectMeta`, tags/acl,
+quarantine, delete) are all retired (apply as no-ops; enum slots reserved, not
+renumbered).
+
+**Internal buckets** (`_grainfs_*`) reject object operations
+(`ErrInternalBucketNotObjectStore`) and never touch the quorum meta store.
+
+**Conflict resolution**: concurrent PUTs to the same key race on ModTime (LWW).
+UUIDv7 version IDs provide natural monotone ordering per-node, mitigating
+clock-skew risk.
+
+**Module shape (orchestration deep module):** the quorum-meta *orchestration* —
+fan-out write (per-version-blob-before-latest), K-of-N peer read + LWW merge,
+version resolution, and cluster-wide scatter-gather LIST — lives in
+`internal/cluster.QuorumMetaStore`, a deep module carved out of the
+`DistributedBackend` god-struct. `DistributedBackend` keeps it as a `qms` field
+and is a facade that delegates; external callers keep calling `b.writeQuorumMeta`
+/ `b.readQuorumMetaCmd` / ... unchanged. The store touches no `DistributedBackend`
+state directly — its collaborators are injected as narrow adapters
+(`localQuorumMetaStore`, the local-fs primitive set that `*ShardService` satisfies
+today and a focused LocalQuorumMetaStore will later replace; `quorumMetaPeerRPC`,
+the addr-taking peer fan-out; `ShardGroupSource`, topology; a 1-method
+`versioningSource`) plus `selfAddr`/`multiGen` accessors, all live accessors over
+the backend. Conflict resolution stays as package-level pure functions
+(`latestWins`/`quorumMetaBlobWins`/`quorumMetaCmdWins`/`decideQuorumMetaWrite`),
+shared by the local write-accept and the orchestration merge — the interface is
+the test surface, so fan-out write ordering and LWW merge are unit-tested with
+fake adapters and no transport. The extracted orchestration is raft-free: it
+touches no `b.store`/FSM, and the BadgerDB-fallback path noted above is no longer
+present in the current `readQuorumMeta` code (it resolves purely from the local
+file plus peer fan-out).
 
 ### Shard Group Peer Identity
 
@@ -343,6 +413,27 @@ into a byte slice), `OpenObject` (streaming reconstruction via an
 the k-of-n fan-out strategy, local data-shard fast paths, cache pre-pass,
 parity-shard fallback, and peer-health transitions from shard fetch outcomes.
 
+All three operations branch on the on-disk shard layout. The `StripeBytes`
+marker (0 = legacy contiguous, >0 = stripe-interleaved fragment size) is carried
+through the placement metadata chain. When it is set, the streaming put pipeline
+wrote each shard as per-stripe interleaved fragments rather than a contiguous
+1/K object slice, so the reader de-interleaves through the shared stripe codec
+(`stripe_codec.go`): a bounded-memory streaming reader for `OpenObject`/`ReadAt`
+and a buffered de-interleave for `ReadObject`. Shard repair regenerates a missing
+shard's interleaved body directly from the surviving siblings' on-disk fragments,
+byte-identical to what the pipeline wrote.
+
+`StripeBytes == 0` is the legacy/contiguous default, so objects written before
+this format existed still read correctly. The marker is **forward-only**: once a
+node writes a striped object (`StripeBytes > 0`, which happens for all-local K>=2
+PUTs), a binary predating the marker cannot read it — it ignores the unknown
+field, reconstructs on the contiguous assumption, and returns garbage with no
+error. Rolling a node back past the release that introduced striped writes
+therefore corrupts reads of any object written striped. Today this is scoped to
+single-node all-local placement (no peer stores a striped shard), so the only
+hazard is same-node binary rollback; a cluster-wide minimum-version capability
+gate is deferred to the multi-node streaming slice.
+
 Shard-key derivation (key + versionID) and the decision to invoke the reader
 stay at the `DistributedBackend` seam. This concentrates the data-plane read
 side effects in one testable place and leaves object placement policy outside
@@ -383,6 +474,38 @@ legacy rows block membership mutation. The generic predicates for these
 policies live next to the snapshot module in `internal/cluster`; admin command
 packages use those predicates rather than re-deriving policy from strings.
 
+### Local Shard Store
+
+The local shard store (`internal/cluster.LocalShardStore`) is the private
+cluster module that owns the local-shard concern carved out of `ShardService`:
+shard-blob physical I/O on the node's own data directories, the at-rest seal
+(DEK-backed, shard key as AAD), the `syncDirChain` durability state machine
+(ancestor-directory fsync dedup via `dirCache`/`dirDurable`), and the
+staging→promote-local path for chunked-PUT segment staging.
+
+`ShardService` keeps the local shard store as a `local` field and is a facade
+over it: every local-shard method (`WriteLocalShard*`, `ReadLocalShard*`,
+`OpenLocalShard*`, `DeleteLocalShards`, `PromoteLocalStagedShards`, and the
+`DataDirs`/`DEKKeeper`/`ClusterID`/`segEnc` accessors) delegates to `s.local.*`.
+Callers continue to see `ShardService`, which still satisfies the `ecShardStore`
+(and `ecObjectSizedShardStore`) seam the EC writer and reader inject; the
+remote-shard half (peer RPC) and the generic raft buffered-route transport stay
+on `ShardService`. Explicit delegation is required — a named `local` field does
+not promote methods.
+
+`dataDirs` is shared config: both `ShardService` and the local shard store hold
+the same resolved shard roots (the facade's quorum-meta and manifest methods
+still use theirs). The at-rest sealer is mandatory — `NewLocalShardStore` panics
+without it, identical to `NewShardService`, which builds its local shard store
+bare before applying options and then enforces the invariant.
+
+The local shard store does not own object metadata, routing, or placement
+policy. Its interface is the test surface for shard durability ordering: the
+`syncFileHook`/`syncDirHook` fsync-order tests drive it directly, with no
+transport and no facade. This is the first slice of a decomposition that will
+also carve a semantic local quorum-meta store and a local manifest store out of
+the same facade.
+
 ### Data Group Bucket Forwarding
 
 Data group bucket forwarding is the runtime path that routes bucket-scoped
@@ -406,18 +529,22 @@ to a placement-group target. Input is `(bucket, key, version)` plus intent
 (bucket-only, object-read, object-write); output is a route target — group
 ID, dial-ready peer list, and self-leader/voter facts.
 
-The module owns object-index lookup, internal-bucket bypass, the
-object-index-missing fallback to bucket routing, write target selection via
-`SelectObjectPlacementGroup` over the EC config, and peer address resolution
-through the address book. It is ctx-free and performs no I/O; address book
-lookup is an in-memory snapshot read, not network probing.
+The module owns deterministic hash placement, internal-bucket bypass, and peer
+address resolution through the address book. Object placement group selection
+uses `groupIDForObject` (FNV-64a hash mod sorted candidate count); `OpRouter`
+freezes a sorted candidate list at construction so write and read paths share
+identical hash logic — a read re-derives the same group the write chose, with
+no index to consult (Phase 4 / S4-4b removed the meta-raft object index
+entirely). It is ctx-free and performs no I/O; address book lookup is an
+in-memory snapshot read, not network probing.
 
 The interface has three methods, one per intent. `RouteBucket(bucket)`
 returns a target alone. `RouteObjectRead(bucket, key, versionID)` returns a
-target plus the resolved object-index entry, where empty `versionID` means
-latest. `RouteObjectWrite(bucket, key)` returns a target plus the chosen
-shard group entry so callers can commit the object-index record after the
-write succeeds.
+target plus a placement entry synthesized from the hash (PlacementGroupID only;
+there is no index lookup), where empty `versionID` means latest.
+`RouteObjectWrite(bucket, key)` returns a target plus the chosen shard group
+entry; the object's authoritative metadata is then written to per-node quorum
+meta (K-of-N fan-out), not a meta-raft index.
 
 Transport-shape selection, ctx-blocking local-vs-forward decisions, and
 forwarded reply parsing remain in their owning modules. Unresolved legacy
@@ -426,14 +553,76 @@ consistent with ADR 0003.
 
 **Forward operation atomicity invariant**: for any mutating forward operation
 (PutObject, CompleteMultipartUpload, DeleteObject, DeleteObjectVersion), the
-storage write and the corresponding object-index commit must both complete on
-the leader side before the response is returned to the originating node. The
-originating node does not perform a post-forward index commit. Violations
-produce orphan storage objects (put/delete-marker) or stale index entries
-(delete-version) that are detectable only by the background scrubber. The
-local execution path (originating node is leader) has no remote hand-off and
-accepts the same best-effort semantics: a node crash between storage write
-and ProposeObjectIndex leaves an orphan that the scrubber resolves.
+storage write and the corresponding quorum-meta write must both complete on the
+leader side before the response is returned to the originating node. The
+originating node does not perform a post-forward metadata write. A node crash
+between the storage write and the quorum-meta write leaves an orphan that the
+background scrubber resolves; the local execution path (originating node is
+leader) accepts the same best-effort semantics.
+
+### Cluster Transport Native Routes
+
+The node-to-node cluster transport is a Hertz HTTP server/client pair over
+zero-CA SPKI-pinned mTLS (ALPN `grainfs-http-v1`). Every RPC family rides its
+own **native route** — there is no generic envelope, frame header, or
+StreamType on the wire. Three route shapes exist:
+
+- **Typed streaming routes** for the bespoke families: `POST /shard/write`,
+  `GET /shard/read`, `POST /forward/write`, `GET /forward/read`,
+  `GET /append-segment/read` — family metadata in typed headers/query, raw
+  bytes streamed.
+- **Buffered-Call routes** (generic primitive, consumer-registered per path):
+  `POST <path>` with the family's own FB/binary frame as the raw request body
+  and the raw reply as the response body; a handler error maps to 500 + text.
+  Carries the raft bridges, shard RPC, proposal/read-index forwards, meta
+  forwards, receipt query, probes, and audit ship.
+- **Gossip routes** (generic primitive): `POST <path>` enqueues
+  `(from, payload)` and answers 200; the consumer callback runs on the
+  route's transport-owned drain goroutine. Carries `/gossip/admin` and
+  `/gossip/receipt`.
+
+`transport.StreamType` survives only as an internal admission/metrics key
+(TrafficLimiter classes); it never travels on the wire. The route tables in
+`http_buffered_route.go`/`http_gossip_route.go` keep the taxonomy centralized.
+
+### Control/Data Plane Boundary
+
+The cluster runs two distinct consensus planes. The **control plane** is the
+meta-raft (`MetaRaft`, reached through the coordinator's `base`
+`DistributedBackend`): it owns cluster membership, bucket creation/assignment,
+IAM, KEK rotation, rebalance/migration plans, and lifecycle policies — cluster-wide
+linearizable state. The **data plane** is per-group raft (each `GroupBackend` owns
+its own raft node, distinct from meta-raft) plus per-node quorum-meta (K-of-N
+fan-out); it owns object metadata and bytes.
+
+Invariant (Phase 6 S6-1, audited + regression-guarded): the object **PUT/GET/HEAD
+critical path never touches the control plane**. PUT/GET/HEAD route via
+deterministic placement to a `GroupBackend` and use group-raft / quorum-meta only.
+The single hot-path touch of `base` is `requireObjectBucket` → `HeadBucket`, a
+*local* BadgerDB read (not a raft propose/ReadIndex), and `bucketAssigned()`
+(in-memory router/meta map) short-circuits even that in steady state.
+`TestControlDataPlaneBoundary_ObjectHotPathDoesNotTouchControlRaft` guards this
+dynamically on a non-collapsed topology.
+
+Two boundary nuances: (1) multipart completion is **raft-free** — the manifest
+lives on a `.qmeta_mpu` quorum-meta blob (not the raft FSM), and
+`CompleteMultipartUpload` writes the completed object's per-version (or
+non-versioned latest-only) quorum-meta blob fail-closed with no group-raft
+propose; concurrent completes converge via a deterministic uploadID-derived
+version-id; (2) legacy single-backend deployments intentionally collapse both
+planes onto one raft node (`WrapDistributedBackend`), so the boundary is
+meaningful for multi-group topologies with a dedicated meta-raft.
+
+Gossip carries soft state — per-node disk used/available and `RequestsPerSec` — off
+the critical path. `DiskCollector` and `RequestRateCollector` each own their field
+on the local node and write it to `NodeStatsStore`; gossip propagates it; consumers
+are write placement (capacity-weighted HRW), the balancer (disk-skew evaluation/status),
+and BoundedLoads (hot-node read reranking). The request-rate signal is sampled from
+the already-incremented service-request counter once per gossip interval, so it adds
+no per-request cost. Load-based **leader transfer** (`selectPeerByLoad →
+TransferLeadership`) is the one consumer gated off by default: moving control-plane
+meta-Raft leadership in response to a data-plane load signal is unvalidated and risks
+election churn (Phase 6 S6-2).
 
 ### Local Execution Decision
 
@@ -481,12 +670,12 @@ Auth uses two layers. SigV4 verification (`s3auth.Verifier` +
 matches, the auth middleware calls `iam.ResolveSA` to attach the
 principal sa_id to the request context. The authz middleware then
 serially evaluates IAM grants and bucket policies — both must allow.
-Protocol credentials are a second SigV4 source for S3 and Iceberg:
+Protocol credentials are a second SigV4 source for S3:
 `internal/server/protocol_credential_auth.go` opens the encrypted
 protocol-credential secret envelope, verifies the SigV4 request without the
 normal cache, then validates the credential strictly against the requested
-`bucket/<bucket>` or `catalog/<warehouse>` resource before attaching the
-credential's SAID to the request context.
+`bucket/<bucket>` resource before attaching the credential's SAID to the
+request context.
 
 Bootstrap path: a fresh cluster starts with an empty IAM store and
 authzMiddleware always-on, so all S3 traffic returns 401 until an
@@ -528,11 +717,15 @@ Bucket-scoped operations (`ListBucket`, `CreateBucket`, `DeleteBucket`,
 `*BucketPolicy`) have no Layer 3 input. They are decided by the pre-load
 phase only.
 
-Authentication-enabled state has a single source of truth:
-`iamStore.AuthEnabled()`. The SigV4 verifier (`s.verifier`) is a separate
-concern about whether request signatures are checked, not about whether
-bucket policy or object ACL apply. The authorizer must depend on the IAM
-predicate only; handlers and middleware must not gate authorization on
+Authentication-enabled state has a single source of truth: whether an IAM
+store is wired. The authorizer captures this once at construction as its
+`authEnabled` flag (`RequestAuthorizer`), which `buildAuthorizer` sets to
+`s.iamStore != nil`. (The former `iamStore.AuthEnabled()` shim — constant-true
+since v0.0.107.0 made authz always-on — was removed; the flag now carries the
+"is IAM wired" predicate directly.) The SigV4 verifier (`s.verifier`) is a
+separate concern about whether request signatures are checked, not about
+whether bucket policy or object ACL apply. The authorizer must depend on the
+IAM predicate only; handlers and middleware must not gate authorization on
 verifier presence.
 
 Every decision the authorizer returns — allow or deny — is audited through
@@ -550,30 +743,12 @@ authorizer call. The source ACL check is part of the authorization decision,
 not of copy-source validation, which remains responsible for existence,
 delete-marker state, and copy-source preconditions only.
 
-Anonymous mode (`AuthEnabled()==false`) skips Layer 1. Bucket policy and
+Anonymous mode (`authEnabled==false`, i.e. no IAM store wired) skips Layer 1. Bucket policy and
 object ACL remain authoritative. ACL `public-read` allows read actions from
 empty access keys; ACL `public-read-write` additionally allows write actions;
 ACL `private` requires a non-empty access key. Multi-tenant ownership
 (`OwnerKey`) is out of scope until Phase 14+; until then all authenticated
 callers are treated as owners of `private` objects.
-
-### Iceberg REST Auth
-
-Iceberg REST Catalog (`/iceberg/v1/*` and `/_iceberg/v1/*`) shares the S3
-SigV4 trust boundary. `internal/server/authMiddleware` routes Iceberg
-requests through `authenticateSignedRequest` and emits
-`401 NotAuthorizedException` JSON (Iceberg REST ErrorModel) on failure,
-while S3 requests continue to receive `403 + XML`.
-
-Iceberg protocol credentials reuse the SigV4 path but bind the request to a
-single `catalog/<warehouse>` resource. Requests that omit `warehouse` after
-the config call use the credential's catalog as the warehouse context.
-
-Per-action authorization (`iceberg:CreateTable`, etc.) is a separate
-follow-up. This layer establishes identity; authz is still bypassed via
-`skipS3Authz: true` on the iceberg `route_surface` entries.
-
-Reference: `docs/superpowers/specs/2026-05-19-iceberg-rest-auth-design.md`.
 
 ### Volume Block I/O
 
@@ -673,28 +848,3 @@ See `docs/adr/0013-lifecycle-service-lock-free-publication.md` for the
 follow-up closure of ADR 0012's reservation. ADR 0012 and ADR 0013
 together establish the **lock-free publication pattern** for leader-only
 executor services in this codebase.
-
-### NFS Write Coalescing Buffer
-
-Per-(bucket, key) local file under `<data>/nfs-writebuf/` owned by
-`internal/nfs4server.writeBuffer`. NFS WRITE / READ / COMMIT / SETATTR-truncate
-ops route through this buffer when wired; the buffer is the source of
-truth for the key while it holds dirty data. Flush triggers are NFS
-COMMIT, SETATTR truncate (discard semantics — pending writes are
-dropped, not flushed), idle timeout (`--nfs-write-buffer-idle`, default
-30s), and shutdown drain. On startup `Recover` scans the buffer dir and
-re-uploads leftover files; permanent failures are quarantined as
-`<sha1>.failed.<reason>.<timestamp>` so the next run's writes cannot
-collide on the same sha1-derived path. The buffer is per-node; cluster
-mode does not coordinate buffers across nodes (single-NFS-mount-point
-usage is supported, multi-mount same-key writes are best-effort —
-operators pin clients to one node, or disable via
-`--nfs-write-buffer-idle=0`).
-
-The purpose is twofold: collapse the per-WRITE-op Read-Modify-Write that
-backends without the WriteAt fast path otherwise pay, and serve NFS READ
-from the buffer file (via `opGetAttr` reporting the buffered file size
-and `opRead` probing the buffer before the backend) so POSIX
-read-after-write holds before the backend flush completes. Operators
-should size `<data>/` for `max(concurrent NFS objects) × max(object size)`
-under the idle timeout window; see `docs/operators/runbook.md#nfs-write-buffer`.

@@ -2,41 +2,17 @@ package cluster
 
 import (
 	"fmt"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/badgermeta"
 	"github.com/gritive/GrainFS/internal/badgerutil"
+	"github.com/gritive/GrainFS/internal/gossip"
 	"github.com/gritive/GrainFS/internal/raft"
 )
-
-type blockingSnapshotter struct {
-	entered chan struct{}
-	release chan struct{}
-	closed  atomic.Bool
-}
-
-func newBlockingSnapshotter() *blockingSnapshotter {
-	return &blockingSnapshotter{
-		entered: make(chan struct{}),
-		release: make(chan struct{}),
-	}
-}
-
-func (s *blockingSnapshotter) Snapshot() ([]byte, error) {
-	if s.closed.CompareAndSwap(false, true) {
-		close(s.entered)
-	}
-	<-s.release
-	return []byte("blocked-snapshot"), nil
-}
-
-func (s *blockingSnapshotter) Restore(raft.SnapshotMeta, []byte) error {
-	return nil
-}
 
 type clusterTestTB interface {
 	Helper()
@@ -47,8 +23,40 @@ type clusterTestTB interface {
 	Fatalf(format string, args ...interface{})
 }
 
+// wireTestShardGroup attaches a single placement group whose peer list is sized
+// to the backend's current EC stripe width, all pointing at selfAddr. This gives
+// test backends the non-nil ShardGroupSource the streaming chunked PUT path
+// requires (production always wires one). Call again after changing the EC config.
+func wireTestShardGroup(backend *DistributedBackend) {
+	n := backend.currentECConfig().NumShards()
+	if n < 1 {
+		n = 1
+	}
+	peers := make([]string, n)
+	for i := range peers {
+		if i < len(backend.allNodes) && backend.allNodes[i] != "" {
+			peers[i] = backend.allNodes[i]
+		} else {
+			peers[i] = backend.selfAddr
+		}
+	}
+	backend.SetShardGroupSource(&fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"group-a": {ID: "group-a", PeerIDs: peers},
+	}})
+}
+
 // newTestDistributedBackend creates a DistributedBackend backed by a local Raft node.
 func newTestDistributedBackend(t clusterTestTB) *DistributedBackend {
+	t.Helper()
+	backend, _ := newTestDistributedBackendWithDB(t)
+	return backend
+}
+
+// newTestDistributedBackendWithDB is newTestDistributedBackend plus the raw
+// BadgerDB handle the test opened, for tests that need raw verification or
+// corruption injection (Phase 6.5 S6.5-3: DistributedBackend no longer
+// exposes its store as *badger.DB).
+func newTestDistributedBackendWithDB(t clusterTestTB) (*DistributedBackend, *badger.DB) {
 	t.Helper()
 	dir := t.TempDir()
 
@@ -79,13 +87,22 @@ func newTestDistributedBackend(t clusterTestTB) *DistributedBackend {
 	}
 	require.True(t, node.IsLeader(), "no-peers node must become leader")
 
-	backend, err := NewDistributedBackend(dir, db, node, nil, false)
+	backend, err := NewDistributedBackend(dir, badgermeta.Wrap(db), node, nil, false)
 	require.NoError(t, err)
 
 	backend.SetECConfig(ECConfig{DataShards: 1, ParityShards: 0})
 	keeper, clusterID := testDEKKeeper(t)
-	svc := NewShardService(backend.root, nil, WithShardDEKKeeper(keeper, clusterID), withTestWALDEK(t, keeper, clusterID))
+	svc := NewShardService(backend.root, nil, WithShardDEKKeeper(keeper, clusterID))
 	backend.SetShardService(svc, []string{backend.selfAddr})
+	// Wire a single-node ShardGroupSource by default so the streaming chunked PUT
+	// path (which requires a non-nil shardGroup) is exercised — production always
+	// wires one. Tests that change the EC config to a wider stripe must re-wire a
+	// group sized to NumShards (see wireTestShardGroup).
+	wireTestShardGroup(backend)
+	// Wire the direct-FSM MetaBucketStore so bucket-write paths work without a
+	// real meta-Raft cluster. Bucket mutations are applied directly to the local
+	// FSM, keeping the local read paths (HeadBucket, etc.) consistent.
+	backend.SetMetaBucketStore(newDirectFSMMetaBucketStore(backend.fsm))
 
 	stopApply := make(chan struct{})
 	go backend.RunApplyLoop(stopApply)
@@ -109,12 +126,7 @@ func newTestDistributedBackend(t clusterTestTB) *DistributedBackend {
 		}
 	})
 
-	return backend
-}
-
-func TestProposalForwardPeersFallsBackToShardServicePeers(t *testing.T) {
-	got := proposalForwardPeers(nil, []string{"127.0.0.1:7001", "127.0.0.1:7002"}, "127.0.0.1:7002")
-	require.Equal(t, []string{"127.0.0.1:7001"}, got)
+	return backend, db
 }
 
 func TestDistributedBackend_Close(t *testing.T) {
@@ -144,7 +156,7 @@ func TestDistributedBackend_Close(t *testing.T) {
 		}
 	}()
 
-	backend, err := NewDistributedBackend(dir, db, node, nil, false)
+	backend, err := NewDistributedBackend(dir, badgermeta.Wrap(db), node, nil, false)
 	require.NoError(t, err)
 
 	err = backend.Close()
@@ -152,10 +164,10 @@ func TestDistributedBackend_Close(t *testing.T) {
 }
 
 func TestSelectPeerByLoad_ReturnsLightestWhenOverloaded(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "node-a", RequestsPerSec: 300.0}) // overloaded
-	store.Set(NodeStats{NodeID: "node-b", RequestsPerSec: 50.0})
-	store.Set(NodeStats{NodeID: "node-c", RequestsPerSec: 80.0})
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "node-a", RequestsPerSec: 300.0}) // overloaded
+	store.Set(gossip.NodeStats{NodeID: "node-b", RequestsPerSec: 50.0})
+	store.Set(gossip.NodeStats{NodeID: "node-c", RequestsPerSec: 80.0})
 
 	peer, ok := selectPeerByLoad(store, "node-a", 1.3)
 	require.True(t, ok)
@@ -163,10 +175,10 @@ func TestSelectPeerByLoad_ReturnsLightestWhenOverloaded(t *testing.T) {
 }
 
 func TestSelectPeerByLoad_NoRedirectWhenBalanced(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "node-a", RequestsPerSec: 100.0})
-	store.Set(NodeStats{NodeID: "node-b", RequestsPerSec: 90.0})
-	store.Set(NodeStats{NodeID: "node-c", RequestsPerSec: 110.0})
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "node-a", RequestsPerSec: 100.0})
+	store.Set(gossip.NodeStats{NodeID: "node-b", RequestsPerSec: 90.0})
+	store.Set(gossip.NodeStats{NodeID: "node-c", RequestsPerSec: 110.0})
 
 	// median ~100, node-a = 100, threshold 1.3 → 100 <= 100*1.3 → no redirect
 	_, ok := selectPeerByLoad(store, "node-a", 1.3)
@@ -174,56 +186,9 @@ func TestSelectPeerByLoad_NoRedirectWhenBalanced(t *testing.T) {
 }
 
 func TestSelectPeerByLoad_SingleNode(t *testing.T) {
-	store := NewNodeStatsStore(1 * time.Minute)
-	store.Set(NodeStats{NodeID: "node-a", RequestsPerSec: 1000.0})
+	store := gossip.NewNodeStatsStore(1 * time.Minute)
+	store.Set(gossip.NodeStats{NodeID: "node-a", RequestsPerSec: 1000.0})
 
 	_, ok := selectPeerByLoad(store, "node-a", 1.3)
 	require.False(t, ok, "single node: no peers to redirect to")
-}
-
-// TestSetOnFSMValueResealDone_CallbackFiresOnMarker verifies that the callback
-// registered via SetOnFSMValueResealDone fires when CmdFSMValueResealDone is
-// applied, does NOT fire for CmdResealFSMValues or CmdPutObjectMeta, and that
-// the callback is dispatched in its own goroutine (non-blocking on apply path).
-func TestSetOnFSMValueResealDone_CallbackFiresOnMarker(t *testing.T) {
-	gb := newTestGroupBackend(t, "callback-test-group")
-
-	fired := make(chan struct{}, 1)
-	gb.SetOnFSMValueResealDone(func() {
-		fired <- struct{}{}
-	})
-
-	// Apply the marker: should fire the callback.
-	raw, err := EncodeCommand(CmdFSMValueResealDone, FSMValueResealDoneCmd{Gen: 5})
-	require.NoError(t, err)
-	gb.notifyOnApply(raw)
-
-	select {
-	case <-fired:
-		// callback fired as expected
-	case <-time.After(2 * time.Second):
-		t.Fatal("SetOnFSMValueResealDone callback did not fire for CmdFSMValueResealDone")
-	}
-
-	// Apply CmdResealFSMValues: must NOT fire the callback.
-	rawReseal, err := EncodeCommand(CmdResealFSMValues, ResealFSMValuesCmd{Keys: []string{"policy:b1"}, ActiveGen: 1})
-	require.NoError(t, err)
-	gb.notifyOnApply(rawReseal)
-	select {
-	case <-fired:
-		t.Fatal("callback must NOT fire for CmdResealFSMValues")
-	case <-time.After(50 * time.Millisecond):
-		// correct: no callback
-	}
-
-	// Apply CmdPutObjectMeta: must NOT fire the callback.
-	rawPut, err := EncodeCommand(CmdPutObjectMeta, PutObjectMetaCmd{Bucket: "b", Key: "k", Size: 1, ETag: "e"})
-	require.NoError(t, err)
-	gb.notifyOnApply(rawPut)
-	select {
-	case <-fired:
-		t.Fatal("callback must NOT fire for CmdPutObjectMeta")
-	case <-time.After(50 * time.Millisecond):
-		// correct: no callback
-	}
 }

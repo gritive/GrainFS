@@ -9,13 +9,12 @@ import (
 )
 
 type fakeStore struct {
-	saToPols      map[string][]string
-	saToGroups    map[string][]string
-	groupToPols   map[string][]string
-	mountSAToPols map[string][]string
-	bucketPols    map[string]string
-	docs          map[string]string
-	resolveCount  int
+	saToPols     map[string][]string
+	saToGroups   map[string][]string
+	groupToPols  map[string][]string
+	bucketPols   map[string]string
+	docs         map[string]string
+	resolveCount int
 }
 
 func (f *fakeStore) SAPolicies(_ context.Context, saID string) ([]string, error) {
@@ -29,11 +28,6 @@ func (f *fakeStore) SAGroups(_ context.Context, saID string) ([]string, error) {
 
 func (f *fakeStore) GroupPolicies(_ context.Context, group string) ([]string, error) {
 	return f.groupToPols[group], nil
-}
-
-func (f *fakeStore) MountSAPolicies(_ context.Context, mountSA string) ([]string, error) {
-	f.resolveCount++
-	return f.mountSAToPols[mountSA], nil
 }
 
 func (f *fakeStore) PolicyDoc(_ context.Context, name string) (*Document, error) {
@@ -58,17 +52,17 @@ func TestResolver_CachesUntilTTL(t *testing.T) {
 		docs:     map[string]string{"readonly": `{"Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}`},
 	}
 	r := NewResolver(s, 100*time.Millisecond)
-	if _, err := r.Effective(context.Background(), "sa-1", "bucket-x", PrincipalTypeS3); err != nil {
+	if _, err := r.Effective(context.Background(), "sa-1", "bucket-x"); err != nil {
 		t.Fatalf("Effective#1: %v", err)
 	}
-	if _, err := r.Effective(context.Background(), "sa-1", "bucket-x", PrincipalTypeS3); err != nil {
+	if _, err := r.Effective(context.Background(), "sa-1", "bucket-x"); err != nil {
 		t.Fatalf("Effective#2: %v", err)
 	}
 	if s.resolveCount > 1 {
 		t.Fatalf("cache miss on second call: resolveCount=%d", s.resolveCount)
 	}
 	time.Sleep(150 * time.Millisecond)
-	if _, err := r.Effective(context.Background(), "sa-1", "bucket-x", PrincipalTypeS3); err != nil {
+	if _, err := r.Effective(context.Background(), "sa-1", "bucket-x"); err != nil {
 		t.Fatalf("Effective#3: %v", err)
 	}
 	if s.resolveCount != 2 {
@@ -99,12 +93,12 @@ func TestResolver_InvalidateClearsImmediately(t *testing.T) {
 		docs:     map[string]string{"readonly": `{"Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}`},
 	}
 	r := NewResolver(s, 1*time.Hour)
-	if _, err := r.Effective(context.Background(), "sa-1", "bucket-x", PrincipalTypeS3); err != nil {
+	if _, err := r.Effective(context.Background(), "sa-1", "bucket-x"); err != nil {
 		t.Fatal(err)
 	}
 	before := s.resolveCount
 	r.Invalidate([]string{"sa-1"}, nil)
-	if _, err := r.Effective(context.Background(), "sa-1", "bucket-x", PrincipalTypeS3); err != nil {
+	if _, err := r.Effective(context.Background(), "sa-1", "bucket-x"); err != nil {
 		t.Fatal(err)
 	}
 	if s.resolveCount != before+1 {

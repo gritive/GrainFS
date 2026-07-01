@@ -53,6 +53,17 @@ func (s *Server) handlePost(ctx context.Context, c *app.RequestContext) {
 }
 
 func (s *Server) createMultipartUpload(ctx context.Context, c *app.RequestContext, bucket, key string) {
+	// Fail-closed: reject unsupported canned ACL values and x-amz-grant-* headers
+	// before any storage access.  The x-amz-acl header on CreateMultipartUpload is
+	// consumed here; the ACL is not yet propagated to the completed object (MPU
+	// ACL stamping is a separate follow-up), so supported values pass through with
+	// the default private ACL.  Unsupported values are rejected with 501 for
+	// consistency with PutObject and CopyObject.
+	if hasUnsupportedACLHeaders(c) {
+		writeACLNotImplemented(c)
+		return
+	}
+
 	contentType := string(c.GetHeader("Content-Type"))
 	if contentType == "" {
 		contentType = "application/octet-stream"
@@ -96,6 +107,14 @@ func (s *Server) uploadPart(ctx context.Context, c *app.RequestContext, bucket, 
 		return
 	}
 
+	// Parse the optional Content-MD5 before reading the body so a malformed
+	// header is rejected as InvalidDigest (mirrors PutObject).
+	contentMD5Hex, md5Err := putObjectContentMD5Hex(c)
+	if md5Err != nil {
+		mapError(c, md5Err)
+		return
+	}
+
 	// UploadPart bodies use the same SigV4 streaming / aws-chunked transport as
 	// PutObject. Strip the chunk framing here so the part file stores the
 	// caller's plaintext bytes — leaving the framing in place inflates Part.Size
@@ -106,7 +125,7 @@ func (s *Server) uploadPart(ctx context.Context, c *app.RequestContext, bucket, 
 		writeXMLError(c, consts.StatusBadRequest, "InvalidArgument", err.Error())
 		return
 	}
-	part, err := s.uploadMultipartPart(ctx, bucket, key, uploadID, partNumber, body)
+	part, err := s.uploadMultipartPart(ctx, bucket, key, uploadID, partNumber, body, contentMD5Hex)
 	if err != nil {
 		mapError(c, err)
 		return
@@ -120,6 +139,16 @@ func (s *Server) completeMultipartUpload(ctx context.Context, c *app.RequestCont
 	parts, err := parseCompleteMultipartUpload(c.Request.Body())
 	if err != nil {
 		writeXMLError(c, consts.StatusBadRequest, "MalformedXML", "invalid XML body")
+		return
+	}
+
+	// Stamp the bucket's versioning state at the S3 edge so the forward path
+	// can drive the blob-authoritative multipart-complete write on leaf
+	// data-group nodes (which cannot read bucket versioning themselves).
+	// Fail-closed: a resolve error must not silently complete as non-versioned.
+	ctx, verr := s.ctxWithBucketVersioningStrict(ctx, bucket)
+	if verr != nil {
+		mapError(c, verr)
 		return
 	}
 

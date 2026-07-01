@@ -1,0 +1,215 @@
+package cluster
+
+import (
+	"bytes"
+	"context"
+	"crypto/md5"
+	"encoding/hex"
+	"io"
+	"testing"
+
+	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/stretchr/testify/require"
+)
+
+// newSingleNode1Plus0ChunkCapable builds a single-node EC 1+0 backend that is
+// chunk-capable (shardGroup wired, small chunk threshold) so a small body
+// exercises the segment/chunked path without a 64 MiB object.
+func newSingleNode1Plus0ChunkCapable(t *testing.T) *DistributedBackend {
+	t.Helper()
+	backend := NewSingletonBackendForTest(t)
+	const selfAddr = "self"
+	keeper, clusterID := testDEKKeeper(t)
+	backend.shardSvc = NewShardService(t.TempDir(), nil, WithShardDEKKeeper(keeper, clusterID))
+	backend.selfAddr = selfAddr
+	backend.allNodes = []string{selfAddr}
+	backend.SetECConfig(ECConfig{DataShards: 1, ParityShards: 0})
+	backend.chunkedPutChunkSize = 1 << 10 // 1 KiB chunk threshold
+	backend.SetShardGroupSource(&fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"group-0": {ID: "group-0", PeerIDs: []string{selfAddr}},
+	}})
+	return backend
+}
+
+// TestSinglePutPath_KnownSizeLarge1Plus0_Chunks proves the fix: a known-size
+// (SizeHint) object larger than the chunk threshold on single-node 1+0 routes
+// through the chunked path (obj.Segments non-empty) instead of being written as
+// one whole-object shard. (Historical: before the chunking fix, a known-size
+// single-local fast path intercepted this and wrote a single shard with no
+// segments; that fast path has since been removed, so the chunked gate is the
+// only route once a ShardGroupSource is wired.)
+func TestSinglePutPath_KnownSizeLarge1Plus0_Chunks(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "b"))
+
+	body := makeChunkedTestBody(8 << 10) // 8 KiB > 1 KiB chunk threshold
+	size := int64(len(body))
+	obj, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{
+		Bucket: "b", Key: "big", Body: bytes.NewReader(body),
+		ContentType: "application/octet-stream", SizeHint: &size,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, obj.Segments, "known-size large object must chunk (RED: fast path writes one shard, no segments)")
+
+	rc, _, gerr := b.GetObject(ctx, "b", "big")
+	require.NoError(t, gerr)
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, body, got, "chunked object must round-trip byte-identical")
+}
+
+// TestSinglePutPath_SmallObject_AlsoChunks proves the single path is
+// size-independent: a tiny simple PUT on a shardGroup-wired backend ALSO chunks
+// (obj.Segments non-empty), not just large objects, and round-trips.
+func TestSinglePutPath_SmallObject_AlsoChunks(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "b"))
+
+	body := []byte("tiny-known-size")
+	size := int64(len(body))
+	obj, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{
+		Bucket: "b", Key: "small", Body: bytes.NewReader(body),
+		ContentType: "application/octet-stream", SizeHint: &size,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, obj.Segments, "small simple PUT takes the same chunked path as large (size-independent)")
+
+	rc, _, gerr := b.GetObject(ctx, "b", "small")
+	require.NoError(t, gerr)
+	defer rc.Close()
+	got, readErr := io.ReadAll(rc)
+	require.NoError(t, readErr)
+	require.Equal(t, body, got)
+}
+
+// TestSinglePutPath_EmptyObject_Chunks proves a 0-byte object now takes the same
+// chunked path (one empty segment) and round-trips empty — no exemption.
+func TestSinglePutPath_EmptyObject_Chunks(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "b"))
+
+	size := int64(0)
+	obj, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{
+		Bucket: "b", Key: "empty", Body: bytes.NewReader(nil),
+		ContentType: "application/octet-stream", SizeHint: &size,
+	})
+	require.NoError(t, err, "empty object must survive the chunked path (1 empty segment)")
+	require.NotEmpty(t, obj.Segments, "empty object now takes the same chunked path (1 empty segment)")
+
+	rc, gobj, gerr := b.GetObject(ctx, "b", "empty")
+	require.NoError(t, gerr)
+	defer rc.Close()
+	got, readErr := io.ReadAll(rc)
+	require.NoError(t, readErr)
+	require.Empty(t, got)
+	require.Equal(t, int64(0), gobj.Size)
+}
+
+// TestSinglePutPath_VersionedRead_ChunkedAndEmpty proves the versioned read
+// path (GetObjectVersion) routes chunked objects — including empty ones — through
+// SegmentReader (the object_version.go Size>0 guard was dropped to match GET).
+func TestSinglePutPath_VersionedRead_ChunkedAndEmpty(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "b"))
+
+	for _, tc := range []struct {
+		name string
+		body []byte
+	}{
+		{"nonempty", []byte("versioned-chunked-body")},
+		{"empty", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			size := int64(len(tc.body))
+			obj, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{
+				Bucket: "b", Key: "v-" + tc.name, Body: bytes.NewReader(tc.body),
+				ContentType: "application/octet-stream", SizeHint: &size,
+			})
+			require.NoError(t, err)
+			require.NotEmpty(t, obj.Segments)
+
+			rc, _, gerr := b.GetObjectVersion(context.Background(), "b", "v-"+tc.name, obj.VersionID)
+			require.NoError(t, gerr)
+			defer rc.Close()
+			got, readErr := io.ReadAll(rc)
+			require.NoError(t, readErr)
+			require.True(t, bytes.Equal(tc.body, got), "versioned chunked read must round-trip")
+		})
+	}
+}
+
+// TestSinglePutPath_UserBucketETagIsPlaintextMD5 pins ETag parity for a normal
+// (non-internal) bucket simple PUT: ETag == md5(plaintext), known-size path.
+func TestSinglePutPath_UserBucketETagIsPlaintextMD5(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "b"))
+
+	body := []byte("user-bucket-etag-parity-body")
+	size := int64(len(body))
+	obj, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{
+		Bucket: "b", Key: "k", Body: bytes.NewReader(body),
+		ContentType: "application/octet-stream", SizeHint: &size,
+	})
+	require.NoError(t, err)
+	sum := md5.Sum(body)
+	require.Equal(t, hex.EncodeToString(sum[:]), obj.ETag, "non-internal bucket ETag must be md5(plaintext)")
+}
+
+func TestSinglePutPath_ExactSizeHintRejectsShortBody(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "b"))
+
+	size := int64(10)
+	_, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{
+		Bucket: "b", Key: "short", Body: bytes.NewReader([]byte("short")),
+		ContentType: "application/octet-stream", SizeHint: &size, SizeHintExact: true,
+	})
+	require.Error(t, err)
+	_, _, getErr := b.GetObject(ctx, "b", "short")
+	require.Error(t, getErr)
+}
+
+func TestSinglePutPath_ExactSizeHintRejectsLongBody(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "b"))
+
+	body := []byte("longer-than-hint")
+	size := int64(4)
+	_, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{
+		Bucket: "b", Key: "long", Body: bytes.NewReader(body),
+		ContentType: "application/octet-stream", SizeHint: &size, SizeHintExact: true,
+	})
+	require.Error(t, err)
+	_, _, getErr := b.GetObject(ctx, "b", "long")
+	require.Error(t, getErr)
+}
+
+func TestSinglePutPath_AdvisorySizeHintStillAllowsLongBody(t *testing.T) {
+	b := newSingleNode1Plus0ChunkCapable(t)
+	ctx := context.Background()
+	require.NoError(t, b.CreateBucket(ctx, "b"))
+
+	body := []byte("longer-than-hint")
+	size := int64(4)
+	obj, err := b.PutObjectWithRequest(ctx, storage.PutObjectRequest{
+		Bucket: "b", Key: "advisory", Body: bytes.NewReader(body),
+		ContentType: "application/octet-stream", SizeHint: &size,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(len(body)), obj.Size)
+
+	rc, _, gerr := b.GetObject(ctx, "b", "advisory")
+	require.NoError(t, gerr)
+	defer rc.Close()
+	got, readErr := io.ReadAll(rc)
+	require.NoError(t, readErr)
+	require.Equal(t, body, got)
+}
