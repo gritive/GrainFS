@@ -1,21 +1,20 @@
-package storage
+package storage_test
 
 import (
 	"bytes"
 	"context"
 	"io"
-	"os"
-	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gritive/GrainFS/internal/storage"
 )
 
 func TestCreateAndCompleteMultipartUpload(t *testing.T) {
-	b := setupTestBackend(t)
-	b.CreateBucket(context.Background(), "test-bucket")
+	b := newBackend(t)
+	require.NoError(t, b.CreateBucket(context.Background(), "test-bucket"))
 
 	upload, err := b.CreateMultipartUpload(context.Background(), "test-bucket", "big-file.bin", "application/octet-stream")
 	require.NoError(t, err, "CreateMultipartUpload")
@@ -32,7 +31,7 @@ func TestCreateAndCompleteMultipartUpload(t *testing.T) {
 	p2, err := b.UploadPart(context.Background(), "test-bucket", "big-file.bin", upload.UploadID, 2, bytes.NewReader(part2Data), "")
 	require.NoError(t, err, "UploadPart 2")
 
-	obj, err := b.CompleteMultipartUpload(context.Background(), "test-bucket", "big-file.bin", upload.UploadID, []Part{*p1, *p2})
+	obj, err := b.CompleteMultipartUpload(context.Background(), "test-bucket", "big-file.bin", upload.UploadID, []storage.Part{*p1, *p2})
 	require.NoError(t, err, "CompleteMultipartUpload")
 	assert.Equal(t, int64(len(part1Data)+len(part2Data)), obj.Size)
 
@@ -45,14 +44,11 @@ func TestCreateAndCompleteMultipartUpload(t *testing.T) {
 	assert.Equal(t, "application/octet-stream", meta.ContentType)
 }
 
-// TestCompleteMultipartUploadPersistsParts verifies the single-node LocalBackend
-// path persists Object.Parts so that a subsequent HeadObject can resolve
-// ?partNumber=N. The cluster path already did this; this test guards the
-// non-cluster path so a restart (or any HeadObject after Complete) returns
-// Parts populated, not nil.
+// TestCompleteMultipartUploadPersistsParts verifies the backend persists
+// Object.Parts so that a subsequent HeadObject can resolve ?partNumber=N.
 func TestCompleteMultipartUploadPersistsParts(t *testing.T) {
-	b := setupTestBackend(t)
-	b.CreateBucket(context.Background(), "test-bucket")
+	b := newBackend(t)
+	require.NoError(t, b.CreateBucket(context.Background(), "test-bucket"))
 
 	upload, err := b.CreateMultipartUpload(context.Background(), "test-bucket", "parts.bin", "application/octet-stream")
 	require.NoError(t, err)
@@ -64,7 +60,7 @@ func TestCompleteMultipartUploadPersistsParts(t *testing.T) {
 	p2, err := b.UploadPart(context.Background(), "test-bucket", "parts.bin", upload.UploadID, 2, bytes.NewReader(part2), "")
 	require.NoError(t, err)
 
-	_, err = b.CompleteMultipartUpload(context.Background(), "test-bucket", "parts.bin", upload.UploadID, []Part{*p1, *p2})
+	_, err = b.CompleteMultipartUpload(context.Background(), "test-bucket", "parts.bin", upload.UploadID, []storage.Part{*p1, *p2})
 	require.NoError(t, err)
 
 	// Head AFTER Complete — must read back Parts through the codec round-trip.
@@ -80,224 +76,39 @@ func TestCompleteMultipartUploadPersistsParts(t *testing.T) {
 }
 
 func TestAbortMultipartUpload(t *testing.T) {
-	b := setupTestBackend(t)
-	b.CreateBucket(context.Background(), "test-bucket")
+	b := newBackend(t)
+	require.NoError(t, b.CreateBucket(context.Background(), "test-bucket"))
 
 	upload, _ := b.CreateMultipartUpload(context.Background(), "test-bucket", "aborted.bin", "application/octet-stream")
-	b.UploadPart(context.Background(), "test-bucket", "aborted.bin", upload.UploadID, 1, bytes.NewReader([]byte("data")), "")
+	_, _ = b.UploadPart(context.Background(), "test-bucket", "aborted.bin", upload.UploadID, 1, bytes.NewReader([]byte("data")), "")
 
 	require.NoError(t, b.AbortMultipartUpload(context.Background(), "test-bucket", "aborted.bin", upload.UploadID), "AbortMultipartUpload")
 
 	// object should not exist
 	_, err := b.HeadObject(context.Background(), "test-bucket", "aborted.bin")
-	require.ErrorIs(t, err, ErrObjectNotFound)
+	require.ErrorIs(t, err, storage.ErrObjectNotFound)
 
 	// abort again should fail
-	require.ErrorIs(t, b.AbortMultipartUpload(context.Background(), "test-bucket", "aborted.bin", upload.UploadID), ErrUploadNotFound)
-}
-
-func TestEncryptedMultipartPartFilesHidePlaintext(t *testing.T) {
-	b := newDEKLocalBackend(t)
-
-	require.NoError(t, b.CreateBucket(context.Background(), "bkt"))
-	up, err := b.CreateMultipartUpload(context.Background(), "bkt", "obj", "text/plain")
-	require.NoError(t, err)
-
-	partBytes := []byte("multipart-sensitive-payload")
-	part, err := b.UploadPart(context.Background(), "bkt", "obj", up.UploadID, 1, bytes.NewReader(partBytes), "")
-	require.NoError(t, err)
-	require.Equal(t, int64(len(partBytes)), part.Size)
-
-	raw, err := os.ReadFile(b.partPath(up.UploadID, 1))
-	require.NoError(t, err)
-	require.NotContains(t, string(raw), string(partBytes))
-
-	parts, err := b.ListParts(context.Background(), "bkt", "obj", up.UploadID, 100)
-	require.NoError(t, err)
-	require.Len(t, parts, 1)
-	require.Equal(t, part.ETag, parts[0].ETag)
-
-	obj, err := b.CompleteMultipartUpload(context.Background(), "bkt", "obj", up.UploadID, []Part{*part})
-	require.NoError(t, err)
-	require.Equal(t, int64(len(partBytes)), obj.Size)
-
-	rc, _, err := b.GetObject(context.Background(), "bkt", "obj")
-	require.NoError(t, err)
-	defer rc.Close()
-	got, err := io.ReadAll(rc)
-	require.NoError(t, err)
-	require.Equal(t, partBytes, got)
-}
-
-func TestEncryptedMultipartCompleteStreamsMultiplePartsOutOfOrder(t *testing.T) {
-	b := newDEKLocalBackend(t)
-
-	ctx := context.Background()
-	require.NoError(t, b.CreateBucket(ctx, "bkt"))
-	up, err := b.CreateMultipartUpload(ctx, "bkt", "obj", "text/plain")
-	require.NoError(t, err)
-
-	part1 := bytes.Repeat([]byte("a"), encryptedChunkSize+17)
-	part2 := bytes.Repeat([]byte("b"), encryptedChunkSize+31)
-	p1, err := b.UploadPart(ctx, "bkt", "obj", up.UploadID, 1, bytes.NewReader(part1), "")
-	require.NoError(t, err)
-	p2, err := b.UploadPart(ctx, "bkt", "obj", up.UploadID, 2, bytes.NewReader(part2), "")
-	require.NoError(t, err)
-
-	obj, err := b.CompleteMultipartUpload(ctx, "bkt", "obj", up.UploadID, []Part{
-		{PartNumber: p2.PartNumber, ETag: p2.ETag},
-		{PartNumber: p1.PartNumber, ETag: p1.ETag},
-	})
-	require.NoError(t, err)
-	require.Equal(t, int64(len(part1)+len(part2)), obj.Size)
-	h, release := hashForBucket("bkt")
-	_, _ = h.Write(part1)
-	_, _ = h.Write(part2)
-	require.Equal(t, etagFromHash(h), obj.ETag)
-	release()
-
-	rc, _, err := b.GetObject(ctx, "bkt", "obj")
-	require.NoError(t, err)
-	defer rc.Close()
-	got, err := io.ReadAll(rc)
-	require.NoError(t, err)
-	require.Equal(t, append(part1, part2...), got)
-}
-
-func TestEncryptedMultipartUploadsListDecryptsMetadata(t *testing.T) {
-	b := newDEKLocalBackend(t)
-
-	ctx := context.Background()
-	require.NoError(t, b.CreateBucket(ctx, "bkt"))
-	up, err := b.CreateMultipartUpload(ctx, "bkt", "prefix/obj", "text/plain")
-	require.NoError(t, err)
-
-	uploads, err := b.ListMultipartUploads(ctx, "bkt", "prefix/", 100)
-	require.NoError(t, err)
-	require.Len(t, uploads, 1)
-	require.Equal(t, up.UploadID, uploads[0].UploadID)
-	require.Equal(t, "bkt", uploads[0].Bucket)
-	require.Equal(t, "prefix/obj", uploads[0].Key)
-	require.Equal(t, "text/plain", uploads[0].ContentType)
+	require.ErrorIs(t, b.AbortMultipartUpload(context.Background(), "test-bucket", "aborted.bin", upload.UploadID), storage.ErrUploadNotFound)
 }
 
 func TestUploadPartInvalidUploadID(t *testing.T) {
-	b := setupTestBackend(t)
-	b.CreateBucket(context.Background(), "test-bucket")
+	b := newBackend(t)
+	require.NoError(t, b.CreateBucket(context.Background(), "test-bucket"))
 
 	_, err := b.UploadPart(context.Background(), "test-bucket", "file.bin", "invalid-id", 1, bytes.NewReader([]byte("data")), "")
-	require.ErrorIs(t, err, ErrUploadNotFound)
+	require.ErrorIs(t, err, storage.ErrUploadNotFound)
 }
 
 func TestCompleteMultipartBucketNotFound(t *testing.T) {
-	b := setupTestBackend(t)
+	b := newBackend(t)
 
 	_, err := b.CreateMultipartUpload(context.Background(), "nope", "file.bin", "application/octet-stream")
-	require.ErrorIs(t, err, ErrBucketNotFound)
+	require.ErrorIs(t, err, storage.ErrBucketNotFound)
 }
 
-func TestLocalBackend_SweepOrphanMultiparts(t *testing.T) {
-	b := setupTestBackend(t)
-	partsRoot := filepath.Join(b.dataRoots[0], "parts")
-	require.NoError(t, os.MkdirAll(partsRoot, 0o755))
-
-	// old1, old2 — older than cutoff, should be removed.
-	// fresh1 — newer than cutoff, should be retained.
-	now := time.Now()
-	old := now.Add(-2 * time.Hour)
-	fresh := now.Add(-1 * time.Minute)
-	for name, mtime := range map[string]time.Time{
-		"old1":   old,
-		"old2":   old,
-		"fresh1": fresh,
-	} {
-		dir := filepath.Join(partsRoot, name)
-		require.NoError(t, os.MkdirAll(dir, 0o755))
-		require.NoError(t, os.Chtimes(dir, mtime, mtime))
-	}
-	// stray regular file under parts/ — must be ignored (only directories sweepable).
-	straySrc := filepath.Join(partsRoot, "stray.txt")
-	require.NoError(t, os.WriteFile(straySrc, []byte("x"), 0o644))
-	require.NoError(t, os.Chtimes(straySrc, old, old))
-
-	cutoff := now.Add(-1 * time.Hour)
-	res, err := b.SweepOrphanMultiparts(context.Background(), cutoff)
-	require.NoError(t, err)
-	assert.Equal(t, 2, res.Removed)
-	assert.Empty(t, res.Errors)
-
-	// Verify which entries remain.
-	for _, name := range []string{"fresh1", "stray.txt"} {
-		_, err := os.Stat(filepath.Join(partsRoot, name))
-		assert.NoError(t, err, "%q must remain", name)
-	}
-	for _, name := range []string{"old1", "old2"} {
-		_, err := os.Stat(filepath.Join(partsRoot, name))
-		assert.True(t, os.IsNotExist(err), "%q must be removed", name)
-	}
-}
-
-func TestLocalBackend_SweepOrphanMultiparts_NoPartsDir(t *testing.T) {
-	b := setupTestBackend(t)
-	res, err := b.SweepOrphanMultiparts(context.Background(), time.Now())
-	require.NoError(t, err)
-	assert.Equal(t, 0, res.Removed)
-	assert.Empty(t, res.Errors)
-}
-
-func TestLocalBackend_SweepOrphanMultiparts_AllFresh(t *testing.T) {
-	b := setupTestBackend(t)
-	partsRoot := filepath.Join(b.dataRoots[0], "parts")
-	require.NoError(t, os.MkdirAll(partsRoot, 0o755))
-	dir := filepath.Join(partsRoot, "active")
-	require.NoError(t, os.MkdirAll(dir, 0o755))
-
-	res, err := b.SweepOrphanMultiparts(context.Background(), time.Now().Add(-1*time.Hour))
-	require.NoError(t, err)
-	assert.Equal(t, 0, res.Removed)
-}
-
-func TestOperations_SweepOrphanMultiparts_DiscoversCapability(t *testing.T) {
-	b := setupTestBackend(t)
-	partsRoot := filepath.Join(b.dataRoots[0], "parts")
-	require.NoError(t, os.MkdirAll(filepath.Join(partsRoot, "old"), 0o755))
-	require.NoError(t, os.Chtimes(filepath.Join(partsRoot, "old"), time.Now().Add(-2*time.Hour), time.Now().Add(-2*time.Hour)))
-
-	ops := NewOperations(b)
-	res, err := ops.SweepOrphanMultiparts(context.Background(), time.Now().Add(-1*time.Hour))
-	require.NoError(t, err)
-	assert.Equal(t, 1, res.Removed)
-}
-
-type noSweepBackend struct{ Backend }
-
-func TestOperations_SweepOrphanMultiparts_NoCapability(t *testing.T) {
-	b := setupTestBackend(t)
-	ops := NewOperations(noSweepBackend{Backend: b})
-	res, err := ops.SweepOrphanMultiparts(context.Background(), time.Now())
-	require.NoError(t, err)
-	assert.Equal(t, 0, res.Removed)
-}
-
-func TestOperations_SweepOrphanMultiparts_BlockedByRecoveryGate(t *testing.T) {
-	b := setupTestBackend(t)
-	partsRoot := filepath.Join(b.dataRoots[0], "parts")
-	require.NoError(t, os.MkdirAll(filepath.Join(partsRoot, "old"), 0o755))
-	require.NoError(t, os.Chtimes(filepath.Join(partsRoot, "old"), time.Now().Add(-2*time.Hour), time.Now().Add(-2*time.Hour)))
-
-	gate := NewRecoveryWriteGate(b, ErrRecoveryWriteDisabled)
-	ops := NewOperations(gate)
-	res, err := ops.SweepOrphanMultiparts(context.Background(), time.Now().Add(-1*time.Hour))
-	require.ErrorIs(t, err, ErrRecoveryWriteDisabled)
-	assert.Equal(t, 0, res.Removed)
-
-	// Confirm the orphan dir was NOT removed (gate blocked the sweep).
-	_, statErr := os.Stat(filepath.Join(partsRoot, "old"))
-	assert.NoError(t, statErr, "gate should have prevented removal")
-}
-
-func TestLocalBackend_ListMultipartUploads(t *testing.T) {
-	b := setupTestBackend(t)
+func TestMultipartListUploads(t *testing.T) {
+	b := newBackend(t)
 	ctx := context.Background()
 	require.NoError(t, b.CreateBucket(ctx, "alpha"))
 	require.NoError(t, b.CreateBucket(ctx, "beta"))
@@ -344,14 +155,8 @@ func TestLocalBackend_ListMultipartUploads(t *testing.T) {
 	assert.Len(t, uploadsCap, 2, "maxUploads cap must apply")
 }
 
-func TestLocalBackend_ListMultipartUploads_BucketNotFound(t *testing.T) {
-	b := setupTestBackend(t)
-	_, err := b.ListMultipartUploads(context.Background(), "ghost", "", 0)
-	require.ErrorIs(t, err, ErrBucketNotFound)
-}
-
-func TestLocalBackend_ListParts(t *testing.T) {
-	b := setupTestBackend(t)
+func TestMultipartListParts(t *testing.T) {
+	b := newBackend(t)
 	ctx := context.Background()
 	require.NoError(t, b.CreateBucket(ctx, "mybucket"))
 	upload, err := b.CreateMultipartUpload(ctx, "mybucket", "obj.bin", "application/octet-stream")
@@ -386,10 +191,10 @@ func TestLocalBackend_ListParts(t *testing.T) {
 	assert.Equal(t, 2, capped[1].PartNumber)
 }
 
-func TestLocalBackend_ListParts_NotFound(t *testing.T) {
-	b := setupTestBackend(t)
+func TestMultipartListPartsNotFound(t *testing.T) {
+	b := newBackend(t)
 	ctx := context.Background()
 	require.NoError(t, b.CreateBucket(ctx, "mybucket"))
 	_, err := b.ListParts(ctx, "mybucket", "ghost.bin", "ghost-upload-id", 0)
-	require.ErrorIs(t, err, ErrUploadNotFound)
+	require.ErrorIs(t, err, storage.ErrUploadNotFound)
 }

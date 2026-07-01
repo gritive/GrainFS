@@ -1,7 +1,6 @@
 package storage
 
 import (
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -26,13 +25,6 @@ func TestParseLocator(t *testing.T) {
 			require.Equal(t, tt.wantRef, loc.Ref, "ref")
 		})
 	}
-}
-
-func TestLocalOpenSegmentRejectsCAS(t *testing.T) {
-	b := newTestLocalBackend(t)
-	store := localSegmentStore{b: b, bucket: "bkt", key: "obj"}
-	_, err := store.OpenSegment(context.Background(), SegmentRef{BlobID: "cas://b3-deadbeef", Size: 16})
-	require.ErrorIs(t, err, ErrCASNotImplemented)
 }
 
 func TestParseLocatorEdgeCases(t *testing.T) {

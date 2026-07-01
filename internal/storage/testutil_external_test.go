@@ -3,15 +3,14 @@ package storage_test
 import (
 	"testing"
 
-	"github.com/stretchr/testify/require"
-
-	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/cluster"
 )
 
-func newBackend(t *testing.T) *storage.LocalBackend {
+// newBackend returns the real single-node production backend for storage_test
+// integration tests. External test packages may import cluster (no import
+// cycle). Tests that need LocalBackend-internal behavior are removed with the
+// backend, not re-homed here.
+func newBackend(t *testing.T) *cluster.DistributedBackend {
 	t.Helper()
-	b, err := storage.NewLocalBackend(t.TempDir())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = b.Close() })
-	return b
+	return cluster.NewSingletonBackendForTest(t)
 }
