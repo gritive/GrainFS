@@ -8,8 +8,7 @@ zero-config cluster management and at-rest encryption on by default.
 ```bash
 DATA_DIR=./tmp
 make bin/grainfs
-CLUSTER_KEY=$(openssl rand -hex 32)
-./bin/grainfs serve --data "$DATA_DIR" --port 9000 --cluster-key "$CLUSTER_KEY"
+./bin/grainfs serve --data "$DATA_DIR" --port 9000
 ```
 
 In another terminal:
@@ -36,49 +35,44 @@ That's it. You have a working local S3 server.
 <details>
 <summary>Cluster (zero-CA join)</summary>
 
-A brand-new node can join with no pre-shared secrets — no `scp` of the KEK or
-`cluster.id`, no `--cluster-key` on the joiner. The leader serves a TCP
-join-listener (started automatically in cluster mode; pass `--join-listen-addr`
-to pin a stable host:port), mints a single-use invite bundle, and seals the
-cluster secrets to the joining node's key during the handshake.
+GrainFS uses Zero-CA invite join for new peers. There is no separate `cluster
+join` command and no `--cluster-key` flag in the current CLI. A fresh leader
+self-generates and seals the cluster transport key; a joining node receives the
+sealed bootstrap material through a single-use invite bundle.
 
-On the leader, mint an invite and copy the printed bundle token:
+Start or restart the leader with a stable Raft address and, for production, a
+stable join-listener address:
 
 ```bash
-./bin/grainfs cluster invite create --endpoint "$DATA_DIR/admin.sock"
+LEADER_DATA=./dataA
+./bin/grainfs serve \
+  --data "$LEADER_DATA" \
+  --node-id node-a \
+  --raft-addr node-a:7001 \
+  --join-listen-addr node-a:7443
 ```
 
-On the joining node, set the token and start `serve` with no cluster secrets:
+On the leader, mint an invite and copy the printed bundle token out-of-band:
+
+```bash
+./bin/grainfs cluster invite create \
+  --endpoint "$LEADER_DATA/admin.sock" \
+  --ttl 1h
+```
+
+On the joining node, set the token and start `serve` with no pre-copied cluster
+secrets:
 
 ```bash
 GRAINFS_INVITE_BUNDLE='<bundle-token>' ./bin/grainfs serve \
   --data ./dataB \
   --node-id node-b \
-  --raft-addr <nodeB>:7001
+  --raft-addr node-b:7001 \
+  --port 9001
 ```
 
 For production steps, verification, cutover, and revocation, see
 [`docs/operators/zero-ca-cluster-join.md`](docs/operators/zero-ca-cluster-join.md).
-
-</details>
-
-<details>
-<summary>Cluster (manual key staging)</summary>
-
-Phase A stages two files on each joining node: `<data>/keys/0.key` (active KEK) and `<data>/cluster.id` (cluster identity). Both must be copied from a healthy peer before running `cluster join`:
-
-```bash
-DATA_DIR=./dataB
-mkdir -p "$DATA_DIR/keys"
-scp <nodeA>:<nodeA-data-dir>/keys/0.key "$DATA_DIR/keys/0.key"
-scp <nodeA>:<nodeA-data-dir>/cluster.id "$DATA_DIR/cluster.id"
-chmod 0600 "$DATA_DIR/keys/0.key" "$DATA_DIR/cluster.id"
-./bin/grainfs cluster join <nodeA>:7001 \
-  --data "$DATA_DIR" \
-  --node-id node-b \
-  --bind-addr <nodeB>:7001 \
-  --cluster-key "$CLUSTER_KEY"
-```
 
 </details>
 

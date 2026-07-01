@@ -30,8 +30,9 @@ install -d -m 0700 "$DATA_DIR"
 - `default` bucket is auto-created with anonymous read/write access
 - `_grainfs` reserved bucket seeded
 
-Joining nodes need the same `<data>/keys/0.key` bytes and the same
-`<data>/cluster.id` bytes as the first node.
+New joining nodes do not hand-copy `<data>/keys/0.key`, `<data>/cluster.id`, or
+the cluster transport key. They receive the required sealed bootstrap material
+through the Zero-CA invite flow below.
 
 Verify (TTHW ~30s):
 
@@ -163,12 +164,12 @@ TLS is strongly recommended for any network-exposed authenticated deployment.
 > boot will refuse if it is set. The keystore is always at `<data>/keys/0.key`.
 > For test environments only, `GRAINFS_KEK_DIR` overrides the directory.
 
-By default, the first node auto-generates `<data>/keys/0.key`. The contents
-must be identical on every node — stage the file out-of-band (e.g. `scp` from
-a healthy peer) before starting a joining node. Do not replace the KEK after
-data exists unless you are restoring the same 32-byte cluster KEK; GrainFS
-also keeps each node's raft-store sidecar sealed under the active KEK and
-rewraps it after KEK rotation.
+By default, the first node auto-generates `<data>/keys/0.key`. New peers receive
+the cluster KEK through Zero-CA invite join; do not stage the KEK with `scp` for
+a fresh joining node. Do not replace the KEK after data exists unless you are
+restoring the same 32-byte cluster KEK for that node. GrainFS also keeps each
+node's raft-store sidecar sealed under the active KEK and rewraps it after KEK
+rotation.
 
 ### DEK rotation
 
