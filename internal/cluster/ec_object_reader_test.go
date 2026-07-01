@@ -254,7 +254,14 @@ func TestECObjectReader_ReadObject_FallsBackToParityShard(t *testing.T) {
 	require.Equal(t, data, got)
 }
 
-func TestECObjectReader_ReadObject_MarksUnhealthyPeerOnFetchError(t *testing.T) {
+// TestECObjectReader_OpenObject_MarksUnhealthyPeerOnFetchError guards that the
+// streaming open path (OpenObject → openShardReaders → remoteShardEndpoint.OpenShardStream)
+// marks a failing remote shard's node as unhealthy. Shard 0 is on node-b (remote,
+// returns rpc timeout); shards 1 and 2 (parity) come from node-a. The open fails
+// at the RPC boundary, which triggers remoteShardEndpoint.markHealth(false) before
+// falling back to parity. Reconstruction via shards 1+2 must still yield the
+// original data.
+func TestECObjectReader_OpenObject_MarksUnhealthyPeerOnFetchError(t *testing.T) {
 	cfg := ECConfig{DataShards: 2, ParityShards: 1}
 	data := []byte("peer health test")
 	fetcher := &fakeECObjectShardFetcher{
@@ -273,13 +280,18 @@ func TestECObjectReader_ReadObject_MarksUnhealthyPeerOnFetchError(t *testing.T) 
 	rec.K = cfg.DataShards
 	rec.M = cfg.ParityShards
 
-	got, err := r.ReadObject(context.Background(), "bucket", "key", rec)
+	got, err := readObjectViaOpen(t, r, "bucket", "key", rec, int64(len(data)))
 	require.NoError(t, err)
 	require.Equal(t, data, got)
 	require.Contains(t, health.unhealthy, "node-b")
 }
 
-func TestECObjectReader_ReadObject_MarksHealthyPeerOnSuccess(t *testing.T) {
+// TestECObjectReader_OpenObject_MarksHealthyPeerOnSuccess guards that the
+// streaming open path (OpenObject → openShardReaders → remoteShardEndpoint.OpenShardStream)
+// marks a successful remote shard's node as healthy. Shard 0 is on node-b (remote,
+// succeeds); shards 1 and 2 come from node-a (local). The open succeeds at the
+// RPC boundary, which triggers remoteShardEndpoint.markHealth(true).
+func TestECObjectReader_OpenObject_MarksHealthyPeerOnSuccess(t *testing.T) {
 	cfg := ECConfig{DataShards: 2, ParityShards: 1}
 	data := []byte("peer health happy path")
 	fetcher := &fakeECObjectShardFetcher{}
@@ -297,7 +309,7 @@ func TestECObjectReader_ReadObject_MarksHealthyPeerOnSuccess(t *testing.T) {
 	rec.K = cfg.DataShards
 	rec.M = cfg.ParityShards
 
-	got, err := r.ReadObject(context.Background(), "bucket", "key", rec)
+	got, err := readObjectViaOpen(t, r, "bucket", "key", rec, int64(len(data)))
 	require.NoError(t, err)
 	require.Equal(t, data, got)
 	require.Contains(t, health.healthy, "node-b")
