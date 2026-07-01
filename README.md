@@ -11,11 +11,28 @@ zero-config cluster management and at-rest encryption on by default.
 > claims should be checked against the compatibility docs, benchmark methodology,
 > `CHANGELOG.md`, and [launch claims checklist](docs/reference/launch-claims-checklist.md).
 
+## Install / Try It
+
+`GrainFS` does not publish release binaries, container images, or Homebrew
+packages yet. For this technical preview, the supported evaluator path is a
+source checkout with Go 1.26+; it does not require the full contributor toolchain
+or `golangci-lint`.
+
+```bash
+git clone https://github.com/gritive/GrainFS.git
+cd GrainFS
+go build -o bin/grainfs ./cmd/grainfs/
+```
+
+Contributor builds should use [`make build`](#development), which also runs the
+repository lint gates.
+
 ## Quick Start (2-5 minutes)
+
+After installing `bin/grainfs` from the source-build step above:
 
 ```bash
 DATA_DIR=./tmp
-make bin/grainfs
 ./bin/grainfs serve --data "$DATA_DIR" --port 9000
 ```
 
