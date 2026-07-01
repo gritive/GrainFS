@@ -967,6 +967,8 @@ func TestOpenShardReaders_SmallObject_StreamsNotBuffers(t *testing.T) {
 // on the streaming path (which handles degraded reads via RS reconstruction).
 // Before Task C this fails because small redundant objects use bufferedShardReaders
 // (readShards path → readShardCalls > 0); after Task C it streams (ReadShardStream).
+// The test reads through OpenObject to verify parity reconstruction yields the
+// original bytes, not just that streaming dispatch occurred.
 func TestOpenShardReaders_SmallDegradedObject_StreamsAndRecovers(t *testing.T) {
 	cfg := ECConfig{DataShards: 1, ParityShards: 1}
 	objectSize := int64(4 << 10) // 4KiB — under old 4MiB limit
@@ -988,10 +990,14 @@ func TestOpenShardReaders_SmallDegradedObject_StreamsAndRecovers(t *testing.T) {
 	rec.K = cfg.DataShards
 	rec.M = cfg.ParityShards
 
-	_, readers, err := r.openShardReaders(context.Background(), "bucket", "key", rec, objectSize)
+	// Read through OpenObject (not just openShardReaders) to verify that parity
+	// reconstruction actually yields the original bytes, not just that dispatch happened.
+	rc, err := r.OpenObject(context.Background(), "bucket", "key", rec, objectSize)
 	require.NoError(t, err, "degraded read must succeed when parity is available")
-	defer closeECShardReaders(readers)
-
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, payload, got, "degraded small object must reconstruct to original bytes via parity")
 	require.Zero(t, fetcher.readShardCalls, "degraded small object must NOT use the buffered path")
 	require.Greater(t, fetcher.readShardStreamCalls, 0, "degraded small object must use ReadShardStream")
 }
@@ -999,12 +1005,13 @@ func TestOpenShardReaders_SmallDegradedObject_StreamsAndRecovers(t *testing.T) {
 // TestOpenShardReaders_ZeroSizeObject_Streams guards that a zero-length redundant
 // EC object is handled correctly on the streaming path. Before Task C, objectSize=0
 // satisfies the `<= maxECPooledReadObjectSize` condition and routes to bufferedShardReaders.
+// The test reads through OpenObject to verify 0-length output — a dispatch-only check
+// cannot catch zero-size reconstruct bugs (e.g. header parsing, origSize=0 early-returns).
 func TestOpenShardReaders_ZeroSizeObject_Streams(t *testing.T) {
 	cfg := ECConfig{DataShards: 1, ParityShards: 1}
-	objectSize := int64(0)
 
 	fetcher := &fakeECObjectShardFetcher{}
-	// Build zero-size shards (header only).
+	// Build zero-size shards (header only, origSize=0).
 	buildFakeShards(t, fetcher, "bucket", "key", cfg, []byte{})
 
 	r := ecObjectReader{
@@ -1016,10 +1023,14 @@ func TestOpenShardReaders_ZeroSizeObject_Streams(t *testing.T) {
 	rec.K = cfg.DataShards
 	rec.M = cfg.ParityShards
 
-	_, readers, err := r.openShardReaders(context.Background(), "bucket", "key", rec, objectSize)
+	// Read through OpenObject (not just openShardReaders) to exercise the full
+	// reconstruct path and verify 0-length output.
+	rc, err := r.OpenObject(context.Background(), "bucket", "key", rec, 0)
 	require.NoError(t, err)
-	defer closeECShardReaders(readers)
-
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Empty(t, got, "zero-size object must produce empty output")
 	require.Zero(t, fetcher.readShardCalls, "zero-size object must NOT use the buffered path")
 	require.Greater(t, fetcher.readShardStreamCalls, 0, "zero-size object must use ReadShardStream")
 }
