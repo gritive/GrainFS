@@ -5,6 +5,18 @@ competitive comparisons. Every public claim should map to repo evidence and use
 wording that does not outrun the compatibility matrix, benchmark methodology, or
 removal history.
 
+## Launch positioning
+
+- Position `GrainFS` as a **technical preview** for local-first S3-compatible
+  storage evaluation, compatibility testing, and operator feedback.
+- Lead with the credible wedge: a working S3-compatible object store with
+  documented encryption, IAM, cluster, metrics, and recovery surfaces.
+- Do not describe the project as GA, production-ready, a drop-in replacement for
+  AWS S3/MinIO/Ceph/etc., or a broad protocol platform unless a linked evidence
+  row and owner approval explicitly support that narrower claim.
+- Avoid marketing retired or currently absent surfaces. NFSv4, 9P, NBD / volume
+  devices, and Iceberg catalog/log-lake support are not currently shipped.
+
 ## Review rules
 
 - Treat [`s3-compatibility.md`](s3-compatibility.md) as the source of truth for
@@ -17,8 +29,8 @@ removal history.
   volume devices, and Iceberg catalog/log-lake support are removal-history
   references only.
 - Use `not supported` or `not planned` wording for surfaces marked that way in
-  the current docs. Use `roadmap` or `future` only when an accepted roadmap item
-  or owner-approved plan exists.
+  the current docs. Use `future` only when an accepted owner-approved plan
+  exists.
 - Get owner approval before using any comparison against MinIO, Ceph, SeaweedFS,
   JuiceFS, Garage, cloud S3-compatible storage, or other named products.
 
@@ -33,8 +45,8 @@ removal history.
 | Cluster durability | `README.md` cluster durability row; [`../architecture/durability-and-placement.md`](../architecture/durability-and-placement.md); [`../operators/runbook.md`](../operators/runbook.md) | "GrainFS provides zero-config cluster placement with Raft-managed control plane, erasure-coded object data, and quorum metadata." | Do not equate GrainFS internal replication with S3 bucket replication; the S3 matrix explicitly does not claim bucket replication compatibility. | Yes. |
 | Operations | `README.md` operations row; [`../operators/runbook.md`](../operators/runbook.md); [`../operators/sli-slo.md`](../operators/sli-slo.md) | "Operators get documented runbooks, metrics/SLO guidance, balancer status, incident views, and recovery-drill procedures." | This repository has no configured production URL or automatic post-deploy canary target. Avoid claiming managed service operations. | Yes for launch copy. |
 | Performance | `README.md` performance tables; [`benchmarks.md`](benchmarks.md); `benchmarks/README.md` | "In the latest documented encrypted GCP `warp` runs, GrainFS measured 215.50 MiB/s PUT and 437.02 MiB/s GET single-node, and 434.79 MiB/s PUT and 1834.58 MiB/s GET on a 4-node cluster, under the stated benchmark conditions." | Always include benchmark conditions. Do not generalize to all workloads, all object sizes, or full product superiority. Do not cite local-only or incomplete benchmark artifacts. | Yes, always. |
-| NFSv4 | `CHANGELOG.md` entries for `0.0.637.0` and `0.0.638.0` | "NFSv4 is not currently shipped by GrainFS." | Not a launch claim. Do not list NFSv4 as supported, partial, or roadmap without a new accepted plan. | Yes if mentioned publicly. |
-| 9P | `CHANGELOG.md` entries for `0.0.636.0` and `0.0.638.0` | "9P is not currently shipped by GrainFS." | Not a launch claim. Do not list 9P as supported, partial, or roadmap without a new accepted plan. | Yes if mentioned publicly. |
+| NFSv4 | `CHANGELOG.md` entries for `0.0.637.0` and `0.0.638.0` | "NFSv4 is not currently shipped by GrainFS." | Not a launch claim. Do not list NFSv4 as supported, partial, or future work without a new accepted plan. | Yes if mentioned publicly. |
+| 9P | `CHANGELOG.md` entries for `0.0.636.0` and `0.0.638.0` | "9P is not currently shipped by GrainFS." | Not a launch claim. Do not list 9P as supported, partial, or future work without a new accepted plan. | Yes if mentioned publicly. |
 | NBD / volume devices | `CHANGELOG.md` entries noting the removed volume/NBD subsystem and removed leftover NBD references | "NBD / volume-device support is not currently shipped by GrainFS." | Not a launch claim. Do not imply block-device or volume service support. | Yes if mentioned publicly. |
 | Iceberg catalog / log lake | `CHANGELOG.md` entries for `0.0.663.0` and `0.0.664.0`; `internal/protocred/iceberg_removal_test.go` | "GrainFS is currently a pure S3 plus Web UI server; the Iceberg catalog and audit log lake were removed." | Not a launch claim. Do not claim DuckDB/Trino/Spark Iceberg catalog integration or Iceberg-backed audit analytics. | Yes if mentioned publicly. |
 | Product comparisons | [`benchmarks.md`](benchmarks.md) comparison principles; current compatibility matrix | "Compare only the specific tested surface: e.g. a particular S3 API/client row or a benchmark run with matching durability, encryption, object size, concurrency, and hardware." | Do not compare against MinIO, Ceph, SeaweedFS, JuiceFS, Garage, or cloud object stores without a row-by-row evidence map and owner approval. | Yes, always. |

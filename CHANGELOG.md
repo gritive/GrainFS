@@ -8,6 +8,12 @@
   operations, performance, and retired protocol surfaces to repo evidence and safe caveats. The README
   and docs index now link to it so marketing copy and competitive comparisons have an explicit
   pre-publication evidence gate.
+- **Technical-preview positioning for launch-facing docs.** The README, docs index,
+  and launch claims checklist now state that GrainFS is positioned for local-first
+  S3-compatible evaluation and operator feedback, not as a GA production storage
+  replacement. The wording names the credible launch wedge and routes broader
+  production, protocol-parity, and competitive claims back through the evidence
+  checklist.
 
 ## [0.0.776.0] - 2026-07-01
 
