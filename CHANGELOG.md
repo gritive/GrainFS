@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.779.0] - 2026-07-02
+
+### Fixed
+- **`ListMultipartUploads` on a non-existent bucket no longer returns an empty `200`.**
+  A `GET /<bucket>?uploads` against a bucket that does not exist now rejects the request the
+  same way `ListObjects`/`ListObjectVersions` do — `404 NoSuchBucket`, or `403 AccessDenied`
+  when the caller has no grant for the bucket — instead of listing it as an empty success. The
+  bucket-existence check runs in both the single-node backend and the cluster coordinator
+  (before group fan-out).
+
+### Changed
+- **Append-segment metadata codec now preserves `SegmentRef.StoredSize` (internal, no user-facing change).**
+  The append side-record wire codec silently dropped the per-segment stored (compressed) size, the
+  same parity gap the object-metadata codec fix closed earlier. It is now encoded as a
+  trailing-optional field — byte-identical to the previous format while append-side segments are
+  uncompressed, so no rolling-upgrade window opens — guarding a future append-side compression change
+  from reading a compressed blob as plaintext.
+
 ## [0.0.778.0] - 2026-07-02
 
 ### Changed
