@@ -122,6 +122,13 @@ func encodeAppendSegment(seg SegmentRef) []byte {
 	for _, nodeID := range seg.NodeIDs {
 		writeString(nodeID)
 	}
+	// StoredSize is a trailing-optional field (mirrors clusterpb.SegmentRef's
+	// conditional stored_size encode). It is written only when non-zero, so while
+	// append-side segments are never compressed (StoredSize==0) the bytes are
+	// identical to the pre-StoredSize format and no rolling-upgrade window opens.
+	if seg.StoredSize != 0 {
+		_ = binary.Write(&buf, binary.BigEndian, seg.StoredSize)
+	}
 	return buf.Bytes()
 }
 
@@ -203,6 +210,19 @@ func decodeAppendSegment(data []byte) (SegmentRef, error) {
 		}
 		nodeIDs = append(nodeIDs, nodeID)
 	}
+	// StoredSize is trailing-optional: pre-StoredSize records (and current
+	// uncompressed segments) have no trailing bytes and decode to StoredSize==0.
+	// Read it only when a full int64 is present; a partial (1-7 byte) or >8-byte
+	// tail still fails the trailing-bytes check below.
+	var storedSize int64
+	if r.Len() >= 8 {
+		if err := binary.Read(r, binary.BigEndian, &storedSize); err != nil {
+			return SegmentRef{}, fmt.Errorf("append segment: stored size: %w", err)
+		}
+		if storedSize < 0 {
+			return SegmentRef{}, fmt.Errorf("append segment: negative stored size %d", storedSize)
+		}
+	}
 	if r.Len() != 0 {
 		return SegmentRef{}, fmt.Errorf("append segment: trailing bytes %d", r.Len())
 	}
@@ -216,6 +236,7 @@ func decodeAppendSegment(data []byte) (SegmentRef, error) {
 		ECParity:         ecParity,
 		StripeBytes:      stripeBytes,
 		NodeIDs:          nodeIDs,
+		StoredSize:       storedSize,
 	}, nil
 }
 
