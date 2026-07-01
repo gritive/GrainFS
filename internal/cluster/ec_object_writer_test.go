@@ -597,8 +597,7 @@ type fakeECObjectWriterShards struct {
 	mu                  sync.Mutex
 	writeShardErr       map[string]error
 	writeShardBlock     map[string]chan struct{}
-	bufferedLocalWrites []fakeECObjectWriterLocalWrite
-	localStreamWrites   []fakeECObjectWriterLocalWrite // stream local writes (body not stored)
+	localStreamWrites []fakeECObjectWriterLocalWrite // stream local writes (body not stored)
 	bufferedWrites      []fakeECObjectWriterBufferedWrite
 	streamWrites        []fakeECObjectWriterStreamWrite
 	stagedWrites        []fakeECObjectWriterStagedWrite
@@ -719,20 +718,8 @@ func (f *fakeECObjectWriterShards) WriteShardStreamStaged(ctx context.Context, p
 	return nil
 }
 
-func (f *fakeECObjectWriterShards) WriteLocalShard(bucket, key string, shardIdx int, data []byte) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.bufferedLocalWrites = append(f.bufferedLocalWrites, fakeECObjectWriterLocalWrite{
-		bucket:   bucket,
-		key:      key,
-		shardIdx: shardIdx,
-		body:     append([]byte(nil), data...),
-	})
+func (f *fakeECObjectWriterShards) WriteLocalShardContext(_ context.Context, _ string, _ string, _ int, _ []byte) error {
 	return nil
-}
-
-func (f *fakeECObjectWriterShards) WriteLocalShardContext(ctx context.Context, bucket, key string, shardIdx int, data []byte) error {
-	return f.WriteLocalShard(bucket, key, shardIdx, data)
 }
 
 func (f *fakeECObjectWriterShards) WriteShard(ctx context.Context, peer, bucket, key string, shardIdx int, data []byte) error {
