@@ -141,12 +141,25 @@ func (r *asyncPrefetchReader) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-func (r *asyncPrefetchReader) Close() error {
-	if !r.closed.CompareAndSwap(false, true) {
-		return nil
+// signalStop tells the background producer to stop, without waiting for it to
+// exit. It does NOT block, so a producer stalled in io.ReadFull on a remote
+// shard body does not delay the caller. Idempotent; a later Close is a no-op on
+// the stop channel.
+func (r *asyncPrefetchReader) signalStop() {
+	if r.closed.CompareAndSwap(false, true) {
+		close(r.stop)
 	}
-	close(r.stop)
-	// Drain any in-flight chunks so the producer can finish.
+}
+
+// awaitDrained drains buffered chunks and waits for the background producer to
+// exit, releasing pooled buffers. It blocks until the producer's in-flight
+// io.ReadFull returns (in production bounded by the idle read timeout), so it
+// must run OFF the caller's synchronous Close path when promptness matters.
+//
+// It touches curRef/cur, which are otherwise owned by the foreground Read, so
+// the caller must guarantee no concurrent Read — true once Close has been
+// requested (the consumer is done reading).
+func (r *asyncPrefetchReader) awaitDrained() {
 	for msg := range r.ch {
 		if msg.ref != nil {
 			releaseAsyncPrefetchChunk(msg.ref)
@@ -157,5 +170,10 @@ func (r *asyncPrefetchReader) Close() error {
 		releaseAsyncPrefetchChunk(r.curRef)
 		r.curRef = nil
 	}
+}
+
+func (r *asyncPrefetchReader) Close() error {
+	r.signalStop()
+	r.awaitDrained()
 	return nil
 }

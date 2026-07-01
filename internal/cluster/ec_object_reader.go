@@ -85,16 +85,17 @@ func (r ecObjectReader) OpenObject(ctx context.Context, bucket, shardKey string,
 		}}, nil
 	}
 
-	rc, err := newECReconstructStreamReaderWithPrefetch(recCfg, readers)
+	rc, err := newECReconstructStreamReaderWithPrefetch(recCfg, readers, func() {
+		closeECShardReaders(shardReaders)
+	})
 	if err != nil {
 		closeECShardReaders(shardReaders)
 		return nil, err
 	}
-	return &multiReadCloser{Reader: rc, close: func() error {
-		err := rc.Close()
-		closeECShardReaders(shardReaders)
-		return err
-	}}, nil
+	// rc.Close owns shard-reader teardown (detached, after the background
+	// prefetch producers stop reading — see newECReconstructStreamReaderWithPrefetch),
+	// so no separate closeECShardReaders here.
+	return rc, nil
 }
 
 // ReadAt reads len(buf) bytes at offset within the EC object without

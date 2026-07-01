@@ -152,7 +152,7 @@ func TestECReconstructStreamReader_SmallReadsRoundTrip(t *testing.T) {
 		readers[i] = bytes.NewReader(shards[i])
 	}
 
-	r, err := newECReconstructStreamReaderWithPrefetch(cfg, readers)
+	r, err := newECReconstructStreamReaderWithPrefetch(cfg, readers, nil)
 	require.NoError(t, err)
 	var got bytes.Buffer
 	buf := make([]byte, 7)
@@ -182,7 +182,7 @@ func TestECReconstructStreamReader_MultiWindowRoundTrip(t *testing.T) {
 		readers[i] = bytes.NewReader(shards[i])
 	}
 
-	r, err := newECReconstructStreamReaderWithPrefetch(cfg, readers)
+	r, err := newECReconstructStreamReaderWithPrefetch(cfg, readers, nil)
 	require.NoError(t, err)
 	got, err := io.ReadAll(r)
 	require.NoError(t, err)
