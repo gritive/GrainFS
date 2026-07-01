@@ -32,6 +32,35 @@ type readAtRangeReader struct {
 	bufPos         int
 	bufEnd         int
 	pooled         bool
+
+	// prepared, when non-nil, is a stateful per-GET ReaderAt that caches
+	// per-read state (e.g. one decompressed EC segment) across refills. It is
+	// built ONCE by newReadAtRangeReader; preparedCleanup releases it on Close.
+	prepared        storage.ObjectRangeReaderAt
+	preparedCleanup func()
+}
+
+// newReadAtRangeReader builds a range reader over [offset, offset+length) and,
+// when the backend offers the stateful PreparedObjectReaderAt fast path, wires it
+// once so refills reuse its per-GET cache instead of re-deriving on every call.
+func newReadAtRangeReader(ctx context.Context, backend objectReadAtBackend, obj *storage.Object, bucket, key string, offset, length int64) *readAtRangeReader {
+	r := &readAtRangeReader{
+		ctx:     ctx,
+		backend: backend,
+		obj:     obj,
+		bucket:  bucket,
+		key:     key,
+		offset:  offset,
+		length:  length,
+	}
+	if obj != nil {
+		if f, ok := backend.(storage.PreparedObjectReaderAt); ok {
+			prepared, cleanup := f.PreparedObjectReaderAt(ctx, bucket, key, obj)
+			r.prepared = prepared
+			r.preparedCleanup = cleanup
+		}
+	}
+	return r
 }
 
 func (r *readAtRangeReader) Read(p []byte) (int, error) {
@@ -75,6 +104,9 @@ func (r *readAtRangeReader) Read(p []byte) (int, error) {
 }
 
 func (r *readAtRangeReader) readAt(offset int64, buf []byte) (int, error) {
+	if r.prepared != nil {
+		return r.prepared.ReadAt(offset, buf)
+	}
 	if r.obj != nil {
 		if prepared, ok := r.backend.(storage.PreparedReadAt); ok {
 			return prepared.ReadAtObject(r.ctx, r.bucket, r.key, r.obj, offset, buf)
@@ -92,6 +124,11 @@ func (r *readAtRangeReader) Close() error {
 	r.bufPos = 0
 	r.bufEnd = 0
 	r.pooled = false
+	if r.preparedCleanup != nil {
+		r.preparedCleanup()
+		r.preparedCleanup = nil
+		r.prepared = nil
+	}
 	return nil
 }
 

@@ -5,8 +5,10 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
+	"errors"
 	"io"
 	"os"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -496,6 +498,132 @@ func TestReadAtSegment_CompressedExactTail(t *testing.T) {
 	}
 	require.Equal(t, tailLen, n, "expected to read all tail bytes")
 	require.Equal(t, plaintext[off:off+n], buf[:n], "range bytes mismatch at exact tail offset %d", off)
+}
+
+// readRangeViaRefills drains [start, start+length) of obj through 5 MiB refills,
+// mirroring the server-side readAtRangeReader.readAt dispatch: prefer the
+// stateful PreparedObjectReaderAt fast path, else fall back to the stateless
+// per-call ReadAtObject. It folds the served bytes into a rolling md5 so callers
+// can assert byte-correctness without allocating a full-body buffer.
+func readRangeViaRefills(t *testing.T, b *DistributedBackend, bucket, key string, obj *storage.Object, start, length int64) [16]byte {
+	t.Helper()
+	const refill = 5 << 20
+	ctx := context.Background()
+
+	var readerAt func(offset int64, buf []byte) (int, error)
+	cleanup := func() {}
+	if f, ok := interface{}(b).(storage.PreparedObjectReaderAt); ok {
+		pr, cl := f.PreparedObjectReaderAt(ctx, bucket, key, obj)
+		if cl != nil {
+			cleanup = cl
+		}
+		if pr != nil {
+			readerAt = pr.ReadAt
+		}
+	}
+	defer cleanup()
+	if readerAt == nil {
+		readerAt = func(offset int64, buf []byte) (int, error) {
+			return b.ReadAtObject(ctx, bucket, key, obj, offset, buf)
+		}
+	}
+
+	h := md5.New()
+	buf := make([]byte, refill)
+	var pos int64
+	for pos < length {
+		want := int64(refill)
+		if r := length - pos; want > r {
+			want = r
+		}
+		n, err := readerAt(start+pos, buf[:want])
+		if n > 0 {
+			h.Write(buf[:n])
+			pos += int64(n)
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			t.Fatalf("readAt at offset %d: %v", start+pos, err)
+		}
+		if n == 0 {
+			break
+		}
+	}
+	require.Equal(t, length, pos, "short range read")
+	var sum [16]byte
+	copy(sum[:], h.Sum(nil))
+	return sum
+}
+
+// TestGetObjectRange_LargeRangeDoesNotAllocateFullBody guards against Bug #1: a
+// bytes-range GET on a compressed multi-segment EC object must decompress each
+// touched segment ONCE per GET, not once per 5 MiB server refill.
+//
+// The object's first segment is ~15 MiB, so a full-first-segment range drains in
+// 3 refills. On the stateless per-call path (pre-fix) each refill re-opens and
+// re-decompresses the whole 15 MiB segment; on the cached stateful path it is
+// decompressed once. The bar is 2*segSize: it clears the inherent single-segment
+// decompress but not the repeated one.
+//
+// Measured TotalAlloc deltas (this machine):
+//
+//	RED  (stateless per-call ReadAtObject): 50 MiB (52650144 B) — 3 refills * ~15 MiB decompress + buffers -> FAILS (> 30 MiB bar)
+//	GREEN (cached stateful reader):         20 MiB (21153432 B) — 1 decompress + 5 MiB refill buf -> PASSES
+func TestGetObjectRange_LargeRangeDoesNotAllocateFullBody(t *testing.T) {
+	b := setupECBackend(t)
+	b.chunkedPutChunkSize = 15 << 20 // force a ~15 MiB first segment
+	b.SetShardGroupSource(&fakeShardGroupSource{groups: map[string]ShardGroupEntry{
+		"group-a": {ID: "group-a", PeerIDs: []string{"self", "self", "self"}},
+	}})
+
+	const (
+		bucket = "range-alloc-bucket"
+		key    = "range-alloc-object"
+	)
+	// Highly compressible ~16 MiB → 2 segments (~15 MiB + ~1 MiB), both StoredSize>0.
+	plaintext := bytes.Repeat([]byte("range-alloc-guard "), (16<<20)/18+1)[:16<<20]
+	sp := makeSpool(t, plaintext)
+
+	require.NoError(t, b.CreateBucket(context.Background(), bucket))
+	_, err := b.putChunked(context.Background(),
+		bucket, key, "v1", sp, "application/octet-stream",
+		nil, "", 0, 0, false, "", nil, nil, nil)
+	require.NoError(t, err)
+
+	obj, err := b.HeadObject(context.Background(), bucket, key)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(obj.Segments), 2, "precondition: multi-segment object")
+	segSize := obj.Segments[0].Size
+	require.Greater(t, segSize, int64(11<<20), "first segment must exceed 11 MiB so a full-segment range forces >=3 refills into it")
+	require.Greater(t, obj.Segments[0].StoredSize, int64(0), "precondition: compressed segment (StoredSize>0)")
+
+	// Range covers exactly the first segment [0, segSize).
+	const start = 0
+
+	// Warm up a SEPARATE reader/GET so one-time sync.Pool + zstd-decoder-pool
+	// allocations don't count against the measured drain (and don't prime the
+	// measured reader's per-GET cache).
+	_ = readRangeViaRefills(t, b, bucket, key, obj, start, segSize)
+
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	got := readRangeViaRefills(t, b, bucket, key, obj, start, segSize)
+	runtime.ReadMemStats(&after)
+	delta := after.TotalAlloc - before.TotalAlloc
+
+	// Byte-correctness: the served bytes must equal plaintext[start:start+segSize].
+	// (Guards a cache-hit that slices at the wrong offset — the alloc bar alone
+	// would not catch that.)
+	want := md5.Sum(plaintext[start : start+int(segSize)])
+	require.Equal(t, want, got, "range GET returned wrong bytes")
+
+	bar := uint64(2 * segSize)
+	require.Less(t, delta, bar,
+		"range GET re-decompressed the segment across refills: delta=%d MiB, bar=%d MiB (segSize=%d MiB)",
+		delta>>20, bar>>20, segSize>>20)
 }
 
 func makeChunkedTestBody(size int) []byte {

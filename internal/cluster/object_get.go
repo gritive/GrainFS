@@ -64,6 +64,15 @@ func (b *DistributedBackend) ReadAtObject(ctx context.Context, bucket, key strin
 }
 
 func (b *DistributedBackend) readAtPreparedObject(ctx context.Context, bucket, key string, obj *storage.Object, placementMeta PlacementMeta, offset int64, buf []byte) (int, error) {
+	return b.readAtPreparedObjectStore(ctx, nil, bucket, key, obj, placementMeta, offset, buf)
+}
+
+// readAtPreparedObjectStore is readAtPreparedObject with an optional reusable
+// clusterSegmentStore for the multi-segment branch. A nil store yields the
+// stateless behavior (a fresh store per call). A caller-owned store (see
+// PreparedObjectReaderAt) survives across a ranged GET's refills so its
+// single-decompressed-segment cache actually hits.
+func (b *DistributedBackend) readAtPreparedObjectStore(ctx context.Context, store *clusterSegmentStore, bucket, key string, obj *storage.Object, placementMeta PlacementMeta, offset int64, buf []byte) (int, error) {
 	if offset >= obj.Size {
 		return 0, io.EOF
 	}
@@ -80,7 +89,9 @@ func (b *DistributedBackend) readAtPreparedObject(ctx context.Context, bucket, k
 		return b.readAtAppendable(ctx, bucket, key, obj, offset, buf)
 	}
 	if !obj.IsAppendable && len(obj.Segments) > 0 {
-		store := &clusterSegmentStore{b: b, bucket: bucket, key: key, obj: obj}
+		if store == nil {
+			store = &clusterSegmentStore{b: b, bucket: bucket, key: key, obj: obj}
+		}
 		return readAtChunkedSegments(ctx, store, obj.Segments, offset, buf)
 	}
 
@@ -99,6 +110,62 @@ func (b *DistributedBackend) readAtPreparedObject(ctx context.Context, bucket, k
 	}
 
 	return b.readAtViaGetObject(ctx, bucket, key, offset, buf)
+}
+
+// distributedObjectRangeReader is a stateful, single-GET-scoped ReaderAt. It
+// pins the placement metadata and (for chunked objects) a reusable segment store
+// whose single-decompressed-segment cache survives across the GET's refills.
+type distributedObjectRangeReader struct {
+	b             *DistributedBackend
+	ctx           context.Context
+	bucket, key   string
+	obj           *storage.Object
+	placementMeta PlacementMeta
+	store         *clusterSegmentStore // reused across refills; nil for non-chunked layouts
+}
+
+func (r *distributedObjectRangeReader) ReadAt(offset int64, buf []byte) (int, error) {
+	return r.b.readAtPreparedObjectStore(r.ctx, r.store, r.bucket, r.key, r.obj, r.placementMeta, offset, buf)
+}
+
+// PreparedObjectReaderAt returns a stateful reader scoped to one ranged GET.
+// For a compressed chunked object it caches the last decompressed segment across
+// refills, so a range GET decompresses each touched segment once instead of once
+// per 5 MiB refill. A nil reader (quarantined / nil obj) tells the caller to use
+// the stateless dispatch instead.
+func (b *DistributedBackend) PreparedObjectReaderAt(ctx context.Context, bucket, key string, obj *storage.Object) (storage.ObjectRangeReaderAt, func()) {
+	if obj == nil {
+		return nil, func() {}
+	}
+	if err := b.quarantineGate(bucket, key, obj.VersionID); err != nil {
+		// Let the stateless path surface the quarantine error on first read.
+		return nil, func() {}
+	}
+	r := &distributedObjectRangeReader{
+		b:      b,
+		ctx:    ctx,
+		bucket: bucket,
+		key:    key,
+		obj:    obj,
+		placementMeta: PlacementMeta{
+			VersionID:        obj.VersionID,
+			ECData:           obj.ECData,
+			ECParity:         obj.ECParity,
+			StripeBytes:      obj.StripeBytes,
+			NodeIDs:          obj.NodeIDs,
+			PlacementGroupID: obj.PlacementGroupID,
+		},
+	}
+	if !obj.IsAppendable && len(obj.Segments) > 0 {
+		r.store = &clusterSegmentStore{b: b, bucket: bucket, key: key, obj: obj}
+	}
+	cleanup := func() {
+		if r.store != nil {
+			r.store.cachedSegPlaintext = nil
+			r.store.cachedSegKey = ""
+		}
+	}
+	return r, cleanup
 }
 
 func (b *DistributedBackend) PreferReadAt(bucket string) bool {

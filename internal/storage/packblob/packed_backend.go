@@ -826,6 +826,23 @@ func (pb *PackedBackend) ReadAtObject(ctx context.Context, bucket, key string, o
 	return pb.ReadAt(ctx, bucket, key, offset, buf)
 }
 
+// PreparedObjectReaderAt forwards the stateful ranged-GET fast path to the inner
+// backend for objects that are NOT packed. Packed small objects are immutable
+// blob slices served directly from the pack file (never EC-compressed segments),
+// so they get no benefit and return a nil reader (stateless dispatch).
+func (pb *PackedBackend) PreparedObjectReaderAt(ctx context.Context, bucket, key string, obj *storage.Object) (storage.ObjectRangeReaderAt, func()) {
+	noop := func() {}
+	if v, packed := pb.index.Load(packedKey{bucket: bucket, key: key}); packed {
+		if entry := v.(*indexEntry); entry.Refcount.Load() > 0 {
+			return nil, noop
+		}
+	}
+	if f, ok := pb.inner.(storage.PreparedObjectReaderAt); ok {
+		return f.PreparedObjectReaderAt(ctx, bucket, key, obj)
+	}
+	return nil, noop
+}
+
 // WriteAt is a pass-through to inner. Packed (small S3 object) entries are
 // immutable blob slices and never receive pwrite traffic — internal buckets
 // live entirely on the inner path, so this is a plain delegate.

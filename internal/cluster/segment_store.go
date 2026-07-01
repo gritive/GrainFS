@@ -16,6 +16,14 @@ type clusterSegmentStore struct {
 	bucket string
 	key    string
 	obj    *storage.Object
+
+	// Single decompressed-segment cache, scoped to one ranged GET. A stateless
+	// store (created fresh per ReadAt) leaves these zero and never hits; a
+	// stateful store reused across a GET's 5 MiB refills caches the last touched
+	// compressed segment's plaintext so it is decompressed once, not once per
+	// refill. cachedSegKey is the blob ID; a nil cachedSegPlaintext is a miss.
+	cachedSegKey       string
+	cachedSegPlaintext []byte
 }
 
 func (s *clusterSegmentStore) OpenSegment(ctx context.Context, ref storage.SegmentRef) (io.ReadCloser, error) {
@@ -145,25 +153,20 @@ func (s *clusterSegmentStore) ReadAtSegment(ctx context.Context, ref storage.Seg
 		buf = buf[:max]
 	}
 	if entry.StoredSize > 0 {
-		// Compressed: no random access into the zstd frame. Open the
-		// decompressed (≤16 MiB) segment, discard up to offset, fill buf.
-		rc, err := s.OpenSegment(ctx, ref)
+		// Compressed: no random access into the zstd frame. Decompress the whole
+		// (≤16 MiB) segment once, cache the plaintext for the GET's remaining
+		// refills, then slice from offset. The buf was already clamped to
+		// entry.Size-offset above, and plaintext length == entry.Size, so the
+		// copy fills buf exactly.
+		plain, err := s.decompressedSegment(ctx, ref, loc.Ref)
 		if err != nil {
 			return 0, err
 		}
-		defer rc.Close()
-		if _, err := io.CopyN(io.Discard, rc, offset); err != nil {
-			return 0, fmt.Errorf("segment %s: seek %d: %w", entry.BlobID, offset, err)
+		if offset >= int64(len(plain)) {
+			return 0, io.EOF
 		}
-		n, err := io.ReadFull(rc, buf)
-		if err == io.ErrUnexpectedEOF {
-			// buf was clamped to remaining plaintext; a short read at the tail
-			// means we hit EOF — return bytes read with nil to match the
-			// uncompressed paths (ecObjectReader.ReadAt and readAtStripedStreaming
-			// both normalize tail/short reads to (n, nil)).
-			return n, nil
-		}
-		return n, err
+		n := copy(buf, plain[offset:])
+		return n, nil
 	}
 	record, err := s.placementRecord(entry)
 	if err != nil {
@@ -171,6 +174,30 @@ func (s *clusterSegmentStore) ReadAtSegment(ctx context.Context, ref storage.Seg
 	}
 	shardKey := s.key + "/segments/" + entry.BlobID
 	return s.b.newECObjectReader().ReadAt(ctx, s.bucket, shardKey, record, entry.Size, offset, buf)
+}
+
+// decompressedSegment returns the plaintext of a compressed segment, serving it
+// from the per-GET single-segment cache when segKey matches the last decompress.
+// On a miss it reuses OpenSegment (which for a compressed segment returns a
+// full-buffer SegmentBytes provider), so this never re-implements the
+// ReadAll+Decompress logic. segKey is the parsed blob ref (loc.Ref).
+func (s *clusterSegmentStore) decompressedSegment(ctx context.Context, ref storage.SegmentRef, segKey string) ([]byte, error) {
+	if s.cachedSegPlaintext != nil && s.cachedSegKey == segKey {
+		return s.cachedSegPlaintext, nil
+	}
+	rc, err := s.OpenSegment(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	sb, ok := rc.(interface{ SegmentBytes() []byte })
+	if !ok {
+		return nil, fmt.Errorf("segment %s: compressed OpenSegment did not return a buffered plaintext provider", ref.BlobID)
+	}
+	plain := sb.SegmentBytes()
+	s.cachedSegKey = segKey
+	s.cachedSegPlaintext = plain
+	return plain, nil
 }
 
 type chunkedSegmentRangeStore interface {
