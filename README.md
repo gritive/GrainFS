@@ -3,6 +3,14 @@
 `GrainFS` is a high-performance distributed S3-compatible storage server with
 zero-config cluster management and at-rest encryption on by default.
 
+> **Technical preview:** `GrainFS` is currently positioned for local-first S3
+> evaluation, compatibility testing, and operator feedback — not as a GA
+> production storage replacement. The strongest launch wedge is a working local
+> S3-compatible object store with documented encryption, IAM, cluster, metrics,
+> and recovery surfaces. Broader production, protocol-parity, and competitive
+> claims should be checked against the compatibility docs, benchmark methodology,
+> `CHANGELOG.md`, and [launch claims checklist](docs/reference/launch-claims-checklist.md).
+
 ## Quick Start (2-5 minutes)
 
 ```bash
@@ -30,7 +38,7 @@ That's it. You have a working local S3 server.
 
 > ⚠ **Anonymous default bucket**: any client on this port can read/write `s3://default` until you install an explicit bucket policy for `default`. Create service accounts through the admin socket under the data directory (`<data-dir>/admin.sock`); the Auth block below shows the Quick Start command. See [`docs/operators/deploy-production-cluster.md`](docs/operators/deploy-production-cluster.md).
 
-### Optional: cluster / production setup
+### Optional: cluster / production preview setup
 
 <details>
 <summary>Cluster (zero-CA join)</summary>

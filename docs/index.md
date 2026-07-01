@@ -4,6 +4,12 @@ Start from the role that matches the work in front of you. The README stays
 short; this index keeps the detailed docs reachable without turning the README
 into a file list.
 
+`GrainFS` is launch-positioned as a **technical preview** for local-first
+S3-compatible storage evaluation, compatibility testing, and operator feedback.
+Do not treat this documentation set as a GA production-readiness claim: use the
+compatibility tables, benchmark methodology, `CHANGELOG.md`, and launch claims
+checklist to bound public copy and deployment expectations.
+
 ## Users
 
 Use these when you are integrating `GrainFS` with clients, protocols, or table
@@ -23,7 +29,7 @@ operator setup instructions.
 
 | Need | Document | Type |
 | --- | --- | --- |
-| Deploy and operate a production node or cluster | [Production runbook](operators/runbook.md) | How-to / runbook |
+| Operate an evaluation node or preview cluster | [Production runbook](operators/runbook.md) | How-to / runbook |
 | Track service objectives | [SLI/SLO](operators/sli-slo.md) | Reference |
 | Operate federated IAM authorization | [OIDC federated IAM](operators/oidc-federated-iam.md) | How-to / explanation |
 | Operate the balancer | [Balancer operations](operators/balancer.md) | How-to |
@@ -37,7 +43,7 @@ rules.
 | Need | Document |
 | --- | --- |
 | S3 API and client compatibility | [S3 compatibility](reference/s3-compatibility.md) |
-| Public launch wording and evidence mapping | [Launch claims checklist](reference/launch-claims-checklist.md) |
+| Technical-preview positioning, public launch wording, and evidence mapping | [Launch claims checklist](reference/launch-claims-checklist.md) |
 | Benchmark methodology | [Benchmarks](reference/benchmarks.md) |
 | Rolling upgrade compatibility | [Rolling upgrade compatibility](reference/rolling-upgrade-compatibility.md) |
 | Retired transport mux rationale | [Historical transport mux versioning](reference/transport-mux-versioning.md) |
