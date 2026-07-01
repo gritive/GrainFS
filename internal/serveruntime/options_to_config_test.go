@@ -27,9 +27,7 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 		AdminGroup:  "sentinel-admin-grp",
 		PublicURL:   "https://sentinel.example.com",
 
-		AppendForwardBufferTotalBytes:    int64(1 << 24),
-		AppendForwardBufferMaxPerRequest: int64(1 << 20),
-		AppendSizeCapBytes:               int64(1 << 26),
+		AppendSizeCapBytes: int64(1 << 26),
 
 		PackThreshold:  31,
 		MeasureReadAmp: true,
@@ -107,9 +105,7 @@ func TestOptionsToConfigFieldParity(t *testing.T) {
 	require.Equal(t, opts.RaftHeartbeatInterval, cfg.RaftHeartbeatInterval)
 	require.Equal(t, opts.RaftElectionTimeout, cfg.RaftElectionTimeout)
 
-	// Append forward buffer + size cap.
-	require.Equal(t, opts.AppendForwardBufferTotalBytes, cfg.AppendForwardBufferTotalBytes)
-	require.Equal(t, opts.AppendForwardBufferMaxPerRequest, cfg.AppendForwardBufferMaxPerRequest)
+	// Append size cap.
 	require.Equal(t, opts.AppendSizeCapBytes, cfg.AppendSizeCapBytes)
 
 	// Storage.

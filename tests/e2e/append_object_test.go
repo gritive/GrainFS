@@ -30,7 +30,6 @@ var _ = ginkgo.Describe("Append objects", func() {
 	runAppendObjectSpecs()
 	runAppendCoalesceSpecs()
 	runAppendMidSizeBodySpecs()
-	runAppendForwardBufferSaturationSpecs()
 	runAppendSizeCapSpecs()
 })
 

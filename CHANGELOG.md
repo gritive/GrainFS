@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.0.774.0] - 2026-07-01
+
+### Performance
+- **Object bodies stream at every size, not just large ones.** PUT, GET,
+  UploadPart, CopyObject, AppendObject and their cross-node forwards previously
+  buffered small bodies whole in memory (PUT < 8 MiB, GET < 128 KiB, forward
+  < 4 MiB) and only streamed above those thresholds. Those thresholds are now 0,
+  so every known-length object body streams straight through — giving a flat,
+  size-independent memory profile instead of one that scales with object size.
+  Client-visible responses are unchanged; only zero-byte objects still take a
+  trivial buffered path.
+  - One behavior change: if the storage backend errors partway through reading a
+    small object, the GET now returns a truncated `200` (the status is already
+    committed once streaming starts) instead of upgrading to `500`. This matches
+    how large objects have always behaved.
+
+### Removed (BREAKING)
+- **AppendObject forward buffer removed.** Cross-node AppendObject forwards now
+  stream the body to the owner instead of buffering it in a byte-budget
+  semaphore. The pool is obsolete under streaming, so the following are removed:
+  - CLI flags `--cluster-append-forward-buffer-total-bytes` and
+    `--cluster-append-forward-buffer-max-per-request`.
+  - The forward-buffer-saturation `503 SlowDown` backpressure signal.
+  - Prometheus metrics `grainfs_cluster_append_forward_buffer_inflight_bytes` and
+    `grainfs_cluster_append_forward_buffer_rejected_total`.
+  The 64 MiB AppendObject body cap (HTTP layer + receiver) is unchanged.
+
 ## [0.0.773.0] - 2026-07-01
 
 ### Performance

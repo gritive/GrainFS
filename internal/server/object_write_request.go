@@ -32,8 +32,6 @@ func putObjectContentMD5Hex(c *app.RequestContext) (string, error) {
 	return hex.EncodeToString(decoded), nil
 }
 
-const putObjectStreamingThresholdBytes = 8 << 20
-
 func putObjectContentType(c *app.RequestContext) string {
 	if contentType := string(c.GetHeader("Content-Type")); contentType != "" {
 		return contentType
@@ -69,19 +67,23 @@ func putObjectStreamLength(c *app.RequestContext) int64 {
 	return int64(c.Request.Header.ContentLength())
 }
 
+// putObjectShouldStream reports whether the request body streams straight to the
+// storage layer instead of being buffered in memory first. Hertz (WithStreamBody)
+// hands us a body stream for every size, so we stream every known-length body —
+// buffering small objects only added RSS with no benefit. Bodies with no usable
+// length fall back to buffered so the exact-length reader always has a size.
 func putObjectShouldStream(c *app.RequestContext) bool {
 	if !c.Request.IsBodyStream() {
 		return false
 	}
 	// aws-chunked: Content-Length is the ENCODED size (chunk framing), so gate on
 	// the decoded object size. putObjectPayloadReader decodes the chunked stream
-	// incrementally (NewAWSChunkedReader), so a large chunked body streams without
-	// buffering the whole object. Falls back to buffered when the decoded size is
-	// absent/unusable so the exact-length reader always has a trustworthy size.
+	// incrementally (NewAWSChunkedReader). Falls back to buffered when the decoded
+	// size is absent/unusable so the exact-length reader has a trustworthy size.
 	if isAWSChunkedPayload(c) {
-		return putObjectDecodedContentLength(c) >= putObjectStreamingThresholdBytes
+		return putObjectDecodedContentLength(c) >= 0
 	}
-	return int64(c.Request.Header.ContentLength()) >= putObjectStreamingThresholdBytes
+	return int64(c.Request.Header.ContentLength()) >= 0
 }
 
 func putObjectBody(c *app.RequestContext) ([]byte, error) {

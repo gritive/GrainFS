@@ -251,10 +251,6 @@ func bootClusterCoordinatorRouting(state *bootState) error {
 		// boot-frozen snapshot. Forwarding variant — a write on a meta follower
 		// still establishes gen-0 (the FSM apply dedups concurrent first-writers).
 		WithGenZeroRecorder(metaRaft.ProposeAddPlacementGenerationForwarding)
-	state.clusterCoord.SetAppendForwardBufferConfig(cluster.AppendForwardBufferConfig{
-		TotalBytes:    state.cfg.AppendForwardBufferTotalBytes,
-		MaxPerRequest: state.cfg.AppendForwardBufferMaxPerRequest,
-	})
 
 	state.distBackend.SetCoalesceConfig(state.coalesceCfg)
 	state.distBackend.SetScrubOrphanAge(state.cfg.ScrubOrphanAge)

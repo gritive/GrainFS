@@ -77,10 +77,6 @@ type Config struct {
 	HealReceiptGossipInterval time.Duration
 	HealReceiptWindow         int
 
-	// AppendObject forward buffer pool
-	AppendForwardBufferTotalBytes    int64
-	AppendForwardBufferMaxPerRequest int64
-
 	// AppendObject size cap
 	AppendSizeCapBytes int64
 

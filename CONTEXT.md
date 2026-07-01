@@ -170,11 +170,10 @@ Coalesce는 segment 수 16 / 총 64 MiB / 30s idle / 60s backstop 중 먼저 도
 walk하고 2-cycle tombstone + cycle-shared cap 50 + age gate 5분으로 자동 회수한다
 (`--scrub-orphan-age`로 조정).
 
-Production 안전 보장은 4단계: (1) 객체별 size cap (default 5 TiB, `--append-size-cap-bytes`,
-FSM-side authoritative + coordinator pre-check fast-reject), (2) forward buffer 바이트 단위
-세마포어 (default 512 MiB pool, `--cluster-append-forward-buffer-total-bytes`, 포화 시
-HTTP 503 SlowDown), (3) per-request body cap 64 MiB (`--cluster-append-forward-buffer-max-per-request-bytes`),
-(4) HTTP `appendBodyMaxBytes` 64 MiB (S3 layer).
+Production 안전 보장은 2단계: (1) 객체별 size cap (default 5 TiB, `--append-size-cap-bytes`,
+FSM-side authoritative + coordinator pre-check fast-reject), (2) HTTP `appendBodyMaxBytes`
+64 MiB (S3 layer). AppendObject forward는 body를 통째로 버퍼링하지 않고 owner로 streaming
+하므로(single-attempt forward) 별도의 메모리 예약 풀/세마포어가 없다.
 
 ### Admin API Wire Schema
 

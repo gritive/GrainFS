@@ -69,22 +69,40 @@ func TestPutObjectBodyReader_DecodesAWSChunkedStreamingBody(t *testing.T) {
 
 func TestPutObjectShouldStreamLargeNonChunkedBody(t *testing.T) {
 	c := app.NewContext(0)
-	c.Request.SetBodyStream(bytes.NewReader(nil), putObjectStreamingThresholdBytes)
+	c.Request.SetBodyStream(bytes.NewReader(nil), 8<<20)
+
+	require.True(t, putObjectShouldStream(c))
+}
+
+// Every known-length body streams now, including small ones (no size threshold):
+// Hertz hands us a body stream for all sizes, so buffering small objects only
+// added RSS without benefit.
+func TestPutObjectShouldStreamSmallKnownLengthBody(t *testing.T) {
+	c := app.NewContext(0)
+	c.Request.SetBodyStream(bytes.NewReader(nil), 1024)
+
+	require.True(t, putObjectShouldStream(c))
+}
+
+func TestPutObjectShouldStreamSmallChunkedBody(t *testing.T) {
+	c := app.NewContext(0)
+	c.Request.SetBodyStream(bytes.NewReader(nil), 4096)
+	c.Request.Header.Set("Content-Encoding", "aws-chunked")
+	c.Request.Header.Set("X-Amz-Decoded-Content-Length", "1024")
 
 	require.True(t, putObjectShouldStream(c))
 }
 
 // Real S3 clients (minio-go, AWS SDK) over HTTP send aws-chunked
 // (STREAMING-AWS4-HMAC-SHA256-PAYLOAD) with X-Amz-Decoded-Content-Length set to
-// the true object size. When that decoded size is at/above the streaming
-// threshold the body must stream (not buffer the whole object), since
+// the true object size. Any usable decoded size streams (no threshold), since
 // putObjectPayloadReader already decodes the chunked stream incrementally.
 func TestPutObjectShouldStreamAWSChunkedBodyWithDecodedLength(t *testing.T) {
 	c := app.NewContext(0)
 	// Content-Length is the ENCODED length (chunk framing); larger than decoded.
-	c.Request.SetBodyStream(bytes.NewReader(nil), putObjectStreamingThresholdBytes+4096)
+	c.Request.SetBodyStream(bytes.NewReader(nil), (8<<20)+4096)
 	c.Request.Header.Set("Content-Encoding", "aws-chunked")
-	c.Request.Header.Set("X-Amz-Decoded-Content-Length", strconv.Itoa(putObjectStreamingThresholdBytes))
+	c.Request.Header.Set("X-Amz-Decoded-Content-Length", strconv.Itoa(8<<20))
 
 	require.True(t, putObjectShouldStream(c))
 }
@@ -94,19 +112,19 @@ func TestPutObjectShouldStreamAWSChunkedBodyWithDecodedLength(t *testing.T) {
 // buffered path (safe default, no regression for malformed/edge clients).
 func TestPutObjectShouldNotStreamAWSChunkedBodyWithoutDecodedLength(t *testing.T) {
 	c := app.NewContext(0)
-	c.Request.SetBodyStream(bytes.NewReader(nil), putObjectStreamingThresholdBytes)
+	c.Request.SetBodyStream(bytes.NewReader(nil), 1024)
 	c.Request.Header.Set("Content-Encoding", "aws-chunked")
 
 	require.False(t, putObjectShouldStream(c))
 }
 
-// A decoded size below the threshold stays on the buffered path (small objects
-// are cheap to buffer; streaming overhead is not worth it).
-func TestPutObjectShouldNotStreamAWSChunkedBodyBelowThreshold(t *testing.T) {
+// A malformed/negative X-Amz-Decoded-Content-Length is treated as no usable size
+// and falls back to the buffered path rather than streaming an untrustworthy len.
+func TestPutObjectShouldNotStreamAWSChunkedBodyMalformedDecodedLength(t *testing.T) {
 	c := app.NewContext(0)
-	c.Request.SetBodyStream(bytes.NewReader(nil), putObjectStreamingThresholdBytes)
+	c.Request.SetBodyStream(bytes.NewReader(nil), 1024)
 	c.Request.Header.Set("Content-Encoding", "aws-chunked")
-	c.Request.Header.Set("X-Amz-Decoded-Content-Length", strconv.Itoa(putObjectStreamingThresholdBytes-1))
+	c.Request.Header.Set("X-Amz-Decoded-Content-Length", "-1")
 
 	require.False(t, putObjectShouldStream(c))
 }

@@ -82,15 +82,16 @@ func TestHeadObject_BackendError(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
 }
 
-// TestGetObject_SmallFilePartialReadReturns500 tests that a mid-stream error on a small file
-// (which uses io.ReadAll before sending) returns 500, not a partial 200.
-func TestGetObject_SmallFilePartialReadReturns500(t *testing.T) {
+// TestGetObject_SmallFilePartialReadTruncates tests that a mid-stream error on a
+// small file truncates the response like a large one. Every object now streams
+// (no buffered-then-ReadFull path), so headers (200 OK) are committed before the
+// body is read — a short read can no longer be upgraded to a 500.
+func TestGetObject_SmallFilePartialReadTruncates(t *testing.T) {
 	tmpDir := t.TempDir()
 	real, err := storage.NewLocalBackend(tmpDir)
 	require.NoError(t, err)
 	require.NoError(t, real.CreateBucket(context.Background(), "test-bucket"))
 
-	// 8KB: below the 16KB zero-copy threshold → uses io.ReadAll path
 	data := bytes.Repeat([]byte("S"), 8*1024)
 	_, err = real.PutObject(context.Background(), "test-bucket", "small.bin", bytes.NewReader(data), "application/octet-stream")
 	require.NoError(t, err)
@@ -105,9 +106,10 @@ func TestGetObject_SmallFilePartialReadReturns500(t *testing.T) {
 	require.NoError(t, err)
 	defer resp.Body.Close()
 
-	// Small file: io.ReadAll is called first, error happens before headers sent → must return 500
-	require.Equal(t, http.StatusInternalServerError, resp.StatusCode,
-		"partial read on small file should return 500 (not partial 200)")
+	// Streamed: headers (200 OK) sent before body streaming — status stays 200.
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	body, _ := io.ReadAll(resp.Body)
+	require.Less(t, len(body), len(data), "partial read should truncate the body")
 }
 
 // TestGetObject_LargeFilePartialReadTruncates tests that a mid-stream error on a large file

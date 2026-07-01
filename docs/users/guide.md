@@ -162,10 +162,9 @@ curl -X PUT "http://localhost:9000/mybucket/log.bin" \
   --data-binary @chunk-1.bin
 ```
 
-Per-request body cap defaults to 64 MiB; per-object size cap defaults to 5 TiB.
-Tune via `--cluster-append-forward-buffer-max-per-request` and
-`--append-size-cap-bytes`. Saturation of the forward buffer surfaces as HTTP
-`503 SlowDown` with `Retry-After: 1` — retry with exponential backoff.
+Per-request body cap defaults to 64 MiB; per-object size cap defaults to 5 TiB
+(tune with `--append-size-cap-bytes`). AppendObject forwards stream to the owner
+node, so there is no forward-buffer pool to size or saturate.
 
 Configure per-bucket pull-through upstreams through the admin surface:
 

@@ -9,11 +9,11 @@ import (
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
-// DefaultMaxForwardBodyBytes is the body cap for AppendObject forward buffering.
-// Raised to 64 MiB to match the HTTP-layer appendBodyMaxBytes cap so that
-// large append bodies are not rejected at the coordinator before reaching the
-// forward path. PutObject and UploadPart use streamed forwarding and are
-// unaffected.
+// DefaultMaxForwardBodyBytes is the single-frame body cap for forwarded
+// PutObject/UploadPart: a body at or under this size MAY ride inside the args
+// FlatBuffer when no stream dialer is available; otherwise everything streams
+// (minForwardStreamBytes == 0). 64 MiB matches the HTTP-layer appendBodyMaxBytes
+// cap. AppendObject forwards stream unconditionally and are unaffected.
 const DefaultMaxForwardBodyBytes = 64 * 1024 * 1024
 
 // DefaultMaxForwardReplyBytes follows the transport frame guard. Forwarded
@@ -21,29 +21,15 @@ const DefaultMaxForwardBodyBytes = 64 * 1024 * 1024
 // without reintroducing the request-body buffering fixed for writes.
 const DefaultMaxForwardReplyBytes = 64 * 1024 * 1024
 
-// minForwardStreamBytes is the body size at or above which a forwarded
-// PutObject OR UploadPart streams its body (body-less FlatBuffer args + a
-// separate body stream) instead of buffering the whole body into the args
-// FlatBuffer. Below it (and at/under the maxBody single-frame cap) the body
-// rides inside the args FlatBuffer in a single frame. PutObject and UploadPart
-// deliberately share ONE floor.
-//
-// Set to 4 MiB from BenchmarkForwardPutObjectWire — the END-TO-END forward bench
-// (two real HTTPTransports + a real receiver, so it includes the Hertz HTTP
-// processing AND the receiver body parsing, unlike the sender-only
-// BenchmarkForwardBodyEncode). That bench shows the SINGLE-FRAME path is
-// actually FASTER than streaming across the whole 0.5–5 MiB range and the gap
-// widens with size (1 MiB: frame 9.1 ms vs stream 13.0 ms; 5 MiB: 26.9 vs
-// 44.6 ms), because streaming chunks the body into many small allocations
-// (~11x the allocs of the one-shot frame buffer) and per-chunk HTTP framing.
-// Framing's only cost is ~1.4x peak memory (body buffered into the args
-// FlatBuffer). So the floor is NOT a latency win — it is a MEMORY cap for large
-// objects: above it, a forwarded PUT/UploadPart streams to avoid buffering the
-// whole (potentially tens-of-MiB) body. 4 MiB caps a framed request at ~41 MB/op
-// while keeping the faster frame path for the common 1–4 MiB range; the previous
-// PutObject behaviour only streamed above the 64 MiB single-frame cap, buffering
-// far larger bodies. PutObject and UploadPart share this floor.
-const minForwardStreamBytes = 4 * 1024 * 1024 // 4 MiB (see BenchmarkForwardPutObjectWire)
+// minForwardStreamBytes is 0: a forwarded PutObject OR UploadPart streams its
+// body (body-less FlatBuffer args + a separate body stream) for every size
+// instead of ever buffering the whole body into the args FlatBuffer. Streaming
+// gives a flat, size-independent forward memory profile at the cost of the
+// single-frame path's lower per-request allocation count for small bodies
+// (BenchmarkForwardPutObjectWire showed the frame path faster in the 0.5–5 MiB
+// range; that latency edge is deliberately traded away for memory here).
+// PutObject and UploadPart share this floor.
+const minForwardStreamBytes = 0
 
 // ErrCoordinatorNoRouter is returned when OpRouter is called on a
 // coordinator that was constructed without a router (test/solo-node configs
@@ -122,8 +108,7 @@ type ClusterCoordinator struct {
 	opRouter  *OpRouter
 	localExec *LocalExecution
 
-	maxBody             int64
-	appendForwardBuffer *appendForwardBuffer
+	maxBody int64
 
 	// recordGenZero records the initial placement generation (gen-0) once, on the
 	// first object write, so every node routes objects over the same raft-replicated
@@ -151,13 +136,12 @@ func NewClusterCoordinator(
 	selfID string,
 ) *ClusterCoordinator {
 	c := &ClusterCoordinator{
-		base:                base,
-		groups:              groups,
-		router:              router,
-		meta:                meta,
-		selfID:              selfID,
-		maxBody:             DefaultMaxForwardBodyBytes,
-		appendForwardBuffer: newAppendForwardBuffer(DefaultAppendForwardBufferConfig().TotalBytes),
+		base:    base,
+		groups:  groups,
+		router:  router,
+		meta:    meta,
+		selfID:  selfID,
+		maxBody: DefaultMaxForwardBodyBytes,
 	}
 	// Order matters: rebuild() first (single-threaded here) does the one-time
 	// plain-field opRouter/localExec init and publishes a non-nil c.runtime; ONLY
@@ -227,13 +211,6 @@ func (c *ClusterCoordinator) WithECConfig(cfg ECConfig) *ClusterCoordinator {
 	c.ecConfig = cfg
 	c.rebuild()
 	return c
-}
-
-// SetAppendForwardBufferConfig replaces the appendForwardBuffer semaphore with
-// a new one sized to cfg.TotalBytes. Intended for test wiring and CLI flag
-// injection; not concurrent-safe with in-flight forwards.
-func (c *ClusterCoordinator) SetAppendForwardBufferConfig(cfg AppendForwardBufferConfig) {
-	c.appendForwardBuffer = newAppendForwardBuffer(cfg.TotalBytes)
 }
 
 func (c *ClusterCoordinator) WithCapabilityGate(gate *CapabilityGate) *ClusterCoordinator {
@@ -325,7 +302,6 @@ func (c *ClusterCoordinator) forwardRuntime() forwardRuntime {
 		selfID:      c.selfID,
 		selfAliases: c.selfAliases,
 		maxBody:     c.maxBody,
-		appendBuf:   c.appendForwardBuffer,
 	}
 }
 
