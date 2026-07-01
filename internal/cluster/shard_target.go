@@ -105,7 +105,6 @@ type localShardEndpoint struct {
 // covers both the writer's local-write and the reader's local-read needs;
 // *ShardService satisfies it.
 type localShardStore interface {
-	WriteLocalShardContext(ctx context.Context, bucket, key string, shardIdx int, data []byte) error
 	WriteLocalShardStreamContext(ctx context.Context, bucket, key string, shardIdx int, body io.Reader) error
 	// WriteLocalShardStreamStagedContext writes a shard to the staging physical
 	// path stagingKey while sealing with finalKey as AAD (PR1 segment staging).

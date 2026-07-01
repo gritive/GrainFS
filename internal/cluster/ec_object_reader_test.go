@@ -108,10 +108,6 @@ func (f *fakeECObjectShardFetcher) ReadShardRangeStream(_ context.Context, peer,
 
 // Write-side methods satisfy the unified ecShardStore interface. The EC reader
 // never invokes them; they are unreachable stubs.
-func (f *fakeECObjectShardFetcher) WriteLocalShardContext(context.Context, string, string, int, []byte) error {
-	panic("WriteLocalShardContext: not used by ecObjectReader")
-}
-
 func (f *fakeECObjectShardFetcher) WriteLocalShardStreamContext(context.Context, string, string, int, io.Reader) error {
 	panic("WriteLocalShardStreamContext: not used by ecObjectReader")
 }

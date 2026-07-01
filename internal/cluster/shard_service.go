@@ -1127,10 +1127,6 @@ func (s *ShardService) WriteLocalShard(bucket, key string, shardIdx int, data []
 	return s.local.WriteLocalShard(bucket, key, shardIdx, data)
 }
 
-func (s *ShardService) WriteLocalShardContext(ctx context.Context, bucket, key string, shardIdx int, data []byte) error {
-	return s.local.WriteLocalShardContext(ctx, bucket, key, shardIdx, data)
-}
-
 // WriteLocalShardStream stores a shard from body without buffering plaintext.
 func (s *ShardService) WriteLocalShardStream(bucket, key string, shardIdx int, body io.Reader) error {
 	return s.local.WriteLocalShardStream(bucket, key, shardIdx, body)

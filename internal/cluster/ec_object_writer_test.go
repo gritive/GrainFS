@@ -718,10 +718,6 @@ func (f *fakeECObjectWriterShards) WriteShardStreamStaged(ctx context.Context, p
 	return nil
 }
 
-func (f *fakeECObjectWriterShards) WriteLocalShardContext(_ context.Context, _ string, _ string, _ int, _ []byte) error {
-	return nil
-}
-
 func (f *fakeECObjectWriterShards) WriteShard(ctx context.Context, peer, bucket, key string, shardIdx int, data []byte) error {
 	if err := f.maybeBlockWrite(ctx, peer); err != nil {
 		return err

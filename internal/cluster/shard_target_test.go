@@ -26,11 +26,6 @@ type recordingShardStore struct {
 
 func (s *recordingShardStore) record(name string) { s.calls = append(s.calls, name) }
 
-func (s *recordingShardStore) WriteLocalShardContext(context.Context, string, string, int, []byte) error {
-	s.record("WriteLocalShardContext")
-	return nil
-}
-
 func (s *recordingShardStore) WriteLocalShardStreamContext(_ context.Context, _ string, _ string, _ int, body io.Reader) error {
 	s.record("WriteLocalShardStreamContext")
 	_, _ = io.Copy(io.Discard, body)
@@ -336,7 +331,6 @@ func TestShardTargetStagedWriteRoutesAndPreservesAADKey(t *testing.T) {
 		require.NoError(t, err)
 		require.Contains(t, store.calls, "WriteLocalShardStreamStagedSizedContext")
 		require.NotContains(t, store.calls, "WriteLocalShardStreamStagedContext")
-		require.NotContains(t, store.calls, "WriteLocalShardContext")
 		require.Equal(t, stagingKey, store.stagedStagingKey, "staging key must be the physical path")
 		require.Equal(t, finalKey, store.stagedFinalKey, "shardKey must remain the final AAD key")
 		require.Equal(t, int64(len("payload")), store.stagedSize)
@@ -352,7 +346,6 @@ func TestShardTargetStagedWriteRoutesAndPreservesAADKey(t *testing.T) {
 		require.NoError(t, err)
 		require.Contains(t, store.calls, "WriteLocalShardStreamStagedContext")
 		require.NotContains(t, store.calls, "WriteLocalShardStreamStagedSizedContext")
-		require.NotContains(t, store.calls, "WriteLocalShardContext")
 		require.Equal(t, stagingKey, store.stagedStagingKey, "staging key must be the physical path")
 		require.Equal(t, finalKey, store.stagedFinalKey, "shardKey must remain the final AAD key")
 	})
@@ -422,8 +415,9 @@ func TestShardTargetRemoteEndpointMarksPeerHealth(t *testing.T) {
 
 // TestWriteShardReader_SmallShard_StreamsNotBuffers pins the streaming-only
 // invariant: a small (≤ old 256KiB) shard with a known size must go through the
-// streaming path (WriteLocalShardStreamSizedContext), not the removed buffered
-// path (WriteLocalShardContext). Regression guard against re-introducing the fork.
+// streaming path (WriteLocalShardStreamSizedContext). The buffered path
+// (WriteLocalShardContext) was removed; its re-introduction would fail compilation
+// because it no longer exists on the localShardStore interface.
 func TestWriteShardReader_SmallShard_StreamsNotBuffers(t *testing.T) {
 	spy := &recordingShardStore{}
 	e := localShardEndpoint{node: "self", shards: spy}
@@ -433,7 +427,6 @@ func TestWriteShardReader_SmallShard_StreamsNotBuffers(t *testing.T) {
 		func(int) (int64, error) { return int64(len(data)), nil })
 	require.NoError(t, err)
 	require.Contains(t, spy.calls, "WriteLocalShardStreamSizedContext", "small shard must use streaming path")
-	require.NotContains(t, spy.calls, "WriteLocalShardContext", "buffered path must be gone")
 }
 
 // TestReadShardAt_SmallRange_StreamsNotBuffers is a regression guard: all range
