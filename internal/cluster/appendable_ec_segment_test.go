@@ -3,6 +3,7 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -133,6 +134,60 @@ func TestAppendableSegmentReader_ECBaseSegment_StreamsViaOpenObject(t *testing.T
 	require.NoError(t, err)
 	require.Equal(t, payload, got,
 		"EC-backed appendable base segment must be streaming-reconstructed via OpenObject")
+}
+
+// TestAppendableSegmentReader_ECBaseSegment_Degraded_StreamsViaOpenObject asserts
+// that when the data shard is unavailable the appendable read path reconstructs
+// the original bytes from the parity shard — verifying that real RS math runs,
+// not just dispatch. Uses selfID="self" so both shard reads go through the
+// remote fetch path; remoteErr on "n0" forces the parity reconstruct branch.
+func TestAppendableSegmentReader_ECBaseSegment_Degraded_StreamsViaOpenObject(t *testing.T) {
+	cfg := ECConfig{DataShards: 1, ParityShards: 1}
+	payload := bytes.Repeat([]byte("data"), 256) // 1 KiB
+	bucket, objKey, blobID := "bucket", "obj", "ec-base-blob"
+	shardKey := objKey + "/segments/" + blobID
+
+	fetcher := &fakeECObjectShardFetcher{
+		remoteErr: map[string]error{
+			"n0": errors.New("shard not available"), // data shard missing — force parity reconstruct
+		},
+	}
+	buildFakeShards(t, fetcher, bucket, shardKey, cfg, payload)
+
+	store := &realECSegmentOpener{
+		reader:  ecObjectReader{selfID: "self", shards: fetcher, ecConfig: cfg},
+		bucket:  bucket,
+		keyBase: objKey,
+	}
+
+	ecRef := &storage.SegmentRef{
+		BlobID:   blobID,
+		Size:     int64(len(payload)),
+		ECData:   uint8(cfg.DataShards),
+		ECParity: uint8(cfg.ParityShards),
+		NodeIDs:  []string{"n0", "n1"},
+	}
+
+	dir := t.TempDir()
+	b := &DistributedBackend{root: dir}
+	reader := &appendableSegmentReader{
+		backend:  b,
+		bucket:   bucket,
+		key:      objKey,
+		paths:    []string{b.segmentBlobPath(bucket, objKey, blobID)},
+		blobIDs:  []string{blobID},
+		kinds:    []byte{appendSegKindSegment},
+		ecRefs:   []*storage.CoalescedRef{nil},
+		segRefs:  []*storage.SegmentRef{ecRef},
+		segStore: store,
+	}
+
+	got, err := io.ReadAll(reader)
+	require.NoError(t, err, "degraded read must succeed when parity shard is available")
+	require.Equal(t, payload, got,
+		"EC-backed appendable base segment must be parity-reconstructed when data shard is unavailable")
+	require.Greater(t, fetcher.readShardStreamCalls, 0,
+		"must have used ReadShardStream (streaming path, not buffered)")
 }
 
 // TestSegmentRefIsECBacked pins the discriminator between an EC base segment
