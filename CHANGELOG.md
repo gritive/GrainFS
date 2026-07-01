@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.775.0] - 2026-07-01
+
+### Fixed
+- **Segment compressed-size now survives the ObjectMeta wire codec.** The
+  `clusterpb.SegmentRef` schema carried no `stored_size` field, so encoding an
+  object's segment metadata through this path dropped a segment's compressed
+  byte length (used to read per-segment zstd blobs). The live compressed-read
+  path was unaffected (it reads `stored_size` from a different record), so this
+  is a latent-corruption guard, not a live fix: the new field defaults to 0
+  (uncompressed), carries no upgrade risk, and prevents a future read via this
+  codec from decompressing a compressed segment as plaintext.
+
 ## [0.0.774.0] - 2026-07-01
 
 ### Performance
