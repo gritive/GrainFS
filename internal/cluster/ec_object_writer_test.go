@@ -594,15 +594,15 @@ func requireECObjectWriterTraceStage(t *testing.T, events []PutTraceEvent, stage
 }
 
 type fakeECObjectWriterShards struct {
-	mu                  sync.Mutex
-	writeShardErr       map[string]error
-	writeShardBlock     map[string]chan struct{}
+	mu                sync.Mutex
+	writeShardErr     map[string]error
+	writeShardBlock   map[string]chan struct{}
 	localStreamWrites []fakeECObjectWriterLocalWrite // stream local writes (body not stored)
-	bufferedWrites      []fakeECObjectWriterBufferedWrite
-	streamWrites        []fakeECObjectWriterStreamWrite
-	stagedWrites        []fakeECObjectWriterStagedWrite
-	deleteLocalCalls    []string
-	deleteRemoteCalls   []string
+	bufferedWrites    []fakeECObjectWriterBufferedWrite
+	streamWrites      []fakeECObjectWriterStreamWrite
+	stagedWrites      []fakeECObjectWriterStagedWrite
+	deleteLocalCalls  []string
+	deleteRemoteCalls []string
 }
 
 func (f *fakeECObjectWriterShards) maybeBlockWrite(ctx context.Context, peer string) error {
