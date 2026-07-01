@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -20,8 +21,7 @@ import (
 // (tagsCreator) type assertion when PackThreshold > 0 is enabled.
 func TestPackedBackend_CreateMultipartUploadWithTags_DelegatesToInner(t *testing.T) {
 	dir := t.TempDir()
-	inner, err := storage.NewLocalBackend(dir + "/local")
-	require.NoError(t, err)
+	inner := cluster.NewSingletonBackendForTest(t)
 	pb, err := NewPackedBackend(inner, dir+"/blobs", 64*1024)
 	require.NoError(t, err)
 	t.Cleanup(func() { pb.Close() })
@@ -64,8 +64,7 @@ func TestPackedBackend_CreateMultipartUploadWithTags_DelegatesToInner(t *testing
 func TestPackedBackend_PutObjectThenSetTags_R1Regression(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	inner, err := storage.NewLocalBackend(dir + "/local")
-	require.NoError(t, err)
+	inner := cluster.NewSingletonBackendForTest(t)
 	pb, err := NewPackedBackend(inner, dir+"/blobs", 64*1024)
 	require.NoError(t, err)
 
@@ -109,8 +108,7 @@ func TestPackedBackend_PutObjectThenSetTags_R1Regression(t *testing.T) {
 func TestPackedBackend_SetObjectTags_RejectsVersionID(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	inner, err := storage.NewLocalBackend(dir + "/local")
-	require.NoError(t, err)
+	inner := cluster.NewSingletonBackendForTest(t)
 	pb, err := NewPackedBackend(inner, dir+"/blobs", 64*1024)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = pb.Close() })
@@ -135,8 +133,7 @@ func TestPackedBackend_SetObjectTags_RejectsVersionID(t *testing.T) {
 func TestPackedBackend_SetObjectTags_ConcurrentCAS(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	inner, err := storage.NewLocalBackend(dir + "/local")
-	require.NoError(t, err)
+	inner := cluster.NewSingletonBackendForTest(t)
 	pb, err := NewPackedBackend(inner, dir+"/blobs", 64*1024)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = pb.Close() })

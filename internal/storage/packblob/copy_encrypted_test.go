@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/encrypt"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -17,8 +18,7 @@ import (
 func newTestDEKPackedBackend(t *testing.T) *PackedBackend {
 	t.Helper()
 	dir := t.TempDir()
-	inner, err := storage.NewLocalBackend(dir + "/local")
-	require.NoError(t, err)
+	inner := cluster.NewSingletonBackendForTest(t)
 
 	kek := make([]byte, encrypt.KEKSize)
 	clusterID := make([]byte, 16)

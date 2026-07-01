@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/pullthrough"
 )
@@ -18,8 +19,7 @@ import (
 // concrete type, so without this pass-through Operations silently falls back
 // to the no-tags overload and drops x-amz-tagging on multipart-initiate.
 func TestPullthroughBackend_CreateMultipartUploadWithTags_DelegatesToInner(t *testing.T) {
-	local, err := storage.NewLocalBackend(t.TempDir())
-	require.NoError(t, err)
+	local := cluster.NewSingletonBackendForTest(t)
 
 	pt := pullthrough.NewBackend(local, &staticResolver{})
 

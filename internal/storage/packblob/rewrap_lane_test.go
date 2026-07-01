@@ -12,8 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/encrypt"
-	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // newRewrapTestKeeper builds a fresh DEKKeeper at gen 0 with the standard test
@@ -30,8 +30,7 @@ func newRewrapTestKeeper(t testing.TB) (*encrypt.DEKKeeper, []byte) {
 func newRewrapTestBackend(t testing.TB, keeper *encrypt.DEKKeeper, cid []byte) *PackedBackend {
 	t.Helper()
 	dir := t.TempDir()
-	inner, err := storage.NewLocalBackend(dir + "/local")
-	require.NoError(t, err)
+	inner := cluster.NewSingletonBackendForTest(t)
 	pb, err := NewPackedBackendWithOptions(inner, dir+"/blobs", 64*1024, PackedBackendOptions{
 		DEKKeeper: keeper,
 		ClusterID: cid,
@@ -40,7 +39,6 @@ func newRewrapTestBackend(t testing.TB, keeper *encrypt.DEKKeeper, cid []byte) *
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		_ = pb.Close()
-		_ = inner.Close()
 	})
 	return pb
 }

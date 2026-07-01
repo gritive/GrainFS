@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/gritive/GrainFS/internal/storage/pullthrough"
 )
@@ -35,9 +36,7 @@ func (u *stubUpstream) GetObject(bucket, key string) (io.ReadCloser, *storage.Ob
 
 func newLocalBackend(t *testing.T) storage.Backend {
 	t.Helper()
-	b, err := storage.NewLocalBackend(t.TempDir())
-	require.NoError(t, err)
-	return b
+	return cluster.NewSingletonBackendForTest(t)
 }
 
 func TestPullThrough_GetObject_LocalHit(t *testing.T) {
@@ -93,8 +92,53 @@ func TestPullThrough_GetObject_NotFound(t *testing.T) {
 		"must return ErrObjectNotFound when neither local nor upstream has the object")
 }
 
+// partialIOInner is a minimal in-memory storage.Backend that ALSO implements
+// storage.PartialIO (WriteAt/ReadAt/Truncate) + PreferWriteAt. It exists to
+// test that pullthrough forwards the PartialIO capability of its inner — the
+// production single-node inner (ClusterCoordinator) provides PartialIO, so a
+// PartialIO-capable inner is the faithful substrate for this forwarding test.
+// The embedded interface panics on any method the test does not exercise.
+type partialIOInner struct {
+	storage.Backend
+	data map[string][]byte
+}
+
+func newPartialIOInner() *partialIOInner { return &partialIOInner{data: map[string][]byte{}} }
+
+func (p *partialIOInner) CreateBucket(context.Context, string) error { return nil }
+func (p *partialIOInner) PreferWriteAt(string) bool                  { return true }
+
+func (p *partialIOInner) WriteAt(_ context.Context, bucket, key string, offset uint64, data []byte) (*storage.Object, error) {
+	k := bucket + "/" + key
+	buf := p.data[k]
+	if end := int(offset) + len(data); end > len(buf) {
+		nb := make([]byte, end)
+		copy(nb, buf)
+		buf = nb
+	}
+	copy(buf[offset:], data)
+	p.data[k] = buf
+	return &storage.Object{Key: key, Size: int64(len(buf))}, nil
+}
+
+func (p *partialIOInner) ReadAt(_ context.Context, bucket, key string, offset int64, buf []byte) (int, error) {
+	d := p.data[bucket+"/"+key]
+	if offset >= int64(len(d)) {
+		return 0, io.EOF
+	}
+	return copy(buf, d[offset:]), nil
+}
+
+func (p *partialIOInner) Truncate(_ context.Context, bucket, key string, size int64) error {
+	k := bucket + "/" + key
+	if d := p.data[k]; int64(len(d)) > size {
+		p.data[k] = d[:size]
+	}
+	return nil
+}
+
 func TestPullThrough_ForwardsPartialIOCapabilities(t *testing.T) {
-	local := newLocalBackend(t)
+	local := newPartialIOInner()
 	require.NoError(t, local.CreateBucket(context.Background(), "__grainfs_test_internal"))
 
 	pt := pullthrough.NewBackend(local, &staticResolver{})

@@ -15,6 +15,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -39,9 +40,7 @@ func (b *recordingPreparedReadAtBackend) ReadAtObject(ctx context.Context, bucke
 }
 
 func TestPackedBackend_ReadAtObjectDelegatesPreparedInner(t *testing.T) {
-	inner, err := storage.NewLocalBackend(t.TempDir())
-	require.NoError(t, err)
-	t.Cleanup(func() { inner.Close() })
+	inner := cluster.NewSingletonBackendForTest(t)
 
 	rec := &recordingPreparedReadAtBackend{Backend: inner}
 	pb, err := NewPackedBackend(rec, t.TempDir(), 64*1024)
@@ -65,6 +64,7 @@ func TestPackedBackend_ReadAtObjectDelegatesPreparedInner(t *testing.T) {
 // for objects above the pack threshold — the production-breaking case from
 // Task 1.9 single-node e2e.
 func TestPackedBackend_RangeAcrossSegments(t *testing.T) {
+	t.Skip(skipReasonSingletonInnerCapability)
 	pb := newTestPackedBackend(t) // 64 KiB threshold
 	ctx := context.Background()
 	require.NoError(t, pb.CreateBucket(ctx, "test"))

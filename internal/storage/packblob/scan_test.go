@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -15,8 +16,7 @@ import (
 func newTestPackedBackendWithInner(t *testing.T) (*PackedBackend, storage.Backend) {
 	t.Helper()
 	dir := t.TempDir()
-	inner, err := storage.NewLocalBackend(dir + "/local")
-	require.NoError(t, err)
+	inner := cluster.NewSingletonBackendForTest(t)
 	pb, err := NewPackedBackend(inner, dir+"/blobs", 64*1024) // 64 KiB threshold
 	require.NoError(t, err)
 	t.Cleanup(func() { pb.Close() })
