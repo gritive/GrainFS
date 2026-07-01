@@ -96,7 +96,7 @@ func TestECObjectWriter_FailsClosedOnShardErrorBeforeQuorumDespiteRemainingCapac
 	close(releaseB)
 	close(releaseD)
 	require.Equal(t, []string{"bucket/object/v1"}, shards.deleteLocalCalls)
-	require.Empty(t, shards.peersWithBufferedWrites("node-b", "node-d"))
+	require.Empty(t, shards.peersWithStreamWrites("node-b", "node-d"))
 }
 
 func TestECObjectWriter_ReturnsAfterDataShardQuorumBeforeAllWritesComplete(t *testing.T) {
@@ -149,12 +149,12 @@ func TestECObjectWriter_ReturnsAfterDataShardQuorumBeforeAllWritesComplete(t *te
 		require.Fail(t, "write did not return after data shard quorum")
 	}
 
-	require.Empty(t, shards.peersWithBufferedWrites("node-c", "node-d"))
+	require.Empty(t, shards.peersWithStreamWrites("node-c", "node-d"))
 	cancel()
 	close(releaseC)
 	close(releaseD)
 	result.waitBackgroundWrites()
-	require.ElementsMatch(t, []string{"node-c", "node-d"}, shards.peersWithBufferedWrites("node-c", "node-d"))
+	require.ElementsMatch(t, []string{"node-c", "node-d"}, shards.peersWithStreamWrites("node-c", "node-d"))
 }
 
 func TestECObjectWriter_CleansWrittenShardsWhenContextCanceledBeforeQuorum(t *testing.T) {
@@ -199,7 +199,7 @@ func TestECObjectWriter_CleansWrittenShardsWhenContextCanceledBeforeQuorum(t *te
 	require.Eventually(t, func() bool {
 		shards.mu.Lock()
 		defer shards.mu.Unlock()
-		return len(shards.bufferedLocalWrites) == 1
+		return len(shards.localStreamWrites) == 1
 	}, time.Second, 10*time.Millisecond)
 	cancel()
 
@@ -241,13 +241,13 @@ func TestECObjectWriteResult_AbortBackgroundWritesStopsSlowRemainingWrites(t *te
 	require.NoError(t, err)
 
 	result.abortBackgroundWrites()
-	require.Empty(t, shards.peersWithBufferedWrites("node-c", "node-d"))
+	require.Empty(t, shards.peersWithStreamWrites("node-c", "node-d"))
 	close(releaseC)
 	close(releaseD)
-	require.Empty(t, shards.peersWithBufferedWrites("node-c", "node-d"))
+	require.Empty(t, shards.peersWithStreamWrites("node-c", "node-d"))
 }
 
-func TestECObjectWriter_WriteStreamShardsMaterializesAndWritesBufferedRemote(t *testing.T) {
+func TestECObjectWriter_WriteStreamShardsMaterializesAndWritesStreamRemote(t *testing.T) {
 	shards := &fakeECObjectWriterShards{}
 	writer := ecObjectWriter{
 		selfID: "node-a",
@@ -267,8 +267,8 @@ func TestECObjectWriter_WriteStreamShardsMaterializesAndWritesBufferedRemote(t *
 	result, err := writer.writeStreamShards(context.Background(), plan, dir, bytes.NewReader([]byte("hello")), 5, func() string { return "etag" })
 	require.NoError(t, err)
 
-	require.Len(t, shards.bufferedWrites, 1)
-	write := shards.bufferedWrites[0]
+	require.Len(t, shards.streamWrites, 1)
+	write := shards.streamWrites[0]
 	require.Equal(t, "node-b", write.peer)
 	require.Equal(t, "object/v1", write.key)
 	require.Equal(t, int64(5), result.Size)
@@ -315,8 +315,11 @@ func TestECObjectWriter_WriteRemoteShardRecordsTraceBreakdown(t *testing.T) {
 
 	events := readECObjectWriterTraceEvents(t, path)
 	requireECObjectWriterTraceStage(t, events, PutTraceStageShardWriteRemoteOpen)
-	requireECObjectWriterTraceStage(t, events, PutTraceStageShardWriteRemoteBuffer)
 	requireECObjectWriterTraceStage(t, events, PutTraceStageShardWriteRemoteRPC)
+	// PutTraceStageShardWriteRemoteBuffer is no longer emitted: all remote writes stream.
+	for _, ev := range events {
+		require.NotEqual(t, PutTraceStageShardWriteRemoteBuffer, ev.Stage, "buffer trace stage must not be emitted")
+	}
 }
 
 func TestECObjectWriter_WriteDataShardsComputesObjectFacts(t *testing.T) {
@@ -351,7 +354,7 @@ func TestECObjectWriter_WriteDataShardsComputesObjectFacts(t *testing.T) {
 	result, err := writer.writeDataShards(ctx, plan, []byte("hello"), -1)
 	require.NoError(t, err)
 
-	require.Len(t, shards.bufferedLocalWrites, 1)
+	require.Len(t, shards.localStreamWrites, 1)
 	require.Equal(t, int64(5), result.Size)
 	require.Equal(t, "", result.ETag) // MD5 removed: writeDataShards ETag is discarded at WriteSegmentBytes
 	require.Equal(t, "object/v1", result.ShardKey)
@@ -484,8 +487,8 @@ func TestECObjectWriter_WriteOneSegmentRotatesPlacementBySegmentShardKey(t *test
 
 	require.NoError(t, err)
 	require.Equal(t, expected, rec.Nodes)
-	require.Len(t, shards.bufferedWrites, cfg.NumShards())
-	for _, write := range shards.bufferedWrites {
+	require.Len(t, shards.streamWrites, cfg.NumShards())
+	for _, write := range shards.streamWrites {
 		require.Contains(t, expected, write.peer)
 	}
 }
@@ -595,6 +598,7 @@ type fakeECObjectWriterShards struct {
 	writeShardErr       map[string]error
 	writeShardBlock     map[string]chan struct{}
 	bufferedLocalWrites []fakeECObjectWriterLocalWrite
+	localStreamWrites   []fakeECObjectWriterLocalWrite // stream local writes (body not stored)
 	bufferedWrites      []fakeECObjectWriterBufferedWrite
 	streamWrites        []fakeECObjectWriterStreamWrite
 	stagedWrites        []fakeECObjectWriterStagedWrite
@@ -617,7 +621,7 @@ func (f *fakeECObjectWriterShards) maybeBlockWrite(ctx context.Context, peer str
 	}
 }
 
-func (f *fakeECObjectWriterShards) peersWithBufferedWrites(peers ...string) []string {
+func (f *fakeECObjectWriterShards) peersWithStreamWrites(peers ...string) []string {
 	want := make(map[string]struct{}, len(peers))
 	for _, peer := range peers {
 		want[peer] = struct{}{}
@@ -625,7 +629,7 @@ func (f *fakeECObjectWriterShards) peersWithBufferedWrites(peers ...string) []st
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	got := make([]string, 0, len(peers))
-	for _, write := range f.bufferedWrites {
+	for _, write := range f.streamWrites {
 		if _, ok := want[write.peer]; ok {
 			got = append(got, write.peer)
 		}
@@ -667,9 +671,14 @@ type fakeECObjectWriterStreamWrite struct {
 }
 
 func (f *fakeECObjectWriterShards) WriteLocalShardStream(bucket, key string, shardIdx int, body io.Reader) error {
-	// Drain the body so the writer side completes; no surviving test inspects the
-	// non-buffered local writes (the readers lived in the removed fast-path tests).
 	_, _ = io.ReadAll(body)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.localStreamWrites = append(f.localStreamWrites, fakeECObjectWriterLocalWrite{
+		bucket:   bucket,
+		key:      key,
+		shardIdx: shardIdx,
+	})
 	return nil
 }
 

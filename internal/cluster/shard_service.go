@@ -1051,7 +1051,6 @@ func (s *ShardService) handleWrite(sr *shardRequest) []byte {
 		Bucket:      sr.Bucket,
 		Key:         sr.Key,
 		Ingress:     PutTraceIngressReceiver,
-		SizeClass:   putTraceSizeClass(int64(len(sr.Data)), ecShardBufferedLimit),
 		ForwardMode: PutTraceForwardNone,
 	})
 	if err := s.local.writeLocalShard(ctx, sr.Bucket, sr.Key, int(sr.ShardIdx), sr.Data); err != nil {

@@ -12,7 +12,7 @@ import (
 // Before this abstraction the writer and reader scattered `node == selfID`
 // branches across six dispatch sites; endpointFor now makes that decision once
 // and hands back a concrete endpoint whose methods carry the local-vs-remote
-// specifics (size threshold, retry/backoff, peerHealth marking, trace stages).
+// specifics (retry/backoff, peerHealth marking, trace stages).
 //
 // Defined at the consumer (the EC writer/reader) per the repo convention; only
 // the operations the writer and reader actually invoke are exposed — no
@@ -26,16 +26,15 @@ type shardEndpoint interface {
 
 	// WriteShardReader writes shard shardIdx. openShard yields a fresh reader for
 	// the shard payload; shardSize (nil ⇒ unknown) yields its size so the impl can
-	// choose buffered-vs-stream against ecShardBufferedLimit. The local and remote
-	// impls emit their own trace stages and (remote) peerHealth marks so the
-	// observable call set is identical to the pre-refactor inline dispatch.
+	// select the sized streaming variant for body-length validation. The local and
+	// remote impls emit their own trace stages and (remote) peerHealth marks so the
+	// observable call set is identical to the pre-refactor inline dispatch. All
+	// paths stream — there is no buffered branch.
 	//
 	// stagingShardKey (PR1 segment staging): when non-empty the shard BYTES are
 	// written to this staging physical path while shardKey stays the FINAL path
 	// used as encryption AAD, so a post-promote read of shardKey decrypts
-	// correctly. Empty ⇒ legacy direct-to-final write (shardKey is both path and
-	// AAD). Staged writes always stream (the buffered-RPC optimization is skipped)
-	// to keep the receiver-side staging contract on one wire path.
+	// correctly. Empty ⇒ direct-to-final write (shardKey is both path and AAD).
 	//
 	// logicalShardSize is the shard's PRE-compression (logical) size, threaded for
 	// the fsync-class decision only (per-segment zstd shrinks the on-disk bytes, so
@@ -170,31 +169,18 @@ func (e localShardEndpoint) WriteShardReader(ctx context.Context, bucket, shardK
 			size, knownSize = sz, true
 		}
 	}
-	if knownSize && size <= ecShardBufferedLimit {
-		data := make([]byte, size)
-		_, werr = io.ReadFull(body, data)
-		if closer, ok := body.(io.Closer); ok {
-			if closeErr := closer.Close(); werr == nil && closeErr != nil {
-				werr = fmt.Errorf("close ec shard %d: %w", shardIdx, closeErr)
-			}
-		}
-		if werr == nil {
-			werr = e.shards.WriteLocalShardContext(ctx, bucket, shardKey, shardIdx, data)
-		}
-	} else {
-		if knownSize {
-			if sized, ok := e.shards.(ecObjectSizedShardStore); ok {
-				werr = sized.WriteLocalShardStreamSizedContext(ctx, bucket, shardKey, shardIdx, body, size)
-			} else {
-				werr = e.shards.WriteLocalShardStreamContext(ctx, bucket, shardKey, shardIdx, body)
-			}
+	if knownSize {
+		if sized, ok := e.shards.(ecObjectSizedShardStore); ok {
+			werr = sized.WriteLocalShardStreamSizedContext(ctx, bucket, shardKey, shardIdx, body, size)
 		} else {
 			werr = e.shards.WriteLocalShardStreamContext(ctx, bucket, shardKey, shardIdx, body)
 		}
-		if closer, ok := body.(io.Closer); ok {
-			if closeErr := closer.Close(); werr == nil && closeErr != nil {
-				werr = fmt.Errorf("close ec shard %d: %w", shardIdx, closeErr)
-			}
+	} else {
+		werr = e.shards.WriteLocalShardStreamContext(ctx, bucket, shardKey, shardIdx, body)
+	}
+	if closer, ok := body.(io.Closer); ok {
+		if closeErr := closer.Close(); werr == nil && closeErr != nil {
+			werr = fmt.Errorf("close ec shard %d: %w", shardIdx, closeErr)
 		}
 	}
 
@@ -342,45 +328,6 @@ func (e remoteShardEndpoint) writeRemoteShard(
 				ShardTargetClass: "remote",
 				Error:            putTraceErrorString(err),
 			})
-		} else if shardSize != nil {
-			if size, sizeErr := shardSize(shardIdx); sizeErr == nil && size <= ecShardBufferedLimit {
-				bufferStart := time.Now()
-				data := make([]byte, size)
-				_, err = io.ReadFull(body, data)
-				if err == nil {
-					ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteBuffer, bufferStart, PutTraceStageFields{
-						Bytes:            int64(len(data)),
-						ShardIndex:       shardIdx,
-						ShardTarget:      node,
-						ShardTargetClass: "remote",
-					})
-					rpcStart := time.Now()
-					err = e.shards.WriteShard(writeCtx, node, bucket, shardKey, shardIdx, data)
-					ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteRPC, rpcStart, PutTraceStageFields{
-						Bytes:            int64(len(data)),
-						ShardIndex:       shardIdx,
-						ShardTarget:      node,
-						ShardTargetClass: "remote",
-						Error:            putTraceErrorString(err),
-					})
-				} else {
-					ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteBuffer, bufferStart, PutTraceStageFields{
-						ShardIndex:       shardIdx,
-						ShardTarget:      node,
-						ShardTargetClass: "remote",
-						Error:            err.Error(),
-					})
-				}
-			} else {
-				rpcStart := time.Now()
-				err = e.shards.WriteShardStream(writeCtx, node, bucket, shardKey, shardIdx, body)
-				ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteRPC, rpcStart, PutTraceStageFields{
-					ShardIndex:       shardIdx,
-					ShardTarget:      node,
-					ShardTargetClass: "remote",
-					Error:            putTraceErrorString(err),
-				})
-			}
 		} else {
 			rpcStart := time.Now()
 			err = e.shards.WriteShardStream(writeCtx, node, bucket, shardKey, shardIdx, readerWithoutWriterTo{Reader: body})

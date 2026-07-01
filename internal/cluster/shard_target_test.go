@@ -37,6 +37,12 @@ func (s *recordingShardStore) WriteLocalShardStreamContext(_ context.Context, _ 
 	return nil
 }
 
+func (s *recordingShardStore) WriteLocalShardStreamSizedContext(_ context.Context, _ string, _ string, _ int, body io.Reader, _ int64) error {
+	s.record("WriteLocalShardStreamSizedContext")
+	_, _ = io.Copy(io.Discard, body)
+	return nil
+}
+
 func (s *recordingShardStore) WriteLocalShardStreamStagedContext(_ context.Context, _ string, stagingKey, finalKey string, _ int, body io.Reader) error {
 	s.record("WriteLocalShardStreamStagedContext")
 	s.stagedStagingKey, s.stagedFinalKey = stagingKey, finalKey
@@ -163,14 +169,14 @@ func TestShardTargetLocalEndpointDelegatesToLocalMethods(t *testing.T) {
 		want string
 	}{
 		{
-			name: "buffered write -> WriteLocalShardContext",
+			name: "known-size write -> WriteLocalShardStreamSizedContext",
 			call: func(t *testing.T, ep shardEndpoint) {
 				err := ep.WriteShardReader(context.Background(), "b", "k", "", 0, -1,
 					func(int) (io.Reader, error) { return strings.NewReader("x"), nil },
 					func(int) (int64, error) { return 1, nil })
 				require.NoError(t, err)
 			},
-			want: "WriteLocalShardContext",
+			want: "WriteLocalShardStreamSizedContext",
 		},
 		{
 			name: "unknown-size write -> WriteLocalShardStreamContext",
@@ -234,14 +240,14 @@ func TestShardTargetRemoteEndpointDelegatesToRemoteMethods(t *testing.T) {
 		want string
 	}{
 		{
-			name: "buffered write -> WriteShard",
+			name: "known-size write -> WriteShardStream",
 			call: func(t *testing.T, ep shardEndpoint) {
 				err := ep.WriteShardReader(context.Background(), "b", "k", "", 0, -1,
 					func(int) (io.Reader, error) { return strings.NewReader("x"), nil },
 					func(int) (int64, error) { return 1, nil })
 				require.NoError(t, err)
 			},
-			want: "WriteShard",
+			want: "WriteShardStream",
 		},
 		{
 			name: "unknown-size write -> WriteShardStream",
@@ -410,4 +416,20 @@ func TestShardTargetRemoteEndpointMarksPeerHealth(t *testing.T) {
 		require.Empty(t, ph.healthy)
 		require.Empty(t, ph.unhealthy)
 	})
+}
+
+// TestWriteShardReader_SmallShard_StreamsNotBuffers pins the streaming-only
+// invariant: a small (≤ old 256KiB) shard with a known size must go through the
+// streaming path (WriteLocalShardStreamSizedContext), not the removed buffered
+// path (WriteLocalShardContext). Regression guard against re-introducing the fork.
+func TestWriteShardReader_SmallShard_StreamsNotBuffers(t *testing.T) {
+	spy := &recordingShardStore{}
+	e := localShardEndpoint{node: "self", shards: spy}
+	data := bytes.Repeat([]byte("x"), 4<<10) // 4KiB, under old 256KiB limit
+	err := e.WriteShardReader(context.Background(), "b", "k", "", 0, int64(len(data)),
+		func(int) (io.Reader, error) { return bytes.NewReader(data), nil },
+		func(int) (int64, error) { return int64(len(data)), nil })
+	require.NoError(t, err)
+	require.Contains(t, spy.calls, "WriteLocalShardStreamSizedContext", "small shard must use streaming path")
+	require.NotContains(t, spy.calls, "WriteLocalShardContext", "buffered path must be gone")
 }

@@ -73,7 +73,6 @@ func ShardRPCTimeout() time.Duration { return shardRPCTimeout }
 func ProposeForwardTimeout() time.Duration { return proposeForwardTimeout }
 
 const (
-	ecShardBufferedLimit = 256 * 1024
 	ecShardWriteAttempts = 3
 	ecShardWriteBackoff  = 250 * time.Millisecond
 
