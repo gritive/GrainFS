@@ -129,6 +129,16 @@ type streamingSegmentReader struct {
 	cur    io.ReadCloser
 	idx    int
 	closed bool
+	next   *prefetchSlot // lookahead-1: at most one in-flight/parked next-segment open
+}
+
+// prefetchSlot holds one background OpenSegment result. ready is closed by the
+// fetch goroutine after rc/err are set; Close() waits on ready to reap rc.
+type prefetchSlot struct {
+	idx   int
+	rc    io.ReadCloser
+	err   error
+	ready chan struct{}
 }
 
 func (r *streamingSegmentReader) Close() error {
@@ -143,11 +153,57 @@ func (r *streamingSegmentReader) Close() error {
 	r.closed = true
 	cur := r.cur
 	r.cur = nil
+	slot := r.next
+	r.next = nil
 	r.mu.Unlock()
+	var err error
 	if cur != nil {
-		return cur.Close()
+		err = cur.Close()
 	}
-	return nil
+	if slot != nil {
+		<-slot.ready // prompt: ctx canceled above unblocks the open (#1008 contract)
+		if slot.rc != nil {
+			_ = slot.rc.Close()
+		}
+	}
+	return err
+}
+
+// nextNonEmpty returns the first index >= from with a non-zero Size, or len(refs).
+func (r *streamingSegmentReader) nextNonEmpty(from int) int {
+	for from < len(r.refs) && r.refs[from].Size == 0 {
+		from++
+	}
+	return from
+}
+
+// startPrefetchLocked spawns the lookahead-1 open for the first non-empty ref
+// after index `after`. Caller holds r.mu. No-op when closed, a slot already
+// exists, or nothing remains.
+//
+// Memory bound: lookahead depth is exactly 1 — one extra open reader; for a
+// zstd-stored segment one extra ≤16MiB plaintext buffer coexists with the
+// current segment's buffer during the drain (peak ~2× segment size per GET,
+// transient). This is bounded, per-request, and far below the 8-worker
+// SegmentReader's accepted ~128MiB budget.
+func (r *streamingSegmentReader) startPrefetchLocked(after int) {
+	if r.closed || r.next != nil {
+		return
+	}
+	target := r.nextNonEmpty(after + 1)
+	if target >= len(r.refs) {
+		return
+	}
+	slot := &prefetchSlot{idx: target, ready: make(chan struct{})}
+	r.next = slot
+	go func() {
+		// Concurrent-with-drain OpenSegment is safe: the cluster store reads only
+		// immutable request state on this path (cachedSeg* belongs to the
+		// ranged-GET ReadAtSegment path, never full-body streaming).
+		rc, err := r.store.OpenSegment(r.ctx, r.refs[slot.idx])
+		slot.rc, slot.err = rc, err
+		close(slot.ready)
+	}()
 }
 
 func (r *streamingSegmentReader) Read(p []byte) (int, error) {
@@ -198,14 +254,39 @@ func (r *streamingSegmentReader) current() (io.ReadCloser, error) {
 		r.mu.Unlock()
 		return cur, nil
 	}
-	for r.idx < len(r.refs) && r.refs[r.idx].Size == 0 {
-		r.idx++
-	}
+	r.idx = r.nextNonEmpty(r.idx)
 	if r.idx >= len(r.refs) {
 		r.mu.Unlock()
 		return nil, io.EOF
 	}
 	idx := r.idx
+	if slot := r.next; slot != nil && slot.idx == idx {
+		r.next = nil
+		r.mu.Unlock()
+		<-slot.ready
+		if slot.err != nil {
+			return nil, slot.err
+		}
+		r.mu.Lock()
+		if r.closed || r.ctx.Err() != nil {
+			cerr := r.ctx.Err()
+			r.mu.Unlock()
+			_ = slot.rc.Close()
+			if cerr != nil {
+				return nil, cerr
+			}
+			return nil, context.Canceled
+		}
+		if r.idx != idx {
+			r.mu.Unlock()
+			_ = slot.rc.Close()
+			return nil, context.Canceled
+		}
+		r.cur = slot.rc
+		r.startPrefetchLocked(idx)
+		r.mu.Unlock()
+		return slot.rc, nil
+	}
 	r.mu.Unlock()
 
 	rc, err := r.store.OpenSegment(r.ctx, r.refs[idx])
@@ -231,6 +312,7 @@ func (r *streamingSegmentReader) current() (io.ReadCloser, error) {
 		return nil, context.Canceled
 	}
 	r.cur = rc
+	r.startPrefetchLocked(idx)
 	return rc, nil
 }
 
