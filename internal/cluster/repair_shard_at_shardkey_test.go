@@ -6,6 +6,7 @@ package cluster
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"testing"
 
@@ -97,8 +98,11 @@ func TestRepairShardAtShardKey_StripedReinterleaves(t *testing.T) {
 		require.NoError(t, derr)
 		survivors[i] = body
 	}
-	got, err := stripeDeinterleave(cfg, survivors, stripeBytes, int64(len(payload)))
+	rc, err := newStripeDeinterleaveStreamReader(cfg, bodyReaders(survivors), stripeBytes, int64(len(payload)))
 	require.NoError(t, err)
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.NoError(t, rc.Close())
 	require.Equal(t, payload, got, "object must recover from {0,2,3} after repairing data shard 0")
 }
 
