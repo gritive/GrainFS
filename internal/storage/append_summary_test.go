@@ -33,6 +33,27 @@ func TestAppendSummary_EncodeDecodeRoundTrip(t *testing.T) {
 	}
 }
 
+// AppendSummaryLogicalAppendCount is live cluster code (the append segment-count
+// cap): logical count = max(CompactedPrefixCount+SegmentCount, ETagPartCount).
+func TestAppendSummaryLogicalAppendCount(t *testing.T) {
+	cases := []struct {
+		name string
+		s    AppendSummary
+		want int
+	}{
+		{"zero", AppendSummary{}, 0},
+		{"segments_only", AppendSummary{SegmentCount: 5}, 5},
+		{"compacted_plus_segments", AppendSummary{CompactedPrefixCount: 3, SegmentCount: 4}, 7},
+		{"etag_count_dominates", AppendSummary{CompactedPrefixCount: 1, SegmentCount: 1, ETagPartCount: 9}, 9},
+		{"etag_count_not_dominant", AppendSummary{CompactedPrefixCount: 4, SegmentCount: 4, ETagPartCount: 3}, 8},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, AppendSummaryLogicalAppendCount(tc.s))
+		})
+	}
+}
+
 func TestAppendSegment_EncodeDecodeRoundTrip(t *testing.T) {
 	// StoredSize is intentionally 0: the append-segment wire codec does not
 	// carry it (pre-existing; tracked as a LocalBackend-removal follow-up in
