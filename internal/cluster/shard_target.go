@@ -51,8 +51,8 @@ type shardEndpoint interface {
 	// OpenShardStream opens a streaming reader for the shard.
 	OpenShardStream(ctx context.Context, bucket, shardKey string, shardIdx int) (io.ReadCloser, error)
 	// ReadShardAt reads len(buf) bytes at offset within the shard. offset is the
-	// on-disk offset (the caller already adds shardHeaderSize). Remote impls choose
-	// buffered RPC vs streaming against maxShardRangeReplyBytes.
+	// on-disk offset (the caller already adds shardHeaderSize). The remote impl
+	// always streams — there is no buffered one-shot branch.
 	ReadShardAt(ctx context.Context, bucket, shardKey string, shardIdx int, offset int64, buf []byte) (int, error)
 }
 
@@ -389,19 +389,8 @@ func (e remoteShardEndpoint) OpenShardStream(ctx context.Context, bucket, shardK
 // ReadShardAt marks peerHealth at the RPC boundary. The post-RPC short-read
 // check returns ErrUnexpectedEOF but does NOT flip the peer unhealthy — the RPC
 // itself succeeded — matching the inline readDataShardAt dispatch.
+// All reads use the streaming RPC — there is no buffered one-shot branch.
 func (e remoteShardEndpoint) ReadShardAt(ctx context.Context, bucket, shardKey string, shardIdx int, offset int64, buf []byte) (int, error) {
-	if len(buf) <= maxShardRangeReplyBytes {
-		data, err := e.shards.ReadShardRange(ctx, e.node, bucket, shardKey, shardIdx, offset, int64(len(buf)))
-		e.markHealth(err == nil)
-		if err != nil {
-			return 0, err
-		}
-		n := copy(buf, data)
-		if n != len(buf) || n != len(data) {
-			return n, io.ErrUnexpectedEOF
-		}
-		return n, nil
-	}
 	rc, err := e.shards.ReadShardRangeStream(ctx, e.node, bucket, shardKey, shardIdx, offset, int64(len(buf)))
 	e.markHealth(err == nil)
 	if err != nil {

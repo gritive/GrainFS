@@ -708,6 +708,41 @@ func TestECObjectReader_ReadAt_CachesRemoteRange(t *testing.T) {
 	require.Equal(t, 1, fetcher.readShardRangeStreamCalls)
 }
 
+// TestECObjectReader_ReadAt_CachesSmallRemoteRange is a TDD guard for Task B:
+// the range-result cache must still be populated when a SMALL range (≤64KiB,
+// under the old maxShardRangeReplyBytes limit) is read. After Task B the small
+// range uses ReadShardRangeStream (same as the large-range case); this test
+// proves the cache write-back (cacheReadAtRange, above the RPC fork) works
+// for both paths and that the second call hits the cache without an extra RPC.
+// This test PASSES before the fork is removed (cache write-back is fork-independent).
+func TestECObjectReader_ReadAt_CachesSmallRemoteRange(t *testing.T) {
+	cfg := ECConfig{DataShards: 2, ParityShards: 0}
+	data := bytes.Repeat([]byte("z"), 256<<10)
+	fetcher := &fakeECObjectShardFetcher{}
+	buildFakeShards(t, fetcher, "bucket", "key", cfg, data)
+	cache := shardcache.New(16 << 20)
+
+	r := ecObjectReader{selfID: "node-a", shards: fetcher, cache: cache, ecConfig: cfg}
+	rec := PlacementRecord{Nodes: []string{"node-b", "node-c"}}
+	rec.K = cfg.DataShards
+
+	// 4KiB — well under the old 64KiB maxShardRangeReplyBytes threshold.
+	first := make([]byte, 4<<10)
+	n, err := r.ReadAt(context.Background(), "bucket", "key", rec, int64(len(data)), 0, first)
+	require.NoError(t, err)
+	require.Equal(t, len(first), n)
+	require.Equal(t, data[:len(first)], first)
+	firstCalls := fetcher.readShardCalls // ReadShardRange uses ReadShard internally
+
+	// Second identical read must be served from the range cache — no new RPC.
+	second := make([]byte, len(first))
+	n, err = r.ReadAt(context.Background(), "bucket", "key", rec, int64(len(data)), 0, second)
+	require.NoError(t, err)
+	require.Equal(t, len(second), n)
+	require.Equal(t, first, second)
+	require.Equal(t, firstCalls, fetcher.readShardCalls, "range cache must prevent duplicate RPC on second call")
+}
+
 func TestECObjectReader_ReadAt_PartialFillAtEnd(t *testing.T) {
 	cfg := ECConfig{DataShards: 2, ParityShards: 0}
 	data := []byte("hello") // 5 bytes
