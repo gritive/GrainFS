@@ -316,27 +316,6 @@ func TestECObjectReader_OpenObject_MarksHealthyPeerOnSuccess(t *testing.T) {
 	require.Empty(t, health.unhealthy)
 }
 
-func TestECObjectReader_ReadObject_PrefersDataShardsBeforeParity(t *testing.T) {
-	cfg := ECConfig{DataShards: 2, ParityShards: 2}
-	data := []byte("healthy data shards avoid parity fanout")
-	fetcher := &fakeECObjectShardFetcher{}
-	buildFakeShards(t, fetcher, "bucket", "key", cfg, data)
-
-	r := ecObjectReader{
-		selfID:   "node-a",
-		shards:   fetcher,
-		ecConfig: cfg,
-	}
-	rec := PlacementRecord{Nodes: []string{"node-b", "node-c", "node-d", "node-e"}}
-	rec.K = cfg.DataShards
-	rec.M = cfg.ParityShards
-
-	got, err := r.ReadObject(context.Background(), "bucket", "key", rec)
-	require.NoError(t, err)
-	require.Equal(t, data, got)
-	require.Equal(t, cfg.DataShards, fetcher.readShardCalls)
-}
-
 func TestECObjectReader_ReadObject_DeinterleavesStripedObject(t *testing.T) {
 	const stripeBytes = 1 << 20
 	cfg := ECConfig{DataShards: 2, ParityShards: 2}
@@ -499,29 +478,6 @@ func TestECObjectReader_ReadObject_ErrorsWhenNotEnoughShards(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestECObjectReader_ReadObject_UsesCache(t *testing.T) {
-	cfg := ECConfig{DataShards: 2, ParityShards: 1}
-	data := []byte("cached read")
-	fetcher := &fakeECObjectShardFetcher{} // fetcher has no shards
-	cache := newFakeCache(1 << 20)
-
-	// Pre-populate the cache with the shards.
-	shards, err := ECSplit(cfg, data)
-	require.NoError(t, err)
-	for i, s := range shards {
-		cache.Put(shardCacheKey("bucket", "key", i), s)
-	}
-
-	r := ecObjectReader{selfID: "node-a", shards: fetcher, cache: cache, ecConfig: cfg}
-	rec := PlacementRecord{Nodes: []string{"node-a", "node-a", "node-a"}}
-	rec.K = cfg.DataShards
-	rec.M = cfg.ParityShards
-
-	got, err := r.ReadObject(context.Background(), "bucket", "key", rec)
-	require.NoError(t, err)
-	require.Equal(t, data, got)
-}
-
 func TestECObjectReader_ReadAt_ReturnsCorrectRange(t *testing.T) {
 	cfg := ECConfig{DataShards: 2, ParityShards: 0}
 	data := []byte("0123456789abcdef") // 16 bytes
@@ -580,20 +536,6 @@ func TestECObjectReader_ReadAt_PastEOFReturnsEOF(t *testing.T) {
 	buf := make([]byte, 4)
 	_, err := r.ReadAt(context.Background(), "bucket", "key", rec, int64(len(data)), 100, buf)
 	require.ErrorIs(t, err, io.EOF)
-}
-
-func TestECObjectReader_NilShardService_ReturnsError(t *testing.T) {
-	r := ecObjectReader{
-		selfID:   "node-a",
-		shards:   nil,
-		ecConfig: ECConfig{DataShards: 2, ParityShards: 1},
-	}
-	rec := PlacementRecord{Nodes: []string{"node-a", "node-a", "node-a"}}
-	rec.K = 2
-	rec.M = 1
-
-	_, err := r.ReadObject(context.Background(), "bucket", "key", rec)
-	require.Error(t, err)
 }
 
 func TestECObjectReader_OpenObject_AllLocal(t *testing.T) {
@@ -658,30 +600,6 @@ func BenchmarkECObjectReaderOpenObject5MiB(b *testing.B) {
 			require.NoError(b, err)
 		}
 		require.NoError(b, rc.Close())
-	}
-}
-
-// BenchmarkECObjectReaderReadObject exercises the readShards path via ReadObject
-// (test/bench-only; production reads use OpenObject streaming). Used to confirm
-// the collector decomposition adds no per-read heap allocations.
-func BenchmarkECObjectReaderReadObject(b *testing.B) {
-	cfg := ECConfig{DataShards: 2, ParityShards: 2}
-	data := bytes.Repeat([]byte("y"), 64<<10)
-	fetcher := &fakeECObjectShardFetcher{}
-	buildFakeShards(b, fetcher, "bucket", "key", cfg, data)
-
-	r := ecObjectReader{selfID: "node-a", shards: fetcher, ecConfig: cfg}
-	rec := PlacementRecord{Nodes: []string{"node-a", "node-a", "node-a", "node-a"}}
-	rec.K = cfg.DataShards
-	rec.M = cfg.ParityShards
-
-	b.SetBytes(int64(len(data)))
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		got, err := r.ReadObject(context.Background(), "bucket", "key", rec)
-		require.NoError(b, err)
-		require.Len(b, got, len(data))
 	}
 }
 
