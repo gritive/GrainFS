@@ -213,7 +213,7 @@ func BenchmarkGetObjectEC_ChunkedSegment10MiB(b *testing.B) {
 	obj, err := bk.HeadObject(context.Background(), "bench", "chunked-readkey")
 	require.NoError(b, err)
 	require.Len(b, obj.Segments, 1)
-	require.Greater(b, obj.Segments[0].Size, int64(maxECPooledReadObjectSize))
+	require.Greater(b, obj.Segments[0].Size, int64(4<<20)) // must be a large, multi-segment object
 
 	store := &clusterSegmentStore{b: bk, bucket: "bench", key: "chunked-readkey", obj: obj}
 	record, err := store.placementRecord(obj.Segments[0])

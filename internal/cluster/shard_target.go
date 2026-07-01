@@ -12,7 +12,7 @@ import (
 // Before this abstraction the writer and reader scattered `node == selfID`
 // branches across six dispatch sites; endpointFor now makes that decision once
 // and hands back a concrete endpoint whose methods carry the local-vs-remote
-// specifics (size threshold, retry/backoff, peerHealth marking, trace stages).
+// specifics (retry/backoff, peerHealth marking, trace stages).
 //
 // Defined at the consumer (the EC writer/reader) per the repo convention; only
 // the operations the writer and reader actually invoke are exposed — no
@@ -20,22 +20,21 @@ import (
 type shardEndpoint interface {
 	// Node is the placement slot's node id.
 	Node() string
-	// IsLocal reports whether the slot resolves to selfID. Used by the reader's
-	// localDataFastPath / hasLocalDataShard performance checks.
+	// IsLocal reports whether the slot resolves to selfID. Used to choose the
+	// local vs remote shard read/write path.
 	IsLocal() bool
 
 	// WriteShardReader writes shard shardIdx. openShard yields a fresh reader for
 	// the shard payload; shardSize (nil ⇒ unknown) yields its size so the impl can
-	// choose buffered-vs-stream against ecShardBufferedLimit. The local and remote
-	// impls emit their own trace stages and (remote) peerHealth marks so the
-	// observable call set is identical to the pre-refactor inline dispatch.
+	// select the sized streaming variant for body-length validation. The local and
+	// remote impls emit their own trace stages and (remote) peerHealth marks so the
+	// observable call set is identical to the pre-refactor inline dispatch. All
+	// paths stream — there is no buffered branch.
 	//
 	// stagingShardKey (PR1 segment staging): when non-empty the shard BYTES are
 	// written to this staging physical path while shardKey stays the FINAL path
 	// used as encryption AAD, so a post-promote read of shardKey decrypts
-	// correctly. Empty ⇒ legacy direct-to-final write (shardKey is both path and
-	// AAD). Staged writes always stream (the buffered-RPC optimization is skipped)
-	// to keep the receiver-side staging contract on one wire path.
+	// correctly. Empty ⇒ direct-to-final write (shardKey is both path and AAD).
 	//
 	// logicalShardSize is the shard's PRE-compression (logical) size, threaded for
 	// the fsync-class decision only (per-segment zstd shrinks the on-disk bytes, so
@@ -52,8 +51,8 @@ type shardEndpoint interface {
 	// OpenShardStream opens a streaming reader for the shard.
 	OpenShardStream(ctx context.Context, bucket, shardKey string, shardIdx int) (io.ReadCloser, error)
 	// ReadShardAt reads len(buf) bytes at offset within the shard. offset is the
-	// on-disk offset (the caller already adds shardHeaderSize). Remote impls choose
-	// buffered RPC vs streaming against maxShardRangeReplyBytes.
+	// on-disk offset (the caller already adds shardHeaderSize). The remote impl
+	// always streams — there is no buffered one-shot branch.
 	ReadShardAt(ctx context.Context, bucket, shardKey string, shardIdx int, offset int64, buf []byte) (int, error)
 }
 
@@ -170,31 +169,18 @@ func (e localShardEndpoint) WriteShardReader(ctx context.Context, bucket, shardK
 			size, knownSize = sz, true
 		}
 	}
-	if knownSize && size <= ecShardBufferedLimit {
-		data := make([]byte, size)
-		_, werr = io.ReadFull(body, data)
-		if closer, ok := body.(io.Closer); ok {
-			if closeErr := closer.Close(); werr == nil && closeErr != nil {
-				werr = fmt.Errorf("close ec shard %d: %w", shardIdx, closeErr)
-			}
-		}
-		if werr == nil {
-			werr = e.shards.WriteLocalShardContext(ctx, bucket, shardKey, shardIdx, data)
-		}
-	} else {
-		if knownSize {
-			if sized, ok := e.shards.(ecObjectSizedShardStore); ok {
-				werr = sized.WriteLocalShardStreamSizedContext(ctx, bucket, shardKey, shardIdx, body, size)
-			} else {
-				werr = e.shards.WriteLocalShardStreamContext(ctx, bucket, shardKey, shardIdx, body)
-			}
+	if knownSize {
+		if sized, ok := e.shards.(ecObjectSizedShardStore); ok {
+			werr = sized.WriteLocalShardStreamSizedContext(ctx, bucket, shardKey, shardIdx, body, size)
 		} else {
 			werr = e.shards.WriteLocalShardStreamContext(ctx, bucket, shardKey, shardIdx, body)
 		}
-		if closer, ok := body.(io.Closer); ok {
-			if closeErr := closer.Close(); werr == nil && closeErr != nil {
-				werr = fmt.Errorf("close ec shard %d: %w", shardIdx, closeErr)
-			}
+	} else {
+		werr = e.shards.WriteLocalShardStreamContext(ctx, bucket, shardKey, shardIdx, body)
+	}
+	if closer, ok := body.(io.Closer); ok {
+		if closeErr := closer.Close(); werr == nil && closeErr != nil {
+			werr = fmt.Errorf("close ec shard %d: %w", shardIdx, closeErr)
 		}
 	}
 
@@ -342,48 +328,23 @@ func (e remoteShardEndpoint) writeRemoteShard(
 				ShardTargetClass: "remote",
 				Error:            putTraceErrorString(err),
 			})
-		} else if shardSize != nil {
-			if size, sizeErr := shardSize(shardIdx); sizeErr == nil && size <= ecShardBufferedLimit {
-				bufferStart := time.Now()
-				data := make([]byte, size)
-				_, err = io.ReadFull(body, data)
-				if err == nil {
-					ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteBuffer, bufferStart, PutTraceStageFields{
-						Bytes:            int64(len(data)),
-						ShardIndex:       shardIdx,
-						ShardTarget:      node,
-						ShardTargetClass: "remote",
-					})
-					rpcStart := time.Now()
-					err = e.shards.WriteShard(writeCtx, node, bucket, shardKey, shardIdx, data)
-					ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteRPC, rpcStart, PutTraceStageFields{
-						Bytes:            int64(len(data)),
-						ShardIndex:       shardIdx,
-						ShardTarget:      node,
-						ShardTargetClass: "remote",
-						Error:            putTraceErrorString(err),
-					})
+		} else {
+			size, knownSize := int64(-1), false
+			if shardSize != nil {
+				if sz, sizeErr := shardSize(shardIdx); sizeErr == nil {
+					size, knownSize = sz, true
+				}
+			}
+			rpcStart := time.Now()
+			if knownSize {
+				if sized, ok := e.shards.(ecObjectRemoteSizedShardStore); ok {
+					err = sized.WriteShardStreamSized(writeCtx, node, bucket, shardKey, shardIdx, readerWithoutWriterTo{Reader: body}, size)
 				} else {
-					ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteBuffer, bufferStart, PutTraceStageFields{
-						ShardIndex:       shardIdx,
-						ShardTarget:      node,
-						ShardTargetClass: "remote",
-						Error:            err.Error(),
-					})
+					err = e.shards.WriteShardStream(writeCtx, node, bucket, shardKey, shardIdx, readerWithoutWriterTo{Reader: body})
 				}
 			} else {
-				rpcStart := time.Now()
-				err = e.shards.WriteShardStream(writeCtx, node, bucket, shardKey, shardIdx, body)
-				ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteRPC, rpcStart, PutTraceStageFields{
-					ShardIndex:       shardIdx,
-					ShardTarget:      node,
-					ShardTargetClass: "remote",
-					Error:            putTraceErrorString(err),
-				})
+				err = e.shards.WriteShardStream(writeCtx, node, bucket, shardKey, shardIdx, readerWithoutWriterTo{Reader: body})
 			}
-		} else {
-			rpcStart := time.Now()
-			err = e.shards.WriteShardStream(writeCtx, node, bucket, shardKey, shardIdx, readerWithoutWriterTo{Reader: body})
 			ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteRPC, rpcStart, PutTraceStageFields{
 				ShardIndex:       shardIdx,
 				ShardTarget:      node,
@@ -442,19 +403,8 @@ func (e remoteShardEndpoint) OpenShardStream(ctx context.Context, bucket, shardK
 // ReadShardAt marks peerHealth at the RPC boundary. The post-RPC short-read
 // check returns ErrUnexpectedEOF but does NOT flip the peer unhealthy — the RPC
 // itself succeeded — matching the inline readDataShardAt dispatch.
+// All reads use the streaming RPC — there is no buffered one-shot branch.
 func (e remoteShardEndpoint) ReadShardAt(ctx context.Context, bucket, shardKey string, shardIdx int, offset int64, buf []byte) (int, error) {
-	if len(buf) <= maxShardRangeReplyBytes {
-		data, err := e.shards.ReadShardRange(ctx, e.node, bucket, shardKey, shardIdx, offset, int64(len(buf)))
-		e.markHealth(err == nil)
-		if err != nil {
-			return 0, err
-		}
-		n := copy(buf, data)
-		if n != len(buf) || n != len(data) {
-			return n, io.ErrUnexpectedEOF
-		}
-		return n, nil
-	}
 	rc, err := e.shards.ReadShardRangeStream(ctx, e.node, bucket, shardKey, shardIdx, offset, int64(len(buf)))
 	e.markHealth(err == nil)
 	if err != nil {

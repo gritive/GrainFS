@@ -1,7 +1,6 @@
 package cluster
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -74,7 +73,7 @@ func (r ecObjectReader) ReadObject(ctx context.Context, bucket, shardKey string,
 // OpenObject returns a streaming reader that reconstructs the object via EC
 // decode on the fly. objectSize is the original pre-encoding size in bytes.
 func (r ecObjectReader) OpenObject(ctx context.Context, bucket, shardKey string, rec PlacementRecord, objectSize int64) (io.ReadCloser, error) {
-	recCfg, shardReaders, err := r.openShardReaders(ctx, bucket, shardKey, rec, objectSize)
+	recCfg, shardReaders, err := r.openShardReaders(ctx, bucket, shardKey, rec)
 	if err != nil {
 		return nil, err
 	}
@@ -110,7 +109,7 @@ func (r ecObjectReader) OpenObject(ctx context.Context, bucket, shardKey string,
 		}}, nil
 	}
 
-	rc, err := newECReconstructStreamReaderWithPrefetch(recCfg, readers, r.hasLocalDataShard(rec, recCfg))
+	rc, err := newECReconstructStreamReaderWithPrefetch(recCfg, readers)
 	if err != nil {
 		closeECShardReaders(shardReaders)
 		return nil, err
@@ -516,26 +515,14 @@ func (r ecObjectReader) readShards(ctx context.Context, bucket, shardKey string,
 }
 
 // openShardReaders opens streaming readers for the shards needed to reconstruct
-// the object. Uses buffered readers (via readShards) when the object fits in
-// the shard cache; otherwise opens direct streaming connections.
-func (r ecObjectReader) openShardReaders(ctx context.Context, bucket, shardKey string, rec PlacementRecord, objectSize int64) (ECConfig, []io.ReadCloser, error) {
+// the object. All reads use direct streaming connections regardless of object size.
+func (r ecObjectReader) openShardReaders(ctx context.Context, bucket, shardKey string, rec PlacementRecord) (ECConfig, []io.ReadCloser, error) {
 	recCfg := rec.ECConfigOrFallback(r.ecConfig)
 	if len(rec.Nodes) != recCfg.NumShards() {
 		return ECConfig{}, nil, fmt.Errorf("placement length %d != expected %d", len(rec.Nodes), recCfg.NumShards())
 	}
 	if r.shards == nil {
 		return ECConfig{}, nil, fmt.Errorf("shard service unavailable")
-	}
-
-	// Sub-multipart objects buffer all data shards (cheap, and warm re-reads hit
-	// the shard cache). Larger objects ALWAYS stream the bounded reconstruct
-	// path regardless of cache capacity: buffering every data shard into []byte
-	// (and populating the cache with full shards) is the dominant peak-RSS cost,
-	// and the in-heap cache is not load-bearing for warm GET throughput when the
-	// OS page cache already covers the working set. Decoupling the buffer
-	// decision from cache admission keeps large reads streaming-bounded.
-	if recCfg.Redundant() && objectSize >= 0 && objectSize <= maxECPooledReadObjectSize {
-		return r.bufferedShardReaders(ctx, bucket, shardKey, rec)
 	}
 
 	shardReaders := make([]io.ReadCloser, len(rec.Nodes))
@@ -590,24 +577,9 @@ func (r ecObjectReader) openShardReaders(ctx context.Context, bucket, shardKey s
 	return recCfg, shardReaders, nil
 }
 
-// bufferedShardReaders collects all shards via readShards and wraps them as
-// NopCloser byte readers. Called when the object fits in the shard cache.
-func (r ecObjectReader) bufferedShardReaders(ctx context.Context, bucket, shardKey string, rec PlacementRecord) (ECConfig, []io.ReadCloser, error) {
-	recCfg, dataShards, err := r.readShards(ctx, bucket, shardKey, rec)
-	if err != nil {
-		return ECConfig{}, nil, err
-	}
-	shardReaders := make([]io.ReadCloser, len(dataShards))
-	for i, data := range dataShards {
-		if data != nil {
-			shardReaders[i] = io.NopCloser(bytes.NewReader(data))
-		}
-	}
-	return recCfg, shardReaders, nil
-}
-
 // readDataShardAt reads len(buf) bytes at shardOffset within a single data
-// shard. Remote reads prefer buffered RPC when len(buf) <= maxShardRangeReplyBytes.
+// shard. The range-result cache is checked first; on a miss the remote streaming
+// RPC is used and the result is cached.
 func (r ecObjectReader) readDataShardAt(ctx context.Context, bucket, shardKey, node string, shardIdx int, shardOffset int64, buf []byte) (int, error) {
 	readamp.RecordECShard(shardCacheKey(bucket, shardKey, shardIdx))
 	rangeCacheKey := ""
@@ -636,16 +608,6 @@ func (r ecObjectReader) cacheReadAtRange(key string, data []byte, n, want int, e
 	if r.cache.CanStore(key, int64(n)) {
 		r.cache.Put(key, data)
 	}
-}
-
-// hasLocalDataShard reports whether any of the K data shards is stored on self.
-func (r ecObjectReader) hasLocalDataShard(rec PlacementRecord, cfg ECConfig) bool {
-	for i := 0; i < cfg.DataShards && i < len(rec.Nodes); i++ {
-		if r.endpointFor(rec.Nodes[i]).IsLocal() {
-			return true
-		}
-	}
-	return false
 }
 
 // skipReader discards the first `skip` bytes from the underlying reader before

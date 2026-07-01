@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.776.0] - 2026-07-01
+
+### Changed
+- **EC data-plane read and write paths unified on streaming.** Removed three
+  size-thresholded buffered fast paths that had accreted as early optimizations:
+  the shard write buffered branch (≤256KiB), the shard range-read one-shot RPC
+  selection (≤64KiB), and the EC object-read pooled reader (≤4MiB). Every
+  production read and write now takes the streaming path. Behavior is unchanged;
+  the all-data-present reconstruct fast path and the range-result cache are
+  preserved. This is a consistency and maintainability change that trades a small
+  warm-GET latency cost for lower memory: the buffered path populated an in-heap
+  full-shard cache that the streaming path does not, so small-object repeated-GET
+  regresses (single-node warm bench: 64KiB +20%, 1MiB +8.6% wall time; 16MiB
+  control unchanged) while per-op memory drops (B/op -6~21%, allocs -12%). The
+  regression is accepted in favor of a single unified path; cluster-mode impact
+  (remote shards, not covered by the OS page cache) may be larger and is tracked
+  as a follow-up.
+
 ## [0.0.775.0] - 2026-07-01
 
 ### Fixed

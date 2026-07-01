@@ -35,11 +35,6 @@ func TestECConfig_IsActive(t *testing.T) {
 	}
 }
 
-func TestECPooledReadThresholdStreamsMultipartPartFloor(t *testing.T) {
-	require.Less(t, maxECPooledReadObjectSize, 5<<20)
-	require.GreaterOrEqual(t, maxECPooledReadObjectSize, 4<<20)
-}
-
 func TestAutoECConfigForClusterSize(t *testing.T) {
 	tests := []struct {
 		nodes int
@@ -157,7 +152,7 @@ func TestECReconstructStreamReader_SmallReadsRoundTrip(t *testing.T) {
 		readers[i] = bytes.NewReader(shards[i])
 	}
 
-	r, err := newECReconstructStreamReaderWithPrefetch(cfg, readers, true)
+	r, err := newECReconstructStreamReaderWithPrefetch(cfg, readers)
 	require.NoError(t, err)
 	var got bytes.Buffer
 	buf := make([]byte, 7)
@@ -187,28 +182,13 @@ func TestECReconstructStreamReader_MultiWindowRoundTrip(t *testing.T) {
 		readers[i] = bytes.NewReader(shards[i])
 	}
 
-	r, err := newECReconstructStreamReaderWithPrefetch(cfg, readers, true)
+	r, err := newECReconstructStreamReaderWithPrefetch(cfg, readers)
 	require.NoError(t, err)
 	got, err := io.ReadAll(r)
 	require.NoError(t, err)
 	require.NoError(t, r.Close())
 	require.Equal(t, len(data), len(got))
 	assert.True(t, bytes.Equal(data, got), "multi-window stream reader output mismatch")
-}
-
-func TestECObjectReader_HasLocalDataShard(t *testing.T) {
-	r := ecObjectReader{selfID: "self"}
-	cfg := ECConfig{DataShards: 2, ParityShards: 1}
-
-	require.True(t, r.hasLocalDataShard(PlacementRecord{
-		Nodes: []string{"remote-a", "self", "remote-b"},
-	}, cfg))
-	require.False(t, r.hasLocalDataShard(PlacementRecord{
-		Nodes: []string{"remote-a", "remote-b", "self"},
-	}, cfg))
-	require.False(t, r.hasLocalDataShard(PlacementRecord{
-		Nodes: []string{"remote-a", "remote-b", "remote-c"},
-	}, cfg))
 }
 
 func TestECReconstruct_MissingParityShard(t *testing.T) {
