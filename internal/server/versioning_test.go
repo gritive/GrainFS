@@ -14,7 +14,6 @@ import (
 
 	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/server/servertest"
-	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // setupECTestServer starts a test server backed by a singleton DistributedBackend.
@@ -35,30 +34,6 @@ func setupECTestServer(t *testing.T) (string, *cluster.DistributedBackend) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	return "http://" + addr, b
-}
-
-// TestPutBucketVersioning_NotImplemented verifies that LocalBackend returns 501.
-func TestPutBucketVersioning_NotImplemented(t *testing.T) {
-	base, backend := setupTestServerWithBackend(t)
-	mustCreateBucket(t, backend, "mybucket")
-
-	body := `<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Enabled</Status></VersioningConfiguration>`
-	req, _ := http.NewRequest(http.MethodPut, base+"/mybucket?versioning", strings.NewReader(body))
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode)
-}
-
-// TestGetBucketVersioning_NotImplemented verifies that LocalBackend returns 501.
-func TestGetBucketVersioning_NotImplemented(t *testing.T) {
-	base, backend := setupTestServerWithBackend(t)
-	mustCreateBucket(t, backend, "mybucket")
-
-	resp, err := http.Get(base + "/mybucket?versioning")
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode)
 }
 
 // TestPutBucketVersioning_InvalidStatus verifies bad status values are rejected.
@@ -171,20 +146,6 @@ func TestListObjectVersions_WithDeleteMarker_EC(t *testing.T) {
 	assert.Len(t, result.DeleteMarkers, 1)
 	assert.True(t, result.DeleteMarkers[0].IsLatest)
 }
-
-// TestListObjectVersions_NotImplemented_Local verifies LocalBackend returns 501.
-func TestListObjectVersions_NotImplemented_Local(t *testing.T) {
-	base, backend := setupTestServerWithBackend(t)
-	mustCreateBucket(t, backend, "mybucket")
-
-	resp, err := http.Get(base + "/mybucket?versions")
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode)
-}
-
-// Ensure LocalBackend still satisfies storage.Backend (compilation check).
-var _ storage.Backend = (*storage.LocalBackend)(nil)
 
 // TestDeleteObjectVersion_EC verifies DELETE /<bucket>/<key>?versionId= hard-deletes a version.
 func TestDeleteObjectVersion_EC(t *testing.T) {

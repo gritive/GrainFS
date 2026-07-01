@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/storage"
 )
@@ -253,11 +254,7 @@ func TestNewServerWiresMutationBroker(t *testing.T) {
 	// backend (matches the pattern in authorizer_wiring_test.go and
 	// server_storage_test.go). NewMutationBroker should be wired in
 	// regardless of which storage paths are configured.
-	backend, err := storage.NewLocalBackend(t.TempDir())
-	if err != nil {
-		t.Fatalf("NewLocalBackend: %v", err)
-	}
-	t.Cleanup(func() { backend.Close() })
+	backend := cluster.NewSingletonBackendForTest(t)
 
 	s := NewWithServerStorage("127.0.0.1:0", NewServerStorage(backend, nil), nil)
 	if s.mutations == nil {

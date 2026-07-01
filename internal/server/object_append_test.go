@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -130,8 +131,7 @@ func TestAppendObjectVersioningBucketRejected(t *testing.T) {
 // regardless; the call-count is the discriminator (same technique as
 // TestEdgeResolverSelection).
 func TestAppendObjectGateUsesLinearizedRead(t *testing.T) {
-	real, err := storage.NewLocalBackend(t.TempDir())
-	require.NoError(t, err)
+	real := cluster.NewSingletonBackendForTest(t)
 	rv := &recordingVersioner{Backend: real}
 	srv := New("127.0.0.1:0", rv)
 
@@ -173,8 +173,7 @@ func (f *faultyVersioner) AppendObject(ctx context.Context, bucket, key string, 
 // append (fail-closed). Without the fix the handler falls through to AppendObject
 // on the wrapped LocalBackend and returns 200.
 func TestAppendObjectGateFailsClosedOnVersioningReadFault(t *testing.T) {
-	real, err := storage.NewLocalBackend(t.TempDir())
-	require.NoError(t, err)
+	real := cluster.NewSingletonBackendForTest(t)
 	require.NoError(t, real.CreateBucket(t.Context(), "b"))
 	srv := New("127.0.0.1:0", &faultyVersioner{Backend: real})
 

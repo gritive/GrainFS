@@ -6,30 +6,23 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/server/servertest"
-	"github.com/gritive/GrainFS/internal/storage"
 )
 
 var _ = Describe("Zero-copy sendfile integration", func() {
 	var (
 		ctx     context.Context
-		backend *storage.LocalBackend
+		backend *cluster.DistributedBackend
 	)
 
 	BeforeEach(func() {
 		ctx = context.Background()
-		tmpDir, err := os.MkdirTemp("", "grainfs-e2e-zerocopy-*")
-		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(os.RemoveAll, tmpDir)
-
-		backend, err = storage.NewLocalBackend(tmpDir)
-		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(backend.Close)
+		backend = cluster.NewSingletonBackendForTest(GinkgoT())
 		Expect(backend.CreateBucket(ctx, "test-bucket")).To(Succeed())
 	})
 

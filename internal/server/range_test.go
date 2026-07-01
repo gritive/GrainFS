@@ -6,24 +6,18 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/server/servertest"
-	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // TestGetObject_IfNoneMatch tests that GET returns 304 when ETag matches
 func TestGetObject_IfNoneMatch(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "grainfs-etag-*")
-	require.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
-
-	backend, err := storage.NewLocalBackend(tmpDir)
-	require.NoError(t, err)
+	backend := cluster.NewSingletonBackendForTest(t)
 	require.NoError(t, backend.CreateBucket(context.Background(), "test-bucket"))
 
 	data := bytes.Repeat([]byte("X"), 1024)
@@ -77,16 +71,11 @@ func TestGetObject_IfNoneMatch(t *testing.T) {
 
 // TestGetObject_IfModifiedSince tests that GET returns 304 when not modified since
 func TestGetObject_IfModifiedSince(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "grainfs-ims-*")
-	require.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
-
-	backend, err := storage.NewLocalBackend(tmpDir)
-	require.NoError(t, err)
+	backend := cluster.NewSingletonBackendForTest(t)
 	require.NoError(t, backend.CreateBucket(context.Background(), "test-bucket"))
 
 	data := bytes.Repeat([]byte("Y"), 512)
-	_, err = backend.PutObject(context.Background(), "test-bucket", "file.txt", bytes.NewReader(data), "text/plain")
+	_, err := backend.PutObject(context.Background(), "test-bucket", "file.txt", bytes.NewReader(data), "text/plain")
 	require.NoError(t, err)
 	require.NoError(t, backend.SetObjectACL("test-bucket", "file.txt", 1)) // ACLPublicRead
 
@@ -124,12 +113,7 @@ func TestGetObject_IfModifiedSince(t *testing.T) {
 
 // TestGetObject_IfMatch tests that GET returns 412 when ETag does not match If-Match
 func TestGetObject_IfMatch(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "grainfs-ifmatch-*")
-	require.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
-
-	backend, err := storage.NewLocalBackend(tmpDir)
-	require.NoError(t, err)
+	backend := cluster.NewSingletonBackendForTest(t)
 	require.NoError(t, backend.CreateBucket(context.Background(), "test-bucket"))
 
 	data := bytes.Repeat([]byte("M"), 512)
@@ -169,12 +153,7 @@ func TestGetObject_IfMatch(t *testing.T) {
 
 // TestHeadObject_ConditionalHeaders tests that HEAD also respects If-None-Match
 func TestHeadObject_ConditionalHeaders(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "grainfs-head-cond-*")
-	require.NoError(t, err)
-	defer os.RemoveAll(tmpDir)
-
-	backend, err := storage.NewLocalBackend(tmpDir)
-	require.NoError(t, err)
+	backend := cluster.NewSingletonBackendForTest(t)
 	require.NoError(t, backend.CreateBucket(context.Background(), "test-bucket"))
 
 	data := bytes.Repeat([]byte("H"), 256)

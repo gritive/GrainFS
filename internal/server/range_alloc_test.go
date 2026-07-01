@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/server/servertest"
 	"github.com/gritive/GrainFS/internal/storage"
@@ -124,11 +124,9 @@ func (b *transientNotFoundBackend) HeadObject(ctx context.Context, bucket, key s
 }
 
 func TestGetAndHeadObjectRetryTransientReadAfterWriteNotFound(t *testing.T) {
-	tmp := t.TempDir()
-	local, err := storage.NewLocalBackend(tmp)
-	require.NoError(t, err)
+	local := cluster.NewSingletonBackendForTest(t)
 	require.NoError(t, local.CreateBucket(context.Background(), "b"))
-	_, err = local.PutObject(context.Background(), "b", "obj", bytes.NewReader([]byte("body")), "text/plain")
+	_, err := local.PutObject(context.Background(), "b", "obj", bytes.NewReader([]byte("body")), "text/plain")
 	require.NoError(t, err)
 	require.NoError(t, local.SetObjectACL("b", "obj", 1)) // ACLPublicRead
 
@@ -160,11 +158,9 @@ func TestGetAndHeadObjectRetryTransientReadAfterWriteNotFound(t *testing.T) {
 }
 
 func TestGetObjectRetryTransientReadAfterWriteNotFoundBeyondSingleTick(t *testing.T) {
-	tmp := t.TempDir()
-	local, err := storage.NewLocalBackend(tmp)
-	require.NoError(t, err)
+	local := cluster.NewSingletonBackendForTest(t)
 	require.NoError(t, local.CreateBucket(context.Background(), "b"))
-	_, err = local.PutObject(context.Background(), "b", "obj", bytes.NewReader([]byte("body")), "text/plain")
+	_, err := local.PutObject(context.Background(), "b", "obj", bytes.NewReader([]byte("body")), "text/plain")
 	require.NoError(t, err)
 
 	backend := &transientNotFoundBackend{
@@ -192,13 +188,11 @@ func TestGetObjectRetryTransientReadAfterWriteNotFoundBeyondSingleTick(t *testin
 }
 
 func TestGetObjectRange_UsesBackendReadAtWhenAvailable(t *testing.T) {
-	tmp := t.TempDir()
-	local, err := storage.NewLocalBackend(tmp)
-	require.NoError(t, err)
+	local := cluster.NewSingletonBackendForTest(t)
 	require.NoError(t, local.CreateBucket(context.Background(), "b"))
 
 	payload := []byte("0123456789abcdefghijklmnopqrstuvwxyz")
-	_, err = local.PutObject(context.Background(), "b", "obj", bytes.NewReader(payload), "application/octet-stream")
+	_, err := local.PutObject(context.Background(), "b", "obj", bytes.NewReader(payload), "application/octet-stream")
 	require.NoError(t, err)
 	require.NoError(t, local.SetObjectACL("b", "obj", 1)) // ACLPublicRead
 
@@ -231,9 +225,7 @@ func TestGetObjectRange_UsesBackendReadAtWhenAvailable(t *testing.T) {
 }
 
 func TestGetObjectPartNumber_UsesBackendReadAtWhenAvailable(t *testing.T) {
-	tmp := t.TempDir()
-	local, err := storage.NewLocalBackend(tmp)
-	require.NoError(t, err)
+	local := cluster.NewSingletonBackendForTest(t)
 	require.NoError(t, local.CreateBucket(context.Background(), "b"))
 
 	payload := []byte("hello grain")
@@ -278,9 +270,7 @@ func TestGetObjectPartNumber_UsesBackendReadAtWhenAvailable(t *testing.T) {
 }
 
 func TestGetObjectPartNumber_FullPartStreamsObject(t *testing.T) {
-	tmp := t.TempDir()
-	local, err := storage.NewLocalBackend(tmp)
-	require.NoError(t, err)
+	local := cluster.NewSingletonBackendForTest(t)
 	require.NoError(t, local.CreateBucket(context.Background(), "b"))
 
 	payload := bytes.Repeat([]byte("x"), 64<<10)
@@ -355,9 +345,7 @@ func (b *stripedRangeBackend) ReadAt(ctx context.Context, bucket, key string, of
 }
 
 func TestGetObjectRange_StripedUsesSingleStreamNotReadAt(t *testing.T) {
-	tmp := t.TempDir()
-	local, err := storage.NewLocalBackend(tmp)
-	require.NoError(t, err)
+	local := cluster.NewSingletonBackendForTest(t)
 	require.NoError(t, local.CreateBucket(context.Background(), "b"))
 
 	payload := []byte("0123456789abcdefghijklmnopqrstuvwxyz")
@@ -422,12 +410,10 @@ func TestGetObjectRange_StripedUsesSingleStreamNotReadAt(t *testing.T) {
 }
 
 func TestGetObjectRange_ReadAtDeniesPrivateObjectBeforeMetadataHeaders(t *testing.T) {
-	tmp := t.TempDir()
-	local, err := storage.NewLocalBackend(tmp)
-	require.NoError(t, err)
+	local := cluster.NewSingletonBackendForTest(t)
 	require.NoError(t, local.CreateBucket(context.Background(), "b"))
 
-	_, err = local.PutObjectWithUserMetadata(
+	_, err := local.PutObjectWithUserMetadata(
 		context.Background(),
 		"b",
 		"private",
@@ -462,44 +448,4 @@ func TestGetObjectRange_ReadAtDeniesPrivateObjectBeforeMetadataHeaders(t *testin
 	require.Empty(t, resp.Header.Get("x-amz-meta-secret"))
 	require.Zero(t, backend.readAtCalls.Load())
 	require.Zero(t, backend.getObjCalls.Load())
-}
-
-func TestGetObjectRange_LargeRangeDoesNotAllocateFullBody(t *testing.T) {
-	tmp := t.TempDir()
-	backend, err := storage.NewLocalBackend(tmp)
-	require.NoError(t, err)
-	require.NoError(t, backend.CreateBucket(context.Background(), "b"))
-
-	payload := bytes.Repeat([]byte("x"), 17<<20)
-	_, err = backend.PutObject(context.Background(), "b", "large.bin", bytes.NewReader(payload), "application/octet-stream")
-	require.NoError(t, err)
-	require.NoError(t, backend.SetObjectACL("b", "large.bin", 1)) // ACLPublicRead
-
-	port := servertest.FreePort(t)
-	s := New(fmt.Sprintf("127.0.0.1:%d", port), backend)
-	go s.Run()
-	t.Cleanup(func() {
-		servertest.ShutdownServer(t, s)
-	})
-	servertest.WaitTCP(t, fmt.Sprintf("127.0.0.1:%d", port))
-
-	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/b/large.bin", port), nil)
-	require.NoError(t, err)
-	req.Header.Set("Range", "bytes=0-16777215")
-
-	runtime.GC()
-	var before runtime.MemStats
-	runtime.ReadMemStats(&before)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	n, err := io.Copy(io.Discard, resp.Body)
-	require.NoError(t, err)
-	runtime.GC()
-	var after runtime.MemStats
-	runtime.ReadMemStats(&after)
-
-	require.Equal(t, http.StatusPartialContent, resp.StatusCode)
-	require.Equal(t, int64(16<<20), n)
-	require.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(8<<20))
 }

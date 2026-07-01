@@ -11,28 +11,23 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/server/servertest"
-	"github.com/gritive/GrainFS/internal/storage"
 )
 
-// setupECAuthServer starts an in-process HTTP server backed by LocalBackend
-// (which now implements storage.ACLSetter) and returns the base URL, a
-// signing helper, and the backend. LocalBackend is sufficient because ACL
+// setupECAuthServer starts an in-process HTTP server backed by DistributedBackend
+// and returns the base URL, a signing helper, and the backend. ACL
 // serialization correctness is covered by cluster/apply_test.go; here we
 // test the HTTP layer.
 func setupECAuthServer(t interface {
-	servertest.TB
+	servertest.FatalTB
 	servertest.CleanupTB
 	TempDir() string
 	Cleanup(func())
-}) (baseURL string, sign func(*http.Request), backend *storage.LocalBackend) {
+}) (baseURL string, sign func(*http.Request), backend *cluster.DistributedBackend) {
 	t.Helper()
-	dir := t.TempDir()
-	var err error
-	backend, err = storage.NewLocalBackend(dir)
-	Expect(err).NotTo(HaveOccurred())
-	t.Cleanup(func() { backend.Close() })
+	backend = cluster.NewSingletonBackendForTest(t)
 
 	const (
 		accessKey = "testkey"
@@ -64,7 +59,7 @@ var _ = Describe("ACL integration", func() {
 	var (
 		base    string
 		sign    func(*http.Request)
-		backend *storage.LocalBackend
+		backend *cluster.DistributedBackend
 	)
 
 	BeforeEach(func() {

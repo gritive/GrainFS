@@ -14,17 +14,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/s3auth"
 	"github.com/gritive/GrainFS/internal/server/servertest"
-	"github.com/gritive/GrainFS/internal/storage"
 )
 
 func setupAuthServer(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
-	backend, err := storage.NewLocalBackend(dir)
-	require.NoError(t, err, "NewLocalBackend")
-	t.Cleanup(func() { backend.Close() })
+	backend := cluster.NewSingletonBackendForTest(t)
 
 	port := servertest.FreePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
@@ -90,10 +87,7 @@ func TestAuthRejectsUnsignedAPIMutationMultipart(t *testing.T) {
 func TestAuthAcceptsValidSignature(t *testing.T) {
 	// D#8: CreateBucket is admin-UDS-only. Pre-create via backend; verify signed
 	// object PUT still works.
-	dir := t.TempDir()
-	backend, err := storage.NewLocalBackend(dir)
-	require.NoError(t, err)
-	t.Cleanup(func() { backend.Close() })
+	backend := cluster.NewSingletonBackendForTest(t)
 	require.NoError(t, backend.CreateBucket(t.Context(), "mybucket"))
 
 	base := "http://" + func() string {
@@ -167,10 +161,7 @@ func TestAuthBucketPolicyCRUDRequiresSignature(t *testing.T) {
 
 func TestAuthAcceptsSignedPostPolicyFormUpload(t *testing.T) {
 	// D#8: pre-create the bucket via backend; test only the form upload path.
-	dir := t.TempDir()
-	backend, err := storage.NewLocalBackend(dir)
-	require.NoError(t, err)
-	t.Cleanup(func() { backend.Close() })
+	backend := cluster.NewSingletonBackendForTest(t)
 	require.NoError(t, backend.CreateBucket(t.Context(), "form-auth"))
 
 	port := servertest.FreePort(t)

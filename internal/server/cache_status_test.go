@@ -13,8 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/cache/shardcache"
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/server/servertest"
-	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // setupCacheTestServer mirrors setupTestServer but wires the shard cache
@@ -23,10 +23,7 @@ import (
 // the JSON reflects it.
 func setupCacheTestServer(t *testing.T, shardCap int64) (string, *shardcache.Cache) {
 	t.Helper()
-	dir := t.TempDir()
-	backend, err := storage.NewLocalBackend(dir)
-	require.NoError(t, err)
-	t.Cleanup(func() { backend.Close() })
+	backend := cluster.NewSingletonBackendForTest(t)
 
 	sc := shardcache.New(shardCap)
 

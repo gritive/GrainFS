@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/storage"
 	"github.com/stretchr/testify/require"
 )
@@ -49,8 +50,7 @@ func TestListObjectVersionsEdge_StampsVersionHistory(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.state, func(t *testing.T) {
-			real, err := storage.NewLocalBackend(t.TempDir())
-			require.NoError(t, err)
+			real := cluster.NewSingletonBackendForTest(t)
 			spy := &listVersionsSpy{Backend: real, stateByBucket: map[string]string{"b": tc.state}}
 			srv := New("127.0.0.1:0", spy)
 

@@ -74,8 +74,7 @@ func (s *versioningStampSpy) ListObjectsPage(ctx context.Context, bucket, prefix
 // newStampTestServer builds a server whose Operations wrap the spy.
 func newStampTestServer(t *testing.T, state string) (*Server, *versioningStampSpy) {
 	t.Helper()
-	real, err := storage.NewLocalBackend(t.TempDir())
-	require.NoError(t, err)
+	real := cluster.NewSingletonBackendForTest(t)
 	spy := &versioningStampSpy{Backend: real, authoritativeState: state}
 	srv := New("127.0.0.1:0", spy)
 	return srv, spy

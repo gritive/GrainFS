@@ -11,8 +11,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/server/servertest"
-	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // stubBalancer is a minimal BalancerInfo for testing.
@@ -38,10 +38,7 @@ func TestBalancerStatus_NilBalancer_ReturnsUnavailable(t *testing.T) {
 }
 
 func TestBalancerStatus_WithBalancer_ReturnsStatus(t *testing.T) {
-	dir := t.TempDir()
-	backend, err := storage.NewLocalBackend(dir)
-	require.NoError(t, err)
-	t.Cleanup(func() { backend.Close() })
+	backend := cluster.NewSingletonBackendForTest(t)
 
 	port := servertest.FreePort(t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)

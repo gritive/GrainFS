@@ -11,8 +11,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/server/servertest"
-	"github.com/gritive/GrainFS/internal/storage"
 )
 
 // TestScrubAPI_Localhost verifies that GET /admin/health/scrub is accessible
@@ -42,10 +42,7 @@ func TestScrubAPI_RemoteDenied(t *testing.T) {
 		t.Skip("no non-loopback IPv4 interface found; skipping external access test")
 	}
 
-	dir := t.TempDir()
-	backend, err := storage.NewLocalBackend(dir)
-	require.NoError(t, err)
-	t.Cleanup(func() { backend.Close() })
+	backend := cluster.NewSingletonBackendForTest(t)
 
 	// Bind to all interfaces so we can reach the server via the non-loopback IP.
 	port := servertest.FreePort(t)

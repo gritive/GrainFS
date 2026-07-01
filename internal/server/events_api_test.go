@@ -16,9 +16,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/badgerutil"
+	"github.com/gritive/GrainFS/internal/cluster"
 	"github.com/gritive/GrainFS/internal/eventstore"
 	"github.com/gritive/GrainFS/internal/server/servertest"
-	"github.com/gritive/GrainFS/internal/storage"
 )
 
 const testEventQueueSize = 64
@@ -59,12 +59,9 @@ func setupTestServerWithEvents(t *testing.T) (string, *eventstore.Store) {
 	return base, evStore
 }
 
-func setupTestServerWithEventsAndBackend(t *testing.T) (string, *storage.LocalBackend, *eventstore.Store) {
+func setupTestServerWithEventsAndBackend(t *testing.T) (string, *cluster.DistributedBackend, *eventstore.Store) {
 	t.Helper()
-	dir := t.TempDir()
-	backend, err := storage.NewLocalBackend(dir)
-	require.NoError(t, err)
-	t.Cleanup(func() { backend.Close() })
+	backend := cluster.NewSingletonBackendForTest(t)
 
 	opts := badgerutil.SmallOptions(t.TempDir())
 	db, err := badger.Open(opts)
@@ -136,10 +133,7 @@ func TestEmitEvent_BoundedQueueNoGoroutineLeak(t *testing.T) {
 	// Regression: emitEvent previously spawned one goroutine per event, so a
 	// burst of N events produced N live goroutines. The bounded queue + single
 	// worker must cap goroutine count regardless of burst size.
-	dir := t.TempDir()
-	backend, err := storage.NewLocalBackend(dir)
-	require.NoError(t, err)
-	t.Cleanup(func() { backend.Close() })
+	backend := cluster.NewSingletonBackendForTest(t)
 
 	opts := badgerutil.SmallOptions(t.TempDir())
 	db, err := badger.Open(opts)

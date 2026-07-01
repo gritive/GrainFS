@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/gritive/GrainFS/internal/storage"
+	"github.com/gritive/GrainFS/internal/cluster"
 )
 
 // partRef carries the ETag and bytes of an uploaded part so the test can
@@ -75,7 +75,7 @@ func completeMultipart(t *testing.T, base, bucket, key, uploadID string, parts [
 // setupMultipartTwoParts creates a bucket, uploads two parts ("hello"=5B and
 // " grain"=6B → total 11B), completes the upload, grants public-read so the
 // anonymous GET/HEAD below can succeed, and returns the parts metadata.
-func setupMultipartTwoParts(t *testing.T, base string, backend *storage.LocalBackend, bucket, key string) []partRef {
+func setupMultipartTwoParts(t *testing.T, base string, backend *cluster.DistributedBackend, bucket, key string) []partRef {
 	t.Helper()
 	mustCreateBucket(t, backend, bucket)
 
