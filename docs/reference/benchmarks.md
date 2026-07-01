@@ -148,16 +148,26 @@ instead of buffering small ones) did not regress cluster throughput. The write
 gap to MinIO is off-CPU (shard-write fsync and inter-node transfer latency), not
 compute headroom.
 
-Mixed workload (warp `mixed`, same VM class and settings, 2026-07-01): GrainFS
-cluster sustained 754.35 MiB/s (75.43 obj/s, 0 errors). No MinIO `mixed`
-baseline is published: the distributed MinIO and single-node `mixed` arms
-returned no benchmark data this run (the same warp-harness flakiness seen on
-`stat`/`get` for some targets), so a `vs MinIO` ratio is not available for the
-mixed workload.
+Mixed workload (warp `mixed`, run isolated as a single-op pass, same VM class and
+settings, 2026-07-01): GrainFS cluster and distributed MinIO are at parity.
+
+| Target            | `mixed` MiB/s | obj/s | errors | vs MinIO |
+| ----------------- | ------------: | ----: | -----: | -------: |
+| `GrainFS` cluster |        784.18 | 78.42 |      0 |    0.99x |
+| MinIO distributed |        794.77 | 79.48 |      0 |    1.00x |
+
+The `mixed` row reports the write-fraction throughput warp extracts as the
+headline; the combined all-operation total was 1045.37 MiB/s (GrainFS) vs
+1059.80 MiB/s (MinIO), also 0.99x. An earlier attempt ran `mixed` as the last op
+after `put`/`get`/`stat` with object retention on (`WARP_NOCLEAR=1`); the
+accumulated working set made the `mixed` arm exit without benchdata on the
+distributed-MinIO and single-node targets. Running `mixed` on its own against a
+clean bucket reproduced 0 errors on both cluster targets, so the failure was the
+prior disk-fill state, not a MinIO- or workload-specific defect.
 
 Date: 2026-07-01
-Commit: 1ebe22c3 (v0.0.774.0)
-Raw artifacts: `benchmarks/profiles/gcp-v774-matched/` (put/get), `gcp-v774-mixed/` (mixed)
+Commit: 1ad1a174 (v0.0.774.0)
+Raw artifacts: `benchmarks/profiles/gcp-v774-matched/` (put/get), `gcp-v774-mixed2/` (mixed)
 
 ## Existing Benchmark Targets
 
