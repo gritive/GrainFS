@@ -281,6 +281,28 @@ type PreparedReadAt interface {
 	ReadAtObject(ctx context.Context, bucket, key string, obj *Object, offset int64, buf []byte) (int, error)
 }
 
+// ObjectRangeReaderAt reads a byte range of a preloaded object. offset is
+// absolute within the object. Unlike PreparedReadAt.ReadAtObject it is stateful
+// and scoped to a single ranged GET, so it may cache per-read state across
+// refills. It is NOT safe for concurrent use.
+type ObjectRangeReaderAt interface {
+	ReadAt(offset int64, buf []byte) (int, error)
+}
+
+// PreparedObjectReaderAt is an optional factory that returns a stateful,
+// single-GET-scoped ObjectRangeReaderAt for a preloaded object. Whereas
+// PreparedReadAt is stateless (each call re-derives everything), the reader
+// returned here may cache per-read state — e.g. one decompressed EC segment — so
+// a multi-refill ranged GET decompresses each touched segment once instead of
+// once per refill.
+//
+// A nil reader means "no fast path available; fall back to stateless dispatch".
+// The returned cleanup func is always non-nil and must be called when the GET
+// completes.
+type PreparedObjectReaderAt interface {
+	PreparedObjectReaderAt(ctx context.Context, bucket, key string, obj *Object) (ObjectRangeReaderAt, func())
+}
+
 // TaggingDirective controls how tags are applied on CopyObject.
 type TaggingDirective uint8
 

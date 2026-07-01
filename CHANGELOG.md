@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.782.0] - 2026-07-02
+
+### Fixed
+- **Range GETs on compressed erasure-coded objects no longer re-decompress the same segment on
+  every refill.** A bytes-range GET over a zstd-compressed multi-segment object decompressed the
+  whole touched segment (up to 16 MiB) once per 5 MiB server refill. The ranged read path now
+  holds a per-request reader that caches the last decompressed segment, so each touched segment
+  is decompressed once per GET (measured: a full-segment range read allocates ~20 MiB instead of
+  ~50 MiB). Uncompressed EC ranged reads are unchanged and still read only the overlapping shard
+  bytes. Applies when the reconstructing owner serves the read locally; cross-node forwarded
+  reads keep the previous per-refill behavior.
+
 ## [0.0.781.0] - 2026-07-02
 
 ### Fixed

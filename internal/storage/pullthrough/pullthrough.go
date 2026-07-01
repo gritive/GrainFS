@@ -102,6 +102,15 @@ func (b *Backend) ReadAtObject(ctx context.Context, bucket, key string, obj *sto
 	return b.ReadAt(ctx, bucket, key, offset, buf)
 }
 
+// PreparedObjectReaderAt transparently forwards the stateful ranged-GET fast
+// path to the inner backend.
+func (b *Backend) PreparedObjectReaderAt(ctx context.Context, bucket, key string, obj *storage.Object) (storage.ObjectRangeReaderAt, func()) {
+	if f, ok := b.Backend.(storage.PreparedObjectReaderAt); ok {
+		return f.PreparedObjectReaderAt(ctx, bucket, key, obj)
+	}
+	return nil, func() {}
+}
+
 func (b *Backend) Truncate(ctx context.Context, bucket, key string, size int64) error {
 	partial, ok := b.Backend.(storage.PartialIO)
 	if !ok {

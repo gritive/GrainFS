@@ -721,6 +721,30 @@ func (c *ClusterCoordinator) ReadAtObject(ctx context.Context, bucket, key strin
 	return n, err
 }
 
+// PreparedObjectReaderAt forwards the stateful ranged-GET fast path to the local
+// group backend when the read routes to a SINGLE topology generation. A single
+// target is byte-identical to legacy routing (see probeRead), so resolving once
+// here is provably equivalent to the stateless attempt — no failover is lost. On
+// a multi-generation route (transient migration window) or a non-local/remote
+// owner it returns a nil reader, so the caller falls back to the stateless
+// per-refill dispatch (which keeps probeRead's newest→older 404 failover).
+func (c *ClusterCoordinator) PreparedObjectReaderAt(ctx context.Context, bucket, key string, obj *storage.Object) (storage.ObjectRangeReaderAt, func()) {
+	noop := func() {}
+	if obj == nil {
+		return nil, noop
+	}
+	targets, err := c.routeReadGenerations(bucket, key, obj.VersionID)
+	if err != nil || len(targets) != 1 {
+		return nil, noop
+	}
+	gb, err := c.runtimeState().localExec.ResolveRead(ctx, targets[0])
+	if err != nil || gb == nil {
+		return nil, noop
+	}
+	// *GroupBackend embeds *DistributedBackend, which implements the factory.
+	return gb.PreparedObjectReaderAt(ctx, bucket, key, obj)
+}
+
 func (c *ClusterCoordinator) PreferReadAt(bucket string) bool {
 	return true
 }

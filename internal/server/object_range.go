@@ -50,15 +50,7 @@ func (s *Server) getObjectRangeReadAt(ctx context.Context, c *app.RequestContext
 	if s.serveStripedRange(ctx, c, bucket, key, obj, start, length) {
 		return true
 	}
-	c.Response.SetBodyStream(&readAtRangeReader{
-		ctx:     ctx,
-		backend: reader,
-		obj:     obj,
-		bucket:  bucket,
-		key:     key,
-		offset:  start,
-		length:  length,
-	}, int(length))
+	c.Response.SetBodyStream(newReadAtRangeReader(ctx, reader, obj, bucket, key, start, length), int(length))
 	c.Status(consts.StatusPartialContent)
 	return true
 }
@@ -137,15 +129,7 @@ func (s *Server) getObjectPartNumberReadAt(ctx context.Context, c *app.RequestCo
 	if s.serveStripedRange(ctx, c, bucket, key, obj, start, length) {
 		return true
 	}
-	c.Response.SetBodyStream(&readAtRangeReader{
-		ctx:     ctx,
-		backend: reader,
-		obj:     obj,
-		bucket:  bucket,
-		key:     key,
-		offset:  start,
-		length:  length,
-	}, int(length))
+	c.Response.SetBodyStream(newReadAtRangeReader(ctx, reader, obj, bucket, key, start, length), int(length))
 	c.Status(consts.StatusPartialContent)
 	return true
 }
