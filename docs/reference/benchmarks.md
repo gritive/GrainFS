@@ -81,6 +81,14 @@ The same measurement attempt produced two additional valid MinIO runs
 runs 2 and 3 failed during `warp` preparation with `Access Denied` and empty
 TSV files. Those failed GrainFS arms are excluded from the table above.
 
+Re-measured on 2026-07-01 on the all-sizes streaming build (v0.0.774.0): GrainFS
+single-node PUT 223.40 MiB/s, GET 365.31 MiB/s, 0 errors — within single-node
+run-to-run variance of the figures above (single-node GET is the noisiest cell),
+so streaming small objects did not regress single-node throughput. The MinIO
+single-node baseline is unchanged: the single-node `minio` `warp` arm again
+returned empty benchmark data this run (a warp/MinIO single-node harness issue;
+the distributed `minio-cluster` arm ran cleanly, see the cluster result below).
+
 ### GCP Cluster Encrypted Path
 
 The cluster path starts a 4-node GrainFS cluster with at-rest encryption and a
@@ -120,27 +128,29 @@ Artifacts:
 
 ### Latest GCP Cluster Encrypted Result
 
-Captured on 2026-06-30 KST in `asia-northeast3-a` with one `n2-standard-4`
-client VM and four `n2-standard-4` storage VMs, 10 MiB object size, concurrency
-32, 1 minute per operation, signed S3 requests, round-robin host selection, warm
-GET over the preceding PUT objects, profiling disabled (no observer overhead),
-and 0 errors. This run uses the adaptive chunk-size policy (a 10 MiB PUT splits
-into 2 segments so the SegmentWriter pipelines EC encode and shard writes).
+Captured on 2026-07-01 KST in `asia-northeast3-a` with one `n2-standard-4`
+client VM and four `n2-standard-4` storage VMs, 10 MiB object size, 2048 total
+objects, concurrency 32, 1 minute per operation, signed S3 requests, round-robin
+host selection, warm GET over the preceding PUT objects, profiling disabled (no
+observer overhead), and 0 errors. Captured on the all-sizes streaming build
+(v0.0.774.0: every object body streams, no small-object buffering).
 
 | Target            | PUT MiB/s | GET MiB/s | vs MinIO PUT | vs MinIO GET |
 | ----------------- | --------: | --------: | -----------: | -----------: |
-| `GrainFS` cluster |    446.42 |   1997.72 |        0.95x |        1.02x |
-| MinIO distributed |    469.42 |   1952.44 |        1.00x |        1.00x |
+| `GrainFS` cluster |    434.79 |   1834.58 |        0.93x |        1.11x |
+| MinIO distributed |    468.67 |   1646.07 |        1.00x |        1.00x |
 
-Interpretation: GrainFS cluster read throughput is 1.02x of distributed MinIO
-(slightly ahead) and write throughput is 0.95x. The write gap closed from an
-earlier 0.76x once the adaptive chunk-size policy split mid-size objects into 2
-segments: a 10 MiB PUT previously landed in a single 16 MiB chunk, so the
-8-worker SegmentWriter used only one worker and ran read, EC encode, and shard
-writes serially. Splitting into 2 segments overlaps those stages (read‖EC‖write
-pipeline), lifting PUT from ~358 to 446 MiB/s. CPU stays around 58 percent under
-this workload, so the remaining gap to MinIO is off-CPU (shard-write fsync and
-inter-node transfer latency), not compute headroom.
+Interpretation: GrainFS cluster read throughput is 1.11x of distributed MinIO
+and write throughput is 0.93x. These figures are within run-to-run variance of
+the previous release's cluster result (v0.0.771.0: PUT 446.42, GET 1997.72),
+so the all-sizes streaming change (PUT/GET/forward now stream every object size
+instead of buffering small ones) did not regress cluster throughput. The write
+gap to MinIO is off-CPU (shard-write fsync and inter-node transfer latency), not
+compute headroom.
+
+Date: 2026-07-01
+Commit: 1ebe22c3 (v0.0.774.0)
+Raw artifacts: `benchmarks/profiles/gcp-v774-matched/`
 
 ## Existing Benchmark Targets
 
