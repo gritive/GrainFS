@@ -929,7 +929,7 @@ func TestOpenShardReaders_BLSwap_StreamingPath(t *testing.T) {
 	rec.K = cfg.DataShards
 	rec.M = cfg.ParityShards
 
-	recCfg, readers, err := r.openShardReaders(context.Background(), "bucket", "key", rec, objectSize)
+	recCfg, readers, err := r.openShardReaders(context.Background(), "bucket", "key", rec)
 	require.NoError(t, err)
 	defer closeECShardReaders(readers)
 
@@ -962,7 +962,7 @@ func TestOpenShardReaders_LargeObject_StreamsEvenWhenCacheFits(t *testing.T) {
 	rec.K = cfg.DataShards
 	rec.M = cfg.ParityShards
 
-	_, readers, err := r.openShardReaders(context.Background(), "bucket", "key", rec, objectSize)
+	_, readers, err := r.openShardReaders(context.Background(), "bucket", "key", rec)
 	require.NoError(t, err)
 	defer closeECShardReaders(readers)
 
@@ -994,7 +994,7 @@ func TestOpenShardReaders_SmallObject_StreamsNotBuffers(t *testing.T) {
 	rec.K = cfg.DataShards
 	rec.M = cfg.ParityShards
 
-	_, readers, err := r.openShardReaders(context.Background(), "bucket", "key", rec, objectSize)
+	_, readers, err := r.openShardReaders(context.Background(), "bucket", "key", rec)
 	require.NoError(t, err)
 	defer closeECShardReaders(readers)
 

@@ -73,7 +73,7 @@ func (r ecObjectReader) ReadObject(ctx context.Context, bucket, shardKey string,
 // OpenObject returns a streaming reader that reconstructs the object via EC
 // decode on the fly. objectSize is the original pre-encoding size in bytes.
 func (r ecObjectReader) OpenObject(ctx context.Context, bucket, shardKey string, rec PlacementRecord, objectSize int64) (io.ReadCloser, error) {
-	recCfg, shardReaders, err := r.openShardReaders(ctx, bucket, shardKey, rec, objectSize)
+	recCfg, shardReaders, err := r.openShardReaders(ctx, bucket, shardKey, rec)
 	if err != nil {
 		return nil, err
 	}
@@ -516,7 +516,7 @@ func (r ecObjectReader) readShards(ctx context.Context, bucket, shardKey string,
 
 // openShardReaders opens streaming readers for the shards needed to reconstruct
 // the object. All reads use direct streaming connections regardless of object size.
-func (r ecObjectReader) openShardReaders(ctx context.Context, bucket, shardKey string, rec PlacementRecord, objectSize int64) (ECConfig, []io.ReadCloser, error) {
+func (r ecObjectReader) openShardReaders(ctx context.Context, bucket, shardKey string, rec PlacementRecord) (ECConfig, []io.ReadCloser, error) {
 	recCfg := rec.ECConfigOrFallback(r.ecConfig)
 	if len(rec.Nodes) != recCfg.NumShards() {
 		return ECConfig{}, nil, fmt.Errorf("placement length %d != expected %d", len(rec.Nodes), recCfg.NumShards())
