@@ -3,6 +3,10 @@
 ## [0.0.777.0] - 2026-07-01
 
 ### Added
+- **Evaluator-friendly install path.** The README now separates the technical-preview
+  source-build install path from the Quick Start, explicitly states that release
+  binaries, container images, and Homebrew packages are not published yet, and
+  keeps contributor-only `make build`/lint requirements in the Development section.
 - **Launch claims checklist for marketing readiness.** Added a reference checklist that maps public
   launch wording for S3 compatibility, clients, access control, encryption, cluster durability,
   operations, performance, and retired protocol surfaces to repo evidence and safe caveats. The README
