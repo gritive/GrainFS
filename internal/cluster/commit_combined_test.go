@@ -318,32 +318,24 @@ func TestPromoteAndWriteQuorumMeta_MetaQuorumShort(t *testing.T) {
 	require.Contains(t, err.Error(), "quorum")
 }
 
-func TestPromoteAndWriteQuorumMeta_PairsOnlyNodeExcludedFromQuorum(t *testing.T) {
+// A pairs-only node (staged shards on a node OUTSIDE cmd.NodeIDs — a segment
+// whose placement group extends beyond the meta placement) breaks the global
+// promote-before-meta barrier IN A CRASH: meta-carrying nodes can persist the
+// blob before the pairs-only node's promote lands, and a coordinator crash
+// then leaves committed metadata referencing staged shards with NO cleanup or
+// rollback running. The combined round therefore refuses such placements and
+// falls back to the legacy two-round flow (global promote barrier).
+func TestPromoteAndWriteQuorumMeta_PairsOnlyNodeForcesLegacyFallback(t *testing.T) {
 	quorumNodes := []string{"n1", "n2", "n3", "n4"}
 	allWithPairs := append([]string{"n5"}, quorumNodes...)
 
-	t.Run("dispatched_without_blob", func(t *testing.T) {
-		fx := newCombinedFixture("", "coordinator", allWithPairs...)
-		promotes, order := combinedTestPromotes(allWithPairs...)
-		cmd := combinedTestCmd(quorumNodes, 2) // n5 NOT in NodeIDs
-		require.NoError(t, fx.store.promoteAndWriteQuorumMeta(context.Background(), cmd, promotes, order, fx.legacyPromote))
-		for _, r := range fx.peer.dispatchSnapshot() {
-			if r.node == "n5" {
-				require.True(t, r.blobNil, "pairs-only node must be dispatched without a meta blob")
-				return
-			}
-		}
-		t.Fatal("n5 was never dispatched")
-	})
+	fx := newCombinedFixture("", "coordinator", allWithPairs...)
+	promotes, order := combinedTestPromotes(allWithPairs...)
+	cmd := combinedTestCmd(quorumNodes, 2) // n5 has pairs but NOT in NodeIDs
 
-	t.Run("plain_error_aborts_even_with_quorum", func(t *testing.T) {
-		fx := newCombinedFixture("", "coordinator", allWithPairs...)
-		fx.peer.errs["n5"] = errors.New("promote transport failure")
-		promotes, order := combinedTestPromotes(allWithPairs...)
-		cmd := combinedTestCmd(quorumNodes, 2)
-		err := fx.store.promoteAndWriteQuorumMeta(context.Background(), cmd, promotes, order, fx.legacyPromote)
-		require.Error(t, err, "a promote-class failure on a pairs-only node must abort even though the meta quorum was met")
-	})
+	require.NoError(t, fx.store.promoteAndWriteQuorumMeta(context.Background(), cmd, promotes, order, fx.legacyPromote))
+	require.Empty(t, fx.peer.dispatchSnapshot(), "a pairs-only node must force the legacy two-round flow (global promote barrier)")
+	require.Equal(t, int32(1), fx.legacyCalls.Load(), "legacyPromote must run exactly once")
 }
 
 func TestPromoteAndWriteQuorumMeta_MetaOnlyNodeFailureTolerated(t *testing.T) {
@@ -495,6 +487,29 @@ func TestPromoteAndWriteQuorumMeta_AbortRollsBackAckedMetas(t *testing.T) {
 	for node, blob := range rollbackBlobs {
 		require.Equal(t, want, blob, "rollback for %s must be content-matched against the round's blob", node)
 	}
+}
+
+// A meta-class failure does NOT prove the blob was not published: the local
+// write can fail AFTER the rename made it visible (e.g. the directory fsync
+// errors). Content-matched rollback on a node that truly published nothing is
+// a no-op, so meta-failed nodes must be INCLUDED in the abort rollback set
+// (delete-only — the error response carries no previous blob).
+func TestPromoteAndWriteQuorumMeta_AbortRollsBackMetaFailedNodesToo(t *testing.T) {
+	nodes := []string{"n1", "n2", "n3", "n4"}
+	fx := newCombinedFixture("", "coordinator", nodes...)
+	fx.peer.errs["n2"] = fmt.Errorf("promote exploded: %w", errCombinedPromoteFailed) // abort trigger
+	fx.peer.errs["n3"] = fmt.Errorf("dir fsync after rename: %w", errCombinedMetaFailed)
+	promotes, order := combinedTestPromotes(nodes...)
+	cmd := combinedTestCmd(nodes, 2)
+
+	err := fx.store.promoteAndWriteQuorumMeta(context.Background(), cmd, promotes, order, fx.legacyPromote)
+	require.Error(t, err)
+
+	rollbackNodes, _ := fx.peer.rollbackSnapshot()
+	require.Contains(t, rollbackNodes, "n3",
+		"a meta-failed node may have published (rename before the failing fsync) and must be rolled back")
+	require.NotContains(t, rollbackNodes, "n2",
+		"a promote-failed node positively never reached the meta write")
 }
 
 func TestPromoteAndWriteQuorumMeta_ResolveFailure(t *testing.T) {

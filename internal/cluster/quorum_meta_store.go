@@ -435,6 +435,20 @@ func (s *QuorumMetaStore) promoteAndWriteQuorumMeta(
 	for _, n := range cmd.NodeIDs {
 		metaVotes[n]++
 	}
+	// Global promote barrier: a pairs-only node (staged shards on a node
+	// OUTSIDE cmd.NodeIDs — a segment placed beyond the meta placement) makes
+	// the one-round collapse crash-unsafe: meta-carrying nodes can persist the
+	// blob before that node's promote lands, and a coordinator crash then
+	// leaves committed metadata referencing staged shards with no cleanup or
+	// rollback ever running. The legacy flow's cluster-wide promote-then-meta
+	// ordering is the crash guard, so such placements keep it. (Single-group
+	// clusters — every segment on the meta nodes — always take the combined
+	// round.)
+	for n := range promotes {
+		if metaVotes[n] == 0 {
+			return runLegacy()
+		}
+	}
 	// Targets = pairs-carrying nodes (nodeOrder, deterministic) + every unique
 	// meta node not already covered. ONE dispatch per unique node.
 	targets := append([]string(nil), nodeOrder...)
@@ -566,14 +580,15 @@ type metaRollback struct {
 
 // buildCombinedRollbackSet selects, from every DISPATCHED meta-carrying result,
 // the nodes that must be rolled back on abort. A meta node is rolled back UNLESS
-// it is POSITIVELY known not to have persisted the blob: errCombinedPromoteFailed
-// (handler ordering: the meta write was never attempted) or errCombinedMetaFailed
-// (the atomic tmp+rename write failed ⇒ nothing published). Every other outcome
-// — a clean ack, an INDETERMINATE transport error (the response was lost after
-// the write may have landed), or a drained-after-cancel result — is rolled back.
-// An acked node carries its overwritten previous blob (RESTORE); an indeterminate
-// node has no ack ⇒ no previous ⇒ delete-only. A rollback on a node that never
-// wrote is a content-matched no-op, so including the indeterminate nodes is safe.
+// it is POSITIVELY known not to have persisted the blob — ONLY
+// errCombinedPromoteFailed qualifies (handler ordering: the meta write was never
+// attempted). Every other outcome is rolled back: a clean ack, a meta-class
+// failure (the local write can fail AFTER the rename made the blob visible,
+// e.g. a directory fsync error), an INDETERMINATE transport error (the response
+// was lost after the write may have landed), or a drained-after-cancel result.
+// An acked node carries its overwritten previous blob (RESTORE); meta-failed and
+// indeterminate nodes have no acked previous ⇒ delete-only. A rollback on a node
+// that never wrote is a content-matched no-op, so over-inclusion is safe.
 //
 // Residual: the previous is lost only in a DOUBLE fault (response lost AND abort)
 // on a node where the previous existed only there — strictly better than the
@@ -585,10 +600,15 @@ func buildCombinedRollbackSet(seen []combinedResult, metaVotes map[string]int) [
 			continue // pairs-only node: it never carried a meta blob to roll back
 		}
 		if res.err != nil {
-			if errors.Is(res.err, errCombinedPromoteFailed) || errors.Is(res.err, errCombinedMetaFailed) {
-				continue // positively did not persist
+			if errors.Is(res.err, errCombinedPromoteFailed) {
+				continue // handler ordering: the meta write was never attempted
 			}
-			out = append(out, metaRollback{node: res.node}) // indeterminate ⇒ delete-only
+			// Meta-class does NOT prove nothing was published — the local write
+			// can fail AFTER the rename made the blob visible (dir fsync error).
+			// Content-matched rollback on a node that published nothing is a
+			// no-op, so meta-failed and indeterminate nodes are both rolled back
+			// (delete-only: neither carries an acked previous blob).
+			out = append(out, metaRollback{node: res.node})
 			continue
 		}
 		out = append(out, metaRollback{node: res.node, previous: res.previous, hadPrevious: res.hadPrevious})
