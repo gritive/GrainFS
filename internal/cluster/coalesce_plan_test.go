@@ -9,12 +9,9 @@ import (
 
 func TestPlanCoalesceTriggerPrecedence(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
-	segs := []storage.SegmentRef{
-		{BlobID: "s1", Size: 10},
-		{BlobID: "s2", Size: 10},
-	}
+	const count, size = 2, int64(20)
 
-	plan := planCoalesceTrigger(segs, now.Add(-time.Hour), now, CoalesceConfig{
+	plan := planCoalesceTrigger(count, size, now.Add(-time.Hour), now, CoalesceConfig{
 		SegmentCount: 2,
 		SizeBytes:    10,
 		IdleTimeout:  time.Second,
@@ -23,7 +20,7 @@ func TestPlanCoalesceTriggerPrecedence(t *testing.T) {
 		t.Fatalf("plan = %+v, want count trigger", plan)
 	}
 
-	plan = planCoalesceTrigger(segs, now.Add(-time.Hour), now, CoalesceConfig{
+	plan = planCoalesceTrigger(count, size, now.Add(-time.Hour), now, CoalesceConfig{
 		SegmentCount: 3,
 		SizeBytes:    20,
 		IdleTimeout:  time.Second,
@@ -32,7 +29,7 @@ func TestPlanCoalesceTriggerPrecedence(t *testing.T) {
 		t.Fatalf("plan = %+v, want size trigger", plan)
 	}
 
-	plan = planCoalesceTrigger(segs, now.Add(-time.Hour), now, CoalesceConfig{
+	plan = planCoalesceTrigger(count, size, now.Add(-time.Hour), now, CoalesceConfig{
 		SegmentCount: 3,
 		SizeBytes:    30,
 		IdleTimeout:  time.Second,
@@ -42,9 +39,9 @@ func TestPlanCoalesceTriggerPrecedence(t *testing.T) {
 	}
 }
 
-func TestPlanCoalesceTriggerRejectsEmptySegments(t *testing.T) {
+func TestPlanCoalesceTriggerRejectsZeroCount(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
-	plan := planCoalesceTrigger(nil, now.Add(-time.Hour), now, CoalesceConfig{
+	plan := planCoalesceTrigger(0, 0, now.Add(-time.Hour), now, CoalesceConfig{
 		SegmentCount: 1,
 		SizeBytes:    1,
 		IdleTimeout:  time.Second,
