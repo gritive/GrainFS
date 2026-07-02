@@ -1,0 +1,118 @@
+package cluster
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
+
+// truncStreamStore serves canned whole-shard streams per shard index via both
+// the remote streaming RPC surface and the local open, so
+// ecObjectReader.OpenObject exercises the real endpoint → header-parse →
+// guard chain for either endpoint kind.
+type truncStreamStore struct {
+	recordingShardStore
+	streams [][]byte
+}
+
+func (s *truncStreamStore) ReadShardStream(_ context.Context, _ string, _ string, _ string, shardIdx int) (io.ReadCloser, error) {
+	return io.NopCloser(bytes.NewReader(s.streams[shardIdx])), nil
+}
+
+func (s *truncStreamStore) OpenLocalShard(_ string, _ string, shardIdx int) (io.ReadCloser, error) {
+	return io.NopCloser(bytes.NewReader(s.streams[shardIdx])), nil
+}
+
+// TestOpenObject_TruncatedRemoteShardMarksPeerUnhealthy pins end-to-end
+// attribution: a remote peer serving a cleanly-truncated shard body fails the
+// GET with *ecShardTruncatedError AND lands in peerHealth.unhealthy.
+func TestOpenObject_TruncatedRemoteShardMarksPeerUnhealthy(t *testing.T) {
+	cfg := ECConfig{DataShards: 2, ParityShards: 1}
+	payload := bytes.Repeat([]byte("abcdefgh"), 512)
+	full, bodyLen := buildECShards(t, cfg, payload)
+
+	streams := [][]byte{full[0][:shardHeaderSize+bodyLen/2], full[1], full[2]}
+	ph := &fakeECObjectPeerHealth{}
+	store := &truncStreamStore{streams: streams}
+	r := ecObjectReader{selfID: "self", shards: store, peerHealth: ph, ecConfig: cfg}
+	rec := PlacementRecord{Nodes: []string{"peer-a", "peer-b", "peer-c"}, K: 2, M: 1}
+
+	rc, err := r.OpenObject(context.Background(), "b", "k", rec, int64(len(payload)))
+	require.NoError(t, err)
+	_, err = io.ReadAll(rc)
+	var terr *ecShardTruncatedError
+	require.True(t, errors.As(err, &terr), "want typed truncation, got %v", err)
+	require.Equal(t, 0, terr.Idx)
+	require.Equal(t, []string{"peer-a"}, ph.unhealthy, "truncating peer must be marked")
+	_ = rc.Close()
+}
+
+// TestOpenObject_EmptyBodyHeaderMarksPeerUnhealthy — empty body: the open
+// itself fails typed, and the peer is marked.
+func TestOpenObject_EmptyBodyHeaderMarksPeerUnhealthy(t *testing.T) {
+	cfg := ECConfig{DataShards: 2, ParityShards: 1}
+	payload := bytes.Repeat([]byte("qwertyui"), 64)
+	full, _ := buildECShards(t, cfg, payload)
+
+	streams := [][]byte{nil, full[1], full[2]}
+	ph := &fakeECObjectPeerHealth{}
+	store := &truncStreamStore{streams: streams}
+	r := ecObjectReader{selfID: "self", shards: store, peerHealth: ph, ecConfig: cfg}
+	rec := PlacementRecord{Nodes: []string{"peer-a", "peer-b", "peer-c"}, K: 2, M: 1}
+
+	_, err := r.OpenObject(context.Background(), "b", "k", rec, int64(len(payload)))
+	var terr *ecShardTruncatedError
+	require.True(t, errors.As(err, &terr), "want typed truncation from open, got %v", err)
+	require.Contains(t, ph.unhealthy, "peer-a")
+}
+
+// TestOpenObject_LocalTruncatedShardDoesNotSelfMark — a node never
+// health-marks itself, even for its own truncated shard.
+func TestOpenObject_LocalTruncatedShardDoesNotSelfMark(t *testing.T) {
+	cfg := ECConfig{DataShards: 2, ParityShards: 1}
+	payload := bytes.Repeat([]byte("selftest"), 512)
+	full, bodyLen := buildECShards(t, cfg, payload)
+
+	streams := [][]byte{full[0][:shardHeaderSize+bodyLen/2], full[1], full[2]}
+	ph := &fakeECObjectPeerHealth{}
+	store := &truncStreamStore{streams: streams}
+	r := ecObjectReader{selfID: "self", shards: store, peerHealth: ph, ecConfig: cfg}
+	rec := PlacementRecord{Nodes: []string{"self", "peer-b", "peer-c"}, K: 2, M: 1}
+
+	rc, err := r.OpenObject(context.Background(), "b", "k", rec, int64(len(payload)))
+	require.NoError(t, err)
+	_, err = io.ReadAll(rc)
+	var terr *ecShardTruncatedError
+	require.True(t, errors.As(err, &terr))
+	require.Empty(t, ph.unhealthy, "a node must not mark itself")
+	_ = rc.Close()
+}
+
+// TestStripeStream_TruncatedFragmentIsTypedAndMarks — stripe path: a short
+// fragment read surfaces *ecShardTruncatedError and fires the hook with the
+// truncated shard's index.
+func TestStripeStream_TruncatedFragmentIsTypedAndMarks(t *testing.T) {
+	const stripeBytes = 1024
+	cfg := ECConfig{DataShards: 2, ParityShards: 1}
+	payload := bytes.Repeat([]byte("stripedd"), 512) // 4 KiB = 4 stripes
+	bodies := buildInterleavedShards(t, cfg, payload, stripeBytes)
+
+	// Truncate shard 0 mid-fragment: one full stripe fragment plus half of the
+	// next, so fill()'s io.ReadFull on stripe 1 comes up short.
+	fragSize := stripeFragSize(stripeBytes, cfg.DataShards)
+	bodies[0] = bodies[0][:fragSize+fragSize/2]
+
+	var faults []int
+	rc, err := newStripeDeinterleaveStreamReader(cfg, bodyReaders(bodies), stripeBytes, int64(len(payload)), func(i int) { faults = append(faults, i) })
+	require.NoError(t, err)
+	_, err = io.ReadAll(rc)
+	var terr *ecShardTruncatedError
+	require.True(t, errors.As(err, &terr), "want typed truncation, got %v", err)
+	require.Equal(t, 0, terr.Idx)
+	require.Equal(t, []int{0}, faults, "hook must fire once with the truncated shard index")
+	_ = rc.Close()
+}

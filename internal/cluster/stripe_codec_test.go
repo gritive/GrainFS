@@ -46,7 +46,7 @@ func TestStripeDeinterleaveStreaming(t *testing.T) {
 	}
 	bodies := buildInterleavedShards(t, cfg, payload, stripeBytes)
 
-	rc, err := newStripeDeinterleaveStreamReader(cfg, bodyReaders(cloneShards(bodies)), stripeBytes, int64(len(payload)))
+	rc, err := newStripeDeinterleaveStreamReader(cfg, bodyReaders(cloneShards(bodies)), stripeBytes, int64(len(payload)), nil)
 	require.NoError(t, err)
 	got, err := io.ReadAll(rc)
 	require.NoError(t, err)
@@ -55,7 +55,7 @@ func TestStripeDeinterleaveStreaming(t *testing.T) {
 
 	deg := cloneShards(bodies)
 	deg[0] = nil
-	rc2, err := newStripeDeinterleaveStreamReader(cfg, bodyReaders(deg), stripeBytes, int64(len(payload)))
+	rc2, err := newStripeDeinterleaveStreamReader(cfg, bodyReaders(deg), stripeBytes, int64(len(payload)), nil)
 	require.NoError(t, err)
 	got2, err := io.ReadAll(rc2)
 	require.NoError(t, err)
@@ -91,7 +91,7 @@ func TestStripeDeinterleaveStreamingBounded(t *testing.T) {
 		probes[i] = &countingReader{r: bytes.NewReader(bodies[i])}
 		readers[i] = probes[i]
 	}
-	rc, err := newStripeDeinterleaveStreamReader(cfg, readers, stripeBytes, int64(len(payload)))
+	rc, err := newStripeDeinterleaveStreamReader(cfg, readers, stripeBytes, int64(len(payload)), nil)
 	require.NoError(t, err)
 	first := make([]byte, 4096)
 	_, err = io.ReadFull(rc, first)

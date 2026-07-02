@@ -98,7 +98,7 @@ func TestRepairShardAtShardKey_StripedReinterleaves(t *testing.T) {
 		require.NoError(t, derr)
 		survivors[i] = body
 	}
-	rc, err := newStripeDeinterleaveStreamReader(cfg, bodyReaders(survivors), stripeBytes, int64(len(payload)))
+	rc, err := newStripeDeinterleaveStreamReader(cfg, bodyReaders(survivors), stripeBytes, int64(len(payload)), nil)
 	require.NoError(t, err)
 	got, err := io.ReadAll(rc)
 	require.NoError(t, err)
