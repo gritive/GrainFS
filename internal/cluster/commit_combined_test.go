@@ -24,8 +24,8 @@ import (
 // (methods may live in any file of the package; the base fake fails loudly if a
 // test that did not opt into the combined round reaches it).
 
-func (f *fakePeerQuorumMeta) PromoteAndWriteQuorumMeta(ctx context.Context, addr, bucket, key string, pairs []stagedPromotePair, blob []byte) ([]byte, bool, error) {
-	return nil, false, fmt.Errorf("fakePeerQuorumMeta: unexpected PromoteAndWriteQuorumMeta to %s", addr)
+func (f *fakePeerQuorumMeta) PromoteAndWriteQuorumMeta(ctx context.Context, addr, bucket, key string, pairs []stagedPromotePair, blob []byte) (bool, []byte, bool, error) {
+	return false, nil, false, fmt.Errorf("fakePeerQuorumMeta: unexpected PromoteAndWriteQuorumMeta to %s", addr)
 }
 
 func (f *fakePeerQuorumMeta) RollbackQuorumMetaIfMatch(ctx context.Context, addr, bucket, key string, expected, previous []byte, hadPrevious bool) error {
@@ -49,6 +49,7 @@ type fakeCombinedPeer struct {
 	errs           map[string]error  // addr → dispatch result
 	resolveErrs    map[string]error  // node → resolvePeerAddress failure injection
 	ackPrevious    map[string][]byte // addr → previous blob returned on a clean ack
+	ackNoOp        map[string]bool   // addr → clean ack with applied=false (idempotent replay / LWW skip)
 	ackAfterCancel map[string]bool   // addr → block until ctx canceled, then return errs[addr]
 	block          map[string]chan struct{}
 	inFlight       atomic.Int32
@@ -64,6 +65,7 @@ func newFakeCombinedPeer() *fakeCombinedPeer {
 		errs:               map[string]error{},
 		resolveErrs:        map[string]error{},
 		ackPrevious:        map[string][]byte{},
+		ackNoOp:            map[string]bool{},
 		ackAfterCancel:     map[string]bool{},
 		block:              map[string]chan struct{}{},
 		rollbackBlobs:      map[string][]byte{},
@@ -72,7 +74,7 @@ func newFakeCombinedPeer() *fakeCombinedPeer {
 	}
 }
 
-func (f *fakeCombinedPeer) PromoteAndWriteQuorumMeta(ctx context.Context, addr, bucket, key string, pairs []stagedPromotePair, blob []byte) ([]byte, bool, error) {
+func (f *fakeCombinedPeer) PromoteAndWriteQuorumMeta(ctx context.Context, addr, bucket, key string, pairs []stagedPromotePair, blob []byte) (bool, []byte, bool, error) {
 	f.inFlight.Add(1)
 	defer f.inFlight.Add(-1)
 	f.mu.Lock()
@@ -81,13 +83,14 @@ func (f *fakeCombinedPeer) PromoteAndWriteQuorumMeta(ctx context.Context, addr, 
 	waitCancel := f.ackAfterCancel[addr]
 	gate := f.block[addr]
 	prev, hadPrev := f.ackPrevious[addr]
+	applied := blob != nil && !f.ackNoOp[addr]
 	f.mu.Unlock()
 	if waitCancel {
 		<-ctx.Done() // "late" node: answers only after the abort's cancel
 		if err == nil {
-			return prev, hadPrev, nil
+			return applied, prev, hadPrev, nil
 		}
-		return nil, false, err
+		return false, nil, false, err
 	}
 	if gate != nil {
 		select {
@@ -96,9 +99,9 @@ func (f *fakeCombinedPeer) PromoteAndWriteQuorumMeta(ctx context.Context, addr, 
 		}
 	}
 	if err != nil {
-		return nil, false, err
+		return false, nil, false, err
 	}
-	return prev, hadPrev, nil
+	return applied, prev, hadPrev, nil
 }
 
 func (f *fakeCombinedPeer) RollbackQuorumMetaIfMatch(ctx context.Context, addr, bucket, key string, expected, previous []byte, hadPrevious bool) error {
@@ -510,6 +513,27 @@ func TestPromoteAndWriteQuorumMeta_AbortRollsBackMetaFailedNodesToo(t *testing.T
 		"a meta-failed node may have published (rename before the failing fsync) and must be rolled back")
 	require.NotContains(t, rollbackNodes, "n2",
 		"a promote-failed node positively never reached the meta write")
+}
+
+// A clean NO-OP ack (applied=false: the identical blob was already on disk —
+// an idempotent retry, or an LWW skip) means this round published NOTHING on
+// that node. Rolling it back would content-match the PRIOR committed PUT's
+// identical metadata and delete it — the no-op node must be excluded.
+func TestPromoteAndWriteQuorumMeta_NoOpAckNotRolledBack(t *testing.T) {
+	nodes := []string{"n1", "n2", "n3", "n4"}
+	fx := newCombinedFixture("", "coordinator", nodes...)
+	fx.peer.ackNoOp["n1"] = true // identical blob already on disk from a prior committed PUT
+	fx.peer.errs["n3"] = fmt.Errorf("promote exploded: %w", errCombinedPromoteFailed)
+	promotes, order := combinedTestPromotes(nodes...)
+	cmd := combinedTestCmd(nodes, 2)
+
+	err := fx.store.promoteAndWriteQuorumMeta(context.Background(), cmd, promotes, order, fx.legacyPromote)
+	require.Error(t, err)
+
+	rollbackNodes, _ := fx.peer.rollbackSnapshot()
+	require.NotContains(t, rollbackNodes, "n1",
+		"a no-op ack published nothing this round; rollback would delete the prior committed identical blob")
+	require.Contains(t, rollbackNodes, "n2", "an applied ack is still rolled back")
 }
 
 func TestPromoteAndWriteQuorumMeta_ResolveFailure(t *testing.T) {

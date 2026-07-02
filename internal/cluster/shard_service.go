@@ -760,30 +760,37 @@ func decodePromoteAndMetaPayload(data []byte) ([]stagedPromotePair, []byte, erro
 }
 
 // encodeCombinedOKBody encodes the OK response body for a combined commit that
-// performed a meta write: [u8 hadPrevious][previous…]. The previous blob is the
-// content the write overwrote (empty when there was none); the coordinator
-// carries it back into an abort-path rollback to RESTORE the prior latest-only
-// object rather than delete it. A promote-only call (no meta write) responds
-// with a nil body instead.
-func encodeCombinedOKBody(previous []byte, hadPrevious bool) []byte {
-	out := make([]byte, 1, 1+len(previous))
-	if hadPrevious {
+// attempted a meta write: [u8 applied][u8 hadPrevious][previous…]. applied=0
+// means the write was a clean NO-OP (byte-identical idempotent replay or LWW
+// skip — the on-disk blob was NOT published by this call); an abort must NOT
+// roll such a node back, because with an identical on-disk blob the content
+// match would delete a PRIOR committed PUT's metadata. previous is the content
+// an applied write overwrote; the coordinator carries it into an abort-path
+// rollback to RESTORE the prior latest-only object rather than delete it. A
+// promote-only call (no meta write) responds with a nil body instead.
+func encodeCombinedOKBody(applied bool, previous []byte, hadPrevious bool) []byte {
+	out := make([]byte, 2, 2+len(previous))
+	if applied {
 		out[0] = 1
+	}
+	if hadPrevious {
+		out[1] = 1
 	}
 	return append(out, previous...)
 }
 
 // decodeCombinedOKBody parses the PromoteAndWriteQuorumMeta OK body. An empty
-// body means no meta write happened (promote-only) ⇒ (nil, false). Otherwise
-// body[0] is hadPrevious; body[1:] is the previous blob.
-func decodeCombinedOKBody(body []byte) (previous []byte, hadPrevious bool) {
-	if len(body) == 0 {
-		return nil, false
+// body means no meta write happened (promote-only) ⇒ (false, nil, false).
+// Otherwise body[0] is applied, body[1] is hadPrevious, body[2:] the previous.
+func decodeCombinedOKBody(body []byte) (applied bool, previous []byte, hadPrevious bool) {
+	if len(body) < 2 {
+		return false, nil, false
 	}
-	if body[0] != 1 {
-		return nil, false
+	applied = body[0] == 1
+	if body[1] != 1 {
+		return applied, nil, false
 	}
-	return append([]byte(nil), body[1:]...), true
+	return applied, append([]byte(nil), body[2:]...), true
 }
 
 // encodeRollbackPayload encodes the RollbackQuorumMetaIfMatch request payload:
@@ -843,29 +850,29 @@ const (
 // tail's two rounds collapsed to node scope, preserving per-node
 // promote-before-meta ordering. addr is a RESOLVED peer address (matching
 // WriteQuorumMeta's convention; the caller resolves exactly once).
-func (s *ShardService) PromoteAndWriteQuorumMeta(ctx context.Context, addr, bucket, key string, pairs []stagedPromotePair, blob []byte) (previous []byte, hadPrevious bool, err error) {
+func (s *ShardService) PromoteAndWriteQuorumMeta(ctx context.Context, addr, bucket, key string, pairs []stagedPromotePair, blob []byte) (applied bool, previous []byte, hadPrevious bool, err error) {
 	if s.transport == nil {
-		return nil, false, fmt.Errorf("shard service: no transport")
+		return false, nil, false, fmt.Errorf("shard service: no transport")
 	}
 	payload, err := encodePromoteAndMetaPayload(pairs, blob)
 	if err != nil {
-		return nil, false, err
+		return false, nil, false, err
 	}
 	envb := buildShardEnvelope("PromoteAndWriteQuorumMeta", bucket, key, 0, payload)
 	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
 	respEnvelope, err := s.callShardRPC(ctx, addr, envb)
 	if err != nil {
-		return nil, false, fmt.Errorf("combined commit on %s: %w", addr, err)
+		return false, nil, false, fmt.Errorf("combined commit on %s: %w", addr, err)
 	}
 	rpcType, body, err := unmarshalEnvelope(respEnvelope)
 	if err != nil {
-		return nil, false, fmt.Errorf("combined commit on %s: unmarshal response: %w", addr, err)
+		return false, nil, false, fmt.Errorf("combined commit on %s: unmarshal response: %w", addr, err)
 	}
 	if rpcType == "Error" {
-		return nil, false, fmt.Errorf("combined commit on %s: %w", addr, classifyCombinedCommitError(string(body)))
+		return false, nil, false, fmt.Errorf("combined commit on %s: %w", addr, classifyCombinedCommitError(string(body)))
 	}
-	previous, hadPrevious = decodeCombinedOKBody(body)
-	return previous, hadPrevious, nil
+	applied, previous, hadPrevious = decodeCombinedOKBody(body)
+	return applied, previous, hadPrevious, nil
 }
 
 // classifyCombinedCommitError maps a combined-commit Error-response body to its
@@ -940,7 +947,7 @@ func (s *ShardService) handlePromoteAndQuorumMetaWrite(sr *shardRequest) []byte 
 		// Carry the overwritten previous blob back so the coordinator can RESTORE
 		// it on abort (not just delete this node's new blob), preserving the prior
 		// object's latest-only authority on a non-versioned overwrite PUT.
-		return s.okResponse(encodeCombinedOKBody(result.previous, result.hadPrevious))
+		return s.okResponse(encodeCombinedOKBody(result.applied, result.previous, result.hadPrevious))
 	}
 	return s.okResponse(nil)
 }

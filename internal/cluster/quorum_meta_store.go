@@ -125,7 +125,7 @@ type quorumMetaPeerRPC interface {
 	// PromoteAndWriteQuorumMeta returns the blob it OVERWROTE (previous,
 	// hadPrevious) so an abort can RESTORE it; RollbackQuorumMetaIfMatch carries
 	// that previous back (hadPrevious=true restores, false deletes).
-	PromoteAndWriteQuorumMeta(ctx context.Context, addr, bucket, key string, pairs []stagedPromotePair, blob []byte) (previous []byte, hadPrevious bool, err error)
+	PromoteAndWriteQuorumMeta(ctx context.Context, addr, bucket, key string, pairs []stagedPromotePair, blob []byte) (applied bool, previous []byte, hadPrevious bool, err error)
 	RollbackQuorumMetaIfMatch(ctx context.Context, addr, bucket, key string, expected, previous []byte, hadPrevious bool) error
 }
 
@@ -492,8 +492,8 @@ func (s *QuorumMetaStore) promoteAndWriteQuorumMeta(
 			nodeBlob = nil
 		}
 		go func() {
-			prev, had, err := s.dispatchCombined(wctx, self, node, cmd.Bucket, cmd.Key, pairs, nodeBlob)
-			results <- combinedResult{node: node, previous: prev, hadPrevious: had, err: err}
+			applied, prev, had, err := s.dispatchCombined(wctx, self, node, cmd.Bucket, cmd.Key, pairs, nodeBlob)
+			results <- combinedResult{node: node, applied: applied, previous: prev, hadPrevious: had, err: err}
 		}()
 	}
 	// seen accumulates EVERY received result (main loop + drain) so the abort
@@ -558,11 +558,14 @@ func (s *QuorumMetaStore) promoteAndWriteQuorumMeta(
 	return nil
 }
 
-// combinedResult is one node's outcome from a combined-commit dispatch: the
-// blob it overwrote (previous/hadPrevious, populated only on a clean ack) and
-// the error class. Package-level so buildCombinedRollbackSet can consume it.
+// combinedResult is one node's outcome from a combined-commit dispatch: whether
+// the meta write actually PUBLISHED (applied — false on an idempotent replay /
+// LWW-skip no-op), the blob it overwrote (previous/hadPrevious, populated only
+// on a clean applied ack) and the error class. Package-level so
+// buildCombinedRollbackSet can consume it.
 type combinedResult struct {
 	node        string
+	applied     bool
 	previous    []byte
 	hadPrevious bool
 	err         error
@@ -609,6 +612,13 @@ func buildCombinedRollbackSet(seen []combinedResult, metaVotes map[string]int) [
 			// no-op, so meta-failed and indeterminate nodes are both rolled back
 			// (delete-only: neither carries an acked previous blob).
 			out = append(out, metaRollback{node: res.node})
+			continue
+		}
+		if !res.applied {
+			// Clean no-op ack: the on-disk blob was NOT published by this round
+			// (byte-identical idempotent replay or LWW skip). Rolling it back
+			// would content-match a PRIOR committed PUT's identical metadata and
+			// delete it — skip.
 			continue
 		}
 		out = append(out, metaRollback{node: res.node, previous: res.previous, hadPrevious: res.hadPrevious})
@@ -661,26 +671,28 @@ func (s *QuorumMetaStore) rollbackCombinedMeta(bucket, key string, blob []byte, 
 // the ShardService method takes the RESOLVED addr — no double resolution).
 // Promote-step failures are wrapped with errCombinedPromoteFailed so the
 // coordinator's error-class split works identically for self and peers.
-func (s *QuorumMetaStore) dispatchCombined(ctx context.Context, self, node, bucket, key string, pairs []stagedPromotePair, blob []byte) (previous []byte, hadPrevious bool, err error) {
+func (s *QuorumMetaStore) dispatchCombined(ctx context.Context, self, node, bucket, key string, pairs []stagedPromotePair, blob []byte) (applied bool, previous []byte, hadPrevious bool, err error) {
 	if node == self {
 		if len(pairs) > 0 && s.promoteLocalStaged == nil {
-			return nil, false, fmt.Errorf("%scombined commit: promoteLocalStaged not wired: %w", combinedPromoteFailedPrefix, errCombinedPromoteFailed)
+			return false, nil, false, fmt.Errorf("%scombined commit: promoteLocalStaged not wired: %w", combinedPromoteFailedPrefix, errCombinedPromoteFailed)
 		}
 		for _, pair := range pairs {
 			if perr := s.promoteLocalStaged(bucket, pair.stagingKey, pair.finalKey, pair.logicalShardSize); perr != nil {
-				return nil, false, fmt.Errorf("%s%v: %w", combinedPromoteFailedPrefix, perr, errCombinedPromoteFailed)
+				return false, nil, false, fmt.Errorf("%s%v: %w", combinedPromoteFailedPrefix, perr, errCombinedPromoteFailed)
 			}
 		}
 		if len(blob) > 0 {
 			// Local write-with-result keeps the overwritten previous blob for the
-			// abort-path RESTORE, mirroring the peer okResponse body.
+			// abort-path RESTORE, mirroring the peer okResponse body. applied=false
+			// (idempotent replay / LWW skip — nothing published by THIS call) keeps
+			// the node out of the rollback set.
 			result, werr := s.local().writeQuorumMetaLocalWithResult(bucket, key, blob)
 			if werr != nil {
-				return nil, false, fmt.Errorf("%v: %w", werr, errCombinedMetaFailed)
+				return false, nil, false, fmt.Errorf("%v: %w", werr, errCombinedMetaFailed)
 			}
-			return result.previous, result.hadPrevious, nil
+			return result.applied, result.previous, result.hadPrevious, nil
 		}
-		return nil, false, nil
+		return false, nil, false, nil
 	}
 	// A resolution failure means NOTHING executed on that node — promote
 	// included — so classify it as promote-class when the node carries pairs
@@ -688,9 +700,9 @@ func (s *QuorumMetaStore) dispatchCombined(ctx context.Context, self, node, buck
 	addr, rerr := s.peer().resolvePeerAddress(node)
 	if rerr != nil {
 		if len(pairs) > 0 {
-			return nil, false, fmt.Errorf("%sresolve %s: %v: %w", combinedPromoteFailedPrefix, node, rerr, errCombinedPromoteFailed)
+			return false, nil, false, fmt.Errorf("%sresolve %s: %v: %w", combinedPromoteFailedPrefix, node, rerr, errCombinedPromoteFailed)
 		}
-		return nil, false, rerr
+		return false, nil, false, rerr
 	}
 	return s.peer().PromoteAndWriteQuorumMeta(ctx, addr, bucket, key, pairs, blob)
 }

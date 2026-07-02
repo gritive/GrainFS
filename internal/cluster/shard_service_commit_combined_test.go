@@ -281,13 +281,23 @@ func TestHandlePromoteAndQuorumMetaWrite_OverwriteRestoresPrevious(t *testing.T)
 	rpcType, okBody, err := unmarshalEnvelope(svc.handlePromoteAndQuorumMetaWrite(&shardRequest{Bucket: bucket, Key: key, Data: payload}))
 	require.NoError(t, err)
 	require.Equal(t, "OK", rpcType)
-	previous, hadPrevious := decodeCombinedOKBody(okBody)
+	applied, previous, hadPrevious := decodeCombinedOKBody(okBody)
+	require.True(t, applied, "a real overwrite must report applied=true")
 	require.True(t, hadPrevious, "overwrite must report a previous blob")
 	require.Equal(t, blobA, previous, "the OK body must carry the exact overwritten blob (A)")
 
 	raw, err := svc.readQuorumMetaRaw(bucket, key)
 	require.NoError(t, err)
 	require.Equal(t, blobB, raw, "B is now the latest")
+
+	// Byte-identical re-delivery of B is a clean NO-OP: applied=false, so the
+	// coordinator will NOT roll this node back on a later abort (the on-disk B
+	// belongs to the prior publish, not to the retrying round).
+	rpcType, okBody2, err := unmarshalEnvelope(svc.handlePromoteAndQuorumMetaWrite(&shardRequest{Bucket: bucket, Key: key, Data: payload}))
+	require.NoError(t, err)
+	require.Equal(t, "OK", rpcType)
+	appliedReplay, _, _ := decodeCombinedOKBody(okBody2)
+	require.False(t, appliedReplay, "an idempotent identical re-write must report applied=false")
 
 	// Abort rollback with (expected=B, previous=A, hadPrevious=true) restores A.
 	rpcType, _, err = unmarshalEnvelope(svc.handleQuorumMetaRollbackIfMatch(&shardRequest{
