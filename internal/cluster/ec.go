@@ -290,10 +290,11 @@ func ECReconstructStreamTo(w io.Writer, cfg ECConfig, shards []io.Reader) error 
 
 // newECReconstructStreamReaderWithPrefetch builds a streaming EC reader. closeShards,
 // if non-nil, releases the underlying shard readers/bodies; it is invoked when the
-// returned reader is closed. For the prefetch path it runs only AFTER the background
-// producers have exited (they must not be mid-Read on a shard body when it is closed —
-// Hertz forbids cross-goroutine CloseBodyStream; see internal/transport/http_shared.go),
-// and it is detached so Close returns promptly instead of blocking on a stalled producer.
+// returned reader is closed. For both background-producer paths (prefetch and the
+// missing-data pipe branch) it runs only AFTER the producers have exited (they must
+// not be mid-Read on a shard body when it is closed — Hertz forbids cross-goroutine
+// CloseBodyStream; see internal/transport/http_shared.go), and it is detached so
+// Close returns promptly instead of blocking on a stalled producer.
 func newECReconstructStreamReaderWithPrefetch(cfg ECConfig, shards []io.Reader, closeShards func()) (*ecReconstructStreamReader, error) {
 	origSize, bodies, err := ecReconstructStreamBodies(cfg, shards)
 	if err != nil {
@@ -347,7 +348,17 @@ func newECReconstructStreamReaderWithPrefetch(cfg ECConfig, shards []io.Reader, 
 		}, nil
 	}
 	pr, pw := io.Pipe()
+	// done gates the detached shard teardown: bodies may be closed only after
+	// the reconstruct goroutine has exited (it reads them via io.ReadFull —
+	// Hertz forbids cross-goroutine CloseBodyStream; see
+	// internal/transport/http_shared.go). pr.Close() does NOT interrupt an
+	// in-flight shard read — it only fails the goroutine's next pw.Write — so
+	// after an abort the shard bodies (and their connections) are retained
+	// until the current window's reads return, in production bounded by the
+	// idle read timeout. Same accepted tradeoff as the prefetch path above.
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		if err := ecReconstructMissingDataStreamTo(pw, cfg, origSize, bodies); err != nil {
 			_ = pw.CloseWithError(err)
 			return
@@ -356,9 +367,12 @@ func newECReconstructStreamReaderWithPrefetch(cfg ECConfig, shards []io.Reader, 
 	}()
 	return &ecReconstructStreamReader{reader: pr, close: func() error {
 		err := pr.Close()
-		if closeShards != nil {
-			closeShards()
-		}
+		go func() {
+			<-done
+			if closeShards != nil {
+				closeShards()
+			}
+		}()
 		return err
 	}}, nil
 }
