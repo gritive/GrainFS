@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.0.788.0] - 2026-07-03
 
 ### Fixed
 - **A peer that opens connections fine but fails mid-body no longer flaps back to healthy on the
