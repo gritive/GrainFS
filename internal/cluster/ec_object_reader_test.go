@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
@@ -154,6 +155,17 @@ func (f *fakeECObjectPeerHealth) MarkUnhealthy(peer string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.unhealthy = append(f.unhealthy, peer)
+	return true
+}
+
+func (f *fakeECObjectPeerHealth) IsHealthy(peer string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, p := range f.unhealthy {
+		if p == peer {
+			return false
+		}
+	}
 	return true
 }
 
@@ -870,6 +882,49 @@ func TestComputeAttemptOrder_CacheBypassSpy(t *testing.T) {
 	assert.Equal(t, []int{4, 5}, fallback)
 	// IsHot called exactly k=4 times (data shards probed, none hot → early exit).
 	assert.Equal(t, int64(4), spy.calls.Load())
+}
+
+func TestComputeAttemptOrder_UnhealthyDataPeerDemotedToFallback(t *testing.T) {
+	// 2+1: data idx 0,1 on n0,n1; parity idx 2 on n2. n1 unhealthy.
+	ph := NewPeerHealth([]string{"n0", "n1", "n2"}, 10*time.Second)
+	ph.MarkUnhealthy("n1")
+	r := ecObjectReader{selfID: "n0", peerHealth: ph}
+	rec := PlacementRecord{Nodes: []string{"n0", "n1", "n2"}}
+	cfg := ECConfig{DataShards: 2, ParityShards: 1}
+
+	primary, fallback := r.computeAttemptOrder(rec, cfg)
+	assert.Equal(t, []int{0, 2}, primary, "healthy parity replaces unhealthy data shard")
+	assert.Equal(t, []int{1}, fallback, "unhealthy data shard demoted, still reachable")
+}
+
+func TestComputeAttemptOrder_UnhealthyParityNotSwappedIn(t *testing.T) {
+	// n1 (data) and n2 (parity) both unhealthy → no healthy candidate; legacy order.
+	ph := NewPeerHealth([]string{"n0", "n1", "n2"}, 10*time.Second)
+	ph.MarkUnhealthy("n1")
+	ph.MarkUnhealthy("n2")
+	r := ecObjectReader{selfID: "n0", peerHealth: ph}
+	rec := PlacementRecord{Nodes: []string{"n0", "n1", "n2"}}
+	cfg := ECConfig{DataShards: 2, ParityShards: 1}
+
+	primary, fallback := r.computeAttemptOrder(rec, cfg)
+	assert.Equal(t, []int{0, 1}, primary)
+	assert.Equal(t, []int{2}, fallback)
+}
+
+func TestComputeAttemptOrder_SelfIsNeverHealthDemoted(t *testing.T) {
+	// Local shards must not be demoted by health, even if peerHealth carries a
+	// stale entry for self — the test marks self unhealthy so the selfID guard
+	// is what the assertion actually exercises (without the guard, shard 0
+	// would be demoted).
+	ph := NewPeerHealth([]string{"n0", "n1", "n2"}, 10*time.Second)
+	ph.MarkUnhealthy("n0")
+	r := ecObjectReader{selfID: "n0", peerHealth: ph}
+	rec := PlacementRecord{Nodes: []string{"n0", "n1", "n2"}}
+	cfg := ECConfig{DataShards: 2, ParityShards: 1}
+
+	primary, fallback := r.computeAttemptOrder(rec, cfg)
+	assert.Equal(t, []int{0, 1}, primary)
+	assert.Equal(t, []int{2}, fallback)
 }
 
 // Step 4: streaming path uses computeAttemptOrder — hot data shard is not opened

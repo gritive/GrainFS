@@ -32,6 +32,7 @@ type ecObjectRemoteSizedShardStore interface {
 type ecObjectPeerHealth interface {
 	MarkHealthy(peer string) bool
 	MarkUnhealthy(peer string) bool
+	IsHealthy(peer string) bool
 }
 
 type ecObjectWriter struct {

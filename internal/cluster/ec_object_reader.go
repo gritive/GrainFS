@@ -219,11 +219,24 @@ func (r ecObjectReader) readAtStripedStreaming(ctx context.Context, bucket, shar
 	return n, err
 }
 
+// demotedNode reports whether reads should try other shards before this node:
+// it is hot (BoundedLoads) or in an active unhealthy cooldown. Local shards
+// are never health-demoted (self is not tracked by peerHealth).
+func (r ecObjectReader) demotedNode(node string) bool {
+	if r.bl != nil && r.bl.IsHot(node) {
+		return true
+	}
+	if r.peerHealth != nil && node != r.selfID && !r.peerHealth.IsHealthy(node) {
+		return true
+	}
+	return false
+}
+
 // computeAttemptOrder returns primary and fallback shard idx lists.
-// Hot data shards are swapped 1:1 with the lowest available parity idx.
-// Both lists are sorted ascending for deterministic ordering.
-// hot > m → bypass: primary=dataIdx, fallback=parityIdx (metric incremented).
-// bl == nil → legacy: primary=dataIdx, fallback=parityIdx.
+// Demoted (hot or unhealthy-peer) data shards are swapped 1:1 with the lowest
+// non-demoted parity idx. Both lists are sorted ascending for determinism.
+// More demoted data shards than usable parity → bypass (metric incremented).
+// bl == nil && peerHealth == nil → legacy: primary=dataIdx, fallback=parityIdx.
 func (r ecObjectReader) computeAttemptOrder(rec PlacementRecord, cfg ECConfig) (primary, fallback []int) {
 	k := cfg.DataShards
 	m := cfg.ParityShards
@@ -236,30 +249,36 @@ func (r ecObjectReader) computeAttemptOrder(rec PlacementRecord, cfg ECConfig) (
 		parityIdx = append(parityIdx, i)
 	}
 
-	if r.bl == nil {
+	if r.bl == nil && r.peerHealth == nil {
 		return dataIdx, parityIdx
 	}
-	var hotData []int
+	var demotedData []int
 	for _, i := range dataIdx {
-		if r.bl.IsHot(rec.Nodes[i]) {
-			hotData = append(hotData, i)
+		if r.demotedNode(rec.Nodes[i]) {
+			demotedData = append(demotedData, i)
 		}
 	}
-	if len(hotData) == 0 {
+	if len(demotedData) == 0 {
 		return dataIdx, parityIdx
 	}
-	if len(hotData) > len(parityIdx) {
+	var candidates []int // parity idx whose node is itself not demoted
+	for _, i := range parityIdx {
+		if !r.demotedNode(rec.Nodes[i]) {
+			candidates = append(candidates, i)
+		}
+	}
+	if len(demotedData) > len(candidates) {
 		metrics.ClusterBLBypassedReads.Inc()
 		return dataIdx, parityIdx
 	}
 
-	// Swap hotData[:n] with parityIdx[:n] (n = len(hotData)).
-	parityIn := parityIdx[:len(hotData)]
+	// Swap demotedData[:n] with candidates[:n] (n = len(demotedData)).
+	parityIn := candidates[:len(demotedData)]
 	primarySet := map[int]struct{}{}
 	for _, i := range dataIdx {
 		primarySet[i] = struct{}{}
 	}
-	for _, i := range hotData {
+	for _, i := range demotedData {
 		delete(primarySet, i)
 	}
 	for _, i := range parityIn {
@@ -277,7 +296,7 @@ func (r ecObjectReader) computeAttemptOrder(rec PlacementRecord, cfg ECConfig) (
 	for _, i := range parityIn {
 		delete(fallbackSet, i)
 	}
-	for _, i := range hotData {
+	for _, i := range demotedData {
 		fallbackSet[i] = struct{}{}
 	}
 	for i := range fallbackSet {
@@ -285,8 +304,8 @@ func (r ecObjectReader) computeAttemptOrder(rec PlacementRecord, cfg ECConfig) (
 	}
 	sort.Ints(fallback)
 
-	// Metric: per-hot-data-node rerank counter.
-	for _, i := range hotData {
+	// Metric: per-demoted-data-node rerank counter.
+	for _, i := range demotedData {
 		metrics.ClusterBLRerankedReads.WithLabelValues(rec.Nodes[i]).Inc()
 	}
 	return primary, fallback
