@@ -10,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/rs/zerolog/log"
+
 	"github.com/gritive/GrainFS/internal/storage"
 )
 
@@ -60,6 +62,19 @@ type QuorumMetaStore struct {
 	// a POINTER so a later SetMultiGeneration is observed live; the atomic value is
 	// never copied.
 	multiGen *atomic.Bool
+	// promoteLocalStaged reaches the shard service's PromoteLocalStagedShards for
+	// the combined commit's SELF dispatch (the localQuorumMetaStore adapter is
+	// meta-only, so the shard promote needs its own seam). nil-able for tests.
+	promoteLocalStaged func(bucket, stagingKey, finalKey string, logicalShardSize int64) error
+	// rollbackLocalIfMatch is the combined-commit abort-path local rollback:
+	// rollbackQuorumMetaLocalIfMatch(bucket, key, expected, nil, false) =
+	// content-matched delete of the latest-only blob. nil-able for tests.
+	rollbackLocalIfMatch func(bucket, key string, expected []byte) error
+	// capabilityEvidence returns the CapabilityGate's EvidenceSnapshot
+	// (peer → capability → ready) for the commit-combined rolling-upgrade gate.
+	// nil (or a nil snapshot) means NOT capable for any remote target — fail
+	// toward the legacy two-round flow, never toward an unknown-RPC error.
+	capabilityEvidence func() map[string]map[string]bool
 }
 
 // localQuorumMetaStore is the local-filesystem quorum-meta primitive set the
@@ -101,6 +116,11 @@ type quorumMetaPeerRPC interface {
 	ScanQuorumMetaVersions(ctx context.Context, addr, bucket, prefix string) ([]PutObjectMetaCmd, error)
 	ScanQuorumMetaVersionsAll(ctx context.Context, addr, bucket, prefix string) ([]PutObjectMetaCmd, error)
 	DeleteQuorumMeta(ctx context.Context, addr, bucket, key string) error
+	// Combined PUT commit tail (promote + latest-only meta in one RPC) and its
+	// abort-path content-matched rollback. Both take a RESOLVED addr, like
+	// WriteQuorumMeta — the caller (dispatchCombined) resolves exactly once.
+	PromoteAndWriteQuorumMeta(ctx context.Context, addr, bucket, key string, pairs []stagedPromotePair, blob []byte) error
+	RollbackQuorumMetaIfMatch(ctx context.Context, addr, bucket, key string, expected []byte) error
 }
 
 // versioningSource is the narrow control-plane reader used by
@@ -146,6 +166,24 @@ func (b *DistributedBackend) buildQuorumMetaStore() *QuorumMetaStore {
 		versioning: b,
 		selfAddr:   b.currentSelfAddr,
 		multiGen:   &b.multiGeneration,
+		promoteLocalStaged: func(bucket, stagingKey, finalKey string, logicalShardSize int64) error {
+			if b.shardSvc == nil {
+				return fmt.Errorf("combined commit: no shard service")
+			}
+			return b.shardSvc.PromoteLocalStagedShards(bucket, stagingKey, finalKey, logicalShardSize)
+		},
+		rollbackLocalIfMatch: func(bucket, key string, expected []byte) error {
+			if b.shardSvc == nil || b.shardSvc.qmeta == nil {
+				return nil
+			}
+			return b.shardSvc.qmeta.rollbackQuorumMetaLocalIfMatch(bucket, key, expected, nil, false)
+		},
+		capabilityEvidence: func() map[string]map[string]bool {
+			if b.capEvidenceSrc == nil {
+				return nil
+			}
+			return b.capEvidenceSrc()
+		},
 	}
 }
 
@@ -290,6 +328,273 @@ func (s *QuorumMetaStore) fanOutPerVersionBlob(ctx context.Context, cmd PutObjec
 		return fmt.Errorf("per-version quorum-meta write %s/%s@%s: %w", cmd.Bucket, cmd.Key, cmd.VersionID, verr)
 	}
 	return nil
+}
+
+// capabilityCommitCombined is the gossip-advertised capability name for the
+// combined PUT commit tail (PromoteAndWriteQuorumMeta + RollbackQuorumMetaIfMatch
+// shard RPCs). Advertised unconditionally by this binary's evidence producer
+// (MetaFSM.CapabilityEvidence); old binaries never advertise it, so the
+// coordinator falls back to the legacy two-round flow during a rolling upgrade.
+const capabilityCommitCombined = "commit-combined"
+
+// commitCombinedCapable reports whether every unique target advertises the
+// commit-combined capability. Self is always capable (this binary has the
+// handler). A missing gate or missing evidence is NOT capable — fail toward
+// the legacy flow, never toward an unknown-RPC error.
+func (s *QuorumMetaStore) commitCombinedCapable(targets []string) bool {
+	self := s.selfAddr()
+	var snapshot map[string]map[string]bool
+	if s.capabilityEvidence != nil {
+		snapshot = s.capabilityEvidence()
+	}
+	for _, node := range targets {
+		if node == self {
+			continue
+		}
+		if snapshot == nil || !snapshot[node][capabilityCommitCombined] {
+			return false
+		}
+	}
+	return true
+}
+
+// promoteAndWriteQuorumMeta collapses the PUT commit tail (promote round +
+// latest-only meta round) into ONE parallel per-node round for non-versioned
+// buckets. Versioned/CAS commands and clusters where any target lacks the
+// commit-combined capability run legacyPromote + writeQuorumMeta verbatim.
+//
+// Wait rule (one round): every promote-carrying node must succeed; WEIGHTED
+// meta acks must reach K (cmd.NodeIDs is a vote LIST — duplicates are extra
+// votes; fanOutQuorumMeta counts len(nodes), and single-node repeated placement
+// depends on it). Early return once all pairs-carrying targets acked and
+// metaOK >= K (parity with fanOutQuorumMeta's return-at-K). On abort: drain all
+// outstanding dispatches (legacy g.Wait() parity — the caller's shard cleanup
+// must not race an in-flight promote), then roll back persisted metas
+// content-matched, then return the error.
+//
+// Crash residual (coordinator dies mid-round): the caller's cleanup never runs
+// and shards stay on disk — an object with ≥K promoted shards remains fully
+// readable; sub-K partial states are unreferenced-shard leaks reclaimed by the
+// orphan walker, and partially-written metas resolve by LWW against the prior
+// version on read.
+func (s *QuorumMetaStore) promoteAndWriteQuorumMeta(
+	ctx context.Context,
+	cmd PutObjectMetaCmd,
+	promotes map[string][]stagedPromotePair,
+	nodeOrder []string,
+	legacyPromote func(context.Context) error,
+) error {
+	runLegacy := func() error {
+		if legacyPromote != nil {
+			if err := legacyPromote(ctx); err != nil {
+				return err
+			}
+		}
+		return s.writeQuorumMeta(ctx, cmd)
+	}
+	if cmd.MetaSeqCAS || (cmd.VersionID != "" && s.bucketVersioningEnabled(ctx, cmd.Bucket)) {
+		// CAS writes need owner-local-first ordering; versioned buckets need the
+		// per-version blob authority first. Both keep the legacy two-round flow.
+		return runLegacy()
+	}
+	if s.local() == nil || len(cmd.NodeIDs) == 0 {
+		return fmt.Errorf("combined commit: no shard service or empty placement")
+	}
+	// Vote multiplicity: cmd.NodeIDs is a LIST (fanOutQuorumMeta counts
+	// len(nodes); duplicate self entries are real votes on single-node
+	// repeated placement). One dispatch per unique node, weighted accounting.
+	metaVotes := make(map[string]int, len(cmd.NodeIDs))
+	for _, n := range cmd.NodeIDs {
+		metaVotes[n]++
+	}
+	// Targets = pairs-carrying nodes (nodeOrder, deterministic) + every unique
+	// meta node not already covered. ONE dispatch per unique node.
+	targets := append([]string(nil), nodeOrder...)
+	seenTarget := make(map[string]bool, len(targets))
+	for _, n := range targets {
+		seenTarget[n] = true
+	}
+	for _, n := range cmd.NodeIDs {
+		if !seenTarget[n] {
+			seenTarget[n] = true
+			targets = append(targets, n)
+		}
+	}
+	// Rolling-upgrade gate: every unique target must advertise the
+	// commit-combined capability; otherwise an old peer would answer
+	// "unknown shard RPC". Fall back to the legacy two-round flow.
+	if !s.commitCombinedCapable(targets) {
+		return runLegacy()
+	}
+	blob, err := encodeQuorumMetaBlob(cmd)
+	if err != nil {
+		return fmt.Errorf("combined commit encode: %w", err)
+	}
+	k := int(cmd.ECData)
+	if k <= 0 {
+		k = 1
+	}
+	metaN := len(cmd.NodeIDs)
+	if metaN < k {
+		return fmt.Errorf("combined commit: placement votes %d < quorum size %d", metaN, k)
+	}
+	type result struct {
+		node string
+		err  error
+	}
+	self := s.selfAddr()
+	wctx, cancel := context.WithTimeout(ctx, quorumMetaWriteTimeout)
+	defer cancel()
+	results := make(chan result, len(targets))
+	for _, node := range targets {
+		node := node
+		pairs := promotes[node]
+		nodeBlob := blob
+		if metaVotes[node] == 0 {
+			nodeBlob = nil
+		}
+		go func() {
+			results <- result{node, s.dispatchCombined(wctx, self, node, cmd.Bucket, cmd.Key, pairs, nodeBlob)}
+		}()
+	}
+	// metaAcked tracks nodes whose call succeeded AND persisted the blob —
+	// the rollback set on abort. abort() drains ALL outstanding results first
+	// (no promote/meta may still be executing when the caller's shard cleanup
+	// runs), then best-effort content-matched rollback, then returns cause.
+	metaAcked := make([]string, 0, len(targets))
+	received := 0
+	abort := func(cause error) error {
+		cancel()
+		for received < len(targets) {
+			res := <-results // buffered chan: senders never block; cancel bounds the wait
+			received++
+			if res.err == nil && metaVotes[res.node] > 0 {
+				metaAcked = append(metaAcked, res.node)
+			}
+			// A drained ack after cancel still persisted its blob — the append
+			// above includes it in the rollback set. Drained errors need no
+			// classification: we are already aborting.
+		}
+		s.rollbackCombinedMeta(cmd.Bucket, cmd.Key, blob, metaAcked, self)
+		return cause
+	}
+	var metaOK, metaFailed int
+	pairsOutstanding := len(promotes)
+	for received < len(targets) {
+		select {
+		case res := <-results:
+			received++
+			votes := metaVotes[res.node]
+			_, hasPairs := promotes[res.node]
+			if hasPairs {
+				pairsOutstanding--
+			}
+			if res.err != nil {
+				// Class split: on a pairs-carrying node only a POSITIVE
+				// meta-write failure (promote already succeeded there) is
+				// tolerable; promote-class and indeterminate (transport,
+				// unknown-RPC) abort, matching today's all-or-fail errgroup.
+				if hasPairs && !errors.Is(res.err, errCombinedMetaFailed) {
+					return abort(fmt.Errorf("combined commit promote (node %s): %w", res.node, res.err))
+				}
+				metaFailed += votes
+				if metaFailed > metaN-k {
+					return abort(fmt.Errorf("combined commit: %d/%d meta votes failed, quorum %d unreachable", metaFailed, metaN, k))
+				}
+				continue
+			}
+			if votes > 0 {
+				metaOK += votes
+				metaAcked = append(metaAcked, res.node)
+			}
+			// Parity with fanOutQuorumMeta's return-at-K: once every
+			// promote-carrying target has answered and the weighted quorum is
+			// met, pairs-less meta stragglers are best-effort.
+			if pairsOutstanding == 0 && metaOK >= k {
+				return nil
+			}
+		case <-wctx.Done():
+			return abort(wctx.Err())
+		}
+	}
+	if metaOK < k {
+		return abort(fmt.Errorf("combined commit: meta acks %d < quorum %d", metaOK, k))
+	}
+	return nil
+}
+
+// rollbackCombinedMeta best-effort deletes the just-written latest blob on
+// every acked node, content-matched (rollbackQuorumMetaLocalIfMatch(blob, nil,
+// false) locally; RollbackQuorumMetaIfMatch RPC for peers). Runs on the abort
+// path BEFORE the caller's shard cleanup, restoring the "no meta references
+// deleted data" property. Uses a fresh short-timeout context (the round's wctx
+// is already canceled). Errors are logged, not returned — rollback is
+// best-effort; the residual (rollback fails → phantom meta over deleted
+// shards) is the documented, narrow leftover of the 1-round design.
+func (s *QuorumMetaStore) rollbackCombinedMeta(bucket, key string, blob []byte, ackedNodes []string, self string) {
+	if len(ackedNodes) == 0 {
+		return
+	}
+	rctx, rcancel := context.WithTimeout(context.Background(), quorumMetaWriteTimeout)
+	defer rcancel()
+	var wg sync.WaitGroup
+	for _, node := range ackedNodes {
+		node := node
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var err error
+			if node == self {
+				if s.rollbackLocalIfMatch != nil {
+					err = s.rollbackLocalIfMatch(bucket, key, blob)
+				}
+			} else if addr, rerr := s.peer().resolvePeerAddress(node); rerr != nil {
+				err = rerr
+			} else {
+				err = s.peer().RollbackQuorumMetaIfMatch(rctx, addr, bucket, key, blob)
+			}
+			if err != nil {
+				log.Warn().Err(err).Str("bucket", bucket).Str("key", key).Str("node", node).
+					Msg("combined-commit abort: best-effort quorum-meta rollback failed (phantom latest blob may linger until the next overwrite)")
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// dispatchCombined: self executes locally with the same promote→meta ordering;
+// peers get the PromoteAndWriteQuorumMeta RPC (addr resolved exactly once here;
+// the ShardService method takes the RESOLVED addr — no double resolution).
+// Promote-step failures are wrapped with errCombinedPromoteFailed so the
+// coordinator's error-class split works identically for self and peers.
+func (s *QuorumMetaStore) dispatchCombined(ctx context.Context, self, node, bucket, key string, pairs []stagedPromotePair, blob []byte) error {
+	if node == self {
+		if len(pairs) > 0 && s.promoteLocalStaged == nil {
+			return fmt.Errorf("%scombined commit: promoteLocalStaged not wired: %w", combinedPromoteFailedPrefix, errCombinedPromoteFailed)
+		}
+		for _, pair := range pairs {
+			if err := s.promoteLocalStaged(bucket, pair.stagingKey, pair.finalKey, pair.logicalShardSize); err != nil {
+				return fmt.Errorf("%s%v: %w", combinedPromoteFailedPrefix, err, errCombinedPromoteFailed)
+			}
+		}
+		if len(blob) > 0 {
+			if err := s.local().writeQuorumMetaLocal(bucket, key, blob); err != nil {
+				return fmt.Errorf("%v: %w", err, errCombinedMetaFailed)
+			}
+		}
+		return nil
+	}
+	// A resolution failure means NOTHING executed on that node — promote
+	// included — so classify it as promote-class when the node carries pairs
+	// (all-or-fail promote must abort).
+	addr, err := s.peer().resolvePeerAddress(node)
+	if err != nil {
+		if len(pairs) > 0 {
+			return fmt.Errorf("%sresolve %s: %v: %w", combinedPromoteFailedPrefix, node, err, errCombinedPromoteFailed)
+		}
+		return err
+	}
+	return s.peer().PromoteAndWriteQuorumMeta(ctx, addr, bucket, key, pairs, blob)
 }
 
 // readQuorumMeta reads object metadata from the local quorum store, falling

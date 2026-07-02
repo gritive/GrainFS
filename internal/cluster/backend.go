@@ -166,6 +166,12 @@ type DistributedBackend struct {
 	// allFrozenObjectVersionDirs fails closed (WalkOrphanShards no-ops).
 	frozenObjVersionSrc func() ([]storage.SnapshotObjectRef, error)
 
+	// capEvidenceSrc yields the CapabilityGate's EvidenceSnapshot for the
+	// combined-commit rolling-upgrade gate. nil until
+	// SetCapabilityEvidenceSource wires the gate at boot; nil ⇒ the PUT commit
+	// tail treats every remote target as not-capable (legacy two-round flow).
+	capEvidenceSrc func() map[string]map[string]bool
+
 	// orphanShardSweepGate, when non-nil and returning true, permits the EC
 	// full-object orphan-shard sweep. nil (default) => fail-closed: the sweep
 	// never runs. Boot sets it to a feature-on predicate; per-candidate
@@ -963,6 +969,16 @@ func (b *DistributedBackend) SetRouter(r *Router) { b.router = r }
 // Must be called before serving traffic. Nil falls back to Router.RouteKey
 // only (legacy default-group behavior).
 func (b *DistributedBackend) SetShardGroupSource(s ShardGroupSource) { b.shardGroup = s }
+
+// SetCapabilityEvidenceSource wires the CapabilityGate's EvidenceSnapshot
+// (peer → capability → ready) so the combined PUT commit tail can verify every
+// remote placement node advertises commit-combined before choosing the 1-round
+// flow (rolling-upgrade gate). Must be called before serving traffic (like
+// SetShardGroupSource). nil/unwired ⇒ remote targets are treated as
+// not-capable and the commit tail keeps the legacy two rounds.
+func (b *DistributedBackend) SetCapabilityEvidenceSource(fn func() map[string]map[string]bool) {
+	b.capEvidenceSrc = fn
+}
 
 // --- Bucket operations ---
 

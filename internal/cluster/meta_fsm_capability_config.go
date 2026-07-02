@@ -86,6 +86,10 @@ func (f *MetaFSM) CapabilityEvidence(nodeID string, now time.Time) compat.Eviden
 		caps[compat.CapabilityMigrationCutoverV1] = true
 	}
 	caps[compat.CapabilityMultipartListingV1] = true
+	// Combined PUT commit tail (PromoteAndWriteQuorumMeta shard RPC):
+	// unconditionally supported by this binary; old binaries never advertise
+	// it, so coordinators keep the legacy two-round flow toward them.
+	caps[capabilityCommitCombined] = true
 	// Advertise the KEK envelope lifecycle capability once the cluster KEK
 	// store is wired (same readiness signal MetaKEKRotateCmd Apply checks).
 	// Without this no node advertises kek_envelope_v1, so the capability gate
