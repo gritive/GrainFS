@@ -404,8 +404,13 @@ func (e remoteShardEndpoint) DeleteShards(ctx context.Context, bucket, shardKey 
 	return e.shards.DeleteShards(ctx, e.node, bucket, shardKey)
 }
 
-// OpenShardStream marks peerHealth at the RPC boundary (success → healthy,
-// failure → unhealthy). The returned reader additionally flips the peer
+// OpenShardStream marks peerHealth unhealthy on an RPC-open failure (via
+// markHealthAfter — local backpressure excepted) but never marks healthy on
+// open success: a peer that reliably 200s then fails mid-body would otherwise
+// flap unhealthy→healthy on every open under sustained read load, neutralizing
+// the mid-body marking below within ms. Healthy evidence instead comes from
+// clean body completion (see ecExactLenReader.onClean / OpenObject's
+// onShardClean wiring). The returned reader additionally flips the peer
 // unhealthy on the first mid-body read failure — a peer that resets the
 // connection or truncates a length-framed body (io.ErrUnexpectedEOF) must not
 // keep being selected; a stalled peer surfaces as the transport idle-read i/o
@@ -417,26 +422,36 @@ func (e remoteShardEndpoint) DeleteShards(ctx context.Context, bucket, shardKey 
 // synthetic readers and future transports may surface them).
 func (e remoteShardEndpoint) OpenShardStream(ctx context.Context, bucket, shardKey string, shardIdx int) (io.ReadCloser, error) {
 	rc, err := e.shards.ReadShardStream(ctx, e.node, bucket, shardKey, shardIdx)
-	e.markHealthAfter(err)
 	if err != nil {
+		e.markHealthAfter(err) // unhealthy unless local backpressure
 		return nil, err
 	}
 	return &healthTrackingReadCloser{rc: rc, markUnhealthy: func() { e.markHealth(false) }}, nil
 }
 
-// ReadShardAt marks peerHealth at the RPC boundary, and additionally flips the
-// peer unhealthy on a mid-body transport failure from the post-RPC read. The
-// short-read case keeps the existing semantic: io.ReadFull's ErrUnexpectedEOF
-// does NOT flip the peer — a short range read is ambiguous at this layer.
-// All reads use the streaming RPC — there is no buffered one-shot branch.
+// ReadShardAt marks peerHealth unhealthy on an RPC-open failure (via
+// markHealthAfter) and on a mid-body transport failure from the post-RPC read,
+// but marks nothing on success: io.ReadFull's ReadAtLeast semantics can
+// deliver the final bytes together with a transport error and swallow it, so
+// "err == nil" here cannot distinguish a clean completion from a
+// fault-alongside-final-bytes — marking healthy on it could clear an active
+// cooldown on faulty evidence. Range reads therefore contribute only
+// unhealthy evidence; recovery comes from the streaming path's onClean and
+// from cooldown expiry. The short-read case keeps the existing semantic:
+// io.ReadFull's ErrUnexpectedEOF does NOT flip the peer — a short range read
+// is ambiguous at this layer. All reads use the streaming RPC — there is no
+// buffered one-shot branch.
 func (e remoteShardEndpoint) ReadShardAt(ctx context.Context, bucket, shardKey string, shardIdx int, offset int64, buf []byte) (int, error) {
 	rc, err := e.shards.ReadShardRangeStream(ctx, e.node, bucket, shardKey, shardIdx, offset, int64(len(buf)))
-	e.markHealthAfter(err)
 	if err != nil {
+		e.markHealthAfter(err)
 		return 0, err
 	}
 	defer rc.Close()
 	n, err := io.ReadFull(rc, buf)
+	// No MarkHealthy on success: io.ReadFull swallows a transport error that
+	// arrives with the final bytes, so success here is not provably-clean
+	// completion. Recovery rides the streaming path's onClean + cooldown expiry.
 	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && isPeerFaultReadErr(err) {
 		e.markHealth(false)
 	}

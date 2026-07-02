@@ -40,7 +40,7 @@ func TestECStreamRead_TruncatedShardFailsTyped(t *testing.T) {
 	}
 
 	var faults []int
-	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, nil, func(i int) { faults = append(faults, i) })
+	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, nil, func(i int) { faults = append(faults, i) }, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestECStreamRead_MissingDataPathTruncationFailsTyped(t *testing.T) {
 	}
 
 	var faults []int
-	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, nil, func(i int) { faults = append(faults, i) })
+	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, nil, func(i int) { faults = append(faults, i) }, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestECStreamRead_ExactAndOverlongShardsStillRoundTrip(t *testing.T) {
 
 	t.Run("exact", func(t *testing.T) {
 		shards := []io.Reader{bytes.NewReader(full[0]), bytes.NewReader(full[1]), nil}
-		rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, nil, nil)
+		rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, nil, nil, nil)
 		if err != nil {
 			t.Fatalf("open: %v", err)
 		}
@@ -124,7 +124,7 @@ func TestECStreamRead_ExactAndOverlongShardsStillRoundTrip(t *testing.T) {
 	t.Run("overlong capped", func(t *testing.T) {
 		long0 := append(append([]byte{}, full[0]...), []byte("GARBAGE")...)
 		shards := []io.Reader{bytes.NewReader(long0), bytes.NewReader(full[1]), nil}
-		rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, nil, nil)
+		rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, nil, nil, nil)
 		if err != nil {
 			t.Fatalf("open: %v", err)
 		}
@@ -195,7 +195,7 @@ func TestECStreamRead_TransportErrorPassesThroughUntyped(t *testing.T) {
 	}
 
 	var faults []int
-	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, nil, func(i int) { faults = append(faults, i) })
+	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, nil, func(i int) { faults = append(faults, i) }, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -277,7 +277,7 @@ func TestECStreamRead_ZeroSizeObjectRoundTrips(t *testing.T) {
 	shards := []io.Reader{mk(), mk(), mk()}
 
 	var faults []int
-	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, nil, func(i int) { faults = append(faults, i) })
+	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, nil, func(i int) { faults = append(faults, i) }, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -306,7 +306,7 @@ func TestECStreamRead_TruncatedParityShardOnPipePathIsTyped(t *testing.T) {
 	}
 
 	var faults []int
-	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, nil, func(i int) { faults = append(faults, i) })
+	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, nil, func(i int) { faults = append(faults, i) }, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

@@ -323,10 +323,14 @@ func TestECObjectReader_OpenObject_MarksUnhealthyPeerOnFetchError(t *testing.T) 
 }
 
 // TestECObjectReader_OpenObject_MarksHealthyPeerOnSuccess guards that the
-// streaming open path (OpenObject → openShardReaders → remoteShardEndpoint.OpenShardStream)
-// marks a successful remote shard's node as healthy. Shard 0 is on node-b (remote,
-// succeeds); shards 1 and 2 come from node-a (local). The open succeeds at the
-// RPC boundary, which triggers remoteShardEndpoint.markHealth(true).
+// streaming read path marks a successful remote shard's node as healthy. Shard
+// 0 is on node-b (remote, succeeds); shards 1 and 2 come from node-a (local).
+// Open success alone marks nothing (see shard_target.go's OpenShardStream doc);
+// the healthy mark instead comes from clean body completion — reading the
+// object to EOF drives ecExactLenReader.onClean, wired here via OpenObject's
+// onShardClean → markShardHealthy. This test doubles as end-to-end coverage
+// that the onShardClean wiring is live: since open never marks healthy, a
+// passing assertion here is only possible through the completion path.
 func TestECObjectReader_OpenObject_MarksHealthyPeerOnSuccess(t *testing.T) {
 	cfg := ECConfig{DataShards: 2, ParityShards: 1}
 	data := []byte("peer health happy path")

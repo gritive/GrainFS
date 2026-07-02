@@ -471,8 +471,9 @@ func (s *streamShardStore) ReadShardRangeStream(ctx context.Context, peer, bucke
 }
 
 // TestOpenShardStreamMarksPeerUnhealthyOnMidBodyFailure pins the post-open
-// health contract: a shard stream that opens OK (peer marked healthy) but
-// fails mid-body must flip the peer unhealthy, exactly once. Normal EOF and
+// health contract: a shard stream that opens OK (open success marks nothing —
+// see TestOpenShardStream_SuccessDoesNotClearActiveCooldown) but fails
+// mid-body must flip the peer unhealthy, exactly once. Normal EOF and
 // caller-driven context cancellation must NOT flip health.
 func TestOpenShardStreamMarksPeerUnhealthyOnMidBodyFailure(t *testing.T) {
 	t.Run("mid-body transport error marks unhealthy once", func(t *testing.T) {
@@ -482,7 +483,7 @@ func TestOpenShardStreamMarksPeerUnhealthyOnMidBodyFailure(t *testing.T) {
 
 		rc, err := ep.OpenShardStream(context.Background(), "b", "k", 0)
 		require.NoError(t, err)
-		require.Equal(t, []string{"peer"}, ph.healthy, "open success marks healthy")
+		require.Empty(t, ph.healthy, "open success no longer marks healthy — only clean body completion does")
 
 		buf := make([]byte, 16)
 		_, err = io.ReadFull(rc, buf)

@@ -59,6 +59,19 @@ func (r ecObjectReader) markShardUnhealthy(rec PlacementRecord, idx int) {
 	r.peerHealth.MarkUnhealthy(node)
 }
 
+// markShardHealthy records clean-completion evidence for the serving peer.
+// Local shards never self-mark, matching markShardUnhealthy.
+func (r ecObjectReader) markShardHealthy(rec PlacementRecord, idx int) {
+	if r.peerHealth == nil || idx < 0 || idx >= len(rec.Nodes) {
+		return
+	}
+	node := rec.Nodes[idx]
+	if node == r.selfID {
+		return
+	}
+	r.peerHealth.MarkHealthy(node)
+}
+
 // OpenObject returns a streaming reader that reconstructs the object via EC
 // decode on the fly. objectSize is the original pre-encoding size in bytes.
 func (r ecObjectReader) OpenObject(ctx context.Context, bucket, shardKey string, rec PlacementRecord, objectSize int64) (io.ReadCloser, error) {
@@ -67,6 +80,7 @@ func (r ecObjectReader) OpenObject(ctx context.Context, bucket, shardKey string,
 		return nil, err
 	}
 	onShardFault := func(i int) { r.markShardUnhealthy(rec, i) }
+	onShardClean := func(i int) { r.markShardHealthy(rec, i) }
 	readers := make([]io.Reader, len(shardReaders))
 	for i, shard := range shardReaders {
 		if shard != nil {
@@ -101,7 +115,7 @@ func (r ecObjectReader) OpenObject(ctx context.Context, bucket, shardKey string,
 
 	rc, err := newECReconstructStreamReaderWithPrefetch(recCfg, readers, func() {
 		closeECShardReaders(shardReaders)
-	}, onShardFault)
+	}, onShardFault, onShardClean)
 	if err != nil {
 		// Typed header truncation carries the shard index: attribute it to the
 		// serving peer before failing the open.

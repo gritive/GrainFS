@@ -287,7 +287,7 @@ func ECReconstructStreamTo(w io.Writer, cfg ECConfig, shards []io.Reader) error 
 	if origSize == 0 {
 		return nil
 	}
-	bodies = ecWrapBodiesExactLen(cfg, origSize, bodies, nil)
+	bodies = ecWrapBodiesExactLen(cfg, origSize, bodies, nil, nil)
 	return ecReconstructStreamBodiesTo(w, cfg, origSize, bodies)
 }
 
@@ -301,12 +301,14 @@ func ECReconstructStreamTo(w io.Writer, cfg ECConfig, shards []io.Reader) error 
 // Every shard body is bounded to its exact expected length: a shard that ends
 // cleanly short surfaces *ecShardTruncatedError (reported to onShardFault, if
 // non-nil, with the shard index) instead of mis-splicing the next shard's bytes.
-func newECReconstructStreamReaderWithPrefetch(cfg ECConfig, shards []io.Reader, closeShards func(), onShardFault func(int)) (*ecReconstructStreamReader, error) {
+// onShardClean, if non-nil, fires once per shard when its body is delivered in
+// full with no fault — clean-completion healthy evidence for the serving peer.
+func newECReconstructStreamReaderWithPrefetch(cfg ECConfig, shards []io.Reader, closeShards func(), onShardFault, onShardClean func(int)) (*ecReconstructStreamReader, error) {
 	origSize, bodies, err := ecReconstructStreamBodies(cfg, shards)
 	if err != nil {
 		return nil, err
 	}
-	bodies = ecWrapBodiesExactLen(cfg, origSize, bodies, onShardFault)
+	bodies = ecWrapBodiesExactLen(cfg, origSize, bodies, onShardFault, onShardClean)
 	if ecStreamHasAllDataShards(cfg, bodies) {
 		dataReaders, err := ecReconstructStreamDataReaders(cfg, bodies)
 		if err != nil {
@@ -642,13 +644,17 @@ func (e *ecShardTruncatedError) Error() string {
 // count becomes *ecShardTruncatedError. onFault, if non-nil, fires once on
 // truncation so the caller can attribute the fault to the serving peer —
 // transport (non-EOF) errors pass through untouched; the endpoint-layer
-// healthTrackingReadCloser already marks those.
+// healthTrackingReadCloser already marks those. onClean, if non-nil, fires
+// once when the body is delivered to its full expected length with no fault —
+// clean completion evidence for the peer that served it (see markHealthAfter
+// / OpenObject's onShardClean wiring).
 type ecExactLenReader struct {
 	r         io.Reader
 	idx       int
 	want      int64
 	remaining int64
 	onFault   func(int)
+	onClean   func(int)
 }
 
 func (g *ecExactLenReader) Read(p []byte) (int, error) {
@@ -660,6 +666,18 @@ func (g *ecExactLenReader) Read(p []byte) (int, error) {
 	}
 	n, err := g.r.Read(p)
 	g.remaining -= int64(n)
+	if g.remaining == 0 && g.onClean != nil &&
+		(err == nil || errors.Is(err, io.EOF)) {
+		// Exactly `want` bytes delivered with no transport fault — clean
+		// completion (a plain EOF may arrive alongside the final bytes or on
+		// the next Read; both are clean). Any error the endpoint layer counts
+		// as a peer fault — including io.ErrUnexpectedEOF, which
+		// isPeerFaultReadErr does NOT exempt — must NOT fire onClean: the
+		// healthTrackingReadCloser just marked the peer unhealthy for it, and
+		// onClean would clear that cooldown immediately.
+		g.onClean(g.idx)
+		g.onClean = nil
+	}
 	if err != nil && g.remaining > 0 &&
 		(errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) {
 		if g.onFault != nil {
@@ -681,14 +699,14 @@ func (g *ecExactLenReader) Read(p []byte) (int, error) {
 // exact-length guard of ceil(origSize/K) bytes — the invariant the write path
 // guarantees for every shard, parity and zero-padded tail included. It
 // mutates bodies in place and returns the same slice.
-func ecWrapBodiesExactLen(cfg ECConfig, origSize int64, bodies []io.Reader, onShardFault func(int)) []io.Reader {
+func ecWrapBodiesExactLen(cfg ECConfig, origSize int64, bodies []io.Reader, onShardFault, onShardClean func(int)) []io.Reader {
 	if cfg.DataShards <= 0 {
 		return bodies
 	}
 	shardBodySize := (origSize + int64(cfg.DataShards) - 1) / int64(cfg.DataShards)
 	for i, b := range bodies {
 		if b != nil {
-			bodies[i] = &ecExactLenReader{r: b, idx: i, want: shardBodySize, remaining: shardBodySize, onFault: onShardFault}
+			bodies[i] = &ecExactLenReader{r: b, idx: i, want: shardBodySize, remaining: shardBodySize, onFault: onShardFault, onClean: onShardClean}
 		}
 	}
 	return bodies
