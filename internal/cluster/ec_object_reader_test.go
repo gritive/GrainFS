@@ -884,6 +884,23 @@ func TestComputeAttemptOrder_CacheBypassSpy(t *testing.T) {
 	assert.Equal(t, int64(4), spy.calls.Load())
 }
 
+// Pins the BL-only behavior change introduced with the generalized demotion:
+// a HOT parity node is no longer a swap-in candidate (the old hot-only code
+// swapped into hot parity blindly). The swap must pick the non-hot parity.
+func TestComputeAttemptOrder_HotParityNotSwappedIn(t *testing.T) {
+	// K=2/M=2: data idx 0,1 on n0,n1; parity idx 2,3 on n2,n3.
+	// n1 (data) and n2 (first parity) are hot; peerHealth == nil (pure BL).
+	rec := PlacementRecord{Nodes: []string{"n0", "n1", "n2", "n3"}}
+	rec.K = 2
+	rec.M = 2
+	cfg := ECConfig{DataShards: 2, ParityShards: 2}
+	r := ecObjectReader{bl: newFakeHot("n1", "n2")}
+
+	primary, fallback := r.computeAttemptOrder(rec, cfg)
+	assert.Equal(t, []int{0, 3}, primary, "swap must pick the non-hot parity idx 3")
+	assert.Equal(t, []int{1, 2}, fallback, "hot data and hot parity both land in fallback")
+}
+
 func TestComputeAttemptOrder_UnhealthyDataPeerDemotedToFallback(t *testing.T) {
 	// 2+1: data idx 0,1 on n0,n1; parity idx 2 on n2. n1 unhealthy.
 	ph := NewPeerHealth([]string{"n0", "n1", "n2"}, 10*time.Second)
