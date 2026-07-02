@@ -8,6 +8,8 @@ import (
 	"net"
 	"sync/atomic"
 	"time"
+
+	"github.com/gritive/GrainFS/internal/transport"
 )
 
 // shardEndpoint abstracts a single placement slot's shard I/O. It is the one
@@ -246,6 +248,27 @@ func (e remoteShardEndpoint) markHealth(ok bool) {
 	}
 }
 
+// errShardWriteLocalOpen tags a shard-write failure whose cause was the LOCAL
+// openShard callback (reading our own staging data), before any RPC reached
+// the peer. Like pool backpressure, it is local evidence and must not
+// health-mark the peer.
+var errShardWriteLocalOpen = errors.New("ec: local shard open failed")
+
+// markHealthAfter records health evidence from an RPC error. Local evidence —
+// pool backpressure (transport.ErrLocalBackpressure) and local shard-open
+// failures (errShardWriteLocalOpen) — says nothing about the peer, so it
+// marks nothing.
+func (e remoteShardEndpoint) markHealthAfter(err error) {
+	if err == nil {
+		e.markHealth(true)
+		return
+	}
+	if errors.Is(err, transport.ErrLocalBackpressure) || errors.Is(err, errShardWriteLocalOpen) {
+		return
+	}
+	e.markHealth(false)
+}
+
 func (e remoteShardEndpoint) WriteShardReader(ctx context.Context, bucket, shardKey, stagingShardKey string, shardIdx int, _ int64, openShard func(int) (io.Reader, error), shardSize func(int) (int64, error)) error {
 	// logicalShardSize is intentionally ignored: the shard-write wire carries no
 	// logical size, so the remote receiver classifies the fsync on the on-disk
@@ -259,7 +282,7 @@ func (e remoteShardEndpoint) WriteShardReader(ctx context.Context, bucket, shard
 		ShardTargetClass: "remote",
 		Error:            putTraceErrorString(werr),
 	})
-	e.markHealth(werr == nil)
+	e.markHealthAfter(werr)
 	return werr
 }
 
@@ -291,7 +314,7 @@ func (e remoteShardEndpoint) writeRemoteShard(
 				ShardTargetClass: "remote",
 				Error:            err.Error(),
 			})
-			return fmt.Errorf("open ec shard %d: %w", shardIdx, err)
+			return fmt.Errorf("%w: open ec shard %d: %w", errShardWriteLocalOpen, shardIdx, err)
 		}
 		ObservePutTraceStage(ctx, PutTraceStageShardWriteRemoteOpen, openStart, PutTraceStageFields{
 			ShardIndex:       shardIdx,
@@ -390,7 +413,7 @@ func (e remoteShardEndpoint) DeleteShards(ctx context.Context, bucket, shardKey 
 // synthetic readers and future transports may surface them).
 func (e remoteShardEndpoint) OpenShardStream(ctx context.Context, bucket, shardKey string, shardIdx int) (io.ReadCloser, error) {
 	rc, err := e.shards.ReadShardStream(ctx, e.node, bucket, shardKey, shardIdx)
-	e.markHealth(err == nil)
+	e.markHealthAfter(err)
 	if err != nil {
 		return nil, err
 	}
@@ -404,7 +427,7 @@ func (e remoteShardEndpoint) OpenShardStream(ctx context.Context, bucket, shardK
 // All reads use the streaming RPC — there is no buffered one-shot branch.
 func (e remoteShardEndpoint) ReadShardAt(ctx context.Context, bucket, shardKey string, shardIdx int, offset int64, buf []byte) (int, error) {
 	rc, err := e.shards.ReadShardRangeStream(ctx, e.node, bucket, shardKey, shardIdx, offset, int64(len(buf)))
-	e.markHealth(err == nil)
+	e.markHealthAfter(err)
 	if err != nil {
 		return 0, err
 	}

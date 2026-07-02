@@ -155,7 +155,7 @@ func (t *HTTPTransport) ShardRead(ctx context.Context, addr string, req ShardRea
 	if err := c.Do(ctx, hreq, hresp); err != nil {
 		protocol.ReleaseRequest(hreq)
 		protocol.ReleaseResponse(hresp)
-		return nil, fmt.Errorf("shard read %s: %w", addr, err)
+		return nil, fmt.Errorf("shard read %s: %w", addr, classifyShardClientErr(err))
 	}
 	protocol.ReleaseRequest(hreq)
 
