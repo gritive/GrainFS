@@ -14,6 +14,7 @@ import (
 	"math"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gritive/GrainFS/internal/metrics"
 )
@@ -424,7 +425,9 @@ func syncShardClose(closeShards func()) func() error {
 type ecReconstructStreamReader struct {
 	reader io.Reader
 	close  func() error
-	closed bool
+	// closed is atomic so a concurrent double-Close is a safe no-op: the
+	// teardown funcs close channels (close(stop)) and must run exactly once.
+	closed atomic.Bool
 }
 
 func (r *ecReconstructStreamReader) Read(p []byte) (int, error) {
@@ -432,10 +435,9 @@ func (r *ecReconstructStreamReader) Read(p []byte) (int, error) {
 }
 
 func (r *ecReconstructStreamReader) Close() error {
-	if r.closed {
+	if !r.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-	r.closed = true
 	if r.close != nil {
 		return r.close()
 	}
@@ -724,48 +726,22 @@ func (e *ecShardHeaderMismatchError) Error() string {
 	return fmt.Sprintf("ec: shard header size mismatch: shards %v report %v, metadata says %d", e.Idxs, e.Got, e.Want)
 }
 
-// headerCheckReader lazily consumes and validates the 8-byte shard header
-// against the metadata-authoritative size before passing body bytes through.
-// Lazy like the skipReader it replaces: no eager blocking read at open; the
-// check runs on the shard's first Read, and a disagreeing header fails typed
-// with per-shard attribution via onFault.
-// Known limitation: it validates one shard at a time with no cross-shard view,
-// so it cannot apply the AnchorCorroborated guard — a corrupt anchor on the
-// stripe path still marks the first-read shard's peer (a single peer, not all;
-// accepted for now, see ecShardHeaderMismatchError.AnchorCorroborated).
-type headerCheckReader struct {
-	r        io.Reader
-	idx      int
-	expected int64
-	onFault  func(int)
-	checked  bool
-}
+// ErrECShardIntegrity classifies the typed EC shard integrity failures
+// (*ecShardTruncatedError, *ecShardHeaderMismatchError) via errors.Is: both
+// implement Is(ErrECShardIntegrity). Exported so layers outside the cluster
+// package (the S3 error mapper) can detect and genericize them without
+// depending on the unexported types.
+var ErrECShardIntegrity = errors.New("ec shard integrity error")
 
-func (h *headerCheckReader) Read(p []byte) (int, error) {
-	if !h.checked {
-		var header [shardHeaderSize]byte
-		if n, err := io.ReadFull(h.r, header[:]); err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-				if h.onFault != nil {
-					h.onFault(h.idx)
-					h.onFault = nil
-				}
-				return 0, &ecShardTruncatedError{Idx: h.idx, Want: shardHeaderSize, Got: int64(n)}
-			}
-			return 0, fmt.Errorf("read shard %d header: %w", h.idx, err)
-		}
-		size := int64(binary.BigEndian.Uint64(header[:]))
-		if size != h.expected {
-			if h.onFault != nil {
-				h.onFault(h.idx)
-				h.onFault = nil
-			}
-			return 0, &ecShardHeaderMismatchError{Idxs: []int{h.idx}, Got: []int64{size}, Want: h.expected}
-		}
-		h.checked = true
-	}
-	return h.r.Read(p)
-}
+func (e *ecShardTruncatedError) Is(target error) bool      { return target == ErrECShardIntegrity }
+func (e *ecShardHeaderMismatchError) Is(target error) bool { return target == ErrECShardIntegrity }
+
+// IsECIntegrityError reports whether err is (or wraps) a typed EC shard
+// integrity failure — a truncated shard body or a shard-header/metadata size
+// mismatch. Their messages carry shard indices and per-peer byte counts, so
+// the S3 error mapper replaces them with a generic message before they reach
+// a client response.
+func IsECIntegrityError(err error) bool { return errors.Is(err, ErrECShardIntegrity) }
 
 // ecExactLenReader bounds a shard body to its expected length: excess bytes
 // are capped (never reach the EC layer), and a clean EOF before the expected

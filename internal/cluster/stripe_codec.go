@@ -21,6 +21,15 @@ func numStripes(objectSize int64, stripeBytes int) int {
 	return int((objectSize + int64(stripeBytes) - 1) / int64(stripeBytes))
 }
 
+// validateStripeObjectSize rejects object sizes the stripe codec cannot
+// address with int arithmetic (negative, or beyond the platform int range).
+func validateStripeObjectSize(objectSize int64) error {
+	if objectSize < 0 || objectSize > math.MaxInt {
+		return fmt.Errorf("stripe: object size %d outside int range", objectSize)
+	}
+	return nil
+}
+
 // stripeReconstructShardBody regenerates ONE missing shard's interleaved body
 // (no 8-byte header) directly from its surviving siblings, per stripe. bodies
 // holds the header-stripped shard bodies (nil = missing); exactly the shard at
@@ -41,8 +50,8 @@ func stripeReconstructShardBody(cfg ECConfig, bodies [][]byte, stripeBytes, shar
 	if stripeBytes <= 0 {
 		return nil, fmt.Errorf("stripe reconstruct shard: stripeBytes must be > 0")
 	}
-	if objectSize < 0 || objectSize > math.MaxInt {
-		return nil, fmt.Errorf("stripe: object size %d outside int range", objectSize)
+	if err := validateStripeObjectSize(objectSize); err != nil {
+		return nil, err
 	}
 	enc, err := getEncoder(cfg)
 	if err != nil {
@@ -103,8 +112,8 @@ func newStripeDeinterleaveStreamReader(cfg ECConfig, shards []io.Reader, stripeB
 	if stripeBytes <= 0 {
 		return nil, fmt.Errorf("stripe stream: stripeBytes must be > 0")
 	}
-	if objectSize < 0 || objectSize > math.MaxInt {
-		return nil, fmt.Errorf("stripe: object size %d outside int range", objectSize)
+	if err := validateStripeObjectSize(objectSize); err != nil {
+		return nil, err
 	}
 	enc, err := getEncoder(cfg)
 	if err != nil {

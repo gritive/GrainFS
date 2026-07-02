@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"testing"
@@ -274,6 +275,54 @@ func TestECStreamBodies_HostileHeaderSizeRejected(t *testing.T) {
 			t.Fatalf("size %d: legacy mode has no anchor to attribute against, got typed mismatch %v", size, err)
 		}
 	}
+}
+
+// TestECStreamBodies_HostileExpectedSizeRejected pins the anchored-mode
+// counterpart of the hostile bounds check: a corrupt METADATA size that would
+// overflow the ceil(size/K) math must be rejected with the generic
+// out-of-range error, NOT typed *ecShardHeaderMismatchError — metadata is not
+// a shard, so there is nobody to health-mark for it.
+func TestECStreamBodies_HostileExpectedSizeRejected(t *testing.T) {
+	cfg := ECConfig{DataShards: 2, ParityShards: 1}
+	payload := bytes.Repeat([]byte("abcdefgh"), 64)
+	full, _ := buildECShards(t, cfg, payload)
+	shards := []io.Reader{bytes.NewReader(full[0]), bytes.NewReader(full[1]), nil}
+
+	hostile := int64(math.MaxInt64) - int64(cfg.NumShards()) + 1 // > MaxInt64 - NumShards
+	_, _, err := ecReconstructStreamBodies(cfg, shards, hostile)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "out of range")
+	var merr *ecShardHeaderMismatchError
+	assert.False(t, errors.As(err, &merr), "corrupt metadata is unattributable — must not be typed as a shard mismatch, got %v", err)
+}
+
+// TestIsECIntegrityError pins the exported predicate the S3 error mapper uses
+// to genericize typed EC integrity failures (their messages carry shard
+// indices and per-peer byte counts that must not leak into S3 responses).
+func TestIsECIntegrityError(t *testing.T) {
+	cfg := ECConfig{DataShards: 2, ParityShards: 1}
+	payload := []byte("0123456789abcdef")
+	full, _ := buildECShards(t, cfg, payload)
+
+	// Real header-mismatch error from the production validation path.
+	lie := encodeShardHeader(int64(len(payload)) + 8)
+	corrupt0 := append(append([]byte{}, lie[:]...), full[0][shardHeaderSize:]...)
+	_, _, mismatchErr := ecReconstructStreamBodies(cfg,
+		[]io.Reader{bytes.NewReader(corrupt0), bytes.NewReader(full[1]), bytes.NewReader(full[2])},
+		int64(len(payload)))
+	require.Error(t, mismatchErr)
+	assert.True(t, IsECIntegrityError(mismatchErr), "header mismatch is an integrity error")
+	assert.True(t, IsECIntegrityError(fmt.Errorf("get object: %w", mismatchErr)), "wrapped mismatch still detected")
+
+	// Real truncation error from the production validation path.
+	_, _, truncErr := ecReconstructStreamBodies(cfg,
+		[]io.Reader{bytes.NewReader(full[0][:4]), bytes.NewReader(full[1]), nil},
+		int64(len(payload)))
+	require.Error(t, truncErr)
+	assert.True(t, IsECIntegrityError(truncErr), "shard truncation is an integrity error")
+
+	assert.False(t, IsECIntegrityError(errors.New("some generic failure")))
+	assert.False(t, IsECIntegrityError(nil))
 }
 
 // TestECStreamRead_ZeroSizeObjectRoundTrips pins the origSize==0 boundary:

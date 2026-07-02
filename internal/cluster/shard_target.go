@@ -255,16 +255,21 @@ func (e remoteShardEndpoint) markHealth(ok bool) {
 // local evidence and must not health-mark the peer.
 var errShardWriteLocalOpen = errors.New("ec: local shard open failed")
 
-// markHealthAfter records health evidence from an RPC error. Local evidence —
-// pool backpressure (transport.ErrLocalBackpressure) and local shard-open
-// failures (errShardWriteLocalOpen) — says nothing about the peer, so it
-// marks nothing.
+// markHealthAfter records health evidence from an RPC error. Local/caller
+// evidence — pool backpressure (transport.ErrLocalBackpressure), local
+// shard-open failures (errShardWriteLocalOpen), and caller-cancellation
+// sentinels (context.Canceled / context.DeadlineExceeded: a client abort
+// mid-open or a local deadline like shardRPCTimeout firing under local
+// overload) — says nothing about the peer, so it marks nothing. The
+// cancellation exemption keeps open-time classification consistent with
+// isPeerFaultReadErr's mid-body classification.
 func (e remoteShardEndpoint) markHealthAfter(err error) {
 	if err == nil {
 		e.markHealth(true)
 		return
 	}
-	if errors.Is(err, transport.ErrLocalBackpressure) || errors.Is(err, errShardWriteLocalOpen) {
+	if errors.Is(err, transport.ErrLocalBackpressure) || errors.Is(err, errShardWriteLocalOpen) ||
+		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return
 	}
 	e.markHealth(false)

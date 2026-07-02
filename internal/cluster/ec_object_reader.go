@@ -72,6 +72,32 @@ func (r ecObjectReader) markShardHealthy(rec PlacementRecord, idx int) {
 	r.peerHealth.MarkHealthy(node)
 }
 
+// attributeShardOpenError applies per-shard health attribution for the typed
+// open-time validation failures ecReconstructStreamBodies surfaces (shared by
+// the contiguous and stripe paths). A typed header truncation carries the
+// shard index: attribute it to the serving peer. An anchored-mode header
+// mismatch marks every lying shard's peer, but ONLY when at least one shard
+// corroborated the metadata anchor: unanimous disagreement means the anchor
+// itself is just as suspect (corrupt metadata would otherwise mass-mark every
+// honest peer serving the object, node-level, on every retry).
+func (r ecObjectReader) attributeShardOpenError(rec PlacementRecord, err error) {
+	var terr *ecShardTruncatedError
+	if errors.As(err, &terr) {
+		r.markShardUnhealthy(rec, terr.Idx)
+	}
+	var merr *ecShardHeaderMismatchError
+	if errors.As(err, &merr) && merr.AnchorCorroborated {
+		for _, i := range merr.Idxs {
+			r.markShardUnhealthy(rec, i)
+		}
+	}
+}
+
+// nonClosingReader hides an underlying reader's io.Closer so a downstream
+// reader that closes its inputs (stripeDeinterleaveStreamReader.Close) cannot
+// double-close shard readers owned by closeECShardReaders.
+type nonClosingReader struct{ io.Reader }
+
 // OpenObject returns a streaming reader that reconstructs the object via EC
 // decode on the fly. objectSize is the original pre-encoding size in bytes.
 func (r ecObjectReader) OpenObject(ctx context.Context, bucket, shardKey string, rec PlacementRecord, objectSize int64) (io.ReadCloser, error) {
@@ -89,21 +115,28 @@ func (r ecObjectReader) OpenObject(ctx context.Context, bucket, shardKey string,
 	}
 
 	if rec.StripeBytes > 0 {
-		// Stripe-interleaved objects: the contiguous stream path strips and
-		// validates the 8-byte shard header inside ecReconstructStreamBodies,
-		// which the de-interleave path bypasses. Validate the header against
-		// the metadata-authoritative objectSize on each present reader
-		// (lazily, no eager blocking read) before handing bodies to the
-		// bounded de-interleave reader. headerCheckReader is not an
-		// io.Closer, so the stripe reader's Close is a no-op on it — the
-		// underlying shardReaders are closed exactly once by
-		// closeECShardReaders below.
-		for i, shard := range readers {
-			if shard != nil {
-				readers[i] = &headerCheckReader{r: shard, idx: i, expected: objectSize, onFault: onShardFault}
+		// Stripe-interleaved objects validate shard headers at open, exactly
+		// like the contiguous path: ecReconstructStreamBodies consumes the
+		// 8-byte header from every present reader and checks it against the
+		// metadata-authoritative objectSize with cross-shard corroboration
+		// (see ecShardHeaderMismatchError.AnchorCorroborated), then hands the
+		// post-header bodies to the bounded de-interleave reader. Bodies are
+		// wrapped nonClosingReader so the stripe reader's Close cannot close
+		// them — the underlying shardReaders are closed exactly once by
+		// closeECShardReaders below. The returned origSize is discarded: in
+		// anchored mode it IS objectSize.
+		_, bodies, err := ecReconstructStreamBodies(recCfg, readers, objectSize)
+		if err != nil {
+			r.attributeShardOpenError(rec, err)
+			closeECShardReaders(shardReaders)
+			return nil, err
+		}
+		for i, b := range bodies {
+			if b != nil {
+				bodies[i] = nonClosingReader{Reader: b}
 			}
 		}
-		rc, err := newStripeDeinterleaveStreamReader(recCfg, readers, int(rec.StripeBytes), objectSize, onShardFault)
+		rc, err := newStripeDeinterleaveStreamReader(recCfg, bodies, int(rec.StripeBytes), objectSize, onShardFault)
 		if err != nil {
 			closeECShardReaders(shardReaders)
 			return nil, err
@@ -119,24 +152,7 @@ func (r ecObjectReader) OpenObject(ctx context.Context, bucket, shardKey string,
 		closeECShardReaders(shardReaders)
 	}, onShardFault, onShardClean)
 	if err != nil {
-		// Typed header truncation carries the shard index: attribute it to the
-		// serving peer before failing the open.
-		var terr *ecShardTruncatedError
-		if errors.As(err, &terr) {
-			r.markShardUnhealthy(rec, terr.Idx)
-		}
-		// Anchored-mode header mismatch: every disagreeing header is
-		// individually attributable against the metadata anchor — mark every
-		// lying shard's peer, but ONLY when at least one shard corroborated
-		// the anchor. Unanimous disagreement means the anchor itself is just
-		// as suspect (corrupt metadata would otherwise mass-mark every honest
-		// peer serving the object, node-level, on every retry).
-		var merr *ecShardHeaderMismatchError
-		if errors.As(err, &merr) && merr.AnchorCorroborated {
-			for _, i := range merr.Idxs {
-				r.markShardUnhealthy(rec, i)
-			}
-		}
+		r.attributeShardOpenError(rec, err)
 		closeECShardReaders(shardReaders)
 		return nil, err
 	}

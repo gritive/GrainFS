@@ -96,6 +96,36 @@ func TestMapError_InvalidDigestIsBadRequest(t *testing.T) {
 	assert.Equal(t, "InvalidDigest", got.Code)
 }
 
+// TestMapError_ECIntegrityErrorDoesNotLeakTopology: a GET that fails with a
+// typed EC integrity error (shard header mismatch / truncated shard) must map
+// to a generic InternalError WITHOUT echoing the detailed message — it names
+// shard indices and per-peer byte counts, internal topology that must not
+// reach S3 clients. The detail still reaches the server log via the
+// audit err_reason context key set by mapError.
+func TestMapError_ECIntegrityErrorDoesNotLeakTopology(t *testing.T) {
+	c := app.NewContext(0)
+
+	detail := "ec: shard header size mismatch: shards [0 2] report [24 4096], metadata says 16"
+	err := fmt.Errorf("get object: %s: %w", detail, cluster.ErrECShardIntegrity)
+	require.True(t, cluster.IsECIntegrityError(err))
+	mapError(c, err)
+
+	require.Equal(t, consts.StatusInternalServerError, c.Response.StatusCode())
+
+	var got s3Error
+	require.NoError(t, xml.Unmarshal(c.Response.Body(), &got))
+	assert.Equal(t, "InternalError", got.Code)
+	assert.Equal(t, "internal storage integrity error", got.Message)
+	assert.NotContains(t, string(c.Response.Body()), "shard header size mismatch")
+	assert.NotContains(t, string(c.Response.Body()), "shards [0 2]")
+
+	// The detailed message must still be available server-side for the
+	// request-log middleware (err_reason).
+	reason, ok := c.Get(auditErrReasonKey)
+	require.True(t, ok)
+	assert.Contains(t, reason.(string), "shard header size mismatch")
+}
+
 // TestMapError_GenericErrorIsInternalError: a plain error that matches no
 // sentinel must still map to 500 InternalError (no over-tagging).
 func TestMapError_GenericErrorIsInternalError(t *testing.T) {

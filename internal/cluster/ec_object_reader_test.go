@@ -479,8 +479,9 @@ func TestECObjectReader_OpenObject_StreamsStripedObjectDegraded(t *testing.T) {
 // TestECObjectReader_OpenObject_StreamsSmallStripedObject guards the striped
 // code path: a small redundant EC object with StripeBytes>0 and objectSize <
 // 4MiB must be reconstructed correctly on the streaming path. All object sizes
-// now use the streaming open loop + headerCheckReader header-validate + stripe
-// de-interleave reader; the old size-based fork has been removed.
+// now use the streaming open loop + open-time header validation
+// (ecReconstructStreamBodies) + stripe de-interleave reader; the old
+// size-based fork has been removed.
 func TestECObjectReader_OpenObject_StreamsSmallStripedObject(t *testing.T) {
 	const stripeBytes = 512 << 10 // 512KiB stripes
 	cfg := ECConfig{DataShards: 2, ParityShards: 2}

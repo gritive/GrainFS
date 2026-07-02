@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -25,6 +26,46 @@ func TestOpenShardStream_SuccessDoesNotClearActiveCooldown(t *testing.T) {
 	require.NoError(t, err)
 	defer rc.Close()
 	assert.False(t, ph.IsHealthy("n2"), "open success must not clear an active cooldown")
+}
+
+// A successful ranged shard read must NOT clear an active cooldown either —
+// io.ReadFull can swallow a transport error that arrives with the final
+// bytes, so ReadShardAt success is not provably-clean completion (mirrors
+// TestOpenShardStream_SuccessDoesNotClearActiveCooldown for the range path).
+func TestReadShardAt_SuccessDoesNotClearActiveCooldown(t *testing.T) {
+	ph := NewPeerHealth([]string{"n2"}, 10*time.Second)
+	ph.MarkUnhealthy("n2") // active cooldown from a mid-body fault
+	store := &streamShardStore{body: io.NopCloser(strings.NewReader("body"))}
+	ep := remoteShardEndpoint{node: "n2", shards: store, peerHealth: ph}
+
+	buf := make([]byte, 4)
+	n, err := ep.ReadShardAt(context.Background(), "b", "k", 0, 0, buf)
+	require.NoError(t, err)
+	require.Equal(t, 4, n)
+	assert.False(t, ph.IsHealthy("n2"), "ranged read success must not clear an active cooldown")
+}
+
+// An RPC-open failure caused by caller cancellation (context.Canceled /
+// context.DeadlineExceeded — client abort mid-open, or the local
+// shardRPCTimeout firing under local overload) is caller/local evidence, not
+// peer evidence: it must mark the peer neither healthy nor unhealthy,
+// consistent with isPeerFaultReadErr's mid-body classification.
+func TestOpenShardStream_CtxCancelOpenFailureMarksNothing(t *testing.T) {
+	for name, sentinel := range map[string]error{
+		"canceled": context.Canceled,
+		"deadline": context.DeadlineExceeded,
+	} {
+		t.Run(name, func(t *testing.T) {
+			ph := &fakeECObjectPeerHealth{}
+			store := &streamShardStore{openErr: fmt.Errorf("rpc open: %w", sentinel)}
+			ep := remoteShardEndpoint{node: "n2", shards: store, peerHealth: ph}
+
+			_, err := ep.OpenShardStream(context.Background(), "b", "k", 0)
+			require.Error(t, err)
+			assert.Empty(t, ph.unhealthy, "caller cancellation must not blame the peer")
+			assert.Empty(t, ph.healthy, "and must not record healthy evidence either")
+		})
+	}
 }
 
 // Clean exact-length body completion IS healthy evidence.
