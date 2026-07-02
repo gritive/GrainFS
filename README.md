@@ -146,19 +146,21 @@ before publishing public copy or competitive comparisons.
 Both runs used `warp`, 10 MiB object size. `GrainFS` ran with XAES-256-GCM
 at-rest encryption; MinIO ran with SSE-S3 auto-encryption.
 
-Latest GCP single-node `warp` run:
+Latest GCP single-node `warp` run (v0.0.783.0; the MinIO row is the 2026-06-30
+baseline — the single-node MinIO `warp` arm again returned empty benchdata, a
+known harness issue):
 
 | Target    | PUT MiB/s | GET MiB/s | vs MinIO PUT | vs MinIO GET |
 | --------- | --------: | --------: | -----------: | -----------: |
-| `GrainFS` |    215.50 |    437.02 |        1.03x |        0.92x |
+| `GrainFS` |    221.98 |    361.39 |        1.06x |        0.76x |
 | MinIO     |    209.77 |    472.65 |        1.00x |        1.00x |
 
-Latest GCP 4-node cluster `warp` run (v0.0.778.0, PUT/GET, profiling disabled):
+Latest GCP 4-node cluster `warp` run (v0.0.783.0, PUT/GET):
 
 | Target            | PUT MiB/s | GET MiB/s | vs MinIO PUT | vs MinIO GET |
 | ----------------- | --------: | --------: | -----------: | -----------: |
-| `GrainFS` cluster |    440.73 |   2271.65 |        0.94x |        0.99x |
-| MinIO distributed |    469.54 |   2290.27 |        1.00x |        1.00x |
+| `GrainFS` cluster |    439.51 |   2267.93 |        0.94x |        0.99x |
+| MinIO distributed |    467.42 |   2291.82 |        1.00x |        1.00x |
 
 ## Core Concepts
 

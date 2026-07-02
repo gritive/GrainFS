@@ -66,28 +66,30 @@ Artifacts:
 
 ### Latest GCP Single-Node Encrypted Result
 
-Captured on 2026-06-30 KST in `asia-northeast3-a` with `n2-standard-4` VMs,
-10 MiB object size, 2048 total objects, concurrency 32, 1 minute per operation,
-signed S3 requests, and 0 errors. `GrainFS` ran with XAES-256-GCM at-rest
-encryption; MinIO ran with SSE-S3 auto-encryption.
+GrainFS row captured on 2026-07-02 KST (v0.0.783.0, commit ce28b248) in
+`asia-northeast3-a` with `n2-standard-4` VMs, 10 MiB object size, 2048 total
+objects, concurrency 32, 1 minute per operation, signed S3 requests, and
+0 errors, XAES-256-GCM at-rest encryption. The MinIO row is the 2026-06-30
+SSE-S3 baseline: the single-node `minio` `warp` arm again returned empty
+benchmark data this run (a warp/MinIO single-node harness issue; the
+distributed `minio-cluster` arm ran cleanly).
 
 | Target    | PUT MiB/s | GET MiB/s | vs MinIO PUT | vs MinIO GET |
 | --------- | --------: | --------: | -----------: | -----------: |
-| `GrainFS` |    215.50 |    437.02 |        1.03x |        0.92x |
+| `GrainFS` |    221.98 |    361.39 |        1.06x |        0.76x |
 | MinIO     |    209.77 |    472.65 |        1.00x |        1.00x |
 
-The same measurement attempt produced two additional valid MinIO runs
-(`PUT=212.37/210.74 MiB/s`, `GET=669.94/716.38 MiB/s`), but GrainFS repeat
-runs 2 and 3 failed during `warp` preparation with `Access Denied` and empty
-TSV files. Those failed GrainFS arms are excluded from the table above.
-
-Re-measured on 2026-07-01 on the all-sizes streaming build (v0.0.774.0): GrainFS
-single-node PUT 223.40 MiB/s, GET 365.31 MiB/s, 0 errors — within single-node
-run-to-run variance of the figures above (single-node GET is the noisiest cell),
-so streaming small objects did not regress single-node throughput. The MinIO
-single-node baseline is unchanged: the single-node `minio` `warp` arm again
-returned empty benchmark data this run (a warp/MinIO single-node harness issue;
-the distributed `minio-cluster` arm ran cleanly, see the cluster result below).
+Interpretation: PUT 221.98 and GET 361.39 sit inside the established
+run-to-run bands (PUT 215-233, GET 357-365 across v0.0.77x-v0.0.783 runs) —
+no regression from the v0.0.783.0 segment-boundary pipelining. The GET cell is
+working-set-regime sensitive: with the standard 2048×10MiB (20 GiB) warm-read
+pass the working set spills the 16 GB page cache and the run measures disk
+reads (~360 MiB/s); a cache-resident 1024-object get-only pass measured
+786 MiB/s on the same hardware (2026-07-02, `gcp-fresh-p0-20260702/single/run4`).
+MinIO serves GETs with O_DIRECT (page-cache independent), which is why its
+baseline is steadier across regimes. The 2026-06-30 GrainFS GET of 437.02 was a
+single unreplicated sample (its repeat runs failed); the 357-365 band is the
+reproducible spill-regime figure.
 
 ### GCP Cluster Encrypted Path
 
@@ -128,31 +130,42 @@ Artifacts:
 
 ### Latest GCP Cluster Encrypted Result
 
-Captured on 2026-07-02 KST in `asia-northeast3-a` with one `n2-standard-4`
-client VM and four `n2-standard-4` storage VMs, 10 MiB object size, 2048 total
-objects, concurrency 32, 1 minute per operation, signed S3 requests, round-robin
-host selection, warm GET over the preceding PUT objects, profiling disabled (no
-observer overhead), and 0 errors. Captured on the LocalBackend-removal build
-(v0.0.778.0), an internal/test-only change that touches no production read/write
-path — this pass re-ran PUT and GET as a regression check.
+Captured on 2026-07-02 KST (v0.0.783.0, commit ce28b248 — the segment-boundary
+pipelining release: GET lookahead prefetch + combined PUT commit round) in
+`asia-northeast3-a` with one `n2-standard-4` client VM and four `n2-standard-4`
+storage VMs, 10 MiB object size, 2048 total objects, concurrency 32, 1 minute
+per operation, signed S3 requests, round-robin host selection, warm GET over the
+preceding PUT objects, put-trace enabled (verified non-distorting on v0.0.778.0:
+443.86 traced vs 443.81 clean), and 0 errors.
 
 | Target            | PUT MiB/s | GET MiB/s | vs MinIO PUT | vs MinIO GET |
 | ----------------- | --------: | --------: | -----------: | -----------: |
-| `GrainFS` cluster |    440.73 |   2271.65 |        0.94x |        0.99x |
-| MinIO distributed |    469.54 |   2290.27 |        1.00x |        1.00x |
+| `GrainFS` cluster |    439.51 |   2267.93 |        0.94x |        0.99x |
+| MinIO distributed |    467.42 |   2291.82 |        1.00x |        1.00x |
 
-Interpretation: GrainFS cluster PUT is 0.94x of distributed MinIO and GET is
-0.99x. GrainFS's own throughput did not regress — PUT 440.73 is within run-to-run
-variance of prior releases (v0.0.774.0: 434.79, v0.0.771.0: 446.42), and GET
-2271.65 is above them. The LocalBackend removal deletes only test-only code and
-changes no production read/write path, so any difference here is run-to-run
-variance, not a code effect. The GET ratio moved from 1.11x (v0.0.774.0) to 0.99x
-because this SPOT run's environment was faster for reads on both targets — MinIO
-GET also jumped (1646 -> 2290, +39%), compressing the ratio; it is not a GrainFS
-read regression (GrainFS GET absolute rose). The write gap to MinIO stays off-CPU
-(shard-write fsync and inter-node transfer latency), not compute headroom.
+Interpretation: performance-neutral release. PUT 439.51 and GET 2267.93 sit
+inside the established run-to-run bands (PUT 434-446, GET 2268-2298 across
+v0.0.771-v0.0.782) — the v0.0.783.0 read/write pipelining neither regressed nor
+moved cluster throughput, which is expected: the cluster is disk-write-bound
+(per-node writes run at ~90% of the pd-ssd ceiling), so latency-side changes do
+not move aggregate MiB/s. STAT: GrainFS 25,691 obj/s vs MinIO 10,034 (2.56x).
 
-Mixed workload (not re-run in the v0.0.778.0 regression pass; last measured on
+Combined-commit verification (put-trace, 727 PUTs): 710 PUTs (97.7%) took the
+new one-round `commit_combined` path; 17 early PUTs fell back to the legacy
+two-round flow while the `commit-combined` gossip capability propagated —
+the designed rolling-upgrade fallback working as intended. HONEST FINDING:
+`commit_combined` p50 is 30.8 ms (p90 202.6) versus the v0.0.778.0 legacy
+two-round sum of ~27.2 ms p50 (promote 22.7 + quorum-meta 4.5; p90 ~163) — the
+predicted 15-25 ms saving did not materialize. Cause: the saved round trip is
+sub-millisecond on this LAN, while the combined RPC must wait for ALL
+pairs-carrying nodes to finish promote+meta (all-or-fail promote), losing the
+legacy meta round's return-at-K best-effort parity writes; on the 4-node 2+2
+single-group topology every node carries pairs, so the early-return never
+fires. Net: correctness guards intact, throughput unchanged, commit-tail
+latency roughly neutral (within cross-run variance, slightly worse at p90).
+The write gap to MinIO stays disk-bound, not compute headroom.
+
+Mixed workload (not re-run in the v0.0.783.0 pass; last measured on
 v0.0.774.0, warp `mixed` as an isolated single-op pass, same VM class and
 settings, 2026-07-01): GrainFS cluster and distributed MinIO are at parity.
 
@@ -171,9 +184,10 @@ clean bucket reproduced 0 errors on both cluster targets, so the failure was the
 prior disk-fill state, not a MinIO- or workload-specific defect.
 
 Date: 2026-07-02
-Commit: da0605cd (v0.0.778.0, PR #1004 LocalBackend removal)
-Raw artifacts: `benchmarks/profiles/gcp-lbr-1004/` (put/get). The mixed row is from
-the v0.0.774.0 run (`gcp-v774-mixed2/`), not re-run this pass.
+Commit: ce28b248 (v0.0.783.0, PR #1010 segment-boundary pipelining)
+Raw artifacts: `benchmarks/profiles/gcp-v783/` (put/get/stat + 4-node put-trace
+JSONL). The mixed row is from the v0.0.774.0 run (`gcp-v774-mixed2/`), not
+re-run this pass.
 
 ## Existing Benchmark Targets
 

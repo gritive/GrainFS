@@ -824,6 +824,7 @@ cmd_single() { # <runidx>
   serve_node 0 "$bin" "" "$PPROF_PORT"
   if ! wait_http 0; then
     log "ERROR: single GrainFS never came up on $n — aborting"
+    ssh_node "$n" "sudo journalctl -u $UNIT -n 120 --no-pager 2>/dev/null | grep -iE 'error|panic|failed|listen|bind|flag' | head -20" || true
     return 1
   fi
   # Wait for leader — single node promotes quickly; no shard-group wait needed.
@@ -857,10 +858,12 @@ cmd_single() { # <runidx>
   local pprof_dir="$localdir/pprof"
   mkdir -p "$pprof_dir"
 
-  # Background: 5s PUT warm-up delay then capture PPROF_CPU_SECONDS of CPU.
-  log "single: spawning background CPU profile capture (5s warmup + ${PPROF_CPU_SECONDS}s)"
+  # Background: PPROF_SINGLE_DELAY (default 5s = PUT warm-up) then capture
+  # PPROF_CPU_SECONDS of CPU. Raise the delay to land the window on a later op
+  # (e.g. the GET measure phase when WARP_OPS=get).
+  log "single: spawning background CPU profile capture (${PPROF_SINGLE_DELAY:-5}s delay + ${PPROF_CPU_SECONDS}s)"
   (
-    sleep 5
+    sleep "${PPROF_SINGLE_DELAY:-5}"
     ssh_node "$n" "curl -sf 'http://127.0.0.1:$PPROF_PORT/debug/pprof/profile?seconds=$PPROF_CPU_SECONDS' -o /tmp/single-cpu.pb.gz 2>/dev/null && echo pprof-cpu-done" || true
     if gcloud compute scp --zone="$ZONE" --project="$PROJECT" --tunnel-through-iap \
       "$n:/tmp/single-cpu.pb.gz" "$pprof_dir/cpu.pb.gz" >/dev/null 2>&1; then
