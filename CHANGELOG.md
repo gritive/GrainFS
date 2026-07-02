@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.787.0] - 2026-07-02
+
+### Fixed
+- **A truncated shard can no longer splice wrong bytes into a GET response.** A shard stream
+  that ended cleanly (EOF) before its expected length was indistinguishable from a normal end
+  of stream, so the EC reader silently advanced to the next shard — the GET streamed the next
+  shard's bytes at the wrong offset until the response came up short against Content-Length,
+  delivering partial wrong data before the client saw a failure. Every shard body is now
+  bounded to its exact expected length (`ceil(origSize/K)`, derived from the shard header —
+  an invariant every write path guarantees, parity and padded tail included): a short shard
+  fails the read with an explicit typed truncation error, the serving peer is marked
+  unhealthy (a peer with an empty or truncated on-disk shard stops being selected for write
+  placement), and excess trailing bytes are capped. The stripe-interleaved path, which
+  already failed loudly on short fragments, gains the same typed error and peer attribution.
+- **Hostile or corrupt shard-header sizes are rejected at open.** The 8-byte shard header is
+  untrusted input from the serving peer; a size near the int64 maximum overflowed the
+  expected-length math and silently disabled the new guard. Header sizes are now
+  bounds-checked before use.
+- **A GET whose backend ends short of the advertised Content-Length now surfaces an explicit
+  error** (`io.ErrUnexpectedEOF`) at the response layer instead of silently ending the body
+  early.
+
 ## [0.0.786.0] - 2026-07-02
 
 ### Fixed
