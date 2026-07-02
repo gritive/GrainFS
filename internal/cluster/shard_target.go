@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"sync/atomic"
 	"time"
 )
@@ -378,12 +379,15 @@ func (e remoteShardEndpoint) DeleteShards(ctx context.Context, bucket, shardKey 
 
 // OpenShardStream marks peerHealth at the RPC boundary (success → healthy,
 // failure → unhealthy). The returned reader additionally flips the peer
-// unhealthy on the first mid-body read failure — a peer that serves 200 then
-// truncates/resets must not keep being selected. Normal EOF and caller-driven
-// cancellation (context.Canceled / DeadlineExceeded — shardRPCTimeout bounds
-// the whole body read, so large legitimate reads can hit it; a stalled peer
-// surfaces as the transport idle-read i/o timeout instead, which IS marked)
-// are not peer faults.
+// unhealthy on the first mid-body read failure — a peer that resets the
+// connection or truncates a length-framed body (io.ErrUnexpectedEOF) must not
+// keep being selected; a stalled peer surfaces as the transport idle-read i/o
+// timeout, which IS marked. Not peer faults: normal EOF (a clean-close
+// truncation is indistinguishable from EOF at this layer), local teardown
+// (net.ErrClosed / io.ErrClosedPipe — our side closed the conn), and caller
+// cancellation sentinels (context.Canceled / DeadlineExceeded — defensive:
+// the production body reader does not thread ctx into body reads, but
+// synthetic readers and future transports may surface them).
 func (e remoteShardEndpoint) OpenShardStream(ctx context.Context, bucket, shardKey string, shardIdx int) (io.ReadCloser, error) {
 	rc, err := e.shards.ReadShardStream(ctx, e.node, bucket, shardKey, shardIdx)
 	e.markHealth(err == nil)
@@ -413,9 +417,11 @@ func (e remoteShardEndpoint) ReadShardAt(ctx context.Context, bucket, shardKey s
 }
 
 // isPeerFaultReadErr reports whether a mid-body read error is evidence of a
-// misbehaving peer (as opposed to normal EOF or caller-driven cancellation).
+// misbehaving peer (as opposed to normal EOF, local connection teardown, or
+// caller-driven cancellation).
 func isPeerFaultReadErr(err error) bool {
 	return !errors.Is(err, io.EOF) &&
+		!errors.Is(err, net.ErrClosed) && !errors.Is(err, io.ErrClosedPipe) &&
 		!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
 }
 

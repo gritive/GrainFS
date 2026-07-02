@@ -367,12 +367,12 @@ func newECReconstructStreamReaderWithPrefetch(cfg ECConfig, shards []io.Reader, 
 	}()
 	return &ecReconstructStreamReader{reader: pr, close: func() error {
 		err := pr.Close()
-		go func() {
-			<-done
-			if closeShards != nil {
+		if closeShards != nil {
+			go func() {
+				<-done
 				closeShards()
-			}
-		}()
+			}()
+		}
 		return err
 	}}, nil
 }

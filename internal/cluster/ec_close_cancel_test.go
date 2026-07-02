@@ -68,10 +68,12 @@ func TestECReconstructStreamPrefetch_CloseReturnsPromptlyWhileShardReadBlocks(t 
 
 	// Invariant: shard bodies must not be closed while producers are still
 	// blocked mid-Read (would be a forbidden cross-goroutine CloseBodyStream).
+	// Held over a bounded window (not an instantaneous check) so an ungated
+	// detached teardown that merely hasn't been scheduled yet cannot false-pass.
 	select {
 	case <-closeShardsCalled:
 		t.Fatal("closeShards ran while a producer was still mid-Read (S8-2 violation)")
-	default:
+	case <-time.After(100 * time.Millisecond):
 	}
 
 	// Releasing the stalled readers lets the producers exit; only then may the
@@ -154,10 +156,12 @@ func TestECReconstructStreamMissingData_CloseIsS82SafeWhileShardReadBlocks(t *te
 
 	// Invariant: shard bodies must not be closed while the reconstruct goroutine
 	// is still blocked mid-Read (forbidden cross-goroutine CloseBodyStream).
+	// Held over a bounded window (not an instantaneous check) so an ungated
+	// detached teardown that merely hasn't been scheduled yet cannot false-pass.
 	select {
 	case <-closeShardsCalled:
 		t.Fatal("closeShards ran while the reconstruct goroutine was still mid-Read (S8-2 violation)")
-	default:
+	case <-time.After(100 * time.Millisecond):
 	}
 
 	// Releasing the stalled readers lets the goroutine exit; only then may the

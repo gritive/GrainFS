@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"strings"
 	"testing"
 
@@ -511,10 +512,10 @@ func TestOpenShardStreamMarksPeerUnhealthyOnMidBodyFailure(t *testing.T) {
 		require.Empty(t, ph.unhealthy, "consumer abort is not peer fault")
 	})
 
-	t.Run("shardRPCTimeout deadline does not mark unhealthy", func(t *testing.T) {
-		// openShardReaders bounds the WHOLE body read with shardRPCTimeout, so a
-		// legitimately large/slow streaming GET can hit the deadline mid-body on a
-		// healthy peer — that must not poison peerHealth.
+	t.Run("context deadline does not mark unhealthy", func(t *testing.T) {
+		// Defensive: the production body reader does not thread ctx into body
+		// reads, but synthetic readers and future transports may surface the
+		// deadline sentinel mid-body — that must not poison peerHealth.
 		ph := &fakeECObjectPeerHealth{}
 		store := &streamShardStore{body: &errAfterReader{data: []byte("partial"), err: fmt.Errorf("read frame: %w", context.DeadlineExceeded)}}
 		ep := remoteShardEndpoint{node: "peer", shards: store, peerHealth: ph}
@@ -525,7 +526,41 @@ func TestOpenShardStreamMarksPeerUnhealthyOnMidBodyFailure(t *testing.T) {
 		require.Error(t, err)
 		require.NoError(t, rc.Close())
 
-		require.Empty(t, ph.unhealthy, "deadline on a large read is not peer fault")
+		require.Empty(t, ph.unhealthy, "deadline sentinel is not peer fault")
+	})
+
+	t.Run("local teardown (net.ErrClosed) does not mark unhealthy", func(t *testing.T) {
+		// Node drain/restart closes conns from OUR side mid-read; the resulting
+		// "use of closed network connection" is not evidence against the peer.
+		ph := &fakeECObjectPeerHealth{}
+		store := &streamShardStore{body: &errAfterReader{data: []byte("partial"), err: fmt.Errorf("read body: %w", net.ErrClosed)}}
+		ep := remoteShardEndpoint{node: "peer", shards: store, peerHealth: ph}
+
+		rc, err := ep.OpenShardStream(context.Background(), "b", "k", 0)
+		require.NoError(t, err)
+		_, err = io.Copy(io.Discard, rc)
+		require.Error(t, err)
+		require.NoError(t, rc.Close())
+
+		require.Empty(t, ph.unhealthy, "local conn teardown is not peer fault")
+	})
+
+	t.Run("length-framed truncation (ErrUnexpectedEOF) marks unhealthy", func(t *testing.T) {
+		// A peer that declares a body length and then closes early surfaces
+		// io.ErrUnexpectedEOF from the transport body reader — that IS a peer
+		// fault on the streaming path (unlike ReadShardAt's post-RPC short
+		// read, which stays excluded there).
+		ph := &fakeECObjectPeerHealth{}
+		store := &streamShardStore{body: &errAfterReader{data: []byte("partial"), err: io.ErrUnexpectedEOF}}
+		ep := remoteShardEndpoint{node: "peer", shards: store, peerHealth: ph}
+
+		rc, err := ep.OpenShardStream(context.Background(), "b", "k", 0)
+		require.NoError(t, err)
+		_, err = io.Copy(io.Discard, rc)
+		require.Error(t, err)
+		require.NoError(t, rc.Close())
+
+		require.Equal(t, []string{"peer"}, ph.unhealthy, "length-framed truncation marks unhealthy")
 	})
 
 	t.Run("ReadShardAt mid-body transport error marks unhealthy", func(t *testing.T) {
