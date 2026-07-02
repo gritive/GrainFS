@@ -1,6 +1,19 @@
 # Changelog
 
-## [0.0.783.0] - 2026-07-02
+## [0.0.784.0] - 2026-07-02
+
+### Changed
+- **Reverted the combined PUT commit round (v0.0.783.0); non-versioned commits are back on the
+  two-round promote → metadata flow.** The post-merge GCP measurement showed the one-round
+  `PromoteAndWriteQuorumMeta` path was performance-neutral: the saved round trip is
+  sub-millisecond on a LAN, while the combined RPC had to wait for every pairs-carrying node's
+  metadata fsync, giving up the legacy metadata round's return-at-K behavior (measured
+  `commit_combined` p50 30.8 ms ≈ the legacy two-round sum of ~27.2 ms). Neutral performance did
+  not justify the added protocol surface (combined RPC + rollback RPC, three-class wire errors,
+  capability gating, abort-path metadata rollback), so the whole mechanism is removed. put-trace
+  reports the `promote_staged_shards` + `quorum_meta_write` stages again; the `commit_combined`
+  stage is gone. The GET segment lookahead prefetch from v0.0.783.0 is unaffected and stays, as
+  does the promote-batch codec's preallocation clamp (a pre-existing hardening fix).
 
 ### Changed
 - **Erasure-coded GETs prefetch the next segment while the current one streams.** Multi-segment

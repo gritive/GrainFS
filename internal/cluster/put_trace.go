@@ -47,7 +47,6 @@ const (
 	PutTraceStagePromoteStagedShards      PutTraceStage = "promote_staged_shards"
 	PutTraceStageDataRaftProposeMeta      PutTraceStage = "data_raft_propose_meta"
 	PutTraceStageQuorumMetaWrite          PutTraceStage = "quorum_meta_write"
-	PutTraceStageCommitCombined           PutTraceStage = "commit_combined"
 )
 
 type PutTraceIngress string
