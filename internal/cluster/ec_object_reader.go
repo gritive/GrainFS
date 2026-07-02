@@ -87,7 +87,7 @@ func (r ecObjectReader) OpenObject(ctx context.Context, bucket, shardKey string,
 
 	rc, err := newECReconstructStreamReaderWithPrefetch(recCfg, readers, func() {
 		closeECShardReaders(shardReaders)
-	})
+	}, nil)
 	if err != nil {
 		closeECShardReaders(shardReaders)
 		return nil, err

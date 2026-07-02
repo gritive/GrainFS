@@ -8,6 +8,7 @@ package cluster
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -285,6 +286,7 @@ func ECReconstructStreamTo(w io.Writer, cfg ECConfig, shards []io.Reader) error 
 	if origSize == 0 {
 		return nil
 	}
+	bodies = ecWrapBodiesExactLen(cfg, origSize, bodies, nil)
 	return ecReconstructStreamBodiesTo(w, cfg, origSize, bodies)
 }
 
@@ -295,11 +297,15 @@ func ECReconstructStreamTo(w io.Writer, cfg ECConfig, shards []io.Reader) error 
 // not be mid-Read on a shard body when it is closed — Hertz forbids cross-goroutine
 // CloseBodyStream; see internal/transport/http_shared.go), and it is detached so
 // Close returns promptly instead of blocking on a stalled producer.
-func newECReconstructStreamReaderWithPrefetch(cfg ECConfig, shards []io.Reader, closeShards func()) (*ecReconstructStreamReader, error) {
+// Every shard body is bounded to its exact expected length: a shard that ends
+// cleanly short surfaces *ecShardTruncatedError (reported to onShardFault, if
+// non-nil, with the shard index) instead of mis-splicing the next shard's bytes.
+func newECReconstructStreamReaderWithPrefetch(cfg ECConfig, shards []io.Reader, closeShards func(), onShardFault func(int)) (*ecReconstructStreamReader, error) {
 	origSize, bodies, err := ecReconstructStreamBodies(cfg, shards)
 	if err != nil {
 		return nil, err
 	}
+	bodies = ecWrapBodiesExactLen(cfg, origSize, bodies, onShardFault)
 	if ecStreamHasAllDataShards(cfg, bodies) {
 		dataReaders, err := ecReconstructStreamDataReaders(cfg, bodies)
 		if err != nil {
@@ -615,6 +621,74 @@ func ecReconstructBodies(cfg ECConfig, shards [][]byte) (int64, [][]byte, error)
 	return origSize, bodies, nil
 }
 
+// ecShardTruncatedError reports a shard stream that ended cleanly (EOF)
+// before the expected byte count — evidence of a truncated on-disk shard or a
+// peer serving a short body, distinct from transport errors. It deliberately
+// does NOT wrap io.EOF/io.ErrUnexpectedEOF: asyncPrefetchReader normalizes
+// the EOF family as legitimate end-of-stream, and this error must propagate.
+type ecShardTruncatedError struct {
+	Idx  int
+	Want int64
+	Got  int64
+}
+
+func (e *ecShardTruncatedError) Error() string {
+	return fmt.Sprintf("ec: shard %d truncated: got %d of %d body bytes", e.Idx, e.Got, e.Want)
+}
+
+// ecExactLenReader bounds a shard body to its expected length: excess bytes
+// are capped (never reach the EC layer), and a clean EOF before the expected
+// count becomes *ecShardTruncatedError. onFault, if non-nil, fires once on
+// truncation so the caller can attribute the fault to the serving peer —
+// transport (non-EOF) errors pass through untouched; the endpoint-layer
+// healthTrackingReadCloser already marks those.
+type ecExactLenReader struct {
+	r         io.Reader
+	idx       int
+	want      int64
+	remaining int64
+	onFault   func(int)
+}
+
+func (g *ecExactLenReader) Read(p []byte) (int, error) {
+	if g.remaining <= 0 {
+		return 0, io.EOF
+	}
+	if int64(len(p)) > g.remaining {
+		p = p[:g.remaining]
+	}
+	n, err := g.r.Read(p)
+	g.remaining -= int64(n)
+	if err != nil && g.remaining > 0 &&
+		(errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) {
+		if g.onFault != nil {
+			g.onFault(g.idx)
+			g.onFault = nil
+		}
+		return n, &ecShardTruncatedError{Idx: g.idx, Want: g.want, Got: g.want - g.remaining}
+	}
+	if err != nil && g.remaining == 0 && errors.Is(err, io.EOF) {
+		return n, io.EOF
+	}
+	return n, err
+}
+
+// ecWrapBodiesExactLen wraps every non-nil post-header shard body in an
+// exact-length guard of ceil(origSize/K) bytes — the invariant the write path
+// guarantees for every shard, parity and zero-padded tail included.
+func ecWrapBodiesExactLen(cfg ECConfig, origSize int64, bodies []io.Reader, onShardFault func(int)) []io.Reader {
+	if cfg.DataShards <= 0 {
+		return bodies
+	}
+	shardBodySize := (origSize + int64(cfg.DataShards) - 1) / int64(cfg.DataShards)
+	for i, b := range bodies {
+		if b != nil {
+			bodies[i] = &ecExactLenReader{r: b, idx: i, want: shardBodySize, remaining: shardBodySize, onFault: onShardFault}
+		}
+	}
+	return bodies
+}
+
 func ecReconstructStreamBodies(cfg ECConfig, shards []io.Reader) (int64, []io.Reader, error) {
 	if len(shards) != cfg.NumShards() {
 		return 0, nil, fmt.Errorf("shard count mismatch: got %d, want %d", len(shards), cfg.NumShards())
@@ -626,7 +700,10 @@ func ecReconstructStreamBodies(cfg ECConfig, shards []io.Reader) (int64, []io.Re
 			continue
 		}
 		var header [shardHeaderSize]byte
-		if _, err := io.ReadFull(r, header[:]); err != nil {
+		if n, err := io.ReadFull(r, header[:]); err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return 0, nil, &ecShardTruncatedError{Idx: i, Want: shardHeaderSize, Got: int64(n)}
+			}
 			return 0, nil, fmt.Errorf("read shard %d header: %w", i, err)
 		}
 		size := int64(binary.BigEndian.Uint64(header[:]))
