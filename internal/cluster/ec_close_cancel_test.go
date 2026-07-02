@@ -46,7 +46,7 @@ func TestECReconstructStreamPrefetch_CloseReturnsPromptlyWhileShardReadBlocks(t 
 	// still mid-Read on a shard body (Hertz S8-2), i.e. not until the blocked
 	// readers are released.
 	closeShardsCalled := make(chan struct{})
-	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, func() {
+	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, origSize, func() {
 		close(closeShardsCalled)
 	}, nil, nil)
 	if err != nil {
@@ -129,7 +129,7 @@ func TestECReconstructStreamMissingData_CloseIsS82SafeWhileShardReadBlocks(t *te
 	}
 
 	closeShardsCalled := make(chan struct{})
-	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, func() {
+	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, origSize, func() {
 		close(closeShardsCalled)
 	}, nil, nil)
 	if err != nil {
@@ -197,7 +197,7 @@ func TestECReconstructStreamMissingData_NormalCompletionStillClosesShards(t *tes
 	}
 
 	closeShardsCalled := make(chan struct{})
-	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, func() {
+	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, int64(len(payload)), func() {
 		close(closeShardsCalled)
 	}, nil, nil)
 	if err != nil {

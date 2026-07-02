@@ -280,7 +280,9 @@ func ECReconstructTo(w io.Writer, cfg ECConfig, shards [][]byte) error {
 // writes it to w without holding full shard bodies in memory. Missing shards
 // are represented by nil readers.
 func ECReconstructStreamTo(w io.Writer, cfg ECConfig, shards []io.Reader) error {
-	origSize, bodies, err := ecReconstructStreamBodies(cfg, shards)
+	// No metadata anchor at this call site: fall back to legacy first-shard-seed
+	// consensus.
+	origSize, bodies, err := ecReconstructStreamBodies(cfg, shards, -1)
 	if err != nil {
 		return err
 	}
@@ -303,8 +305,11 @@ func ECReconstructStreamTo(w io.Writer, cfg ECConfig, shards []io.Reader) error 
 // non-nil, with the shard index) instead of mis-splicing the next shard's bytes.
 // onShardClean, if non-nil, fires once per shard when its body is delivered in
 // full with no fault — clean-completion healthy evidence for the serving peer.
-func newECReconstructStreamReaderWithPrefetch(cfg ECConfig, shards []io.Reader, closeShards func(), onShardFault, onShardClean func(int)) (*ecReconstructStreamReader, error) {
-	origSize, bodies, err := ecReconstructStreamBodies(cfg, shards)
+// objectSize, when >= 0, anchors shard-header validation to the
+// metadata-authoritative size (see ecReconstructStreamBodies); pass -1 for the
+// legacy first-shard-seed consensus mode.
+func newECReconstructStreamReaderWithPrefetch(cfg ECConfig, shards []io.Reader, objectSize int64, closeShards func(), onShardFault, onShardClean func(int)) (*ecReconstructStreamReader, error) {
+	origSize, bodies, err := ecReconstructStreamBodies(cfg, shards, objectSize)
 	if err != nil {
 		return nil, err
 	}
@@ -639,6 +644,59 @@ func (e *ecShardTruncatedError) Error() string {
 	return fmt.Sprintf("ec: shard %d truncated: got %d of %d body bytes", e.Idx, e.Got, e.Want)
 }
 
+// ecShardHeaderMismatchError reports shards whose header origSize disagrees
+// with the metadata-authoritative object size. Unlike the old first-shard-seed
+// consensus, each listed shard is individually attributable: its header lied
+// relative to the size quorum-meta recorded for this object/segment.
+type ecShardHeaderMismatchError struct {
+	Idxs []int
+	Got  []int64
+	Want int64
+}
+
+func (e *ecShardHeaderMismatchError) Error() string {
+	return fmt.Sprintf("ec: shard header size mismatch: shards %v report %v, metadata says %d", e.Idxs, e.Got, e.Want)
+}
+
+// headerCheckReader lazily consumes and validates the 8-byte shard header
+// against the metadata-authoritative size before passing body bytes through.
+// Lazy like the skipReader it replaces: no eager blocking read at open; the
+// check runs on the shard's first Read, and a disagreeing header fails typed
+// with per-shard attribution via onFault.
+type headerCheckReader struct {
+	r        io.Reader
+	idx      int
+	expected int64
+	onFault  func(int)
+	checked  bool
+}
+
+func (h *headerCheckReader) Read(p []byte) (int, error) {
+	if !h.checked {
+		var header [shardHeaderSize]byte
+		if n, err := io.ReadFull(h.r, header[:]); err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				if h.onFault != nil {
+					h.onFault(h.idx)
+					h.onFault = nil
+				}
+				return 0, &ecShardTruncatedError{Idx: h.idx, Want: shardHeaderSize, Got: int64(n)}
+			}
+			return 0, fmt.Errorf("read shard %d header: %w", h.idx, err)
+		}
+		size := int64(binary.BigEndian.Uint64(header[:]))
+		if size != h.expected {
+			if h.onFault != nil {
+				h.onFault(h.idx)
+				h.onFault = nil
+			}
+			return 0, &ecShardHeaderMismatchError{Idxs: []int{h.idx}, Got: []int64{size}, Want: h.expected}
+		}
+		h.checked = true
+	}
+	return h.r.Read(p)
+}
+
 // ecExactLenReader bounds a shard body to its expected length: excess bytes
 // are capped (never reach the EC layer), and a clean EOF before the expected
 // count becomes *ecShardTruncatedError. onFault, if non-nil, fires once on
@@ -712,11 +770,25 @@ func ecWrapBodiesExactLen(cfg ECConfig, origSize int64, bodies []io.Reader, onSh
 	return bodies
 }
 
-func ecReconstructStreamBodies(cfg ECConfig, shards []io.Reader) (int64, []io.Reader, error) {
+// ecReconstructStreamBodies strips and validates the 8-byte shard headers.
+// expectedSize >= 0 anchors validation to the metadata-authoritative size:
+// every readable header must equal it, disagreeing shards are reported (all of
+// them) via *ecShardHeaderMismatchError, and the returned origSize IS
+// expectedSize — so downstream buffer sizing derives from metadata, never from
+// the wire. expectedSize < 0 falls back to first-shard-seed consensus (callers
+// with no metadata anchor, e.g. ECReconstructStreamTo).
+func ecReconstructStreamBodies(cfg ECConfig, shards []io.Reader, expectedSize int64) (int64, []io.Reader, error) {
 	if len(shards) != cfg.NumShards() {
 		return 0, nil, fmt.Errorf("shard count mismatch: got %d, want %d", len(shards), cfg.NumShards())
 	}
+	// The metadata anchor drives buffer sizing downstream — guard it with the
+	// same overflow bound applied to wire headers, so corrupt metadata cannot
+	// drive the ceil(size/K) math past int64 either.
+	if expectedSize > math.MaxInt64-int64(cfg.NumShards()) {
+		return 0, nil, fmt.Errorf("ec: metadata object size %d out of range", expectedSize)
+	}
 	var origSize int64 = -1
+	var mismatch *ecShardHeaderMismatchError
 	bodies := make([]io.Reader, len(shards))
 	for i, r := range shards {
 		if r == nil {
@@ -734,15 +806,37 @@ func ecReconstructStreamBodies(cfg ECConfig, shards []io.Reader) (int64, []io.Re
 		// that are negative (uint64 wrap) or large enough to overflow the
 		// ceil(origSize/K) math the exact-length guard and the missing-data
 		// window loop derive from it.
-		if size < 0 || size > math.MaxInt64-int64(cfg.NumShards()) {
-			return 0, nil, fmt.Errorf("shard %d header size %d out of range", i, size)
-		}
-		if origSize < 0 {
-			origSize = size
-		} else if size != origSize {
-			return 0, nil, fmt.Errorf("shard %d original size mismatch: got %d, want %d", i, size, origSize)
+		outOfRange := size < 0 || size > math.MaxInt64-int64(cfg.NumShards())
+		if expectedSize >= 0 {
+			// Anchored mode: ANY disagreement with metadata — including a
+			// hostile out-of-range value — is individually attributable to
+			// this shard. Collect instead of failing generically, so the
+			// worst lies do not dodge per-shard health marking.
+			if outOfRange || size != expectedSize {
+				if mismatch == nil {
+					mismatch = &ecShardHeaderMismatchError{Want: expectedSize}
+				}
+				mismatch.Idxs = append(mismatch.Idxs, i)
+				mismatch.Got = append(mismatch.Got, size)
+				continue // keep scanning: report ALL disagreeing shards
+			}
+			origSize = expectedSize
+		} else {
+			// Legacy consensus mode (no metadata anchor): keep the untyped
+			// bounds rejection — nothing is attributable without an anchor.
+			if outOfRange {
+				return 0, nil, fmt.Errorf("shard %d header size %d out of range", i, size)
+			}
+			if origSize < 0 {
+				origSize = size
+			} else if size != origSize {
+				return 0, nil, fmt.Errorf("shard %d original size mismatch: got %d, want %d", i, size, origSize)
+			}
 		}
 		bodies[i] = r
+	}
+	if mismatch != nil {
+		return 0, nil, mismatch
 	}
 	if origSize < 0 {
 		return 0, nil, fmt.Errorf("no readable shards")

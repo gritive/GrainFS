@@ -7,6 +7,9 @@ import (
 	"io"
 	"math"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // buildECShards encodes payload into a cfg-shaped shard set and returns the
@@ -40,7 +43,7 @@ func TestECStreamRead_TruncatedShardFailsTyped(t *testing.T) {
 	}
 
 	var faults []int
-	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, nil, func(i int) { faults = append(faults, i) }, nil)
+	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, int64(len(payload)), nil, func(i int) { faults = append(faults, i) }, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -79,7 +82,7 @@ func TestECStreamRead_MissingDataPathTruncationFailsTyped(t *testing.T) {
 	}
 
 	var faults []int
-	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, nil, func(i int) { faults = append(faults, i) }, nil)
+	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, int64(len(payload)), nil, func(i int) { faults = append(faults, i) }, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -107,7 +110,7 @@ func TestECStreamRead_ExactAndOverlongShardsStillRoundTrip(t *testing.T) {
 
 	t.Run("exact", func(t *testing.T) {
 		shards := []io.Reader{bytes.NewReader(full[0]), bytes.NewReader(full[1]), nil}
-		rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, nil, nil, nil)
+		rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, int64(len(payload)), nil, nil, nil)
 		if err != nil {
 			t.Fatalf("open: %v", err)
 		}
@@ -124,7 +127,7 @@ func TestECStreamRead_ExactAndOverlongShardsStillRoundTrip(t *testing.T) {
 	t.Run("overlong capped", func(t *testing.T) {
 		long0 := append(append([]byte{}, full[0]...), []byte("GARBAGE")...)
 		shards := []io.Reader{bytes.NewReader(long0), bytes.NewReader(full[1]), nil}
-		rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, nil, nil, nil)
+		rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, int64(len(payload)), nil, nil, nil)
 		if err != nil {
 			t.Fatalf("open: %v", err)
 		}
@@ -151,7 +154,7 @@ func TestECStreamBodies_EmptyBodyHeaderIsTypedTruncation(t *testing.T) {
 		bytes.NewReader(full[1]),
 		nil,
 	}
-	_, _, err := ecReconstructStreamBodies(cfg, shards)
+	_, _, err := ecReconstructStreamBodies(cfg, shards, int64(len(payload)))
 	var terr *ecShardTruncatedError
 	if !errors.As(err, &terr) {
 		t.Fatalf("expected *ecShardTruncatedError for empty-body header, got %v", err)
@@ -195,7 +198,7 @@ func TestECStreamRead_TransportErrorPassesThroughUntyped(t *testing.T) {
 	}
 
 	var faults []int
-	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, nil, func(i int) { faults = append(faults, i) }, nil)
+	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, int64(len(payload)), nil, func(i int) { faults = append(faults, i) }, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -229,7 +232,7 @@ func TestECStreamBodies_PartialHeaderIsTypedTruncation(t *testing.T) {
 		bytes.NewReader(full[1]),
 		nil,
 	}
-	_, _, err := ecReconstructStreamBodies(cfg, shards)
+	_, _, err := ecReconstructStreamBodies(cfg, shards, int64(len(payload)))
 	var terr *ecShardTruncatedError
 	if !errors.As(err, &terr) {
 		t.Fatalf("expected *ecShardTruncatedError for partial header, got %v", err)
@@ -240,9 +243,11 @@ func TestECStreamBodies_PartialHeaderIsTypedTruncation(t *testing.T) {
 }
 
 // TestECStreamBodies_HostileHeaderSizeRejected pins the untrusted-header
-// bounds check: a header size that would overflow the ceil(origSize/K) math
-// (or a negative size from uint64 wrap) must fail the open with an explicit
-// error — not silently disable the guard via negative shardBodySize.
+// bounds check in legacy (no metadata anchor, expectedSize=-1) consensus mode:
+// a header size that would overflow the ceil(origSize/K) math (or a negative
+// size from uint64 wrap) must fail the open with an explicit, generic error —
+// not silently disable the guard via negative shardBodySize, and not typed as
+// attributable (there is no anchor to attribute against).
 func TestECStreamBodies_HostileHeaderSizeRejected(t *testing.T) {
 	cfg := ECConfig{DataShards: 2, ParityShards: 1}
 
@@ -256,13 +261,17 @@ func TestECStreamBodies_HostileHeaderSizeRejected(t *testing.T) {
 		body := append(append([]byte{}, h[:]...), []byte("xx")...)
 		shards := []io.Reader{bytes.NewReader(body), bytes.NewReader(body), nil}
 
-		_, _, err := ecReconstructStreamBodies(cfg, shards)
+		_, _, err := ecReconstructStreamBodies(cfg, shards, -1)
 		if err == nil {
 			t.Fatalf("size %d: expected out-of-range rejection", size)
 		}
 		var terr *ecShardTruncatedError
 		if errors.As(err, &terr) {
 			t.Fatalf("size %d: hostile header must not be typed as truncation (no health marking for unattributable corruption), got %v", size, err)
+		}
+		var merr *ecShardHeaderMismatchError
+		if errors.As(err, &merr) {
+			t.Fatalf("size %d: legacy mode has no anchor to attribute against, got typed mismatch %v", size, err)
 		}
 	}
 }
@@ -277,7 +286,7 @@ func TestECStreamRead_ZeroSizeObjectRoundTrips(t *testing.T) {
 	shards := []io.Reader{mk(), mk(), mk()}
 
 	var faults []int
-	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, nil, func(i int) { faults = append(faults, i) }, nil)
+	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, 0, nil, func(i int) { faults = append(faults, i) }, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -306,7 +315,7 @@ func TestECStreamRead_TruncatedParityShardOnPipePathIsTyped(t *testing.T) {
 	}
 
 	var faults []int
-	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, nil, func(i int) { faults = append(faults, i) }, nil)
+	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, int64(len(payload)), nil, func(i int) { faults = append(faults, i) }, nil)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -322,4 +331,76 @@ func TestECStreamRead_TruncatedParityShardOnPipePathIsTyped(t *testing.T) {
 		t.Fatalf("onShardFault calls = %v, want [2]", faults)
 	}
 	_ = rc.Close()
+}
+
+// TestECStreamBodies_HeaderLieAttributedAgainstMetadata — a first-shard header
+// lie must be attributed to shard 0, not blamed on the later healthy shards
+// (the old first-seed consensus did exactly that).
+func TestECStreamBodies_HeaderLieAttributedAgainstMetadata(t *testing.T) {
+	cfg := ECConfig{DataShards: 2, ParityShards: 1}
+	payload := []byte("0123456789abcdef")
+	full, _ := buildECShards(t, cfg, payload) // existing helper in this file (returns shards, dataLen)
+
+	// Corrupt shard 0's header: claim size+8.
+	lie := encodeShardHeader(int64(len(payload)) + 8)
+	corrupt0 := append(append([]byte{}, lie[:]...), full[0][shardHeaderSize:]...)
+
+	shards := []io.Reader{bytes.NewReader(corrupt0), bytes.NewReader(full[1]), bytes.NewReader(full[2])}
+	_, _, err := ecReconstructStreamBodies(cfg, shards, int64(len(payload)))
+	var merr *ecShardHeaderMismatchError
+	require.ErrorAs(t, err, &merr)
+	assert.Equal(t, []int{0}, merr.Idxs, "the lying shard is attributed, not the healthy ones")
+	assert.Equal(t, []int64{int64(len(payload)) + 8}, merr.Got)
+	assert.Equal(t, int64(len(payload)), merr.Want)
+}
+
+// TestECStreamBodies_ConsistentLargeLieRejected — a consistent large lie on
+// every shard must fail at open against metadata — this is what bounds the
+// missing-data pipe allocations to the metadata size.
+func TestECStreamBodies_ConsistentLargeLieRejected(t *testing.T) {
+	cfg := ECConfig{DataShards: 2, ParityShards: 1}
+	payload := []byte("0123456789abcdef")
+	full, _ := buildECShards(t, cfg, payload)
+
+	huge := encodeShardHeader(1 << 40)
+	shards := make([]io.Reader, len(full))
+	for i, s := range full {
+		shards[i] = io.MultiReader(bytes.NewReader(huge[:]), bytes.NewReader(s[shardHeaderSize:]))
+	}
+	_, _, err := ecReconstructStreamBodies(cfg, shards, int64(len(payload)))
+	var merr *ecShardHeaderMismatchError
+	require.ErrorAs(t, err, &merr)
+	assert.Equal(t, []int{0, 1, 2}, merr.Idxs)
+}
+
+// TestECStreamBodies_SmallLieRejected — small lie: shortens the stream —
+// rejected at open with attribution instead of surfacing later as an
+// unattributed exact-length error.
+func TestECStreamBodies_SmallLieRejected(t *testing.T) {
+	cfg := ECConfig{DataShards: 2, ParityShards: 1}
+	payload := []byte("0123456789abcdef")
+	full, _ := buildECShards(t, cfg, payload)
+
+	small := encodeShardHeader(2)
+	shards := []io.Reader{
+		io.MultiReader(bytes.NewReader(small[:]), bytes.NewReader(full[0][shardHeaderSize:])),
+		bytes.NewReader(full[1]), bytes.NewReader(full[2]),
+	}
+	_, _, err := ecReconstructStreamBodies(cfg, shards, int64(len(payload)))
+	var merr *ecShardHeaderMismatchError
+	require.ErrorAs(t, err, &merr)
+	assert.Equal(t, []int{0}, merr.Idxs)
+}
+
+// TestECStreamBodies_NoAnchorKeepsConsensusSemantics — legacy consensus path
+// (no metadata anchor) must keep working: expectedSize=-1.
+func TestECStreamBodies_NoAnchorKeepsConsensusSemantics(t *testing.T) {
+	cfg := ECConfig{DataShards: 2, ParityShards: 1}
+	payload := []byte("0123456789abcdef")
+	full, _ := buildECShards(t, cfg, payload)
+	shards := []io.Reader{bytes.NewReader(full[0]), bytes.NewReader(full[1]), bytes.NewReader(full[2])}
+	origSize, bodies, err := ecReconstructStreamBodies(cfg, shards, -1)
+	require.NoError(t, err)
+	assert.Equal(t, int64(len(payload)), origSize)
+	assert.Len(t, bodies, 3)
 }

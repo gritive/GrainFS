@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 
 	"github.com/klauspost/reedsolomon"
 )
@@ -39,6 +40,9 @@ func stripeReconstructShardBody(cfg ECConfig, bodies [][]byte, stripeBytes, shar
 	}
 	if stripeBytes <= 0 {
 		return nil, fmt.Errorf("stripe reconstruct shard: stripeBytes must be > 0")
+	}
+	if objectSize < 0 || objectSize > math.MaxInt {
+		return nil, fmt.Errorf("stripe: object size %d outside int range", objectSize)
 	}
 	enc, err := getEncoder(cfg)
 	if err != nil {
@@ -98,6 +102,9 @@ func newStripeDeinterleaveStreamReader(cfg ECConfig, shards []io.Reader, stripeB
 	}
 	if stripeBytes <= 0 {
 		return nil, fmt.Errorf("stripe stream: stripeBytes must be > 0")
+	}
+	if objectSize < 0 || objectSize > math.MaxInt {
+		return nil, fmt.Errorf("stripe: object size %d outside int range", objectSize)
 	}
 	enc, err := getEncoder(cfg)
 	if err != nil {

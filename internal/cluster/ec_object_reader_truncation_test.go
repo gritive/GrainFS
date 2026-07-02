@@ -51,6 +51,32 @@ func TestOpenObject_TruncatedRemoteShardMarksPeerUnhealthy(t *testing.T) {
 	_ = rc.Close()
 }
 
+// TestOpenObject_HeaderLieMarksLyingPeerOnly pins end-to-end anchored-mode
+// attribution: shard 0 (peer-a) lies in its header against the
+// metadata-authoritative objectSize; shards 1 and 2 are honest. OpenObject
+// must fail typed with *ecShardHeaderMismatchError and mark peer-a — and only
+// peer-a — unhealthy.
+func TestOpenObject_HeaderLieMarksLyingPeerOnly(t *testing.T) {
+	cfg := ECConfig{DataShards: 2, ParityShards: 1}
+	payload := bytes.Repeat([]byte("abcdefgh"), 512)
+	full, _ := buildECShards(t, cfg, payload)
+
+	lie := encodeShardHeader(int64(len(payload)) + 8)
+	corrupt0 := append(append([]byte{}, lie[:]...), full[0][shardHeaderSize:]...)
+
+	streams := [][]byte{corrupt0, full[1], full[2]}
+	ph := &fakeECObjectPeerHealth{}
+	store := &truncStreamStore{streams: streams}
+	r := ecObjectReader{selfID: "self", shards: store, peerHealth: ph, ecConfig: cfg}
+	rec := PlacementRecord{Nodes: []string{"peer-a", "peer-b", "peer-c"}, K: 2, M: 1}
+
+	_, err := r.OpenObject(context.Background(), "b", "k", rec, int64(len(payload)))
+	require.Error(t, err)
+	var merr *ecShardHeaderMismatchError
+	require.True(t, errors.As(err, &merr), "want typed header mismatch, got %v", err)
+	require.Equal(t, []string{"peer-a"}, ph.unhealthy, "only the lying peer must be marked")
+}
+
 // TestOpenObject_EmptyBodyHeaderMarksPeerUnhealthy — empty body: the open
 // itself fails typed, and the peer is marked.
 func TestOpenObject_EmptyBodyHeaderMarksPeerUnhealthy(t *testing.T) {
@@ -149,5 +175,41 @@ func TestOpenObject_StripedTruncatedRemoteShardMarksPeerUnhealthy(t *testing.T) 
 	require.True(t, errors.As(err, &terr), "want typed truncation, got %v", err)
 	require.Equal(t, 0, terr.Idx)
 	require.Equal(t, []string{"peer-a"}, ph.unhealthy, "striped truncating peer must be marked")
+	_ = rc.Close()
+}
+
+// TestOpenObject_StripedHeaderLieMarksLyingPeerOnly pins striped end-to-end
+// header validation (the board acceptance gap: the stripe branch used to skip
+// the header BLIND via skipReader, so a lying header there was never
+// validated). A lying shard-0 header on an otherwise-honest striped object
+// must surface *ecShardHeaderMismatchError with that shard's idx and mark
+// exactly that peer unhealthy.
+func TestOpenObject_StripedHeaderLieMarksLyingPeerOnly(t *testing.T) {
+	const stripeBytes = 1024
+	cfg := ECConfig{DataShards: 2, ParityShards: 1}
+	payload := bytes.Repeat([]byte("stripelie"), 512)
+	bodies := buildInterleavedShards(t, cfg, payload, stripeBytes)
+
+	h := encodeShardHeader(int64(len(payload)))
+	streams := make([][]byte, len(bodies))
+	for i, b := range bodies {
+		streams[i] = append(append([]byte{}, h[:]...), b...)
+	}
+	// Corrupt shard 0's header only; its interleaved body is untouched.
+	lie := encodeShardHeader(int64(len(payload)) + 8)
+	streams[0] = append(append([]byte{}, lie[:]...), bodies[0]...)
+
+	ph := &fakeECObjectPeerHealth{}
+	store := &truncStreamStore{streams: streams}
+	r := ecObjectReader{selfID: "self", shards: store, peerHealth: ph, ecConfig: cfg}
+	rec := PlacementRecord{Nodes: []string{"peer-a", "peer-b", "peer-c"}, K: 2, M: 1, StripeBytes: stripeBytes}
+
+	rc, err := r.OpenObject(context.Background(), "b", "k", rec, int64(len(payload)))
+	require.NoError(t, err) // stripe header check is lazy: open succeeds, first Read fails
+	_, err = io.ReadAll(rc)
+	var merr *ecShardHeaderMismatchError
+	require.True(t, errors.As(err, &merr), "want typed header mismatch, got %v", err)
+	require.Equal(t, []int{0}, merr.Idxs)
+	require.Equal(t, []string{"peer-a"}, ph.unhealthy, "only the lying peer must be marked")
 	_ = rc.Close()
 }

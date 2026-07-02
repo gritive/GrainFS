@@ -89,16 +89,18 @@ func (r ecObjectReader) OpenObject(ctx context.Context, bucket, shardKey string,
 	}
 
 	if rec.StripeBytes > 0 {
-		// Stripe-interleaved objects: the contiguous stream path strips the
-		// 8-byte shard header inside ecReconstructStreamBodies, which the
-		// de-interleave path bypasses. Skip the header on each present reader
-		// (lazily, no eager blocking read) before handing bodies to the bounded
-		// de-interleave reader. skipReader is not an io.Closer, so the stripe
-		// reader's Close is a no-op on it — the underlying shardReaders are
-		// closed exactly once by closeECShardReaders below.
+		// Stripe-interleaved objects: the contiguous stream path strips and
+		// validates the 8-byte shard header inside ecReconstructStreamBodies,
+		// which the de-interleave path bypasses. Validate the header against
+		// the metadata-authoritative objectSize on each present reader
+		// (lazily, no eager blocking read) before handing bodies to the
+		// bounded de-interleave reader. headerCheckReader is not an
+		// io.Closer, so the stripe reader's Close is a no-op on it — the
+		// underlying shardReaders are closed exactly once by
+		// closeECShardReaders below.
 		for i, shard := range readers {
 			if shard != nil {
-				readers[i] = &skipReader{r: shard, skip: shardHeaderSize}
+				readers[i] = &headerCheckReader{r: shard, idx: i, expected: objectSize, onFault: onShardFault}
 			}
 		}
 		rc, err := newStripeDeinterleaveStreamReader(recCfg, readers, int(rec.StripeBytes), objectSize, onShardFault)
@@ -113,7 +115,7 @@ func (r ecObjectReader) OpenObject(ctx context.Context, bucket, shardKey string,
 		}}, nil
 	}
 
-	rc, err := newECReconstructStreamReaderWithPrefetch(recCfg, readers, func() {
+	rc, err := newECReconstructStreamReaderWithPrefetch(recCfg, readers, objectSize, func() {
 		closeECShardReaders(shardReaders)
 	}, onShardFault, onShardClean)
 	if err != nil {
@@ -122,6 +124,15 @@ func (r ecObjectReader) OpenObject(ctx context.Context, bucket, shardKey string,
 		var terr *ecShardTruncatedError
 		if errors.As(err, &terr) {
 			r.markShardUnhealthy(rec, terr.Idx)
+		}
+		// Anchored-mode header mismatch: every disagreeing header is
+		// individually attributable against the metadata anchor — mark every
+		// lying shard's peer.
+		var merr *ecShardHeaderMismatchError
+		if errors.As(err, &merr) {
+			for _, i := range merr.Idxs {
+				r.markShardUnhealthy(rec, i)
+			}
 		}
 		closeECShardReaders(shardReaders)
 		return nil, err
@@ -411,31 +422,6 @@ func (r ecObjectReader) cacheReadAtRange(key string, data []byte, n, want int, e
 	if r.cache.CanStore(key, int64(n)) {
 		r.cache.Put(key, data)
 	}
-}
-
-// skipReader discards the first `skip` bytes from the underlying reader before
-// passing subsequent reads through. It skips lazily (no eager blocking read) so
-// shard readers are not forced to materialize their header until first Read.
-// It deliberately does NOT implement io.Closer: the underlying shard readers
-// are owned and closed elsewhere (closeECShardReaders).
-type skipReader struct {
-	r    io.Reader
-	skip int
-}
-
-func (s *skipReader) Read(p []byte) (int, error) {
-	for s.skip > 0 {
-		n := s.skip
-		if n > len(p) {
-			n = len(p)
-		}
-		m, err := s.r.Read(p[:n])
-		s.skip -= m
-		if err != nil {
-			return 0, err
-		}
-	}
-	return s.r.Read(p)
 }
 
 func closeECShardReaders(shards []io.ReadCloser) {
