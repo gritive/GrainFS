@@ -352,6 +352,7 @@ func TestECStreamBodies_HeaderLieAttributedAgainstMetadata(t *testing.T) {
 	assert.Equal(t, []int{0}, merr.Idxs, "the lying shard is attributed, not the healthy ones")
 	assert.Equal(t, []int64{int64(len(payload)) + 8}, merr.Got)
 	assert.Equal(t, int64(len(payload)), merr.Want)
+	assert.True(t, merr.AnchorCorroborated, "shards 1,2 agreed with the anchor")
 }
 
 // TestECStreamBodies_ConsistentLargeLieRejected — a consistent large lie on
@@ -371,6 +372,7 @@ func TestECStreamBodies_ConsistentLargeLieRejected(t *testing.T) {
 	var merr *ecShardHeaderMismatchError
 	require.ErrorAs(t, err, &merr)
 	assert.Equal(t, []int{0, 1, 2}, merr.Idxs)
+	assert.False(t, merr.AnchorCorroborated, "no shard agreed with the anchor — unattributable")
 }
 
 // TestECStreamBodies_SmallLieRejected — small lie: shortens the stream —
@@ -390,6 +392,7 @@ func TestECStreamBodies_SmallLieRejected(t *testing.T) {
 	var merr *ecShardHeaderMismatchError
 	require.ErrorAs(t, err, &merr)
 	assert.Equal(t, []int{0}, merr.Idxs)
+	assert.True(t, merr.AnchorCorroborated)
 }
 
 // TestECStreamBodies_NoAnchorKeepsConsensusSemantics — legacy consensus path

@@ -74,7 +74,33 @@ func TestOpenObject_HeaderLieMarksLyingPeerOnly(t *testing.T) {
 	require.Error(t, err)
 	var merr *ecShardHeaderMismatchError
 	require.True(t, errors.As(err, &merr), "want typed header mismatch, got %v", err)
+	require.True(t, merr.AnchorCorroborated, "honest shards 1,2 corroborate the anchor")
 	require.Equal(t, []string{"peer-a"}, ph.unhealthy, "only the lying peer must be marked")
+}
+
+// TestOpenObject_CorruptAnchorMarksNobody pins the mass-marking guard: when
+// every readable shard agrees with the others but disagrees with the metadata
+// anchor, the anchor is just as suspect as the shards (metadata corruption or
+// full collusion — indistinguishable). The open must still fail typed, but NO
+// peer may be marked unhealthy — otherwise one corrupt quorum-meta entry would
+// node-level-taint every peer serving the object on every retry.
+func TestOpenObject_CorruptAnchorMarksNobody(t *testing.T) {
+	cfg := ECConfig{DataShards: 2, ParityShards: 1}
+	payload := bytes.Repeat([]byte("abcdefgh"), 512)
+	full, _ := buildECShards(t, cfg, payload)
+
+	ph := &fakeECObjectPeerHealth{}
+	store := &truncStreamStore{streams: full}
+	r := ecObjectReader{selfID: "self", shards: store, peerHealth: ph, ecConfig: cfg}
+	rec := PlacementRecord{Nodes: []string{"peer-a", "peer-b", "peer-c"}, K: 2, M: 1}
+
+	// Honest shards, corrupt anchor: objectSize disagrees with every header.
+	_, err := r.OpenObject(context.Background(), "b", "k", rec, int64(len(payload))+8)
+	require.Error(t, err)
+	var merr *ecShardHeaderMismatchError
+	require.True(t, errors.As(err, &merr), "want typed header mismatch, got %v", err)
+	require.False(t, merr.AnchorCorroborated, "no shard agreed with the anchor")
+	require.Empty(t, ph.unhealthy, "unanimous disagreement must not mark any peer")
 }
 
 // TestOpenObject_EmptyBodyHeaderMarksPeerUnhealthy — empty body: the open

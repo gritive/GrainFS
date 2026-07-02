@@ -652,6 +652,13 @@ type ecShardHeaderMismatchError struct {
 	Idxs []int
 	Got  []int64
 	Want int64
+	// AnchorCorroborated is true iff at least one readable shard's header
+	// MATCHED the anchor (Want). Only then are the Idxs shards individually
+	// blameable: unanimous disagreement means the anchor is just as suspect
+	// as the shards (metadata corruption or full collusion —
+	// indistinguishable), so callers must NOT health-mark anyone from an
+	// uncorroborated mismatch.
+	AnchorCorroborated bool
 }
 
 func (e *ecShardHeaderMismatchError) Error() string {
@@ -663,6 +670,10 @@ func (e *ecShardHeaderMismatchError) Error() string {
 // Lazy like the skipReader it replaces: no eager blocking read at open; the
 // check runs on the shard's first Read, and a disagreeing header fails typed
 // with per-shard attribution via onFault.
+// Known limitation: it validates one shard at a time with no cross-shard view,
+// so it cannot apply the AnchorCorroborated guard — a corrupt anchor on the
+// stripe path still marks the first-read shard's peer (a single peer, not all;
+// accepted for now, see ecShardHeaderMismatchError.AnchorCorroborated).
 type headerCheckReader struct {
 	r        io.Reader
 	idx      int
@@ -836,6 +847,9 @@ func ecReconstructStreamBodies(cfg ECConfig, shards []io.Reader, expectedSize in
 		bodies[i] = r
 	}
 	if mismatch != nil {
+		// origSize was set only if some shard's header matched the anchor —
+		// that agreement is what makes the disagreeing shards blameable.
+		mismatch.AnchorCorroborated = origSize >= 0
 		return 0, nil, mismatch
 	}
 	if origSize < 0 {

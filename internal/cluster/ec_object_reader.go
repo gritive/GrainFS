@@ -127,9 +127,12 @@ func (r ecObjectReader) OpenObject(ctx context.Context, bucket, shardKey string,
 		}
 		// Anchored-mode header mismatch: every disagreeing header is
 		// individually attributable against the metadata anchor — mark every
-		// lying shard's peer.
+		// lying shard's peer, but ONLY when at least one shard corroborated
+		// the anchor. Unanimous disagreement means the anchor itself is just
+		// as suspect (corrupt metadata would otherwise mass-mark every honest
+		// peer serving the object, node-level, on every retry).
 		var merr *ecShardHeaderMismatchError
-		if errors.As(err, &merr) {
+		if errors.As(err, &merr) && merr.AnchorCorroborated {
 			for _, i := range merr.Idxs {
 				r.markShardUnhealthy(rec, i)
 			}

@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/storage"
@@ -140,6 +141,7 @@ func TestChunkedSegmentStore_OpenSegmentRejectsMetadataSizeMismatch(t *testing.T
 			_, err := store.OpenSegment(context.Background(), badObj.Segments[0])
 			var merr *ecShardHeaderMismatchError
 			require.ErrorAs(t, err, &merr, "want typed header mismatch, got %v", err)
+			assert.Equal(t, obj.Segments[0].Size+tc.delta, merr.Want, "anchor must be the corrupted metadata size")
 		})
 	}
 }
