@@ -630,10 +630,19 @@ func runChunkedPutWithParts(
 	// shards. The residual orphan window (promote succeeds, commit fails, OR a crash
 	// between promote and commit) leaves final-path shards no manifest references —
 	// a disk leak, not data loss; PR1 narrows the leak, it does not close the class.
+	// The promotes-map build runs unconditionally when staging is active; the
+	// promote EXECUTION moves into the commit tail. legacyPromote captures
+	// today's all-or-fail errgroup fan-out (with its trace stages) verbatim: the
+	// versioned blob path and every legacy-seam/CAS/capability fallback run it
+	// before the meta write, and the combined round replaces it with the
+	// per-node promote+meta RPC — data-before-meta ordering holds on all routes.
+	var (
+		promotes      map[string][]stagedPromotePair
+		nodeOrder     []string
+		legacyPromote func(context.Context) error
+	)
 	if csb.stagingTxnID != "" {
-		promoteStart := time.Now()
-		promotes := make(map[string][]stagedPromotePair)
-		var nodeOrder []string
+		promotes = make(map[string][]stagedPromotePair)
 		for _, p := range csb.placements {
 			if p.BlobID == "" {
 				continue
@@ -651,22 +660,26 @@ func runChunkedPutWithParts(
 				})
 			}
 		}
-		g, promoteCtx := errgroup.WithContext(ctx)
-		for _, node := range nodeOrder {
-			node := node
-			pairs := promotes[node]
-			g.Go(func() error {
-				if perr := csb.promoteStagedShardsBatch(promoteCtx, node, bucket, pairs); perr != nil {
-					return fmt.Errorf("promote staged segment shard batch (node %s, count %d): %w", node, len(pairs), perr)
-				}
-				return nil
-			})
+		legacyPromote = func(pctx context.Context) error {
+			promoteStart := time.Now()
+			g, promoteCtx := errgroup.WithContext(pctx)
+			for _, node := range nodeOrder {
+				node := node
+				pairs := promotes[node]
+				g.Go(func() error {
+					if perr := csb.promoteStagedShardsBatch(promoteCtx, node, bucket, pairs); perr != nil {
+						return fmt.Errorf("promote staged segment shard batch (node %s, count %d): %w", node, len(pairs), perr)
+					}
+					return nil
+				})
+			}
+			if err := g.Wait(); err != nil {
+				ObservePutTraceStage(pctx, PutTraceStagePromoteStagedShards, promoteStart, PutTraceStageFields{Error: err.Error()})
+				return err
+			}
+			ObservePutTraceStage(pctx, PutTraceStagePromoteStagedShards, promoteStart, PutTraceStageFields{})
+			return nil
 		}
-		if err := g.Wait(); err != nil {
-			ObservePutTraceStage(ctx, PutTraceStagePromoteStagedShards, promoteStart, PutTraceStageFields{Error: err.Error()})
-			return nil, err
-		}
-		ObservePutTraceStage(ctx, PutTraceStagePromoteStagedShards, promoteStart, PutTraceStageFields{})
 	}
 
 	// 5. Build PutObjectMetaCmd. csb.placements is already SegmentIdx-indexed.
@@ -685,10 +698,7 @@ func runChunkedPutWithParts(
 	// convergence across concurrent completers / idempotent retry is provided by the
 	// deterministic VersionID + the det-vid existence short-circuit in
 	// CompleteMultipartUpload — NOT a done-marker.
-	var (
-		commitErr        error
-		commitTraceStart time.Time
-	)
+	var commitErr error
 	if completeUploadID != "" {
 		// Vid-deterministic recorded blob placement (same-vid convergence): the
 		// recorded NodeIDs must be a function of (bucket,key,det-vid), NOT segment-0's
@@ -728,6 +738,12 @@ func runChunkedPutWithParts(
 			// VERSIONED: the per-version quorum-meta blob is the blob authority,
 			// written FAIL-CLOSED. On failure nothing is committed; the segment shards
 			// are cleaned by the defer and the client retries CompleteMultipartUpload.
+			// The staged promote (legacy fan-out) runs FIRST — data-before-meta.
+			if legacyPromote != nil {
+				if perr := legacyPromote(ctx); perr != nil {
+					return nil, perr
+				}
+			}
 			winCmd, werr := csb.writeCompletedMultipartBlob(ctx, metaBlob)
 			if werr != nil {
 				return nil, werr
@@ -740,12 +756,12 @@ func runChunkedPutWithParts(
 		// NON-VERSIONED / Suspended: the latest-only quorum-meta blob is the sole
 		// authority, written FAIL-CLOSED (M3 F7) — mirrors the regular non-versioned
 		// PUT. On failure nothing is committed; the cleanup defer reclaims the shards.
-		commitTraceStart = time.Now()
-		commitErr = csb.writeQuorumMeta(ctx, metaCmd)
+		// promoteAndCommit collapses promote+meta into one per-node round when
+		// every target is commit-combined capable; otherwise legacy two rounds.
+		commitErr = csb.promoteAndCommit(ctx, metaCmd, promotes, nodeOrder, legacyPromote)
 	} else {
 		// Phase 3: commit via per-node quorum meta write (bypasses data_raft).
-		commitTraceStart = time.Now()
-		commitErr = csb.writeQuorumMeta(ctx, PutObjectMetaCmd{
+		commitErr = csb.promoteAndCommit(ctx, PutObjectMetaCmd{
 			Bucket:           bucket,
 			Key:              key,
 			Size:             obj.Size,
@@ -765,14 +781,7 @@ func runChunkedPutWithParts(
 			PlacementGroupID: csb.placements[0].PlacementGroupID,
 			Segments:         segments,
 			Tags:             tags,
-		})
-	}
-	if !commitTraceStart.IsZero() {
-		fields := PutTraceStageFields{}
-		if commitErr != nil {
-			fields.Error = commitErr.Error()
-		}
-		ObservePutTraceStage(ctx, PutTraceStageQuorumMetaWrite, commitTraceStart, fields)
+		}, promotes, nodeOrder, legacyPromote)
 	}
 	if commitErr != nil {
 		return nil, fmt.Errorf("commit meta: %w", commitErr)
@@ -792,6 +801,37 @@ func (c *clusterSegmentBackend) writeQuorumMeta(ctx context.Context, cmd PutObje
 		return c.writeQuorumMetaFn(ctx, cmd)
 	}
 	return c.b.writeQuorumMeta(ctx, cmd)
+}
+
+// promoteAndCommit routes the non-versioned commit tail. Seam precedence keeps
+// every pre-existing injected test working unmodified: any legacy seam
+// (writeQuorumMetaFn / promoteStagedBatchFn / promoteStagedFn) or a nil backend
+// forces the legacy two-round sequence (with its historical put-trace stages);
+// production takes the combined round wrapped in the commit_combined stage.
+func (c *clusterSegmentBackend) promoteAndCommit(ctx context.Context, cmd PutObjectMetaCmd, promotes map[string][]stagedPromotePair, nodeOrder []string, legacyPromote func(context.Context) error) (err error) {
+	if c.writeQuorumMetaFn != nil || c.promoteStagedBatchFn != nil || c.promoteStagedFn != nil || c.b == nil {
+		if legacyPromote != nil {
+			if perr := legacyPromote(ctx); perr != nil {
+				return perr
+			}
+		}
+		start := time.Now()
+		defer func() { observeCommitStage(ctx, PutTraceStageQuorumMetaWrite, start, err) }()
+		err = c.writeQuorumMeta(ctx, cmd)
+		return err
+	}
+	start := time.Now()
+	defer func() { observeCommitStage(ctx, PutTraceStageCommitCombined, start, err) }()
+	err = c.b.qmsOrBuild().promoteAndWriteQuorumMeta(ctx, cmd, promotes, nodeOrder, legacyPromote)
+	return err
+}
+
+func observeCommitStage(ctx context.Context, stage PutTraceStage, start time.Time, err error) {
+	fields := PutTraceStageFields{}
+	if err != nil {
+		fields.Error = err.Error()
+	}
+	ObservePutTraceStage(ctx, stage, start, fields)
 }
 
 // buildMultipartMetaBlob delegates to the DistributedBackend. A nil backend

@@ -311,6 +311,22 @@ func (g *CapabilityGate) EvidenceSnapshot() map[string]map[string]bool {
 	return out
 }
 
+// HasPeerCapability reports whether nodeID currently advertises capability with
+// Ready evidence, WITHOUT materializing the full EvidenceSnapshot map — the
+// per-PUT hot path (combined commit tail) probes one node at a time under a
+// single RLock. Semantics are byte-for-byte those EvidenceSnapshot exposes
+// (`ev.Ready && ev.Capabilities[capability]`, no TTL/staleness gate), so the
+// combined-commit decision matches the snapshot the admin path serves.
+func (g *CapabilityGate) HasPeerCapability(nodeID, capability string) bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	ev, ok := g.evidence[compat.NodeID(nodeID)]
+	if !ok || !ev.Ready {
+		return false
+	}
+	return ev.Capabilities[capability]
+}
+
 func (g *CapabilityGate) ValidatePlanStillCurrent(plan compat.GatePlan) error {
 	g.mu.RLock()
 	defer g.mu.RUnlock()

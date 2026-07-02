@@ -155,7 +155,7 @@ func TestSegmentReader_UsesProvidedSegmentBytesWithoutSecondReadAll(t *testing.T
 	require.True(t, store.closed, "materialized reader was not closed")
 }
 
-func TestStreamingSegmentReader_StreamsOneSegmentAtATime(t *testing.T) {
+func TestStreamingSegmentReader_StreamsAtMostCurrentPlusLookahead(t *testing.T) {
 	t.Parallel()
 	segs := makeTestSegments(t, []int{1024, 2048, 512})
 	store := newTrackingStreamingSegmentStore(segs)
@@ -164,7 +164,9 @@ func TestStreamingSegmentReader_StreamsOneSegmentAtATime(t *testing.T) {
 	got, err := io.ReadAll(r)
 	require.NoError(t, err)
 	require.Equal(t, segs.flat, got)
-	require.Equal(t, 1, store.maxOpen)
+	// Lookahead-1 prefetch: at most the current segment plus one prefetched
+	// next segment may be open concurrently (exact overlap is timing-dependent).
+	require.LessOrEqual(t, store.maxOpen, 2)
 	require.Equal(t, []string{"blob-0", "blob-1", "blob-2"}, store.openOrder)
 	require.Equal(t, []string{"blob-0", "blob-1", "blob-2"}, store.closeOrder)
 }

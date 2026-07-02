@@ -1,6 +1,28 @@
 # Changelog
 
-## [0.0.782.0] - 2026-07-02
+## [0.0.783.0] - 2026-07-02
+
+### Changed
+- **Erasure-coded GETs prefetch the next segment while the current one streams.** Multi-segment
+  EC objects (>10 MiB, and any compressed multi-segment object) no longer stall at every segment
+  boundary waiting for the next segment's shard readers to open — and, for zstd-compressed
+  segments, for the whole next segment to decompress. The streaming reader now opens the next
+  segment in the background with a lookahead of one (bounded: at most one extra open segment,
+  up to one extra ≤16 MiB plaintext buffer for compressed objects per in-flight GET).
+- **Non-versioned PUT commits collapse the promote and metadata rounds into one RPC per node.**
+  The commit tail previously issued two sequential network rounds (staged-shard promote fan-out,
+  then the K-of-N latest-only metadata write). Nodes that carry both now receive a single
+  combined RPC that promotes first and then persists the metadata, cutting one round trip from
+  every non-versioned PUT and multipart complete (~15-25 ms at the measured cluster p50, more at
+  p90). Ordering and failure guarantees are preserved: promote-before-meta per node, all-or-fail
+  promote, K-of-N metadata quorum with vote multiplicity, and an abort path that drains in-flight
+  writes and rolls back published metadata content-matched (restoring an overwritten previous
+  object, skipping idempotent no-op writes). Versioned buckets, CAS metadata writes, and
+  placements whose segments extend beyond the metadata nodes keep the legacy two-round flow, as
+  do clusters with nodes that predate the new RPC (gossip capability gate) — rolling upgrades
+  fall back safely. Operational note: put-trace now reports the combined round under the
+  `commit_combined` stage; the separate `promote_staged_shards` + `quorum_meta_write` stages
+  remain only on the legacy/fallback flows.
 
 ### Fixed
 - **Range GETs on compressed erasure-coded objects no longer re-decompress the same segment on
