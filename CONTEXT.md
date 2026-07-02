@@ -415,7 +415,8 @@ pre-pass, parity-shard fallback, and peer-health transitions from shard fetch
 outcomes. Peer-health evidence follows a completion-based model: a successful
 stream open records nothing (so an open cannot clear an active unhealthy
 cooldown), a shard body delivered to its exact expected length with no
-transport fault marks the peer healthy (`onClean`), and a mid-body peer-fault
+transport fault marks the peer healthy (`onClean`, contiguous path only —
+striped reads rely on cooldown expiry for recovery), and a mid-body peer-fault
 error (connection reset, length-framed truncation, idle-read timeout — not
 local teardown, local backpressure, or caller cancellation) flips the peer
 unhealthy once. Clean-EOF truncation is detected too: every shard body is

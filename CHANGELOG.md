@@ -7,7 +7,8 @@
   next open.** Read-path health marking moves from RPC-open time to clean body completion: a
   successful shard-stream open records nothing (it no longer clears an active unhealthy
   cooldown), and a peer is marked healthy only when a shard body is delivered to its exact
-  expected length with no transport fault. Ranged shard reads mark nothing on success (a full
+  expected length with no transport fault (contiguous reads; striped reads rely on the cooldown
+  expiry for recovery). Ranged shard reads mark nothing on success (a full
   ranged read cannot distinguish clean completion from a fault arriving with the final bytes);
   recovery there rides the cooldown expiry.
 - **Local resource failures no longer blame remote peers.** Exhausting this node's own
