@@ -14,6 +14,8 @@ import (
 	"math"
 	"path/filepath"
 	"sync"
+
+	"github.com/gritive/GrainFS/internal/metrics"
 )
 
 const (
@@ -338,15 +340,21 @@ func newECReconstructStreamReaderWithPrefetch(cfg ECConfig, shards []io.Reader, 
 			readers[i] = p
 		}
 		closeAll := func() error {
-			// Stop the producers without blocking; a producer stalled in
-			// io.ReadFull on a remote shard only unblocks at the idle read
-			// timeout. Wait for them to exit and close the shard bodies in a
-			// detached goroutine so Close returns promptly while preserving the
-			// invariant that bodies are closed only after producers stop reading.
+			// Stop the producers without blocking. signalStop cannot interrupt a
+			// Read already in flight (S8-2 forbids cross-goroutine
+			// CloseBodyStream), so a producer stalled mid-Read on a remote shard
+			// still returns from that one Read before it notices — but
+			// readFullOrStop's stop-check between Reads means a trickling peer no
+			// longer re-arms the wait forever; see readFullOrStop. Wait for them
+			// to exit and close the shard bodies in a detached goroutine so Close
+			// returns promptly while preserving the invariant that bodies are
+			// closed only after producers stop reading.
 			for _, p := range prefetchers {
 				p.signalStop()
 			}
+			metrics.ECDetachedTeardowns.Inc()
 			go func() {
+				defer metrics.ECDetachedTeardowns.Dec()
 				for _, p := range prefetchers {
 					p.awaitDrained()
 				}
@@ -362,18 +370,25 @@ func newECReconstructStreamReaderWithPrefetch(cfg ECConfig, shards []io.Reader, 
 		}, nil
 	}
 	pr, pw := io.Pipe()
+	// stop lets the reconstruct goroutine notice an abort BETWEEN reads: it
+	// cannot interrupt an in-flight Read (S8-2 forbids cross-goroutine
+	// CloseBodyStream), but a trickling peer's next progressing Read now leads
+	// to a stop-check exit instead of re-arming the idle deadline forever; see
+	// readFullOrStop.
+	stop := make(chan struct{})
 	// done gates the detached shard teardown: bodies may be closed only after
-	// the reconstruct goroutine has exited (it reads them via io.ReadFull —
+	// the reconstruct goroutine has exited (it reads them via readFullOrStop —
 	// Hertz forbids cross-goroutine CloseBodyStream; see
 	// internal/transport/http_shared.go). pr.Close() does NOT interrupt an
 	// in-flight shard read — it only fails the goroutine's next pw.Write — so
 	// after an abort the shard bodies (and their connections) are retained
-	// until the current window's reads return, in production bounded by the
-	// idle read timeout. Same accepted tradeoff as the prefetch path above.
+	// until the current in-flight Read returns: against a trickling peer that
+	// is the next progressing Read (bounded by readFullOrStop's stop-check),
+	// against a fully stalled peer it remains the idle read timeout.
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if err := ecReconstructMissingDataStreamTo(pw, cfg, origSize, bodies); err != nil {
+		if err := ecReconstructMissingDataStreamTo(pw, cfg, origSize, bodies, stop); err != nil {
 			_ = pw.CloseWithError(err)
 			return
 		}
@@ -381,8 +396,11 @@ func newECReconstructStreamReaderWithPrefetch(cfg ECConfig, shards []io.Reader, 
 	}()
 	return &ecReconstructStreamReader{reader: pr, close: func() error {
 		err := pr.Close()
+		close(stop)
 		if closeShards != nil {
+			metrics.ECDetachedTeardowns.Inc()
 			go func() {
+				defer metrics.ECDetachedTeardowns.Dec()
 				<-done
 				closeShards()
 			}()
@@ -480,7 +498,7 @@ func ecReconstructStreamBodiesTo(w io.Writer, cfg ECConfig, origSize int64, bodi
 		}
 		return nil
 	}
-	if err := ecReconstructMissingDataStreamTo(w, cfg, origSize, bodies); err != nil {
+	if err := ecReconstructMissingDataStreamTo(w, cfg, origSize, bodies, nil); err != nil {
 		return fmt.Errorf("ec join: %w", err)
 	}
 	return nil
@@ -502,7 +520,48 @@ func ecReconstructStreamDataReaders(cfg ECConfig, bodies []io.Reader) ([]io.Read
 	return nil, nil
 }
 
-func ecReconstructMissingDataStreamTo(w io.Writer, cfg ECConfig, origSize int64, bodies []io.Reader) error {
+// errECReadAborted reports that a shard-body fill stopped because the consumer
+// aborted (stop closed). Local teardown, never a peer fault — it must not
+// reach health marking (it doesn't: producers swallow it and exit).
+var errECReadAborted = errors.New("ec: shard read aborted by consumer")
+
+// readFullOrStop fills buf like io.ReadFull but checks stop between individual
+// Reads. It cannot interrupt a Read already in flight — S8-2 forbids that (see
+// newECReconstructStreamReaderWithPrefetch) — so after stop is closed, a
+// producer stuck on a trickling peer (progress arriving, just slowly) still
+// exits at the very next stop-check instead of waiting indefinitely for the
+// idle-read deadline to re-arm forever; against a fully stalled peer with no
+// progress at all, the bound remains the transport idle-read deadline (≤5min,
+// see http_transport.go), and it can no longer be re-armed past that because
+// the producer exits on its next check regardless of trickled progress. Local
+// disk reads return at syscall speed either way. stop == nil degrades to plain
+// io.ReadFull semantics.
+func readFullOrStop(r io.Reader, buf []byte, stop <-chan struct{}) (int, error) {
+	n := 0
+	for n < len(buf) {
+		if stop != nil {
+			select {
+			case <-stop:
+				return n, errECReadAborted
+			default:
+			}
+		}
+		m, err := r.Read(buf[n:])
+		n += m
+		if n == len(buf) {
+			return n, nil
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) && n > 0 {
+				return n, io.ErrUnexpectedEOF
+			}
+			return n, err
+		}
+	}
+	return n, nil
+}
+
+func ecReconstructMissingDataStreamTo(w io.Writer, cfg ECConfig, origSize int64, bodies []io.Reader, stop <-chan struct{}) error {
 	enc, err := getEncoder(cfg)
 	if err != nil {
 		return fmt.Errorf("ec decoder: %w", err)
@@ -564,7 +623,7 @@ func ecReconstructMissingDataStreamTo(w io.Writer, cfg ECConfig, origSize int64,
 				continue
 			}
 			buf := windowBufs[i][:n]
-			if _, err := io.ReadFull(r, buf); err != nil {
+			if _, err := readFullOrStop(r, buf, stop); err != nil {
 				return fmt.Errorf("read ec shard %d window: %w", i, err)
 			}
 			windows[i] = buf

@@ -85,7 +85,11 @@ func (r *asyncPrefetchReader) run(src io.Reader, closeSrc func() error) {
 	for {
 		ref := acquireAsyncPrefetchChunk()
 		buf := *ref
-		n, err := io.ReadFull(src, buf)
+		n, err := readFullOrStop(src, buf, r.stop)
+		if errors.Is(err, errECReadAborted) {
+			releaseAsyncPrefetchChunk(ref)
+			return
+		}
 		if n == 0 && err != nil {
 			releaseAsyncPrefetchChunk(ref)
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
@@ -142,9 +146,10 @@ func (r *asyncPrefetchReader) Read(p []byte) (int, error) {
 }
 
 // signalStop tells the background producer to stop, without waiting for it to
-// exit. It does NOT block, so a producer stalled in io.ReadFull on a remote
-// shard body does not delay the caller. Idempotent; a later Close is a no-op on
-// the stop channel.
+// exit. It does NOT block: it only closes r.stop, which readFullOrStop checks
+// BETWEEN Reads (run() cannot interrupt a Read already in flight — S8-2
+// forbids cross-goroutine CloseBodyStream). Idempotent; a later Close is a
+// no-op on the stop channel.
 func (r *asyncPrefetchReader) signalStop() {
 	if r.closed.CompareAndSwap(false, true) {
 		close(r.stop)
@@ -152,9 +157,13 @@ func (r *asyncPrefetchReader) signalStop() {
 }
 
 // awaitDrained drains buffered chunks and waits for the background producer to
-// exit, releasing pooled buffers. It blocks until the producer's in-flight
-// io.ReadFull returns (in production bounded by the idle read timeout), so it
-// must run OFF the caller's synchronous Close path when promptness matters.
+// exit, releasing pooled buffers. It blocks until run()'s current in-flight
+// Read returns: against a trickling remote peer (bytes still progressing) that
+// is bounded by readFullOrStop's stop-check firing at the very next Read, no
+// longer re-armable by further trickled progress; against a fully stalled peer
+// it remains the transport idle-read deadline; local disk reads return at
+// syscall speed. So it must run OFF the caller's synchronous Close path when
+// promptness matters.
 //
 // It touches curRef/cur, which are otherwise owned by the foreground Read, so
 // the caller must guarantee no concurrent Read — true once Close has been
