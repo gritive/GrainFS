@@ -308,6 +308,15 @@ func TestStagedPromotePairsCodec(t *testing.T) {
 	require.Error(t, err, "truncated batch payload must fail closed")
 }
 
+// A hostile/corrupt u32 pair count must not drive a multi-GB slice
+// preallocation from a tiny frame: the prealloc hint is clamped to the
+// frame's byte budget and the per-pair reads fail closed on truncation.
+func TestDecodeStagedPromotePairsClampsPrealloc(t *testing.T) {
+	frame := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0x00} // count=~4B, then one stray byte
+	_, err := decodeStagedPromotePairs(frame)
+	require.Error(t, err)
+}
+
 // PR2 Task (delete-time liveness rework): the orphan-shard walker AGES OUT abandoned
 // .segstaging/ staged shard leaves (crash / failed PUT / LWW loser) instead of
 // skipping them forever, while NEVER deleting a committed (live) object however it
