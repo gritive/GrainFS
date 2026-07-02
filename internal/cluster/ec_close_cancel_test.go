@@ -3,8 +3,14 @@ package cluster
 import (
 	"bytes"
 	"io"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/gritive/GrainFS/internal/metrics"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // blockUntilReader blocks every Read until release is closed, then reports EOF.
@@ -46,9 +52,9 @@ func TestECReconstructStreamPrefetch_CloseReturnsPromptlyWhileShardReadBlocks(t 
 	// still mid-Read on a shard body (Hertz S8-2), i.e. not until the blocked
 	// readers are released.
 	closeShardsCalled := make(chan struct{})
-	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, func() {
+	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, origSize, func() {
 		close(closeShardsCalled)
-	}, nil)
+	}, nil, nil)
 	if err != nil {
 		t.Fatalf("newECReconstructStreamReaderWithPrefetch: %v", err)
 	}
@@ -129,9 +135,9 @@ func TestECReconstructStreamMissingData_CloseIsS82SafeWhileShardReadBlocks(t *te
 	}
 
 	closeShardsCalled := make(chan struct{})
-	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, func() {
+	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, origSize, func() {
 		close(closeShardsCalled)
-	}, nil)
+	}, nil, nil)
 	if err != nil {
 		t.Fatalf("newECReconstructStreamReaderWithPrefetch: %v", err)
 	}
@@ -197,9 +203,9 @@ func TestECReconstructStreamMissingData_NormalCompletionStillClosesShards(t *tes
 	}
 
 	closeShardsCalled := make(chan struct{})
-	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, func() {
+	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, int64(len(payload)), func() {
 		close(closeShardsCalled)
-	}, nil)
+	}, nil, nil)
 	if err != nil {
 		t.Fatalf("newECReconstructStreamReaderWithPrefetch: %v", err)
 	}
@@ -221,4 +227,195 @@ func TestECReconstructStreamMissingData_NormalCompletionStillClosesShards(t *tes
 	case <-time.After(2 * time.Second):
 		t.Fatal("closeShards was not invoked after normal completion + Close")
 	}
+}
+
+// trickleThenBlockReader yields exactly one byte per Read while unblocked; each
+// subsequent Read blocks until step is signaled. Models a trickling peer that
+// defeats the idle-read deadline (which re-arms on every progressing Read).
+type trickleThenBlockReader struct {
+	step chan struct{} // send one token per byte to release
+}
+
+func (r *trickleThenBlockReader) Read(p []byte) (int, error) {
+	<-r.step
+	if len(p) == 0 {
+		return 0, nil
+	}
+	p[0] = 'x'
+	return 1, nil
+}
+
+func TestReadFullOrStop_AbortWinsOverTricklingReader(t *testing.T) {
+	step := make(chan struct{}, 4)
+	r := &trickleThenBlockReader{step: step}
+	stop := make(chan struct{})
+	buf := make([]byte, 1<<20)
+
+	step <- struct{}{} // one byte arrives
+	done := make(chan struct{})
+	var n int
+	var err error
+	go func() { defer close(done); n, err = readFullOrStop(r, buf, stop) }()
+
+	// Producer consumed the byte and is now blocked awaiting the next trickle.
+	// Abort, then deliver ONE more byte: the fill loop must exit at the next
+	// stop-check instead of continuing toward 1 MiB.
+	close(stop)
+	step <- struct{}{}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("readFullOrStop kept filling after stop; trickling peer defeats abort")
+	}
+	require.ErrorIs(t, err, errECReadAborted)
+	assert.LessOrEqual(t, n, 2)
+}
+
+func TestReadFullOrStop_MatchesReadFullSemantics(t *testing.T) {
+	// full read, EOF-at-zero, and partial-EOF must mirror io.ReadFull.
+	n, err := readFullOrStop(strings.NewReader("abcd"), make([]byte, 4), nil)
+	require.NoError(t, err)
+	assert.Equal(t, 4, n)
+
+	n, err = readFullOrStop(strings.NewReader(""), make([]byte, 4), nil)
+	assert.Equal(t, 0, n)
+	require.ErrorIs(t, err, io.EOF)
+
+	n, err = readFullOrStop(strings.NewReader("ab"), make([]byte, 4), nil)
+	assert.Equal(t, 2, n)
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+}
+
+// TestECReconstructMissingData_AbortReleasesAgainstTricklingPeer covers the
+// io.Pipe (missing-data) branch: aborting a GET against a trickling shard
+// peer must release the detached teardown within a bounded time (one more
+// trickled byte) instead of waiting for the full idle-read window, and the
+// parked-teardown gauge must return to its pre-test baseline once the
+// teardown has completed.
+func TestECReconstructMissingData_AbortReleasesAgainstTricklingPeer(t *testing.T) {
+	cfg := ECConfig{DataShards: 2, ParityShards: 1}
+	payload := bytes.Repeat([]byte("x"), 64)
+
+	stripe, err := ECSplit(cfg, payload)
+	if err != nil {
+		t.Fatalf("ECSplit: %v", err)
+	}
+
+	step := make(chan struct{}, 4)
+	// Serve shard 0's header synchronously, then trickle its body — data shard
+	// 1 is nil to force the io.Pipe reconstruct branch.
+	h := encodeShardHeader(int64(len(payload)))
+	shard0 := io.MultiReader(bytes.NewReader(h[:]), &trickleThenBlockReader{step: step})
+	shards := []io.Reader{
+		shard0,
+		nil, // data shard 1 missing → io.Pipe reconstruct branch
+		bytes.NewReader(stripe[2]),
+	}
+
+	baseline := testutil.ToFloat64(metrics.ECDetachedTeardowns)
+
+	closeShardsCalled := make(chan struct{})
+	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, int64(len(payload)), func() {
+		close(closeShardsCalled)
+	}, nil, nil)
+	if err != nil {
+		t.Fatalf("newECReconstructStreamReaderWithPrefetch: %v", err)
+	}
+
+	// Let the reconstruct goroutine reach its blocking Read on shard 0's body.
+	step <- struct{}{}
+	time.Sleep(20 * time.Millisecond)
+
+	done := make(chan error, 1)
+	go func() { done <- rc.Close() }()
+
+	select {
+	case <-done:
+		// Close returned promptly — good.
+	case <-time.After(2 * time.Second):
+		t.Fatal("rc.Close() did not return promptly")
+	}
+
+	// While the teardown is parked (producer aborted but not yet exited), the
+	// gauge must reflect the in-flight teardown.
+	assert.GreaterOrEqual(t, testutil.ToFloat64(metrics.ECDetachedTeardowns), baseline+1)
+
+	// Release ONE more byte: the stop-aware fill loop must exit at the next
+	// stop-check instead of continuing to wait on the trickling peer.
+	step <- struct{}{}
+
+	select {
+	case <-closeShardsCalled:
+		// Teardown released promptly after abort — correct.
+	case <-time.After(2 * time.Second):
+		t.Fatal("closeShards was not invoked promptly after abort + one trickled byte")
+	}
+
+	assert.Eventually(t, func() bool {
+		return testutil.ToFloat64(metrics.ECDetachedTeardowns) == baseline
+	}, 2*time.Second, 10*time.Millisecond, "gauge did not return to baseline after teardown completed")
+}
+
+// TestECReconstructPrefetch_AbortReleasesAgainstTricklingPeer pins the same
+// trickle-abort scenario on the prefetch path (all data shards present, >=2
+// data shards so the async prefetcher engages) — internal/cluster/async_prefetch_reader.go's
+// stop-aware wiring, not just the shared readFullOrStop helper.
+func TestECReconstructPrefetch_AbortReleasesAgainstTricklingPeer(t *testing.T) {
+	cfg := ECConfig{DataShards: 2, ParityShards: 1}
+	origSize := int64(4 << 20)
+
+	step := make(chan struct{}, 4)
+	release := make(chan struct{}) // unused by shard 1; kept unclosed so shard 1 must not need release
+
+	shards := []io.Reader{
+		headerThenBlock(origSize, release), // stays blocked entirely; never reaches EOF during test
+		func() io.Reader {
+			h := encodeShardHeader(origSize)
+			return io.MultiReader(bytes.NewReader(h[:]), &trickleThenBlockReader{step: step})
+		}(),
+		nil, // parity absent — all data shards present drives the prefetch path
+	}
+
+	baseline := testutil.ToFloat64(metrics.ECDetachedTeardowns)
+
+	closeShardsCalled := make(chan struct{})
+	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, origSize, func() {
+		close(closeShardsCalled)
+	}, nil, nil)
+	if err != nil {
+		t.Fatalf("newECReconstructStreamReaderWithPrefetch: %v", err)
+	}
+
+	// Let the background producers reach their blocking reads.
+	step <- struct{}{}
+	time.Sleep(20 * time.Millisecond)
+
+	done := make(chan error, 1)
+	go func() { done <- rc.Close() }()
+
+	select {
+	case <-done:
+		// Close returned promptly — good.
+	case <-time.After(2 * time.Second):
+		t.Fatal("rc.Close() did not return promptly")
+	}
+
+	assert.GreaterOrEqual(t, testutil.ToFloat64(metrics.ECDetachedTeardowns), baseline+1)
+
+	// Release one more byte on the trickling shard; the fully-blocked shard
+	// (blockUntilReader) is released too so the producer waiting on it can also
+	// exit and unblock the teardown.
+	step <- struct{}{}
+	close(release)
+
+	select {
+	case <-closeShardsCalled:
+		// Teardown released promptly after abort — correct.
+	case <-time.After(2 * time.Second):
+		t.Fatal("closeShards was not invoked promptly after abort + one trickled byte")
+	}
+
+	assert.Eventually(t, func() bool {
+		return testutil.ToFloat64(metrics.ECDetachedTeardowns) == baseline
+	}, 2*time.Second, 10*time.Millisecond, "gauge did not return to baseline after teardown completed")
 }

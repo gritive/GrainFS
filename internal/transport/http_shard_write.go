@@ -177,7 +177,7 @@ func (t *HTTPTransport) ShardWrite(ctx context.Context, addr string, req ShardWr
 	setShardWriteBody(hreq, req, body)
 
 	if err := c.Do(ctx, hreq, hresp); err != nil {
-		return fmt.Errorf("shard write %s: %w", addr, err)
+		return fmt.Errorf("shard write %s: %w", addr, classifyShardClientErr(err))
 	}
 	if sc := hresp.StatusCode(); sc != consts.StatusOK {
 		msg, rerr := io.ReadAll(io.LimitReader(hresp.BodyStream(), shardWriteErrCap))

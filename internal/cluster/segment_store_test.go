@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/gritive/GrainFS/internal/storage"
@@ -109,6 +110,14 @@ func TestChunkedSegmentStore_OpenSegmentLargeSegmentStreamsExactBytes(t *testing
 	require.Equal(t, body, got)
 }
 
+// TestChunkedSegmentStore_OpenSegmentRejectsMetadataSizeMismatch pins
+// corrupt-metadata rejection. Segments[0].Size flows storedSize → objectSize →
+// the OpenObject anchor (see ecReconstructStreamBodies), so a metadata size
+// that disagrees with the (honest, unmodified) on-disk shard header is now
+// caught eagerly at OpenSegment as a typed *ecShardHeaderMismatchError —
+// stronger than the old downstream "exceeds/short" checks in
+// exactSegmentReadCloser, which only fire after a successful open (e.g. for
+// compressed-segment or other non-header-attributable corruption).
 func TestChunkedSegmentStore_OpenSegmentRejectsMetadataSizeMismatch(t *testing.T) {
 	b, bucket, key, _ := putChunkedTestObject(t)
 	obj, err := b.HeadObject(context.Background(), bucket, key)
@@ -117,12 +126,11 @@ func TestChunkedSegmentStore_OpenSegmentRejectsMetadataSizeMismatch(t *testing.T
 	require.Greater(t, obj.Segments[0].Size, int64(1))
 
 	for _, tc := range []struct {
-		name    string
-		delta   int64
-		wantErr string
+		name  string
+		delta int64
 	}{
-		{name: "metadata_too_small", delta: -1, wantErr: "exceeds metadata size"},
-		{name: "metadata_too_large", delta: 1, wantErr: "reconstructed size short"},
+		{name: "metadata_too_small", delta: -1},
+		{name: "metadata_too_large", delta: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			badObj := *obj
@@ -130,11 +138,10 @@ func TestChunkedSegmentStore_OpenSegmentRejectsMetadataSizeMismatch(t *testing.T
 			badObj.Segments[0].Size += tc.delta
 
 			store := &clusterSegmentStore{b: b, bucket: bucket, key: key, obj: &badObj}
-			rc, err := store.OpenSegment(context.Background(), badObj.Segments[0])
-			require.NoError(t, err)
-			_, err = io.ReadAll(rc)
-			require.ErrorContains(t, err, tc.wantErr)
-			require.NoError(t, rc.Close())
+			_, err := store.OpenSegment(context.Background(), badObj.Segments[0])
+			var merr *ecShardHeaderMismatchError
+			require.ErrorAs(t, err, &merr, "want typed header mismatch, got %v", err)
+			assert.Equal(t, obj.Segments[0].Size+tc.delta, merr.Want, "anchor must be the corrupted metadata size")
 		})
 	}
 }

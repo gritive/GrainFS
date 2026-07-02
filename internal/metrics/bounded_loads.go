@@ -31,17 +31,19 @@ var (
 		Help: "Number of nodes currently in hot state.",
 	})
 
-	// ClusterBLRerankedReads counts reads that swapped out a hot data shard to parity due to BoundedLoads.
+	// ClusterBLRerankedReads counts reads that swapped out a demoted (hot or
+	// unhealthy-peer) data shard to parity.
 	// node label: node ID.
 	ClusterBLRerankedReads = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "grainfs_cluster_bl_reranked_reads_total",
-		Help: "Reads that swapped out a hot data shard to parity due to BoundedLoads.",
+		Help: "Reads that swapped out a hot or unhealthy data shard to parity.",
 	}, []string{"node"})
 
-	// ClusterBLBypassedReads counts reads where BL was bypassed because hot_count > m.
+	// ClusterBLBypassedReads counts reads where the swap was bypassed because
+	// demoted (hot or unhealthy) data shards outnumber usable parity shards.
 	ClusterBLBypassedReads = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "grainfs_cluster_bl_bypassed_reads_total",
-		Help: "Reads where BL was bypassed because hot_count > m.",
+		Help: "Reads where the parity swap was bypassed because hot or unhealthy data shards exceed usable parity.",
 	})
 
 	// ClusterBLHotStateTransitions counts transitions in/out of hot state per node.

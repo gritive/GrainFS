@@ -14,6 +14,9 @@ import (
 	"math"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
+
+	"github.com/gritive/GrainFS/internal/metrics"
 )
 
 const (
@@ -280,14 +283,16 @@ func ECReconstructTo(w io.Writer, cfg ECConfig, shards [][]byte) error {
 // writes it to w without holding full shard bodies in memory. Missing shards
 // are represented by nil readers.
 func ECReconstructStreamTo(w io.Writer, cfg ECConfig, shards []io.Reader) error {
-	origSize, bodies, err := ecReconstructStreamBodies(cfg, shards)
+	// No metadata anchor at this call site: fall back to legacy first-shard-seed
+	// consensus.
+	origSize, bodies, err := ecReconstructStreamBodies(cfg, shards, -1)
 	if err != nil {
 		return err
 	}
 	if origSize == 0 {
 		return nil
 	}
-	bodies = ecWrapBodiesExactLen(cfg, origSize, bodies, nil)
+	bodies = ecWrapBodiesExactLen(cfg, origSize, bodies, nil, nil)
 	return ecReconstructStreamBodiesTo(w, cfg, origSize, bodies)
 }
 
@@ -301,12 +306,17 @@ func ECReconstructStreamTo(w io.Writer, cfg ECConfig, shards []io.Reader) error 
 // Every shard body is bounded to its exact expected length: a shard that ends
 // cleanly short surfaces *ecShardTruncatedError (reported to onShardFault, if
 // non-nil, with the shard index) instead of mis-splicing the next shard's bytes.
-func newECReconstructStreamReaderWithPrefetch(cfg ECConfig, shards []io.Reader, closeShards func(), onShardFault func(int)) (*ecReconstructStreamReader, error) {
-	origSize, bodies, err := ecReconstructStreamBodies(cfg, shards)
+// onShardClean, if non-nil, fires once per shard when its body is delivered in
+// full with no fault — clean-completion healthy evidence for the serving peer.
+// objectSize, when >= 0, anchors shard-header validation to the
+// metadata-authoritative size (see ecReconstructStreamBodies); pass -1 for the
+// legacy first-shard-seed consensus mode.
+func newECReconstructStreamReaderWithPrefetch(cfg ECConfig, shards []io.Reader, objectSize int64, closeShards func(), onShardFault, onShardClean func(int)) (*ecReconstructStreamReader, error) {
+	origSize, bodies, err := ecReconstructStreamBodies(cfg, shards, objectSize)
 	if err != nil {
 		return nil, err
 	}
-	bodies = ecWrapBodiesExactLen(cfg, origSize, bodies, onShardFault)
+	bodies = ecWrapBodiesExactLen(cfg, origSize, bodies, onShardFault, onShardClean)
 	if ecStreamHasAllDataShards(cfg, bodies) {
 		dataReaders, err := ecReconstructStreamDataReaders(cfg, bodies)
 		if err != nil {
@@ -331,15 +341,21 @@ func newECReconstructStreamReaderWithPrefetch(cfg ECConfig, shards []io.Reader, 
 			readers[i] = p
 		}
 		closeAll := func() error {
-			// Stop the producers without blocking; a producer stalled in
-			// io.ReadFull on a remote shard only unblocks at the idle read
-			// timeout. Wait for them to exit and close the shard bodies in a
-			// detached goroutine so Close returns promptly while preserving the
-			// invariant that bodies are closed only after producers stop reading.
+			// Stop the producers without blocking. signalStop cannot interrupt a
+			// Read already in flight (S8-2 forbids cross-goroutine
+			// CloseBodyStream), so a producer stalled mid-Read on a remote shard
+			// still returns from that one Read before it notices — but
+			// readFullOrStop's stop-check between Reads means a trickling peer no
+			// longer re-arms the wait forever; see readFullOrStop. Wait for them
+			// to exit and close the shard bodies in a detached goroutine so Close
+			// returns promptly while preserving the invariant that bodies are
+			// closed only after producers stop reading.
 			for _, p := range prefetchers {
 				p.signalStop()
 			}
+			metrics.ECDetachedTeardowns.Inc()
 			go func() {
+				defer metrics.ECDetachedTeardowns.Dec()
 				for _, p := range prefetchers {
 					p.awaitDrained()
 				}
@@ -355,18 +371,25 @@ func newECReconstructStreamReaderWithPrefetch(cfg ECConfig, shards []io.Reader, 
 		}, nil
 	}
 	pr, pw := io.Pipe()
+	// stop lets the reconstruct goroutine notice an abort BETWEEN reads: it
+	// cannot interrupt an in-flight Read (S8-2 forbids cross-goroutine
+	// CloseBodyStream), but a trickling peer's next progressing Read now leads
+	// to a stop-check exit instead of re-arming the idle deadline forever; see
+	// readFullOrStop.
+	stop := make(chan struct{})
 	// done gates the detached shard teardown: bodies may be closed only after
-	// the reconstruct goroutine has exited (it reads them via io.ReadFull —
+	// the reconstruct goroutine has exited (it reads them via readFullOrStop —
 	// Hertz forbids cross-goroutine CloseBodyStream; see
 	// internal/transport/http_shared.go). pr.Close() does NOT interrupt an
 	// in-flight shard read — it only fails the goroutine's next pw.Write — so
 	// after an abort the shard bodies (and their connections) are retained
-	// until the current window's reads return, in production bounded by the
-	// idle read timeout. Same accepted tradeoff as the prefetch path above.
+	// until the current in-flight Read returns: against a trickling peer that
+	// is the next progressing Read (bounded by readFullOrStop's stop-check),
+	// against a fully stalled peer it remains the idle read timeout.
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if err := ecReconstructMissingDataStreamTo(pw, cfg, origSize, bodies); err != nil {
+		if err := ecReconstructMissingDataStreamTo(pw, cfg, origSize, bodies, stop); err != nil {
 			_ = pw.CloseWithError(err)
 			return
 		}
@@ -374,8 +397,11 @@ func newECReconstructStreamReaderWithPrefetch(cfg ECConfig, shards []io.Reader, 
 	}()
 	return &ecReconstructStreamReader{reader: pr, close: func() error {
 		err := pr.Close()
+		close(stop)
 		if closeShards != nil {
+			metrics.ECDetachedTeardowns.Inc()
 			go func() {
+				defer metrics.ECDetachedTeardowns.Dec()
 				<-done
 				closeShards()
 			}()
@@ -399,7 +425,9 @@ func syncShardClose(closeShards func()) func() error {
 type ecReconstructStreamReader struct {
 	reader io.Reader
 	close  func() error
-	closed bool
+	// closed is atomic so a concurrent double-Close is a safe no-op: the
+	// teardown funcs close channels (close(stop)) and must run exactly once.
+	closed atomic.Bool
 }
 
 func (r *ecReconstructStreamReader) Read(p []byte) (int, error) {
@@ -407,10 +435,9 @@ func (r *ecReconstructStreamReader) Read(p []byte) (int, error) {
 }
 
 func (r *ecReconstructStreamReader) Close() error {
-	if r.closed {
+	if !r.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-	r.closed = true
 	if r.close != nil {
 		return r.close()
 	}
@@ -473,7 +500,7 @@ func ecReconstructStreamBodiesTo(w io.Writer, cfg ECConfig, origSize int64, bodi
 		}
 		return nil
 	}
-	if err := ecReconstructMissingDataStreamTo(w, cfg, origSize, bodies); err != nil {
+	if err := ecReconstructMissingDataStreamTo(w, cfg, origSize, bodies, nil); err != nil {
 		return fmt.Errorf("ec join: %w", err)
 	}
 	return nil
@@ -495,7 +522,48 @@ func ecReconstructStreamDataReaders(cfg ECConfig, bodies []io.Reader) ([]io.Read
 	return nil, nil
 }
 
-func ecReconstructMissingDataStreamTo(w io.Writer, cfg ECConfig, origSize int64, bodies []io.Reader) error {
+// errECReadAborted reports that a shard-body fill stopped because the consumer
+// aborted (stop closed). Local teardown, never a peer fault — it must not
+// reach health marking (it doesn't: producers swallow it and exit).
+var errECReadAborted = errors.New("ec: shard read aborted by consumer")
+
+// readFullOrStop fills buf like io.ReadFull but checks stop between individual
+// Reads. It cannot interrupt a Read already in flight — S8-2 forbids that (see
+// newECReconstructStreamReaderWithPrefetch) — so after stop is closed, a
+// producer stuck on a trickling peer (progress arriving, just slowly) still
+// exits at the very next stop-check instead of waiting indefinitely for the
+// idle-read deadline to re-arm forever; against a fully stalled peer with no
+// progress at all, the bound remains the transport idle-read deadline (≤5min,
+// see http_transport.go), and it can no longer be re-armed past that because
+// the producer exits on its next check regardless of trickled progress. Local
+// disk reads return at syscall speed either way. stop == nil degrades to plain
+// io.ReadFull semantics.
+func readFullOrStop(r io.Reader, buf []byte, stop <-chan struct{}) (int, error) {
+	n := 0
+	for n < len(buf) {
+		if stop != nil {
+			select {
+			case <-stop:
+				return n, errECReadAborted
+			default:
+			}
+		}
+		m, err := r.Read(buf[n:])
+		n += m
+		if n == len(buf) {
+			return n, nil
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) && n > 0 {
+				return n, io.ErrUnexpectedEOF
+			}
+			return n, err
+		}
+	}
+	return n, nil
+}
+
+func ecReconstructMissingDataStreamTo(w io.Writer, cfg ECConfig, origSize int64, bodies []io.Reader, stop <-chan struct{}) error {
 	enc, err := getEncoder(cfg)
 	if err != nil {
 		return fmt.Errorf("ec decoder: %w", err)
@@ -557,7 +625,7 @@ func ecReconstructMissingDataStreamTo(w io.Writer, cfg ECConfig, origSize int64,
 				continue
 			}
 			buf := windowBufs[i][:n]
-			if _, err := io.ReadFull(r, buf); err != nil {
+			if _, err := readFullOrStop(r, buf, stop); err != nil {
 				return fmt.Errorf("read ec shard %d window: %w", i, err)
 			}
 			windows[i] = buf
@@ -637,18 +705,60 @@ func (e *ecShardTruncatedError) Error() string {
 	return fmt.Sprintf("ec: shard %d truncated: got %d of %d body bytes", e.Idx, e.Got, e.Want)
 }
 
+// ecShardHeaderMismatchError reports shards whose header origSize disagrees
+// with the metadata-authoritative object size. Unlike the old first-shard-seed
+// consensus, each listed shard is individually attributable: its header lied
+// relative to the size quorum-meta recorded for this object/segment.
+type ecShardHeaderMismatchError struct {
+	Idxs []int
+	Got  []int64
+	Want int64
+	// AnchorCorroborated is true iff at least one readable shard's header
+	// MATCHED the anchor (Want). Only then are the Idxs shards individually
+	// blameable: unanimous disagreement means the anchor is just as suspect
+	// as the shards (metadata corruption or full collusion —
+	// indistinguishable), so callers must NOT health-mark anyone from an
+	// uncorroborated mismatch.
+	AnchorCorroborated bool
+}
+
+func (e *ecShardHeaderMismatchError) Error() string {
+	return fmt.Sprintf("ec: shard header size mismatch: shards %v report %v, metadata says %d", e.Idxs, e.Got, e.Want)
+}
+
+// ErrECShardIntegrity classifies the typed EC shard integrity failures
+// (*ecShardTruncatedError, *ecShardHeaderMismatchError) via errors.Is: both
+// implement Is(ErrECShardIntegrity). Exported so layers outside the cluster
+// package (the S3 error mapper) can detect and genericize them without
+// depending on the unexported types.
+var ErrECShardIntegrity = errors.New("ec shard integrity error")
+
+func (e *ecShardTruncatedError) Is(target error) bool      { return target == ErrECShardIntegrity }
+func (e *ecShardHeaderMismatchError) Is(target error) bool { return target == ErrECShardIntegrity }
+
+// IsECIntegrityError reports whether err is (or wraps) a typed EC shard
+// integrity failure — a truncated shard body or a shard-header/metadata size
+// mismatch. Their messages carry shard indices and per-peer byte counts, so
+// the S3 error mapper replaces them with a generic message before they reach
+// a client response.
+func IsECIntegrityError(err error) bool { return errors.Is(err, ErrECShardIntegrity) }
+
 // ecExactLenReader bounds a shard body to its expected length: excess bytes
 // are capped (never reach the EC layer), and a clean EOF before the expected
 // count becomes *ecShardTruncatedError. onFault, if non-nil, fires once on
 // truncation so the caller can attribute the fault to the serving peer —
 // transport (non-EOF) errors pass through untouched; the endpoint-layer
-// healthTrackingReadCloser already marks those.
+// healthTrackingReadCloser already marks those. onClean, if non-nil, fires
+// once when the body is delivered to its full expected length with no fault —
+// clean completion evidence for the peer that served it (see markHealthAfter
+// / OpenObject's onShardClean wiring).
 type ecExactLenReader struct {
 	r         io.Reader
 	idx       int
 	want      int64
 	remaining int64
 	onFault   func(int)
+	onClean   func(int)
 }
 
 func (g *ecExactLenReader) Read(p []byte) (int, error) {
@@ -660,6 +770,18 @@ func (g *ecExactLenReader) Read(p []byte) (int, error) {
 	}
 	n, err := g.r.Read(p)
 	g.remaining -= int64(n)
+	if g.remaining == 0 && g.onClean != nil &&
+		(err == nil || errors.Is(err, io.EOF)) {
+		// Exactly `want` bytes delivered with no transport fault — clean
+		// completion (a plain EOF may arrive alongside the final bytes or on
+		// the next Read; both are clean). Any error the endpoint layer counts
+		// as a peer fault — including io.ErrUnexpectedEOF, which
+		// isPeerFaultReadErr does NOT exempt — must NOT fire onClean: the
+		// healthTrackingReadCloser just marked the peer unhealthy for it, and
+		// onClean would clear that cooldown immediately.
+		g.onClean(g.idx)
+		g.onClean = nil
+	}
 	if err != nil && g.remaining > 0 &&
 		(errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) {
 		if g.onFault != nil {
@@ -681,24 +803,38 @@ func (g *ecExactLenReader) Read(p []byte) (int, error) {
 // exact-length guard of ceil(origSize/K) bytes — the invariant the write path
 // guarantees for every shard, parity and zero-padded tail included. It
 // mutates bodies in place and returns the same slice.
-func ecWrapBodiesExactLen(cfg ECConfig, origSize int64, bodies []io.Reader, onShardFault func(int)) []io.Reader {
+func ecWrapBodiesExactLen(cfg ECConfig, origSize int64, bodies []io.Reader, onShardFault, onShardClean func(int)) []io.Reader {
 	if cfg.DataShards <= 0 {
 		return bodies
 	}
 	shardBodySize := (origSize + int64(cfg.DataShards) - 1) / int64(cfg.DataShards)
 	for i, b := range bodies {
 		if b != nil {
-			bodies[i] = &ecExactLenReader{r: b, idx: i, want: shardBodySize, remaining: shardBodySize, onFault: onShardFault}
+			bodies[i] = &ecExactLenReader{r: b, idx: i, want: shardBodySize, remaining: shardBodySize, onFault: onShardFault, onClean: onShardClean}
 		}
 	}
 	return bodies
 }
 
-func ecReconstructStreamBodies(cfg ECConfig, shards []io.Reader) (int64, []io.Reader, error) {
+// ecReconstructStreamBodies strips and validates the 8-byte shard headers.
+// expectedSize >= 0 anchors validation to the metadata-authoritative size:
+// every readable header must equal it, disagreeing shards are reported (all of
+// them) via *ecShardHeaderMismatchError, and the returned origSize IS
+// expectedSize — so downstream buffer sizing derives from metadata, never from
+// the wire. expectedSize < 0 falls back to first-shard-seed consensus (callers
+// with no metadata anchor, e.g. ECReconstructStreamTo).
+func ecReconstructStreamBodies(cfg ECConfig, shards []io.Reader, expectedSize int64) (int64, []io.Reader, error) {
 	if len(shards) != cfg.NumShards() {
 		return 0, nil, fmt.Errorf("shard count mismatch: got %d, want %d", len(shards), cfg.NumShards())
 	}
+	// The metadata anchor drives buffer sizing downstream — guard it with the
+	// same overflow bound applied to wire headers, so corrupt metadata cannot
+	// drive the ceil(size/K) math past int64 either.
+	if expectedSize > math.MaxInt64-int64(cfg.NumShards()) {
+		return 0, nil, fmt.Errorf("ec: metadata object size %d out of range", expectedSize)
+	}
 	var origSize int64 = -1
+	var mismatch *ecShardHeaderMismatchError
 	bodies := make([]io.Reader, len(shards))
 	for i, r := range shards {
 		if r == nil {
@@ -716,15 +852,40 @@ func ecReconstructStreamBodies(cfg ECConfig, shards []io.Reader) (int64, []io.Re
 		// that are negative (uint64 wrap) or large enough to overflow the
 		// ceil(origSize/K) math the exact-length guard and the missing-data
 		// window loop derive from it.
-		if size < 0 || size > math.MaxInt64-int64(cfg.NumShards()) {
-			return 0, nil, fmt.Errorf("shard %d header size %d out of range", i, size)
-		}
-		if origSize < 0 {
-			origSize = size
-		} else if size != origSize {
-			return 0, nil, fmt.Errorf("shard %d original size mismatch: got %d, want %d", i, size, origSize)
+		outOfRange := size < 0 || size > math.MaxInt64-int64(cfg.NumShards())
+		if expectedSize >= 0 {
+			// Anchored mode: ANY disagreement with metadata — including a
+			// hostile out-of-range value — is individually attributable to
+			// this shard. Collect instead of failing generically, so the
+			// worst lies do not dodge per-shard health marking.
+			if outOfRange || size != expectedSize {
+				if mismatch == nil {
+					mismatch = &ecShardHeaderMismatchError{Want: expectedSize}
+				}
+				mismatch.Idxs = append(mismatch.Idxs, i)
+				mismatch.Got = append(mismatch.Got, size)
+				continue // keep scanning: report ALL disagreeing shards
+			}
+			origSize = expectedSize
+		} else {
+			// Legacy consensus mode (no metadata anchor): keep the untyped
+			// bounds rejection — nothing is attributable without an anchor.
+			if outOfRange {
+				return 0, nil, fmt.Errorf("shard %d header size %d out of range", i, size)
+			}
+			if origSize < 0 {
+				origSize = size
+			} else if size != origSize {
+				return 0, nil, fmt.Errorf("shard %d original size mismatch: got %d, want %d", i, size, origSize)
+			}
 		}
 		bodies[i] = r
+	}
+	if mismatch != nil {
+		// origSize was set only if some shard's header matched the anchor —
+		// that agreement is what makes the disagreeing shards blameable.
+		mismatch.AnchorCorroborated = origSize >= 0
+		return 0, nil, mismatch
 	}
 	if origSize < 0 {
 		return 0, nil, fmt.Errorf("no readable shards")

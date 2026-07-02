@@ -85,6 +85,13 @@ func mapError(c *app.RequestContext, err error) {
 		writeXMLError(c, consts.StatusMethodNotAllowed, "MethodNotAllowed", err.Error())
 	case errors.Is(err, storage.ErrUnsupportedOperation):
 		writeXMLError(c, consts.StatusNotImplemented, "NotImplemented", err.Error())
+	case cluster.IsECIntegrityError(err):
+		// Typed EC integrity errors name shard indices and per-peer byte
+		// counts — internal topology that must not leak into the S3 response.
+		// The detailed message still reaches the server log: mapError stored
+		// it under auditErrReasonKey above, and s3RequestLogMiddleware emits
+		// it as err_reason.
+		writeXMLError(c, consts.StatusInternalServerError, "InternalError", "internal storage integrity error")
 	default:
 		writeXMLError(c, consts.StatusInternalServerError, "InternalError", err.Error())
 	}

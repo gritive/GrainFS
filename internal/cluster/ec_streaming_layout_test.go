@@ -160,7 +160,7 @@ func TestEcReconstructMissingDataStreamTo_LinearLayout(t *testing.T) {
 	}
 
 	var got bytes.Buffer
-	require.NoError(t, ecReconstructMissingDataStreamTo(&got, cfg, int64(len(input)), bodies))
+	require.NoError(t, ecReconstructMissingDataStreamTo(&got, cfg, int64(len(input)), bodies, nil))
 
 	if !bytes.Equal(got.Bytes(), input) {
 		for blk := 0; blk*(1<<20) < got.Len(); blk++ {

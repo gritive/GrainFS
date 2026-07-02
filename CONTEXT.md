@@ -412,17 +412,31 @@ an `io.ReadCloser`) and `ReadAt` (range read without full reconstruction) — th
 buffered `ReadObject` surface was retired with the streaming-only unification.
 It owns the k-of-n fan-out strategy, local data-shard fast paths, cache
 pre-pass, parity-shard fallback, and peer-health transitions from shard fetch
-outcomes. Peer health is marked at stream open AND on mid-body failures: a
-remote shard body that fails mid-read with a peer-fault error (connection
-reset, length-framed truncation, idle-read timeout — not local teardown or
-cancellation) flips the peer unhealthy once. Clean-EOF truncation is detected
-too: every shard body is bounded to its exact expected length (the 8-byte
-header's origSize gives `ceil(origSize/K)` for every shard, parity and padded
-tail included), so a shard stream that ends cleanly short surfaces a typed
-truncation error attributed to the serving peer instead of mis-splicing the
-next shard's bytes into the output; the header itself is bounds-checked as
-untrusted input. Health feeds write placement (`liveNodes`) and the degraded
-monitor; read attempt ordering does not consult it today.
+outcomes. Peer-health evidence follows a completion-based model: a successful
+stream open records nothing (so an open cannot clear an active unhealthy
+cooldown), a shard body delivered to its exact expected length with no
+transport fault marks the peer healthy (`onClean`, contiguous path only —
+striped reads rely on cooldown expiry for recovery), and a mid-body peer-fault
+error (connection reset, length-framed truncation, idle-read timeout — not
+local teardown, local backpressure, or caller cancellation) flips the peer
+unhealthy once. Clean-EOF truncation is detected too: every shard body is
+bounded to its exact expected length (`ceil(origSize/K)` for every shard,
+parity and padded tail included), so a shard stream that ends cleanly short
+surfaces a typed truncation error attributed to the serving peer instead of
+mis-splicing the next shard's bytes into the output. The 8-byte header's
+origSize is untrusted input: at open (both contiguous and stripe paths) every
+readable header is validated against the metadata-authoritative object size,
+and disagreeing shards fail the read with per-shard attribution — their peers
+are health-marked only when at least one shard corroborates the anchor, so a
+corrupt metadata record cannot mass-mark honest peers. Health feeds write
+placement (`liveNodes`), the degraded monitor, AND read attempt ordering:
+`computeAttemptOrder` demotes data shards on hot or unhealthy peers to the
+fallback tier (swapping in non-demoted parity) and orders fallback
+healthy-first, while demoted shards stay reachable so availability is
+unchanged. Aborted GETs are bounded too: background shard-body producers
+(prefetch and missing-data reconstruction) check a stop signal between reads,
+so a trickling peer cannot re-arm the idle deadline indefinitely; parked
+teardowns are visible via the `grainfs_ec_detached_teardowns` gauge.
 
 Both operations branch on the on-disk shard layout. The `StripeBytes`
 marker (0 = legacy contiguous, >0 = stripe-interleaved fragment size) is carried

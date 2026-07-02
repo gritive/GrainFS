@@ -59,6 +59,45 @@ func (r ecObjectReader) markShardUnhealthy(rec PlacementRecord, idx int) {
 	r.peerHealth.MarkUnhealthy(node)
 }
 
+// markShardHealthy records clean-completion evidence for the serving peer.
+// Local shards never self-mark, matching markShardUnhealthy.
+func (r ecObjectReader) markShardHealthy(rec PlacementRecord, idx int) {
+	if r.peerHealth == nil || idx < 0 || idx >= len(rec.Nodes) {
+		return
+	}
+	node := rec.Nodes[idx]
+	if node == r.selfID {
+		return
+	}
+	r.peerHealth.MarkHealthy(node)
+}
+
+// attributeShardOpenError applies per-shard health attribution for the typed
+// open-time validation failures ecReconstructStreamBodies surfaces (shared by
+// the contiguous and stripe paths). A typed header truncation carries the
+// shard index: attribute it to the serving peer. An anchored-mode header
+// mismatch marks every lying shard's peer, but ONLY when at least one shard
+// corroborated the metadata anchor: unanimous disagreement means the anchor
+// itself is just as suspect (corrupt metadata would otherwise mass-mark every
+// honest peer serving the object, node-level, on every retry).
+func (r ecObjectReader) attributeShardOpenError(rec PlacementRecord, err error) {
+	var terr *ecShardTruncatedError
+	if errors.As(err, &terr) {
+		r.markShardUnhealthy(rec, terr.Idx)
+	}
+	var merr *ecShardHeaderMismatchError
+	if errors.As(err, &merr) && merr.AnchorCorroborated {
+		for _, i := range merr.Idxs {
+			r.markShardUnhealthy(rec, i)
+		}
+	}
+}
+
+// nonClosingReader hides an underlying reader's io.Closer so a downstream
+// reader that closes its inputs (stripeDeinterleaveStreamReader.Close) cannot
+// double-close shard readers owned by closeECShardReaders.
+type nonClosingReader struct{ io.Reader }
+
 // OpenObject returns a streaming reader that reconstructs the object via EC
 // decode on the fly. objectSize is the original pre-encoding size in bytes.
 func (r ecObjectReader) OpenObject(ctx context.Context, bucket, shardKey string, rec PlacementRecord, objectSize int64) (io.ReadCloser, error) {
@@ -67,6 +106,7 @@ func (r ecObjectReader) OpenObject(ctx context.Context, bucket, shardKey string,
 		return nil, err
 	}
 	onShardFault := func(i int) { r.markShardUnhealthy(rec, i) }
+	onShardClean := func(i int) { r.markShardHealthy(rec, i) }
 	readers := make([]io.Reader, len(shardReaders))
 	for i, shard := range shardReaders {
 		if shard != nil {
@@ -75,19 +115,28 @@ func (r ecObjectReader) OpenObject(ctx context.Context, bucket, shardKey string,
 	}
 
 	if rec.StripeBytes > 0 {
-		// Stripe-interleaved objects: the contiguous stream path strips the
-		// 8-byte shard header inside ecReconstructStreamBodies, which the
-		// de-interleave path bypasses. Skip the header on each present reader
-		// (lazily, no eager blocking read) before handing bodies to the bounded
-		// de-interleave reader. skipReader is not an io.Closer, so the stripe
-		// reader's Close is a no-op on it — the underlying shardReaders are
-		// closed exactly once by closeECShardReaders below.
-		for i, shard := range readers {
-			if shard != nil {
-				readers[i] = &skipReader{r: shard, skip: shardHeaderSize}
+		// Stripe-interleaved objects validate shard headers at open, exactly
+		// like the contiguous path: ecReconstructStreamBodies consumes the
+		// 8-byte header from every present reader and checks it against the
+		// metadata-authoritative objectSize with cross-shard corroboration
+		// (see ecShardHeaderMismatchError.AnchorCorroborated), then hands the
+		// post-header bodies to the bounded de-interleave reader. Bodies are
+		// wrapped nonClosingReader so the stripe reader's Close cannot close
+		// them — the underlying shardReaders are closed exactly once by
+		// closeECShardReaders below. The returned origSize is discarded: in
+		// anchored mode it IS objectSize.
+		_, bodies, err := ecReconstructStreamBodies(recCfg, readers, objectSize)
+		if err != nil {
+			r.attributeShardOpenError(rec, err)
+			closeECShardReaders(shardReaders)
+			return nil, err
+		}
+		for i, b := range bodies {
+			if b != nil {
+				bodies[i] = nonClosingReader{Reader: b}
 			}
 		}
-		rc, err := newStripeDeinterleaveStreamReader(recCfg, readers, int(rec.StripeBytes), objectSize, onShardFault)
+		rc, err := newStripeDeinterleaveStreamReader(recCfg, bodies, int(rec.StripeBytes), objectSize, onShardFault)
 		if err != nil {
 			closeECShardReaders(shardReaders)
 			return nil, err
@@ -99,16 +148,11 @@ func (r ecObjectReader) OpenObject(ctx context.Context, bucket, shardKey string,
 		}}, nil
 	}
 
-	rc, err := newECReconstructStreamReaderWithPrefetch(recCfg, readers, func() {
+	rc, err := newECReconstructStreamReaderWithPrefetch(recCfg, readers, objectSize, func() {
 		closeECShardReaders(shardReaders)
-	}, onShardFault)
+	}, onShardFault, onShardClean)
 	if err != nil {
-		// Typed header truncation carries the shard index: attribute it to the
-		// serving peer before failing the open.
-		var terr *ecShardTruncatedError
-		if errors.As(err, &terr) {
-			r.markShardUnhealthy(rec, terr.Idx)
-		}
+		r.attributeShardOpenError(rec, err)
 		closeECShardReaders(shardReaders)
 		return nil, err
 	}
@@ -205,11 +249,45 @@ func (r ecObjectReader) readAtStripedStreaming(ctx context.Context, bucket, shar
 	return n, err
 }
 
+// demotedNode reports whether reads should try other shards before this node:
+// it is hot (BoundedLoads) or in an active unhealthy cooldown. Local shards
+// are never health-demoted (self is not tracked by peerHealth).
+func (r ecObjectReader) demotedNode(node string) bool {
+	if r.bl != nil && r.bl.IsHot(node) {
+		return true
+	}
+	if r.peerHealth != nil && node != r.selfID && !r.peerHealth.IsHealthy(node) {
+		return true
+	}
+	return false
+}
+
+// orderFallbackByDemotion partitions a fallback idx list so non-demoted
+// entries come first: openShardReaders opens fallback shards in listed order
+// when a primary open fails, so an unhealthy (cooldown) or hot shard must not
+// be attempted before a healthy one just because its index is lower. The
+// partition is stable, so an ascending input stays ascending within each
+// class (determinism preserved).
+func (r ecObjectReader) orderFallbackByDemotion(rec PlacementRecord, idxs []int) []int {
+	ordered := make([]int, 0, len(idxs))
+	var demoted []int
+	for _, i := range idxs {
+		if r.demotedNode(rec.Nodes[i]) {
+			demoted = append(demoted, i)
+		} else {
+			ordered = append(ordered, i)
+		}
+	}
+	return append(ordered, demoted...)
+}
+
 // computeAttemptOrder returns primary and fallback shard idx lists.
-// Hot data shards are swapped 1:1 with the lowest available parity idx.
-// Both lists are sorted ascending for deterministic ordering.
-// hot > m → bypass: primary=dataIdx, fallback=parityIdx (metric incremented).
-// bl == nil → legacy: primary=dataIdx, fallback=parityIdx.
+// Demoted (hot or unhealthy-peer) data shards are swapped 1:1 with the lowest
+// non-demoted parity idx. Both lists are sorted ascending for determinism,
+// with the fallback list additionally partitioned non-demoted-first (see
+// orderFallbackByDemotion).
+// More demoted data shards than usable parity → bypass (metric incremented).
+// bl == nil && peerHealth == nil → legacy: primary=dataIdx, fallback=parityIdx.
 func (r ecObjectReader) computeAttemptOrder(rec PlacementRecord, cfg ECConfig) (primary, fallback []int) {
 	k := cfg.DataShards
 	m := cfg.ParityShards
@@ -222,30 +300,38 @@ func (r ecObjectReader) computeAttemptOrder(rec PlacementRecord, cfg ECConfig) (
 		parityIdx = append(parityIdx, i)
 	}
 
-	if r.bl == nil {
+	if r.bl == nil && r.peerHealth == nil {
 		return dataIdx, parityIdx
 	}
-	var hotData []int
+	var demotedData []int
 	for _, i := range dataIdx {
-		if r.bl.IsHot(rec.Nodes[i]) {
-			hotData = append(hotData, i)
+		if r.demotedNode(rec.Nodes[i]) {
+			demotedData = append(demotedData, i)
 		}
 	}
-	if len(hotData) == 0 {
-		return dataIdx, parityIdx
+	if len(demotedData) == 0 {
+		// No swap needed, but the fallback still opens in listed order on a
+		// primary failure: put non-demoted parity first.
+		return dataIdx, r.orderFallbackByDemotion(rec, parityIdx)
 	}
-	if len(hotData) > len(parityIdx) {
+	var candidates []int // parity idx whose node is itself not demoted
+	for _, i := range parityIdx {
+		if !r.demotedNode(rec.Nodes[i]) {
+			candidates = append(candidates, i)
+		}
+	}
+	if len(demotedData) > len(candidates) {
 		metrics.ClusterBLBypassedReads.Inc()
 		return dataIdx, parityIdx
 	}
 
-	// Swap hotData[:n] with parityIdx[:n] (n = len(hotData)).
-	parityIn := parityIdx[:len(hotData)]
+	// Swap demotedData[:n] with candidates[:n] (n = len(demotedData)).
+	parityIn := candidates[:len(demotedData)]
 	primarySet := map[int]struct{}{}
 	for _, i := range dataIdx {
 		primarySet[i] = struct{}{}
 	}
-	for _, i := range hotData {
+	for _, i := range demotedData {
 		delete(primarySet, i)
 	}
 	for _, i := range parityIn {
@@ -263,16 +349,19 @@ func (r ecObjectReader) computeAttemptOrder(rec PlacementRecord, cfg ECConfig) (
 	for _, i := range parityIn {
 		delete(fallbackSet, i)
 	}
-	for _, i := range hotData {
+	for _, i := range demotedData {
 		fallbackSet[i] = struct{}{}
 	}
 	for i := range fallbackSet {
 		fallback = append(fallback, i)
 	}
 	sort.Ints(fallback)
+	// Leftover non-demoted parity (candidates beyond the swapped-in prefix)
+	// must be attempted before the demoted entries sharing the list.
+	fallback = r.orderFallbackByDemotion(rec, fallback)
 
-	// Metric: per-hot-data-node rerank counter.
-	for _, i := range hotData {
+	// Metric: per-demoted-data-node rerank counter.
+	for _, i := range demotedData {
 		metrics.ClusterBLRerankedReads.WithLabelValues(rec.Nodes[i]).Inc()
 	}
 	return primary, fallback
@@ -378,31 +467,6 @@ func (r ecObjectReader) cacheReadAtRange(key string, data []byte, n, want int, e
 	if r.cache.CanStore(key, int64(n)) {
 		r.cache.Put(key, data)
 	}
-}
-
-// skipReader discards the first `skip` bytes from the underlying reader before
-// passing subsequent reads through. It skips lazily (no eager blocking read) so
-// shard readers are not forced to materialize their header until first Read.
-// It deliberately does NOT implement io.Closer: the underlying shard readers
-// are owned and closed elsewhere (closeECShardReaders).
-type skipReader struct {
-	r    io.Reader
-	skip int
-}
-
-func (s *skipReader) Read(p []byte) (int, error) {
-	for s.skip > 0 {
-		n := s.skip
-		if n > len(p) {
-			n = len(p)
-		}
-		m, err := s.r.Read(p[:n])
-		s.skip -= m
-		if err != nil {
-			return 0, err
-		}
-	}
-	return s.r.Read(p)
 }
 
 func closeECShardReaders(shards []io.ReadCloser) {

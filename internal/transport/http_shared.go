@@ -1,15 +1,36 @@
 package transport
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"sync"
 
+	hzerrors "github.com/cloudwego/hertz/pkg/common/errors"
 	"github.com/cloudwego/hertz/pkg/protocol"
 )
 
 // Shared HTTP client helpers used by the native per-family routes
 // (http_shard_write.go, http_shard_read.go, http_forward.go,
 // http_append_segment.go).
+
+// ErrLocalBackpressure tags a shard-client failure caused by THIS node's
+// connection-pool exhaustion (Hertz ErrNoFreeConns with WithMaxConnWaitTimeout
+// unset). It is evidence about local load, not about the remote peer, so
+// callers must not health-mark the peer for it.
+var ErrLocalBackpressure = errors.New("transport: local connection pool exhausted")
+
+// classifyShardClientErr wraps local-backpressure client errors with
+// ErrLocalBackpressure and passes everything else through unchanged.
+func classifyShardClientErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, hzerrors.ErrNoFreeConns) {
+		return fmt.Errorf("%w: %w", ErrLocalBackpressure, err)
+	}
+	return err
+}
 
 // maxPayloadSize bounds buffered request/reply payloads (allocation guard;
 // WithResponseBodyStream bypasses Hertz's MaxResponseBodySize, so the native

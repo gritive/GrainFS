@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.0.788.0] - 2026-07-03
+
+### Fixed
+- **A peer that opens connections fine but fails mid-body no longer flaps back to healthy on the
+  next open.** Read-path health marking moves from RPC-open time to clean body completion: a
+  successful shard-stream open records nothing (it no longer clears an active unhealthy
+  cooldown), and a peer is marked healthy only when a shard body is delivered to its exact
+  expected length with no transport fault (contiguous reads; striped reads rely on the cooldown
+  expiry for recovery). Ranged shard reads mark nothing on success (a full
+  ranged read cannot distinguish clean completion from a fault arriving with the final bytes);
+  recovery there rides the cooldown expiry.
+- **Local resource failures no longer blame remote peers.** Exhausting this node's own
+  connection pool (Hertz `ErrNoFreeConns`; the pool intentionally fails fast instead of
+  queueing), failures opening or closing the local staging data during a shard write, and
+  caller-cancelled shard opens (`context.Canceled` / `context.DeadlineExceeded` — a client
+  abort or a local RPC deadline) are now classified as local evidence — they no longer mark
+  the remote peer unhealthy and no longer evict healthy peers from write placement for the
+  cooldown window.
+- **EC reads now route around unhealthy peers.** Read attempt ordering demotes data shards
+  served by peers in an active unhealthy cooldown (and, as before, hot peers) to the fallback
+  tier, swapping in parity shards whose peers are healthy; demoted shards remain reachable as
+  fallback so availability is unchanged. Parity shards on hot or unhealthy peers are no longer
+  chosen as swap-in targets, and when a primary shard open fails, fallback shards are now
+  attempted healthy-first (an unhealthy parity with a lower index no longer delays a healthy
+  one). The `grainfs_cluster_bl_*` reranked/bypassed read metrics now count both hot- and
+  health-demotions.
+- **Shard headers are validated against the metadata-recorded object size** — at open, for
+  both contiguous and striped objects. A header that disagrees with the quorum-meta size fails
+  the read with a typed error naming every disagreeing shard, and the lying shards' peers are
+  marked unhealthy (only when at least one shard corroborates the metadata — a corrupt metadata
+  record no longer mass-marks every honest peer). Missing-data reconstruction buffers are now
+  sized from the metadata, so a lying header can no longer drive multi-GiB allocations before
+  the first body byte is validated. Typed integrity failures are reported to S3 clients as a
+  generic `InternalError` ("internal storage integrity error"); the detailed shard-level
+  message stays in the server request log.
+- **An aborted GET now releases shard connections within a bounded time even against a peer
+  trickling bytes.** Background shard-body producers (prefetch and missing-data reconstruction)
+  check for consumer abort between reads, so a trickling peer can no longer re-arm the idle-read
+  deadline indefinitely and pin connections, pooled buffers, and remote admission slots. New
+  gauge `grainfs_ec_detached_teardowns` exposes teardown goroutines currently parked awaiting
+  producer exit.
+
 ## [0.0.787.0] - 2026-07-02
 
 ### Fixed
