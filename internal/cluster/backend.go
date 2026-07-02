@@ -166,11 +166,12 @@ type DistributedBackend struct {
 	// allFrozenObjectVersionDirs fails closed (WalkOrphanShards no-ops).
 	frozenObjVersionSrc func() ([]storage.SnapshotObjectRef, error)
 
-	// capEvidenceSrc yields the CapabilityGate's EvidenceSnapshot for the
-	// combined-commit rolling-upgrade gate. nil until
-	// SetCapabilityEvidenceSource wires the gate at boot; nil ⇒ the PUT commit
-	// tail treats every remote target as not-capable (legacy two-round flow).
-	capEvidenceSrc func() map[string]map[string]bool
+	// capProbe reports whether a RAW placement node ID advertises the
+	// commit-combined capability (production: resolve node ID → raft addr, then
+	// probe the CapabilityGate). nil until SetCapabilityProbe wires it at boot;
+	// nil ⇒ the PUT commit tail treats every remote target as not-capable
+	// (legacy two-round flow).
+	capProbe func(nodeID string) bool
 
 	// orphanShardSweepGate, when non-nil and returning true, permits the EC
 	// full-object orphan-shard sweep. nil (default) => fail-closed: the sweep
@@ -970,14 +971,16 @@ func (b *DistributedBackend) SetRouter(r *Router) { b.router = r }
 // only (legacy default-group behavior).
 func (b *DistributedBackend) SetShardGroupSource(s ShardGroupSource) { b.shardGroup = s }
 
-// SetCapabilityEvidenceSource wires the CapabilityGate's EvidenceSnapshot
-// (peer → capability → ready) so the combined PUT commit tail can verify every
-// remote placement node advertises commit-combined before choosing the 1-round
-// flow (rolling-upgrade gate). Must be called before serving traffic (like
-// SetShardGroupSource). nil/unwired ⇒ remote targets are treated as
-// not-capable and the commit tail keeps the legacy two rounds.
-func (b *DistributedBackend) SetCapabilityEvidenceSource(fn func() map[string]map[string]bool) {
-	b.capEvidenceSrc = fn
+// SetCapabilityProbe wires the per-node commit-combined capability probe so the
+// combined PUT commit tail can verify every remote placement node advertises
+// commit-combined before choosing the 1-round flow (rolling-upgrade gate). The
+// probe takes a RAW placement node ID and resolves it to the gate's evidence
+// key (raft address) internally — see NewCommitCombinedProbe. Must be called
+// before serving traffic (like SetShardGroupSource). nil/unwired ⇒ remote
+// targets are treated as not-capable and the commit tail keeps the legacy two
+// rounds.
+func (b *DistributedBackend) SetCapabilityProbe(fn func(nodeID string) bool) {
+	b.capProbe = fn
 }
 
 // --- Bucket operations ---

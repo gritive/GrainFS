@@ -608,7 +608,17 @@ func decodeStagedPromotePairs(data []byte) ([]stagedPromotePair, error) {
 	}
 	count := int(binary.BigEndian.Uint32(data[:4]))
 	off := 4
-	pairs := make([]stagedPromotePair, 0, count)
+	// Clamp the preallocation to what the frame can actually hold: an
+	// attacker/corruption-controlled u32 count (up to ~4B) would otherwise
+	// prealloc ~171GB from a few bytes. Each pair needs at least two 4-byte
+	// length prefixes on the wire; cap the hint at len(data)/4 (append still
+	// grows if the true count is somehow higher — it never is, the loop
+	// bounds-checks every read).
+	prealloc := count
+	if max := len(data) / 4; prealloc > max {
+		prealloc = max
+	}
+	pairs := make([]stagedPromotePair, 0, prealloc)
 	for i := 0; i < count; i++ {
 		stagingKey, next, err := readPromoteString(data, off)
 		if err != nil {
@@ -690,6 +700,15 @@ func decodePromoteAndMetaPayload(data []byte) ([]stagedPromotePair, []byte, erro
 	}
 	count := binary.BigEndian.Uint32(data)
 	off := 4
+	// Clamp the preallocation to what the frame can hold so a corrupt/hostile
+	// count (up to ~4B) cannot drive a multi-GB prealloc from a tiny frame.
+	// Each pair is at least 12 wire bytes (u16 staging len + u16 final len +
+	// i64 logical size); cap the hint at len(data)/12. append still grows if
+	// the true count were higher — it never is, every read is bounds-checked.
+	prealloc := int(count)
+	if max := len(data) / 12; prealloc > max {
+		prealloc = max
+	}
 	readStr := func() (string, error) {
 		if off+2 > len(data) {
 			return "", fmt.Errorf("combined payload: truncated string length")
@@ -703,7 +722,7 @@ func decodePromoteAndMetaPayload(data []byte) ([]stagedPromotePair, []byte, erro
 		off += n
 		return s, nil
 	}
-	pairs := make([]stagedPromotePair, 0, count)
+	pairs := make([]stagedPromotePair, 0, prealloc)
 	for i := uint32(0); i < count; i++ {
 		sk, err := readStr()
 		if err != nil {
@@ -740,6 +759,68 @@ func decodePromoteAndMetaPayload(data []byte) ([]stagedPromotePair, []byte, erro
 	return pairs, data[off:], nil
 }
 
+// encodeCombinedOKBody encodes the OK response body for a combined commit that
+// performed a meta write: [u8 hadPrevious][previous…]. The previous blob is the
+// content the write overwrote (empty when there was none); the coordinator
+// carries it back into an abort-path rollback to RESTORE the prior latest-only
+// object rather than delete it. A promote-only call (no meta write) responds
+// with a nil body instead.
+func encodeCombinedOKBody(previous []byte, hadPrevious bool) []byte {
+	out := make([]byte, 1, 1+len(previous))
+	if hadPrevious {
+		out[0] = 1
+	}
+	return append(out, previous...)
+}
+
+// decodeCombinedOKBody parses the PromoteAndWriteQuorumMeta OK body. An empty
+// body means no meta write happened (promote-only) ⇒ (nil, false). Otherwise
+// body[0] is hadPrevious; body[1:] is the previous blob.
+func decodeCombinedOKBody(body []byte) (previous []byte, hadPrevious bool) {
+	if len(body) == 0 {
+		return nil, false
+	}
+	if body[0] != 1 {
+		return nil, false
+	}
+	return append([]byte(nil), body[1:]...), true
+}
+
+// encodeRollbackPayload encodes the RollbackQuorumMetaIfMatch request payload:
+// [u32 expectedLen][expected][u8 hadPrevious][previous…]. hadPrevious=false
+// (previous empty) is a delete-if-match; hadPrevious=true restores previous.
+func encodeRollbackPayload(expected, previous []byte, hadPrevious bool) []byte {
+	out := make([]byte, 4, 4+len(expected)+1+len(previous))
+	binary.BigEndian.PutUint32(out, uint32(len(expected)))
+	out = append(out, expected...)
+	if hadPrevious {
+		out = append(out, 1)
+	} else {
+		out = append(out, 0)
+	}
+	return append(out, previous...)
+}
+
+func decodeRollbackPayload(data []byte) (expected, previous []byte, hadPrevious bool, err error) {
+	if len(data) < 4 {
+		return nil, nil, false, fmt.Errorf("rollback payload: truncated expected length")
+	}
+	n := int(binary.BigEndian.Uint32(data[:4]))
+	off := 4
+	if off+n > len(data) {
+		return nil, nil, false, fmt.Errorf("rollback payload: truncated expected body")
+	}
+	expected = data[off : off+n]
+	off += n
+	if off >= len(data) {
+		return nil, nil, false, fmt.Errorf("rollback payload: missing hadPrevious flag")
+	}
+	hadPrevious = data[off] == 1
+	off++
+	previous = data[off:]
+	return expected, previous, hadPrevious, nil
+}
+
 // errCombinedPromoteFailed marks a combined-commit failure whose CAUSE was the
 // promote step (not the meta write). The coordinator aborts on promote-class
 // failures (all-or-fail promote) but tolerates meta-class failures up to n−K —
@@ -762,52 +843,62 @@ const (
 // tail's two rounds collapsed to node scope, preserving per-node
 // promote-before-meta ordering. addr is a RESOLVED peer address (matching
 // WriteQuorumMeta's convention; the caller resolves exactly once).
-func (s *ShardService) PromoteAndWriteQuorumMeta(ctx context.Context, addr, bucket, key string, pairs []stagedPromotePair, blob []byte) error {
+func (s *ShardService) PromoteAndWriteQuorumMeta(ctx context.Context, addr, bucket, key string, pairs []stagedPromotePair, blob []byte) (previous []byte, hadPrevious bool, err error) {
 	if s.transport == nil {
-		return fmt.Errorf("shard service: no transport")
+		return nil, false, fmt.Errorf("shard service: no transport")
 	}
 	payload, err := encodePromoteAndMetaPayload(pairs, blob)
 	if err != nil {
-		return err
+		return nil, false, err
 	}
 	envb := buildShardEnvelope("PromoteAndWriteQuorumMeta", bucket, key, 0, payload)
 	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
 	respEnvelope, err := s.callShardRPC(ctx, addr, envb)
 	if err != nil {
-		return fmt.Errorf("combined commit on %s: %w", addr, err)
+		return nil, false, fmt.Errorf("combined commit on %s: %w", addr, err)
 	}
 	rpcType, body, err := unmarshalEnvelope(respEnvelope)
 	if err != nil {
-		return fmt.Errorf("combined commit on %s: unmarshal response: %w", addr, err)
+		return nil, false, fmt.Errorf("combined commit on %s: unmarshal response: %w", addr, err)
 	}
 	if rpcType == "Error" {
-		msg := string(body)
-		switch {
-		case strings.HasPrefix(msg, combinedPromoteFailedPrefix):
-			return fmt.Errorf("combined commit on %s: %s: %w", addr, msg, errCombinedPromoteFailed)
-		case strings.HasPrefix(msg, combinedMetaFailedPrefix):
-			return fmt.Errorf("combined commit on %s: %s: %w", addr, msg, errCombinedMetaFailed)
-		default:
-			// INDETERMINATE: an unprefixed body means the peer did not run our
-			// handler (e.g. "unknown shard RPC" from an old binary — capability
-			// gating should prevent this, this is the second belt). No sentinel
-			// → the coordinator treats it as abort-class.
-			return fmt.Errorf("combined commit on %s: %s", addr, msg)
-		}
+		return nil, false, fmt.Errorf("combined commit on %s: %w", addr, classifyCombinedCommitError(string(body)))
 	}
-	return nil
+	previous, hadPrevious = decodeCombinedOKBody(body)
+	return previous, hadPrevious, nil
 }
 
-// RollbackQuorumMetaIfMatch deletes the latest-only quorum-meta blob on a
+// classifyCombinedCommitError maps a combined-commit Error-response body to its
+// error class so the coordinator's 3-class abort/tolerate split works
+// identically for self and peers. A combined-promote-failed: prefix wraps
+// errCombinedPromoteFailed; a combined-meta-failed: prefix wraps
+// errCombinedMetaFailed; anything else is INDETERMINATE (an old binary's
+// "unknown shard RPC", a transport-shaped body) and carries NEITHER sentinel,
+// so the coordinator treats it as abort-class. Extracted from the wire client
+// so the mapping is unit-testable without a live transport.
+func classifyCombinedCommitError(msg string) error {
+	switch {
+	case strings.HasPrefix(msg, combinedPromoteFailedPrefix):
+		return fmt.Errorf("%s: %w", msg, errCombinedPromoteFailed)
+	case strings.HasPrefix(msg, combinedMetaFailedPrefix):
+		return fmt.Errorf("%s: %w", msg, errCombinedMetaFailed)
+	default:
+		return errors.New(msg)
+	}
+}
+
+// RollbackQuorumMetaIfMatch rolls back the latest-only quorum-meta blob on a
 // remote node ONLY IF its current content equals expected — the abort-path
-// rollback of a combined commit. Content-matched, so a concurrent newer PUT's
-// blob is never clobbered. Best-effort: callers ignore the error beyond
-// logging. addr is a RESOLVED peer address.
-func (s *ShardService) RollbackQuorumMetaIfMatch(ctx context.Context, addr, bucket, key string, expected []byte) error {
+// rollback of a combined commit. hadPrevious=true restores previous (an
+// overwrite PUT's abort); hadPrevious=false deletes (a create PUT's abort).
+// Content-matched, so a concurrent newer PUT's blob is never clobbered.
+// Best-effort: callers ignore the error beyond logging. addr is a RESOLVED
+// peer address.
+func (s *ShardService) RollbackQuorumMetaIfMatch(ctx context.Context, addr, bucket, key string, expected, previous []byte, hadPrevious bool) error {
 	if s.transport == nil {
 		return fmt.Errorf("shard service: no transport")
 	}
-	envb := buildShardEnvelope("RollbackQuorumMetaIfMatch", bucket, key, 0, expected)
+	envb := buildShardEnvelope("RollbackQuorumMetaIfMatch", bucket, key, 0, encodeRollbackPayload(expected, previous, hadPrevious))
 	defer func() { envb.Reset(); shardBuilderPool.Put(envb) }()
 	respEnvelope, err := s.callShardRPC(ctx, addr, envb)
 	if err != nil {
@@ -840,22 +931,32 @@ func (s *ShardService) handlePromoteAndQuorumMetaWrite(sr *shardRequest) []byte 
 		}
 	}
 	if len(blob) > 0 {
-		if werr := s.writeQuorumMetaLocal(sr.Bucket, sr.Key, blob); werr != nil {
+		result, werr := s.writeQuorumMetaLocalWithResult(sr.Bucket, sr.Key, blob)
+		if werr != nil {
 			// Meta-class: promote already succeeded on this node. Preserve the
 			// CAS wire body inside the prefix so nothing downstream breaks.
 			return s.errorResponse(combinedMetaFailedPrefix + quorumMetaWriteErrorBody(werr))
 		}
+		// Carry the overwritten previous blob back so the coordinator can RESTORE
+		// it on abort (not just delete this node's new blob), preserving the prior
+		// object's latest-only authority on a non-versioned overwrite PUT.
+		return s.okResponse(encodeCombinedOKBody(result.previous, result.hadPrevious))
 	}
 	return s.okResponse(nil)
 }
 
-// handleQuorumMetaRollbackIfMatch deletes the local latest-only blob iff its
-// content equals the request payload (abort-path rollback; content match makes
-// it safe against concurrent newer PUTs). Reuses the CAS rollback machinery
-// with (expected, nil, false) = delete-if-match; a content mismatch or an
-// absent file is a no-op SUCCESS (nothing of ours to remove).
+// handleQuorumMetaRollbackIfMatch rolls back the local latest-only blob iff its
+// content equals the request's expected bytes (abort-path rollback; the content
+// match makes it safe against concurrent newer PUTs). The payload carries the
+// overwritten previous blob: hadPrevious=true RESTORES it (an overwrite PUT's
+// abort keeps the prior object), hadPrevious=false DELETES (a create PUT's
+// abort). A content mismatch or absent file is a no-op SUCCESS.
 func (s *ShardService) handleQuorumMetaRollbackIfMatch(sr *shardRequest) []byte {
-	if err := s.rollbackQuorumMetaLocalIfMatch(sr.Bucket, sr.Key, sr.Data, nil, false); err != nil {
+	expected, previous, hadPrevious, err := decodeRollbackPayload(sr.Data)
+	if err != nil {
+		return s.errorResponse(err.Error())
+	}
+	if err := s.rollbackQuorumMetaLocalIfMatch(sr.Bucket, sr.Key, expected, previous, hadPrevious); err != nil {
 		return s.errorResponse(err.Error())
 	}
 	return s.okResponse(nil)

@@ -50,7 +50,6 @@ type clusterSegmentBackend struct {
 	promoteStagedFn      func(ctx context.Context, node, bucket, stagingKey, finalKey string) error
 	promoteStagedBatchFn func(ctx context.Context, node, bucket string, pairs []stagedPromotePair) error
 	writeQuorumMetaFn    func(ctx context.Context, cmd PutObjectMetaCmd) error
-	promoteAndCommitFn   func(ctx context.Context, cmd PutObjectMetaCmd, promotes map[string][]stagedPromotePair, nodeOrder []string, legacyPromote func(context.Context) error) error
 	ecConfigFn           func() ECConfig
 	// peerWeightsFn returns the per-peer disk-capacity weight snapshot aligned
 	// 1:1 with peers and whether weighting is enabled. Production constructor
@@ -805,15 +804,11 @@ func (c *clusterSegmentBackend) writeQuorumMeta(ctx context.Context, cmd PutObje
 }
 
 // promoteAndCommit routes the non-versioned commit tail. Seam precedence keeps
-// every pre-existing injected test working unmodified: an explicit
-// promoteAndCommitFn wins; any legacy seam (writeQuorumMetaFn /
-// promoteStagedBatchFn / promoteStagedFn) or a nil backend forces the legacy
-// two-round sequence (with its historical put-trace stages); production takes
-// the combined round wrapped in the commit_combined stage.
+// every pre-existing injected test working unmodified: any legacy seam
+// (writeQuorumMetaFn / promoteStagedBatchFn / promoteStagedFn) or a nil backend
+// forces the legacy two-round sequence (with its historical put-trace stages);
+// production takes the combined round wrapped in the commit_combined stage.
 func (c *clusterSegmentBackend) promoteAndCommit(ctx context.Context, cmd PutObjectMetaCmd, promotes map[string][]stagedPromotePair, nodeOrder []string, legacyPromote func(context.Context) error) (err error) {
-	if c.promoteAndCommitFn != nil {
-		return c.promoteAndCommitFn(ctx, cmd, promotes, nodeOrder, legacyPromote)
-	}
 	if c.writeQuorumMetaFn != nil || c.promoteStagedBatchFn != nil || c.promoteStagedFn != nil || c.b == nil {
 		if legacyPromote != nil {
 			if perr := legacyPromote(ctx); perr != nil {

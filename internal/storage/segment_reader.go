@@ -268,24 +268,8 @@ func (r *streamingSegmentReader) current() (io.ReadCloser, error) {
 			return nil, slot.err
 		}
 		r.mu.Lock()
-		if r.closed || r.ctx.Err() != nil {
-			cerr := r.ctx.Err()
-			r.mu.Unlock()
-			_ = slot.rc.Close()
-			if cerr != nil {
-				return nil, cerr
-			}
-			return nil, context.Canceled
-		}
-		if r.idx != idx {
-			r.mu.Unlock()
-			_ = slot.rc.Close()
-			return nil, context.Canceled
-		}
-		r.cur = slot.rc
-		r.startPrefetchLocked(idx)
-		r.mu.Unlock()
-		return slot.rc, nil
+		defer r.mu.Unlock()
+		return r.commitOpenedLocked(idx, slot.rc)
 	}
 	r.mu.Unlock()
 
@@ -296,6 +280,15 @@ func (r *streamingSegmentReader) current() (io.ReadCloser, error) {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.commitOpenedLocked(idx, rc)
+}
+
+// commitOpenedLocked publishes rc as the current segment iff this call still
+// owns index idx and the reader is live; otherwise it closes rc and returns the
+// abort/loop-around result (a live r.cur set by a racing open, else the ctx/
+// cancel error). Caller holds r.mu. Shared by the prefetch-hit and cold-open
+// tails of current(), which were previously near-duplicate.
+func (r *streamingSegmentReader) commitOpenedLocked(idx int, rc io.ReadCloser) (io.ReadCloser, error) {
 	if r.closed {
 		_ = rc.Close()
 		return nil, context.Canceled

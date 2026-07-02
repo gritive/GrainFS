@@ -337,7 +337,7 @@ func (state *bootState) instantiateGroupWithConfig(glc cluster.GroupLifecycleCon
 	gb.SetCoalesceConfig(state.coalesceCfg)
 	gb.SetShardGroupSource(state.metaRaft.FSM())
 	if state.capabilityGate != nil {
-		gb.SetCapabilityEvidenceSource(state.capabilityGate.EvidenceSnapshot)
+		gb.SetCapabilityProbe(cluster.NewCommitCombinedProbe(state.capabilityGate, state.metaRaft.FSM()))
 	}
 	return gb, nil
 }
@@ -363,9 +363,9 @@ func bootOwnedGroupsAndEC(ctx context.Context, state *bootState) error {
 	distBackend.SetShardService(state.shardSvc, allNodes)
 	if state.capabilityGate != nil {
 		// Combined PUT commit tail rolling-upgrade gate: the coordinator checks
-		// every placement node's gossiped commit-combined evidence before
-		// collapsing promote+meta into one RPC round.
-		distBackend.SetCapabilityEvidenceSource(state.capabilityGate.EvidenceSnapshot)
+		// every placement node's gossiped commit-combined evidence (keyed by
+		// resolved raft address) before collapsing promote+meta into one RPC round.
+		distBackend.SetCapabilityProbe(cluster.NewCommitCombinedProbe(state.capabilityGate, state.metaRaft.FSM()))
 	}
 
 	state.shardCache = shardcache.New(state.cfg.ShardCacheSize)

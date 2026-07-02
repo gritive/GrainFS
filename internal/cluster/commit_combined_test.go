@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gritive/GrainFS/internal/compat"
 	"github.com/stretchr/testify/require"
 )
 
@@ -23,11 +24,11 @@ import (
 // (methods may live in any file of the package; the base fake fails loudly if a
 // test that did not opt into the combined round reaches it).
 
-func (f *fakePeerQuorumMeta) PromoteAndWriteQuorumMeta(ctx context.Context, addr, bucket, key string, pairs []stagedPromotePair, blob []byte) error {
-	return fmt.Errorf("fakePeerQuorumMeta: unexpected PromoteAndWriteQuorumMeta to %s", addr)
+func (f *fakePeerQuorumMeta) PromoteAndWriteQuorumMeta(ctx context.Context, addr, bucket, key string, pairs []stagedPromotePair, blob []byte) ([]byte, bool, error) {
+	return nil, false, fmt.Errorf("fakePeerQuorumMeta: unexpected PromoteAndWriteQuorumMeta to %s", addr)
 }
 
-func (f *fakePeerQuorumMeta) RollbackQuorumMetaIfMatch(ctx context.Context, addr, bucket, key string, expected []byte) error {
+func (f *fakePeerQuorumMeta) RollbackQuorumMetaIfMatch(ctx context.Context, addr, bucket, key string, expected, previous []byte, hadPrevious bool) error {
 	return fmt.Errorf("fakePeerQuorumMeta: unexpected RollbackQuorumMetaIfMatch to %s", addr)
 }
 
@@ -45,25 +46,33 @@ type fakeCombinedPeer struct {
 	*fakePeerQuorumMeta
 	mu             sync.Mutex
 	dispatches     []combinedDispatchRecord
-	errs           map[string]error // addr → dispatch result
-	ackAfterCancel map[string]bool  // addr → block until ctx canceled, then return errs[addr]
+	errs           map[string]error  // addr → dispatch result
+	resolveErrs    map[string]error  // node → resolvePeerAddress failure injection
+	ackPrevious    map[string][]byte // addr → previous blob returned on a clean ack
+	ackAfterCancel map[string]bool   // addr → block until ctx canceled, then return errs[addr]
 	block          map[string]chan struct{}
 	inFlight       atomic.Int32
 	rollbackNodes  []string
 	rollbackBlobs  map[string][]byte
+	rollbackPrev   map[string][]byte
+	rollbackHad    map[string]bool
 }
 
 func newFakeCombinedPeer() *fakeCombinedPeer {
 	return &fakeCombinedPeer{
 		fakePeerQuorumMeta: newFakePeerQuorumMeta(nil),
 		errs:               map[string]error{},
+		resolveErrs:        map[string]error{},
+		ackPrevious:        map[string][]byte{},
 		ackAfterCancel:     map[string]bool{},
 		block:              map[string]chan struct{}{},
 		rollbackBlobs:      map[string][]byte{},
+		rollbackPrev:       map[string][]byte{},
+		rollbackHad:        map[string]bool{},
 	}
 }
 
-func (f *fakeCombinedPeer) PromoteAndWriteQuorumMeta(ctx context.Context, addr, bucket, key string, pairs []stagedPromotePair, blob []byte) error {
+func (f *fakeCombinedPeer) PromoteAndWriteQuorumMeta(ctx context.Context, addr, bucket, key string, pairs []stagedPromotePair, blob []byte) ([]byte, bool, error) {
 	f.inFlight.Add(1)
 	defer f.inFlight.Add(-1)
 	f.mu.Lock()
@@ -71,10 +80,14 @@ func (f *fakeCombinedPeer) PromoteAndWriteQuorumMeta(ctx context.Context, addr, 
 	err := f.errs[addr]
 	waitCancel := f.ackAfterCancel[addr]
 	gate := f.block[addr]
+	prev, hadPrev := f.ackPrevious[addr]
 	f.mu.Unlock()
 	if waitCancel {
 		<-ctx.Done() // "late" node: answers only after the abort's cancel
-		return err
+		if err == nil {
+			return prev, hadPrev, nil
+		}
+		return nil, false, err
 	}
 	if gate != nil {
 		select {
@@ -82,15 +95,32 @@ func (f *fakeCombinedPeer) PromoteAndWriteQuorumMeta(ctx context.Context, addr, 
 		case <-ctx.Done():
 		}
 	}
-	return err
+	if err != nil {
+		return nil, false, err
+	}
+	return prev, hadPrev, nil
 }
 
-func (f *fakeCombinedPeer) RollbackQuorumMetaIfMatch(ctx context.Context, addr, bucket, key string, expected []byte) error {
+func (f *fakeCombinedPeer) RollbackQuorumMetaIfMatch(ctx context.Context, addr, bucket, key string, expected, previous []byte, hadPrevious bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.rollbackNodes = append(f.rollbackNodes, addr)
 	f.rollbackBlobs[addr] = append([]byte(nil), expected...)
+	f.rollbackPrev[addr] = append([]byte(nil), previous...)
+	f.rollbackHad[addr] = hadPrevious
 	return nil
+}
+
+// resolvePeerAddress overrides the identity resolver so a test can inject a
+// per-node resolution failure (the placement node isn't in the address book).
+func (f *fakeCombinedPeer) resolvePeerAddress(peer string) (string, error) {
+	f.mu.Lock()
+	err := f.resolveErrs[peer]
+	f.mu.Unlock()
+	if err != nil {
+		return "", err
+	}
+	return peer, nil
 }
 
 func (f *fakeCombinedPeer) dispatchSnapshot() []combinedDispatchRecord {
@@ -123,15 +153,29 @@ func (f *failingLocalQuorumMeta) writeQuorumMetaLocal(bucket, key string, data [
 	return f.fakeLocalQuorumMeta.writeQuorumMetaLocal(bucket, key, data)
 }
 
+func (f *failingLocalQuorumMeta) writeQuorumMetaLocalWithResult(bucket, key string, data []byte) (quorumMetaLocalWriteResult, error) {
+	if f.writeErr != nil {
+		return quorumMetaLocalWriteResult{}, f.writeErr
+	}
+	return f.fakeLocalQuorumMeta.writeQuorumMetaLocalWithResult(bucket, key, data)
+}
+
 // combinedFixture wires a QuorumMetaStore over the combined fakes plus the new
 // seams (promoteLocalStaged / rollbackLocalIfMatch / capabilityEvidence).
+type selfRollbackRecord struct {
+	expected    []byte
+	previous    []byte
+	hadPrevious bool
+}
+
 type combinedFixture struct {
-	local        *fakeLocalQuorumMeta
-	peer         *fakeCombinedPeer
-	store        *QuorumMetaStore
-	self         string
-	selfPromotes atomic.Int32
-	legacyCalls  atomic.Int32
+	local         *fakeLocalQuorumMeta
+	peer          *fakeCombinedPeer
+	store         *QuorumMetaStore
+	self          string
+	selfPromotes  atomic.Int32
+	legacyCalls   atomic.Int32
+	selfRollbacks []selfRollbackRecord
 }
 
 func newCombinedFixture(versioning, self string, capableNodes ...string) *combinedFixture {
@@ -152,8 +196,11 @@ func newCombinedFixture(versioning, self string, capableNodes ...string) *combin
 		fx.selfPromotes.Add(1)
 		return nil
 	}
-	fx.store.rollbackLocalIfMatch = func(bucket, key string, expected []byte) error { return nil }
-	fx.store.capabilityEvidence = grantCommitCombined(capableNodes...)
+	fx.store.rollbackLocalIfMatch = func(bucket, key string, expected, previous []byte, hadPrevious bool) error {
+		fx.selfRollbacks = append(fx.selfRollbacks, selfRollbackRecord{expected: append([]byte(nil), expected...), previous: append([]byte(nil), previous...), hadPrevious: hadPrevious})
+		return nil
+	}
+	fx.store.capabilityProbe = grantCommitCombined(capableNodes...)
 	return fx
 }
 
@@ -162,12 +209,15 @@ func (fx *combinedFixture) legacyPromote(context.Context) error {
 	return nil
 }
 
-func grantCommitCombined(nodes ...string) func() map[string]map[string]bool {
-	out := map[string]map[string]bool{}
+// grantCommitCombined returns a capability probe (func(nodeID string) bool) that
+// reports the listed nodes as commit-combined capable. Node IDs are used
+// directly (the fixture's identity resolvePeerAddress means node id == addr).
+func grantCommitCombined(nodes ...string) func(nodeID string) bool {
+	capable := map[string]bool{}
 	for _, n := range nodes {
-		out[n] = map[string]bool{capabilityCommitCombined: true}
+		capable[n] = true
 	}
-	return func() map[string]map[string]bool { return out }
+	return func(nodeID string) bool { return capable[nodeID] }
 }
 
 func combinedTestCmd(nodeIDs []string, ecData uint8) PutObjectMetaCmd {
@@ -381,9 +431,9 @@ func TestPromoteAndWriteQuorumMeta_CapabilityGate(t *testing.T) {
 		require.NoError(t, err, "legacy fallback must have written the latest-only blob")
 	})
 
-	t.Run("capability_nil_snapshot_falls_back", func(t *testing.T) {
+	t.Run("capability_nil_probe_falls_back", func(t *testing.T) {
 		fx := newCombinedFixture("", "self")
-		fx.store.capabilityEvidence = func() map[string]map[string]bool { return nil }
+		fx.store.capabilityProbe = nil
 		promotes, order := combinedTestPromotes("self", "n2")
 		cmd := combinedTestCmd([]string{"self", "n2"}, 2)
 
@@ -446,6 +496,120 @@ func TestPromoteAndWriteQuorumMeta_AbortRollsBackAckedMetas(t *testing.T) {
 		require.Equal(t, want, blob, "rollback for %s must be content-matched against the round's blob", node)
 	}
 }
+
+func TestPromoteAndWriteQuorumMeta_ResolveFailure(t *testing.T) {
+	t.Run("pairs_node_resolve_failure_aborts", func(t *testing.T) {
+		nodes := []string{"n1", "n2", "n3", "n4"}
+		fx := newCombinedFixture("", "coordinator", nodes...)
+		fx.peer.resolveErrs["n2"] = errors.New("node not in address book")
+		promotes, order := combinedTestPromotes(nodes...) // n2 carries pairs
+		cmd := combinedTestCmd(nodes, 2)
+		err := fx.store.promoteAndWriteQuorumMeta(context.Background(), cmd, promotes, order, fx.legacyPromote)
+		require.Error(t, err, "resolve failure on a pairs-carrying node is promote-class → abort")
+		require.ErrorIs(t, err, errCombinedPromoteFailed)
+	})
+
+	t.Run("meta_only_node_resolve_failure_tolerated", func(t *testing.T) {
+		pairsNodes := []string{"n1", "n2", "n3"}
+		all := append(append([]string(nil), pairsNodes...), "n4") // n4 = meta-only
+		fx := newCombinedFixture("", "coordinator", all...)
+		fx.peer.resolveErrs["n4"] = errors.New("node not in address book")
+		promotes, order := combinedTestPromotes(pairsNodes...)
+		cmd := combinedTestCmd(all, 2) // n=4, K=2 → tolerance 2
+		require.NoError(t, fx.store.promoteAndWriteQuorumMeta(context.Background(), cmd, promotes, order, fx.legacyPromote),
+			"a meta-only node's resolve failure counts as a tolerated meta failure, not a promote abort")
+	})
+}
+
+func TestPromoteAndWriteQuorumMeta_SelfPromoteNotWired(t *testing.T) {
+	fx := newCombinedFixture("", "self", "self")
+	fx.store.promoteLocalStaged = nil // self carries pairs but promote is unwired
+	promotes, order := combinedTestPromotes("self")
+	cmd := combinedTestCmd([]string{"self"}, 1)
+	err := fx.store.promoteAndWriteQuorumMeta(context.Background(), cmd, promotes, order, fx.legacyPromote)
+	require.Error(t, err)
+	require.ErrorIs(t, err, errCombinedPromoteFailed, "an unwired self promote is promote-class → abort")
+}
+
+func TestPromoteAndWriteQuorumMeta_EntryGuards(t *testing.T) {
+	t.Run("empty_node_ids", func(t *testing.T) {
+		fx := newCombinedFixture("", "self", "self")
+		cmd := combinedTestCmd(nil, 1) // empty placement
+		err := fx.store.promoteAndWriteQuorumMeta(context.Background(), cmd, nil, nil, fx.legacyPromote)
+		require.Error(t, err)
+	})
+
+	t.Run("votes_below_quorum", func(t *testing.T) {
+		fx := newCombinedFixture("", "self", "self", "n2")
+		promotes, order := combinedTestPromotes("self", "n2")
+		cmd := combinedTestCmd([]string{"self", "n2"}, 3) // K=3 > 2 votes
+		err := fx.store.promoteAndWriteQuorumMeta(context.Background(), cmd, promotes, order, fx.legacyPromote)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "placement votes")
+	})
+}
+
+func TestPromoteAndWriteQuorumMeta_SelfRollbackOnAbort(t *testing.T) {
+	self := "self"
+	nodes := []string{self, "n2", "n3"}
+	fx := newCombinedFixture("", self, nodes...)
+	// Pre-seed a previous blob on self so the ack captures it (overwrite PUT).
+	prevBlob, err := encodeQuorumMetaBlob(PutObjectMetaCmd{
+		Bucket: "b", Key: "obj", ModTime: 100, ETag: "old", NodeIDs: nodes, ECData: 2,
+	})
+	require.NoError(t, err)
+	require.NoError(t, fx.local.writeQuorumMetaLocal("b", "obj", prevBlob))
+	// n3 promote-fails → abort; self + n2 acked → rolled back.
+	fx.peer.errs["n3"] = fmt.Errorf("promote gone: %w", errCombinedPromoteFailed)
+	promotes, order := combinedTestPromotes(nodes...)
+	cmd := combinedTestCmd(nodes, 2) // ModTime 500 > 100 → overwrites the previous
+
+	err = fx.store.promoteAndWriteQuorumMeta(context.Background(), cmd, promotes, order, fx.legacyPromote)
+	require.Error(t, err)
+
+	require.Len(t, fx.selfRollbacks, 1, "self acked then abort → exactly one self rollback")
+	rb := fx.selfRollbacks[0]
+	want, encErr := encodeQuorumMetaBlob(cmd)
+	require.NoError(t, encErr)
+	require.Equal(t, want, rb.expected, "self rollback is content-matched against the round's blob")
+	require.True(t, rb.hadPrevious, "overwrite PUT abort must RESTORE the previous, not delete")
+	require.Equal(t, prevBlob, rb.previous, "self rollback carries the exact overwritten previous blob")
+}
+
+// TestNewCommitCombinedProbe covers FIX 4's core: capability evidence is keyed
+// by the RESOLVED raft address, while placement targets are raw node IDs, so the
+// probe MUST resolve before checking the gate.
+func TestNewCommitCombinedProbe(t *testing.T) {
+	gate := NewCapabilityGate(compat.DefaultRegistry, time.Minute)
+	gate.ReportEvidence(compat.Evidence{
+		NodeID:       compat.NodeID("127.0.0.1:7001"), // keyed by ADDRESS
+		Capabilities: map[string]bool{capabilityCommitCombined: true},
+		LastSeen:     time.Now(),
+		Ready:        true,
+	})
+	book := probeAddrBook{nodes: []MetaNodeEntry{{ID: "node-1", Address: "127.0.0.1:7001"}}}
+	probe := NewCommitCombinedProbe(gate, book)
+
+	require.True(t, probe("node-1"), "a node whose resolved address has commit-combined evidence is capable")
+	require.False(t, probe("node-unknown"), "an unresolvable node ID is not capable (→ legacy fallback)")
+	require.False(t, NewCommitCombinedProbe(nil, book)("node-1"), "a nil gate is never capable")
+}
+
+// TestCommitCombinedCapableAllSelfSkipsProbe: an all-self placement must never
+// call the probe (solo: zero gate overhead).
+func TestCommitCombinedCapableAllSelfSkipsProbe(t *testing.T) {
+	probeCalls := 0
+	s := &QuorumMetaStore{
+		selfAddr:        func() string { return "self" },
+		capabilityProbe: func(string) bool { probeCalls++; return true },
+	}
+	require.True(t, s.commitCombinedCapable([]string{"self", "self"}))
+	require.Equal(t, 0, probeCalls, "all-self targets must short-circuit without probing")
+}
+
+type probeAddrBook struct{ nodes []MetaNodeEntry }
+
+func (b probeAddrBook) Nodes() []MetaNodeEntry { return b.nodes }
 
 func TestPromoteAndWriteQuorumMeta_AbortDrainsBeforeReturn(t *testing.T) {
 	nodes := []string{"n1", "n2", "n3", "n4"}

@@ -62,6 +62,22 @@ func TestDecodePromoteAndMetaPayloadRejectsTruncated(t *testing.T) {
 	}
 }
 
+// TestDecodePromoteAndMetaPayloadClampsPrealloc guards the codec against a
+// preallocation DoS: a tiny frame whose u32 pair count is 0xFFFFFFFF must fail
+// to decode (there are not 4B pairs' worth of bytes) WITHOUT attempting a
+// multi-GB slice preallocation.
+func TestDecodePromoteAndMetaPayloadClampsPrealloc(t *testing.T) {
+	frame := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0x00} // count=~4B, then one stray byte
+	_, _, err := decodePromoteAndMetaPayload(frame)
+	require.Error(t, err)
+}
+
+func TestDecodeStagedPromotePairsClampsPrealloc(t *testing.T) {
+	frame := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0x00} // count=~4B, then one stray byte
+	_, err := decodeStagedPromotePairs(frame)
+	require.Error(t, err)
+}
+
 // --- handler-level tests (real ShardService on a temp dir) -------------------
 
 // stageOneShard writes one staged shard (final-key AAD) so a promote pair for
@@ -183,6 +199,107 @@ func TestHandlePromoteAndQuorumMetaWrite_DecodeErrorPromoteClass(t *testing.T) {
 		"decode failure (nothing executed) must carry the promote-class prefix, got %q", body)
 }
 
+// TestClassifyCombinedCommitError unit-tests the client's 3-class Error-body
+// mapping without a live transport (FIX 7a): the promote/meta prefixes map to
+// their sentinels; anything else is INDETERMINATE (neither sentinel).
+func TestClassifyCombinedCommitError(t *testing.T) {
+	promote := classifyCombinedCommitError(combinedPromoteFailedPrefix + "stage gone")
+	require.ErrorIs(t, promote, errCombinedPromoteFailed)
+	require.NotErrorIs(t, promote, errCombinedMetaFailed)
+
+	meta := classifyCombinedCommitError(combinedMetaFailedPrefix + "disk full")
+	require.ErrorIs(t, meta, errCombinedMetaFailed)
+	require.NotErrorIs(t, meta, errCombinedPromoteFailed)
+
+	// An old binary's "unknown shard RPC" (unprefixed) is indeterminate: it must
+	// carry NEITHER sentinel so the coordinator treats it as abort-class.
+	indeterminate := classifyCombinedCommitError("unknown shard RPC: PromoteAndWriteQuorumMeta")
+	require.Error(t, indeterminate)
+	require.NotErrorIs(t, indeterminate, errCombinedPromoteFailed)
+	require.NotErrorIs(t, indeterminate, errCombinedMetaFailed)
+}
+
+// TestCombinedCommitErrorBodyRoundTrip drives the REAL handler to produce each
+// error class's wire body, then feeds it through the same classification the
+// client uses — the end-to-end proof that handler prefix + client mapping agree.
+func TestCombinedCommitErrorBodyRoundTrip(t *testing.T) {
+	svc, dir := newTestShardService(t)
+
+	// promote class: a missing staged shard fails the promote step.
+	promoteBlob := combinedHandlerBlob(t, "b", "k-promote")
+	promotePayload, err := encodePromoteAndMetaPayload([]stagedPromotePair{
+		{stagingKey: ".segstaging/none/x", finalKey: "k-promote/segments/x", logicalShardSize: -1},
+	}, promoteBlob)
+	require.NoError(t, err)
+	_, body, err := unmarshalEnvelope(svc.handlePromoteAndQuorumMetaWrite(&shardRequest{Bucket: "b", Key: "k-promote", Data: promotePayload}))
+	require.NoError(t, err)
+	require.ErrorIs(t, classifyCombinedCommitError(string(body)), errCombinedPromoteFailed)
+
+	// meta class: a directory occupying the target path fails the rename.
+	target := filepath.Join(dir, "shards", quorumMetaSubDir, "b", "k-meta")
+	require.NoError(t, os.MkdirAll(target, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(target, "occupant"), []byte("x"), 0o644))
+	metaPayload, err := encodePromoteAndMetaPayload(nil, combinedHandlerBlob(t, "b", "k-meta"))
+	require.NoError(t, err)
+	_, body, err = unmarshalEnvelope(svc.handlePromoteAndQuorumMetaWrite(&shardRequest{Bucket: "b", Key: "k-meta", Data: metaPayload}))
+	require.NoError(t, err)
+	require.ErrorIs(t, classifyCombinedCommitError(string(body)), errCombinedMetaFailed)
+
+	// indeterminate: an unprefixed error body (here a truncated rollback payload)
+	// classifies to neither sentinel.
+	_, body, err = unmarshalEnvelope(svc.handleQuorumMetaRollbackIfMatch(&shardRequest{Bucket: "b", Key: "k3", Data: []byte{0x00}}))
+	require.NoError(t, err)
+	cls := classifyCombinedCommitError(string(body))
+	require.Error(t, cls)
+	require.NotErrorIs(t, cls, errCombinedPromoteFailed)
+	require.NotErrorIs(t, cls, errCombinedMetaFailed)
+}
+
+// TestHandlePromoteAndQuorumMetaWrite_OverwriteRestoresPrevious drives the
+// handler-level restore-previous path (FIX 3): write blob A, combined-write blob
+// B (the OK body carries prev=A), then roll back with (B, A, true) → the file
+// content is back to A.
+func TestHandlePromoteAndQuorumMetaWrite_OverwriteRestoresPrevious(t *testing.T) {
+	svc, _ := newTestShardService(t)
+	const bucket, key = "b", "obj-overwrite"
+
+	blobA, err := encodeQuorumMetaBlob(PutObjectMetaCmd{
+		Bucket: bucket, Key: key, ModTime: 100, ETag: "A", NodeIDs: []string{"self"}, ECData: 1,
+	})
+	require.NoError(t, err)
+	blobB, err := encodeQuorumMetaBlob(PutObjectMetaCmd{
+		Bucket: bucket, Key: key, ModTime: 200, ETag: "B", NodeIDs: []string{"self"}, ECData: 1,
+	})
+	require.NoError(t, err)
+
+	// Write A.
+	require.NoError(t, svc.writeQuorumMetaLocal(bucket, key, blobA))
+
+	// Combined-write B; the OK body carries the overwritten previous (A).
+	payload, err := encodePromoteAndMetaPayload(nil, blobB)
+	require.NoError(t, err)
+	rpcType, okBody, err := unmarshalEnvelope(svc.handlePromoteAndQuorumMetaWrite(&shardRequest{Bucket: bucket, Key: key, Data: payload}))
+	require.NoError(t, err)
+	require.Equal(t, "OK", rpcType)
+	previous, hadPrevious := decodeCombinedOKBody(okBody)
+	require.True(t, hadPrevious, "overwrite must report a previous blob")
+	require.Equal(t, blobA, previous, "the OK body must carry the exact overwritten blob (A)")
+
+	raw, err := svc.readQuorumMetaRaw(bucket, key)
+	require.NoError(t, err)
+	require.Equal(t, blobB, raw, "B is now the latest")
+
+	// Abort rollback with (expected=B, previous=A, hadPrevious=true) restores A.
+	rpcType, _, err = unmarshalEnvelope(svc.handleQuorumMetaRollbackIfMatch(&shardRequest{
+		Bucket: bucket, Key: key, Data: encodeRollbackPayload(blobB, previous, hadPrevious),
+	}))
+	require.NoError(t, err)
+	require.Equal(t, "OK", rpcType)
+	raw, err = svc.readQuorumMetaRaw(bucket, key)
+	require.NoError(t, err)
+	require.Equal(t, blobA, raw, "overwrite abort must RESTORE the previous blob (A), not delete it")
+}
+
 func TestHandleQuorumMetaRollbackIfMatch(t *testing.T) {
 	svc, _ := newTestShardService(t)
 	const bucket, key = "b", "obj-rollback"
@@ -194,7 +311,7 @@ func TestHandleQuorumMetaRollbackIfMatch(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "OK", rpcType)
 
-	resp = svc.handleQuorumMetaRollbackIfMatch(&shardRequest{Bucket: bucket, Key: key, Data: blob})
+	resp = svc.handleQuorumMetaRollbackIfMatch(&shardRequest{Bucket: bucket, Key: key, Data: encodeRollbackPayload(blob, nil, false)})
 	rpcType, _, err = unmarshalEnvelope(resp)
 	require.NoError(t, err)
 	require.Equal(t, "OK", rpcType)
@@ -211,7 +328,7 @@ func TestHandleQuorumMetaRollbackIfMatch(t *testing.T) {
 		NodeIDs: []string{"self"}, ECData: 1,
 	})
 	require.NoError(t, err)
-	resp = svc.handleQuorumMetaRollbackIfMatch(&shardRequest{Bucket: bucket, Key: key, Data: other})
+	resp = svc.handleQuorumMetaRollbackIfMatch(&shardRequest{Bucket: bucket, Key: key, Data: encodeRollbackPayload(other, nil, false)})
 	rpcType, _, err = unmarshalEnvelope(resp)
 	require.NoError(t, err)
 	require.Equal(t, "OK", rpcType, "content-mismatch rollback is a no-op success")
