@@ -116,3 +116,38 @@ func TestStripeStream_TruncatedFragmentIsTypedAndMarks(t *testing.T) {
 	require.Equal(t, []int{0}, faults, "hook must fire once with the truncated shard index")
 	_ = rc.Close()
 }
+
+// TestOpenObject_StripedTruncatedRemoteShardMarksPeerUnhealthy pins striped
+// end-to-end attribution: OpenObject with StripeBytes>0 routes through the
+// stripe de-interleave reader (headers skipped lazily), and a remote shard
+// whose stream ends cleanly mid-fragment fails typed AND marks the peer.
+func TestOpenObject_StripedTruncatedRemoteShardMarksPeerUnhealthy(t *testing.T) {
+	const stripeBytes = 1024
+	cfg := ECConfig{DataShards: 2, ParityShards: 1}
+	payload := bytes.Repeat([]byte("stripeee"), 512) // 4 KiB = 4 stripes
+	bodies := buildInterleavedShards(t, cfg, payload, stripeBytes)
+
+	// Whole-shard streams = 8-byte header + interleaved body; truncate shard 0
+	// after one full fragment plus half of the next.
+	h := encodeShardHeader(int64(len(payload)))
+	fragSize := stripeFragSize(stripeBytes, cfg.DataShards)
+	streams := make([][]byte, len(bodies))
+	for i, b := range bodies {
+		streams[i] = append(append([]byte{}, h[:]...), b...)
+	}
+	streams[0] = streams[0][:shardHeaderSize+fragSize+fragSize/2]
+
+	ph := &fakeECObjectPeerHealth{}
+	store := &truncStreamStore{streams: streams}
+	r := ecObjectReader{selfID: "self", shards: store, peerHealth: ph, ecConfig: cfg}
+	rec := PlacementRecord{Nodes: []string{"peer-a", "peer-b", "peer-c"}, K: 2, M: 1, StripeBytes: stripeBytes}
+
+	rc, err := r.OpenObject(context.Background(), "b", "k", rec, int64(len(payload)))
+	require.NoError(t, err)
+	_, err = io.ReadAll(rc)
+	var terr *ecShardTruncatedError
+	require.True(t, errors.As(err, &terr), "want typed truncation, got %v", err)
+	require.Equal(t, 0, terr.Idx)
+	require.Equal(t, []string{"peer-a"}, ph.unhealthy, "striped truncating peer must be marked")
+	_ = rc.Close()
+}

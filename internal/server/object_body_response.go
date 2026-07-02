@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -108,6 +109,11 @@ func (r *exactLengthReadCloser) Read(p []byte) (int, error) {
 	r.remaining -= int64(n)
 	if r.remaining == 0 {
 		return n, nil
+	}
+	if err != nil && errors.Is(err, io.EOF) {
+		// The backend ended short of the advertised Content-Length: surface it
+		// as an error instead of silently truncating the response body.
+		return n, io.ErrUnexpectedEOF
 	}
 	return n, err
 }

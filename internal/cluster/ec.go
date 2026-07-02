@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"path/filepath"
 	"sync"
 )
@@ -667,7 +668,10 @@ func (g *ecExactLenReader) Read(p []byte) (int, error) {
 		}
 		return n, &ecShardTruncatedError{Idx: g.idx, Want: g.want, Got: g.want - g.remaining}
 	}
-	if err != nil && g.remaining == 0 && errors.Is(err, io.EOF) {
+	if err != nil && g.remaining == 0 &&
+		(errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) {
+		// The body is complete; an EOF-family error delivered alongside the
+		// final bytes is a normal end of stream, not a truncation.
 		return n, io.EOF
 	}
 	return n, err
@@ -675,7 +679,8 @@ func (g *ecExactLenReader) Read(p []byte) (int, error) {
 
 // ecWrapBodiesExactLen wraps every non-nil post-header shard body in an
 // exact-length guard of ceil(origSize/K) bytes — the invariant the write path
-// guarantees for every shard, parity and zero-padded tail included.
+// guarantees for every shard, parity and zero-padded tail included. It
+// mutates bodies in place and returns the same slice.
 func ecWrapBodiesExactLen(cfg ECConfig, origSize int64, bodies []io.Reader, onShardFault func(int)) []io.Reader {
 	if cfg.DataShards <= 0 {
 		return bodies
@@ -707,6 +712,13 @@ func ecReconstructStreamBodies(cfg ECConfig, shards []io.Reader) (int64, []io.Re
 			return 0, nil, fmt.Errorf("read shard %d header: %w", i, err)
 		}
 		size := int64(binary.BigEndian.Uint64(header[:]))
+		// The header is untrusted input from the serving peer: reject sizes
+		// that are negative (uint64 wrap) or large enough to overflow the
+		// ceil(origSize/K) math the exact-length guard and the missing-data
+		// window loop derive from it.
+		if size < 0 || size > math.MaxInt64-int64(cfg.NumShards()) {
+			return 0, nil, fmt.Errorf("shard %d header size %d out of range", i, size)
+		}
 		if origSize < 0 {
 			origSize = size
 		} else if size != origSize {
