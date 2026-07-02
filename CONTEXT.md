@@ -404,22 +404,28 @@ the whole membership view.
 The EC object reader is the private cluster module that reconstructs
 erasure-coded objects from their constituent shards. It mirrors the EC Object
 Writer in structure: a per-call struct with injected adapters for shard I/O
-(`ecObjectShardFetcher`), the shard LRU cache (`ecObjectShardCache`), and
+(`ecShardStore`), the shard LRU cache (`ecObjectShardCache`), and
 peer-health marking (`ecObjectPeerHealth`).
 
-The reader exposes three operations: `ReadObject` (full buffered reconstruction
-into a byte slice), `OpenObject` (streaming reconstruction via an
-`io.ReadCloser`), and `ReadAt` (range read without full reconstruction). It owns
-the k-of-n fan-out strategy, local data-shard fast paths, cache pre-pass,
-parity-shard fallback, and peer-health transitions from shard fetch outcomes.
+The reader exposes two operations: `OpenObject` (streaming reconstruction via
+an `io.ReadCloser`) and `ReadAt` (range read without full reconstruction) — the
+buffered `ReadObject` surface was retired with the streaming-only unification.
+It owns the k-of-n fan-out strategy, local data-shard fast paths, cache
+pre-pass, parity-shard fallback, and peer-health transitions from shard fetch
+outcomes. Peer health is marked at stream open AND on mid-body failures: a
+remote shard body that fails mid-read with a peer-fault error (connection
+reset, length-framed truncation, idle-read timeout — not clean EOF, local
+teardown, or cancellation) flips the peer unhealthy once. Health feeds write
+placement (`liveNodes`) and the degraded monitor; read attempt ordering does
+not consult it today.
 
-All three operations branch on the on-disk shard layout. The `StripeBytes`
+Both operations branch on the on-disk shard layout. The `StripeBytes`
 marker (0 = legacy contiguous, >0 = stripe-interleaved fragment size) is carried
 through the placement metadata chain. When it is set, the streaming put pipeline
 wrote each shard as per-stripe interleaved fragments rather than a contiguous
 1/K object slice, so the reader de-interleaves through the shared stripe codec
-(`stripe_codec.go`): a bounded-memory streaming reader for `OpenObject`/`ReadAt`
-and a buffered de-interleave for `ReadObject`. Shard repair regenerates a missing
+(`stripe_codec.go`) via a bounded-memory streaming reader for
+`OpenObject`/`ReadAt`. Shard repair regenerates a missing
 shard's interleaved body directly from the surviving siblings' on-disk fragments,
 byte-identical to what the pipeline wrote.
 
