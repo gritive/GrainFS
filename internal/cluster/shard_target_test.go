@@ -658,6 +658,55 @@ func TestWriteShardReader_LocalOpenFailureDoesNotMarkPeerUnhealthy(t *testing.T)
 	require.Empty(t, ph.healthy)
 }
 
+// TestWriteShardReader_LocalBackpressureDoesNotMarkPeer pins the write-RPC
+// side of the local-vs-peer split: a write RPC that fails because THIS node's
+// connection pool is exhausted (transport.ErrLocalBackpressure surfacing
+// through the ShardService %w chain) must mark the peer neither unhealthy nor
+// healthy.
+func TestWriteShardReader_LocalBackpressureDoesNotMarkPeer(t *testing.T) {
+	ph := &fakeECObjectPeerHealth{}
+	store := &writeOpenErrShardStore{rpcErr: fmt.Errorf("stream shard to n2: %w", transport.ErrLocalBackpressure)}
+	ep := remoteShardEndpoint{node: "n2", shards: store, peerHealth: ph, writeAttempts: 1}
+
+	err := ep.WriteShardReader(context.Background(), "b", "k", "", 0, -1,
+		func(int) (io.Reader, error) { return strings.NewReader("x"), nil }, nil)
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, transport.ErrLocalBackpressure)
+	require.Empty(t, ph.unhealthy, "local pool exhaustion must not flip the peer")
+	require.Empty(t, ph.healthy, "and must not mark healthy either")
+}
+
+// failingCloseReader is an openShard body whose LOCAL Close fails after the
+// remote write RPC has already succeeded.
+type failingCloseReader struct {
+	io.Reader
+	closeErr error
+}
+
+func (r *failingCloseReader) Close() error { return r.closeErr }
+
+// TestWriteShardReader_LocalCloseFailureDoesNotMarkPeerUnhealthy pins the
+// close half of the local shard-source contract: when the write RPC succeeds
+// but closing OUR OWN openShard reader fails, the error must propagate to the
+// caller wrapped in errShardWriteLocalOpen and must NOT blame the peer.
+func TestWriteShardReader_LocalCloseFailureDoesNotMarkPeerUnhealthy(t *testing.T) {
+	ph := &fakeECObjectPeerHealth{}
+	ep := remoteShardEndpoint{node: "peer", shards: &recordingShardStore{}, peerHealth: ph, writeAttempts: 1}
+	closeErr := errors.New("staging file close failed")
+
+	err := ep.WriteShardReader(context.Background(), "b", "k", "", 0, -1,
+		func(int) (io.Reader, error) {
+			return &failingCloseReader{Reader: strings.NewReader("x"), closeErr: closeErr}, nil
+		}, nil)
+
+	require.Error(t, err, "the close failure must still propagate to the caller")
+	require.ErrorIs(t, err, errShardWriteLocalOpen)
+	require.ErrorIs(t, err, closeErr)
+	require.Empty(t, ph.unhealthy, "local close failure must not mark the peer unhealthy")
+	require.Empty(t, ph.healthy)
+}
+
 // TestWriteShardReader_RemoteRPCFailureStillMarksPeerUnhealthy is the
 // regression guard for markHealthAfter: a genuine RPC failure (the write
 // reached the peer and failed there) must still flip the peer unhealthy,

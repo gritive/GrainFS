@@ -249,9 +249,10 @@ func (e remoteShardEndpoint) markHealth(ok bool) {
 }
 
 // errShardWriteLocalOpen tags a shard-write failure whose cause was the LOCAL
-// openShard callback (reading our own staging data), before any RPC reached
-// the peer. Like pool backpressure, it is local evidence and must not
-// health-mark the peer.
+// shard source: the openShard callback failing (reading our own staging data,
+// before any RPC reached the peer) or the Close of the reader it returned
+// failing (after the RPC already succeeded). Like pool backpressure, both are
+// local evidence and must not health-mark the peer.
 var errShardWriteLocalOpen = errors.New("ec: local shard open failed")
 
 // markHealthAfter records health evidence from an RPC error. Local evidence —
@@ -372,7 +373,10 @@ func (e remoteShardEndpoint) writeRemoteShard(
 		}
 		if closer, ok := body.(io.Closer); ok {
 			if closeErr := closer.Close(); err == nil && closeErr != nil {
-				err = fmt.Errorf("close ec shard %d: %w", shardIdx, closeErr)
+				// The RPC succeeded; the failure is OUR OWN reader's Close.
+				// Tag it as local evidence so markHealthAfter does not blame
+				// the peer for it.
+				err = fmt.Errorf("%w: close ec shard %d: %w", errShardWriteLocalOpen, shardIdx, closeErr)
 			}
 		}
 		writeCancel()
