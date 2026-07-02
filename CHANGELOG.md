@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.786.0] - 2026-07-02
+
+### Fixed
+- **A peer that fails mid-way through serving a shard is now marked unhealthy.** The streaming
+  EC read path marked peer health only when a shard stream OPENED — a peer that returned 200 and
+  then reset the connection or truncated a length-framed body kept its healthy mark and stayed in
+  write placement. Remote shard streams (full-object opens and ranged reads) now flip the peer
+  unhealthy on the first mid-body peer-fault error. Normal EOF, local connection teardown
+  (node drain/restart), and caller cancellation are excluded so healthy peers are not poisoned;
+  a ranged read's plain short-read keeps its existing non-marking semantic.
+- **Aborting a degraded (missing-data-shard) GET no longer risks closing shard bodies under the
+  reconstruct goroutine.** The missing-data reconstruct path closed shard response bodies
+  synchronously on Close while its background goroutine could still be mid-read on them — a
+  latent violation of the transport's cross-goroutine body-close rule. Close now returns
+  promptly and shard bodies are released only after the reconstruct goroutine exits, mirroring
+  the prefetch-path teardown shipped in v0.0.781.0.
+
 ## [0.0.785.0] - 2026-07-02
 
 ### Fixed
