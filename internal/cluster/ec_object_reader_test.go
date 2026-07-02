@@ -868,9 +868,9 @@ func (s *spyHotChecker) IsHot(string) bool {
 	return false
 }
 
-// Step 2: contract test — computeAttemptOrder calls IsHot exactly k times (data shards only).
-// computeAttemptOrder only probes data-shard nodes, so it is called exactly k times
-// regardless of how many parity shards are present in the placement.
+// Step 2: contract test — computeAttemptOrder calls IsHot exactly k+m times:
+// k data-shard probes for demotion, plus m parity probes to order the
+// fallback list non-demoted-first (FIX 8) even when nothing is demoted.
 func TestComputeAttemptOrder_CacheBypassSpy(t *testing.T) {
 	rec := PlacementRecord{Nodes: []string{"n0", "n1", "n2", "n3", "n4", "n5"}}
 	rec.K = 4
@@ -881,8 +881,9 @@ func TestComputeAttemptOrder_CacheBypassSpy(t *testing.T) {
 	primary, fallback := r.computeAttemptOrder(rec, cfg)
 	assert.Equal(t, []int{0, 1, 2, 3}, primary)
 	assert.Equal(t, []int{4, 5}, fallback)
-	// IsHot called exactly k=4 times (data shards probed, none hot → early exit).
-	assert.Equal(t, int64(4), spy.calls.Load())
+	// IsHot called exactly k+m=6 times (4 data probes + 2 parity probes for
+	// fallback ordering; none hot → no swap).
+	assert.Equal(t, int64(6), spy.calls.Load())
 }
 
 // Pins the BL-only behavior change introduced with the generalized demotion:
@@ -927,6 +928,43 @@ func TestComputeAttemptOrder_UnhealthyParityNotSwappedIn(t *testing.T) {
 	primary, fallback := r.computeAttemptOrder(rec, cfg)
 	assert.Equal(t, []int{0, 1}, primary)
 	assert.Equal(t, []int{2}, fallback)
+}
+
+// FIX 8 pin: with NO data demotion, the fallback list must still order
+// non-demoted parity before demoted parity — openShardReaders opens fallback
+// in listed order, so an unhealthy (cooldown) parity with a lower index must
+// not be attempted before a healthy parity when a primary open fails.
+func TestComputeAttemptOrder_NoDemotionOrdersFallbackHealthyFirst(t *testing.T) {
+	// 2+2: data idx 0,1 on n0,n1 (healthy); parity idx 2 on n2 (unhealthy),
+	// idx 3 on n3 (healthy).
+	ph := NewPeerHealth([]string{"n0", "n1", "n2", "n3"}, 10*time.Second)
+	ph.MarkUnhealthy("n2")
+	r := ecObjectReader{selfID: "n0", peerHealth: ph}
+	rec := PlacementRecord{Nodes: []string{"n0", "n1", "n2", "n3"}}
+	cfg := ECConfig{DataShards: 2, ParityShards: 2}
+
+	primary, fallback := r.computeAttemptOrder(rec, cfg)
+	assert.Equal(t, []int{0, 1}, primary, "no data demotion: primary unchanged")
+	assert.Equal(t, []int{3, 2}, fallback, "healthy parity 3 must be attempted before unhealthy parity 2")
+}
+
+// FIX 8 pin, swap-path variant: after a data→parity swap, the fallback list
+// (leftover parity + demoted data) must also order non-demoted entries first.
+func TestComputeAttemptOrder_SwapPathOrdersFallbackHealthyFirst(t *testing.T) {
+	// 2+3: data idx 0,1 on n0,n1; parity idx 2,3,4 on n2,n3,n4.
+	// n1 (data) unhealthy → swapped with first healthy parity candidate (idx 3,
+	// since n2 is unhealthy). Fallback then holds: idx 4 (healthy leftover
+	// parity), idx 2 (unhealthy parity), idx 1 (demoted data) → healthy first.
+	ph := NewPeerHealth([]string{"n0", "n1", "n2", "n3", "n4"}, 10*time.Second)
+	ph.MarkUnhealthy("n1")
+	ph.MarkUnhealthy("n2")
+	r := ecObjectReader{selfID: "n0", peerHealth: ph}
+	rec := PlacementRecord{Nodes: []string{"n0", "n1", "n2", "n3", "n4"}}
+	cfg := ECConfig{DataShards: 2, ParityShards: 3}
+
+	primary, fallback := r.computeAttemptOrder(rec, cfg)
+	assert.Equal(t, []int{0, 3}, primary, "unhealthy data 1 swapped with healthy parity 3 (2 is unhealthy)")
+	assert.Equal(t, []int{4, 1, 2}, fallback, "healthy leftover parity 4 first, then demoted 1,2 ascending")
 }
 
 func TestComputeAttemptOrder_SelfIsNeverHealthDemoted(t *testing.T) {

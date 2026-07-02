@@ -21,8 +21,10 @@
   served by peers in an active unhealthy cooldown (and, as before, hot peers) to the fallback
   tier, swapping in parity shards whose peers are healthy; demoted shards remain reachable as
   fallback so availability is unchanged. Parity shards on hot or unhealthy peers are no longer
-  chosen as swap-in targets. The `grainfs_cluster_bl_*` reranked/bypassed read metrics now count
-  both hot- and health-demotions.
+  chosen as swap-in targets, and when a primary shard open fails, fallback shards are now
+  attempted healthy-first (an unhealthy parity with a lower index no longer delays a healthy
+  one). The `grainfs_cluster_bl_*` reranked/bypassed read metrics now count both hot- and
+  health-demotions.
 - **Shard headers are validated against the metadata-recorded object size** — at open, for
   both contiguous and striped objects. A header that disagrees with the quorum-meta size fails
   the read with a typed error naming every disagreeing shard, and the lying shards' peers are

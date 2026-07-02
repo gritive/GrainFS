@@ -262,9 +262,30 @@ func (r ecObjectReader) demotedNode(node string) bool {
 	return false
 }
 
+// orderFallbackByDemotion partitions a fallback idx list so non-demoted
+// entries come first: openShardReaders opens fallback shards in listed order
+// when a primary open fails, so an unhealthy (cooldown) or hot shard must not
+// be attempted before a healthy one just because its index is lower. The
+// partition is stable, so an ascending input stays ascending within each
+// class (determinism preserved).
+func (r ecObjectReader) orderFallbackByDemotion(rec PlacementRecord, idxs []int) []int {
+	ordered := make([]int, 0, len(idxs))
+	var demoted []int
+	for _, i := range idxs {
+		if r.demotedNode(rec.Nodes[i]) {
+			demoted = append(demoted, i)
+		} else {
+			ordered = append(ordered, i)
+		}
+	}
+	return append(ordered, demoted...)
+}
+
 // computeAttemptOrder returns primary and fallback shard idx lists.
 // Demoted (hot or unhealthy-peer) data shards are swapped 1:1 with the lowest
-// non-demoted parity idx. Both lists are sorted ascending for determinism.
+// non-demoted parity idx. Both lists are sorted ascending for determinism,
+// with the fallback list additionally partitioned non-demoted-first (see
+// orderFallbackByDemotion).
 // More demoted data shards than usable parity → bypass (metric incremented).
 // bl == nil && peerHealth == nil → legacy: primary=dataIdx, fallback=parityIdx.
 func (r ecObjectReader) computeAttemptOrder(rec PlacementRecord, cfg ECConfig) (primary, fallback []int) {
@@ -289,7 +310,9 @@ func (r ecObjectReader) computeAttemptOrder(rec PlacementRecord, cfg ECConfig) (
 		}
 	}
 	if len(demotedData) == 0 {
-		return dataIdx, parityIdx
+		// No swap needed, but the fallback still opens in listed order on a
+		// primary failure: put non-demoted parity first.
+		return dataIdx, r.orderFallbackByDemotion(rec, parityIdx)
 	}
 	var candidates []int // parity idx whose node is itself not demoted
 	for _, i := range parityIdx {
@@ -333,6 +356,9 @@ func (r ecObjectReader) computeAttemptOrder(rec PlacementRecord, cfg ECConfig) (
 		fallback = append(fallback, i)
 	}
 	sort.Ints(fallback)
+	// Leftover non-demoted parity (candidates beyond the swapped-in prefix)
+	// must be attempted before the demoted entries sharing the list.
+	fallback = r.orderFallbackByDemotion(rec, fallback)
 
 	// Metric: per-demoted-data-node rerank counter.
 	for _, i := range demotedData {
