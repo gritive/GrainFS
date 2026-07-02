@@ -414,10 +414,15 @@ It owns the k-of-n fan-out strategy, local data-shard fast paths, cache
 pre-pass, parity-shard fallback, and peer-health transitions from shard fetch
 outcomes. Peer health is marked at stream open AND on mid-body failures: a
 remote shard body that fails mid-read with a peer-fault error (connection
-reset, length-framed truncation, idle-read timeout — not clean EOF, local
-teardown, or cancellation) flips the peer unhealthy once. Health feeds write
-placement (`liveNodes`) and the degraded monitor; read attempt ordering does
-not consult it today.
+reset, length-framed truncation, idle-read timeout — not local teardown or
+cancellation) flips the peer unhealthy once. Clean-EOF truncation is detected
+too: every shard body is bounded to its exact expected length (the 8-byte
+header's origSize gives `ceil(origSize/K)` for every shard, parity and padded
+tail included), so a shard stream that ends cleanly short surfaces a typed
+truncation error attributed to the serving peer instead of mis-splicing the
+next shard's bytes into the output; the header itself is bounds-checked as
+untrusted input. Health feeds write placement (`liveNodes`) and the degraded
+monitor; read attempt ordering does not consult it today.
 
 Both operations branch on the on-disk shard layout. The `StripeBytes`
 marker (0 = legacy contiguous, >0 = stripe-interleaved fragment size) is carried

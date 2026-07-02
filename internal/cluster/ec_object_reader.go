@@ -46,6 +46,19 @@ type ecObjectReader struct {
 // Verify that *BoundedLoads satisfies hotChecker at compile time.
 var _ hotChecker = (*BoundedLoads)(nil)
 
+// markShardUnhealthy attributes a shard-level fault (truncation) to the
+// serving peer. Local shards never self-mark, matching the endpoint rule.
+func (r ecObjectReader) markShardUnhealthy(rec PlacementRecord, idx int) {
+	if r.peerHealth == nil || idx < 0 || idx >= len(rec.Nodes) {
+		return
+	}
+	node := rec.Nodes[idx]
+	if node == r.selfID {
+		return
+	}
+	r.peerHealth.MarkUnhealthy(node)
+}
+
 // OpenObject returns a streaming reader that reconstructs the object via EC
 // decode on the fly. objectSize is the original pre-encoding size in bytes.
 func (r ecObjectReader) OpenObject(ctx context.Context, bucket, shardKey string, rec PlacementRecord, objectSize int64) (io.ReadCloser, error) {
@@ -53,6 +66,7 @@ func (r ecObjectReader) OpenObject(ctx context.Context, bucket, shardKey string,
 	if err != nil {
 		return nil, err
 	}
+	onShardFault := func(i int) { r.markShardUnhealthy(rec, i) }
 	readers := make([]io.Reader, len(shardReaders))
 	for i, shard := range shardReaders {
 		if shard != nil {
@@ -73,7 +87,7 @@ func (r ecObjectReader) OpenObject(ctx context.Context, bucket, shardKey string,
 				readers[i] = &skipReader{r: shard, skip: shardHeaderSize}
 			}
 		}
-		rc, err := newStripeDeinterleaveStreamReader(recCfg, readers, int(rec.StripeBytes), objectSize)
+		rc, err := newStripeDeinterleaveStreamReader(recCfg, readers, int(rec.StripeBytes), objectSize, onShardFault)
 		if err != nil {
 			closeECShardReaders(shardReaders)
 			return nil, err
@@ -87,8 +101,14 @@ func (r ecObjectReader) OpenObject(ctx context.Context, bucket, shardKey string,
 
 	rc, err := newECReconstructStreamReaderWithPrefetch(recCfg, readers, func() {
 		closeECShardReaders(shardReaders)
-	})
+	}, onShardFault)
 	if err != nil {
+		// Typed header truncation carries the shard index: attribute it to the
+		// serving peer before failing the open.
+		var terr *ecShardTruncatedError
+		if errors.As(err, &terr) {
+			r.markShardUnhealthy(rec, terr.Idx)
+		}
 		closeECShardReaders(shardReaders)
 		return nil, err
 	}

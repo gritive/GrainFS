@@ -48,7 +48,7 @@ func TestECReconstructStreamPrefetch_CloseReturnsPromptlyWhileShardReadBlocks(t 
 	closeShardsCalled := make(chan struct{})
 	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, func() {
 		close(closeShardsCalled)
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("newECReconstructStreamReaderWithPrefetch: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestECReconstructStreamMissingData_CloseIsS82SafeWhileShardReadBlocks(t *te
 	closeShardsCalled := make(chan struct{})
 	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, func() {
 		close(closeShardsCalled)
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("newECReconstructStreamReaderWithPrefetch: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestECReconstructStreamMissingData_NormalCompletionStillClosesShards(t *tes
 	closeShardsCalled := make(chan struct{})
 	rc, err := newECReconstructStreamReaderWithPrefetch(cfg, shards, func() {
 		close(closeShardsCalled)
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("newECReconstructStreamReaderWithPrefetch: %v", err)
 	}

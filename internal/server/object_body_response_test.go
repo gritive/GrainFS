@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -97,5 +98,27 @@ func BenchmarkWriteObjectBody_WarpSizedObject(b *testing.B) {
 		if !streamed {
 			b.Fatal("expected streamed response")
 		}
+	}
+}
+
+// TestExactLengthReadCloser_ShortBackendSurfacesUnexpectedEOF pins the
+// exact-length contract: a backend stream that ends cleanly short of the
+// advertised length must surface io.ErrUnexpectedEOF, never a silent short
+// body under a larger Content-Length.
+func TestExactLengthReadCloser_ShortBackendSurfacesUnexpectedEOF(t *testing.T) {
+	rc := newExactLengthReadCloser(io.NopCloser(strings.NewReader("short")), 10)
+	got, err := io.ReadAll(rc)
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("want io.ErrUnexpectedEOF for short backend, got %v", err)
+	}
+	if string(got) != "short" {
+		t.Fatalf("delivered prefix = %q", got)
+	}
+
+	// Exact-length stream stays clean.
+	rc = newExactLengthReadCloser(io.NopCloser(strings.NewReader("exactlyten")), 10)
+	got, err = io.ReadAll(rc)
+	if err != nil || string(got) != "exactlyten" {
+		t.Fatalf("exact-length read: got %q, err %v", got, err)
 	}
 }

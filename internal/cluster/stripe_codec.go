@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"errors"
 	"fmt"
 	"io"
 
@@ -84,9 +85,13 @@ type stripeDeinterleaveStreamReader struct {
 	bufOff      int
 	fragScratch [][]byte
 	err         error
+	// onShardFault, if non-nil, fires once with the shard index when a
+	// fragment read ends cleanly short (truncated shard), so the caller can
+	// attribute the fault to the serving peer.
+	onShardFault func(int)
 }
 
-func newStripeDeinterleaveStreamReader(cfg ECConfig, shards []io.Reader, stripeBytes int, objectSize int64) (io.ReadCloser, error) {
+func newStripeDeinterleaveStreamReader(cfg ECConfig, shards []io.Reader, stripeBytes int, objectSize int64, onShardFault func(int)) (io.ReadCloser, error) {
 	n := cfg.NumShards()
 	if len(shards) != n {
 		return nil, fmt.Errorf("stripe stream: got %d shards, want %d", len(shards), n)
@@ -101,6 +106,7 @@ func newStripeDeinterleaveStreamReader(cfg ECConfig, shards []io.Reader, stripeB
 	return &stripeDeinterleaveStreamReader{
 		cfg: cfg, enc: enc, shards: shards, stripeBytes: stripeBytes,
 		remaining: int(objectSize), fragScratch: make([][]byte, n),
+		onShardFault: onShardFault,
 	}, nil
 }
 
@@ -125,7 +131,17 @@ func (r *stripeDeinterleaveStreamReader) fill() error {
 			r.fragScratch[i] = make([]byte, fragSize)
 		}
 		r.fragScratch[i] = r.fragScratch[i][:fragSize]
-		if _, err := io.ReadFull(r.shards[i], r.fragScratch[i]); err != nil {
+		if n, err := io.ReadFull(r.shards[i], r.fragScratch[i]); err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				// A fragment that ends cleanly short is a truncated shard, not
+				// end-of-object: report it once so the caller can attribute the
+				// fault to the serving peer, and surface the typed error.
+				if r.onShardFault != nil {
+					r.onShardFault(i)
+					r.onShardFault = nil
+				}
+				err = &ecShardTruncatedError{Idx: i, Want: int64(fragSize), Got: int64(n)}
+			}
 			return fmt.Errorf("stripe stream read shard %d stripe %d: %w", i, r.stripe, err)
 		}
 	}
