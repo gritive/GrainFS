@@ -202,12 +202,15 @@ func (b *DistributedBackend) AppendObject(ctx context.Context, bucket, key strin
 			// Re-enable coalesce over the blob (Task 4): the manifest now lives in
 			// the quorum-meta blob and the coalesce worker publishes via blob CAS
 			// (publishCoalesceBlob), not an FSM propose. Evaluate the trigger against
-			// the freshly-written segment list so a blob-resident appendable that
-			// crosses a count/size/idle threshold gets enqueued. The worker's
-			// owner-gate + objectMetaRMWLock serialize the publish against this append.
+			// the freshly-written raw tail — cmd.Segments for legacy-shape objects,
+			// the side SUMMARY counts in side mode (where cmd.Segments stays empty
+			// by design; reading it here left side-mode appendables permanently
+			// un-coalesced). The worker's owner-gate + objectMetaRMWLock serialize
+			// the publish against this append.
 			if obj != nil {
 				if len(cmd.Coalesced) == 0 {
-					b.maybeTriggerCoalesce(bucket, key, segmentMetaEntriesToRefs(cmd.Segments))
+					count, size := coalesceTriggerInputsFromAppend(cmd, summary, sideMode)
+					b.maybeTriggerCoalesce(bucket, key, count, size)
 				}
 				metrics.AppendCoalescedDepth.Observe(float64(len(obj.Coalesced)))
 				metrics.AppendCoalescedTotalBytes.Observe(float64(obj.Size))

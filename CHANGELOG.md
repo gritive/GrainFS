@@ -1,6 +1,19 @@
 # Changelog
 
-## [0.0.784.0] - 2026-07-02
+## [0.0.785.0] - 2026-07-02
+
+### Fixed
+- **Appendable objects coalesce again.** Since side records became the default manifest shape
+  for appendable objects, the coalesce trigger and the periodic backstop scan both read the
+  manifest's `Segments` list — which side-record mode keeps empty by design — so no appendable
+  object created since then was ever coalesced: raw append segments (and their side-record
+  files) accumulated without bound, and reads had to stitch an ever-growing tail. Both enqueue
+  points now derive the trigger inputs from where the tail actually lives: the append path
+  evaluates the side SUMMARY's segment count and byte size right after each append, and the
+  backstop reads the side summary for appendables whose manifest carries no segments. The
+  downstream pipeline (merge, EC distribute, CAS publish advancing the side summary) was
+  already side-record-aware and is unchanged. The five append/coalesce e2e specs this
+  un-breaks are now expected green.
 
 ### Changed
 - **Reverted the combined PUT commit round (v0.0.783.0); non-versioned commits are back on the

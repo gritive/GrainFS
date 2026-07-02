@@ -7,13 +7,13 @@
 // the degenerate-EC control (k=1, no cross-node distribute); cluster adds
 // the EC distribute aspect to the same case.
 //
-// SingleNode currently fails (intentionally): post-coalesce appendable read
-// goes through PartialIO/ReadAt on the storage stack, but single-node
-// LocalBackend does not implement PartialIO — the wal wrapper surfaces
-// `wal: inner backend does not support ReadAt` as EOF on the post-coalesce
-// GET. Tracked in TODOS.md → AppendObject Follow-Ups → "Single-node
-// LocalBackend missing PartialIO". The failing subtest is the regression
-// signal that unblocks closing the gap.
+// History: SingleNode was a long-standing red spec. The original cause
+// (single-node LocalBackend lacked PartialIO) disappeared with the
+// LocalBackend removal, but the specs stayed red for a second reason: the
+// coalesce trigger and backstop read the manifest's Segments, which
+// side-record mode keeps empty — no side-mode appendable ever coalesced.
+// Both enqueue points now read the append side SUMMARY counts, and all specs
+// in this file are expected GREEN.
 package e2e
 
 import (

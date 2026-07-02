@@ -483,15 +483,17 @@ func (b *DistributedBackend) processCoalesceJobB2(ctx context.Context, job coale
 }
 
 // maybeTriggerCoalesce evaluates the trigger thresholds against the supplied
-// segment slice and enqueues a coalesce job if any threshold is met. The
-// caller passes the live segments (e.g. post-AppendObject HeadObject result)
-// so we never re-read BadgerDB on the hot path.
+// RAW tail segment count and byte total, and enqueues a coalesce job if any
+// threshold is met. Callers derive the counts from wherever the tail actually
+// lives: the manifest's Segments for legacy-shape appendables, the append
+// side SUMMARY for side-record appendables (whose manifest Segments stay
+// empty by design — see coalesceTriggerInputsFromAppend).
 //
 // first-seen tracking: a sync.Map keyed by "<bucket>\x00<key>" records the
 // timestamp of the first segment observed in the current batch so that the
 // idle-timeout branch fires for low-volume objects.
-func (b *DistributedBackend) maybeTriggerCoalesce(bucket, key string, segs []storage.SegmentRef) {
-	if b.coalesce == nil || len(segs) == 0 {
+func (b *DistributedBackend) maybeTriggerCoalesce(bucket, key string, segCount int, totalSize int64) {
+	if b.coalesce == nil || segCount <= 0 {
 		return
 	}
 	cacheKey := bucket + "\x00" + key
@@ -500,7 +502,7 @@ func (b *DistributedBackend) maybeTriggerCoalesce(bucket, key string, segs []sto
 	if v, ok := b.coalesceFirstSeen.LoadOrStore(cacheKey, nowT); ok {
 		firstT = v.(time.Time)
 	}
-	plan := planCoalesceTrigger(segs, firstT, nowT, *b.coalesceCfg.Load())
+	plan := planCoalesceTrigger(segCount, totalSize, firstT, nowT, *b.coalesceCfg.Load())
 	if !plan.ShouldEnqueue {
 		return
 	}
@@ -563,10 +565,30 @@ func (b *DistributedBackend) scanAppendableAndTrigger(ctx context.Context) {
 			continue // best-effort: skip an unreadable bucket
 		}
 		for _, cmd := range cmds {
-			if !cmd.IsAppendable || len(cmd.Segments) == 0 {
+			if !cmd.IsAppendable {
 				continue
 			}
-			b.maybeTriggerCoalesce(bucket, cmd.Key, segmentMetaEntriesToRefs(cmd.Segments))
+			if len(cmd.Segments) > 0 {
+				// Legacy-shape appendable: the manifest carries the raw segments.
+				var total int64
+				for _, s := range cmd.Segments {
+					total += s.Size
+				}
+				b.maybeTriggerCoalesce(bucket, cmd.Key, len(cmd.Segments), total)
+				continue
+			}
+			// Side-record appendable: the manifest's Segments stay empty by design
+			// (the raw tail lives in side records). Read the side SUMMARY for the
+			// tail counts — skipping on empty Segments here left every side-mode
+			// appendable invisible to the backstop, so coalesce never ran for them.
+			if cmd.Size == 0 {
+				continue
+			}
+			summary, serr := b.readClusterAppendSummary(ctx, bucket, cmd.Key, cmd.VersionID, cmd.NodeIDs)
+			if serr != nil {
+				continue // best-effort: absent/unreadable summary (e.g. fully coalesced)
+			}
+			b.maybeTriggerCoalesce(bucket, cmd.Key, summary.SegmentCount, summary.Size)
 		}
 	}
 }
